@@ -483,7 +483,7 @@ fn timeslice_wakes_expired_waiter_even_while_other_thread_spins() {
     assert_eq!(v.sched.current, 1);
     assert_eq!(v.sched.take_wake(), Some(Wake::Completed(0x102)));
     assert_eq!(v.cpu.mxcsr, 0x1f80);
-    assert_eq!(v.cpu.fpu_cw, 0x037f);
+    assert_eq!(v.cpu.fpu.cw, 0x037f);
 }
 
 #[test]
@@ -502,4 +502,136 @@ fn worker_teb_slots_do_not_alias_main_teb_or_peb() {
         assert_ne!(t.teb, wire::loader::PEB_ADDR);
         assert_eq!(v.mem.read_u32(t.teb + 0x24).unwrap(), t.tid);
     }
+}
+
+#[test]
+fn x87_stack_and_rounding_survive_thread_switches() {
+    let mut v = Vm::new();
+    v.k("CreateThread", &[0, 0, CODE + 0x400, 0, 0, 0]);
+    v.mem.write_bytes(CODE, &[0xd9, 0xe8]).unwrap();
+    v.cpu.eip = CODE;
+    v.cpu.step(&mut v.mem).unwrap();
+    assert!(v.sched.round_robin(&mut v.cpu));
+    assert_eq!(v.cpu.fpu.tags, 0xffff);
+    v.cpu.fpu.cw = 0xb7f;
+    v.mem.write_bytes(CODE + 0x400, &[0xd9, 0xeb]).unwrap();
+    v.cpu.step(&mut v.mem).unwrap();
+    let worker = v.cpu.fpu;
+    assert!(v.sched.round_robin(&mut v.cpu));
+    assert_eq!(v.cpu.fpu.st_bits(0), 0x3fff_8000_0000_0000_0000);
+    assert_eq!(v.cpu.fpu.cw, 0x37f);
+    assert!(v.sched.round_robin(&mut v.cpu));
+    assert_eq!(v.cpu.fpu.regs, worker.regs);
+    assert_eq!(v.cpu.fpu.tags, worker.tags);
+    assert_eq!(v.cpu.fpu.sw, worker.sw);
+    assert_eq!(v.cpu.fpu.cw, worker.cw);
+}
+#[test]
+fn seh_context_preserves_and_allows_editing_x87_stack() {
+    let mut v = Vm::new();
+    v.mem.write_bytes(CODE + 0x400, &[0xd9, 0xe8]).unwrap();
+    v.cpu.eip = CODE + 0x400;
+    v.cpu.step(&mut v.mem).unwrap();
+    v.cpu.fpu.cw = 0xb7f;
+    // FNINIT; ctx=[esp+12]; FLDZ; FSTP m80[ctx+56]; tag[ctx]=zero;
+    // return ExceptionContinueExecution. Callback clobbers the live FP state.
+    v.mem
+        .write_bytes(
+            CODE,
+            &[
+                0xdb, 0xe3, 0x8b, 0x44, 0x24, 0x0c, 0xd9, 0xee, 0xdb, 0x78, 0x38, 0xc7, 0x40, 0x24,
+                0xff, 0x7f, 0, 0, 0x31, 0xc0, 0xc3,
+            ],
+        )
+        .unwrap();
+    v.mem.write_u32(DATA, u32::MAX).unwrap();
+    v.mem.write_u32(DATA + 4, CODE).unwrap();
+    v.mem.write_u32(TEB_ADDR, DATA).unwrap();
+    v.k("RaiseException", &[0x1234, 0, 0, 0]);
+    assert_eq!(v.cpu.fpu.cw, 0xb7f);
+    assert_eq!(v.cpu.fpu.top(), 7);
+    assert_eq!(v.cpu.fpu.tags, 0x7fff);
+    assert_eq!(v.cpu.fpu.st_bits(0), 0);
+}
+
+#[test]
+fn system_profile_memory_structures_and_monotonic_clocks() {
+    let mut v = Vm::new();
+    v.k("GetNativeSystemInfo", &[DATA]);
+    assert_eq!(v.mem.read_u16(DATA).unwrap(), 0); // x86, irrespective of host
+    assert_eq!(v.mem.read_u32(DATA + 4).unwrap(), 4096);
+    assert_eq!(v.mem.read_u32(DATA + 16).unwrap(), 1);
+    assert_eq!(v.mem.read_u32(DATA + 20).unwrap(), 1);
+    v.mem.write_u32(DATA + 128, 32).unwrap();
+    assert_eq!(v.k("GlobalMemoryStatusEx", &[DATA + 128]), 0);
+    assert_eq!(v.k("GetLastError", &[]), 87);
+    v.mem.write_u32(DATA + 128, 64).unwrap();
+    assert_eq!(v.k("GlobalMemoryStatusEx", &[DATA + 128]), 1);
+    let available = v.mem.read_u64(DATA + 144).unwrap();
+    v.k("HeapAlloc", &[v.state.process_heap, 0, 65536]);
+    v.k("GlobalMemoryStatusEx", &[DATA + 128]);
+    assert!(v.mem.read_u64(DATA + 144).unwrap() <= available - 65536);
+    v.k("GlobalMemoryStatus", &[DATA + 256]);
+    assert_eq!(v.mem.read_u32(DATA + 256).unwrap(), 32);
+    assert_eq!(
+        v.mem.read_u32(DATA + 264).unwrap() as u64,
+        v.mem.read_u64(DATA + 136).unwrap()
+    );
+    v.state.start =
+        std::time::Instant::now() - std::time::Duration::from_millis((1u64 << 32) + 1000);
+    let ticks = v.k("GetTickCount64", &[]);
+    assert_eq!(v.cpu.regs[2], 1);
+    assert!((1000..2000).contains(&ticks));
+    let mm = v.call("winmm.dll", "timeGetTime", &[]);
+    let ordinary = v.k("GetTickCount", &[]);
+    assert!(ordinary.wrapping_sub(mm) < 100);
+    assert_eq!(v.call("winmm.dll", "timeGetDevCaps", &[DATA, 7]), 97);
+    assert_eq!(v.call("winmm.dll", "timeGetDevCaps", &[DATA, 8]), 0);
+    assert_eq!(v.mem.read_u32(DATA).unwrap(), 1);
+    assert_eq!(v.call("winmm.dll", "timeBeginPeriod", &[0]), 97);
+    assert_eq!(v.call("winmm.dll", "timeBeginPeriod", &[1]), 0);
+    v.k("GetSystemTime", &[DATA]);
+    assert!(v.mem.read_u16(DATA).unwrap() >= 2026);
+    assert!((1..=12).contains(&v.mem.read_u16(DATA + 2).unwrap()));
+}
+#[test]
+fn nls_case_mapping_lengths_buffers_and_crt_character_types() {
+    let mut v = Vm::new();
+    v.wide(DATA, "aZ 9日本");
+    assert_eq!(
+        v.k("LCMapStringEx", &[0, 0x200, DATA, u32::MAX, 0, 0, 0, 0, 0]),
+        7
+    );
+    assert_eq!(
+        v.k(
+            "LCMapStringEx",
+            &[0, 0x200, DATA, u32::MAX, DATA + 64, 7, 0, 0, 0]
+        ),
+        7
+    );
+    assert_eq!(v.mem.read_wstr(DATA + 64, 7).unwrap(), "AZ 9日本");
+    assert_eq!(
+        v.k(
+            "LCMapStringW",
+            &[0x411, 0x100, DATA + 64, u32::MAX, DATA + 64, 7]
+        ),
+        7
+    );
+    assert_eq!(v.mem.read_wstr(DATA + 64, 7).unwrap(), "az 9日本");
+    assert_eq!(
+        v.k(
+            "LCMapStringEx",
+            &[0, 0x200, DATA, u32::MAX, DATA + 128, 6, 0, 0, 0]
+        ),
+        0
+    );
+    assert_eq!(v.k("GetLastError", &[]), 122);
+    assert_eq!(v.k("GetStringTypeW", &[1, DATA, u32::MAX, DATA + 128]), 1);
+    assert_eq!(v.mem.read_u16(DATA + 128).unwrap() & 0x182, 0x182); // lower, alpha, hex 'a'
+    assert_eq!(v.mem.read_u16(DATA + 132).unwrap() & 0x48, 0x48); // blank/space
+    assert_eq!(v.mem.read_u16(DATA + 134).unwrap() & 0x84, 0x84); // digit/hex
+    assert_eq!(v.mem.read_u16(DATA + 136).unwrap() & 0x100, 0x100); // Japanese letter
+    assert_eq!(v.mem.read_u16(DATA + 140).unwrap() & 0x20, 0x20); // explicit NUL count
+    assert_eq!(v.k("GetStringTypeW", &[3, DATA, 1, DATA + 128]), 0);
+    assert_eq!(v.k("GetLastError", &[]), 1004);
 }

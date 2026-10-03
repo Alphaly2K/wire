@@ -1,14 +1,15 @@
 # M2 进行中：最新进度与交接（2026-10-04）
 
-M2 **尚未验收，不打 tag**。上一个 agent 的线程/SSE 工作已先验证并保存为本地提交
-`75f90a6`。本轮补充了资源、堆、编码、文件 I/O、基础 SEH 和回归测试。
-目标程序从原先 199,566 条指令推进到约 **1200 万条指令**，当前明确停在 x87 浮点加载。
+M2 **尚未验收，不打 tag**。前两次本地检查点为 `75f90a6`（线程/SSE）和
+`852eba3`（资源、堆、编码、文件 I/O、基础 SEH）。本轮完成软件 x87 与初始化系统/NLS 子集。
+目标程序从约 1200 万条指令推进到 **21,425,797 条指令**，当前停在 MSVC C++ 异常展开的 `RtlUnwind`。
+未读取 data.xp3，也还没有可见游戏窗口。
 
 ## 已完成并验证
 
 ### 解释器与差分测试
 
-- 原有 24 组 CPU 差分测试全部保留；现在共 **30 组**。
+- 原有 24 组 CPU 差分测试全部保留；现在共 **34 组**。
 - 初始 XMM 状态随机化，终态比较全部 8 个 XMM 的 128 位；原有 GPR、EFLAGS、数据/栈内存比较继续执行。
 - 新增 SSE 传送、整数/逻辑/unpack/shuffle、移位、浮点算术/比较/转换和标量边界访问测试。
 - 修复 `UNPCKLPD/UNPCKHPD` 错用 32 位 lane、`MOVQ xmm,xmm` 未清高 64 位、
@@ -78,39 +79,76 @@ M2 **尚未验收，不打 tag**。上一个 agent 的线程/SSE 工作已先验
 - **未实现完整 MSVC EH / RtlUnwind、nested/collided unwind，也没有把 CPU 内存 fault 自动转为 SEH。**
   不应把基础 dispatch 测试通过视为完整 C++ 异常支持。
 
-## 验证结果
+## 本轮新增：软件 x87（2026-10-04）
 
-- `cargo test --release`：**47/47**（1 个静态导入检查 + 30 个差分族 + 16 个 Win32 行为测试）。
-- `cargo build --release`、`cargo fmt -- --check`、`cargo clippy --all-targets -- -D warnings` 全部通过。
-- 对照 EXE：退出码 0；CreateFile/WriteFile 成功，宿主输出内容确认为 `wire control program\n`，21 字节。
-  它的窗口 API 仍是 stub，所以这个退出码只验证加载/解释/文件路径，不代表图形验收。
-- macOS 沙箱内 Unicorn 参照执行可能 SIGILL；本轮在沙箱外跑差分测试通过。
-  Unicorn 仅为测试/调试依赖，wire 发布可执行文件仍为纯解释器。
+- `src/cpu/fpu.rs` 实现 8 个物理 FP80 寄存器、完整 tag word、TOP、控制/状态字和环境地址；
+  `ThreadCtx` 保存整套状态，SEH CONTEXT 的 FLOATING_SAVE_AREA 与初始扩展区也填入寄存器数据。
+  测试覆盖真实调度切换，以及 SEH 回调破坏现场后从修改过的 CONTEXT 恢复。
+- 32/64/80 位 FLD/FST/FSTP、16/32/64 位 FILD/FIST/FISTP/FISTTP、寄存器加载/交换/释放/存储，
+  加减乘除及反向/弹栈形式、FCOM/FUCOM/FCOMI/FUCOMI、FCMOV、FCHS/FABS/FTST/FXAM、
+  FLD 常数、FRNDINT/FSQRT/FSCALE、环境保存恢复与 FNSAVE/FRSTOR 已接入。
+- 基础算术使用 `rustc_apfloat` 的 80 位软件格式；PC=24/53 保持 x87 的 15 位指数范围，
+  使用 round-to-odd 中间结果避免 64 位到低精度的双重舍入。四种 RC 均覆盖。
+  FSQRT 使用整数平方根与余数做舍入，不依赖宿主 f64。
+- CRT `pow` 的 FYL2X、FYL2XP1、F2XM1 使用软件 Quad 中间运算和收敛级数；
+  对数归一化避开接近 1 时的相减消失，log1p 路径保留极小增量。
+  独立高精度十进制参考验证 sqrt(2)、log2(3)、2^0.5-1、log2(1-2^-64)、log2(1+2^-200)。
+  **这不是逐位仿真某款 Intel 微码的超越函数，尚未证明所有极端输入的正确舍入。**
+- 异常 sticky bits、masked stack overflow/underflow 的 indefinite、比较条件位、舍入 C1 已验证；
+  FNCLEX 保留 TOP/条件码。待处理未屏蔽异常在 FWAIT/后续 waiting 指令明确报错。
+  **尚未实现完整的未屏蔽异常精确提交/取消和向 SEH 的 #MF 转换。**
+- FPREM/FPREM1、三角函数、packed BCD 等仍明确 Unsupported；不是完整 x87 ISA。
+- Unicorn/QEMU 对 x87 异常位和 C1 的报告不完整、FCOMI 未清 SF/AF/OF、masked stack fault
+  和 F2XM1(-0) 也与架构要求不一致。差分对比数值、栈顺序、TOP 和比较条件；
+  上述部分用独立架构断言验证，没有为了匹配参照而复制这些缺陷。
+
+## 本轮新增：初始化系统/计时/NLS
+
+- GetSystemInfo/GetNativeSystemInfo 返回 guest x86、单 CPU、4 KiB 页、64 KiB 分配粒度。
+  GlobalMemoryStatus/Ex 填写完整结构，Ex 校验 dwLength=64；报告固定 512 MiB guest 物理内存，
+  可用量随实际提交的应用地址空间页面减少。这是兼容层硬件配置，不是宿主硬件透传。
+- timeGetTime 与 GetTickCount 共用单调毫秒时钟；GetTickCount64 正确返回 EDX:EAX。
+  timeGetDevCaps、timeBeginPeriod/timeEndPeriod 提供参数校验；周期请求不改变宿主定时精度。
+  GetSystemTime 返回真实 UTC SYSTEMTIME。
+- GetStringTypeW/ExW 的 CT_CTYPE1 与 LCMapStringA/W/Ex 大小写映射支持长度查询、显式长度、
+  -1 包含 NUL、容量不足错误和 case mapping 原地写回。CRT 的 256 字符初始化现在成功。
+  Unicode 分类和大小写使用 Rust 表；CT_CTYPE2/3、排序键、locale 特殊规则等仍未实现，
+  分类子集不是完整 Windows NLS 数据库。
+
+## 最新验证结果
+
+- `cargo test --release`：**60/60**（1 个静态导入检查 + 34 个差分族 + 5 个 x87 架构测试 + 20 个 Win32 行为测试）。
+- `cargo build --release`、`cargo fmt -- --check`、`cargo clippy --all-targets -- -D warnings` 通过。
+- 对照 EXE：退出码 0；宿主输出再次确认为 `wire control program\n`，21 字节。
+  窗口 API 仍为 stub，所以退出码只验证加载/解释/文件路径，不代表图形验收。
+- Unicorn 差分在沙箱外执行；发布可执行文件始终为纯解释器。
+- 游戏 `.cf` 成功读取 927 字节并到 EOF；静态导入 unknown arity 警告为 0。
 
 ## 最新游戏阻断
 
-本轮最终运行：**12,004,086 条指令 / 24,264 次 API 调用 / 191 种 opcode**。
-线程等待和计时会让确切计数略有变化，阻断地址稳定。
+最终运行：**21,425,797 条指令 / 24,592 次 API 调用 / 197 种 opcode**。
+线程等待和计时会让确切计数略有变化。
 
 ```text
-unsupported instruction at 0x00691284: x87 mem op dd /0
-bytes: dd 02 c3 ...        ; FLD qword [edx]
+outcome: CRASHED: api dispatch: api dispatch: RtlUnwind/MSVC stack unwind is not yet implemented
+EIP=0x6fff05a0, ESP=0x0019fd44, EBP=0x0019fd78
+RaiseException(0xe06d7363, 1, 3, 0x0019fd6c)
 ```
 
-调用链从 0x50978d 进入 CRT 数学函数 0x6cdfc0，再到 0x6cfd84 / 0x691275。
-当前只有 x87 控制/状态类，没有 ST(0)..ST(7) 浮点栈与算术。
-前面的窗口类注册、GDI、timeGetTime、GlobalMemoryStatus、LCMapStringEx 等仍有未实现日志；
-此次还没有读到 data.xp3 或进入可见游戏画面。
+原 0x00691284 的 FLD m64 阻断已解决；CRT 数学路径通过后抛出 MSVC C++ 异常。
+日志显示搜索处理器 0x6e939b / 0x6da37b / 0x6d9644，随后经 0x67ec25 调用 RtlUnwind。
+之前的 RegisterClassExW/GetClassInfoExW 仍返回 stub 失败；需排查异常原因与窗口初始化的关系，
+不能把绕过异常或模拟窗口成功当成完成 C++ unwind。
+本轮仍未读到 data.xp3 或进入可见游戏画面。
 
 ## 下一步（按序）
 
-1. 补 x87 浮点栈及实际路径需要的加载、存储、算术与比较；把完整状态纳入 ThreadCtx，
-   明确 80 位精度/舍入处理方式，先做差分再跑游戏。优先处理 FLD m64 和随后出现的 FSTP/CRT 数学路径。
-2. 补初始化所需 GetSystemInfo、GlobalMemoryStatus/Ex、timeGetTime、NLS 分类/映射等实质语义。
-3. user32 类/窗口注册与消息队列、guest WndProc 回调；避免把窗口创建失败误判为正常主循环。
-4. 完整 MSVC EH / RtlUnwind；用独立 SEH/C++ 对照程序验证搜索与展开，不能只用 game 不再 throw 的路径验收。
-5. 图形推进后检查 XP3 大文件读取、存档目录、插件 guest DLL 装载与导出解析。
-6. 达到可见主循环后再验收 M2，开始 M3 的 GDI 帧缓冲/音频/输入接入。
+1. 排查 MSVC C++ 异常原因；实现并用独立对照程序验证 RtlUnwind 的帧遍历、unwind handler、
+   FS:[0] 链更新和恢复语义。nested/collided unwind 仍需单独验证。
+2. user32 类/窗口注册与消息队列、guest WndProc 回调；重点检查现有 RegisterClassExW 失败路径。
+3. 图形推进后检查 XP3 大文件读取、存档目录、插件 guest DLL 装载与导出解析。
+4. 补剩余实际触发的 x87/Win32 语义，并继续差分与独立行为测试。
+5. 达到可见主循环后再验收 M2，开始 M3 的 GDI 帧缓冲/音频/输入接入。
 
 ## M3 已认可路线
 
@@ -131,6 +169,6 @@ cargo test --release
 cargo clippy --all-targets -- -D warnings
 cargo build --release
 ./target/release/wire run "/Users/alphaly/Downloads/王様恋愛【体験版】/王様恋愛【体験版】.exe" --max-instr 50000000 --trace-cpu
-# 最新全量日志：wire-out/api.log；之前的分步运行保留在 wire-out/m2-*/。
+# 本轮最终日志：wire-out/m2-x87-system/api.log；首轮 x87 日志：wire-out/m2-x87/api.log。
 ./target/release/wire run tests/control/control.exe --cwd "$PWD/wire-out/control-cwd" --log-dir wire-out/control-m2
 ```

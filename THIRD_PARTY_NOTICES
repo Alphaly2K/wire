@@ -6,6 +6,13 @@ version of third-party code used by this repository, per project policy.
 ## Build dependencies (linked, not distributed as source)
 
 - libc crate (MIT OR Apache-2.0) — host OS bindings. https://github.com/rust-lang/libc
+- rustc_apfloat 0.2.3+llvm-462a31f5a5ab (Apache-2.0 WITH LLVM-exception) —
+  pure Rust software floating-point arithmetic, including x87 extended precision.
+  https://github.com/rust-lang/rustc_apfloat
+- smallvec 1.16.2 (MIT OR Apache-2.0) — transitive dependency of rustc_apfloat.
+  https://github.com/servo/rust-smallvec
+- bitflags 2.13.2 (MIT OR Apache-2.0) — transitive dependency of rustc_apfloat.
+  https://github.com/bitflags/bitflags
 - System libiconv (platform-provided) — CP932/UTF-8/Windows-1252 conversion,
   linked from the host OS rather than vendored. The exact implementation and
   version follow the platform. https://www.gnu.org/software/libiconv/

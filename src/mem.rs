@@ -80,6 +80,16 @@ impl GuestMem {
         self.page_ok(addr as usize / self.host_page)
     }
 
+    /// Bytes committed below the guest's 2 GiB application-address ceiling.
+    pub fn application_committed_bytes(&self) -> u64 {
+        let words = (0x8000_0000usize / self.host_page) / 64;
+        self.committed[..words]
+            .iter()
+            .map(|w| w.count_ones() as u64)
+            .sum::<u64>()
+            * self.host_page as u64
+    }
+
     /// Commit the host pages covering [addr, addr+len). The range is rounded
     /// out to host-page boundaries because mprotect(2) requires host-page
     /// alignment (16 KiB on Apple Silicon — guest-visible allocation

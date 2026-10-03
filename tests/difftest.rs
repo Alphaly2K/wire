@@ -1557,3 +1557,198 @@ fn double_shifts() {
         }
     }
 }
+
+fn x87_mem(code: &mut Vec<u8>, op: u8, group: u8, offset: u32) {
+    code.extend([op, (group << 3) | 5]);
+    code.extend((DATA + offset).to_le_bytes());
+}
+fn x87_check(code: &[u8], init: &Init, tag: &str) {
+    let mut w = run_wire(code, init, 1000);
+    let mut u = run_unicorn(code, init, 1000);
+    assert!(matches!(w, RunResult::Completed { .. }), "wire fault");
+    assert!(matches!(u, RunResult::Completed { .. }), "unicorn fault");
+    // Unicorn/QEMU does not reliably report x87 exception flags or the
+    // rounded-up C1 bit, and FCOMI leaves SF/AF/OF unchanged. Check those
+    // architectural requirements independently instead of copying the oracle.
+    for r in [&mut w, &mut u] {
+        if let RunResult::Completed { regs, .. } = r {
+            regs[0] &= !0x23f;
+        }
+    }
+    if let Err(e) = compare(tag, code, init, &w, &u, FLAG_MASK & !0x890) {
+        panic!("{e}");
+    }
+}
+fn x87_start(init: &mut Init, cw: u16) -> Vec<u8> {
+    init.data[0..2].copy_from_slice(&cw.to_le_bytes());
+    let mut code = vec![0xdb, 0xe3];
+    x87_mem(&mut code, 0xd9, 5, 0);
+    code
+}
+fn x87_dump(code: &mut Vec<u8>, offset: u32) {
+    x87_mem(code, 0xdb, 7, offset); // fstp m80, preserve full extended result
+    code.extend([0xdf, 0xe0]); // status including exception/rounding flags
+}
+
+#[test]
+fn x87_arithmetic_precision_and_rounding() {
+    let mut rng = Rng(0x873);
+    for pc in [0x000, 0x200, 0x300] {
+        for rc in 0..4 {
+            for kind in [0, 1, 4, 5, 6, 7] {
+                for n in 0..24 {
+                    let mut init = Init::random(&mut rng);
+                    let mut code = x87_start(&mut init, 0x7f | pc | (rc << 10));
+                    // Independently generated 64-bit significands catch rounding
+                    // the operands prematurely and loss of the extended tail.
+                    for off in [16, 32] {
+                        let sig = rng.next() | (1 << 63);
+                        let exp = 16383 + rng.below(120) as u16 - 60;
+                        let sign = (rng.below(2) as u128) << 79;
+                        let bits = if n == 0 && (kind == 0 || kind == 4) {
+                            // Exact cancellation exercises the directed zero sign.
+                            0x3fff_8000_0000_0000_0000
+                                | if off == 32 && kind == 0 { 1 << 79 } else { 0 }
+                        } else {
+                            sign | ((exp as u128) << 64) | sig as u128
+                        };
+                        init.data[off..off + 10].copy_from_slice(&bits.to_le_bytes()[..10]);
+                        x87_mem(&mut code, 0xdb, 5, off as u32);
+                    }
+                    code.extend([0xd8, 0xc1 | (kind << 3)]);
+                    x87_dump(&mut code, 64);
+                    x87_dump(&mut code, 80);
+                    x87_check(
+                        &code,
+                        &init,
+                        &format!("pc={pc:x} rc={rc} kind={kind} case={n}"),
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn x87_load_store_integer_and_sqrt() {
+    let mut rng = Rng(0xf10a7);
+    for pc in [0x000, 0x200, 0x300] {
+        for rc in 0..4 {
+            for n in 0..32 {
+                let mut init = Init::random(&mut rng);
+                let mut code = x87_start(&mut init, 0x7f | pc | (rc << 10));
+                let x = (rng.below(200_000) as f64 - 100_000.0) / 32.0;
+                init.data[16..24].copy_from_slice(&x.to_le_bytes());
+                x87_mem(&mut code, 0xdd, 0, 16);
+                code.extend([0xd9, 0xc0, 0xd9, 0xe1, 0xd9, 0xfa]); // duplicate, abs, sqrt
+                x87_dump(&mut code, 64);
+                code.extend([0xd9, 0xc0, 0xd9, 0xfc]); // frndint
+                x87_dump(&mut code, 80);
+                x87_mem(&mut code, 0xd9, 2, 100); // store single
+                x87_mem(&mut code, 0xdf, 2, 104); // fist16
+                x87_mem(&mut code, 0xdb, 2, 108); // fist32
+                code.extend([0xd9, 0xc0]);
+                x87_mem(&mut code, 0xdb, 1, 120); // fisttp32 ignores RC
+                code.extend([0xd9, 0xc0]);
+                x87_mem(&mut code, 0xdd, 1, 128); // fisttp64
+                x87_mem(&mut code, 0xdf, 7, 112); // fistp64
+                for (i, (op, g, off)) in [
+                    (0xd9, 0, 100),
+                    (0xdf, 0, 104),
+                    (0xdb, 0, 108),
+                    (0xdf, 5, 112),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    x87_mem(&mut code, op, g, off);
+                    x87_dump(&mut code, 160 + i as u32 * 16);
+                }
+                x87_check(
+                    &code,
+                    &init,
+                    &format!("load/store/sqrt pc={pc:x} rc={rc} n={n}"),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn x87_stack_comparison_and_exceptions() {
+    let mut rng = Rng(0xf00);
+    for a in [
+        0.0,
+        -0.0,
+        1.0,
+        -2.0,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NAN,
+    ] {
+        for b in [0.0, 1.0, -2.0, f64::INFINITY, f64::NAN] {
+            for instr in [
+                [0xd8, 0xd1],
+                [0xdd, 0xe1],
+                [0xdb, 0xe9],
+                [0xdb, 0xf1],
+                [0xda, 0xe9],
+                [0xde, 0xd9],
+            ] {
+                let mut init = Init::random(&mut rng);
+                let mut code = x87_start(&mut init, 0x37f);
+                init.data[16..24].copy_from_slice(&a.to_le_bytes());
+                init.data[24..32].copy_from_slice(&b.to_le_bytes());
+                x87_mem(&mut code, 0xdd, 0, 16);
+                x87_mem(&mut code, 0xdd, 0, 24);
+                code.extend(instr);
+                code.extend([0xdf, 0xe0]);
+                x87_check(&code, &init, &format!("compare {a:?}/{b:?} {instr:x?}"));
+            }
+        }
+    }
+    let mut init = Init::random(&mut rng);
+    // Reversed destination/pop arithmetic and register stores/exchanges.
+    for instr in [
+        [0xdc, 0xe1],
+        [0xdc, 0xe9],
+        [0xde, 0xe1],
+        [0xde, 0xe9],
+        [0xde, 0xf1],
+        [0xde, 0xf9],
+        [0xde, 0xc1],
+        [0xde, 0xc9],
+    ] {
+        let mut code = x87_start(&mut init, 0x37f);
+        code.extend([0xd9, 0xe8, 0xd9, 0xeb, 0xd9, 0xc9]);
+        code.extend(instr);
+        x87_dump(&mut code, 64);
+        x87_check(&code, &init, &format!("dest {instr:x?}"));
+    }
+}
+
+#[test]
+fn x87_transcendental_exact_identities() {
+    let mut rng = Rng(0x123);
+    for exponent in [-100i64, -8, -1, 0, 1, 8, 100] {
+        let mut init = Init::random(&mut rng);
+        let mut code = x87_start(&mut init, 0x37f);
+        init.data[16..24].copy_from_slice(&exponent.to_le_bytes());
+        code.extend([0xd9, 0xe8]);
+        x87_mem(&mut code, 0xdf, 5, 16);
+        code.extend([
+            0xd9, 0xc9, 0xd9, 0xfd, 0xdd, 0xd9, 0xd9, 0xe8, 0xd9, 0xc9, 0xd9, 0xf1,
+        ]);
+        x87_dump(&mut code, 64);
+        x87_check(&code, &init, "log2 of power of two");
+    }
+    for x in [-1.0f64, 0.0, 1.0] {
+        let mut init = Init::random(&mut rng);
+        let mut code = x87_start(&mut init, 0x37f);
+        init.data[16..24].copy_from_slice(&x.to_le_bytes());
+        x87_mem(&mut code, 0xdd, 0, 16);
+        code.extend([0xd9, 0xf0]);
+        x87_dump(&mut code, 64);
+        x87_check(&code, &init, "exp2 identity");
+    }
+}

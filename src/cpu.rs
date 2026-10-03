@@ -1,8 +1,8 @@
 //! x86 interpreter core.
 //!
 //! Correctness-first decode-dispatch loop covering a compiler-generated-code
-//! integer subset (plus string ops, cpuid, rdtsc, and minimal x87 control
-//! instructions). Unsupported opcodes are fatal errors carrying the opcode
+//! integer subset (plus string ops, cpuid, rdtsc, SSE and software x87).
+//! Unsupported opcodes are fatal errors carrying the opcode
 //! bytes; `op_stats` records what actually executed so M1 coverage is driven
 //! by data, not guesses. Differential testing against a reference emulator
 //! (Unicorn, dev-only) is M1 scope.
@@ -13,6 +13,9 @@ use crate::thread::Sched;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::time::Instant;
+
+mod fpu;
+pub use fpu::Fpu;
 
 pub const CF: u32 = 0x001;
 pub const PF: u32 = 0x004;
@@ -37,6 +40,7 @@ pub enum CpuError {
     Unsupported { eip: u32, desc: String },
     Breakpoint { eip: u32 },
     DivideError { eip: u32 },
+    FloatingPoint { eip: u32, status: u16 },
 }
 
 impl fmt::Display for CpuError {
@@ -48,6 +52,10 @@ impl fmt::Display for CpuError {
             }
             CpuError::Breakpoint { eip } => write!(f, "int3 breakpoint at {eip:#010x}"),
             CpuError::DivideError { eip } => write!(f, "divide error at {eip:#010x}"),
+            CpuError::FloatingPoint { eip, status } => write!(
+                f,
+                "unmasked x87 exception at {eip:#010x}: status={status:#06x}"
+            ),
         }
     }
 }
@@ -120,8 +128,7 @@ pub struct ThreadCtx {
     pub eflags: u32,
     pub fs_base: u32,
     pub gs_base: u32,
-    pub fpu_cw: u16,
-    pub fpu_sw: u16,
+    pub fpu: Fpu,
     pub xmm: [[u8; 16]; 8],
     pub mxcsr: u32,
 }
@@ -132,8 +139,7 @@ pub struct Cpu {
     pub eflags: u32,
     pub fs_base: u32,
     pub gs_base: u32,
-    pub fpu_cw: u16,
-    pub fpu_sw: u16,
+    pub fpu: Fpu,
     pub xmm: [[u8; 16]; 8],
     pub mxcsr: u32,
     pub halted: bool,
@@ -153,8 +159,7 @@ impl Cpu {
             eflags: 0x202,
             fs_base: teb,
             gs_base: 0,
-            fpu_cw: 0x037f,
-            fpu_sw: 0,
+            fpu: Fpu::default(),
             xmm: [[0; 16]; 8],
             mxcsr: 0x1f80,
             halted: false,
@@ -197,8 +202,7 @@ impl Cpu {
             eflags: self.eflags,
             fs_base: self.fs_base,
             gs_base: self.gs_base,
-            fpu_cw: self.fpu_cw,
-            fpu_sw: self.fpu_sw,
+            fpu: self.fpu,
             xmm: self.xmm,
             mxcsr: self.mxcsr,
         }
@@ -210,8 +214,7 @@ impl Cpu {
         self.eflags = c.eflags;
         self.fs_base = c.fs_base;
         self.gs_base = c.gs_base;
-        self.fpu_cw = c.fpu_cw;
-        self.fpu_sw = c.fpu_sw;
+        self.fpu = c.fpu;
         self.xmm = c.xmm;
         self.mxcsr = c.mxcsr;
     }
@@ -953,54 +956,6 @@ impl Cpu {
         Ok(())
     }
 
-    fn fpu_op(&mut self, mem: &mut GuestMem, seg: u32, op: u8, eip0: u32) -> Result<(), CpuError> {
-        let b = mem.read_u8(self.eip)?;
-        if b >= 0xC0 {
-            // register (stack) forms
-            self.eip = self.eip.wrapping_add(1);
-            match (op, b) {
-                (0xD9, 0xD0) => Ok(()), // fnop
-                (0xDB, 0xE2) => {
-                    // fnclex
-                    self.fpu_sw = 0;
-                    Ok(())
-                }
-                (0xDB, 0xE3) => {
-                    // fninit
-                    self.fpu_cw = 0x037f;
-                    self.fpu_sw = 0;
-                    Ok(())
-                }
-                (0xDF, 0xE0) => {
-                    // fnstsw ax
-                    self.regs[EAX] = (self.regs[EAX] & !0xffff) | (self.fpu_sw as u32);
-                    Ok(())
-                }
-                _ => Err(self.unsupported(mem, eip0, &format!("x87 reg op {op:02x} {b:02x}"))),
-            }
-        } else {
-            let rm = self.modrm(mem)?;
-            match (op, rm.reg) {
-                (0xD9, 5) => {
-                    // fldcw m16
-                    self.fpu_cw = mem.read_u16(rm.addr.unwrap().wrapping_add(seg))?;
-                    Ok(())
-                }
-                (0xD9, 7) => {
-                    // fnstcw m16
-                    mem.write_u16(rm.addr.unwrap().wrapping_add(seg), self.fpu_cw)?;
-                    Ok(())
-                }
-                (0xDF, 7) => {
-                    // fnstsw m16
-                    mem.write_u16(rm.addr.unwrap().wrapping_add(seg), self.fpu_sw)?;
-                    Ok(())
-                }
-                _ => Err(self.unsupported(mem, eip0, &format!("x87 mem op {op:02x} /{}", rm.reg))),
-            }
-        }
-    }
-
     fn bt_op(
         &mut self,
         mem: &mut GuestMem,
@@ -1322,7 +1277,7 @@ impl Cpu {
                     };
                 }
             }
-            0x9B => {} // fwait: nop
+            0x9B => self.fpu_wait(eip0)?, // fwait
             0x9C => {
                 let v = (self.eflags | 2) & mask(bits);
                 self.push_sized(mem, v, bits)?;
@@ -1445,7 +1400,7 @@ impl Cpu {
                 let r = self.shift(rm.reg, v, c, bb);
                 self.rm_write(mem, &rm, r, bb, seg)?;
             }
-            0xD8..=0xDF => self.fpu_op(mem, seg, op, eip0)?,
+            0xD8..=0xDF => self.fpu_op(mem, seg, bits, op, eip0)?,
             0xE0..=0xE2 => {
                 let d = self.fetch8(mem)? as i8 as i32 as u32;
                 self.regs[ECX] = self.regs[ECX].wrapping_sub(1);

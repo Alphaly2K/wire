@@ -7,7 +7,7 @@
 //! execution resumes at the return address. Unimplemented APIs are not silent:
 //! they are counted and reported, which is the primary M0 deliverable.
 
-use crate::cpu::Cpu;
+use crate::cpu::{Cpu, EDX};
 use crate::mem::GuestMem;
 use crate::thread::{
     target_mentions, Sched, ThreadState, WaitTarget, Wake, WAIT_OBJECT_0, WAIT_TIMEOUT,
@@ -1764,8 +1764,13 @@ pub fn dispatch(
             ret = 4242;
             note = "fake pid".into();
         }
-        ("kernel32.dll", "GetTickCount") => {
+        ("kernel32.dll", "GetTickCount") | ("winmm.dll", "timeGetTime") => {
             ret = state.start.elapsed().as_millis() as u32;
+        }
+        ("kernel32.dll", "GetTickCount64") => {
+            let ticks = state.start.elapsed().as_millis() as u64;
+            cpu.regs[EDX] = (ticks >> 32) as u32;
+            ret = ticks as u32;
         }
         ("kernel32.dll", "GetCommandLineA") => ret = state.cmdline_a,
         ("kernel32.dll", "GetCommandLineW") => ret = state.cmdline_w,
@@ -2404,6 +2409,9 @@ pub fn dispatch(
         }
         _ => {
             if let Some((v, msg)) = crate::file_api::dispatch(dll, name, &args, mem, state) {
+                ret = v;
+                note = msg;
+            } else if let Some((v, msg)) = crate::system::dispatch(dll, name, &args, mem, state) {
                 ret = v;
                 note = msg;
             } else if let Some((v, msg)) = crate::nls::dispatch(dll, name, &args, mem, state) {

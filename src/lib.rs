@@ -10,4 +10,5 @@ pub mod nls;
 pub mod pe;
 pub mod resource;
 pub mod seh;
+pub mod system;
 pub mod thread;

@@ -53,6 +53,11 @@ pub fn dispatch(
                 | "GetUserDefaultLangID"
                 | "GetSystemDefaultLangID"
                 | "IsValidCodePage"
+                | "GetStringTypeW"
+                | "GetStringTypeExW"
+                | "LCMapStringW"
+                | "LCMapStringA"
+                | "LCMapStringEx"
         ))
         || (dll == "shell32.dll"
             && matches!(
@@ -69,6 +74,60 @@ pub fn dispatch(
     }
     let result = (|| -> Result<u32, u32> {
         match name {
+            "GetStringTypeW" | "GetStringTypeExW" => {
+                let shift = usize::from(name == "GetStringTypeExW");
+                if a[shift] != 1 {
+                    return Err(1004);
+                } // CT_CTYPE1
+                let bytes = input(mem, a[shift + 1], a[shift + 2], 2)?;
+                let output: Vec<_> = bytes
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .flat_map(|b| ctype1(u16::from_le_bytes(*b)).to_le_bytes())
+                    .collect();
+                mem.write_bytes(a[shift + 3], &output).map_err(|_| 87u32)?;
+                Ok(1)
+            }
+            "LCMapStringW" | "LCMapStringA" | "LCMapStringEx" => {
+                let upper = a[1] & 0x200 != 0;
+                let lower = a[1] & 0x100 != 0;
+                if upper == lower || a[1] & !0x0100_0300 != 0 {
+                    return Err(1004);
+                }
+                let wide = name != "LCMapStringA";
+                let bytes = input(mem, a[2], a[3], if wide { 2 } else { 1 })?;
+                let text = if wide {
+                    let units: Vec<_> = bytes
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|b| u16::from_le_bytes(*b))
+                        .collect();
+                    String::from_utf16(&units).map_err(|_| 1113u32)?
+                } else {
+                    crate::codepage::decode(&bytes, 932)?
+                };
+                let mapped = if upper {
+                    text.to_uppercase()
+                } else {
+                    text.to_lowercase()
+                };
+                let output = if wide {
+                    mapped.encode_utf16().flat_map(u16::to_le_bytes).collect()
+                } else {
+                    crate::codepage::encode(&mapped, 932)?.0
+                };
+                let count = output.len() as u32 / if wide { 2 } else { 1 };
+                if a[5] == 0 {
+                    return Ok(count);
+                }
+                if a[5] < count {
+                    return Err(122);
+                }
+                mem.write_bytes(a[4], &output).map_err(|_| 87u32)?;
+                Ok(count)
+            }
             "MultiByteToWideChar" => {
                 let bytes = input(mem, a[2], a[3], 1)?;
                 let s = if a[1] & 8 != 0 {
@@ -166,4 +225,52 @@ pub fn dispatch(
             )
         }
     })
+}
+
+/// C1 flags needed by the CRT's character tables. Unicode properties follow
+/// Rust's Unicode tables; this is not a complete Windows NLS database.
+fn ctype1(unit: u16) -> u16 {
+    let Some(c) = char::from_u32(unit as u32) else {
+        return 0;
+    };
+    if (0xfdd0..=0xfdef).contains(&unit) || unit >= 0xfffe {
+        return 0;
+    }
+    let mut flags = 0x200;
+    if c.is_uppercase() {
+        flags |= 1;
+    }
+    if c.is_lowercase() {
+        flags |= 2;
+    }
+    if c.is_ascii_digit() || ('０'..='９').contains(&c) {
+        flags |= 4;
+    }
+    if c.is_whitespace() {
+        flags |= 8;
+    }
+    if c.is_control() {
+        flags |= 0x20;
+    }
+    if matches!(
+        c,
+        '\t' | ' ' | '\u{a0}' | '\u{1680}' | '\u{202f}' | '\u{205f}' | '\u{3000}'
+    ) || ('\u{2000}'..='\u{200a}').contains(&c)
+    {
+        flags |= 0x40;
+    }
+    if c.is_ascii_hexdigit()
+        || ('Ａ'..='Ｆ').contains(&c)
+        || ('ａ'..='ｆ').contains(&c)
+        || ('０'..='９').contains(&c)
+    {
+        flags |= 0x80;
+    }
+    if c.is_alphabetic() {
+        flags |= 0x100;
+    }
+    if !c.is_alphanumeric() && !c.is_whitespace() && !c.is_control() {
+        flags |= 0x10;
+    }
+    flags
 }

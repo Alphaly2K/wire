@@ -192,7 +192,6 @@ impl Sched {
             eip: entry,
             eflags: 0x202,
             fs_base: teb,
-            fpu_cw: 0x037f,
             mxcsr: 0x1f80,
             ..ThreadCtx::default()
         };
