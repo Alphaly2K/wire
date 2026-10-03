@@ -1,0 +1,124 @@
+file:        /Users/alphaly/Downloads/王様恋愛【体験版】/王様恋愛【体験版】.exe
+image base:  0x00400000
+entry rva:   0x0027d3ba
+subsystem:   2
+image size:  0x508000
+stack:       reserve 0x100000 commit 0x1000
+sections:
+  .text    va=0x00001000 vsize=0x02fc93c raw=0x02fca00 X  <== entry
+  .adata   va=0x002fe000 vsize=0x0000050 raw=0x0000200 X
+  .rdata   va=0x002ff000 vsize=0x00d6540 raw=0x00d6600 
+  .data    va=0x003d6000 vsize=0x00aa200 raw=0x0008e00 W
+  .rsrc    va=0x00481000 vsize=0x004fde9 raw=0x004fe00 
+  .reloc   va=0x004d1000 vsize=0x0036986 raw=0x0036a00 
+
+imports: 18 DLLs, 346 functions
+
+  KERNEL32.dll (165):
+    GlobalAlloc Sleep SizeofResource GetVersionExW GlobalFree LockResource GlobalMemoryStatusEx 
+    SetCurrentDirectoryW HeapSetInformation GetCurrentThreadId GetSystemTime CreateMutexW 
+    HeapCompact GetNativeSystemInfo HeapQueryInformation GetProcessHeaps HeapWalk GetConsoleMode 
+    FreeConsole WriteConsoleW AttachConsole GetLocalTime SetConsoleTitleW GetConsoleTitleW 
+    GetConsoleProcessList OpenProcess GetProcessAffinityMask SetThreadAffinityMask 
+    GlobalMemoryStatus TerminateProcess GetCurrentThread SetThreadPriority GlobalDeleteAtom 
+    GlobalAddAtomW MulDiv OutputDebugStringW FormatMessageW WaitForSingleObject SetEvent ResetEvent 
+    WaitForMultipleObjects CreateThread MultiByteToWideChar GetVersionExA LoadLibraryExW SearchPathW 
+    GetSystemDirectoryW GetWindowsDirectoryW GlobalLock GlobalUnlock InterlockedIncrement 
+    InterlockedDecrement InterlockedCompareExchange ExitThread CreateEventW IsBadReadPtr 
+    GetSystemInfo GetThreadPriority SuspendThread ResumeThread HeapAlloc DeleteFileW HeapDestroy 
+    HeapCreate LocalSize GetFileAttributesExW GetOEMCP GetACP IsValidCodePage HeapSize 
+    EnumSystemLocalesW GetUserDefaultLCID IsValidLocale GetLocaleInfoW LCMapStringW CompareStringW 
+    GetTimeFormatW GetDateFormatW GetStartupInfoW TlsFree TlsSetValue TlsGetValue TlsAlloc 
+    SetLastError SetUnhandledExceptionFilter UnhandledExceptionFilter 
+    InitializeCriticalSectionAndSpinCount GetCPInfo RaiseException RtlUnwind GetCommandLineW 
+    GetSystemTimeAsFileTime AreFileApisANSI GetModuleHandleExW HeapReAlloc IsProcessorFeaturePresent 
+    IsDebuggerPresent DecodePointer EncodePointer GetStringTypeW WideCharToMultiByte lstrcmpW 
+    VirtualFree VirtualAlloc ReleaseSemaphore CreateSemaphoreW InterlockedExchange ExitProcess 
+    GetTimeZoneInformation GetConsoleCP GetProcessHeap LoadResource FindResourceW VirtualQuery 
+    GetFullPathNameW LocalFree LocalLock LocalUnlock GetVolumeInformationW SetThreadIdealProcessor 
+    GetCurrentProcessId SetFilePointerEx ReadConsoleW QueryPerformanceCounter GetEnvironmentStringsW 
+    FreeEnvironmentStringsW GetCurrentDirectoryW GetExitCodeProcess SetEnvironmentVariableA 
+    SetEnvironmentVariableW GetFileType RemoveDirectoryW GetTempPathW CreateFileW GetFileAttributesW 
+    GetTickCount CreateDirectoryW SetEndOfFile GetDriveTypeW SetFilePointer GetFileSize CloseHandle 
+    DuplicateHandle CreatePipe SetStdHandle GetStdHandle FlushFileBuffers GetModuleFileNameW 
+    ReadFile WriteFile GetCurrentProcess CreateProcessW FindNextFileW FindClose GetProcAddress 
+    LoadLibraryW FreeLibrary FindFirstFileW GetLastError GetModuleHandleW DeleteCriticalSection 
+    EnterCriticalSection LeaveCriticalSection HeapFree InitializeCriticalSection 
+
+  USER32.dll (97):
+    MonitorFromWindow SetCursorPos GetKeyboardLayout SetWindowRgn ClientToScreen MoveWindow 
+    GetForegroundWindow PostThreadMessageW RegisterWindowMessageW DestroyCaret LoadStringW GetFocus 
+    OpenClipboard SetCaretPos GetMonitorInfoW EndPaint GetWindowTextLengthW GetSystemMenu 
+    ScreenToClient SetActiveWindow GetMessageExtraInfo GetClipboardData IsClipboardFormatAvailable 
+    SetFocus MsgWaitForMultipleObjects EnumDisplaySettingsExW GetKeyState TrackMouseEvent 
+    IsWindowEnabled GetClientRect BeginPaint SetPropW GetCapture GetMenu LoadIconW SetRect 
+    InvalidateRect GetWindowTextW GetMenuItemCount SetClipboardData SetCapture CloseClipboard 
+    GetPriorityClipboardFormat KillTimer SetTimer GetDC ReleaseDC ChangeDisplaySettingsW GetSysColor 
+    SystemParametersInfoW EnumDisplaySettingsW LoadCursorFromFileW GetQueueStatus AdjustWindowRectEx 
+    ReleaseCapture IsWindowVisible UpdateWindow SetWindowTextW SetCursor LoadCursorW WindowFromPoint 
+    GetCursor DialogBoxParamW GetDlgItem EndDialog SetDlgItemTextW EnableWindow 
+    TranslateAcceleratorW DestroyAcceleratorTable IsIconic CreateAcceleratorTableW WaitMessage 
+    TranslateMessage LoadAcceleratorsW PeekMessageW ShowWindow DispatchMessageW GetAsyncKeyState 
+    GetSystemMetrics EnumWindows GetCursorPos SendMessageW GetWindowThreadProcessId DestroyWindow 
+    PostMessageW GetClassInfoExW RegisterClassExW GetWindowLongW SetWindowLongW CreateWindowExW 
+    DefWindowProcW GetWindowRect GetParent SetWindowPos PostQuitMessage MessageBoxW CreateCaret 
+
+  GDI32.dll (23):
+    DeleteObject GetFontData SelectObject CreateFontIndirectW GetTextMetricsW GetStockObject 
+    EnumFontFamiliesExW GetObjectW CombineRgn CreateDIBSection DeleteDC EnumFontsW CreateDIBitmap 
+    GetPixel CreateCompatibleBitmap SetPixel ExtCreateRegion CreateRectRgn GetOutlineTextMetricsW 
+    GetTextExtentPoint32W GetGlyphOutlineW GetDeviceCaps CreateCompatibleDC 
+
+  COMDLG32.dll (3):
+    GetSaveFileNameW GetOpenFileNameW CommDlgExtendedError 
+
+  ADVAPI32.dll (3):
+    RegOpenKeyExW RegQueryValueExW RegCloseKey 
+
+  SHELL32.dll (8):
+    SHBrowseForFolderW ShellExecuteW SHGetSpecialFolderPathW DragFinish DragQueryFileW 
+    DragAcceptFiles SHGetPathFromIDListW SHGetKnownFolderPath 
+
+  ole32.dll (12):
+    StringFromGUID2 CreateItemMoniker CoInitialize GetRunningObjectTable CoFreeUnusedLibraries 
+    CoInitializeEx CoUninitialize CoCreateInstance CoTaskMemFree CoCreateGuid CoTaskMemAlloc 
+    PropVariantClear 
+
+  OLEAUT32.dll (1):
+    #9 
+
+  WINMM.dll (6):
+    timeEndPeriod timeKillEvent timeGetTime timeGetDevCaps timeBeginPeriod timeSetEvent 
+
+  VERSION.dll (3):
+    VerQueryValueW GetFileVersionInfoSizeW GetFileVersionInfoW 
+
+  MPR.dll (1):
+    WNetGetUniversalNameW 
+
+  SHLWAPI.dll (2):
+    PathIsDirectoryW PathFileExistsW 
+
+  IMM32.dll (10):
+    ImmGetContext ImmGetOpenStatus ImmIsIME ImmSetCompositionFontW ImmSetConversionStatus 
+    ImmSetOpenStatus ImmAssociateContext ImmGetConversionStatus ImmSetCompositionWindow 
+    ImmReleaseContext 
+
+  dbghelp.dll (1):
+    MiniDumpWriteDump 
+
+  QUARTZ.dll (1):
+    AMGetErrorTextW 
+
+  PROPSYS.dll (1):
+    PropVariantToDouble 
+
+  MFPlat.DLL (3):
+    MFShutdown MFFrameRateToAverageTimePerFrame MFStartup 
+
+  MF.dll (6):
+    MFCreateVideoRendererActivate MFCreateAudioRendererActivate MFCreateTopologyNode 
+    MFCreateTopology MFCreateMediaSession MFCreateSourceResolver 
+
+heuristics:
+  entry section: .text

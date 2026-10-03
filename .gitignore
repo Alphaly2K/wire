@@ -1,0 +1,4 @@
+/target
+*.log
+wire-out/
+tests/control/*.exe

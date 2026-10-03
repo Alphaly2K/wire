@@ -1,0 +1,66 @@
+file:        tests/control/control.exe
+image base:  0x00400000
+entry rva:   0x00001450
+subsystem:   2
+image size:  0x23000
+stack:       reserve 0x200000 commit 0x1000
+sections:
+  .text    va=0x00001000 vsize=0x0001cd0 raw=0x0001e00 X  <== entry
+  .data    va=0x00003000 vsize=0x0000030 raw=0x0000200 W
+  .rdata   va=0x00004000 vsize=0x00005e0 raw=0x0000600 
+  .bss     va=0x00005000 vsize=0x0000094 raw=0x0000000 W
+  .idata   va=0x00006000 vsize=0x000095c raw=0x0000a00 
+  .tls     va=0x00007000 vsize=0x0000008 raw=0x0000200 W
+  .reloc   va=0x00008000 vsize=0x0000260 raw=0x0000400 
+  /4       va=0x00009000 vsize=0x0000398 raw=0x0000400 
+  /19      va=0x0000a000 vsize=0x000b921 raw=0x000ba00 
+  /31      va=0x00016000 vsize=0x000212d raw=0x0002200 
+  /45      va=0x00019000 vsize=0x0002001 raw=0x0002200 
+  /57      va=0x0001c000 vsize=0x000071c raw=0x0000800 
+  /70      va=0x0001d000 vsize=0x000038d raw=0x0000400 
+  /81      va=0x0001e000 vsize=0x00026e2 raw=0x0002800 
+  /97      va=0x00021000 vsize=0x0000c2d raw=0x0000e00 
+  /113     va=0x00022000 vsize=0x00001c5 raw=0x0000200 
+
+imports: 11 DLLs, 62 functions
+
+  GDI32.dll (6):
+    BitBlt CreateCompatibleBitmap CreateCompatibleDC DeleteDC DeleteObject SelectObject 
+
+  KERNEL32.dll (15):
+    CloseHandle CreateFileA DeleteCriticalSection EnterCriticalSection GetLastError GetStartupInfoA 
+    InitializeCriticalSection IsDBCSLeadByte LeaveCriticalSection SetUnhandledExceptionFilter Sleep 
+    TlsGetValue VirtualProtect VirtualQuery WriteFile 
+
+  api-ms-win-crt-environment-l1-1-0.dll (1):
+    __p__environ 
+
+  api-ms-win-crt-heap-l1-1-0.dll (4):
+    _set_new_mode calloc free malloc 
+
+  api-ms-win-crt-locale-l1-1-0.dll (1):
+    _configthreadlocale 
+
+  api-ms-win-crt-math-l1-1-0.dll (1):
+    __setusermatherr 
+
+  api-ms-win-crt-private-l1-1-0.dll (1):
+    memcpy 
+
+  api-ms-win-crt-runtime-l1-1-0.dll (15):
+    __p___argc __p___argv __p__acmdln _cexit _configure_narrow_argv _crt_atexit _exit 
+    _initialize_narrow_environment _initterm _initterm_e _set_app_type 
+    _set_invalid_parameter_handler abort exit signal 
+
+  api-ms-win-crt-stdio-l1-1-0.dll (6):
+    __acrt_iob_func __p__commode __p__fmode __stdio_common_vfprintf fflush setvbuf 
+
+  api-ms-win-crt-string-l1-1-0.dll (2):
+    strlen strncmp 
+
+  USER32.dll (10):
+    CreateWindowExA DefWindowProcA DispatchMessageA GetDC PeekMessageA RegisterClassA ReleaseDC 
+    ShowWindow TranslateMessage UpdateWindow 
+
+heuristics:
+  entry section: .text

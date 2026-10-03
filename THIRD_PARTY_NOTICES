@@ -1,0 +1,14 @@
+# Third-Party Notices
+
+wire is licensed LGPL-2.1-only (see LICENSE). This file records the origin and
+version of third-party code used by this repository, per project policy.
+
+## Build dependencies (linked, not distributed as source)
+
+- libc crate (MIT OR Apache-2.0) — host OS bindings. https://github.com/rust-lang/libc
+
+## Imported source code
+
+None as of M0. When Wine (or any other third-party) source is imported, each
+file must keep its original copyright header and an entry is added here with
+source project, version/commit, and license.
