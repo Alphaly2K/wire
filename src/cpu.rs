@@ -606,8 +606,8 @@ impl Cpu {
                 }
                 (r as u32) & m
             }
-            4 => {
-                // shl
+            4 | 6 => {
+                // shl / sal (intel: /6 is an alias of /4)
                 if (c as u32) >= width {
                     self.set_flag(CF, false);
                     self.set_szp(0, bits);
@@ -621,7 +621,7 @@ impl Cpu {
                 self.set_szp(r, bits);
                 r
             }
-            6 => {
+            5 => {
                 // shr
                 if (c as u32) >= width {
                     self.set_flag(CF, false);
@@ -807,7 +807,7 @@ impl Cpu {
                             )
                         } else {
                             let p = (eax as u64) * (a as u64);
-                            ((p >> 32) as u32, p as u32, p >> 32 != 0)
+                            ((p >> 32) as u32, p as u32, p >> 32 == 0)
                         };
                         self.regs[EAX] = lo;
                         self.regs[EDX] = hi;
@@ -1279,7 +1279,10 @@ impl Cpu {
             }
             0x9D => {
                 let v = self.pop_sized(mem, bits)?;
-                self.eflags = (v & 0x0fd5) | 2;
+                // TF is masked off: single-step #DB is not emulated (a guest
+                // that sets TF would otherwise diverge silently). IF forced
+                // to the usual user-mode state.
+                self.eflags = (v & 0x0cd5) | 0x202;
             }
             0x9E => {
                 // sahf
@@ -1515,8 +1518,11 @@ impl Cpu {
             }
             0x40..=0x4F => {
                 let rm = self.modrm(mem)?;
+                // cmov with a memory source performs the read even when the
+                // condition is false (it can fault); only the register write
+                // is conditional.
+                let v = self.rm_read(mem, &rm, bits, seg)?;
                 if self.cc(op & 15) {
-                    let v = self.rm_read(mem, &rm, bits, seg)?;
                     self.set_r(rm.reg, v, bits);
                 }
             }

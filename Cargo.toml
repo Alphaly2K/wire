@@ -8,5 +8,8 @@ description = "Watari-Is-a-Runtime-Environment: non-JIT x86 interpretation + Win
 [dependencies]
 libc = "0.2"
 
+[dev-dependencies]
+unicorn-engine = "2"
+
 [profile.release]
 debug = true

@@ -37,6 +37,14 @@ pub struct GuestMem {
 unsafe impl Send for GuestMem {}
 unsafe impl Sync for GuestMem {}
 
+impl Drop for GuestMem {
+    fn drop(&mut self) {
+        unsafe {
+            libc::munmap(self.base as *mut libc::c_void, SPACE_SIZE as usize);
+        }
+    }
+}
+
 impl GuestMem {
     pub fn new() -> std::io::Result<GuestMem> {
         let p = unsafe {
