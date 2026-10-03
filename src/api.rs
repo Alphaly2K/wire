@@ -34,6 +34,12 @@ pub struct ApiTable {
     by_key: HashMap<(String, String), u32>,
 }
 
+impl Default for ApiTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ApiTable {
     pub fn new() -> ApiTable {
         let mut t = ApiTable {
@@ -59,11 +65,7 @@ impl ApiTable {
         let idx = self.entries.len();
         assert!(idx < STUB_CAPACITY, "API stub table overflow");
         let addr = STUB_BASE + idx as u32 * STUB_STRIDE;
-        self.entries.push(ApiEntry {
-            dll,
-            name,
-            ordinal,
-        });
+        self.entries.push(ApiEntry { dll, name, ordinal });
         self.by_key.insert(key, addr);
         addr
     }
@@ -90,6 +92,15 @@ pub const SCRATCH_BASE: u32 = 0x00f0_0000;
 /// real file I/O lands.
 #[derive(Debug)]
 pub enum HandleObj {
+    File {
+        file: File,
+        readable: bool,
+        writable: bool,
+    },
+    Search {
+        entries: Vec<std::path::PathBuf>,
+        next: usize,
+    },
     Event {
         manual: bool,
         signaled: bool,
@@ -110,6 +121,7 @@ pub enum HandleObj {
 /// Mutable host-side state for the emulated process.
 pub struct ApiState {
     pub last_error: u32,
+    pub unhandled_filter: u32,
     pub start: Instant,
     pub exe_base: u32,
     pub exe_path: String,
@@ -122,9 +134,11 @@ pub struct ApiState {
     pub argv_ptr: u32,
     pub envp_ptr: u32,
     pub process_heap: u32,
-    pub tls: HashMap<u32, u32>,
+    pub heap: crate::heap::GuestHeap,
+    pub fs: Option<crate::fs::GuestFs>,
+    pub tls: HashMap<(u32, u32), u32>,
     pub next_tls: u32,
-    pub fls: HashMap<u32, u32>,
+    pub fls: HashMap<(u32, u32), u32>,
     pub next_fls: u32,
     pub handles: HashMap<u32, HandleObj>,
     pub named_objs: HashMap<String, u32>, // event/mutex/semaphore name -> handle
@@ -135,6 +149,7 @@ impl ApiState {
     pub fn new(exe_base: u32, exe_path: String, cmdline_a: u32, cmdline_w: u32) -> ApiState {
         let mut s = ApiState {
             last_error: 0,
+            unhandled_filter: 0,
             start: Instant::now(),
             exe_base,
             exe_path,
@@ -147,6 +162,8 @@ impl ApiState {
             argv_ptr: 0,
             envp_ptr: 0,
             process_heap: 0x7005_0000,
+            heap: crate::heap::GuestHeap::new(0x7005_0000),
+            fs: None,
             tls: HashMap::new(),
             next_tls: 1,
             fls: HashMap::new(),
@@ -292,12 +309,8 @@ impl ApiLogger {
 
     pub fn finish(&mut self) {
         self.emit("; ---- API call frequency (all) ----".into());
-        let mut v: Vec<(String, u64)> = self
-            .freq
-            .iter()
-            .map(|(k, c)| (k.clone(), *c))
-            .collect();
-        v.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut v: Vec<(String, u64)> = self.freq.iter().map(|(k, c)| (k.clone(), *c)).collect();
+        v.sort_by_key(|a| std::cmp::Reverse(a.1));
         for (k, c) in &v {
             self.emit(format!("; {c:>8}  {k}"));
         }
@@ -307,7 +320,7 @@ impl ApiLogger {
             .iter()
             .map(|(k, c)| (k.clone(), *c))
             .collect();
-        u.sort_by(|a, b| b.1.cmp(&a.1));
+        u.sort_by_key(|a| std::cmp::Reverse(a.1));
         for (k, c) in &u {
             self.emit(format!("; {c:>8}  {k}"));
         }
@@ -329,9 +342,11 @@ fn read_str(mem: &GuestMem, addr: u32, wide: bool) -> String {
         return String::new();
     }
     if wide {
-        mem.read_wstr(addr, 260).unwrap_or_else(|_| "<fault>".into())
+        mem.read_wstr(addr, 260)
+            .unwrap_or_else(|_| "<fault>".into())
     } else {
-        mem.read_cstr(addr, 260).unwrap_or_else(|_| "<fault>".into())
+        mem.read_cstr(addr, 260)
+            .unwrap_or_else(|_| "<fault>".into())
     }
 }
 
@@ -349,306 +364,749 @@ fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
         add(
             "kernel32.dll",
             &[
-                ("GetModuleHandleA", 4), ("GetModuleHandleW", 4), ("GetModuleHandleExA", 12),
-                ("GetModuleHandleExW", 12), ("GetModuleFileNameA", 12), ("GetModuleFileNameW", 12),
-                ("GetProcAddress", 8), ("LoadLibraryA", 4), ("LoadLibraryW", 4),
-                ("LoadLibraryExA", 12), ("LoadLibraryExW", 12), ("FreeLibrary", 4),
-                ("GetStartupInfoA", 4), ("GetStartupInfoW", 4),
-                ("GetCommandLineA", 0), ("GetCommandLineW", 0),
-                ("GetStdHandle", 4), ("SetStdHandle", 8), ("GetFileType", 4),
-                ("CreateFileA", 28), ("CreateFileW", 28), ("ReadFile", 20), ("WriteFile", 20),
-                ("CloseHandle", 4), ("GetFileSize", 8), ("GetFileSizeEx", 8),
-                ("SetFilePointer", 16), ("SetFilePointerEx", 20), ("SetEndOfFile", 4),
-                ("FlushFileBuffers", 4), ("DeleteFileA", 4), ("DeleteFileW", 4),
-                ("CreateDirectoryA", 8), ("CreateDirectoryW", 8),
-                ("GetCurrentDirectoryA", 8), ("GetCurrentDirectoryW", 8),
-                ("SetCurrentDirectoryA", 4), ("SetCurrentDirectoryW", 4),
-                ("GetFullPathNameA", 16), ("GetFullPathNameW", 16),
-                ("FindFirstFileA", 8), ("FindFirstFileW", 8), ("FindNextFileA", 8),
-                ("FindNextFileW", 8), ("FindClose", 4),
-                ("GetFileAttributesA", 4), ("GetFileAttributesW", 4),
-                ("SetFileAttributesA", 8), ("SetFileAttributesW", 8),
-                ("MoveFileA", 8), ("MoveFileW", 8), ("CopyFileA", 12), ("CopyFileW", 12),
-                ("GetTempPathA", 8), ("GetTempPathW", 8),
-                ("GetCurrentProcessId", 0), ("GetCurrentThreadId", 0), ("GetCurrentProcess", 0),
-                ("GetCurrentThread", 0), ("GetTickCount", 0), ("GetTickCount64", 0),
-                ("QueryPerformanceCounter", 4), ("QueryPerformanceFrequency", 4),
-                ("GetSystemTimeAsFileTime", 4), ("GetLocalTime", 4), ("GetSystemTime", 4),
-                ("SystemTimeToFileTime", 8), ("FileTimeToSystemTime", 8),
-                ("FileTimeToLocalFileTime", 8), ("GetTimeZoneInformation", 4),
-                ("InitializeCriticalSection", 4), ("EnterCriticalSection", 4),
-                ("LeaveCriticalSection", 4), ("DeleteCriticalSection", 4),
-                ("InitializeCriticalSectionAndSpinCount", 8), ("TryEnterCriticalSection", 4),
-                ("TlsAlloc", 0), ("TlsGetValue", 4), ("TlsSetValue", 8), ("TlsFree", 4),
-                ("GetLastError", 0), ("SetLastError", 4),
-                ("MultiByteToWideChar", 24), ("WideCharToMultiByte", 32),
-                ("VirtualAlloc", 16), ("VirtualFree", 12), ("VirtualProtect", 16),
+                ("GetModuleHandleA", 4),
+                ("GetModuleHandleW", 4),
+                ("GetModuleHandleExA", 12),
+                ("GetModuleHandleExW", 12),
+                ("GetModuleFileNameA", 12),
+                ("GetModuleFileNameW", 12),
+                ("GetProcAddress", 8),
+                ("LoadLibraryA", 4),
+                ("LoadLibraryW", 4),
+                ("LoadLibraryExA", 12),
+                ("LoadLibraryExW", 12),
+                ("FreeLibrary", 4),
+                ("GetStartupInfoA", 4),
+                ("GetStartupInfoW", 4),
+                ("GetCommandLineA", 0),
+                ("GetCommandLineW", 0),
+                ("GetStdHandle", 4),
+                ("SetStdHandle", 8),
+                ("GetFileType", 4),
+                ("CreateFileA", 28),
+                ("CreateFileW", 28),
+                ("ReadFile", 20),
+                ("WriteFile", 20),
+                ("CloseHandle", 4),
+                ("GetFileSize", 8),
+                ("GetFileSizeEx", 8),
+                ("SetFilePointer", 16),
+                ("SetFilePointerEx", 20),
+                ("SetEndOfFile", 4),
+                ("FlushFileBuffers", 4),
+                ("DeleteFileA", 4),
+                ("DeleteFileW", 4),
+                ("CreateDirectoryA", 8),
+                ("CreateDirectoryW", 8),
+                ("GetCurrentDirectoryA", 8),
+                ("GetCurrentDirectoryW", 8),
+                ("SetCurrentDirectoryA", 4),
+                ("SetCurrentDirectoryW", 4),
+                ("GetFullPathNameA", 16),
+                ("GetFullPathNameW", 16),
+                ("FindFirstFileA", 8),
+                ("FindFirstFileW", 8),
+                ("FindNextFileA", 8),
+                ("FindNextFileW", 8),
+                ("FindClose", 4),
+                ("GetFileAttributesA", 4),
+                ("GetFileAttributesW", 4),
+                ("SetFileAttributesA", 8),
+                ("SetFileAttributesW", 8),
+                ("MoveFileA", 8),
+                ("MoveFileW", 8),
+                ("CopyFileA", 12),
+                ("CopyFileW", 12),
+                ("GetTempPathA", 8),
+                ("GetTempPathW", 8),
+                ("GetCurrentProcessId", 0),
+                ("GetCurrentThreadId", 0),
+                ("GetCurrentProcess", 0),
+                ("GetCurrentThread", 0),
+                ("GetTickCount", 0),
+                ("GetTickCount64", 0),
+                ("QueryPerformanceCounter", 4),
+                ("QueryPerformanceFrequency", 4),
+                ("GetSystemTimeAsFileTime", 4),
+                ("GetLocalTime", 4),
+                ("GetSystemTime", 4),
+                ("SystemTimeToFileTime", 8),
+                ("FileTimeToSystemTime", 8),
+                ("FileTimeToLocalFileTime", 8),
+                ("GetTimeZoneInformation", 4),
+                ("InitializeCriticalSection", 4),
+                ("EnterCriticalSection", 4),
+                ("LeaveCriticalSection", 4),
+                ("DeleteCriticalSection", 4),
+                ("InitializeCriticalSectionAndSpinCount", 8),
+                ("TryEnterCriticalSection", 4),
+                ("TlsAlloc", 0),
+                ("TlsGetValue", 4),
+                ("TlsSetValue", 8),
+                ("TlsFree", 4),
+                ("GetLastError", 0),
+                ("SetLastError", 4),
+                ("MultiByteToWideChar", 24),
+                ("WideCharToMultiByte", 32),
+                ("VirtualAlloc", 16),
+                ("VirtualFree", 12),
+                ("VirtualProtect", 16),
                 ("VirtualQuery", 12),
-                ("HeapCreate", 12), ("HeapAlloc", 12), ("HeapFree", 12), ("HeapDestroy", 4),
-                ("GetProcessHeap", 0), ("HeapSize", 12), ("HeapReAlloc", 16), ("HeapValidate", 12),
-                ("LocalAlloc", 8), ("LocalFree", 4), ("GlobalAlloc", 8), ("GlobalFree", 4),
-                ("ExitProcess", 4), ("TerminateProcess", 8),
-                ("SetUnhandledExceptionFilter", 4), ("UnhandledExceptionFilter", 4),
-                ("IsDebuggerPresent", 0), ("DebugBreak", 0), ("OutputDebugStringA", 4),
+                ("HeapCreate", 12),
+                ("HeapAlloc", 12),
+                ("HeapFree", 12),
+                ("HeapDestroy", 4),
+                ("GetProcessHeap", 0),
+                ("HeapSize", 12),
+                ("HeapReAlloc", 16),
+                ("HeapValidate", 12),
+                ("GetProcessHeaps", 8),
+                ("LocalAlloc", 8),
+                ("LocalFree", 4),
+                ("GlobalAlloc", 8),
+                ("GlobalFree", 4),
+                ("ExitProcess", 4),
+                ("TerminateProcess", 8),
+                ("SetUnhandledExceptionFilter", 4),
+                ("UnhandledExceptionFilter", 4),
+                ("IsDebuggerPresent", 0),
+                ("DebugBreak", 0),
+                ("OutputDebugStringA", 4),
                 ("OutputDebugStringW", 4),
-                ("GetEnvironmentStrings", 0), ("GetEnvironmentStringsW", 0),
-                ("FreeEnvironmentStringsA", 4), ("FreeEnvironmentStringsW", 4),
-                ("GetEnvironmentVariableA", 12), ("GetEnvironmentVariableW", 12),
-                ("SetEnvironmentVariableA", 8), ("SetEnvironmentVariableW", 8),
-                ("CreateThread", 24), ("Sleep", 4), ("SwitchToThread", 0), ("ExitThread", 4),
-                ("GetSystemInfo", 4), ("GetNativeSystemInfo", 4),
-                ("InterlockedIncrement", 4), ("InterlockedDecrement", 4),
-                ("InterlockedExchange", 8), ("InterlockedCompareExchange", 12),
-                ("GetACP", 0), ("GetOEMCP", 0), ("GetCPInfo", 8), ("IsValidCodePage", 4),
-                ("IsDBCSLeadByte", 4), ("IsDBCSLeadByteEx", 8),
-                ("GetConsoleCP", 0), ("GetConsoleOutputCP", 0), ("GetCPInfoExA", 12), ("GetCPInfoExW", 12),
-                ("GetStringTypeA", 20), ("GetStringTypeW", 16), ("GetStringTypeExA", 20), ("GetStringTypeExW", 20),
-                ("GetLocaleInfoA", 16), ("GetLocaleInfoW", 16),
-                ("GetUserDefaultLCID", 0), ("GetSystemDefaultLCID", 0), ("GetThreadLocale", 0),
-                ("SetThreadLocale", 4), ("EnumSystemLocalesA", 8), ("EnumSystemLocalesW", 8),
-                ("CompareStringA", 24), ("CompareStringW", 24), ("LCMapStringA", 24), ("LCMapStringW", 24),
-                ("LoadResource", 8), ("FindResourceA", 12), ("FindResourceW", 12),
-                ("FindResourceExA", 16), ("FindResourceExW", 16), ("SizeofResource", 8),
-                ("LockResource", 4), ("FreeResource", 4),
-                ("FormatMessageA", 28), ("FormatMessageW", 28),
-                ("CreateEventA", 16), ("CreateEventW", 16), ("SetEvent", 4), ("ResetEvent", 4),
-                ("OpenEventA", 12), ("OpenEventW", 12), ("PulseEvent", 4),
-                ("CreateMutexA", 12), ("CreateMutexW", 12), ("ReleaseMutex", 4),
-                ("OpenMutexA", 12), ("OpenMutexW", 12),
-                ("WaitForSingleObject", 8), ("WaitForMultipleObjects", 16),
-                ("SleepEx", 8), ("GetExitCodeThread", 8), ("TerminateThread", 8),
+                ("GetEnvironmentStrings", 0),
+                ("GetEnvironmentStringsW", 0),
+                ("FreeEnvironmentStringsA", 4),
+                ("FreeEnvironmentStringsW", 4),
+                ("GetEnvironmentVariableA", 12),
+                ("GetEnvironmentVariableW", 12),
+                ("SetEnvironmentVariableA", 8),
+                ("SetEnvironmentVariableW", 8),
+                ("CreateThread", 24),
+                ("Sleep", 4),
+                ("SwitchToThread", 0),
+                ("ExitThread", 4),
+                ("GetSystemInfo", 4),
+                ("GetNativeSystemInfo", 4),
+                ("InterlockedIncrement", 4),
+                ("InterlockedDecrement", 4),
+                ("InterlockedExchange", 8),
+                ("InterlockedCompareExchange", 12),
+                ("GetACP", 0),
+                ("GetOEMCP", 0),
+                ("GetCPInfo", 8),
+                ("IsValidCodePage", 4),
+                ("IsDBCSLeadByte", 4),
+                ("IsDBCSLeadByteEx", 8),
+                ("GetConsoleCP", 0),
+                ("GetConsoleOutputCP", 0),
+                ("GetCPInfoExA", 12),
+                ("GetCPInfoExW", 12),
+                ("GetStringTypeA", 20),
+                ("GetStringTypeW", 16),
+                ("GetStringTypeExA", 20),
+                ("GetStringTypeExW", 20),
+                ("GetLocaleInfoA", 16),
+                ("GetLocaleInfoW", 16),
+                ("GetUserDefaultLCID", 0),
+                ("GetSystemDefaultLCID", 0),
+                ("GetThreadLocale", 0),
+                ("SetThreadLocale", 4),
+                ("EnumSystemLocalesA", 8),
+                ("EnumSystemLocalesW", 8),
+                ("CompareStringA", 24),
+                ("CompareStringW", 24),
+                ("LCMapStringA", 24),
+                ("LCMapStringW", 24),
+                ("LoadResource", 8),
+                ("FindResourceA", 12),
+                ("FindResourceW", 12),
+                ("FindResourceExA", 16),
+                ("FindResourceExW", 16),
+                ("SizeofResource", 8),
+                ("LockResource", 4),
+                ("FreeResource", 4),
+                ("FormatMessageA", 28),
+                ("FormatMessageW", 28),
+                ("CreateEventA", 16),
+                ("CreateEventW", 16),
+                ("SetEvent", 4),
+                ("ResetEvent", 4),
+                ("OpenEventA", 12),
+                ("OpenEventW", 12),
+                ("PulseEvent", 4),
+                ("CreateMutexA", 12),
+                ("CreateMutexW", 12),
+                ("ReleaseMutex", 4),
+                ("OpenMutexA", 12),
+                ("OpenMutexW", 12),
+                ("WaitForSingleObject", 8),
+                ("WaitForMultipleObjects", 16),
+                ("SleepEx", 8),
+                ("GetExitCodeThread", 8),
+                ("TerminateThread", 8),
                 ("CreateSemaphoreA", 16),
-                ("GetVersion", 0), ("GetVersionExA", 4), ("GetVersionExW", 4),
-                ("VerifyVersionInfoW", 16), ("VerSetConditionMask", 16),
-                ("GetComputerNameA", 8), ("GetComputerNameW", 8),
-                ("GetUserNameA", 8), ("GetUserNameW", 8),
-                ("GetDiskFreeSpaceA", 20), ("GetDiskFreeSpaceW", 20),
-                ("GetDriveTypeA", 4), ("GetDriveTypeW", 4),
-                ("CreateFileMappingA", 24), ("CreateFileMappingW", 24),
-                ("MapViewOfFile", 20), ("UnmapViewOfFile", 4),
-                ("DuplicateHandle", 28), ("GetHandleInformation", 8), ("SetHandleInformation", 12),
-                ("DeviceIoControl", 32), ("GetOverlappedResult", 16),
-                ("IsProcessorFeaturePresent", 4), ("GetSystemDefaultLangID", 0),
-                ("GetUserDefaultLangID", 0), ("SetConsoleCtrlHandler", 8),
-                ("GetProcessTimes", 20), ("GetProcessWorkingSetSize", 12),
-                ("GlobalMemoryStatus", 4), ("GlobalMemoryStatusEx", 4),
-                ("EncodePointer", 4), ("DecodePointer", 4),
-                ("FlsAlloc", 4), ("FlsGetValue", 4), ("FlsSetValue", 8), ("FlsFree", 4),
-                ("IsWow64Process", 8), ("GetLogicalProcessorInformation", 8),
-                ("RaiseException", 16), ("RtlUnwind", 16),
-                ("InitializeCriticalSectionEx", 12), ("GetCurrentPackageId", 8),
-                ("CreateSemaphoreW", 16), ("CreateSemaphoreExW", 24), ("ReleaseSemaphore", 12),
-                ("CreateThreadpoolTimer", 12), ("SetThreadpoolTimer", 16),
-                ("WaitForThreadpoolTimerCallbacks", 8), ("CloseThreadpoolTimer", 4),
-                ("CreateThreadpoolWait", 12), ("SetThreadpoolWait", 12), ("CloseThreadpoolWait", 4),
-                ("FlushProcessWriteBuffers", 0), ("FreeLibraryWhenCallbackReturns", 8),
-                ("GetCurrentProcessorNumber", 0), ("SetThreadStackGuarantee", 4),
-                ("SetDefaultDllDirectories", 4), ("EnumSystemLocalesEx", 16),
-                ("CompareStringEx", 36), ("GetDateFormatEx", 24), ("GetLocaleInfoEx", 16),
-                ("GetTimeFormatEx", 24), ("GetUserDefaultLocaleName", 8),
-                ("IsValidLocaleName", 4), ("LCMapStringEx", 36),
-                ("SetThreadPriority", 8), ("GetThreadPriority", 4),
-                ("SuspendThread", 4), ("ResumeThread", 4),
-                ("OpenProcess", 12), ("GetProcessAffinityMask", 12),
-                ("SetThreadAffinityMask", 8), ("SetThreadIdealProcessor", 8),
-                ("GlobalAddAtomW", 4), ("GlobalDeleteAtom", 4), ("MulDiv", 12),
-                ("FreeConsole", 0), ("AttachConsole", 4), ("GetConsoleMode", 8),
-                ("WriteConsoleW", 20), ("SetConsoleTitleW", 4), ("GetConsoleTitleW", 8),
-                ("GetConsoleProcessList", 8), ("ReadConsoleW", 20),
-                ("GlobalLock", 4), ("GlobalUnlock", 4), ("LocalSize", 4),
-                ("LocalLock", 4), ("LocalUnlock", 4), ("GlobalSize", 4),
-                ("IsBadReadPtr", 8), ("AreFileApisANSI", 0), ("GetVolumeInformationW", 32),
-                ("SearchPathW", 24), ("GetSystemDirectoryW", 8), ("GetWindowsDirectoryW", 8),
-                ("GetFileAttributesExW", 12), ("RemoveDirectoryW", 4),
-                ("GetExitCodeProcess", 8), ("CreateProcessW", 40), ("CreatePipe", 16),
-                ("GetTimeFormatW", 16), ("GetDateFormatW", 16),
-                ("lstrcmpW", 8), ("lstrcmpA", 8), ("lstrlenW", 4), ("lstrlenA", 4),
-                ("IsValidLocale", 8), ("HeapSetInformation", 16), ("HeapQueryInformation", 20),
-                ("HeapCompact", 8), ("HeapWalk", 8), ("GetLargePageMinimum", 0),
+                ("GetVersion", 0),
+                ("GetVersionExA", 4),
+                ("GetVersionExW", 4),
+                ("VerifyVersionInfoW", 16),
+                ("VerSetConditionMask", 16),
+                ("GetComputerNameA", 8),
+                ("GetComputerNameW", 8),
+                ("GetUserNameA", 8),
+                ("GetUserNameW", 8),
+                ("GetDiskFreeSpaceA", 20),
+                ("GetDiskFreeSpaceW", 20),
+                ("GetDriveTypeA", 4),
+                ("GetDriveTypeW", 4),
+                ("CreateFileMappingA", 24),
+                ("CreateFileMappingW", 24),
+                ("MapViewOfFile", 20),
+                ("UnmapViewOfFile", 4),
+                ("DuplicateHandle", 28),
+                ("GetHandleInformation", 8),
+                ("SetHandleInformation", 12),
+                ("DeviceIoControl", 32),
+                ("GetOverlappedResult", 16),
+                ("IsProcessorFeaturePresent", 4),
+                ("GetSystemDefaultLangID", 0),
+                ("GetUserDefaultLangID", 0),
+                ("SetConsoleCtrlHandler", 8),
+                ("GetProcessTimes", 20),
+                ("GetProcessWorkingSetSize", 12),
+                ("GlobalMemoryStatus", 4),
+                ("GlobalMemoryStatusEx", 4),
+                ("EncodePointer", 4),
+                ("DecodePointer", 4),
+                ("FlsAlloc", 4),
+                ("FlsGetValue", 4),
+                ("FlsSetValue", 8),
+                ("FlsFree", 4),
+                ("IsWow64Process", 8),
+                ("GetLogicalProcessorInformation", 8),
+                ("RaiseException", 16),
+                ("RtlUnwind", 16),
+                ("InitializeCriticalSectionEx", 12),
+                ("GetCurrentPackageId", 8),
+                ("CreateSemaphoreW", 16),
+                ("CreateSemaphoreExW", 24),
+                ("ReleaseSemaphore", 12),
+                ("CreateThreadpoolTimer", 12),
+                ("SetThreadpoolTimer", 16),
+                ("WaitForThreadpoolTimerCallbacks", 8),
+                ("CloseThreadpoolTimer", 4),
+                ("CreateThreadpoolWait", 12),
+                ("SetThreadpoolWait", 12),
+                ("CloseThreadpoolWait", 4),
+                ("FlushProcessWriteBuffers", 0),
+                ("FreeLibraryWhenCallbackReturns", 8),
+                ("GetCurrentProcessorNumber", 0),
+                ("SetThreadStackGuarantee", 4),
+                ("SetDefaultDllDirectories", 4),
+                ("EnumSystemLocalesEx", 16),
+                ("CompareStringEx", 36),
+                ("GetDateFormatEx", 24),
+                ("GetLocaleInfoEx", 16),
+                ("GetTimeFormatEx", 24),
+                ("GetUserDefaultLocaleName", 8),
+                ("IsValidLocaleName", 4),
+                ("LCMapStringEx", 36),
+                ("SetThreadPriority", 8),
+                ("GetThreadPriority", 4),
+                ("SuspendThread", 4),
+                ("ResumeThread", 4),
+                ("OpenProcess", 12),
+                ("GetProcessAffinityMask", 12),
+                ("SetThreadAffinityMask", 8),
+                ("SetThreadIdealProcessor", 8),
+                ("GlobalAddAtomW", 4),
+                ("GlobalDeleteAtom", 4),
+                ("MulDiv", 12),
+                ("FreeConsole", 0),
+                ("AttachConsole", 4),
+                ("GetConsoleMode", 8),
+                ("WriteConsoleW", 20),
+                ("SetConsoleTitleW", 4),
+                ("GetConsoleTitleW", 8),
+                ("GetConsoleProcessList", 8),
+                ("ReadConsoleW", 20),
+                ("GlobalLock", 4),
+                ("GlobalUnlock", 4),
+                ("LocalSize", 4),
+                ("LocalLock", 4),
+                ("LocalUnlock", 4),
+                ("GlobalSize", 4),
+                ("IsBadReadPtr", 8),
+                ("AreFileApisANSI", 0),
+                ("GetVolumeInformationW", 32),
+                ("SearchPathW", 24),
+                ("GetSystemDirectoryW", 8),
+                ("GetWindowsDirectoryW", 8),
+                ("GetFileAttributesExW", 12),
+                ("RemoveDirectoryW", 4),
+                ("GetExitCodeProcess", 8),
+                ("CreateProcessW", 40),
+                ("CreatePipe", 16),
+                ("GetTimeFormatW", 16),
+                ("GetDateFormatW", 16),
+                ("lstrcmpW", 8),
+                ("lstrcmpA", 8),
+                ("lstrlenW", 4),
+                ("lstrlenA", 4),
+                ("IsValidLocale", 8),
+                ("HeapSetInformation", 16),
+                ("HeapQueryInformation", 20),
+                ("HeapCompact", 8),
+                ("HeapWalk", 8),
+                ("GetLargePageMinimum", 0),
             ],
         );
         add(
             "user32.dll",
             &[
-                ("RegisterClassA", 4), ("RegisterClassW", 4), ("RegisterClassExA", 4),
-                ("RegisterClassExW", 4), ("UnregisterClassA", 8), ("UnregisterClassW", 8),
-                ("CreateWindowExA", 48), ("CreateWindowExW", 48), ("DestroyWindow", 4),
-                ("DefWindowProcA", 16), ("DefWindowProcW", 16),
-                ("ShowWindow", 8), ("UpdateWindow", 4), ("IsWindow", 4), ("IsWindowVisible", 4),
-                ("IsIconic", 4), ("IsZoomed", 4), ("EnableWindow", 8),
-                ("GetProcessWindowStation", 0), ("GetUserObjectInformationW", 20),
-                ("GetUserObjectInformationA", 20), ("GetLastActivePopup", 4),
-                ("GetMessageA", 16), ("GetMessageW", 16), ("PeekMessageA", 20), ("PeekMessageW", 20),
-                ("TranslateMessage", 4), ("DispatchMessageA", 4), ("DispatchMessageW", 4),
-                ("PostQuitMessage", 4), ("SendMessageA", 16), ("SendMessageW", 16),
-                ("PostMessageA", 16), ("PostMessageW", 16), ("PostThreadMessageA", 16),
-                ("LoadIconA", 8), ("LoadIconW", 8), ("LoadCursorA", 8), ("LoadCursorW", 8),
-                ("LoadImageA", 24), ("LoadImageW", 24), ("SetCursor", 4), ("GetCursor", 0),
-                ("GetDC", 4), ("GetWindowDC", 4), ("ReleaseDC", 8),
-                ("BeginPaint", 8), ("EndPaint", 8), ("InvalidateRect", 12), ("ValidateRect", 8),
-                ("GetClientRect", 8), ("GetWindowRect", 8), ("SetWindowTextA", 8), ("SetWindowTextW", 8),
-                ("GetWindowTextA", 12), ("GetWindowTextW", 12),
-                ("MessageBoxA", 16), ("MessageBoxW", 16), ("MessageBoxExA", 20), ("MessageBoxExW", 20),
-                ("SetTimer", 16), ("KillTimer", 8),
-                ("GetSystemMetrics", 4), ("SystemParametersInfoA", 16), ("SystemParametersInfoW", 16),
-                ("GetForegroundWindow", 0), ("SetForegroundWindow", 4),
-                ("SetFocus", 4), ("GetFocus", 0), ("GetActiveWindow", 0), ("SetActiveWindow", 4),
-                ("MoveWindow", 24), ("SetWindowPos", 28), ("BringWindowToTop", 4),
-                ("ClientToScreen", 8), ("ScreenToClient", 8), ("WindowFromPoint", 8),
-                ("GetCursorPos", 4), ("SetCursorPos", 8), ("ClipCursor", 4), ("ShowCursor", 4),
-                ("LoadAcceleratorsA", 8), ("LoadAcceleratorsW", 8),
-                ("TranslateAcceleratorA", 12), ("TranslateAcceleratorW", 12),
-                ("AdjustWindowRect", 12), ("AdjustWindowRectEx", 16),
-                ("GetDesktopWindow", 0), ("GetShellWindow", 0), ("GetParent", 4), ("SetParent", 8),
-                ("DrawIcon", 12), ("FillRect", 12), ("FrameRect", 12), ("InvertRect", 8),
-                ("GetKeyState", 4), ("GetAsyncKeyState", 4), ("GetKeyboardState", 4),
-                ("SetKeyboardState", 4), ("VkKeyScanA", 4), ("VkKeyScanW", 4),
-                ("MapVirtualKeyA", 8), ("MapVirtualKeyW", 8), ("GetKeyNameTextA", 12),
-                ("RegisterHotKey", 16), ("UnregisterHotKey", 8),
-                ("CharNextA", 4), ("CharNextW", 4), ("CharPrevA", 8), ("CharPrevW", 8),
-                ("CharUpperA", 4), ("CharUpperW", 4), ("CharLowerA", 4), ("CharLowerW", 4),
-                ("wsprintfA", 0), ("wsprintfW", 0), // cdecl varargs
-                ("wvsprintfA", 12), ("wvsprintfW", 12),
-                ("DrawTextA", 20), ("DrawTextW", 20), ("DrawTextExA", 24), ("DrawTextExW", 24),
-                ("GetWindowLongA", 8), ("GetWindowLongW", 8), ("SetWindowLongA", 12), ("SetWindowLongW", 12),
-                ("GetClassLongA", 8), ("GetClassLongW", 8),
-                ("DefDlgProcA", 16), ("DefDlgProcW", 16),
-                ("DialogBoxParamA", 20), ("DialogBoxParamW", 20),
-                ("CreateDialogParamA", 20), ("CreateDialogParamW", 20),
-                ("EndDialog", 8), ("GetDlgItem", 8), ("SetDlgItemTextA", 12), ("SetDlgItemTextW", 12),
-                ("GetDlgItemTextA", 16), ("GetDlgItemTextW", 16),
-                ("GetMenu", 4), ("SetMenu", 8), ("LoadMenuA", 8), ("LoadMenuW", 8),
-                ("TrackPopupMenu", 28), ("GetSystemMenu", 8),
-                ("SetRect", 20), ("CopyRect", 8), ("InflateRect", 12), ("OffsetRect", 12),
-                ("PtInRect", 12), ("IsRectEmpty", 4), ("UnionRect", 12), ("IntersectRect", 12),
-                ("GetSysColor", 4), ("GetSysColorBrush", 4),
-                ("EnumWindows", 8), ("FindWindowA", 8), ("FindWindowW", 8),
-                ("GetWindowThreadProcessId", 8), ("AttachThreadInput", 12),
-                ("RegisterWindowMessageA", 4), ("RegisterWindowMessageW", 4),
-                ("RedrawWindow", 16), ("GetUpdateRect", 12), ("MapWindowPoints", 16),
-                ("ReleaseCapture", 0), ("SetCapture", 4), ("GetCapture", 0),
-                ("MonitorFromWindow", 8), ("GetMonitorInfoA", 8), ("GetMonitorInfoW", 8),
-                ("EnumDisplaySettingsA", 12), ("EnumDisplaySettingsW", 12),
-                ("ChangeDisplaySettingsA", 8), ("ChangeDisplaySettingsW", 8),
-                ("SetWindowsHookExA", 16), ("SetWindowsHookExW", 16),
-                ("UnhookWindowsHookEx", 4), ("CallNextHookEx", 16),
-                ("GetKeyboardLayout", 4), ("GetKeyboardLayoutList", 8), ("ActivateKeyboardLayout", 8),
-                ("ToAscii", 20), ("ToUnicode", 24), ("GetDoubleClickTime", 0),
+                ("RegisterClassA", 4),
+                ("RegisterClassW", 4),
+                ("RegisterClassExA", 4),
+                ("LoadStringA", 16),
+                ("LoadStringW", 16),
+                ("GetClassInfoA", 12),
+                ("GetClassInfoW", 12),
+                ("GetClassInfoExA", 12),
+                ("GetClassInfoExW", 12),
+                ("RegisterClassExW", 4),
+                ("UnregisterClassA", 8),
+                ("UnregisterClassW", 8),
+                ("CreateWindowExA", 48),
+                ("CreateWindowExW", 48),
+                ("DestroyWindow", 4),
+                ("DefWindowProcA", 16),
+                ("DefWindowProcW", 16),
+                ("ShowWindow", 8),
+                ("UpdateWindow", 4),
+                ("IsWindow", 4),
+                ("IsWindowVisible", 4),
+                ("IsIconic", 4),
+                ("IsZoomed", 4),
+                ("EnableWindow", 8),
+                ("GetProcessWindowStation", 0),
+                ("GetUserObjectInformationW", 20),
+                ("GetUserObjectInformationA", 20),
+                ("GetLastActivePopup", 4),
+                ("GetMessageA", 16),
+                ("GetMessageW", 16),
+                ("PeekMessageA", 20),
+                ("PeekMessageW", 20),
+                ("TranslateMessage", 4),
+                ("DispatchMessageA", 4),
+                ("DispatchMessageW", 4),
+                ("PostQuitMessage", 4),
+                ("SendMessageA", 16),
+                ("SendMessageW", 16),
+                ("PostMessageA", 16),
+                ("PostMessageW", 16),
+                ("PostThreadMessageA", 16),
+                ("LoadIconA", 8),
+                ("LoadIconW", 8),
+                ("LoadCursorA", 8),
+                ("LoadCursorW", 8),
+                ("LoadImageA", 24),
+                ("LoadImageW", 24),
+                ("SetCursor", 4),
+                ("GetCursor", 0),
+                ("GetDC", 4),
+                ("GetWindowDC", 4),
+                ("ReleaseDC", 8),
+                ("BeginPaint", 8),
+                ("EndPaint", 8),
+                ("InvalidateRect", 12),
+                ("ValidateRect", 8),
+                ("GetClientRect", 8),
+                ("GetWindowRect", 8),
+                ("SetWindowTextA", 8),
+                ("SetWindowTextW", 8),
+                ("GetWindowTextA", 12),
+                ("GetWindowTextW", 12),
+                ("MessageBoxA", 16),
+                ("MessageBoxW", 16),
+                ("MessageBoxExA", 20),
+                ("MessageBoxExW", 20),
+                ("SetTimer", 16),
+                ("KillTimer", 8),
+                ("GetSystemMetrics", 4),
+                ("SystemParametersInfoA", 16),
+                ("SystemParametersInfoW", 16),
+                ("GetForegroundWindow", 0),
+                ("SetForegroundWindow", 4),
+                ("SetFocus", 4),
+                ("GetFocus", 0),
+                ("GetActiveWindow", 0),
+                ("SetActiveWindow", 4),
+                ("MoveWindow", 24),
+                ("SetWindowPos", 28),
+                ("BringWindowToTop", 4),
+                ("ClientToScreen", 8),
+                ("ScreenToClient", 8),
+                ("WindowFromPoint", 8),
+                ("GetCursorPos", 4),
+                ("SetCursorPos", 8),
+                ("ClipCursor", 4),
+                ("ShowCursor", 4),
+                ("LoadAcceleratorsA", 8),
+                ("LoadAcceleratorsW", 8),
+                ("TranslateAcceleratorA", 12),
+                ("TranslateAcceleratorW", 12),
+                ("AdjustWindowRect", 12),
+                ("AdjustWindowRectEx", 16),
+                ("GetDesktopWindow", 0),
+                ("GetShellWindow", 0),
+                ("GetParent", 4),
+                ("SetParent", 8),
+                ("DrawIcon", 12),
+                ("FillRect", 12),
+                ("FrameRect", 12),
+                ("InvertRect", 8),
+                ("GetKeyState", 4),
+                ("GetAsyncKeyState", 4),
+                ("GetKeyboardState", 4),
+                ("SetKeyboardState", 4),
+                ("VkKeyScanA", 4),
+                ("VkKeyScanW", 4),
+                ("MapVirtualKeyA", 8),
+                ("MapVirtualKeyW", 8),
+                ("GetKeyNameTextA", 12),
+                ("RegisterHotKey", 16),
+                ("UnregisterHotKey", 8),
+                ("CharNextA", 4),
+                ("CharNextW", 4),
+                ("CharPrevA", 8),
+                ("CharPrevW", 8),
+                ("CharUpperA", 4),
+                ("CharUpperW", 4),
+                ("CharLowerA", 4),
+                ("CharLowerW", 4),
+                ("wsprintfA", 0),
+                ("wsprintfW", 0), // cdecl varargs
+                ("wvsprintfA", 12),
+                ("wvsprintfW", 12),
+                ("DrawTextA", 20),
+                ("DrawTextW", 20),
+                ("DrawTextExA", 24),
+                ("DrawTextExW", 24),
+                ("GetWindowLongA", 8),
+                ("GetWindowLongW", 8),
+                ("SetWindowLongA", 12),
+                ("SetWindowLongW", 12),
+                ("GetClassLongA", 8),
+                ("GetClassLongW", 8),
+                ("DefDlgProcA", 16),
+                ("DefDlgProcW", 16),
+                ("DialogBoxParamA", 20),
+                ("DialogBoxParamW", 20),
+                ("CreateDialogParamA", 20),
+                ("CreateDialogParamW", 20),
+                ("EndDialog", 8),
+                ("GetDlgItem", 8),
+                ("SetDlgItemTextA", 12),
+                ("SetDlgItemTextW", 12),
+                ("GetDlgItemTextA", 16),
+                ("GetDlgItemTextW", 16),
+                ("GetMenu", 4),
+                ("SetMenu", 8),
+                ("LoadMenuA", 8),
+                ("LoadMenuW", 8),
+                ("TrackPopupMenu", 28),
+                ("GetSystemMenu", 8),
+                ("SetRect", 20),
+                ("CopyRect", 8),
+                ("InflateRect", 12),
+                ("OffsetRect", 12),
+                ("PtInRect", 12),
+                ("IsRectEmpty", 4),
+                ("UnionRect", 12),
+                ("IntersectRect", 12),
+                ("GetSysColor", 4),
+                ("GetSysColorBrush", 4),
+                ("EnumWindows", 8),
+                ("FindWindowA", 8),
+                ("FindWindowW", 8),
+                ("GetWindowThreadProcessId", 8),
+                ("AttachThreadInput", 12),
+                ("RegisterWindowMessageA", 4),
+                ("RegisterWindowMessageW", 4),
+                ("RedrawWindow", 16),
+                ("GetUpdateRect", 12),
+                ("MapWindowPoints", 16),
+                ("ReleaseCapture", 0),
+                ("SetCapture", 4),
+                ("GetCapture", 0),
+                ("MonitorFromWindow", 8),
+                ("GetMonitorInfoA", 8),
+                ("GetMonitorInfoW", 8),
+                ("EnumDisplaySettingsA", 12),
+                ("EnumDisplaySettingsW", 12),
+                ("ChangeDisplaySettingsA", 8),
+                ("ChangeDisplaySettingsW", 8),
+                ("SetWindowsHookExA", 16),
+                ("SetWindowsHookExW", 16),
+                ("UnhookWindowsHookEx", 4),
+                ("CallNextHookEx", 16),
+                ("GetKeyboardLayout", 4),
+                ("GetKeyboardLayoutList", 8),
+                ("ActivateKeyboardLayout", 8),
+                ("ToAscii", 20),
+                ("ToUnicode", 24),
+                ("GetDoubleClickTime", 0),
             ],
         );
         add(
             "gdi32.dll",
             &[
-                ("CreateCompatibleDC", 4), ("DeleteDC", 4), ("CreateDCA", 16), ("CreateDCW", 16),
-                ("CreateDIBSection", 24), ("CreateBitmap", 20), ("CreateCompatibleBitmap", 12),
-                ("CreateBitmapIndirect", 4), ("DeleteObject", 4), ("SelectObject", 8),
-                ("GetObjectA", 12), ("GetObjectW", 12), ("GetCurrentObject", 8),
-                ("BitBlt", 36), ("StretchBlt", 44), ("PatBlt", 24), ("MaskBlt", 52),
-                ("TransparentBlt", 44), ("AlphaBlend", 44), ("GradientFill", 24),
-                ("GetDIBits", 28), ("SetDIBits", 28), ("SetDIBitsToDevice", 48), ("StretchDIBits", 52),
-                ("CreateFontIndirectA", 4), ("CreateFontIndirectW", 4),
-                ("CreateFontA", 56), ("CreateFontW", 56),
-                ("CreatePen", 12), ("CreatePenIndirect", 12), ("CreateSolidBrush", 4),
-                ("CreateHatchBrush", 8), ("CreatePatternBrush", 4), ("CreateBrushIndirect", 4),
-                ("CreateRectRgn", 16), ("CreateRectRgnIndirect", 4), ("CreateEllipticRgn", 16),
-                ("CreateRoundRectRgn", 24), ("CombineRgn", 20), ("SelectClipRgn", 8),
-                ("SetTextColor", 8), ("GetTextColor", 4), ("SetBkColor", 8), ("GetBkColor", 4),
-                ("SetBkMode", 8), ("GetBkMode", 4),
-                ("TextOutA", 20), ("TextOutW", 20), ("ExtTextOutA", 32), ("ExtTextOutW", 32),
-                ("GetTextExtentPoint32A", 16), ("GetTextExtentPoint32W", 16),
-                ("GetTextExtentExPointA", 28), ("GetTextExtentExPointW", 28),
-                ("GetCharWidthA", 16), ("GetCharWidthW", 16), ("GetCharWidth32A", 16), ("GetCharWidth32W", 16),
-                ("GetTextMetricsA", 8), ("GetTextMetricsW", 8), ("GetOutlineTextMetricsA", 12),
-                ("GetGlyphOutlineA", 28), ("GetGlyphOutlineW", 28),
-                ("SetTextAlign", 8), ("GetTextAlign", 4), ("SetTextCharacterExtra", 8),
-                ("GetStockObject", 4), ("SetPixel", 16), ("GetPixel", 12), ("SetPixelV", 16),
-                ("Rectangle", 20), ("Ellipse", 20), ("RoundRect", 28), ("Polygon", 12),
-                ("Polyline", 12), ("MoveToEx", 16), ("LineTo", 12), ("Arc", 36), ("Pie", 36),
-                ("SetROP2", 8), ("GetROP2", 4), ("SetPolyFillMode", 8),
-                ("SetMapMode", 8), ("GetMapMode", 4),
-                ("SetViewportOrgEx", 16), ("GetViewportOrgEx", 8), ("SetWindowOrgEx", 16),
-                ("GetWindowOrgEx", 8), ("SetViewportExtEx", 16), ("SetWindowExtEx", 16),
-                ("DPtoLP", 12), ("LPtoDP", 12),
-                ("GetDeviceCaps", 8), ("GetDCOrgEx", 8),
-                ("SelectPalette", 12), ("RealizePalette", 4), ("CreatePalette", 4),
-                ("SetPaletteEntries", 16), ("GetPaletteEntries", 16),
-                ("SetStretchBltMode", 8), ("GetStretchBltMode", 4),
-                ("SetBrushOrgEx", 16), ("UnrealizeObject", 4),
-                ("GetClipBox", 8), ("IntersectClipRect", 16), ("ExcludeClipRect", 16),
-                ("SaveDC", 4), ("RestoreDC", 8),
-                ("GetTextFaceA", 12), ("GetTextFaceW", 12),
-                ("EnumFontFamiliesExA", 20), ("EnumFontFamiliesExW", 20),
-                ("GetFontData", 20), ("AddFontResourceA", 4), ("AddFontResourceW", 4),
-                ("RemoveFontResourceA", 4), ("RemoveFontResourceW", 4),
-                ("CreateHalftonePalette", 4), ("SetColorAdjustment", 8),
-                ("StartDocA", 8), ("StartDocW", 8), ("EndDoc", 4), ("StartPage", 4), ("EndPage", 4),
-                ("GdiFlush", 0), ("GetPixelFormat", 4), ("SetPixelFormat", 12),
-                ("SwapBuffers", 4), ("ChoosePixelFormat", 8),
+                ("CreateCompatibleDC", 4),
+                ("DeleteDC", 4),
+                ("CreateDCA", 16),
+                ("CreateDCW", 16),
+                ("CreateDIBSection", 24),
+                ("CreateBitmap", 20),
+                ("CreateCompatibleBitmap", 12),
+                ("CreateBitmapIndirect", 4),
+                ("DeleteObject", 4),
+                ("SelectObject", 8),
+                ("GetObjectA", 12),
+                ("GetObjectW", 12),
+                ("GetCurrentObject", 8),
+                ("BitBlt", 36),
+                ("StretchBlt", 44),
+                ("PatBlt", 24),
+                ("MaskBlt", 52),
+                ("TransparentBlt", 44),
+                ("AlphaBlend", 44),
+                ("GradientFill", 24),
+                ("GetDIBits", 28),
+                ("SetDIBits", 28),
+                ("SetDIBitsToDevice", 48),
+                ("StretchDIBits", 52),
+                ("CreateFontIndirectA", 4),
+                ("CreateFontIndirectW", 4),
+                ("CreateFontA", 56),
+                ("CreateFontW", 56),
+                ("CreatePen", 12),
+                ("CreatePenIndirect", 12),
+                ("CreateSolidBrush", 4),
+                ("CreateHatchBrush", 8),
+                ("CreatePatternBrush", 4),
+                ("CreateBrushIndirect", 4),
+                ("CreateRectRgn", 16),
+                ("CreateRectRgnIndirect", 4),
+                ("CreateEllipticRgn", 16),
+                ("CreateRoundRectRgn", 24),
+                ("CombineRgn", 20),
+                ("SelectClipRgn", 8),
+                ("SetTextColor", 8),
+                ("GetTextColor", 4),
+                ("SetBkColor", 8),
+                ("GetBkColor", 4),
+                ("SetBkMode", 8),
+                ("GetBkMode", 4),
+                ("TextOutA", 20),
+                ("TextOutW", 20),
+                ("ExtTextOutA", 32),
+                ("ExtTextOutW", 32),
+                ("GetTextExtentPoint32A", 16),
+                ("GetTextExtentPoint32W", 16),
+                ("GetTextExtentExPointA", 28),
+                ("GetTextExtentExPointW", 28),
+                ("GetCharWidthA", 16),
+                ("GetCharWidthW", 16),
+                ("GetCharWidth32A", 16),
+                ("GetCharWidth32W", 16),
+                ("GetTextMetricsA", 8),
+                ("GetTextMetricsW", 8),
+                ("GetOutlineTextMetricsA", 12),
+                ("GetGlyphOutlineA", 28),
+                ("GetGlyphOutlineW", 28),
+                ("SetTextAlign", 8),
+                ("GetTextAlign", 4),
+                ("SetTextCharacterExtra", 8),
+                ("GetStockObject", 4),
+                ("SetPixel", 16),
+                ("GetPixel", 12),
+                ("SetPixelV", 16),
+                ("Rectangle", 20),
+                ("Ellipse", 20),
+                ("RoundRect", 28),
+                ("Polygon", 12),
+                ("Polyline", 12),
+                ("MoveToEx", 16),
+                ("LineTo", 12),
+                ("Arc", 36),
+                ("Pie", 36),
+                ("SetROP2", 8),
+                ("GetROP2", 4),
+                ("SetPolyFillMode", 8),
+                ("SetMapMode", 8),
+                ("GetMapMode", 4),
+                ("SetViewportOrgEx", 16),
+                ("GetViewportOrgEx", 8),
+                ("SetWindowOrgEx", 16),
+                ("GetWindowOrgEx", 8),
+                ("SetViewportExtEx", 16),
+                ("SetWindowExtEx", 16),
+                ("DPtoLP", 12),
+                ("LPtoDP", 12),
+                ("GetDeviceCaps", 8),
+                ("GetDCOrgEx", 8),
+                ("SelectPalette", 12),
+                ("RealizePalette", 4),
+                ("CreatePalette", 4),
+                ("SetPaletteEntries", 16),
+                ("GetPaletteEntries", 16),
+                ("SetStretchBltMode", 8),
+                ("GetStretchBltMode", 4),
+                ("SetBrushOrgEx", 16),
+                ("UnrealizeObject", 4),
+                ("GetClipBox", 8),
+                ("IntersectClipRect", 16),
+                ("ExcludeClipRect", 16),
+                ("SaveDC", 4),
+                ("RestoreDC", 8),
+                ("GetTextFaceA", 12),
+                ("GetTextFaceW", 12),
+                ("EnumFontFamiliesExA", 20),
+                ("EnumFontFamiliesExW", 20),
+                ("GetFontData", 20),
+                ("AddFontResourceA", 4),
+                ("AddFontResourceW", 4),
+                ("RemoveFontResourceA", 4),
+                ("RemoveFontResourceW", 4),
+                ("CreateHalftonePalette", 4),
+                ("SetColorAdjustment", 8),
+                ("StartDocA", 8),
+                ("StartDocW", 8),
+                ("EndDoc", 4),
+                ("StartPage", 4),
+                ("EndPage", 4),
+                ("GdiFlush", 0),
+                ("GetPixelFormat", 4),
+                ("SetPixelFormat", 12),
+                ("SwapBuffers", 4),
+                ("ChoosePixelFormat", 8),
             ],
         );
         add(
             "advapi32.dll",
             &[
-                ("RegOpenKeyExA", 20), ("RegOpenKeyExW", 20), ("RegCloseKey", 4),
-                ("RegQueryValueExA", 24), ("RegQueryValueExW", 24), ("RegSetValueExA", 24),
-                ("RegSetValueExW", 24), ("RegCreateKeyExA", 36), ("RegCreateKeyExW", 36),
-                ("RegDeleteKeyA", 8), ("RegDeleteKeyW", 8), ("RegEnumKeyExA", 32),
-                ("RegEnumValueA", 32), ("RegQueryInfoKeyA", 48),
-                ("GetUserNameA", 8), ("GetUserNameW", 8),
-                ("OpenProcessToken", 12), ("GetTokenInformation", 20),
-                ("LookupPrivilegeValueA", 12), ("AdjustTokenPrivileges", 24),
+                ("RegOpenKeyExA", 20),
+                ("RegOpenKeyExW", 20),
+                ("RegCloseKey", 4),
+                ("RegQueryValueExA", 24),
+                ("RegQueryValueExW", 24),
+                ("RegSetValueExA", 24),
+                ("RegSetValueExW", 24),
+                ("RegCreateKeyExA", 36),
+                ("RegCreateKeyExW", 36),
+                ("RegDeleteKeyA", 8),
+                ("RegDeleteKeyW", 8),
+                ("RegEnumKeyExA", 32),
+                ("RegEnumValueA", 32),
+                ("RegQueryInfoKeyA", 48),
+                ("GetUserNameA", 8),
+                ("GetUserNameW", 8),
+                ("OpenProcessToken", 12),
+                ("GetTokenInformation", 20),
+                ("LookupPrivilegeValueA", 12),
+                ("AdjustTokenPrivileges", 24),
             ],
         );
         add(
             "version.dll",
             &[
-                ("GetFileVersionInfoA", 16), ("GetFileVersionInfoW", 16),
-                ("GetFileVersionInfoSizeA", 8), ("GetFileVersionInfoSizeW", 8),
-                ("VerQueryValueA", 16), ("VerQueryValueW", 16),
+                ("GetFileVersionInfoA", 16),
+                ("GetFileVersionInfoW", 16),
+                ("GetFileVersionInfoSizeA", 8),
+                ("GetFileVersionInfoSizeW", 8),
+                ("VerQueryValueA", 16),
+                ("VerQueryValueW", 16),
             ],
         );
         add(
             "winmm.dll",
             &[
-                ("timeGetTime", 0), ("timeBeginPeriod", 4), ("timeEndPeriod", 4),
-                ("timeGetDevCaps", 8), ("timeSetEvent", 20), ("timeKillEvent", 4),
-                ("waveOutGetNumDevs", 0), ("waveOutOpen", 24), ("waveOutClose", 4),
-                ("waveOutPrepareHeader", 12), ("waveOutUnprepareHeader", 12),
-                ("waveOutWrite", 12), ("waveOutReset", 4), ("waveOutPause", 4),
-                ("waveOutRestart", 4), ("waveOutGetPosition", 12), ("waveOutSetVolume", 8),
-                ("mciSendStringA", 16), ("mciSendStringW", 16),
-                ("PlaySoundA", 12), ("PlaySoundW", 12),
-                ("midiOutGetNumDevs", 0), ("joyGetNumDevs", 0),
+                ("timeGetTime", 0),
+                ("timeBeginPeriod", 4),
+                ("timeEndPeriod", 4),
+                ("timeGetDevCaps", 8),
+                ("timeSetEvent", 20),
+                ("timeKillEvent", 4),
+                ("waveOutGetNumDevs", 0),
+                ("waveOutOpen", 24),
+                ("waveOutClose", 4),
+                ("waveOutPrepareHeader", 12),
+                ("waveOutUnprepareHeader", 12),
+                ("waveOutWrite", 12),
+                ("waveOutReset", 4),
+                ("waveOutPause", 4),
+                ("waveOutRestart", 4),
+                ("waveOutGetPosition", 12),
+                ("waveOutSetVolume", 8),
+                ("mciSendStringA", 16),
+                ("mciSendStringW", 16),
+                ("PlaySoundA", 12),
+                ("PlaySoundW", 12),
+                ("midiOutGetNumDevs", 0),
+                ("joyGetNumDevs", 0),
             ],
         );
         add(
             "imm32.dll",
             &[
-                ("ImmGetContext", 4), ("ImmReleaseContext", 8), ("ImmGetCompositionStringA", 16),
-                ("ImmGetCompositionStringW", 16), ("ImmSetCompositionStringA", 24),
-                ("ImmSetCompositionStringW", 24), ("ImmNotifyIME", 16),
-                ("ImmGetDefaultIMEWnd", 4), ("ImmIsIME", 4), ("ImmGetOpenStatus", 4),
-                ("ImmSetOpenStatus", 8), ("ImmAssociateContext", 8), ("ImmAssociateContextEx", 12),
+                ("ImmGetContext", 4),
+                ("ImmReleaseContext", 8),
+                ("ImmGetCompositionStringA", 16),
+                ("ImmGetCompositionStringW", 16),
+                ("ImmSetCompositionStringA", 24),
+                ("ImmSetCompositionStringW", 24),
+                ("ImmNotifyIME", 16),
+                ("ImmGetDefaultIMEWnd", 4),
+                ("ImmIsIME", 4),
+                ("ImmGetOpenStatus", 4),
+                ("ImmSetOpenStatus", 8),
+                ("ImmAssociateContext", 8),
+                ("ImmAssociateContextEx", 12),
             ],
         );
         add(
             "ole32.dll",
             &[
-                ("CoInitialize", 4), ("CoInitializeEx", 8), ("CoUninitialize", 0),
-                ("CoCreateInstance", 20), ("CoTaskMemAlloc", 4), ("CoTaskMemFree", 4),
-                ("OleInitialize", 4), ("OleUninitialize", 0),
-                ("CreateStreamOnHGlobal", 12), ("GetHGlobalFromStream", 8),
-                ("CLSIDFromString", 8), ("StringFromCLSID", 8),
+                ("CoInitialize", 4),
+                ("CoInitializeEx", 8),
+                ("CoUninitialize", 0),
+                ("CoCreateInstance", 20),
+                ("CoTaskMemAlloc", 4),
+                ("CoTaskMemFree", 4),
+                ("OleInitialize", 4),
+                ("OleUninitialize", 0),
+                ("CreateStreamOnHGlobal", 12),
+                ("GetHGlobalFromStream", 8),
+                ("CLSIDFromString", 8),
+                ("StringFromCLSID", 8),
             ],
         );
         add(
             "shell32.dll",
             &[
-                ("ShellExecuteA", 24), ("ShellExecuteW", 24), ("SHGetFolderPathA", 20),
-                ("SHGetFolderPathW", 20), ("SHGetSpecialFolderPathA", 16),
-                ("SHBrowseForFolderA", 4), ("SHGetPathFromIDListA", 8),
-                ("DragAcceptFiles", 8), ("DragQueryFileA", 16), ("DragQueryFileW", 16),
-                ("DragFinish", 4), ("CommandLineToArgvW", 8),
+                ("ShellExecuteA", 24),
+                ("ShellExecuteW", 24),
+                ("SHGetFolderPathA", 20),
+                ("SHGetFolderPathW", 20),
+                ("SHGetSpecialFolderPathA", 16),
+                ("SHGetSpecialFolderPathW", 16),
+                ("SHGetKnownFolderPath", 16),
+                ("SHBrowseForFolderA", 4),
+                ("SHGetPathFromIDListA", 8),
+                ("DragAcceptFiles", 8),
+                ("DragQueryFileA", 16),
+                ("DragQueryFileW", 16),
+                ("DragFinish", 4),
+                ("CommandLineToArgvW", 8),
             ],
         );
         add(
@@ -658,27 +1116,150 @@ fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
         add(
             "shlwapi.dll",
             &[
-                ("PathCombineA", 12), ("PathCombineW", 12), ("PathFileExistsA", 4),
-                ("PathFileExistsW", 4), ("PathFindExtensionA", 4), ("PathFindFileNameA", 4),
-                ("PathRemoveExtensionA", 4), ("PathRemoveFileSpecA", 4),
-                ("StrStrIA", 8), ("StrStrIW", 8),
+                ("PathCombineA", 12),
+                ("PathCombineW", 12),
+                ("PathFileExistsA", 4),
+                ("PathFileExistsW", 4),
+                ("PathFindExtensionA", 4),
+                ("PathFindFileNameA", 4),
+                ("PathIsDirectoryA", 4),
+                ("PathIsDirectoryW", 4),
+                ("PathRemoveExtensionA", 4),
+                ("PathRemoveFileSpecA", 4),
+                ("StrStrIA", 8),
+                ("StrStrIW", 8),
             ],
         );
         add(
             "ws2_32.dll",
-            &[("WSAStartup", 8), ("WSACleanup", 0), ("socket", 12), ("closesocket", 4)],
+            &[
+                ("WSAStartup", 8),
+                ("WSACleanup", 0),
+                ("socket", 12),
+                ("closesocket", 4),
+            ],
+        );
+        add(
+            "mpr.dll",
+            &[("WNetGetUniversalNameA", 16), ("WNetGetUniversalNameW", 16)],
+        );
+        add("ntdll.dll", &[("RtlGetVersion", 4), ("RtlUnwind", 16)]);
+        add(
+            "user32.dll",
+            &[
+                ("SetWindowRgn", 12),
+                ("PostThreadMessageW", 16),
+                ("DestroyCaret", 0),
+                ("OpenClipboard", 4),
+                ("SetCaretPos", 8),
+                ("GetWindowTextLengthW", 4),
+                ("GetMessageExtraInfo", 0),
+                ("GetClipboardData", 4),
+                ("IsClipboardFormatAvailable", 4),
+                ("MsgWaitForMultipleObjects", 20),
+                ("EnumDisplaySettingsExW", 16),
+                ("TrackMouseEvent", 4),
+                ("IsWindowEnabled", 4),
+                ("SetPropW", 12),
+                ("GetMenuItemCount", 4),
+                ("SetClipboardData", 8),
+                ("CloseClipboard", 0),
+                ("GetPriorityClipboardFormat", 8),
+                ("LoadCursorFromFileW", 4),
+                ("GetQueueStatus", 4),
+                ("DestroyAcceleratorTable", 4),
+                ("CreateAcceleratorTableW", 8),
+                ("WaitMessage", 0),
+                ("CreateCaret", 16),
+            ],
+        );
+        add(
+            "gdi32.dll",
+            &[
+                ("EnumFontsW", 16),
+                ("CreateDIBitmap", 24),
+                ("ExtCreateRegion", 12),
+                ("GetOutlineTextMetricsW", 12),
+            ],
+        );
+        add(
+            "comdlg32.dll",
+            &[
+                ("GetSaveFileNameW", 4),
+                ("GetOpenFileNameW", 4),
+                ("CommDlgExtendedError", 0),
+            ],
+        );
+        add(
+            "shell32.dll",
+            &[("SHBrowseForFolderW", 4), ("SHGetPathFromIDListW", 8)],
+        );
+        add(
+            "ole32.dll",
+            &[
+                ("StringFromGUID2", 12),
+                ("CreateItemMoniker", 12),
+                ("GetRunningObjectTable", 8),
+                ("CoFreeUnusedLibraries", 0),
+                ("CoCreateGuid", 4),
+                ("PropVariantClear", 4),
+            ],
+        );
+        add("oleaut32.dll", &[("#9", 4)]); // VariantClear
+        add(
+            "imm32.dll",
+            &[
+                ("ImmSetCompositionFontW", 8),
+                ("ImmSetConversionStatus", 12),
+                ("ImmGetConversionStatus", 12),
+                ("ImmSetCompositionWindow", 8),
+            ],
+        );
+        add("dbghelp.dll", &[("MiniDumpWriteDump", 28)]);
+        add("quartz.dll", &[("AMGetErrorTextW", 12)]);
+        add("propsys.dll", &[("PropVariantToDouble", 8)]);
+        add(
+            "mfplat.dll",
+            &[
+                ("MFShutdown", 0),
+                ("MFFrameRateToAverageTimePerFrame", 12),
+                ("MFStartup", 8),
+            ],
+        );
+        add(
+            "mf.dll",
+            &[
+                ("MFCreateVideoRendererActivate", 8),
+                ("MFCreateAudioRendererActivate", 4),
+                ("MFCreateTopologyNode", 8),
+                ("MFCreateTopology", 4),
+                ("MFCreateMediaSession", 8),
+                ("MFCreateSourceResolver", 4),
+            ],
         );
         add(
             "ddraw.dll",
-            &[("DirectDrawCreate", 12), ("DirectDrawCreateEx", 16), ("DirectDrawEnumerateA", 8)],
+            &[
+                ("DirectDrawCreate", 12),
+                ("DirectDrawCreateEx", 16),
+                ("DirectDrawEnumerateA", 8),
+            ],
         );
         add(
             "dsound.dll",
-            &[("DirectSoundCreate", 12), ("DirectSoundCreate8", 12), ("DirectSoundEnumerateA", 8)],
+            &[
+                ("DirectSoundCreate", 12),
+                ("DirectSoundCreate8", 12),
+                ("DirectSoundEnumerateA", 8),
+            ],
         );
         add(
             "dinput.dll",
-            &[("DirectInputCreateA", 16), ("DirectInputCreateW", 16), ("DirectInput8Create", 20)],
+            &[
+                ("DirectInputCreateA", 16),
+                ("DirectInputCreateW", 16),
+                ("DirectInput8Create", 20),
+            ],
         );
         m
     });
@@ -698,7 +1279,7 @@ fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
     None
 }
 
-/// --- kernel-object wait helpers (M2) ---
+// --- kernel-object wait helpers (M2) ---
 
 /// Non-consuming readiness test (used by wait-all and by acquire itself).
 fn obj_ready(state: &ApiState, sched: &Sched, h: u32) -> bool {
@@ -712,7 +1293,7 @@ fn obj_ready(state: &ApiState, sched: &Sched, h: u32) -> bool {
             .threads
             .iter()
             .any(|t| t.tid == *tid && matches!(t.state, ThreadState::Exited(_))),
-        None => false,
+        _ => false,
     }
 }
 
@@ -760,7 +1341,7 @@ fn obj_acquire(state: &mut ApiState, sched: &Sched, h: u32) -> bool {
                 .iter()
                 .any(|t| t.tid == tid && matches!(t.state, ThreadState::Exited(_)))
         }
-        None => false,
+        _ => false,
     }
 }
 
@@ -800,7 +1381,12 @@ pub fn dispatch(
     let dll = entry.dll.as_str();
     let name = entry.name.as_str();
     let esp = cpu.esp();
-    let mut args = [0u32; 6];
+    if cpu.fs_base != 0 {
+        state.last_error = mem
+            .read_u32(cpu.fs_base + 0x34)
+            .map_err(|e| e.to_string())?;
+    }
+    let mut args = [0u32; 12];
     for (i, a) in args.iter_mut().enumerate() {
         *a = mem
             .read_u32(esp.wrapping_add(4 + 4 * i as u32))
@@ -861,7 +1447,11 @@ pub fn dispatch(
             };
             mem.write_u32(args[1], code).map_err(|e| e.to_string())?;
             ret = 1;
-            note = if running { "STILL_ACTIVE".into() } else { format!("exited, code {code:#x}") };
+            note = if running {
+                "STILL_ACTIVE".into()
+            } else {
+                format!("exited, code {code:#x}")
+            };
         }
         ("kernel32.dll", "SuspendThread") => {
             if let Some(i) = sched.thread_index_by_handle(args[0]) {
@@ -948,49 +1538,43 @@ pub fn dispatch(
                 }
             }
         }
-        ("kernel32.dll", "SetEvent") => {
-            match state.handles.get_mut(&args[0]) {
-                Some(HandleObj::Event { manual, signaled }) => {
-                    let manual = *manual;
-                    *signaled = true;
-                    let woken = wake_obj_waiters(sched, args[0], if manual { usize::MAX } else { 1 });
-                    note = format!("woke {woken} waiter(s)");
-                    ret = 1;
-                }
-                _ => {
-                    state.last_error = 6;
-                    ret = 0;
-                    note = "bad event handle".into();
-                }
+        ("kernel32.dll", "SetEvent") => match state.handles.get_mut(&args[0]) {
+            Some(HandleObj::Event { manual, signaled }) => {
+                let manual = *manual;
+                *signaled = true;
+                let woken = wake_obj_waiters(sched, args[0], if manual { usize::MAX } else { 1 });
+                note = format!("woke {woken} waiter(s)");
+                ret = 1;
             }
-        }
-        ("kernel32.dll", "ResetEvent") => {
-            match state.handles.get_mut(&args[0]) {
-                Some(HandleObj::Event { signaled, .. }) => {
-                    *signaled = false;
-                    ret = 1;
-                }
-                _ => {
-                    state.last_error = 6;
-                    ret = 0;
-                }
+            _ => {
+                state.last_error = 6;
+                ret = 0;
+                note = "bad event handle".into();
             }
-        }
-        ("kernel32.dll", "PulseEvent") => {
-            match state.handles.get_mut(&args[0]) {
-                Some(HandleObj::Event { manual, signaled }) => {
-                    let manual = *manual;
-                    *signaled = false;
-                    let woken = wake_obj_waiters(sched, args[0], if manual { usize::MAX } else { 1 });
-                    note = format!("woke {woken} waiter(s)");
-                    ret = 1;
-                }
-                _ => {
-                    state.last_error = 6;
-                    ret = 0;
-                }
+        },
+        ("kernel32.dll", "ResetEvent") => match state.handles.get_mut(&args[0]) {
+            Some(HandleObj::Event { signaled, .. }) => {
+                *signaled = false;
+                ret = 1;
             }
-        }
+            _ => {
+                state.last_error = 6;
+                ret = 0;
+            }
+        },
+        ("kernel32.dll", "PulseEvent") => match state.handles.get_mut(&args[0]) {
+            Some(HandleObj::Event { manual, signaled }) => {
+                let manual = *manual;
+                *signaled = false;
+                let woken = wake_obj_waiters(sched, args[0], if manual { usize::MAX } else { 1 });
+                note = format!("woke {woken} waiter(s)");
+                ret = 1;
+            }
+            _ => {
+                state.last_error = 6;
+                ret = 0;
+            }
+        },
         // --- mutexes ---
         ("kernel32.dll", "CreateMutexA") | ("kernel32.dll", "CreateMutexW") => {
             let wide = name.ends_with('W');
@@ -1001,7 +1585,10 @@ pub fn dispatch(
                 owner: if own { Some(me) } else { None },
                 count: if own { 1 } else { 0 },
             });
-            note = format!("mutex \"{nm}\"{}", if existed { " (already exists)" } else { "" });
+            note = format!(
+                "mutex \"{nm}\"{}",
+                if existed { " (already exists)" } else { "" }
+            );
             ret = h;
         }
         ("kernel32.dll", "ReleaseMutex") => {
@@ -1036,29 +1623,31 @@ pub fn dispatch(
                 count: initial,
                 max,
             });
-            note = format!("semaphore \"{nm}\" {initial}/{max}{}", if existed { " (already exists)" } else { "" });
+            note = format!(
+                "semaphore \"{nm}\" {initial}/{max}{}",
+                if existed { " (already exists)" } else { "" }
+            );
             ret = h;
         }
-        ("kernel32.dll", "ReleaseSemaphore") => {
-            match state.handles.get_mut(&args[0]) {
-                Some(HandleObj::Semaphore { count, max }) => {
-                    let prev = *count;
-                    let n = args[1] as i32;
-                    *count = (*count + n).min(*max);
-                    if args[2] != 0 {
-                        mem.write_u32(args[2], prev as u32).map_err(|e| e.to_string())?;
-                    }
-                    let woken = wake_obj_waiters(sched, args[0], n.max(0) as usize);
-                    note = format!("count {prev} -> {}, woke {woken}", *count);
-                    ret = 1;
+        ("kernel32.dll", "ReleaseSemaphore") => match state.handles.get_mut(&args[0]) {
+            Some(HandleObj::Semaphore { count, max }) => {
+                let prev = *count;
+                let n = args[1] as i32;
+                *count = (*count + n).min(*max);
+                if args[2] != 0 {
+                    mem.write_u32(args[2], prev as u32)
+                        .map_err(|e| e.to_string())?;
                 }
-                _ => {
-                    state.last_error = 6;
-                    ret = 0;
-                    note = "bad semaphore handle".into();
-                }
+                let woken = wake_obj_waiters(sched, args[0], n.max(0) as usize);
+                note = format!("count {prev} -> {}, woke {woken}", *count);
+                ret = 1;
             }
-        }
+            _ => {
+                state.last_error = 6;
+                ret = 0;
+                note = "bad semaphore handle".into();
+            }
+        },
         // --- waits ---
         ("kernel32.dll", "WaitForSingleObject") => {
             let (h, timeout) = (args[0], args[1]);
@@ -1084,7 +1673,11 @@ pub fn dispatch(
                         log.note(&format!(
                             "thread {} blocks in WaitForSingleObject({h:#x}, {}ms)",
                             sched.current_tid(),
-                            if timeout == u32::MAX { "inf".into() } else { timeout.to_string() }
+                            if timeout == u32::MAX {
+                                "inf".into()
+                            } else {
+                                timeout.to_string()
+                            }
                         ));
                         sched.block_current(cpu, WaitTarget::Object(h), d)?;
                         return Ok(());
@@ -1144,6 +1737,7 @@ pub fn dispatch(
         }
         ("kernel32.dll", "CloseHandle") => {
             if state.handles.remove(&args[0]).is_some() {
+                state.named_objs.retain(|_, handle| *handle != args[0]);
                 ret = 1;
             } else {
                 state.last_error = 6;
@@ -1179,6 +1773,127 @@ pub fn dispatch(
             ret = 932;
             note = "fake CP932 (ja-JP)".into();
         }
+        ("kernel32.dll", "GetCPInfo") => {
+            let cp = if args[0] == 0 || args[0] == 1 {
+                932
+            } else {
+                args[0]
+            };
+            if matches!(cp, 932 | 1252 | 65001) {
+                let mut info = [0u8; 20];
+                let width: u32 = match cp {
+                    932 => 2,
+                    65001 => 4,
+                    _ => 1,
+                };
+                info[..4].copy_from_slice(&width.to_le_bytes());
+                info[4] = b'?';
+                if cp == 932 {
+                    info[6..10].copy_from_slice(&[0x81, 0x9f, 0xe0, 0xfc]);
+                }
+                mem.write_bytes(args[1], &info).map_err(|e| e.to_string())?;
+                ret = 1;
+            } else {
+                state.last_error = 87;
+                ret = 0;
+            }
+        }
+        ("kernel32.dll", "IsProcessorFeaturePresent") => {
+            // SSE/SSE2 subset is enabled; SSE3 still lacks several opcodes.
+            ret = matches!(args[0], 6 | 10) as u32;
+        }
+        ("user32.dll", "LoadStringW") | ("user32.dll", "LoadStringA") => {
+            let base = if args[0] == 0 {
+                state.exe_base
+            } else {
+                args[0]
+            };
+            let found = crate::resource::string(mem, base, args[1] & 0xffff);
+            let (ptr, len) = found.unwrap_or((0, 0));
+            if name.ends_with('W') && args[3] == 0 {
+                mem.write_u32(args[2], ptr).map_err(|e| e.to_string())?;
+                ret = len;
+            } else if args[3] as i32 > 0 {
+                let n = len.min(args[3] - 1);
+                if name.ends_with('W') {
+                    for i in 0..n {
+                        mem.write_u16(
+                            args[2] + i * 2,
+                            mem.read_u16(ptr + i * 2).map_err(|e| e.to_string())?,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    }
+                    mem.write_u16(args[2] + n * 2, 0)
+                        .map_err(|e| e.to_string())?;
+                    ret = n;
+                } else {
+                    let mut units = Vec::new();
+                    for i in 0..len {
+                        units.push(mem.read_u16(ptr + i * 2).map_err(|e| e.to_string())?);
+                    }
+                    let bytes = crate::codepage::encode(&String::from_utf16_lossy(&units), 932)
+                        .map_err(|e| format!("code-page error {e}"))?
+                        .0;
+                    let count = bytes.len().min(args[3] as usize - 1);
+                    mem.write_bytes(args[2], &bytes[..count])
+                        .map_err(|e| e.to_string())?;
+                    mem.write_u8(args[2] + count as u32, 0)
+                        .map_err(|e| e.to_string())?;
+                    ret = count as u32;
+                }
+            } else {
+                ret = 0;
+            }
+            note = format!("resource string {}: {} UTF-16 units", args[1], len);
+        }
+        ("kernel32.dll", "FindResourceA")
+        | ("kernel32.dll", "FindResourceW")
+        | ("kernel32.dll", "FindResourceExA")
+        | ("kernel32.dll", "FindResourceExW") => {
+            let base = if args[0] == 0 {
+                state.exe_base
+            } else {
+                args[0]
+            };
+            let ex = name.contains("Ex");
+            let wide = name.ends_with('W');
+            let key = |p| -> Result<crate::resource::Key, String> {
+                if p <= 0xffff {
+                    Ok(crate::resource::Key::Id(p))
+                } else {
+                    Ok(crate::resource::Key::Name(
+                        crate::file_api::read_name(mem, p, wide)
+                            .map_err(|e| format!("resource name: {e}"))?,
+                    ))
+                }
+            };
+            let typ = key(if ex { args[1] } else { args[2] })?;
+            let id = key(if ex { args[2] } else { args[1] })?;
+            ret = crate::resource::find_key(
+                mem,
+                base,
+                &typ,
+                &id,
+                if ex { Some(args[3]) } else { None },
+            )
+            .unwrap_or(0);
+            if ret == 0 {
+                state.last_error = 1814;
+            }
+        }
+        ("kernel32.dll", "LoadResource") | ("kernel32.dll", "SizeofResource") => {
+            let base = if args[0] == 0 {
+                state.exe_base
+            } else {
+                args[0]
+            };
+            let data = crate::resource::data(mem, base, args[1]);
+            ret = data
+                .map(|(ptr, size)| if name == "LoadResource" { ptr } else { size })
+                .unwrap_or(0);
+        }
+        ("kernel32.dll", "LockResource") => ret = args[0],
+        ("kernel32.dll", "FreeResource") => ret = 0,
         ("kernel32.dll", "GetOEMCP") => {
             ret = 932;
             note = "fake CP932 (ja-JP)".into();
@@ -1204,12 +1919,13 @@ pub fn dispatch(
             ret = 0;
         }
         ("kernel32.dll", "QueryPerformanceCounter") => {
-            let v = state.start.elapsed().as_nanos() as u64 * 10;
+            let v = (state.start.elapsed().as_nanos() / 100) as u64;
             mem.write_u64(args[0], v).map_err(|e| e.to_string())?;
             ret = 1;
         }
         ("kernel32.dll", "QueryPerformanceFrequency") => {
-            mem.write_u64(args[0], 10_000_000).map_err(|e| e.to_string())?;
+            mem.write_u64(args[0], 10_000_000)
+                .map_err(|e| e.to_string())?;
             ret = 1;
         }
         ("kernel32.dll", "GetStartupInfoA") | ("kernel32.dll", "GetStartupInfoW") => {
@@ -1267,31 +1983,54 @@ pub fn dispatch(
         }
         ("kernel32.dll", "GetProcessHeap") => ret = state.process_heap,
         ("kernel32.dll", "HeapAlloc") => {
-            let p = state.scratch_alloc(mem, args[2].max(1), 16);
-            if args[1] & 0x8 != 0 {
-                // HEAP_ZERO_MEMORY
-                let z = vec![0u8; (args[2] as usize).min(1 << 26)];
-                mem.write_bytes(p, &z).map_err(|e| e.to_string())?;
+            ret = state.heap.alloc(mem, args[0], args[2], args[1] & 8 != 0)?;
+            if ret == 0 {
+                state.last_error = 8;
             }
-            note = "bump alloc (no real heap yet)".into();
-            ret = p;
         }
         ("kernel32.dll", "HeapReAlloc") => {
-            ret = state.scratch_alloc(mem, args[3].max(1), 16);
-            note = "bump alloc (contents not preserved)".into();
+            ret = state
+                .heap
+                .realloc(mem, args[0], args[2], args[3], args[1])?;
+            if ret == 0 {
+                state.last_error = 8;
+            }
         }
-        ("kernel32.dll", "HeapFree") | ("kernel32.dll", "HeapDestroy") => {
-            ret = 1;
-            note = "no-op".into();
+        ("kernel32.dll", "HeapFree") => {
+            ret = state.heap.free(args[0], args[2]) as u32;
+            if ret == 0 {
+                state.last_error = 87;
+            }
         }
-        ("kernel32.dll", "HeapCreate") => {
-            ret = 0x7006_0000;
-            note = "fake heap handle".into();
+        ("kernel32.dll", "HeapDestroy") => {
+            ret = (args[0] != state.process_heap && state.heap.destroy(args[0])) as u32;
+            if ret == 0 {
+                state.last_error = 87;
+            }
         }
-        ("kernel32.dll", "HeapSize") => {
-            ret = 0x1000;
-            note = "fake size".into();
+        ("kernel32.dll", "HeapCreate") => ret = state.heap.create(args[2]),
+        ("kernel32.dll", "HeapSize") => ret = state.heap.size(args[0], args[2]).unwrap_or(u32::MAX),
+        ("kernel32.dll", "HeapValidate") => ret = state.heap.valid(args[0], args[2]) as u32,
+        ("kernel32.dll", "LocalAlloc") | ("kernel32.dll", "GlobalAlloc") => {
+            if args[0] & 2 != 0 {
+                return Err("movable Local/GlobalAlloc is unsupported".into());
+            }
+            ret = state
+                .heap
+                .alloc(mem, state.process_heap, args[1], args[0] & 0x40 != 0)?;
         }
+        ("kernel32.dll", "LocalFree") | ("kernel32.dll", "GlobalFree") => {
+            ret = if state.heap.free(state.process_heap, args[0]) {
+                0
+            } else {
+                args[0]
+            };
+        }
+        ("kernel32.dll", "LocalSize") | ("kernel32.dll", "GlobalSize") => {
+            ret = state.heap.size(state.process_heap, args[0]).unwrap_or(0);
+        }
+        ("kernel32.dll", "LocalLock") | ("kernel32.dll", "GlobalLock") => ret = args[0],
+        ("kernel32.dll", "LocalUnlock") | ("kernel32.dll", "GlobalUnlock") => ret = 0,
         ("kernel32.dll", "GetProcessHeaps") => {
             ret = 1;
             note = "fake: single heap".into();
@@ -1312,16 +2051,19 @@ pub fn dispatch(
                     let w: Vec<u16> = path.encode_utf16().collect();
                     let n = (w.len() as u32).min(bufsize.saturating_sub(1));
                     for i in 0..n {
-                        mem.write_u16(buf + 2 * i, w[i as usize]).map_err(|e| e.to_string())?;
+                        mem.write_u16(buf + 2 * i, w[i as usize])
+                            .map_err(|e| e.to_string())?;
                     }
                     if bufsize > 0 {
                         mem.write_u16(buf + 2 * n, 0).map_err(|e| e.to_string())?;
                     }
                     ret = n;
                 } else {
-                    let b = path.as_bytes();
+                    let (b, _) = crate::codepage::encode(&path, 932)
+                        .map_err(|e| format!("module filename encoding: {e}"))?;
                     let n = (b.len() as u32).min(bufsize.saturating_sub(1));
-                    mem.write_bytes(buf, &b[..n as usize]).map_err(|e| e.to_string())?;
+                    mem.write_bytes(buf, &b[..n as usize])
+                        .map_err(|e| e.to_string())?;
                     if bufsize > 0 {
                         mem.write_u8(buf + n, 0).map_err(|e| e.to_string())?;
                     }
@@ -1334,7 +2076,7 @@ pub fn dispatch(
             }
         }
         ("kernel32.dll", "GetFileType") => {
-            ret = 0; // FILE_TYPE_UNKNOWN
+            ret = matches!(state.handles.get(&args[0]), Some(HandleObj::File { .. })) as u32;
         }
         ("kernel32.dll", "GetEnvironmentStrings") => {
             // empty block: "\0\0"
@@ -1350,16 +2092,37 @@ pub fn dispatch(
             ret = p;
             note = "empty environment block".into();
         }
-        ("kernel32.dll", "FreeEnvironmentStringsA") | ("kernel32.dll", "FreeEnvironmentStringsW") => {
+        ("kernel32.dll", "FreeEnvironmentStringsA")
+        | ("kernel32.dll", "FreeEnvironmentStringsW") => {
             ret = 1;
         }
-        ("kernel32.dll", "GetEnvironmentVariableA") | ("kernel32.dll", "GetEnvironmentVariableW") => {
+        ("kernel32.dll", "GetEnvironmentVariableA")
+        | ("kernel32.dll", "GetEnvironmentVariableW") => {
             ret = 0; // not found; GetLastError already 0
             note = "empty environment".into();
         }
         ("kernel32.dll", "SetUnhandledExceptionFilter") => {
-            ret = 0;
-            note = "no-op".into();
+            ret = state.unhandled_filter;
+            state.unhandled_filter = args[0];
+        }
+        ("kernel32.dll", "RaiseException") => {
+            log.log_call(dll, name, &args[..4], 0, true, "first-chance SEH dispatch");
+            return crate::seh::raise(cpu, mem, api, state, log, sched, &args, max_instr);
+        }
+        ("kernel32.dll", "UnhandledExceptionFilter") => {
+            if state.unhandled_filter == 0 {
+                ret = 0;
+            } else {
+                let saved = cpu.save_ctx();
+                let filter = state.unhandled_filter;
+                let result =
+                    cpu.call_guest(mem, api, state, log, sched, filter, &[args[0]], max_instr);
+                cpu.load_ctx(&saved);
+                ret = result?;
+            }
+        }
+        ("kernel32.dll", "RtlUnwind") | ("ntdll.dll", "RtlUnwind") => {
+            return Err("RtlUnwind/MSVC stack unwind is not yet implemented".into());
         }
         // --- critical sections: real owner/recursion bookkeeping in the guest
         // CRITICAL_SECTION struct; contention blocks cooperatively. The
@@ -1378,7 +2141,7 @@ pub fn dispatch(
         ("kernel32.dll", "InitializeCriticalSectionAndSpinCount")
         | ("kernel32.dll", "InitializeCriticalSectionEx") => {
             let cs = args[0];
-            let spin = if name.ends_with("Ex") { args[2] } else { args[1] };
+            let spin = args[1];
             mem.write_u32(cs, 0).map_err(|e| e.to_string())?;
             mem.write_u32(cs + 4, u32::MAX).map_err(|e| e.to_string())?;
             mem.write_u32(cs + 8, 0).map_err(|e| e.to_string())?;
@@ -1458,12 +2221,19 @@ pub fn dispatch(
             state.next_tls += 1;
         }
         ("kernel32.dll", "TlsSetValue") => {
-            state.tls.insert(args[0], args[1]);
+            state.tls.insert((sched.current_tid(), args[0]), args[1]);
             ret = 1;
         }
-        ("kernel32.dll", "TlsGetValue") => ret = state.tls.get(&args[0]).copied().unwrap_or(0),
+        ("kernel32.dll", "TlsGetValue") => {
+            ret = state
+                .tls
+                .get(&(sched.current_tid(), args[0]))
+                .copied()
+                .unwrap_or(0);
+            state.last_error = 0;
+        }
         ("kernel32.dll", "TlsFree") => {
-            state.tls.remove(&args[0]);
+            state.tls.retain(|&(_, slot), _| slot != args[0]);
             ret = 1;
         }
         ("kernel32.dll", "FlsAlloc") => {
@@ -1472,12 +2242,18 @@ pub fn dispatch(
             note = "callback not invoked".into();
         }
         ("kernel32.dll", "FlsSetValue") => {
-            state.fls.insert(args[0], args[1]);
+            state.fls.insert((sched.current_tid(), args[0]), args[1]);
             ret = 1;
         }
-        ("kernel32.dll", "FlsGetValue") => ret = state.fls.get(&args[0]).copied().unwrap_or(0),
+        ("kernel32.dll", "FlsGetValue") => {
+            ret = state
+                .fls
+                .get(&(sched.current_tid(), args[0]))
+                .copied()
+                .unwrap_or(0)
+        }
         ("kernel32.dll", "FlsFree") => {
-            state.fls.remove(&args[0]);
+            state.fls.retain(|&(_, slot), _| slot != args[0]);
             ret = 1;
         }
         ("kernel32.dll", "LoadLibraryExA") | ("kernel32.dll", "LoadLibraryExW") => {
@@ -1508,12 +2284,18 @@ pub fn dispatch(
             note = "not a packaged app".into();
         }
         ("kernel32.dll", "InterlockedIncrement") => {
-            let v = mem.read_u32(args[0]).map_err(|e| e.to_string())?.wrapping_add(1);
+            let v = mem
+                .read_u32(args[0])
+                .map_err(|e| e.to_string())?
+                .wrapping_add(1);
             mem.write_u32(args[0], v).map_err(|e| e.to_string())?;
             ret = v;
         }
         ("kernel32.dll", "InterlockedDecrement") => {
-            let v = mem.read_u32(args[0]).map_err(|e| e.to_string())?.wrapping_sub(1);
+            let v = mem
+                .read_u32(args[0])
+                .map_err(|e| e.to_string())?
+                .wrapping_sub(1);
             mem.write_u32(args[0], v).map_err(|e| e.to_string())?;
             ret = v;
         }
@@ -1524,8 +2306,8 @@ pub fn dispatch(
         }
         ("kernel32.dll", "InterlockedCompareExchange") => {
             let old = mem.read_u32(args[0]).map_err(|e| e.to_string())?;
-            if old == args[1] {
-                mem.write_u32(args[0], args[2]).map_err(|e| e.to_string())?;
+            if old == args[2] {
+                mem.write_u32(args[0], args[1]).map_err(|e| e.to_string())?;
             }
             ret = old;
         }
@@ -1545,6 +2327,75 @@ pub fn dispatch(
             ret = 1; // IDOK
         }
         ("user32.dll", "GetActiveWindow") | ("user32.dll", "GetLastActivePopup") => ret = 0,
+        ("mpr.dll", "WNetGetUniversalNameA") | ("mpr.dll", "WNetGetUniversalNameW") => {
+            ret = 2250; // ERROR_NOT_CONNECTED: sandbox C: is a local drive
+        }
+        ("kernel32.dll", "GetVersionExA")
+        | ("kernel32.dll", "GetVersionExW")
+        | ("ntdll.dll", "RtlGetVersion") => {
+            let size = mem.read_u32(args[0]).map_err(|e| e.to_string())?;
+            if matches!(size, 148 | 156 | 276 | 284) {
+                let mut info = vec![0; size as usize];
+                for (i, value) in [size, 6, 1, 7601, 2].iter().enumerate() {
+                    info[i * 4..i * 4 + 4].copy_from_slice(&value.to_le_bytes());
+                }
+                if matches!(size, 156 | 284) {
+                    info[size as usize - 2] = 1;
+                } // VER_NT_WORKSTATION
+                mem.write_bytes(args[0], &info).map_err(|e| e.to_string())?;
+                ret = if dll == "ntdll.dll" { 0 } else { 1 };
+            } else {
+                state.last_error = 87;
+                ret = 0;
+            }
+        }
+        ("kernel32.dll", "FormatMessageA") | ("kernel32.dll", "FormatMessageW") => {
+            let wide = name.ends_with('W');
+            let text = if args[0] & 0x400 != 0 {
+                crate::file_api::read_name(mem, args[1], wide)
+                    .map_err(|e| format!("FormatMessage: {e}"))?
+            } else {
+                match args[2] {
+                    2 => "The system cannot find the file specified.\r\n".into(),
+                    5 => "Access is denied.\r\n".into(),
+                    87 => "The parameter is incorrect.\r\n".into(),
+                    n => format!("Win32 error {n}.\r\n"),
+                }
+            };
+            let count = if wide {
+                text.encode_utf16().count()
+            } else {
+                crate::codepage::encode(&text, 932)
+                    .map_err(|e| format!("FormatMessage: {e}"))?
+                    .0
+                    .len()
+            } as u32;
+            if args[0] & 0x100 != 0 {
+                let p = state.heap.alloc(
+                    mem,
+                    state.process_heap,
+                    (count + 1).max(args[5]) * if wide { 2 } else { 1 },
+                    false,
+                )?;
+                if p == 0 {
+                    state.last_error = 8;
+                    ret = 0;
+                } else {
+                    crate::file_api::write_string(mem, p, count + 1, &text, wide)
+                        .map_err(|e| format!("FormatMessage: {e}"))?;
+                    mem.write_u32(args[4], p).map_err(|e| e.to_string())?;
+                    ret = count;
+                }
+            } else if args[5] <= count {
+                state.last_error = 122;
+                ret = 0;
+            } else {
+                crate::file_api::write_string(mem, args[4], args[5], &text, wide)
+                    .map_err(|e| format!("FormatMessage: {e}"))?;
+                ret = count;
+            }
+            note = text.trim().into();
+        }
         ("mscoree.dll", "CorExitProcess") => {
             cpu.halted = true;
             cpu.exit_code = Some(args[0]);
@@ -1552,16 +2403,26 @@ pub fn dispatch(
             ret = 0;
         }
         _ => {
-            match crt_dispatch(dll, name, &args, cpu, mem, api, state, log, sched, max_instr)? {
-                Some(v) => {
-                    ret = v;
-                    note = "crt shim".into();
-                }
-                None => {
-                    implemented = false;
-                    ret = 0;
-                    if stack_args_bytes(dll, name).is_none() {
-                        note = "unknown stdcall arity, assuming cdecl/0-byte cleanup".into();
+            if let Some((v, msg)) = crate::file_api::dispatch(dll, name, &args, mem, state) {
+                ret = v;
+                note = msg;
+            } else if let Some((v, msg)) = crate::nls::dispatch(dll, name, &args, mem, state) {
+                ret = v;
+                note = msg;
+            } else {
+                match crt_dispatch(
+                    dll, name, &args, cpu, mem, api, state, log, sched, max_instr,
+                )? {
+                    Some(v) => {
+                        ret = v;
+                        note = "crt shim".into();
+                    }
+                    None => {
+                        implemented = false;
+                        ret = 0;
+                        if stack_args_bytes(dll, name).is_none() {
+                            note = "unknown stdcall arity, assuming cdecl/0-byte cleanup".into();
+                        }
                     }
                 }
             }
@@ -1578,6 +2439,10 @@ pub fn dispatch(
         .map_err(|e| format!("stub stack fault: {e}"))?;
     cpu.set_esp(esp.wrapping_add(4 + stack_args));
     cpu.eip = retaddr;
+    if cpu.fs_base != 0 {
+        mem.write_u32(cpu.fs_base + 0x34, state.last_error)
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -1587,7 +2452,7 @@ pub fn dispatch(
 fn crt_dispatch(
     dll: &str,
     name: &str,
-    args: &[u32; 6],
+    args: &[u32; 12],
     cpu: &mut Cpu,
     mem: &mut GuestMem,
     api: &mut ApiTable,
@@ -1616,12 +2481,14 @@ fn crt_dispatch(
         }
         "__p__acmdln" => {
             let p = state.scratch_alloc(mem, 4, 4);
-            mem.write_u32(p, state.cmdline_a).map_err(|e| e.to_string())?;
+            mem.write_u32(p, state.cmdline_a)
+                .map_err(|e| e.to_string())?;
             p
         }
         "__p__wcmdln" => {
             let p = state.scratch_alloc(mem, 4, 4);
-            mem.write_u32(p, state.cmdline_w).map_err(|e| e.to_string())?;
+            mem.write_u32(p, state.cmdline_w)
+                .map_err(|e| e.to_string())?;
             p
         }
         "__p___argv" | "__p___wargv" => {
@@ -1638,7 +2505,8 @@ fn crt_dispatch(
         }
         "__p__pgmptr" | "__p__wpgmptr" => {
             let p = state.scratch_alloc(mem, 4, 4);
-            mem.write_u32(p, state.cmdline_a).map_err(|e| e.to_string())?;
+            mem.write_u32(p, state.cmdline_a)
+                .map_err(|e| e.to_string())?;
             p
         }
         "__getmainargs" => {
@@ -1666,26 +2534,51 @@ fn crt_dispatch(
             }
             first_err
         }
-        "_initialize_narrow_environment" | "_initialize_wide_environment"
-        | "_configure_narrow_argv" | "_configure_wide_argv" | "_initialize_onexit_table"
-        | "_register_onexit_function" | "_crt_atexit" | "_crt_at_quick_exit"
-        | "_set_invalid_parameter_handler" | "_set_app_type" | "_set_fmode"
-        | "_set_new_mode" | "setvbuf" | "_crt_debugger_hook" | "_controlfp_s" | "_lock"
-        | "_unlock" | "__setusermatherr" | "_register_thread_local_exe_atexit_callback" => 0,
-        "malloc" => state.scratch_alloc(mem, args[0].max(1), 16),
-        "calloc" => {
-            let n = args[0].max(1).saturating_mul(args[1].max(1));
-            let p = state.scratch_alloc(mem, n, 16);
-            let z = vec![0u8; n.min(1 << 26) as usize];
-            mem.write_bytes(p, &z).map_err(|e| e.to_string())?;
-            p
+        "_initialize_narrow_environment"
+        | "_initialize_wide_environment"
+        | "_configure_narrow_argv"
+        | "_configure_wide_argv"
+        | "_initialize_onexit_table"
+        | "_register_onexit_function"
+        | "_crt_atexit"
+        | "_crt_at_quick_exit"
+        | "_set_invalid_parameter_handler"
+        | "_set_app_type"
+        | "_set_fmode"
+        | "_set_new_mode"
+        | "setvbuf"
+        | "_crt_debugger_hook"
+        | "_controlfp_s"
+        | "_lock"
+        | "_unlock"
+        | "__setusermatherr"
+        | "_register_thread_local_exe_atexit_callback" => 0,
+        "malloc" => state.heap.alloc(mem, state.process_heap, args[0], false)?,
+        "calloc" => match args[0].checked_mul(args[1]) {
+            Some(n) => state.heap.alloc(mem, state.process_heap, n, true)?,
+            None => 0,
+        },
+        "realloc" => {
+            if args[0] == 0 {
+                state.heap.alloc(mem, state.process_heap, args[1], false)?
+            } else if args[1] == 0 {
+                state.heap.free(state.process_heap, args[0]);
+                0
+            } else {
+                state
+                    .heap
+                    .realloc(mem, state.process_heap, args[0], args[1], 0)?
+            }
         }
-        "realloc" => state.scratch_alloc(mem, args[1].max(1), 16),
-        "free" | "_free_dbg" | "_aligned_free" => 0,
+        "free" | "_free_dbg" => {
+            state.heap.free(state.process_heap, args[0]);
+            0
+        }
         "memcpy" | "memmove" => {
             let n = (args[2] as usize).min(1 << 26);
             let mut tmp = vec![0u8; n];
-            mem.read_bytes(args[1], &mut tmp).map_err(|e| e.to_string())?;
+            mem.read_bytes(args[1], &mut tmp)
+                .map_err(|e| e.to_string())?;
             mem.write_bytes(args[0], &tmp).map_err(|e| e.to_string())?;
             args[0]
         }
@@ -1707,4 +2600,31 @@ fn crt_dispatch(
         _ => return Ok(None),
     };
     Ok(Some(r))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn target_static_imports_have_known_stack_cleanup() {
+        let mut dll = String::new();
+        let mut count = 0;
+        for line in include_str!("../docs/m0-imports.txt").lines() {
+            if line.starts_with("  ") && !line.starts_with("    ") {
+                if let Some((name, _)) = line.trim().split_once(" (") {
+                    if name.to_ascii_lowercase().ends_with(".dll") {
+                        dll = name.to_ascii_lowercase();
+                    }
+                }
+            } else if line.starts_with("    ") && !dll.is_empty() {
+                for name in line.split_whitespace() {
+                    assert!(
+                        super::stack_args_bytes(&dll, name).is_some(),
+                        "missing cleanup for {dll}!{name}"
+                    );
+                    count += 1;
+                }
+            }
+        }
+        assert_eq!(count, 346);
+    }
 }

@@ -1,6 +1,13 @@
 pub mod api;
+pub mod codepage;
 pub mod cpu;
+pub mod file_api;
+pub mod fs;
+pub mod heap;
 pub mod loader;
 pub mod mem;
+pub mod nls;
 pub mod pe;
+pub mod resource;
+pub mod seh;
 pub mod thread;

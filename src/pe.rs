@@ -180,7 +180,9 @@ impl PeFile {
 
     /// Which section contains the entry point (packing heuristic aid).
     pub fn entry_section(&self) -> Option<&Section> {
-        self.sections.iter().find(|s| s.contains_rva(self.entry_rva))
+        self.sections
+            .iter()
+            .find(|s| s.contains_rva(self.entry_rva))
     }
 
     pub fn imports(&self, buf: &[u8]) -> Result<Vec<ImportDll>, String> {

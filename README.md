@@ -6,10 +6,15 @@
 ## 里程碑状态
 
 - [x] **M0** PE 装载器 + API 调用日志
-- [x] **M1** x86 解释器核心 + 差分测试（Unicorn 参照，24 族全绿）
+- [x] **M1** x86 解释器核心 + 差分测试（Unicorn 参照，当前 30 族全绿）
 - [ ] M2 Win32 最小子集（需求驱动）
 - [ ] M3 图形与音频落地（目标引擎为 GDI blit 路径，见 docs/m0-report.md）
 - [ ] M4 性能测量与 Go/No-Go 报告
+
+M2 已加入协作式线程/同步、SSE/SSE2 子集、可复用堆、PE 资源、CP932 转换、
+受限文件 I/O 和基础软件 SEH 分发。目标 EXE 已推进至约 1200 万条指令；
+下一阻断是 x87 浮点运算，窗口/GDI 与完整 MSVC 栈展开仍待实现。详见
+[M2 进度与交接](docs/m2-progress.md)。
 
 ## 架构决策（v0，实现方敲定）
 
@@ -32,8 +37,16 @@ cargo build --release
 wire imports path/to/program.exe
 
 # 运行；API 全量 trace 与频率表写入 wire-out/api.log
-wire run path/to/program.exe [--max-instr N] [--log-dir DIR] [--trace-cpu]
+wire run path/to/program.exe [--max-instr N] [--log-dir DIR] [--cwd DIR] [--trace-cpu]
 ```
+
+文件访问默认以 EXE 所在目录为根，将其映射为 guest `C:\`；`--cwd DIR` 可指定另一目录。
+guest 当前目录独立于宿主目录，拒绝 `..` 越界、其他盘符、UNC/device 路径以及指向根目录外的符号链接。
+已实现同步读取、写入、64 位 seek、文件大小与目录枚举；OVERLAPPED、文件映射与共享锁尚未实现。
+
+验证：`cargo test --release`（Unicorn 差分 + Win32 行为测试）。macOS 的受限执行沙箱
+可能禁止 Unicorn 的参照执行并导致 SIGILL；这种情况下需在普通终端运行该命令。
+发布的 wire 可执行文件始终只解释 guest 指令，不使用 Unicorn 或 JIT。
 
 对照程序（自编译，仓库只含源码）：
 

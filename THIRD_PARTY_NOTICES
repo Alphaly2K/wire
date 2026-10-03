@@ -6,6 +6,15 @@ version of third-party code used by this repository, per project policy.
 ## Build dependencies (linked, not distributed as source)
 
 - libc crate (MIT OR Apache-2.0) — host OS bindings. https://github.com/rust-lang/libc
+- System libiconv (platform-provided) — CP932/UTF-8/Windows-1252 conversion,
+  linked from the host OS rather than vendored. The exact implementation and
+  version follow the platform. https://www.gnu.org/software/libiconv/
+
+## Test dependencies (not linked into wire)
+
+- unicorn-engine / unicorn-engine-sys 2.1.5 (GPL-2.0) — differential-test
+  reference emulator and lockstep debugging example only.
+  https://github.com/unicorn-engine/unicorn
 
 ## Imported source code
 

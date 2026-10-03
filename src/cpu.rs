@@ -835,7 +835,11 @@ impl Cpu {
                             )
                         } else {
                             let p = (ax as u64) * (a as u64);
-                            ((p >> 16) as u32 & 0xffff, p as u32 & 0xffff, p & 0xffff_0000 == 0)
+                            (
+                                (p >> 16) as u32 & 0xffff,
+                                p as u32 & 0xffff,
+                                p & 0xffff_0000 == 0,
+                            )
                         };
                         self.regs[EAX] = (self.regs[EAX] & !0xffff) | lo;
                         self.regs[EDX] = (self.regs[EDX] & !0xffff) | hi;
@@ -847,11 +851,7 @@ impl Cpu {
                         let (hi, lo, fits) = if signed {
                             let p = (eax as i32 as i64) * (a as i32 as i64);
                             let r = p as u64;
-                            (
-                                (r >> 32) as u32,
-                                r as u32,
-                                p == ((r as u32) as i32 as i64),
-                            )
+                            ((r >> 32) as u32, r as u32, p == ((r as u32) as i32 as i64))
                         } else {
                             let p = (eax as u64) * (a as u64);
                             ((p >> 32) as u32, p as u32, p >> 32 == 0)
@@ -880,14 +880,15 @@ impl Cpu {
                             }
                             let q = n.wrapping_div(dd);
                             let r = n.wrapping_rem(dd);
-                            (q as u32, r as u32, q >= -128 && q <= 127)
+                            (q as u32, r as u32, (-128..=127).contains(&q))
                         } else {
                             (ax / d, ax % d, ax / d <= 0xff)
                         };
                         if !ok {
                             return Err(CpuError::DivideError { eip: eip0 });
                         }
-                        self.regs[EAX] = (self.regs[EAX] & !0xffff) | ((r & 0xff) << 8) | (q & 0xff);
+                        self.regs[EAX] =
+                            (self.regs[EAX] & !0xffff) | ((r & 0xff) << 8) | (q & 0xff);
                     }
                     16 => {
                         if d == 0 {
@@ -905,7 +906,7 @@ impl Cpu {
                             }
                             let q = n / dd;
                             let r = n % dd;
-                            (q as u32, r as u32, q >= -32768 && q <= 32767)
+                            (q as u32, r as u32, (-32768..=32767).contains(&q))
                         } else {
                             (n / d, n % d, n / d <= 0xffff)
                         };
@@ -931,7 +932,11 @@ impl Cpu {
                             }
                             let q = n / dd;
                             let r = n % dd;
-                            (q as u64, r as u64, q >= i32::MIN as i64 && q <= i32::MAX as i64)
+                            (
+                                q as u64,
+                                r as u64,
+                                q >= i32::MIN as i64 && q <= i32::MAX as i64,
+                            )
                         } else {
                             (n / d as u64, n % d as u64, n / d as u64 <= 0xffff_ffff)
                         };
@@ -948,13 +953,7 @@ impl Cpu {
         Ok(())
     }
 
-    fn fpu_op(
-        &mut self,
-        mem: &mut GuestMem,
-        seg: u32,
-        op: u8,
-        eip0: u32,
-    ) -> Result<(), CpuError> {
+    fn fpu_op(&mut self, mem: &mut GuestMem, seg: u32, op: u8, eip0: u32) -> Result<(), CpuError> {
         let b = mem.read_u8(self.eip)?;
         if b >= 0xC0 {
             // register (stack) forms
@@ -1267,9 +1266,9 @@ impl Cpu {
                 // mov r/m16, sreg — store plausible flat-model selectors
                 let rm = self.modrm(mem)?;
                 let v: u32 = match rm.reg {
-                    1 => 0x23,           // cs
-                    4 => 0x53,           // fs
-                    _ => 0x2b,           // ds/es/ss/gs
+                    1 => 0x23, // cs
+                    4 => 0x53, // fs
+                    _ => 0x2b, // ds/es/ss/gs
                 };
                 self.rm_write(mem, &rm, v, 16, seg)?;
             }
@@ -1309,7 +1308,11 @@ impl Cpu {
             }
             0x99 => {
                 if opsize16 {
-                    let v: u32 = if self.regs[EAX] & 0x8000 != 0 { 0xffff } else { 0 };
+                    let v: u32 = if self.regs[EAX] & 0x8000 != 0 {
+                        0xffff
+                    } else {
+                        0
+                    };
                     self.regs[EDX] = (self.regs[EDX] & !0xffff) | v;
                 } else {
                     self.regs[EDX] = if self.regs[EAX] as i32 & 0x8000_0000u32 as i32 != 0 {
@@ -1630,6 +1633,51 @@ impl Cpu {
                     }
                 }
             }
+            0xA4 | 0xA5 | 0xAC | 0xAD => {
+                // SHLD/SHRD r/m16/32, r16/32, imm8/CL.
+                let rm = self.modrm(mem)?;
+                let count = if op & 1 == 0 {
+                    self.fetch8(mem)? as u32
+                } else {
+                    self.regs[ECX] & 0xff
+                } & 31;
+                let dest = self.rm_read(mem, &rm, bits, seg)?;
+                let src = self.get_r(rm.reg, bits);
+                if count != 0 {
+                    let width = bits as u32;
+                    let left = op < 0xAC;
+                    let pair = if left {
+                        ((dest as u64) << width) | src as u64
+                    } else {
+                        ((src as u64) << width) | dest as u64
+                    };
+                    let result = if left {
+                        (pair << count) >> width
+                    } else {
+                        pair >> count
+                    } as u32
+                        & mask(bits);
+                    let carry = if left {
+                        (pair >> (2 * width - count)) & 1 != 0
+                    } else {
+                        (pair >> (count - 1)) & 1 != 0
+                    };
+                    self.set_flag(CF, carry);
+                    if count == 1 {
+                        let sign = 1u32 << (bits - 1);
+                        self.set_flag(
+                            OF,
+                            if left {
+                                (result & sign != 0) != carry
+                            } else {
+                                (dest ^ result) & sign != 0
+                            },
+                        );
+                    }
+                    self.set_szp(result, bits);
+                    self.rm_write(mem, &rm, result, bits, seg)?;
+                }
+            }
             0xAF => {
                 let rm = self.modrm(mem)?;
                 let a = self.get_r(rm.reg, bits);
@@ -1726,7 +1774,9 @@ impl Cpu {
                         } else {
                             match rm.addr {
                                 Some(a) => {
-                                    let v = u32::from_le_bytes(self.xmm[rm.reg][..4].try_into().unwrap());
+                                    let v = u32::from_le_bytes(
+                                        self.xmm[rm.reg][..4].try_into().unwrap(),
+                                    );
                                     mem.write_u32(a.wrapping_add(seg), v)?;
                                 }
                                 None => {
@@ -1755,7 +1805,9 @@ impl Cpu {
                         } else {
                             match rm.addr {
                                 Some(a) => {
-                                    let v = u64::from_le_bytes(self.xmm[rm.reg][..8].try_into().unwrap());
+                                    let v = u64::from_le_bytes(
+                                        self.xmm[rm.reg][..8].try_into().unwrap(),
+                                    );
                                     mem.write_u64(a.wrapping_add(seg), v)?;
                                 }
                                 None => {
@@ -1781,7 +1833,7 @@ impl Cpu {
                 let rm = self.modrm(mem)?;
                 if !op66 && rep == Some(0xF2) {
                     // movddup
-                    let v = self.xmm_rm(mem, &rm, seg)?;
+                    let v = self.xmm_rm_sized(mem, &rm, seg, 8)?;
                     let mut out = [0u8; 16];
                     out[..8].copy_from_slice(&v[..8]);
                     out[8..].copy_from_slice(&v[..8]);
@@ -1817,10 +1869,15 @@ impl Cpu {
                 let lo = op == 0x14;
                 let off = if lo { 0 } else { 8 };
                 let mut out = [0u8; 16];
-                out[0..4].copy_from_slice(&a[off..off + 4]);
-                out[4..8].copy_from_slice(&b[off..off + 4]);
-                out[8..12].copy_from_slice(&a[off + 4..off + 8]);
-                out[12..16].copy_from_slice(&b[off + 4..off + 8]);
+                if op66 {
+                    out[..8].copy_from_slice(&a[off..off + 8]);
+                    out[8..].copy_from_slice(&b[off..off + 8]);
+                } else {
+                    out[0..4].copy_from_slice(&a[off..off + 4]);
+                    out[4..8].copy_from_slice(&b[off..off + 4]);
+                    out[8..12].copy_from_slice(&a[off + 4..off + 8]);
+                    out[12..16].copy_from_slice(&b[off + 4..off + 8]);
+                }
                 self.xmm[rm.reg] = out;
             }
             0x16 | 0x17 => {
@@ -1883,36 +1940,51 @@ impl Cpu {
                 let rm = self.modrm(mem)?;
                 let x64 = rep == Some(0xF2);
                 let (v, valid) = if x64 {
-                    let x = f64::from_le_bytes(self.xmm_rm(mem, &rm, seg)?[..8].try_into().unwrap());
-                    let t = if op == 0x2C { x.trunc() } else { x.round_ties_even() };
-                    (t as i64 as i32 as u32, t.is_finite() && t >= -2147483648.0 && t < 2147483648.0)
+                    let x = f64::from_le_bytes(
+                        self.xmm_rm_sized(mem, &rm, seg, 8)?[..8]
+                            .try_into()
+                            .unwrap(),
+                    );
+                    let t = if op == 0x2C {
+                        x.trunc()
+                    } else {
+                        x.round_ties_even()
+                    };
+                    (
+                        t as i64 as i32 as u32,
+                        t.is_finite() && (-2147483648.0..2147483648.0).contains(&t),
+                    )
                 } else {
-                    let x = f32::from_le_bytes(self.xmm_rm(mem, &rm, seg)?[..4].try_into().unwrap());
-                    let t = if op == 0x2C { x.trunc() } else { x.round_ties_even() };
-                    (t as i64 as i32 as u32, t.is_finite() && t >= -2147483648.0 && t < 2147483648.0)
+                    let x = f32::from_le_bytes(
+                        self.xmm_rm_sized(mem, &rm, seg, 4)?[..4]
+                            .try_into()
+                            .unwrap(),
+                    );
+                    let t = if op == 0x2C {
+                        x.trunc()
+                    } else {
+                        x.round_ties_even()
+                    };
+                    (
+                        t as i64 as i32 as u32,
+                        t.is_finite() && (-2147483648.0..2147483648.0).contains(&t),
+                    )
                 };
                 self.set_r(rm.reg, if valid { v } else { 0x8000_0000 }, 32);
             }
             0x2E | 0x2F => {
                 // comiss/ucomiss, comisd/ucomisd
                 let rm = self.modrm(mem)?;
-                let s = self.xmm_rm(mem, &rm, seg)?;
-                let unordered;
-                let greater;
-                let less;
-                if op66 {
+                let s = self.xmm_rm_sized(mem, &rm, seg, if op66 { 8 } else { 4 })?;
+                let (unordered, greater, less) = if op66 {
                     let a = f64::from_le_bytes(self.xmm[rm.reg][..8].try_into().unwrap());
                     let b = f64::from_le_bytes(s[..8].try_into().unwrap());
-                    unordered = a.is_nan() || b.is_nan();
-                    greater = a > b;
-                    less = a < b;
+                    (a.is_nan() || b.is_nan(), a > b, a < b)
                 } else {
                     let a = f32::from_le_bytes(self.xmm[rm.reg][..4].try_into().unwrap());
                     let b = f32::from_le_bytes(s[..4].try_into().unwrap());
-                    unordered = a.is_nan() || b.is_nan();
-                    greater = a > b;
-                    less = a < b;
-                }
+                    (a.is_nan() || b.is_nan(), a > b, a < b)
+                };
                 self.set_flag(ZF, unordered || (!greater && !less));
                 self.set_flag(PF, unordered);
                 self.set_flag(CF, unordered || less);
@@ -1938,7 +2010,12 @@ impl Cpu {
             0x51 => {
                 // sqrtps/sqrtpd/sqrtss/sqrtsd
                 let rm = self.modrm(mem)?;
-                let s = self.xmm_rm(mem, &rm, seg)?;
+                let width = match rep {
+                    Some(0xF3) => 4,
+                    Some(0xF2) => 8,
+                    _ => 16,
+                };
+                let s = self.xmm_rm_sized(mem, &rm, seg, width)?;
                 match (op66, rep) {
                     (false, Some(0xF3)) => {
                         let x = f32::from_le_bytes(s[..4].try_into().unwrap());
@@ -1960,8 +2037,8 @@ impl Cpu {
                 // rsqrtps/rsqrtss, rcpps/rcpss (exact 1/x, 1/sqrt(x): HW is
                 // approximate, difference irrelevant for game logic)
                 let rm = self.modrm(mem)?;
-                let s = self.xmm_rm(mem, &rm, seg)?;
                 let scalar = rep == Some(0xF3);
+                let s = self.xmm_rm_sized(mem, &rm, seg, if scalar { 4 } else { 16 })?;
                 let f = |x: f32| -> f32 {
                     if op == 0x52 {
                         1.0 / x.sqrt()
@@ -2142,7 +2219,8 @@ impl Cpu {
                     }
                     (0x73, 2) | (0x73, 6) => {
                         for half in 0..2 {
-                            let q = u64::from_le_bytes(s[8 * half..8 * half + 8].try_into().unwrap());
+                            let q =
+                                u64::from_le_bytes(s[8 * half..8 * half + 8].try_into().unwrap());
                             let r = if rm.reg == 2 {
                                 if imm > 63 {
                                     0
@@ -2259,7 +2337,8 @@ impl Cpu {
                     return Err(self.unsupported(mem, eip0, "pextrw from memory"));
                 }
                 let imm = (self.fetch8(mem)? & 7) as usize;
-                let v = u16::from_le_bytes(self.xmm[rm.idx][2 * imm..2 * imm + 2].try_into().unwrap());
+                let v =
+                    u16::from_le_bytes(self.xmm[rm.idx][2 * imm..2 * imm + 2].try_into().unwrap());
                 self.set_r(rm.reg, v as u32, 32);
             }
             0xD4 | 0xD7 | 0xDB | 0xDF | 0xE7 | 0xEB | 0xEF | 0xF8..=0xFE if op66 => {
@@ -2300,10 +2379,12 @@ impl Cpu {
                             }
                             0xD4 | 0xFB => {
                                 for half in 0..2 {
-                                    let qa =
-                                        u64::from_le_bytes(a[8 * half..8 * half + 8].try_into().unwrap());
-                                    let qb =
-                                        u64::from_le_bytes(b[8 * half..8 * half + 8].try_into().unwrap());
+                                    let qa = u64::from_le_bytes(
+                                        a[8 * half..8 * half + 8].try_into().unwrap(),
+                                    );
+                                    let qb = u64::from_le_bytes(
+                                        b[8 * half..8 * half + 8].try_into().unwrap(),
+                                    );
                                     let r = if op == 0xD4 {
                                         qa.wrapping_add(qb)
                                     } else {
@@ -2360,6 +2441,7 @@ impl Cpu {
                 match rm.addr {
                     Some(a) => mem.write_u64(a.wrapping_add(seg), v)?,
                     None => {
+                        self.xmm[rm.idx] = [0; 16];
                         self.xmm[rm.idx][..8].copy_from_slice(&v.to_le_bytes());
                     }
                 }
@@ -2392,7 +2474,7 @@ impl Cpu {
             0xE6 => {
                 // cvttpd2dq (66) / cvtpd2dq (f2) / cvtdq2pd (f3)
                 let rm = self.modrm(mem)?;
-                let s = self.xmm_rm(mem, &rm, seg)?;
+                let s = self.xmm_rm_sized(mem, &rm, seg, if rep == Some(0xF3) { 8 } else { 16 })?;
                 match rep {
                     Some(0xF3) => {
                         let l = lanes32(&s);
@@ -2410,7 +2492,7 @@ impl Cpu {
                             } else {
                                 x[i].trunc()
                             };
-                            l[i] = if t.is_finite() && t >= -2147483648.0 && t < 2147483648.0 {
+                            l[i] = if t.is_finite() && (-2147483648.0..2147483648.0).contains(&t) {
                                 t as i64 as i32 as u32
                             } else {
                                 0x8000_0000
@@ -2430,10 +2512,20 @@ impl Cpu {
     // ---- SSE helpers ----
 
     fn xmm_rm(&self, mem: &GuestMem, rm: &Rm, seg: u32) -> Result<[u8; 16], CpuError> {
+        self.xmm_rm_sized(mem, rm, seg, 16)
+    }
+
+    fn xmm_rm_sized(
+        &self,
+        mem: &GuestMem,
+        rm: &Rm,
+        seg: u32,
+        width: usize,
+    ) -> Result<[u8; 16], CpuError> {
         match rm.addr {
             Some(a) => {
                 let mut b = [0u8; 16];
-                mem.read_bytes(a.wrapping_add(seg), &mut b)?;
+                mem.read_bytes(a.wrapping_add(seg), &mut b[..width])?;
                 Ok(b)
             }
             None => Ok(self.xmm[rm.idx]),
@@ -2470,7 +2562,12 @@ impl Cpu {
         }
         let rm = self.modrm(mem)?;
         let a = self.xmm[rm.reg];
-        let b = self.xmm_rm(mem, &rm, seg)?;
+        let width = match rep {
+            Some(0xF3) => 4,
+            Some(0xF2) => 8,
+            _ => 16,
+        };
+        let b = self.xmm_rm_sized(mem, &rm, seg, width)?;
         fn af32(op: u8, x: f32, y: f32) -> f32 {
             match op {
                 0x58 => x + y,
@@ -2557,7 +2654,16 @@ impl Cpu {
         eip0: u32,
     ) -> Result<(), CpuError> {
         let rm = self.modrm(mem)?;
-        let s = self.xmm_rm(mem, &rm, seg)?;
+        let width = if op == 0x5A {
+            match (op66, rep) {
+                (false, Some(0xF3)) => 4,
+                (false, _) => 8,
+                _ => 16,
+            }
+        } else {
+            16
+        };
+        let s = self.xmm_rm_sized(mem, &rm, seg, width)?;
         if op == 0x5A {
             match (op66, rep) {
                 (true, _) => {
@@ -2596,7 +2702,7 @@ impl Cpu {
                         } else {
                             x[i].trunc()
                         };
-                        l[i] = if t.is_finite() && t >= -2147483648.0 && t < 2147483648.0 {
+                        l[i] = if t.is_finite() && (-2147483648.0..2147483648.0).contains(&t) {
                             t as i64 as i32 as u32
                         } else {
                             0x8000_0000
@@ -2610,8 +2716,7 @@ impl Cpu {
                 (false, _) => {
                     // cvtdq2ps
                     let l = lanes32(&s);
-                    self.xmm[rm.reg] =
-                        pack_f32x4(l.map(|v| v as i32 as f32));
+                    self.xmm[rm.reg] = pack_f32x4(l.map(|v| v as i32 as f32));
                 }
             }
         }
@@ -2641,14 +2746,14 @@ impl Cpu {
         log: &mut ApiLogger,
         sched: &mut Sched,
         max_instr: u64,
-        callback_exit: Option<u32>,
+        callback_exit: Option<(u32, u32)>,
     ) -> RunOutcome {
         loop {
             if self.halted {
                 return RunOutcome::Exited(self.exit_code.unwrap_or(0));
             }
-            if let Some(exit) = callback_exit {
-                if self.eip == exit {
+            if let Some((exit, owner_teb)) = callback_exit {
+                if self.eip == exit && self.fs_base == owner_teb {
                     return RunOutcome::CallbackReturned;
                 }
             }
@@ -2666,7 +2771,7 @@ impl Cpu {
                     self.instr_count += 1;
                     // Cooperative timeslice: a guest thread that never calls a
                     // blocking API (spin loop) must not starve the others.
-                    if self.instr_count & 0xF_FFFF == 0 && sched.any_other_runnable() {
+                    if self.instr_count & 0xF_FFFF == 0 {
                         sched.round_robin(self);
                     }
                 }
@@ -2700,7 +2805,15 @@ impl Cpu {
         self.push32(mem, exit_stub).map_err(|e| e.to_string())?;
         let saved_eip = self.eip;
         self.eip = func;
-        let r = self.run_loop(mem, api, state, log, sched, max_instr, Some(exit_stub));
+        let r = self.run_loop(
+            mem,
+            api,
+            state,
+            log,
+            sched,
+            max_instr,
+            Some((exit_stub, self.fs_base)),
+        );
         match r {
             RunOutcome::CallbackReturned => {
                 self.eip = saved_eip;

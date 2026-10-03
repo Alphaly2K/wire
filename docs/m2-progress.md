@@ -1,66 +1,136 @@
-# M2 进行中：进度快照与下一步（2026-10-04）
+# M2 进行中：最新进度与交接（2026-10-04）
 
-> 本文档是限额保护性快照。M2 未完成，不打 tag。代码已在磁盘上（工作树），**尚未 commit**。
+M2 **尚未验收，不打 tag**。上一个 agent 的线程/SSE 工作已先验证并保存为本地提交
+`75f90a6`。本轮补充了资源、堆、编码、文件 I/O、基础 SEH 和回归测试。
+目标程序从原先 199,566 条指令推进到约 **1200 万条指令**，当前明确停在 x87 浮点加载。
 
-## 已完成（本阶段）
+## 已完成并验证
 
-### M2a：协作式 guest 线程 + 同步对象（已验证）
+### 解释器与差分测试
 
-- `src/thread.rs`（新）：协作式调度器 `Sched`。单宿主 CPU 跑全部 guest 线程；切换点 = 阻塞 API / Sleep(0) / SwitchToThread / 解释器每 1M 指令的分时片（防自旋饿死）。
-- `Cpu::save_ctx/load_ctx` 按线程换入换出（regs/eip/eflags/fs/gs/fpu/xmm/mxcsr）；`ThreadCtx` derive Default。
-- 内核对象句柄表 `ApiState.handles: HashMap<u32, HandleObj>`（Event/Mutex/Semaphore/Thread），命名对象去重（ERROR_ALREADY_EXISTS）。主线程也有真实句柄（main.rs 注册，tid=1）。
-- 已实现 API：CreateThread（guest 栈 1MiB @0x2000000+、TEB @0x7ffc0000+、返址指向新 stub `wire::ExitThread`）、ExitThread、GetExitCodeThread、Suspend/ResumeThread、Sleep/SleepEx、SwitchToThread、CreateEventA/W、OpenEventA/W、Set/Reset/PulseEvent、CreateMutexA/W、ReleaseMutex、CreateSemaphoreA/W、ReleaseSemaphore、WaitForSingleObject、WaitForMultipleObjects（any/all）、CloseHandle、GetCurrentThreadId（真 tid）、Set/GetThreadPriority（假）。
-- 临界区从 no-op 升级为真实 owner/递归计数（写 guest CRITICAL_SECTION 字段；争用走 WaitTarget::CriticalSection 协作阻塞）。LockCount 只分 -1/0，不维护等待者数（简化假设）。
-- 等待语义：信号唤醒统一 `Wake::Retest`（重测获取，all-or-nothing for wait_all），超时唤醒 `Wake::Completed(WAIT_TIMEOUT)`；`wait_deadline` 跨 Retest 重阻塞保留原始预算。无可运行线程时宿主睡到最近 deadline；全 INFINITE 死锁 → 报错并列出线程状态（`describe_deadlock`）；全部退出 → 停机。
-- 阻塞式 API 的实现技巧：不推进 eip/esp 直接切走，被唤醒后重入同一 dispatch（参数从栈重读），日志只记完成那次，阻塞时用 `log.note` 不计数。
-- **回归**：`cargo build` 零警告；difftest 24/24 绿；对照程序退出码 0。
+- 原有 24 组 CPU 差分测试全部保留；现在共 **30 组**。
+- 初始 XMM 状态随机化，终态比较全部 8 个 XMM 的 128 位；原有 GPR、EFLAGS、数据/栈内存比较继续执行。
+- 新增 SSE 传送、整数/逻辑/unpack/shuffle、移位、浮点算术/比较/转换和标量边界访问测试。
+- 修复 `UNPCKLPD/UNPCKHPD` 错用 32 位 lane、`MOVQ xmm,xmm` 未清高 64 位、
+  多种标量 SSE 指令按 16 字节读取内存的问题。
+- 新增 `SHLD/SHRD`（0f a4/a5/ac/ad，16/32 位、立即数/CL、寄存器/内存），
+  并验证 count=0/1、按 5 位屏蔽计数和 ISA 定义范围内的标志。
+- `examples/lockstep.rs` 现在也比较 XMM；`--xmm-hex` 可传入 8 个逗号分隔的 16 字节初值。
+- Unicorn 2.1.5 对 `CVTPS2PD m64` 有 16 字节过度读取：普通转换仍做差分；
+  精确 m64 边界访问用独立断言验证 wire，未把这个参照缺陷复制到解释器。
 
-### M2b：SSE/SSE2 指令子集（刚写完，仅初步验证）
+### 线程与同步
 
-游戏越过 CreateThread 后在 0x6f85b6 撞上 `0f 28`（movaps，CRT 的 SSE memcpy）。已实现：
+- 延续已有单宿主 CPU 的协作式调度，切换点为阻塞 API、显式 yield 和约 1M 指令的分时片。
+- TLS/FLS 的值按 `(tid, slot)` 保存；LastError 按当前 TEB 的 +0x34 保存。
+- 工作线程初始化 x87 控制字为 0x037f、MXCSR 为 0x1f80。
+- 原 TEB arena `0x7ffc0000+` 的第 30/31 个槽会覆盖主 PEB/TEB；迁至 **0x7ff00000+**，
+  并通过创建 40 个工作线程的回归检查。
+- 分时片会处理等待超时，防止另一个持续 runnable 的自旋线程让超时永不唤醒。
+- 修复 `InterlockedCompareExchange` 的 Exchange/Comparand 参数颠倒；
+  `InitializeCriticalSectionEx` 的 SpinCount 使用第二参数。
+- 新增真正执行 guest 代码的事件唤醒/线程退出测试，以及 wait-all 原子获取测试。
 
-- Cpu/ThreadCtx 增加 `xmm: [[u8;16];8]` + `mxcsr`。
-- 传送：movups/upd/ss/sd、movaps/apd、movdqa/movdqu/lddqu、movlps/hps（含 movhlps/movlhps/movddup）、movd/movq、movnt*（按普通 store）。
-- 逻辑：and/andn/or/xor ps/pd（按位）、pand/pandn/por/pxor。
-- 算术：add/sub/mul/div/min/max ps/pd/ss/sd、sqrt*、rcp/rsqrt（用精确 1/x 代替硬件近似，已登记偏差）。
-- 比较/掩码：comiss/ucomiss/comisd（ZF/PF/CF，清 OF/SF/AF）、movmskps/pd、pmovmskb、pcmpeqb/w/d。
-- 移位：pshufd/hw/lw、psrl/psll/psra w/d/q、psrlldq/pslldq（0f 71/72/73 组，66 前缀）。
-- unpack：punpckl/h bw/wd/dq/qdq、unpckl/h ps/pd（别名到 punpck 实现）。
-- 转换：cvtsi2ss/sd、cvtt/cvt ss/sd 2si（截断/最近偶，无效→0x80000000）、cvtps2pd/pd2ps/ss2sd/sd2ss、cvtdq2ps/ps2dq/tps2dq、cvttpd2dq/pd2dq/dq2pd（0f e6）。
-- pinsrw/pextrw、ldmxcsr/stmxcsr、fence 族 nop；0f 18-1f hint nop。
-- 简化假设（已登记）：movaps 不查 16B 对齐 fault；MXCSR 舍入模式不建模（恒定最近偶）；MMX（mm0-7）未实现，遇 `0f 6f/7f` 无前缀报 unsupported。
-- **SSE 尚未纳入差分测试**（difftest 模板目前只生成 GPR 序列）——这是正确性债，下阶段第一件事。
+### 资源与 stdcall
 
-## 当前阻断点（游戏实测）
+- `LoadStringA/W` 使用 **16 字节**参数清理（旧交接写的 20 字节错误）。读取映射 PE 的真实 RT_STRING，
+  支持 W 版本 capacity=0 的资源指针返回、截断和 NUL 终止，A 版本转换为 CP932。
+- `FindResource[A/W/Ex]` 支持数字/名称键；`LoadResource/SizeofResource/LockResource` 可直接读取映射资源。
+- 资源目录与字符串长度有边界检查。
+- 补齐特殊目录、PathIsDirectory、WNetGetUniversalName、RtlGetVersion、GetClassInfoEx 等栈清理，
+  并覆盖原静态导入清单内所有缺失项（视频/对话框等仍可保持功能未实现，但栈参数大小已知）。
+- 单元测试检查目标程序 **346 个静态导入**都有清理记录；最新游戏日志的 unknown arity 警告为 0。
+- `FormatMessageA/W` 支持少量系统错误文本、FROM_STRING 和 ALLOCATE_BUFFER；生成的块可由 LocalFree 真正释放。
 
-51186→199566 指令、470→3995 次 API 调用。当前停在：
+### 真实堆
 
+- 独立 guest arena **0x10000000..0x30000000**，16 字节对齐，分离 scratch/线程栈。
+- HeapAlloc/Free/ReAlloc/Size/Validate/Create/Destroy 使用分配表和可合并空闲区；
+  realloc 保留内容，支持原地增长、移动、HEAP_ZERO_MEMORY 和 IN_PLACE_ONLY 失败保留原块。
+- 私有堆拥有独立句柄与分配归属检查；固定最大大小按分配容量检查。
+- CRT malloc/calloc/realloc/free 以及固定型 Local/GlobalAlloc/Free 接入同一实现。
+- DWORD 尺寸溢出或 arena 用尽返回失败，不再以 bump 分配冒充 realloc。
+
+### 编码、路径与同步文件 I/O
+
+- 系统 iconv 提供 CP932、Windows-1252、UTF-8 转换；实现 MultiByteToWideChar/WideCharToMultiByte，
+  包括长度查询、显式长度、-1 的 NUL 计数、缓冲区不足及 CP932 非法输入的严格/替换处理。
+- GetCPInfo(932) 返回 MaxCharSize=2 和正确 lead-byte 范围。
+- SSE/SSE2 检测 6/10 返回 1；SSE3 仍不广告完整支持。
+- `wire run --cwd DIR` 指定文件根；默认 EXE 所在目录。根映射为 guest `C:\`，
+  guest 当前目录独立于宿主 cwd。shell 的特殊目录暂时统一映射到这个根。
+- 支持 A/W 路径、大小写匹配和反斜线；拒绝 `..` 越界、其他盘符、UNC/device 路径及指向根外的符号链接，
+  创建新文件也检查最近存在的父目录。
+- CreateFile、ReadFile、WriteFile、GetFileType、GetFileSize/Ex、SetFilePointer/Ex、SetEndOfFile、
+  FlushFileBuffers、CreateDirectory、Get/SetCurrentDirectory、GetFullPathName、GetFileAttributes、
+  PathFileExists/PathIsDirectory、FindFirst/Next/Close、CloseHandle 已落地。
+- 最新游戏日志显示 `.cf` 配置文件成功打开、读取 **927 字节**，随后正确读到 EOF。
+- QPC 计数修正为与 QueryPerformanceFrequency 一致的 10 MHz。
+
+### 基础软件 SEH
+
+- SetUnhandledExceptionFilter 存储回调并返回旧回调。
+- RaiseException 构建 x86 EXCEPTION_RECORD、CONTEXT、EXCEPTION_POINTERS，沿 FS:[0] 遍历处理器，
+  用 guest 回调执行，支持 ContinueSearch 与 ContinueExecution 及处理器修改 CONTEXT 后恢复。
+- 未处理时调用已注册 filter；不能恢复的异常会明确报出异常码，而不再直接返回并落入 int3。
+- 检查 noncontinuable、循环链与不支持的 disposition。
+- guest 回调的返回哨兵绑定到调用线程 TEB，避免其他线程误结束当前宿主回调。
+- **未实现完整 MSVC EH / RtlUnwind、nested/collided unwind，也没有把 CPU 内存 fault 自动转为 SEH。**
+  不应把基础 dispatch 测试通过视为完整 C++ 异常支持。
+
+## 验证结果
+
+- `cargo test --release`：**47/47**（1 个静态导入检查 + 30 个差分族 + 16 个 Win32 行为测试）。
+- `cargo build --release`、`cargo fmt -- --check`、`cargo clippy --all-targets -- -D warnings` 全部通过。
+- 对照 EXE：退出码 0；CreateFile/WriteFile 成功，宿主输出内容确认为 `wire control program\n`，21 字节。
+  它的窗口 API 仍是 stub，所以这个退出码只验证加载/解释/文件路径，不代表图形验收。
+- macOS 沙箱内 Unicorn 参照执行可能 SIGILL；本轮在沙箱外跑差分测试通过。
+  Unicorn 仅为测试/调试依赖，wire 发布可执行文件仍为纯解释器。
+
+## 最新游戏阻断
+
+本轮最终运行：**12,004,086 条指令 / 24,264 次 API 调用 / 191 种 opcode**。
+线程等待和计时会让确切计数略有变化，阻断地址稳定。
+
+```text
+unsupported instruction at 0x00691284: x87 mem op dd /0
+bytes: dd 02 c3 ...        ; FLD qword [edx]
 ```
-user32.dll!LoadStringW(0x400000) = 0 [UNIMPLEMENTED]（无 arity 记录，按 cdecl 清的栈——可能把栈清错了！）
-kernel32.dll!RaiseException(0xe06d7363, 1, 3, 0x19f6cc) = 0 [UNIMPLEMENTED]
-→ int3 breakpoint at 0x00462d03
-```
 
-分析：0xE06D7363 是 MSVC C++ 异常。游戏可能因 LoadStringW 失败（返回 0）走错误路径抛异常；RaiseException 未实现直接返回，执行流落回异常处理代码里的 int3。注意 LoadStringW 无 arity 记录导致栈清理可能错误（它是 16 字节参数：hmod, id, buf, max）——**先补 arity 再查**。
+调用链从 0x50978d 进入 CRT 数学函数 0x6cdfc0，再到 0x6cfd84 / 0x691275。
+当前只有 x87 控制/状态类，没有 ST(0)..ST(7) 浮点栈与算术。
+前面的窗口类注册、GDI、timeGetTime、GlobalMemoryStatus、LCMapStringEx 等仍有未实现日志；
+此次还没有读到 data.xp3 或进入可见游戏画面。
 
 ## 下一步（按序）
 
-1. **commit 现有工作**（用户喊停时还没提交）：`git -c commit.gpgsign=false commit`，信息含 M2a+M2b。不必打 tag（M2 未验收）。
-2. 修 LoadStringW：arity 表加 `("LoadStringA",20),("LoadStringW",20)`；实现返回空串+ret 0 还是真资源串先跑日志看后续。
-3. 实现最小 RaiseException/SEH（M2 计划项）：0xE06D7363 走 TEB SEH 链（FS:[0]）或 SetUnhandledExceptionFilter 注册的过滤函数；MSVC EH 的 safe-handler 链解析可做最小版。先只记录+调用 UnhandledExceptionFilter 观察。
-4. GetCPInfo(932)（MaxCharSize=2+lead bytes）、IsProcessorFeaturePresent（SSE 已实现→对 PF_XMMI(6)/PF_XMMI64(10)/PF_SSE3(13) 返 1）。
-5. **SSE 差分测试补债**：difftest 模板扩展 XMM 状态比对（lockstep 工具目前只比 GPR/flags）。
-6. 真实堆（HeapAlloc/Free/ReAlloc 替换 bump heap，free 语义要生效）——引擎进入主循环后必然反复分配释放，bump heap 会爆。
-7. 文件 I/O + 沙箱（CreateFileW/ReadFile/SetFilePointer/GetFileSize，宿主映射到游戏目录；`wire run` 加 `--cwd`，默认 exe 所在目录；注意 CP932↔UTF-8 路径、`.cf`/`savedata/`/`plugin/*.dll`）。
-8. 之后每实现一批重跑：`./target/debug/wire run "<游戏路径>" --max-instr 50000000`（日志在 wire-out/api.log）。
+1. 补 x87 浮点栈及实际路径需要的加载、存储、算术与比较；把完整状态纳入 ThreadCtx，
+   明确 80 位精度/舍入处理方式，先做差分再跑游戏。优先处理 FLD m64 和随后出现的 FSTP/CRT 数学路径。
+2. 补初始化所需 GetSystemInfo、GlobalMemoryStatus/Ex、timeGetTime、NLS 分类/映射等实质语义。
+3. user32 类/窗口注册与消息队列、guest WndProc 回调；避免把窗口创建失败误判为正常主循环。
+4. 完整 MSVC EH / RtlUnwind；用独立 SEH/C++ 对照程序验证搜索与展开，不能只用 game 不再 throw 的路径验收。
+5. 图形推进后检查 XP3 大文件读取、存档目录、插件 guest DLL 装载与导出解析。
+6. 达到可见主循环后再验收 M2，开始 M3 的 GDI 帧缓冲/音频/输入接入。
 
-## M3 图形路线（用户提议 SDL3，已认可）
+## M3 已认可路线
 
-采用 **SDL3**，但藏在薄平台层后面：`src/platform/` 定义 trait（present 帧缓冲 / 音频队列 / 窗口事件），SDL3 是第一个后端，iOS 上若集成不顺可换 Metal/UIKit 后端而不动 GDI/user32 代码。理由：游戏图形导入只有 GDI32 → 我们维护软件帧缓冲做 BitBlt，SDL3 streaming texture 上传即可，无需 GPU 管线；音频 waveOut→SDL_AudioStream 直通；zlib 许可与 LGPL-2.1 兼容。注意点：SDL3 的 Rust 绑定用 `sdl3-sys` 自己薄封（不依赖高层 crate）；iOS 需 main-callback 模式，平台层从第一天按此设计；参考截图（Windows 原版）M3 再向用户要。
+保留上轮与用户确认的 **SDL3 + 薄平台层**：`src/platform/` 定义呈现帧缓冲、音频队列、
+窗口事件接口；SDL3 为首个后端，Rust 用 sdl3-sys 薄封。GDI 软件 blit 上传 streaming texture，
+waveOut 接 SDL_AudioStream。iOS 从设计开始考虑 main-callback 模式；需要时可替换为 UIKit/Metal。
+图形对照截图在 M3 再收集，本轮未开始引入 SDL3。
 
-## 关键环境备忘
+## 环境与复现
 
-- 游戏路径：`/Users/alphaly/Downloads/王様恋愛【体験版】/王様恋愛【体験版】.exe`；工作目录须为游戏目录（data.xp3 803MB）。
-- commit/tag 需 `-c commit.gpgsign=false` / `-c tag.gpgsign=false`。
-- 常数：STUB_BASE 0x6fff0000；SCRATCH 0xf00000；STACK 0x180000；TEB 0x7ffdf000；PEB 0x7ffde000；线程栈 0x2000000+；线程 TEB 0x7ffc0000+；句柄从 0x100 起。
-- 入口 0x67d3ba；崩溃时的 `wire-out/api.log` 尾部 + `--trace-cpu` 是标准排查组合。
+- 游戏：`/Users/alphaly/Downloads/王様恋愛【体験版】/王様恋愛【体験版】.exe`，data.xp3 约 803 MB。
+- commit/tag 使用 `-c commit.gpgsign=false` / `-c tag.gpgsign=false`。
+- STUB_BASE 0x6fff0000；scratch 0xf00000；主栈 0x180000；主 TEB 0x7ffdf000；PEB 0x7ffde000；
+  工作线程栈 0x2000000+；**工作线程 TEB 0x7ff00000+**；真实堆 0x10000000+；句柄 0x100 起。
+
+```sh
+cargo test --release
+cargo clippy --all-targets -- -D warnings
+cargo build --release
+./target/release/wire run "/Users/alphaly/Downloads/王様恋愛【体験版】/王様恋愛【体験版】.exe" --max-instr 50000000 --trace-cpu
+# 最新全量日志：wire-out/api.log；之前的分步运行保留在 wire-out/m2-*/。
+./target/release/wire run tests/control/control.exe --cwd "$PWD/wire-out/control-cwd" --log-dir wire-out/control-m2
+```

@@ -10,10 +10,12 @@ use wire::thread::Sched;
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        eprintln!("wire — Watari-Is-a-Runtime-Environment (M0 spike)");
+        eprintln!("wire — Watari-Is-a-Runtime-Environment (M2 spike)");
         eprintln!("usage:");
         eprintln!("  wire imports <program.exe>");
-        eprintln!("  wire run <program.exe> [--max-instr N] [--log-dir DIR]");
+        eprintln!(
+            "  wire run <program.exe> [--max-instr N] [--log-dir DIR] [--cwd DIR] [--trace-cpu]"
+        );
         return ExitCode::from(2);
     }
     match args[1].as_str() {
@@ -59,7 +61,11 @@ fn cmd_imports(path: &str) -> ExitCode {
         if s.is_writable() {
             flags.push('W');
         }
-        let entry_mark = if s.contains_rva(pe.entry_rva) { "  <== entry" } else { "" };
+        let entry_mark = if s.contains_rva(pe.entry_rva) {
+            "  <== entry"
+        } else {
+            ""
+        };
         println!(
             "  {:8} va={:#010x} vsize={:#09x} raw={:#09x} {}{}",
             s.name, s.virtual_address, s.virtual_size, s.raw_size, flags, entry_mark
@@ -84,7 +90,7 @@ fn cmd_imports(path: &str) -> ExitCode {
                     line.push_str(&n);
                     line.push(' ');
                 }
-                if line.trim().len() > 0 {
+                if !line.trim().is_empty() {
                     println!("{line}");
                 }
             }
@@ -95,7 +101,9 @@ fn cmd_imports(path: &str) -> ExitCode {
                 Some(s) => {
                     println!("  entry section: {}", s.name);
                     if s.is_writable() {
-                        println!("  WARNING: entry section is writable (common in packed binaries)");
+                        println!(
+                            "  WARNING: entry section is writable (common in packed binaries)"
+                        );
                     }
                 }
                 None => println!("  WARNING: entry point not inside any section"),
@@ -116,12 +124,16 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
     let mut max_instr: u64 = 50_000_000;
     let mut log_dir = String::from("wire-out");
     let mut trace_cpu = false;
+    let mut guest_cwd = None;
     let mut i = 0;
     while i < opts.len() {
         match opts[i].as_str() {
             "--max-instr" => {
                 i += 1;
-                max_instr = opts.get(i).and_then(|s| s.parse().ok()).unwrap_or(max_instr);
+                max_instr = opts
+                    .get(i)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(max_instr);
             }
             "--log-dir" => {
                 i += 1;
@@ -130,11 +142,37 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
                 }
             }
             "--trace-cpu" => trace_cpu = true,
+            "--cwd" => {
+                i += 1;
+                let Some(dir) = opts.get(i) else {
+                    eprintln!("--cwd needs a directory");
+                    return ExitCode::from(2);
+                };
+                guest_cwd = Some(std::path::PathBuf::from(dir));
+            }
             other => eprintln!("ignoring unknown option: {other}"),
         }
         i += 1;
     }
-    let exe_path = Path::new(path);
+    let exe_path_buf = match Path::new(path).canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("read {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let exe_path = exe_path_buf.as_path();
+    let fs = match wire::fs::GuestFs::new(
+        guest_cwd
+            .as_deref()
+            .unwrap_or_else(|| exe_path.parent().unwrap()),
+    ) {
+        Ok(fs) => fs,
+        Err(e) => {
+            eprintln!("guest cwd: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     let display_name = exe_path
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
@@ -167,17 +205,21 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
     };
     let mut state = ApiState::new(
         loaded.image_base,
-        path.to_string(),
+        format!("C:\\{display_name}"),
         loaded.cmdline_a,
         loaded.cmdline_w,
     );
+    state.fs = Some(fs);
 
     println!("loaded: {display_name}");
     println!(
         "  image base {:#010x}  entry {:#010x}  imports {}",
         loaded.image_base, loaded.entry, loaded.import_count
     );
-    println!("  initial eip {:#010x}  esp {:#010x}", loaded.entry, loaded.esp);
+    println!(
+        "  initial eip {:#010x}  esp {:#010x}",
+        loaded.entry, loaded.esp
+    );
     logger.note(&format!(
         "run {} entry={:#x} esp={:#x}",
         display_name, loaded.entry, loaded.esp
@@ -195,7 +237,14 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
         max_instr
     );
     let t_start = std::time::Instant::now();
-    let outcome = cpu.run(&mut mem, &mut api, &mut state, &mut logger, &mut sched, max_instr);
+    let outcome = cpu.run(
+        &mut mem,
+        &mut api,
+        &mut state,
+        &mut logger,
+        &mut sched,
+        max_instr,
+    );
     let wall = t_start.elapsed();
 
     println!("\n== run report ==");
@@ -203,7 +252,9 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
         RunOutcome::Exited(code) => println!("outcome: exited cleanly, guest code {code}"),
         RunOutcome::InstructionLimit => println!("outcome: instruction limit hit ({max_instr})"),
         RunOutcome::Crashed(e) => println!("outcome: CRASHED: {e}"),
-        RunOutcome::CallbackReturned => println!("outcome: internal error (callback frame escaped top level)"),
+        RunOutcome::CallbackReturned => {
+            println!("outcome: internal error (callback frame escaped top level)")
+        }
     }
     println!(
         "instructions: {} in {:.3}s ({:.2} Minstr/s)",
@@ -220,7 +271,10 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
         "            esp={:#010x} ebp={:#010x} esi={:#010x} edi={:#010x}",
         cpu.regs[4], cpu.regs[5], cpu.regs[6], cpu.regs[7]
     );
-    println!("            eip={:#010x} eflags={:#06x}", cpu.eip, cpu.eflags);
+    println!(
+        "            eip={:#010x} eflags={:#06x}",
+        cpu.eip, cpu.eflags
+    );
 
     if !logger.unimpl_freq.is_empty() {
         println!("\ntop unimplemented APIs:");
@@ -245,12 +299,31 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
     }
     if matches!(outcome, RunOutcome::Crashed(_)) {
         println!("\nlast API calls before stop:");
-        for l in logger.recent.iter().rev().take(12).collect::<Vec<_>>().iter().rev() {
+        for l in logger
+            .recent
+            .iter()
+            .rev()
+            .take(12)
+            .collect::<Vec<_>>()
+            .iter()
+            .rev()
+        {
             println!("  {l}");
         }
         if !cpu.trace_ring.is_empty() {
-            println!("\nlast {} executed instructions (eip: bytes):", cpu.trace_ring.len().min(32));
-            for (eip, bytes) in cpu.trace_ring.iter().rev().take(32).collect::<Vec<_>>().iter().rev() {
+            println!(
+                "\nlast {} executed instructions (eip: bytes):",
+                cpu.trace_ring.len().min(32)
+            );
+            for (eip, bytes) in cpu
+                .trace_ring
+                .iter()
+                .rev()
+                .take(32)
+                .collect::<Vec<_>>()
+                .iter()
+                .rev()
+            {
                 let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02x}")).collect();
                 println!("  {eip:#010x}: {}", hex.join(" "));
             }

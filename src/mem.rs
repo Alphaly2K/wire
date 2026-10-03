@@ -85,6 +85,13 @@ impl GuestMem {
     /// alignment (16 KiB on Apple Silicon — guest-visible allocation
     /// granularity stays finer in the bitmap).
     pub fn commit(&mut self, addr: u32, len: u32) -> Result<(), MemFault> {
+        if addr as u64 + len as u64 > SPACE_SIZE {
+            return Err(MemFault {
+                addr,
+                len,
+                write: true,
+            });
+        }
         if len == 0 {
             return Ok(());
         }
@@ -113,7 +120,7 @@ impl GuestMem {
         Ok(())
     }
 
-    fn ptr(&self, addr: u32, len: u32, write: bool) -> Result<*mut u8, MemFault> {
+    pub(crate) fn ptr(&self, addr: u32, len: u32, write: bool) -> Result<*mut u8, MemFault> {
         let end = addr as u64 + len as u64;
         if end > SPACE_SIZE {
             return Err(MemFault { addr, len, write });

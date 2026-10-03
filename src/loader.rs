@@ -42,8 +42,11 @@ pub fn load_image(
     }
     mem.commit(base, pe.size_of_image)
         .map_err(|e| format!("commit image: {e}"))?;
-    mem.write_bytes(base, &buf[..pe.size_of_headers.min(buf.len() as u32) as usize])
-        .map_err(|e| format!("map headers: {e}"))?;
+    mem.write_bytes(
+        base,
+        &buf[..pe.size_of_headers.min(buf.len() as u32) as usize],
+    )
+    .map_err(|e| format!("map headers: {e}"))?;
     for s in &pe.sections {
         if s.raw_size == 0 || s.raw_ptr == 0 {
             continue;
@@ -82,22 +85,33 @@ pub fn load_image(
     // Minimal TEB/PEB. Only fields actually read by typical CRT startup code.
     mem.commit(TEB_ADDR, 0x1000).map_err(|e| e.to_string())?;
     mem.commit(PEB_ADDR, 0x1000).map_err(|e| e.to_string())?;
-    mem.write_u32(TEB_ADDR, 0xffff_ffff).map_err(|e| e.to_string())?; // SEH chain: empty
+    mem.write_u32(TEB_ADDR, 0xffff_ffff)
+        .map_err(|e| e.to_string())?; // SEH chain: empty
     mem.write_u32(TEB_ADDR + 0x04, STACK_BASE + STACK_SIZE)
         .map_err(|e| e.to_string())?; // StackBase
-    mem.write_u32(TEB_ADDR + 0x08, STACK_BASE).map_err(|e| e.to_string())?; // StackLimit
-    mem.write_u32(TEB_ADDR + 0x18, TEB_ADDR).map_err(|e| e.to_string())?; // Self
-    mem.write_u32(TEB_ADDR + 0x20, 4242).map_err(|e| e.to_string())?; // ProcessId
-    mem.write_u32(TEB_ADDR + 0x24, 1).map_err(|e| e.to_string())?; // ThreadId (main = 1)
-    mem.write_u32(TEB_ADDR + 0x30, PEB_ADDR).map_err(|e| e.to_string())?; // ProcessEnvironmentBlock
-    mem.write_u32(PEB_ADDR + 0x08, base).map_err(|e| e.to_string())?; // ImageBaseAddress
+    mem.write_u32(TEB_ADDR + 0x08, STACK_BASE)
+        .map_err(|e| e.to_string())?; // StackLimit
+    mem.write_u32(TEB_ADDR + 0x18, TEB_ADDR)
+        .map_err(|e| e.to_string())?; // Self
+    mem.write_u32(TEB_ADDR + 0x20, 4242)
+        .map_err(|e| e.to_string())?; // ProcessId
+    mem.write_u32(TEB_ADDR + 0x24, 1)
+        .map_err(|e| e.to_string())?; // ThreadId (main = 1)
+    mem.write_u32(TEB_ADDR + 0x30, PEB_ADDR)
+        .map_err(|e| e.to_string())?; // ProcessEnvironmentBlock
+    mem.write_u32(PEB_ADDR + 0x08, base)
+        .map_err(|e| e.to_string())?; // ImageBaseAddress
 
     // Command line: `"<display_name>" ` in narrow and wide form.
-    mem.commit(CMDLINE_ADDR, 0x1000).map_err(|e| e.to_string())?;
-    let cmdline = format!("\"{display_name}\" ");
-    mem.write_bytes(CMDLINE_ADDR, cmdline.as_bytes())
+    mem.commit(CMDLINE_ADDR, 0x1000)
         .map_err(|e| e.to_string())?;
-    mem.write_u8(CMDLINE_ADDR + cmdline.len() as u32, 0)
+    let cmdline = format!("\"{display_name}\" ");
+    let narrow = crate::codepage::encode(&cmdline, 932)
+        .map_err(|e| format!("command-line encoding: {e}"))?
+        .0;
+    mem.write_bytes(CMDLINE_ADDR, &narrow)
+        .map_err(|e| e.to_string())?;
+    mem.write_u8(CMDLINE_ADDR + narrow.len() as u32, 0)
         .map_err(|e| e.to_string())?;
     let cmdline_w_addr = CMDLINE_ADDR + 0x800;
     let wide: Vec<u16> = cmdline.encode_utf16().collect();

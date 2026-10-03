@@ -41,7 +41,9 @@ fn unhex(s: &str) -> Vec<u8> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("usage: lockstep <code-hex> [--regs r,r,r,r,r,r,r,r] [--eflags HEX] [--data-hex HEX]");
+        eprintln!(
+            "usage: lockstep <code-hex> [--regs r,r,r,r,r,r,r,r] [--eflags HEX] [--data-hex HEX]"
+        );
         std::process::exit(2);
     }
     let code = unhex(&args[1]);
@@ -57,6 +59,7 @@ fn main() {
     ];
     let mut eflags: u32 = 0x202;
     let mut data_fill: Vec<u8> = Vec::new();
+    let mut xmm = [[0; 16]; 8];
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
@@ -64,6 +67,12 @@ fn main() {
                 i += 1;
                 for (j, part) in args[i].split(',').enumerate() {
                     regs[j] = u32::from_str_radix(part, 16).unwrap();
+                }
+            }
+            "--xmm-hex" => {
+                i += 1;
+                for (j, part) in args[i].split(',').enumerate() {
+                    xmm[j].copy_from_slice(&unhex(part));
                 }
             }
             "--eflags" => {
@@ -91,12 +100,16 @@ fn main() {
     let mut cpu = Cpu::new(CODE, regs[4], 0);
     cpu.regs = regs;
     cpu.eflags = eflags;
+    cpu.xmm = xmm;
 
     // unicorn side
     let mut uc = Unicorn::new(Arch::X86, Mode::MODE_32).unwrap();
-    uc.mem_map(CODE as u64, CODE_SIZE as u64, Prot::ALL).unwrap();
-    uc.mem_map(DATA as u64, DATA_SIZE as u64, Prot::READ | Prot::WRITE).unwrap();
-    uc.mem_map(STACK as u64, STACK_SIZE as u64, Prot::READ | Prot::WRITE).unwrap();
+    uc.mem_map(CODE as u64, CODE_SIZE as u64, Prot::ALL)
+        .unwrap();
+    uc.mem_map(DATA as u64, DATA_SIZE as u64, Prot::READ | Prot::WRITE)
+        .unwrap();
+    uc.mem_map(STACK as u64, STACK_SIZE as u64, Prot::READ | Prot::WRITE)
+        .unwrap();
     uc.mem_write(CODE as u64, &code).unwrap();
     if !data_fill.is_empty() {
         uc.mem_write(DATA as u64, &data_fill).unwrap();
@@ -106,6 +119,11 @@ fn main() {
     }
     uc.reg_write(RegisterX86::EFLAGS, eflags as u64).unwrap();
     uc.reg_write(RegisterX86::EIP, CODE as u64).unwrap();
+    uc.reg_write(RegisterX86::MXCSR, 0x1f80).unwrap();
+    for (j, v) in xmm.iter().enumerate() {
+        uc.reg_write_long(RegisterX86::XMM0 as i32 + j as i32, v)
+            .unwrap();
+    }
 
     let code_end = CODE + code.len() as u32;
     for step in 0..10_000u64 {
@@ -124,7 +142,9 @@ fn main() {
         let u_err = uc.emu_start(u_eip as u64, 0, 0, 1).err();
         match (&w_err, &u_err) {
             (Some(we), Some(ue)) => {
-                println!("both faulted at step {step} (eip {w_eip:#x}):\n  wire: {we}\n  uni:  {ue}");
+                println!(
+                    "both faulted at step {step} (eip {w_eip:#x}):\n  wire: {we}\n  uni:  {ue}"
+                );
                 return;
             }
             (Some(we), None) => {
@@ -142,7 +162,18 @@ fn main() {
         for j in 0..8 {
             let uv = uc.reg_read(UREGS[j]).unwrap() as u32;
             if cpu.regs[j] != uv {
-                diff += &format!(" {}: wire={:#010x} uni={:#010x}", REGNAME[j], cpu.regs[j], uv);
+                diff += &format!(
+                    " {}: wire={:#010x} uni={:#010x}",
+                    REGNAME[j], cpu.regs[j], uv
+                );
+            }
+        }
+        for j in 0..8 {
+            let uv = uc
+                .reg_read_long(RegisterX86::XMM0 as i32 + j as i32)
+                .unwrap();
+            if cpu.xmm[j] != *uv {
+                diff += &format!(" xmm{j}: wire={:02x?} uni={:02x?}", cpu.xmm[j], uv);
             }
         }
         let ue = uc.reg_read(RegisterX86::EFLAGS).unwrap() as u32;

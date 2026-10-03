@@ -18,7 +18,8 @@ pub const WAIT_TIMEOUT: u32 = 0x102;
 /// The main thread's stack comes from the loader.
 pub const THREAD_STACK_SIZE: u32 = 0x10_0000;
 const STACK_ARENA_BASE: u32 = 0x0200_0000;
-const TEB_ARENA_BASE: u32 = 0x7ffc_0000;
+// Leave the main TEB/PEB at 0x7ffdf000/0x7ffde000 outside all 64 slots.
+const TEB_ARENA_BASE: u32 = 0x7ff0_0000;
 const MAX_THREADS: usize = 64;
 
 /// Why a blocked thread was made runnable again.
@@ -127,6 +128,7 @@ impl Sched {
     /// Timeslice / explicit yield: hand the CPU to the next runnable thread.
     /// Returns true if a switch happened.
     pub fn round_robin(&mut self, cpu: &mut Cpu) -> bool {
+        self.poll_timeouts();
         let n = self.threads.len();
         for k in 1..n {
             let i = (self.current + k) % n;
@@ -173,20 +175,25 @@ impl Sched {
         mem.commit(teb, 0x1000).map_err(|e| format!("teb: {e}"))?;
         let stack_top = stack_base + THREAD_STACK_SIZE;
         mem.write_u32(teb, 0xffff_ffff).map_err(|e| e.to_string())?; // SEH chain: empty
-        mem.write_u32(teb + 0x04, stack_top).map_err(|e| e.to_string())?;
-        mem.write_u32(teb + 0x08, stack_base).map_err(|e| e.to_string())?;
+        mem.write_u32(teb + 0x04, stack_top)
+            .map_err(|e| e.to_string())?;
+        mem.write_u32(teb + 0x08, stack_base)
+            .map_err(|e| e.to_string())?;
         mem.write_u32(teb + 0x18, teb).map_err(|e| e.to_string())?; // Self
         mem.write_u32(teb + 0x20, 4242).map_err(|e| e.to_string())?; // pid
         mem.write_u32(teb + 0x24, tid).map_err(|e| e.to_string())?;
         mem.write_u32(teb + 0x30, crate::loader::PEB_ADDR)
             .map_err(|e| e.to_string())?;
         let esp = (stack_top - 16) & !15;
-        mem.write_u32(esp, exit_thread_stub).map_err(|e| e.to_string())?;
+        mem.write_u32(esp, exit_thread_stub)
+            .map_err(|e| e.to_string())?;
         mem.write_u32(esp + 4, param).map_err(|e| e.to_string())?;
         let mut ctx = ThreadCtx {
             eip: entry,
             eflags: 0x202,
             fs_base: teb,
+            fpu_cw: 0x037f,
+            mxcsr: 0x1f80,
             ..ThreadCtx::default()
         };
         ctx.regs[ESP] = esp;
@@ -244,18 +251,7 @@ impl Sched {
 
     fn switch_away(&mut self, cpu: &mut Cpu) -> Result<(), String> {
         loop {
-            let now = Instant::now();
-            for t in self.threads.iter_mut() {
-                if let ThreadState::Waiting {
-                    deadline: Some(d), ..
-                } = t.state
-                {
-                    if d <= now {
-                        t.state = ThreadState::Runnable;
-                        t.wake = Some(Wake::Completed(WAIT_TIMEOUT));
-                    }
-                }
-            }
+            self.poll_timeouts();
             let n = self.threads.len();
             for k in 1..=n {
                 let i = (self.current + k) % n;
@@ -278,11 +274,12 @@ impl Sched {
                     std::thread::sleep(dur);
                 }
                 None => {
-                    if self
-                        .threads
-                        .iter()
-                        .any(|t| matches!(t.state, ThreadState::Waiting { .. } | ThreadState::Suspended))
-                    {
+                    if self.threads.iter().any(|t| {
+                        matches!(
+                            t.state,
+                            ThreadState::Waiting { .. } | ThreadState::Suspended
+                        )
+                    }) {
                         return Err(self.describe_deadlock());
                     }
                     // Every guest thread has exited: end the process.
@@ -302,10 +299,29 @@ impl Sched {
         }
     }
 
+    /// A runnable spinner must not prevent another thread's timeout expiring.
+    pub fn poll_timeouts(&mut self) {
+        let now = Instant::now();
+        for t in &mut self.threads {
+            if let ThreadState::Waiting {
+                deadline: Some(d), ..
+            } = t.state
+            {
+                if d <= now {
+                    t.state = ThreadState::Runnable;
+                    t.wake = Some(Wake::Completed(WAIT_TIMEOUT));
+                }
+            }
+        }
+    }
+
     fn describe_deadlock(&self) -> String {
         let mut s = String::from("guest deadlock: no runnable thread");
         for t in &self.threads {
-            s.push_str(&format!("\n  tid {} handle {:#x}: {:?}", t.tid, t.handle, t.state));
+            s.push_str(&format!(
+                "\n  tid {} handle {:#x}: {:?}",
+                t.tid, t.handle, t.state
+            ));
         }
         s
     }
