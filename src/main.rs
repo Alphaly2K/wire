@@ -1,10 +1,11 @@
 use std::path::Path;
 use std::process::ExitCode;
-use wire::api::{ApiLogger, ApiState, ApiTable};
+use wire::api::{ApiLogger, ApiState, ApiTable, HandleObj};
 use wire::cpu::{Cpu, RunOutcome};
 use wire::loader;
 use wire::mem::GuestMem;
 use wire::pe::PeFile;
+use wire::thread::Sched;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -185,12 +186,16 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
     // --- execution reaches the entry point here ---
     let mut cpu = Cpu::new(loaded.entry, loaded.esp, loaded.teb);
     cpu.trace_enabled = trace_cpu;
+    let mut sched = Sched::new();
+    let main_tid = sched.alloc_tid();
+    let main_handle = state.alloc_handle(HandleObj::Thread { tid: main_tid });
+    sched.add_main(main_tid, main_handle, loaded.teb);
     println!(
         "  reached entry point; starting interpretation (max {} instructions)",
         max_instr
     );
     let t_start = std::time::Instant::now();
-    let outcome = cpu.run(&mut mem, &mut api, &mut state, &mut logger, max_instr);
+    let outcome = cpu.run(&mut mem, &mut api, &mut state, &mut logger, &mut sched, max_instr);
     let wall = t_start.elapsed();
 
     println!("\n== run report ==");

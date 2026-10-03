@@ -9,6 +9,7 @@
 
 use crate::api::{self, ApiLogger, ApiState, ApiTable};
 use crate::mem::{GuestMem, MemFault};
+use crate::thread::Sched;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::time::Instant;
@@ -109,6 +110,22 @@ struct Rm {
     idx: usize,
 }
 
+/// Per-thread execution context: the subset of Cpu state that belongs to one
+/// guest thread. Everything else on Cpu (instruction counters, opcode stats,
+/// tracing) is machine-global and survives context switches.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ThreadCtx {
+    pub regs: [u32; 8],
+    pub eip: u32,
+    pub eflags: u32,
+    pub fs_base: u32,
+    pub gs_base: u32,
+    pub fpu_cw: u16,
+    pub fpu_sw: u16,
+    pub xmm: [[u8; 16]; 8],
+    pub mxcsr: u32,
+}
+
 pub struct Cpu {
     pub regs: [u32; 8], // EAX ECX EDX EBX ESP EBP ESI EDI
     pub eip: u32,
@@ -117,6 +134,8 @@ pub struct Cpu {
     pub gs_base: u32,
     pub fpu_cw: u16,
     pub fpu_sw: u16,
+    pub xmm: [[u8; 16]; 8],
+    pub mxcsr: u32,
     pub halted: bool,
     pub exit_code: Option<u32>,
     pub instr_count: u64,
@@ -136,6 +155,8 @@ impl Cpu {
             gs_base: 0,
             fpu_cw: 0x037f,
             fpu_sw: 0,
+            xmm: [[0; 16]; 8],
+            mxcsr: 0x1f80,
             halted: false,
             exit_code: None,
             instr_count: 0,
@@ -167,6 +188,32 @@ impl Cpu {
         } else {
             self.eflags &= !f;
         }
+    }
+
+    pub fn save_ctx(&self) -> ThreadCtx {
+        ThreadCtx {
+            regs: self.regs,
+            eip: self.eip,
+            eflags: self.eflags,
+            fs_base: self.fs_base,
+            gs_base: self.gs_base,
+            fpu_cw: self.fpu_cw,
+            fpu_sw: self.fpu_sw,
+            xmm: self.xmm,
+            mxcsr: self.mxcsr,
+        }
+    }
+
+    pub fn load_ctx(&mut self, c: &ThreadCtx) {
+        self.regs = c.regs;
+        self.eip = c.eip;
+        self.eflags = c.eflags;
+        self.fs_base = c.fs_base;
+        self.gs_base = c.gs_base;
+        self.fpu_cw = c.fpu_cw;
+        self.fpu_sw = c.fpu_sw;
+        self.xmm = c.xmm;
+        self.mxcsr = c.mxcsr;
     }
 
     // ---- flag arithmetic ----
@@ -1490,7 +1537,7 @@ impl Cpu {
                     _ => return Err(self.unsupported(mem, eip0, "0xff group far form")),
                 }
             }
-            0x0F => self.step_0f(mem, seg, bits, eip0)?,
+            0x0F => self.step_0f(mem, seg, bits, eip0, opsize16, rep)?,
             _ => return Err(self.unsupported(mem, eip0, &format!("opcode {op:02x}"))),
         }
         Ok(())
@@ -1502,11 +1549,13 @@ impl Cpu {
         seg: u32,
         bits: u8,
         eip0: u32,
+        op66: bool,
+        rep: Option<u8>,
     ) -> Result<(), CpuError> {
         let op = self.fetch8(mem)?;
         *self.op_stats.entry(0x100 | op as u32).or_insert(0) += 1;
         match op {
-            0x0D | 0x1F => {
+            0x0D | 0x18..=0x1F => {
                 // prefetch / multi-byte nop: consume modrm, do nothing
                 self.modrm(mem)?;
             }
@@ -1652,8 +1701,918 @@ impl Cpu {
                 let i = (op - 0xC8) as usize;
                 self.regs[i] = self.regs[i].swap_bytes();
             }
+            // ---- SSE/SSE2 subset (game-driven; MOVAPS alignment faults and
+            // MXCSR rounding modes are not modeled — documented) ----
+            0x10 | 0x11 => {
+                let rm = self.modrm(mem)?;
+                let load = op == 0x10;
+                match (op66, rep) {
+                    (false, Some(0xF3)) => {
+                        // movss
+                        if load {
+                            match rm.addr {
+                                Some(a) => {
+                                    let mut v = [0u8; 16];
+                                    v[..4].copy_from_slice(
+                                        &mem.read_u32(a.wrapping_add(seg))?.to_le_bytes(),
+                                    );
+                                    self.xmm[rm.reg] = v;
+                                }
+                                None => {
+                                    let s = self.xmm[rm.idx];
+                                    self.xmm[rm.reg][..4].copy_from_slice(&s[..4]);
+                                }
+                            }
+                        } else {
+                            match rm.addr {
+                                Some(a) => {
+                                    let v = u32::from_le_bytes(self.xmm[rm.reg][..4].try_into().unwrap());
+                                    mem.write_u32(a.wrapping_add(seg), v)?;
+                                }
+                                None => {
+                                    let s = self.xmm[rm.reg];
+                                    self.xmm[rm.idx][..4].copy_from_slice(&s[..4]);
+                                }
+                            }
+                        }
+                    }
+                    (false, Some(0xF2)) => {
+                        // movsd
+                        if load {
+                            match rm.addr {
+                                Some(a) => {
+                                    let mut v = [0u8; 16];
+                                    v[..8].copy_from_slice(
+                                        &mem.read_u64(a.wrapping_add(seg))?.to_le_bytes(),
+                                    );
+                                    self.xmm[rm.reg] = v;
+                                }
+                                None => {
+                                    let s = self.xmm[rm.idx];
+                                    self.xmm[rm.reg][..8].copy_from_slice(&s[..8]);
+                                }
+                            }
+                        } else {
+                            match rm.addr {
+                                Some(a) => {
+                                    let v = u64::from_le_bytes(self.xmm[rm.reg][..8].try_into().unwrap());
+                                    mem.write_u64(a.wrapping_add(seg), v)?;
+                                }
+                                None => {
+                                    let s = self.xmm[rm.reg];
+                                    self.xmm[rm.idx][..8].copy_from_slice(&s[..8]);
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        // movups / movupd
+                        if load {
+                            let v = self.xmm_rm(mem, &rm, seg)?;
+                            self.xmm[rm.reg] = v;
+                        } else {
+                            let v = self.xmm[rm.reg];
+                            self.xmm_rm_write(mem, &rm, seg, v)?;
+                        }
+                    }
+                }
+            }
+            0x12 => {
+                let rm = self.modrm(mem)?;
+                if !op66 && rep == Some(0xF2) {
+                    // movddup
+                    let v = self.xmm_rm(mem, &rm, seg)?;
+                    let mut out = [0u8; 16];
+                    out[..8].copy_from_slice(&v[..8]);
+                    out[8..].copy_from_slice(&v[..8]);
+                    self.xmm[rm.reg] = out;
+                } else {
+                    // movlps/movlpd load; reg-reg form is movhlps
+                    match rm.addr {
+                        Some(a) => {
+                            let v = mem.read_u64(a.wrapping_add(seg))?;
+                            self.xmm[rm.reg][..8].copy_from_slice(&v.to_le_bytes());
+                        }
+                        None => {
+                            let s = self.xmm[rm.idx];
+                            self.xmm[rm.reg][..8].copy_from_slice(&s[8..]);
+                        }
+                    }
+                }
+            }
+            0x13 => {
+                // movlps/movlpd store
+                let rm = self.modrm(mem)?;
+                let v = u64::from_le_bytes(self.xmm[rm.reg][..8].try_into().unwrap());
+                match rm.addr {
+                    Some(a) => mem.write_u64(a.wrapping_add(seg), v)?,
+                    None => self.xmm[rm.idx][..8].copy_from_slice(&v.to_le_bytes()),
+                }
+            }
+            0x14 | 0x15 => {
+                // unpcklps/unpcklpd, unpckhps/unpckhpd (bitwise == punpckldq/dq)
+                let rm = self.modrm(mem)?;
+                let a = self.xmm[rm.reg];
+                let b = self.xmm_rm(mem, &rm, seg)?;
+                let lo = op == 0x14;
+                let off = if lo { 0 } else { 8 };
+                let mut out = [0u8; 16];
+                out[0..4].copy_from_slice(&a[off..off + 4]);
+                out[4..8].copy_from_slice(&b[off..off + 4]);
+                out[8..12].copy_from_slice(&a[off + 4..off + 8]);
+                out[12..16].copy_from_slice(&b[off + 4..off + 8]);
+                self.xmm[rm.reg] = out;
+            }
+            0x16 | 0x17 => {
+                // movhps/movhpd; reg-reg load form is movlhps
+                let rm = self.modrm(mem)?;
+                if op == 0x16 {
+                    match rm.addr {
+                        Some(a) => {
+                            let v = mem.read_u64(a.wrapping_add(seg))?;
+                            self.xmm[rm.reg][8..].copy_from_slice(&v.to_le_bytes());
+                        }
+                        None => {
+                            let s = self.xmm[rm.idx];
+                            self.xmm[rm.reg][8..].copy_from_slice(&s[..8]);
+                        }
+                    }
+                } else {
+                    let v = u64::from_le_bytes(self.xmm[rm.reg][8..].try_into().unwrap());
+                    match rm.addr {
+                        Some(a) => mem.write_u64(a.wrapping_add(seg), v)?,
+                        None => self.xmm[rm.idx][8..].copy_from_slice(&v.to_le_bytes()),
+                    }
+                }
+            }
+            0x28 | 0x29 => {
+                // movaps/movapd (alignment faults not modeled)
+                let rm = self.modrm(mem)?;
+                if op == 0x28 {
+                    let v = self.xmm_rm(mem, &rm, seg)?;
+                    self.xmm[rm.reg] = v;
+                } else {
+                    let v = self.xmm[rm.reg];
+                    self.xmm_rm_write(mem, &rm, seg, v)?;
+                }
+            }
+            0x2B => {
+                // movntps/movntpd: plain store here
+                let rm = self.modrm(mem)?;
+                let v = self.xmm[rm.reg];
+                self.xmm_rm_write(mem, &rm, seg, v)?;
+            }
+            0x2A => {
+                // cvtsi2ss / cvtsi2sd
+                let rm = self.modrm(mem)?;
+                let i = self.rm_read(mem, &rm, 32, seg)? as i32;
+                match rep {
+                    Some(0xF3) => {
+                        let f = i as f32;
+                        self.xmm[rm.reg][..4].copy_from_slice(&f.to_le_bytes());
+                    }
+                    Some(0xF2) => {
+                        let f = i as f64;
+                        self.xmm[rm.reg][..8].copy_from_slice(&f.to_le_bytes());
+                    }
+                    _ => return Err(self.unsupported(mem, eip0, "cvtsi2 with bad prefix")),
+                }
+            }
+            0x2C | 0x2D => {
+                // cvttss2si/cvttsd2si (truncate), cvtss2si/cvtsd2si (round-nearest)
+                let rm = self.modrm(mem)?;
+                let x64 = rep == Some(0xF2);
+                let (v, valid) = if x64 {
+                    let x = f64::from_le_bytes(self.xmm_rm(mem, &rm, seg)?[..8].try_into().unwrap());
+                    let t = if op == 0x2C { x.trunc() } else { x.round_ties_even() };
+                    (t as i64 as i32 as u32, t.is_finite() && t >= -2147483648.0 && t < 2147483648.0)
+                } else {
+                    let x = f32::from_le_bytes(self.xmm_rm(mem, &rm, seg)?[..4].try_into().unwrap());
+                    let t = if op == 0x2C { x.trunc() } else { x.round_ties_even() };
+                    (t as i64 as i32 as u32, t.is_finite() && t >= -2147483648.0 && t < 2147483648.0)
+                };
+                self.set_r(rm.reg, if valid { v } else { 0x8000_0000 }, 32);
+            }
+            0x2E | 0x2F => {
+                // comiss/ucomiss, comisd/ucomisd
+                let rm = self.modrm(mem)?;
+                let s = self.xmm_rm(mem, &rm, seg)?;
+                let unordered;
+                let greater;
+                let less;
+                if op66 {
+                    let a = f64::from_le_bytes(self.xmm[rm.reg][..8].try_into().unwrap());
+                    let b = f64::from_le_bytes(s[..8].try_into().unwrap());
+                    unordered = a.is_nan() || b.is_nan();
+                    greater = a > b;
+                    less = a < b;
+                } else {
+                    let a = f32::from_le_bytes(self.xmm[rm.reg][..4].try_into().unwrap());
+                    let b = f32::from_le_bytes(s[..4].try_into().unwrap());
+                    unordered = a.is_nan() || b.is_nan();
+                    greater = a > b;
+                    less = a < b;
+                }
+                self.set_flag(ZF, unordered || (!greater && !less));
+                self.set_flag(PF, unordered);
+                self.set_flag(CF, unordered || less);
+                self.set_flag(OF, false);
+                self.set_flag(SF, false);
+                self.set_flag(AF, false);
+            }
+            0x50 => {
+                // movmskps (np) / movmskpd (66)
+                let rm = self.modrm(mem)?;
+                let x = self.xmm[rm.idx];
+                let m: u32 = if op66 {
+                    ((x[15] >> 7) as u32) << 1 | (x[7] >> 7) as u32
+                } else {
+                    [3, 7, 11, 15]
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &o)| ((x[o] >> 7) as u32) << i)
+                        .sum()
+                };
+                self.set_r(rm.reg, m, 32);
+            }
+            0x51 => {
+                // sqrtps/sqrtpd/sqrtss/sqrtsd
+                let rm = self.modrm(mem)?;
+                let s = self.xmm_rm(mem, &rm, seg)?;
+                match (op66, rep) {
+                    (false, Some(0xF3)) => {
+                        let x = f32::from_le_bytes(s[..4].try_into().unwrap());
+                        self.xmm[rm.reg][..4].copy_from_slice(&x.sqrt().to_le_bytes());
+                    }
+                    (false, Some(0xF2)) => {
+                        let x = f64::from_le_bytes(s[..8].try_into().unwrap());
+                        self.xmm[rm.reg][..8].copy_from_slice(&x.sqrt().to_le_bytes());
+                    }
+                    (false, _) => {
+                        self.xmm[rm.reg] = pack_f32x4(f32x4(&s).map(f32::sqrt));
+                    }
+                    (true, _) => {
+                        self.xmm[rm.reg] = pack_f64x2(f64x2(&s).map(f64::sqrt));
+                    }
+                }
+            }
+            0x52 | 0x53 => {
+                // rsqrtps/rsqrtss, rcpps/rcpss (exact 1/x, 1/sqrt(x): HW is
+                // approximate, difference irrelevant for game logic)
+                let rm = self.modrm(mem)?;
+                let s = self.xmm_rm(mem, &rm, seg)?;
+                let scalar = rep == Some(0xF3);
+                let f = |x: f32| -> f32 {
+                    if op == 0x52 {
+                        1.0 / x.sqrt()
+                    } else {
+                        1.0 / x
+                    }
+                };
+                if scalar {
+                    let x = f32::from_le_bytes(s[..4].try_into().unwrap());
+                    self.xmm[rm.reg][..4].copy_from_slice(&f(x).to_le_bytes());
+                } else {
+                    self.xmm[rm.reg] = pack_f32x4(f32x4(&s).map(f));
+                }
+            }
+            0x54..=0x57 => {
+                // andps/andpd, andnps/andnpd, orps/orpd, xorps/xorpd
+                let rm = self.modrm(mem)?;
+                let a = self.xmm[rm.reg];
+                let b = self.xmm_rm(mem, &rm, seg)?;
+                let mut out = [0u8; 16];
+                for i in 0..16 {
+                    out[i] = match op {
+                        0x54 => a[i] & b[i],
+                        0x55 => !a[i] & b[i],
+                        0x56 => a[i] | b[i],
+                        _ => a[i] ^ b[i],
+                    };
+                }
+                self.xmm[rm.reg] = out;
+            }
+            0x58..=0x5F => {
+                self.sse_arith(mem, seg, op, op66, rep, eip0)?;
+            }
+            0x60..=0x62 | 0x68..=0x6A | 0x6C | 0x6D if op66 => {
+                // punpcklbw/lwd/ldq, punpckhbw/hwd/hdq, punpcklqdq/hqdq
+                let rm = self.modrm(mem)?;
+                let a = self.xmm[rm.reg];
+                let b = self.xmm_rm(mem, &rm, seg)?;
+                let hi = matches!(op, 0x68..=0x6A | 0x6D);
+                let off = if hi { 8 } else { 0 };
+                let mut out = [0u8; 16];
+                match op {
+                    0x60 | 0x68 => {
+                        for i in 0..8 {
+                            out[2 * i] = a[off + i];
+                            out[2 * i + 1] = b[off + i];
+                        }
+                    }
+                    0x61 | 0x69 => {
+                        for i in 0..4 {
+                            out[4 * i..4 * i + 2].copy_from_slice(&a[off + 2 * i..off + 2 * i + 2]);
+                            out[4 * i + 2..4 * i + 4]
+                                .copy_from_slice(&b[off + 2 * i..off + 2 * i + 2]);
+                        }
+                    }
+                    0x62 | 0x6A => {
+                        for i in 0..2 {
+                            out[8 * i..8 * i + 4].copy_from_slice(&a[off + 4 * i..off + 4 * i + 4]);
+                            out[8 * i + 4..8 * i + 8]
+                                .copy_from_slice(&b[off + 4 * i..off + 4 * i + 4]);
+                        }
+                    }
+                    _ => {
+                        out[..8].copy_from_slice(&a[off..off + 8]);
+                        out[8..].copy_from_slice(&b[off..off + 8]);
+                    }
+                }
+                self.xmm[rm.reg] = out;
+            }
+            0x6E if op66 => {
+                // movd xmm, r/m32
+                let rm = self.modrm(mem)?;
+                let v = self.rm_read(mem, &rm, 32, seg)?;
+                let mut out = [0u8; 16];
+                out[..4].copy_from_slice(&v.to_le_bytes());
+                self.xmm[rm.reg] = out;
+            }
+            0x6F => {
+                let rm = self.modrm(mem)?;
+                if op66 || rep == Some(0xF3) {
+                    // movdqa / movdqu (identical without alignment faults)
+                    let v = self.xmm_rm(mem, &rm, seg)?;
+                    self.xmm[rm.reg] = v;
+                } else {
+                    return Err(self.unsupported(mem, eip0, "movq mm (MMX)"));
+                }
+            }
+            0x70 => {
+                let rm = self.modrm(mem)?;
+                let s = self.xmm_rm(mem, &rm, seg)?;
+                let imm = self.fetch8(mem)?;
+                let mut out = s;
+                match (op66, rep) {
+                    (true, _) => {
+                        // pshufd
+                        let l = lanes32(&s);
+                        out = pack32([
+                            l[(imm & 3) as usize],
+                            l[((imm >> 2) & 3) as usize],
+                            l[((imm >> 4) & 3) as usize],
+                            l[((imm >> 6) & 3) as usize],
+                        ]);
+                    }
+                    (false, Some(0xF3)) => {
+                        // pshufhw: word lanes 4..8 shuffled
+                        for i in 0..4 {
+                            let sel = ((imm >> (2 * i)) & 3) as usize;
+                            out[8 + 2 * i..8 + 2 * i + 2]
+                                .copy_from_slice(&s[8 + 2 * sel..8 + 2 * sel + 2]);
+                        }
+                    }
+                    (false, Some(0xF2)) => {
+                        // pshuflw: word lanes 0..4 shuffled
+                        for i in 0..4 {
+                            let sel = ((imm >> (2 * i)) & 3) as usize;
+                            out[2 * i..2 * i + 2].copy_from_slice(&s[2 * sel..2 * sel + 2]);
+                        }
+                    }
+                    _ => return Err(self.unsupported(mem, eip0, "pshufw mm (MMX)")),
+                }
+                self.xmm[rm.reg] = out;
+            }
+            0x71..=0x73 if op66 => {
+                // shift-by-imm groups: 71 w, 72 d, 73 q/dq
+                let rm = self.modrm(mem)?;
+                if rm.addr.is_some() {
+                    return Err(self.unsupported(mem, eip0, "shift group with memory operand"));
+                }
+                let imm = self.fetch8(mem)? as u32;
+                let s = self.xmm[rm.idx];
+                let mut out = [0u8; 16];
+                match (op, rm.reg) {
+                    (0x71, 2) | (0x71, 6) | (0x71, 4) => {
+                        let mut l = lanes16(&s);
+                        for w in l.iter_mut() {
+                            *w = match rm.reg {
+                                2 => {
+                                    if imm > 15 {
+                                        0
+                                    } else {
+                                        *w >> imm
+                                    }
+                                }
+                                6 => {
+                                    if imm > 15 {
+                                        0
+                                    } else {
+                                        w.wrapping_shl(imm)
+                                    }
+                                }
+                                _ => ((*w as i16) >> imm.min(15)) as u16,
+                            };
+                        }
+                        out = pack16(l);
+                    }
+                    (0x72, 2) | (0x72, 6) | (0x72, 4) => {
+                        let mut l = lanes32(&s);
+                        for d in l.iter_mut() {
+                            *d = match rm.reg {
+                                2 => {
+                                    if imm > 31 {
+                                        0
+                                    } else {
+                                        *d >> imm
+                                    }
+                                }
+                                6 => {
+                                    if imm > 31 {
+                                        0
+                                    } else {
+                                        d.wrapping_shl(imm)
+                                    }
+                                }
+                                _ => ((*d as i32) >> imm.min(31)) as u32,
+                            };
+                        }
+                        out = pack32(l);
+                    }
+                    (0x73, 2) | (0x73, 6) => {
+                        for half in 0..2 {
+                            let q = u64::from_le_bytes(s[8 * half..8 * half + 8].try_into().unwrap());
+                            let r = if rm.reg == 2 {
+                                if imm > 63 {
+                                    0
+                                } else {
+                                    q >> imm
+                                }
+                            } else if imm > 63 {
+                                0
+                            } else {
+                                q.wrapping_shl(imm)
+                            };
+                            out[8 * half..8 * half + 8].copy_from_slice(&r.to_le_bytes());
+                        }
+                    }
+                    (0x73, 3) => {
+                        // psrldq
+                        let n = (imm as usize).min(16);
+                        for i in 0..16 {
+                            out[i] = if i + n < 16 { s[i + n] } else { 0 };
+                        }
+                    }
+                    (0x73, 7) => {
+                        // pslldq
+                        let n = (imm as usize).min(16);
+                        for i in 0..16 {
+                            out[i] = if i >= n { s[i - n] } else { 0 };
+                        }
+                    }
+                    _ => return Err(self.unsupported(mem, eip0, "shift group /n")),
+                }
+                self.xmm[rm.idx] = out;
+            }
+            0x74..=0x76 if op66 => {
+                // pcmpeqb/w/d
+                let rm = self.modrm(mem)?;
+                let a = self.xmm[rm.reg];
+                let b = self.xmm_rm(mem, &rm, seg)?;
+                let mut out = [0u8; 16];
+                match op {
+                    0x74 => {
+                        for i in 0..16 {
+                            out[i] = if a[i] == b[i] { 0xFF } else { 0 };
+                        }
+                    }
+                    0x75 => {
+                        for i in 0..8 {
+                            let eq = a[2 * i..2 * i + 2] == b[2 * i..2 * i + 2];
+                            out[2 * i] = if eq { 0xFF } else { 0 };
+                            out[2 * i + 1] = if eq { 0xFF } else { 0 };
+                        }
+                    }
+                    _ => {
+                        for i in 0..4 {
+                            let eq = a[4 * i..4 * i + 4] == b[4 * i..4 * i + 4];
+                            for j in 0..4 {
+                                out[4 * i + j] = if eq { 0xFF } else { 0 };
+                            }
+                        }
+                    }
+                }
+                self.xmm[rm.reg] = out;
+            }
+            0x7E => {
+                let rm = self.modrm(mem)?;
+                match (op66, rep) {
+                    (false, Some(0xF3)) => {
+                        // movq xmm, xmm/m64: load 8, zero upper
+                        match rm.addr {
+                            Some(a) => {
+                                let v = mem.read_u64(a.wrapping_add(seg))?;
+                                let mut out = [0u8; 16];
+                                out[..8].copy_from_slice(&v.to_le_bytes());
+                                self.xmm[rm.reg] = out;
+                            }
+                            None => {
+                                let s = self.xmm[rm.idx];
+                                let mut out = [0u8; 16];
+                                out[..8].copy_from_slice(&s[..8]);
+                                self.xmm[rm.reg] = out;
+                            }
+                        }
+                    }
+                    (true, _) => {
+                        // movd r/m32, xmm
+                        let v = u32::from_le_bytes(self.xmm[rm.reg][..4].try_into().unwrap());
+                        match rm.addr {
+                            Some(a) => mem.write_u32(a.wrapping_add(seg), v)?,
+                            None => self.set_r(rm.idx, v, 32),
+                        }
+                    }
+                    _ => return Err(self.unsupported(mem, eip0, "movd/movq with bad prefix")),
+                }
+            }
+            0x7F => {
+                let rm = self.modrm(mem)?;
+                if op66 || rep == Some(0xF3) {
+                    let v = self.xmm[rm.reg];
+                    self.xmm_rm_write(mem, &rm, seg, v)?;
+                } else {
+                    return Err(self.unsupported(mem, eip0, "movq mm (MMX)"));
+                }
+            }
+            0xC4 if op66 => {
+                // pinsrw xmm, r32/m16, imm8
+                let rm = self.modrm(mem)?;
+                let v = self.rm_read(mem, &rm, 16, seg)? as u16;
+                let imm = (self.fetch8(mem)? & 7) as usize;
+                self.xmm[rm.reg][2 * imm..2 * imm + 2].copy_from_slice(&v.to_le_bytes());
+            }
+            0xC5 if op66 => {
+                // pextrw r32, xmm, imm8
+                let rm = self.modrm(mem)?;
+                if rm.addr.is_some() {
+                    return Err(self.unsupported(mem, eip0, "pextrw from memory"));
+                }
+                let imm = (self.fetch8(mem)? & 7) as usize;
+                let v = u16::from_le_bytes(self.xmm[rm.idx][2 * imm..2 * imm + 2].try_into().unwrap());
+                self.set_r(rm.reg, v as u32, 32);
+            }
+            0xD4 | 0xD7 | 0xDB | 0xDF | 0xE7 | 0xEB | 0xEF | 0xF8..=0xFE if op66 => {
+                let rm = self.modrm(mem)?;
+                match op {
+                    0xD7 => {
+                        // pmovmskb r32, xmm
+                        if rm.addr.is_some() {
+                            return Err(self.unsupported(mem, eip0, "pmovmskb from memory"));
+                        }
+                        let x = self.xmm[rm.idx];
+                        let m: u32 = x
+                            .iter()
+                            .enumerate()
+                            .map(|(i, b)| ((b >> 7) as u32) << i)
+                            .sum();
+                        self.set_r(rm.reg, m, 32);
+                    }
+                    0xE7 => {
+                        // movntdq: plain store here
+                        let v = self.xmm[rm.reg];
+                        self.xmm_rm_write(mem, &rm, seg, v)?;
+                    }
+                    _ => {
+                        let a = self.xmm[rm.reg];
+                        let b = self.xmm_rm(mem, &rm, seg)?;
+                        let mut out = [0u8; 16];
+                        match op {
+                            0xDB | 0xDF | 0xEB | 0xEF => {
+                                for i in 0..16 {
+                                    out[i] = match op {
+                                        0xDB => a[i] & b[i],
+                                        0xDF => !a[i] & b[i],
+                                        0xEB => a[i] | b[i],
+                                        _ => a[i] ^ b[i],
+                                    };
+                                }
+                            }
+                            0xD4 | 0xFB => {
+                                for half in 0..2 {
+                                    let qa =
+                                        u64::from_le_bytes(a[8 * half..8 * half + 8].try_into().unwrap());
+                                    let qb =
+                                        u64::from_le_bytes(b[8 * half..8 * half + 8].try_into().unwrap());
+                                    let r = if op == 0xD4 {
+                                        qa.wrapping_add(qb)
+                                    } else {
+                                        qa.wrapping_sub(qb)
+                                    };
+                                    out[8 * half..8 * half + 8].copy_from_slice(&r.to_le_bytes());
+                                }
+                            }
+                            0xFC | 0xF8 => {
+                                for i in 0..16 {
+                                    out[i] = if op == 0xFC {
+                                        a[i].wrapping_add(b[i])
+                                    } else {
+                                        a[i].wrapping_sub(b[i])
+                                    };
+                                }
+                            }
+                            0xFD | 0xF9 => {
+                                let la = lanes16(&a);
+                                let lb = lanes16(&b);
+                                let mut l = [0u16; 8];
+                                for i in 0..8 {
+                                    l[i] = if op == 0xFD {
+                                        la[i].wrapping_add(lb[i])
+                                    } else {
+                                        la[i].wrapping_sub(lb[i])
+                                    };
+                                }
+                                out = pack16(l);
+                            }
+                            _ => {
+                                // 0xFE paddd / 0xFA psubd
+                                let la = lanes32(&a);
+                                let lb = lanes32(&b);
+                                let mut l = [0u32; 4];
+                                for i in 0..4 {
+                                    l[i] = if op == 0xFE {
+                                        la[i].wrapping_add(lb[i])
+                                    } else {
+                                        la[i].wrapping_sub(lb[i])
+                                    };
+                                }
+                                out = pack32(l);
+                            }
+                        }
+                        self.xmm[rm.reg] = out;
+                    }
+                }
+            }
+            0xD6 if op66 => {
+                // movq xmm/m64, xmm: store low 8
+                let rm = self.modrm(mem)?;
+                let v = u64::from_le_bytes(self.xmm[rm.reg][..8].try_into().unwrap());
+                match rm.addr {
+                    Some(a) => mem.write_u64(a.wrapping_add(seg), v)?,
+                    None => {
+                        self.xmm[rm.idx][..8].copy_from_slice(&v.to_le_bytes());
+                    }
+                }
+            }
+            0xAE => {
+                let rm = self.modrm(mem)?;
+                match rm.reg {
+                    2 => {
+                        // ldmxcsr m32
+                        if let Some(a) = rm.addr {
+                            self.mxcsr = mem.read_u32(a.wrapping_add(seg))?;
+                        }
+                    }
+                    3 => {
+                        // stmxcsr m32
+                        if let Some(a) = rm.addr {
+                            mem.write_u32(a.wrapping_add(seg), self.mxcsr)?;
+                        }
+                    }
+                    5..=7 => {} // lfence/mfence/sfence: nop
+                    _ => return Err(self.unsupported(mem, eip0, "0f ae group /n")),
+                }
+            }
+            0xF0 if rep == Some(0xF2) => {
+                // lddqu: same as movdqu without alignment faults
+                let rm = self.modrm(mem)?;
+                let v = self.xmm_rm(mem, &rm, seg)?;
+                self.xmm[rm.reg] = v;
+            }
+            0xE6 => {
+                // cvttpd2dq (66) / cvtpd2dq (f2) / cvtdq2pd (f3)
+                let rm = self.modrm(mem)?;
+                let s = self.xmm_rm(mem, &rm, seg)?;
+                match rep {
+                    Some(0xF3) => {
+                        let l = lanes32(&s);
+                        let mut out = [0u8; 16];
+                        out[..8].copy_from_slice(&(l[0] as i32 as f64).to_le_bytes());
+                        out[8..].copy_from_slice(&(l[1] as i32 as f64).to_le_bytes());
+                        self.xmm[rm.reg] = out;
+                    }
+                    p => {
+                        let x = f64x2(&s);
+                        let mut l = [0u32; 4];
+                        for i in 0..2 {
+                            let t = if p == Some(0xF2) {
+                                x[i].round_ties_even()
+                            } else {
+                                x[i].trunc()
+                            };
+                            l[i] = if t.is_finite() && t >= -2147483648.0 && t < 2147483648.0 {
+                                t as i64 as i32 as u32
+                            } else {
+                                0x8000_0000
+                            };
+                        }
+                        self.xmm[rm.reg] = pack32(l);
+                    }
+                }
+            }
             _ => {
                 return Err(self.unsupported(mem, eip0, &format!("opcode 0f {op:02x}")));
+            }
+        }
+        Ok(())
+    }
+
+    // ---- SSE helpers ----
+
+    fn xmm_rm(&self, mem: &GuestMem, rm: &Rm, seg: u32) -> Result<[u8; 16], CpuError> {
+        match rm.addr {
+            Some(a) => {
+                let mut b = [0u8; 16];
+                mem.read_bytes(a.wrapping_add(seg), &mut b)?;
+                Ok(b)
+            }
+            None => Ok(self.xmm[rm.idx]),
+        }
+    }
+
+    fn xmm_rm_write(
+        &mut self,
+        mem: &mut GuestMem,
+        rm: &Rm,
+        seg: u32,
+        v: [u8; 16],
+    ) -> Result<(), CpuError> {
+        match rm.addr {
+            Some(a) => mem.write_bytes(a.wrapping_add(seg), &v)?,
+            None => self.xmm[rm.idx] = v,
+        }
+        Ok(())
+    }
+
+    /// Packed/scalar floating-point arithmetic: 0f 58..=5f with NP/66/f3/f2.
+    #[allow(clippy::too_many_arguments)]
+    fn sse_arith(
+        &mut self,
+        mem: &mut GuestMem,
+        seg: u32,
+        op: u8,
+        op66: bool,
+        rep: Option<u8>,
+        eip0: u32,
+    ) -> Result<(), CpuError> {
+        if op == 0x5A || op == 0x5B {
+            return self.sse_cvt(mem, seg, op, op66, rep, eip0);
+        }
+        let rm = self.modrm(mem)?;
+        let a = self.xmm[rm.reg];
+        let b = self.xmm_rm(mem, &rm, seg)?;
+        fn af32(op: u8, x: f32, y: f32) -> f32 {
+            match op {
+                0x58 => x + y,
+                0x59 => x * y,
+                0x5C => x - y,
+                0x5E => x / y,
+                // min/max: SRC1 < SRC2 ? SRC1 : SRC2 (x = old dest, y = src)
+                0x5D => {
+                    if x < y {
+                        x
+                    } else {
+                        y
+                    }
+                }
+                _ => {
+                    if x > y {
+                        x
+                    } else {
+                        y
+                    }
+                }
+            }
+        }
+        fn af64(op: u8, x: f64, y: f64) -> f64 {
+            match op {
+                0x58 => x + y,
+                0x59 => x * y,
+                0x5C => x - y,
+                0x5E => x / y,
+                0x5D => {
+                    if x < y {
+                        x
+                    } else {
+                        y
+                    }
+                }
+                _ => {
+                    if x > y {
+                        x
+                    } else {
+                        y
+                    }
+                }
+            }
+        }
+        match (op66, rep) {
+            (false, Some(0xF3)) => {
+                let x = f32::from_le_bytes(a[..4].try_into().unwrap());
+                let y = f32::from_le_bytes(b[..4].try_into().unwrap());
+                self.xmm[rm.reg][..4].copy_from_slice(&af32(op, x, y).to_le_bytes());
+            }
+            (false, Some(0xF2)) => {
+                let x = f64::from_le_bytes(a[..8].try_into().unwrap());
+                let y = f64::from_le_bytes(b[..8].try_into().unwrap());
+                self.xmm[rm.reg][..8].copy_from_slice(&af64(op, x, y).to_le_bytes());
+            }
+            (false, None) | (false, Some(_)) => {
+                let x = f32x4(&a);
+                let y = f32x4(&b);
+                let mut out = [0f32; 4];
+                for i in 0..4 {
+                    out[i] = af32(op, x[i], y[i]);
+                }
+                self.xmm[rm.reg] = pack_f32x4(out);
+            }
+            (true, _) => {
+                let x = f64x2(&a);
+                let y = f64x2(&b);
+                self.xmm[rm.reg] = pack_f64x2([af64(op, x[0], y[0]), af64(op, x[1], y[1])]);
+            }
+        }
+        Ok(())
+    }
+
+    /// Conversion group: 0f 5a / 0f 5b.
+    #[allow(clippy::too_many_arguments)]
+    fn sse_cvt(
+        &mut self,
+        mem: &mut GuestMem,
+        seg: u32,
+        op: u8,
+        op66: bool,
+        rep: Option<u8>,
+        eip0: u32,
+    ) -> Result<(), CpuError> {
+        let rm = self.modrm(mem)?;
+        let s = self.xmm_rm(mem, &rm, seg)?;
+        if op == 0x5A {
+            match (op66, rep) {
+                (true, _) => {
+                    // cvtpd2ps
+                    let x = f64x2(&s);
+                    let mut out = [0u8; 16];
+                    out[..4].copy_from_slice(&(x[0] as f32).to_le_bytes());
+                    out[4..8].copy_from_slice(&(x[1] as f32).to_le_bytes());
+                    self.xmm[rm.reg] = out;
+                }
+                (false, Some(0xF3)) => {
+                    // cvtss2sd
+                    let x = f32::from_le_bytes(s[..4].try_into().unwrap());
+                    self.xmm[rm.reg][..8].copy_from_slice(&(x as f64).to_le_bytes());
+                }
+                (false, Some(0xF2)) => {
+                    // cvtsd2ss
+                    let x = f64::from_le_bytes(s[..8].try_into().unwrap());
+                    self.xmm[rm.reg][..4].copy_from_slice(&(x as f32).to_le_bytes());
+                }
+                (false, _) => {
+                    // cvtps2pd
+                    let x = f32x4(&s);
+                    self.xmm[rm.reg] = pack_f64x2([x[0] as f64, x[1] as f64]);
+                }
+            }
+        } else {
+            match (op66, rep) {
+                (true, _) | (false, Some(0xF3)) => {
+                    // cvtps2dq (round-nearest) / cvttps2dq (truncate)
+                    let x = f32x4(&s);
+                    let mut l = [0u32; 4];
+                    for i in 0..4 {
+                        let t = if op66 {
+                            x[i].round_ties_even()
+                        } else {
+                            x[i].trunc()
+                        };
+                        l[i] = if t.is_finite() && t >= -2147483648.0 && t < 2147483648.0 {
+                            t as i64 as i32 as u32
+                        } else {
+                            0x8000_0000
+                        };
+                    }
+                    self.xmm[rm.reg] = pack32(l);
+                }
+                (false, Some(0xF2)) => {
+                    return Err(self.unsupported(mem, eip0, "0f 5b with f2 prefix"));
+                }
+                (false, _) => {
+                    // cvtdq2ps
+                    let l = lanes32(&s);
+                    self.xmm[rm.reg] =
+                        pack_f32x4(l.map(|v| v as i32 as f32));
+                }
             }
         }
         Ok(())
@@ -1667,17 +2626,20 @@ impl Cpu {
         api: &mut ApiTable,
         state: &mut ApiState,
         log: &mut ApiLogger,
+        sched: &mut Sched,
         max_instr: u64,
     ) -> RunOutcome {
-        self.run_loop(mem, api, state, log, max_instr, None)
+        self.run_loop(mem, api, state, log, sched, max_instr, None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_loop(
         &mut self,
         mem: &mut GuestMem,
         api: &mut ApiTable,
         state: &mut ApiState,
         log: &mut ApiLogger,
+        sched: &mut Sched,
         max_instr: u64,
         callback_exit: Option<u32>,
     ) -> RunOutcome {
@@ -1691,7 +2653,7 @@ impl Cpu {
                 }
             }
             if let Some(idx) = api.stub_index(self.eip) {
-                if let Err(e) = api::dispatch(idx, self, mem, api, state, log, max_instr) {
+                if let Err(e) = api::dispatch(idx, self, mem, api, state, log, sched, max_instr) {
                     return RunOutcome::Crashed(format!("api dispatch: {e}"));
                 }
                 continue;
@@ -1700,7 +2662,14 @@ impl Cpu {
                 return RunOutcome::InstructionLimit;
             }
             match self.step(mem) {
-                Ok(()) => self.instr_count += 1,
+                Ok(()) => {
+                    self.instr_count += 1;
+                    // Cooperative timeslice: a guest thread that never calls a
+                    // blocking API (spin loop) must not starve the others.
+                    if self.instr_count & 0xF_FFFF == 0 && sched.any_other_runnable() {
+                        sched.round_robin(self);
+                    }
+                }
                 Err(e) => return RunOutcome::Crashed(e.to_string()),
             }
         }
@@ -1710,12 +2679,14 @@ impl Cpu {
     /// _initterm, later window procs). Pushes a fresh frame whose return
     /// address is the ExitEmulation stub and runs until the guest `ret`s
     /// into it. Returns EAX. Nested callbacks are supported.
+    #[allow(clippy::too_many_arguments)]
     pub fn call_guest(
         &mut self,
         mem: &mut GuestMem,
         api: &mut ApiTable,
         state: &mut ApiState,
         log: &mut ApiLogger,
+        sched: &mut Sched,
         func: u32,
         args: &[u32],
         max_instr: u64,
@@ -1729,7 +2700,7 @@ impl Cpu {
         self.push32(mem, exit_stub).map_err(|e| e.to_string())?;
         let saved_eip = self.eip;
         self.eip = func;
-        let r = self.run_loop(mem, api, state, log, max_instr, Some(exit_stub));
+        let r = self.run_loop(mem, api, state, log, sched, max_instr, Some(exit_stub));
         match r {
             RunOutcome::CallbackReturned => {
                 self.eip = saved_eip;
@@ -1751,6 +2722,63 @@ fn read_sized(mem: &GuestMem, addr: u32, size: u32) -> Result<u32, CpuError> {
         2 => Ok(mem.read_u16(addr)? as u32),
         _ => Ok(mem.read_u32(addr)?),
     }
+}
+
+// ---- SSE lane helpers ----
+
+fn lanes32(v: &[u8; 16]) -> [u32; 4] {
+    [
+        u32::from_le_bytes(v[0..4].try_into().unwrap()),
+        u32::from_le_bytes(v[4..8].try_into().unwrap()),
+        u32::from_le_bytes(v[8..12].try_into().unwrap()),
+        u32::from_le_bytes(v[12..16].try_into().unwrap()),
+    ]
+}
+
+fn pack32(l: [u32; 4]) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    for (i, v) in l.iter().enumerate() {
+        out[4 * i..4 * i + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    out
+}
+
+fn lanes16(v: &[u8; 16]) -> [u16; 8] {
+    let mut l = [0u16; 8];
+    for i in 0..8 {
+        l[i] = u16::from_le_bytes(v[2 * i..2 * i + 2].try_into().unwrap());
+    }
+    l
+}
+
+fn pack16(l: [u16; 8]) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    for (i, v) in l.iter().enumerate() {
+        out[2 * i..2 * i + 2].copy_from_slice(&v.to_le_bytes());
+    }
+    out
+}
+
+fn f32x4(v: &[u8; 16]) -> [f32; 4] {
+    lanes32(v).map(f32::from_bits)
+}
+
+fn pack_f32x4(a: [f32; 4]) -> [u8; 16] {
+    pack32(a.map(f32::to_bits))
+}
+
+fn f64x2(v: &[u8; 16]) -> [f64; 2] {
+    [
+        f64::from_bits(u64::from_le_bytes(v[0..8].try_into().unwrap())),
+        f64::from_bits(u64::from_le_bytes(v[8..16].try_into().unwrap())),
+    ]
+}
+
+fn pack_f64x2(a: [f64; 2]) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    out[0..8].copy_from_slice(&a[0].to_bits().to_le_bytes());
+    out[8..16].copy_from_slice(&a[1].to_bits().to_le_bytes());
+    out
 }
 
 fn write_sized(mem: &GuestMem, addr: u32, v: u32, size: u32) -> Result<(), CpuError> {

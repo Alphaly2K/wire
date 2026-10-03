@@ -87,6 +87,8 @@ pub fn load_image(
         .map_err(|e| e.to_string())?; // StackBase
     mem.write_u32(TEB_ADDR + 0x08, STACK_BASE).map_err(|e| e.to_string())?; // StackLimit
     mem.write_u32(TEB_ADDR + 0x18, TEB_ADDR).map_err(|e| e.to_string())?; // Self
+    mem.write_u32(TEB_ADDR + 0x20, 4242).map_err(|e| e.to_string())?; // ProcessId
+    mem.write_u32(TEB_ADDR + 0x24, 1).map_err(|e| e.to_string())?; // ThreadId (main = 1)
     mem.write_u32(TEB_ADDR + 0x30, PEB_ADDR).map_err(|e| e.to_string())?; // ProcessEnvironmentBlock
     mem.write_u32(PEB_ADDR + 0x08, base).map_err(|e| e.to_string())?; // ImageBaseAddress
 

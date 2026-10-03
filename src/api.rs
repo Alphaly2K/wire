@@ -9,6 +9,9 @@
 
 use crate::cpu::Cpu;
 use crate::mem::GuestMem;
+use crate::thread::{
+    target_mentions, Sched, ThreadState, WaitTarget, Wake, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -39,6 +42,8 @@ impl ApiTable {
         };
         // index 0: return address pushed for the initial thread entry.
         t.register("wire", Some("ExitEmulation"), None);
+        // index 1: return address pushed for worker thread functions.
+        t.register("wire", Some("ExitThread"), None);
         t
     }
 
@@ -81,6 +86,27 @@ impl ApiTable {
 /// Guest scratch space for fake CRT pointers (starts here, bump-allocated).
 pub const SCRATCH_BASE: u32 = 0x00f0_0000;
 
+/// Kernel objects behind guest HANDLE values (M2). Files join this enum when
+/// real file I/O lands.
+#[derive(Debug)]
+pub enum HandleObj {
+    Event {
+        manual: bool,
+        signaled: bool,
+    },
+    Mutex {
+        owner: Option<u32>, // owning tid; recursion via count
+        count: u32,
+    },
+    Semaphore {
+        count: i32,
+        max: i32,
+    },
+    Thread {
+        tid: u32,
+    },
+}
+
 /// Mutable host-side state for the emulated process.
 pub struct ApiState {
     pub last_error: u32,
@@ -100,6 +126,9 @@ pub struct ApiState {
     pub next_tls: u32,
     pub fls: HashMap<u32, u32>,
     pub next_fls: u32,
+    pub handles: HashMap<u32, HandleObj>,
+    pub named_objs: HashMap<String, u32>, // event/mutex/semaphore name -> handle
+    pub next_handle: u32,
 }
 
 impl ApiState {
@@ -122,6 +151,9 @@ impl ApiState {
             next_tls: 1,
             fls: HashMap::new(),
             next_fls: 1,
+            handles: HashMap::new(),
+            named_objs: HashMap::new(),
+            next_handle: 0x100,
         };
         for dll in [
             "kernel32.dll",
@@ -134,6 +166,30 @@ impl ApiState {
             s.module_handle_for(dll);
         }
         s
+    }
+
+    pub fn alloc_handle(&mut self, obj: HandleObj) -> u32 {
+        let h = self.next_handle;
+        self.next_handle += 4;
+        self.handles.insert(h, obj);
+        h
+    }
+
+    /// CreateEvent/CreateMutex/CreateSemaphore share name-based dedup:
+    /// creating a named object that already exists returns the existing
+    /// handle and sets ERROR_ALREADY_EXISTS.
+    pub fn create_named(&mut self, name: &str, make: impl FnOnce() -> HandleObj) -> (u32, bool) {
+        if !name.is_empty() {
+            if let Some(&h) = self.named_objs.get(name) {
+                self.last_error = 183; // ERROR_ALREADY_EXISTS
+                return (h, true);
+            }
+        }
+        let h = self.alloc_handle(make());
+        if !name.is_empty() {
+            self.named_objs.insert(name.to_string(), h);
+        }
+        (h, false)
     }
 
     pub fn module_handle_for(&mut self, dll: &str) -> u32 {
@@ -356,8 +412,12 @@ fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("LockResource", 4), ("FreeResource", 4),
                 ("FormatMessageA", 28), ("FormatMessageW", 28),
                 ("CreateEventA", 16), ("CreateEventW", 16), ("SetEvent", 4), ("ResetEvent", 4),
+                ("OpenEventA", 12), ("OpenEventW", 12), ("PulseEvent", 4),
                 ("CreateMutexA", 12), ("CreateMutexW", 12), ("ReleaseMutex", 4),
+                ("OpenMutexA", 12), ("OpenMutexW", 12),
                 ("WaitForSingleObject", 8), ("WaitForMultipleObjects", 16),
+                ("SleepEx", 8), ("GetExitCodeThread", 8), ("TerminateThread", 8),
+                ("CreateSemaphoreA", 16),
                 ("GetVersion", 0), ("GetVersionExA", 4), ("GetVersionExW", 4),
                 ("VerifyVersionInfoW", 16), ("VerSetConditionMask", 16),
                 ("GetComputerNameA", 8), ("GetComputerNameW", 8),
@@ -638,8 +698,94 @@ fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
     None
 }
 
+/// --- kernel-object wait helpers (M2) ---
+
+/// Non-consuming readiness test (used by wait-all and by acquire itself).
+fn obj_ready(state: &ApiState, sched: &Sched, h: u32) -> bool {
+    match state.handles.get(&h) {
+        Some(HandleObj::Event { signaled, .. }) => *signaled,
+        Some(HandleObj::Mutex { owner, .. }) => {
+            owner.is_none() || *owner == Some(sched.current_tid())
+        }
+        Some(HandleObj::Semaphore { count, .. }) => *count > 0,
+        Some(HandleObj::Thread { tid }) => sched
+            .threads
+            .iter()
+            .any(|t| t.tid == *tid && matches!(t.state, ThreadState::Exited(_))),
+        None => false,
+    }
+}
+
+/// Consuming acquire: events clear their signal (auto-reset), mutexes take
+/// ownership, semaphores decrement. Thread handles have nothing to consume.
+fn obj_acquire(state: &mut ApiState, sched: &Sched, h: u32) -> bool {
+    match state.handles.get_mut(&h) {
+        Some(HandleObj::Event { manual, signaled }) => {
+            if *signaled {
+                if !*manual {
+                    *signaled = false;
+                }
+                true
+            } else {
+                false
+            }
+        }
+        Some(HandleObj::Mutex { owner, count }) => {
+            let me = sched.current_tid();
+            match *owner {
+                None => {
+                    *owner = Some(me);
+                    *count = 1;
+                    true
+                }
+                Some(o) if o == me => {
+                    *count += 1;
+                    true
+                }
+                _ => false,
+            }
+        }
+        Some(HandleObj::Semaphore { count, .. }) => {
+            if *count > 0 {
+                *count -= 1;
+                true
+            } else {
+                false
+            }
+        }
+        Some(HandleObj::Thread { tid }) => {
+            let tid = *tid;
+            sched
+                .threads
+                .iter()
+                .any(|t| t.tid == tid && matches!(t.state, ThreadState::Exited(_)))
+        }
+        None => false,
+    }
+}
+
+/// Wake up to `max` threads waiting on object `h` so they re-test it.
+fn wake_obj_waiters(sched: &mut Sched, h: u32, max: usize) -> usize {
+    let mut n = 0;
+    for i in 0..sched.threads.len() {
+        if n >= max {
+            break;
+        }
+        let hit = matches!(
+            &sched.threads[i].state,
+            ThreadState::Waiting { target, .. } if target_mentions(target, h)
+        );
+        if hit {
+            sched.wake_thread(i, Wake::Retest);
+            n += 1;
+        }
+    }
+    n
+}
+
 /// Execute one API call on behalf of the guest. EIP currently points at the
 /// stub address; the guest stack has [ret][args...].
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch(
     idx: usize,
     cpu: &mut Cpu,
@@ -647,6 +793,7 @@ pub fn dispatch(
     api: &mut ApiTable,
     state: &mut ApiState,
     log: &mut ApiLogger,
+    sched: &mut Sched,
     max_instr: u64,
 ) -> Result<(), String> {
     let entry = api.entries[idx].clone();
@@ -669,12 +816,346 @@ pub fn dispatch(
             cpu.exit_code = Some(0);
             return Ok(());
         }
+        ("wire", "ExitThread") => {
+            // A worker thread function returned; its EAX is the exit code.
+            let code = cpu.regs[0];
+            log.log_call(dll, name, &args[..1], 0, true, "thread function returned");
+            sched.exit_current(cpu, code)?;
+            return Ok(());
+        }
         ("kernel32.dll", "ExitProcess") => {
             log.log_call(dll, name, &args[..1], 0, true, "process exit");
             cpu.halted = true;
             cpu.exit_code = Some(args[0]);
             return Ok(());
         }
+        ("kernel32.dll", "ExitThread") => {
+            log.log_call(dll, name, &args[..1], 0, true, "thread exit");
+            sched.exit_current(cpu, args[0])?;
+            return Ok(());
+        }
+        ("kernel32.dll", "CreateThread") => {
+            let (entry, param, flags) = (args[2], args[3], args[4]);
+            let tid = sched.alloc_tid();
+            let exit_stub = api.lookup("wire", "ExitThread").unwrap();
+            let handle = state.alloc_handle(HandleObj::Thread { tid });
+            sched.create_thread(mem, entry, param, flags & 4 != 0, tid, handle, exit_stub)?;
+            if args[5] != 0 {
+                mem.write_u32(args[5], tid).map_err(|e| e.to_string())?;
+            }
+            note = format!(
+                "tid {tid} entry={entry:#x} param={param:#x}{}",
+                if flags & 4 != 0 { " (suspended)" } else { "" }
+            );
+            ret = handle;
+        }
+        ("kernel32.dll", "GetCurrentThread") => ret = 0xffff_fffe,
+        ("kernel32.dll", "GetCurrentThreadId") => ret = sched.current_tid(),
+        ("kernel32.dll", "GetExitCodeThread") => {
+            let (code, running) = match sched.thread_index_by_handle(args[0]) {
+                Some(i) => match sched.threads[i].state {
+                    ThreadState::Exited(c) => (c, false),
+                    _ => (0x103, true), // STILL_ACTIVE
+                },
+                None => (0, false),
+            };
+            mem.write_u32(args[1], code).map_err(|e| e.to_string())?;
+            ret = 1;
+            note = if running { "STILL_ACTIVE".into() } else { format!("exited, code {code:#x}") };
+        }
+        ("kernel32.dll", "SuspendThread") => {
+            if let Some(i) = sched.thread_index_by_handle(args[0]) {
+                if matches!(sched.threads[i].state, ThreadState::Runnable) {
+                    sched.threads[i].state = ThreadState::Suspended;
+                }
+                ret = 0;
+            } else {
+                state.last_error = 6;
+                ret = u32::MAX;
+            }
+        }
+        ("kernel32.dll", "ResumeThread") => {
+            if let Some(i) = sched.thread_index_by_handle(args[0]) {
+                if sched.threads[i].state == ThreadState::Suspended {
+                    sched.threads[i].state = ThreadState::Runnable;
+                }
+                ret = 0;
+            } else {
+                state.last_error = 6;
+                ret = u32::MAX;
+            }
+        }
+        ("kernel32.dll", "SwitchToThread") => {
+            ret = sched.round_robin(cpu) as u32;
+        }
+        ("kernel32.dll", "Sleep") => {
+            if sched.take_wake().is_some() {
+                ret = 0; // void; woke after the full delay
+            } else if args[0] == 0 {
+                sched.round_robin(cpu); // yield
+                ret = 0;
+            } else {
+                let d = sched.arm_deadline(args[0]);
+                log.note(&format!(
+                    "thread {} sleeps {}ms",
+                    sched.current_tid(),
+                    args[0]
+                ));
+                sched.block_current(cpu, WaitTarget::Sleep, d)?;
+                return Ok(());
+            }
+        }
+        ("kernel32.dll", "SleepEx") => {
+            if sched.take_wake().is_some() {
+                ret = 0;
+            } else if args[0] == 0 {
+                sched.round_robin(cpu);
+                ret = 0;
+            } else {
+                let d = sched.arm_deadline(args[0]);
+                sched.block_current(cpu, WaitTarget::Sleep, d)?;
+                return Ok(());
+            }
+        }
+        // --- events ---
+        ("kernel32.dll", "CreateEventA") | ("kernel32.dll", "CreateEventW") => {
+            let wide = name.ends_with('W');
+            let nm = read_str(mem, args[3], wide);
+            let (h, existed) = state.create_named(&nm, || HandleObj::Event {
+                manual: args[1] != 0,
+                signaled: args[2] != 0,
+            });
+            note = format!(
+                "event \"{nm}\" manual={} signaled={}{}",
+                args[1] != 0,
+                args[2] != 0,
+                if existed { " (already exists)" } else { "" }
+            );
+            ret = h;
+        }
+        ("kernel32.dll", "OpenEventA") | ("kernel32.dll", "OpenEventW") => {
+            let wide = name.ends_with('W');
+            let nm = read_str(mem, args[2], wide);
+            match state.named_objs.get(&nm) {
+                Some(&h) => {
+                    ret = h;
+                    note = format!("event \"{nm}\"");
+                }
+                None => {
+                    state.last_error = 2; // ERROR_FILE_NOT_FOUND
+                    ret = 0;
+                    note = format!("event \"{nm}\" not found");
+                }
+            }
+        }
+        ("kernel32.dll", "SetEvent") => {
+            match state.handles.get_mut(&args[0]) {
+                Some(HandleObj::Event { manual, signaled }) => {
+                    let manual = *manual;
+                    *signaled = true;
+                    let woken = wake_obj_waiters(sched, args[0], if manual { usize::MAX } else { 1 });
+                    note = format!("woke {woken} waiter(s)");
+                    ret = 1;
+                }
+                _ => {
+                    state.last_error = 6;
+                    ret = 0;
+                    note = "bad event handle".into();
+                }
+            }
+        }
+        ("kernel32.dll", "ResetEvent") => {
+            match state.handles.get_mut(&args[0]) {
+                Some(HandleObj::Event { signaled, .. }) => {
+                    *signaled = false;
+                    ret = 1;
+                }
+                _ => {
+                    state.last_error = 6;
+                    ret = 0;
+                }
+            }
+        }
+        ("kernel32.dll", "PulseEvent") => {
+            match state.handles.get_mut(&args[0]) {
+                Some(HandleObj::Event { manual, signaled }) => {
+                    let manual = *manual;
+                    *signaled = false;
+                    let woken = wake_obj_waiters(sched, args[0], if manual { usize::MAX } else { 1 });
+                    note = format!("woke {woken} waiter(s)");
+                    ret = 1;
+                }
+                _ => {
+                    state.last_error = 6;
+                    ret = 0;
+                }
+            }
+        }
+        // --- mutexes ---
+        ("kernel32.dll", "CreateMutexA") | ("kernel32.dll", "CreateMutexW") => {
+            let wide = name.ends_with('W');
+            let nm = read_str(mem, args[2], wide);
+            let me = sched.current_tid();
+            let own = args[1] != 0;
+            let (h, existed) = state.create_named(&nm, || HandleObj::Mutex {
+                owner: if own { Some(me) } else { None },
+                count: if own { 1 } else { 0 },
+            });
+            note = format!("mutex \"{nm}\"{}", if existed { " (already exists)" } else { "" });
+            ret = h;
+        }
+        ("kernel32.dll", "ReleaseMutex") => {
+            let me = sched.current_tid();
+            match state.handles.get_mut(&args[0]) {
+                Some(HandleObj::Mutex { owner, count }) if *owner == Some(me) => {
+                    *count -= 1;
+                    if *count == 0 {
+                        *owner = None;
+                        wake_obj_waiters(sched, args[0], 1);
+                    }
+                    ret = 1;
+                }
+                Some(HandleObj::Mutex { .. }) => {
+                    state.last_error = 288; // ERROR_NOT_OWNER
+                    ret = 0;
+                    note = "not the owner".into();
+                }
+                _ => {
+                    state.last_error = 6;
+                    ret = 0;
+                    note = "bad mutex handle".into();
+                }
+            }
+        }
+        // --- semaphores ---
+        ("kernel32.dll", "CreateSemaphoreW") | ("kernel32.dll", "CreateSemaphoreA") => {
+            let wide = name.ends_with('W');
+            let nm = read_str(mem, args[3], wide);
+            let (initial, max) = (args[1] as i32, args[2] as i32);
+            let (h, existed) = state.create_named(&nm, || HandleObj::Semaphore {
+                count: initial,
+                max,
+            });
+            note = format!("semaphore \"{nm}\" {initial}/{max}{}", if existed { " (already exists)" } else { "" });
+            ret = h;
+        }
+        ("kernel32.dll", "ReleaseSemaphore") => {
+            match state.handles.get_mut(&args[0]) {
+                Some(HandleObj::Semaphore { count, max }) => {
+                    let prev = *count;
+                    let n = args[1] as i32;
+                    *count = (*count + n).min(*max);
+                    if args[2] != 0 {
+                        mem.write_u32(args[2], prev as u32).map_err(|e| e.to_string())?;
+                    }
+                    let woken = wake_obj_waiters(sched, args[0], n.max(0) as usize);
+                    note = format!("count {prev} -> {}, woke {woken}", *count);
+                    ret = 1;
+                }
+                _ => {
+                    state.last_error = 6;
+                    ret = 0;
+                    note = "bad semaphore handle".into();
+                }
+            }
+        }
+        // --- waits ---
+        ("kernel32.dll", "WaitForSingleObject") => {
+            let (h, timeout) = (args[0], args[1]);
+            match sched.take_wake() {
+                Some(Wake::Completed(r)) => {
+                    ret = r;
+                    note = "wait completed".into();
+                }
+                wake => {
+                    if obj_acquire(state, sched, h) {
+                        sched.clear_deadline();
+                        ret = WAIT_OBJECT_0;
+                    } else if !state.handles.contains_key(&h) {
+                        sched.clear_deadline();
+                        state.last_error = 6;
+                        ret = 0xffff_ffff; // WAIT_FAILED
+                        note = "invalid handle".into();
+                    } else if timeout == 0 && wake.is_none() {
+                        ret = WAIT_TIMEOUT;
+                        note = "poll, not ready".into();
+                    } else {
+                        let d = sched.arm_deadline(timeout);
+                        log.note(&format!(
+                            "thread {} blocks in WaitForSingleObject({h:#x}, {}ms)",
+                            sched.current_tid(),
+                            if timeout == u32::MAX { "inf".into() } else { timeout.to_string() }
+                        ));
+                        sched.block_current(cpu, WaitTarget::Object(h), d)?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        ("kernel32.dll", "WaitForMultipleObjects") => {
+            let (n, ptr, wait_all, timeout) = (args[0], args[1], args[2] != 0, args[3]);
+            let mut hs = Vec::new();
+            for i in 0..n.min(64) {
+                hs.push(mem.read_u32(ptr + 4 * i).map_err(|e| e.to_string())?);
+            }
+            match sched.take_wake() {
+                Some(Wake::Completed(r)) => {
+                    ret = r;
+                    note = "wait completed".into();
+                }
+                wake => {
+                    let mut got = None;
+                    if wait_all {
+                        if hs.iter().all(|&h| obj_ready(state, sched, h)) {
+                            for &h in &hs {
+                                obj_acquire(state, sched, h);
+                            }
+                            got = Some(0);
+                        }
+                    } else {
+                        for (i, &h) in hs.iter().enumerate() {
+                            if obj_acquire(state, sched, h) {
+                                got = Some(i as u32);
+                                break;
+                            }
+                        }
+                    }
+                    match got {
+                        Some(i) => {
+                            sched.clear_deadline();
+                            ret = WAIT_OBJECT_0 + i;
+                        }
+                        None if timeout == 0 && wake.is_none() => {
+                            ret = WAIT_TIMEOUT;
+                            note = "poll, not ready".into();
+                        }
+                        None => {
+                            let d = sched.arm_deadline(timeout);
+                            log.note(&format!(
+                                "thread {} blocks in WaitForMultipleObjects({hs:?}, all={wait_all})",
+                                sched.current_tid()
+                            ));
+                            sched.block_current(cpu, WaitTarget::Multi(hs, wait_all), d)?;
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+        ("kernel32.dll", "CloseHandle") => {
+            if state.handles.remove(&args[0]).is_some() {
+                ret = 1;
+            } else {
+                state.last_error = 6;
+                ret = 0;
+                note = "unknown handle".into();
+            }
+        }
+        ("kernel32.dll", "SetThreadPriority") => {
+            ret = 1;
+            note = "no-op (cooperative scheduler)".into();
+        }
+        ("kernel32.dll", "GetThreadPriority") => ret = 0, // THREAD_PRIORITY_NORMAL
         ("kernel32.dll", "GetLastError") => ret = state.last_error,
         ("kernel32.dll", "SetLastError") => {
             state.last_error = args[0];
@@ -688,10 +1169,6 @@ pub fn dispatch(
         ("kernel32.dll", "GetCurrentProcessId") => {
             ret = 4242;
             note = "fake pid".into();
-        }
-        ("kernel32.dll", "GetCurrentThreadId") => {
-            ret = 1;
-            note = "fake tid".into();
         }
         ("kernel32.dll", "GetTickCount") => {
             ret = state.start.elapsed().as_millis() as u32;
@@ -884,15 +1361,97 @@ pub fn dispatch(
             ret = 0;
             note = "no-op".into();
         }
-        // --- critical sections: no-ops (single-threaded assumption, M2 documents) ---
-        ("kernel32.dll", "InitializeCriticalSection") => ret = 0, // void
-        ("kernel32.dll", "InitializeCriticalSectionAndSpinCount")
-        | ("kernel32.dll", "InitializeCriticalSectionEx") => ret = 1,
-        ("kernel32.dll", "EnterCriticalSection") | ("kernel32.dll", "LeaveCriticalSection") => {
+        // --- critical sections: real owner/recursion bookkeeping in the guest
+        // CRITICAL_SECTION struct; contention blocks cooperatively. The
+        // LockCount field only distinguishes free (-1) vs held (0); waiter
+        // counts are not maintained (documented simplification).
+        ("kernel32.dll", "InitializeCriticalSection") => {
+            let cs = args[0];
+            mem.write_u32(cs, 0).map_err(|e| e.to_string())?;
+            mem.write_u32(cs + 4, u32::MAX).map_err(|e| e.to_string())?; // LockCount = -1
+            mem.write_u32(cs + 8, 0).map_err(|e| e.to_string())?; // RecursionCount
+            mem.write_u32(cs + 12, 0).map_err(|e| e.to_string())?; // OwningThread
+            mem.write_u32(cs + 16, 0).map_err(|e| e.to_string())?; // LockSemaphore
+            mem.write_u32(cs + 20, 0).map_err(|e| e.to_string())?; // SpinCount
             ret = 0; // void
         }
-        ("kernel32.dll", "TryEnterCriticalSection") => ret = 1,
-        ("kernel32.dll", "DeleteCriticalSection") => ret = 0, // void
+        ("kernel32.dll", "InitializeCriticalSectionAndSpinCount")
+        | ("kernel32.dll", "InitializeCriticalSectionEx") => {
+            let cs = args[0];
+            let spin = if name.ends_with("Ex") { args[2] } else { args[1] };
+            mem.write_u32(cs, 0).map_err(|e| e.to_string())?;
+            mem.write_u32(cs + 4, u32::MAX).map_err(|e| e.to_string())?;
+            mem.write_u32(cs + 8, 0).map_err(|e| e.to_string())?;
+            mem.write_u32(cs + 12, 0).map_err(|e| e.to_string())?;
+            mem.write_u32(cs + 16, 0).map_err(|e| e.to_string())?;
+            mem.write_u32(cs + 20, spin).map_err(|e| e.to_string())?;
+            ret = 1;
+        }
+        ("kernel32.dll", "EnterCriticalSection") => {
+            let cs = args[0];
+            let me = sched.current_tid();
+            let owner = mem.read_u32(cs + 12).map_err(|e| e.to_string())?;
+            if owner == 0 || owner == me {
+                let rc = mem.read_u32(cs + 8).map_err(|e| e.to_string())?;
+                mem.write_u32(cs + 12, me).map_err(|e| e.to_string())?;
+                mem.write_u32(cs + 8, rc + 1).map_err(|e| e.to_string())?;
+                mem.write_u32(cs + 4, 0).map_err(|e| e.to_string())?;
+                ret = 0; // void
+            } else {
+                sched.take_wake(); // discard Retest; fall through to re-test
+                log.note(&format!(
+                    "thread {} blocks on CRITICAL_SECTION {cs:#x} (owner tid {owner})",
+                    sched.current_tid()
+                ));
+                sched.block_current(cpu, WaitTarget::CriticalSection(cs), None)?;
+                return Ok(());
+            }
+        }
+        ("kernel32.dll", "LeaveCriticalSection") => {
+            let cs = args[0];
+            let rc = mem
+                .read_u32(cs + 8)
+                .map_err(|e| e.to_string())?
+                .saturating_sub(1);
+            mem.write_u32(cs + 8, rc).map_err(|e| e.to_string())?;
+            if rc == 0 {
+                mem.write_u32(cs + 12, 0).map_err(|e| e.to_string())?;
+                mem.write_u32(cs + 4, u32::MAX).map_err(|e| e.to_string())?;
+                for i in 0..sched.threads.len() {
+                    if matches!(
+                        &sched.threads[i].state,
+                        ThreadState::Waiting {
+                            target: WaitTarget::CriticalSection(a),
+                            ..
+                        } if *a == cs
+                    ) {
+                        sched.wake_thread(i, Wake::Retest);
+                        break;
+                    }
+                }
+            }
+            ret = 0; // void
+        }
+        ("kernel32.dll", "TryEnterCriticalSection") => {
+            let cs = args[0];
+            let me = sched.current_tid();
+            let owner = mem.read_u32(cs + 12).map_err(|e| e.to_string())?;
+            if owner == 0 || owner == me {
+                let rc = mem.read_u32(cs + 8).map_err(|e| e.to_string())?;
+                mem.write_u32(cs + 12, me).map_err(|e| e.to_string())?;
+                mem.write_u32(cs + 8, rc + 1).map_err(|e| e.to_string())?;
+                mem.write_u32(cs + 4, 0).map_err(|e| e.to_string())?;
+                ret = 1;
+            } else {
+                ret = 0;
+            }
+        }
+        ("kernel32.dll", "DeleteCriticalSection") => {
+            let cs = args[0];
+            mem.write_u32(cs + 4, u32::MAX).map_err(|e| e.to_string())?;
+            mem.write_u32(cs + 12, 0).map_err(|e| e.to_string())?;
+            ret = 0; // void
+        }
         // --- TLS / FLS ---
         ("kernel32.dll", "TlsAlloc") => {
             ret = state.next_tls;
@@ -921,7 +1480,6 @@ pub fn dispatch(
             state.fls.remove(&args[0]);
             ret = 1;
         }
-        ("kernel32.dll", "GetCurrentThread") => ret = 0xffff_fffe,
         ("kernel32.dll", "LoadLibraryExA") | ("kernel32.dll", "LoadLibraryExW") => {
             let wide = name.ends_with('W');
             let n = read_str(mem, args[0], wide);
@@ -994,7 +1552,7 @@ pub fn dispatch(
             ret = 0;
         }
         _ => {
-            match crt_dispatch(dll, name, &args, cpu, mem, api, state, log, max_instr)? {
+            match crt_dispatch(dll, name, &args, cpu, mem, api, state, log, sched, max_instr)? {
                 Some(v) => {
                     ret = v;
                     note = "crt shim".into();
@@ -1035,6 +1593,7 @@ fn crt_dispatch(
     api: &mut ApiTable,
     state: &mut ApiState,
     log: &mut ApiLogger,
+    sched: &mut Sched,
     max_instr: u64,
 ) -> Result<Option<u32>, String> {
     if !(dll.starts_with("api-ms-win-crt-")
@@ -1098,7 +1657,7 @@ fn crt_dispatch(
             while a < end {
                 let f = mem.read_u32(a).unwrap_or(0);
                 if f != 0 {
-                    let v = cpu.call_guest(mem, api, state, log, f, &[], max_instr)?;
+                    let v = cpu.call_guest(mem, api, state, log, sched, f, &[], max_instr)?;
                     if name.ends_with("_e") && v != 0 && first_err == 0 {
                         first_err = v;
                     }
