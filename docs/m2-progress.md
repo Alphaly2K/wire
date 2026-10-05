@@ -9,6 +9,26 @@ M2 **尚未验收，不打 tag**。前两次本地检查点为 `75f90a6`（线�
 并实现 CALL_NATIVE/IAT guard。M2功能阻塞仍为 RtlUnwind；不能将 IR 原型计为 M2验收。
 最新软件 x87/系统/NLS 检查点是 `ca94a36`。
 
+## 最新：真实 CPU profile 与 x87 热点优化
+
+沿解释器主路径检查点 `a3de840`，使用完整游戏目录抓取四次 IR、两次 raw 的 macOS sample，
+另抓一份 Instruments Time Profiler；排除启动/IR绑定，只分析 `Cpu::run_loop` 的运行期样本。
+基线 4,781 个样本里软件 x87 占 **63.75%**，IR执行/缓存 **20.14%**；
+固定十进制常量反复解析占 **15.92%**，APFloat通用除法 self 占 **27.88%**。
+此前整数IR优化覆盖了有限的实际CPU成本。
+
+本轮只解析一次LN2，FLD常数按四种RC缓存；级数中的1…255小整数除法用精确u128商/余数和
+nearest-even舍入替换，subnormal/下溢风险/NaN/Inf仍回APFloat。保留binary128中间值、FP80最终舍入和异常逻辑。
+26,536次与APFloat逐位oracle比较通过；FLDPI额外验证切换RC后的位模式。
+优化后三次采样（2,420个运行期样本）x87占 **48.68%**，未再采到常量解析热点。
+
+四对AB/BA无profiler对照：guest MIPS中位数 **15.02→18.76（约+25%）**，
+全进程CPU时间中位数 **1.402s→1.044s（约−26%）**；每对CPU时间减少约19%…29%。
+guest初始化有轻微计时路径差异，并非严格同路径；一次Instruments记录83%运行期样本在E core，
+因此不能把跨批次绝对MIPS当成稳定上限。完整 **72项回归**、Clippy/format通过。
+仍停在RtlUnwind，性能目标和M2均未验收。详细口径、热点表、复现命令与本机trace位置见
+[CPU profile记录](cpu-profile-2026-10-05.md)。下一瓶颈仍是软件浮点division及IR调度，按profile继续定位。
+
 ## 最新：解释器主路径的运行时优化
 
 用户再次明确：**解释执行为主，Wasm仅作可用时的加速；当前急需提升主解释器吞吐。**

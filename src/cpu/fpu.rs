@@ -6,6 +6,7 @@ use crate::mem::GuestMem;
 use rustc_apfloat::ieee::{Double, IeeeFloat, Quad, Semantics, Single, X87DoubleExtended};
 use rustc_apfloat::{Float, FloatConvert, Round, Status, StatusAnd};
 use std::cmp::Ordering;
+use std::sync::LazyLock;
 
 type Ext = X87DoubleExtended;
 const C0: u16 = 0x100;
@@ -13,6 +14,74 @@ const C1: u16 = 0x200;
 const C2: u16 = 0x400;
 const C3: u16 = 0x4000;
 const INDEFINITE: u128 = 0xffff_c000_0000_0000_0000;
+static LN2: LazyLock<Quad> = LazyLock::new(|| {
+    Quad::from_str_r(
+        "0.693147180559945309417232121458176568075500134360255254120",
+        Round::NearestTiesToEven,
+    )
+    .unwrap()
+    .value
+});
+static LOAD_CONSTANTS: LazyLock<[[Ext; 7]; 4]> = LazyLock::new(|| {
+    [
+        Round::NearestTiesToEven,
+        Round::TowardNegative,
+        Round::TowardPositive,
+        Round::TowardZero,
+    ]
+    .map(|round| {
+        [
+            "1",
+            "3.321928094887362347870319429489390175864831393",
+            "1.442695040888963407359924681001892137426645954",
+            "3.141592653589793238462643383279502884197169399",
+            "0.301029995663981195213738894724493026768189881",
+            "0.693147180559945309417232121458176568075500134",
+            "0",
+        ]
+        .map(|text| Ext::from_str_r(text, round).unwrap().value)
+    })
+});
+
+/// The series divides binary128 terms by integers <=255. Divide their exact
+/// significand using u128 quotient/remainder, then round once to nearest-even.
+/// This produces the same bits as APFloat, without its general float division.
+/// Subnormal/underflow and non-finite inputs retain the general implementation.
+#[inline]
+fn quad_divide_small(x: Quad, n: u32) -> Quad {
+    let bits = x.to_bits();
+    let mut exponent = ((bits >> 112) & 0x7fff) as u32;
+    let mut shift = if n == 0 {
+        0
+    } else {
+        32 - (n - 1).leading_zeros()
+    };
+    if !(1..=255).contains(&n) || exponent <= shift || exponent == 0x7fff {
+        return (x / Quad::from_u128(n as u128).value).value;
+    }
+    const FRACTION: u128 = (1 << 112) - 1;
+    let significand = (bits & FRACTION) | (1 << 112);
+    let numerator = significand << shift; // at most 121 bits
+    let mut divisor = n as u128;
+    let mut quotient = numerator / divisor;
+    let mut remainder = numerator % divisor;
+    if quotient >= 1 << 113 {
+        // Normalize one bit without losing its contribution to the remainder.
+        remainder += (quotient & 1) * divisor;
+        divisor *= 2;
+        quotient >>= 1;
+        shift -= 1;
+    }
+    exponent -= shift;
+    if remainder * 2 > divisor || (remainder * 2 == divisor && quotient & 1 != 0) {
+        quotient += 1;
+        if quotient == 1 << 113 {
+            quotient >>= 1;
+            exponent += 1;
+        }
+    }
+    Quad::from_bits((bits & (1 << 127)) | ((exponent as u128) << 112) | (quotient & FRACTION))
+}
 struct P24;
 impl Semantics for P24 {
     const BITS: usize = 39;
@@ -261,23 +330,14 @@ impl Fpu {
         r.value
     }
     fn ln2() -> Quad {
-        Quad::from_str_r(
-            "0.693147180559945309417232121458176568075500134360255254120",
-            Round::NearestTiesToEven,
-        )
-        .unwrap()
-        .value
+        *LN2
     }
     fn log2(x: Quad) -> Quad {
         let mut exponent = 0;
         let mut mantissa = x.frexp_r(&mut exponent, Round::NearestTiesToEven);
         // Keep the mantissa close to one. Normalizing exclusively to [1,2)
         // would cancel almost all significant bits for inputs just below one.
-        if mantissa
-            < Quad::from_str_r("0.75", Round::NearestTiesToEven)
-                .unwrap()
-                .value
-        {
+        if mantissa < Quad::from_bits(0x3ffe_8000_0000_0000_0000_0000_0000_0000) {
             mantissa = mantissa.scalbn(1);
             exponent -= 1;
         }
@@ -292,7 +352,7 @@ impl Fpu {
         let mut sum = z;
         for n in 1..128 {
             power = (power * z2).value;
-            let next = (sum + (power / Quad::from_u128(2 * n + 1).value).value).value;
+            let next = (sum + quad_divide_small(power, 2 * n + 1)).value;
             if next == sum {
                 break;
             }
@@ -331,14 +391,13 @@ impl Fpu {
             let r = y.mul_r(logarithm, self.round());
             self.accept(r, r.value)
         } else {
-            let logarithm =
-                if plus_one && x.abs() <= Ext::from_str_r("0.5", self.round()).unwrap().value {
-                    let x = Self::to_quad(x);
-                    let z = (x / (x + Quad::from_u128(2).value).value).value;
-                    Self::atanh_log2(z)
-                } else {
-                    Self::log2(q)
-                };
+            let logarithm = if plus_one && x.abs() <= Ext::from_bits(0x3ffe_8000_0000_0000_0000) {
+                let x = Self::to_quad(x);
+                let z = (x / (x + Quad::from_u128(2).value).value).value;
+                Self::atanh_log2(z)
+            } else {
+                Self::log2(q)
+            };
             let q = (logarithm * Self::to_quad(y)).value;
             self.narrow_quad(q)
         };
@@ -366,14 +425,14 @@ impl Fpu {
             return;
         }
         if x == -one {
-            self.put(0, Ext::from_str_r("-0.5", self.round()).unwrap().value);
+            self.put(0, Ext::from_bits(0xbffe_8000_0000_0000_0000));
             return;
         }
         let z = (Self::to_quad(x) * Self::ln2()).value;
         let mut term = z;
         let mut sum = z;
         for n in 2..128 {
-            term = ((term * z).value / Quad::from_u128(n).value).value;
+            term = quad_divide_small((term * z).value, n);
             let next = (sum + term).value;
             if next == sum {
                 break;
@@ -576,16 +635,7 @@ impl Cpu {
                         | if x.is_negative() { C1 } else { 0 };
                 }
                 (0xd9, 0xe8..=0xee) => {
-                    let s = match b {
-                        0xe8 => "1",
-                        0xe9 => "3.321928094887362347870319429489390175864831393",
-                        0xea => "1.442695040888963407359924681001892137426645954",
-                        0xeb => "3.141592653589793238462643383279502884197169399",
-                        0xec => "0.301029995663981195213738894724493026768189881",
-                        0xed => "0.693147180559945309417232121458176568075500134",
-                        _ => "0",
-                    };
-                    let x = Ext::from_str_r(s, self.fpu.round()).unwrap().value;
+                    let x = LOAD_CONSTANTS[((self.fpu.cw >> 10) & 3) as usize][(b - 0xe8) as usize];
                     self.fpu.push(x);
                 }
                 (0xd9, 0xf0) => self.fpu.exp2_minus_one(),
@@ -832,5 +882,44 @@ impl Cpu {
             mem.write_u32(a + 24, 0xffff0000)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn small_integer_quad_division_matches_apfloat_bits() {
+        let mut seed = 0x3ac5_79df_1234_5678_9abc_def0_2468_1357u128;
+        for exponent in [0, 1, 2, 7, 8, 9, 0x3fff, 0x7ffe, 0x7fff] {
+            for fraction in [0, 1, 1 << 111, (1 << 112) - 1] {
+                for sign in [0, 1 << 127] {
+                    let bits = sign | (exponent << 112) | fraction;
+                    check(bits, 1..=255);
+                }
+            }
+        }
+        for _ in 0..4096 {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            check(seed, std::iter::once((seed as u32 % 255) + 1));
+        }
+        // Adjacent near-one significands exercise normalization and rounding.
+        for fraction in 0..16 {
+            check((0x3fffu128 << 112) | fraction, 1..=255);
+        }
+        fn check(bits: u128, divisors: impl IntoIterator<Item = u32>) {
+            let x = Quad::from_bits(bits);
+            for n in divisors {
+                let expected = (x / Quad::from_u128(n as u128).value).value.to_bits();
+                assert_eq!(
+                    quad_divide_small(x, n).to_bits(),
+                    expected,
+                    "{bits:032x} / {n}"
+                );
+            }
+        }
     }
 }

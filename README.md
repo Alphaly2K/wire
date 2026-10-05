@@ -66,6 +66,7 @@ CALL_NATIVE 保留 IAT hook、现有 API 栈清理和 callback 行为。设计�
 [IR AOT 设计](docs/ir-aot-design.md)；长期计划的修正见 [方案评审](docs/project-plan-review.md)。
 版本3增加typed load/store/LEA、顺序链接和连续解释段，保留所有访存/代码失效检查；版本2 `.wir` 需重新生成。
 解释执行是主路径，性能优化以此为优先；Wasm只作可用时的可选加速。
+真实游戏CPU热点、x87优化及可复现的采样工具见 [CPU profile记录](docs/cpu-profile-2026-10-05.md)。
 实验性单循环IR→Wasm lowering、系统JSC JIT和native bridge的验证见 [可行性记录](docs/wasm-jsc-feasibility.md)，
 尚未接入主程序或完整guest内存模型。
 

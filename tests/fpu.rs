@@ -111,6 +111,21 @@ fn x87_masked_stack_faults_and_denormals() {
 #[test]
 fn x87_software_math_known_extended_results() {
     let mut v = Vm::new();
+    // FLDPI must follow the current RC even after another RC used the cache.
+    for (rc, significand) in [
+        (0, 0xc90f_daa2_2168_c235u128),
+        (1, 0xc90f_daa2_2168_c234),
+        (2, 0xc90f_daa2_2168_c235),
+        (3, 0xc90f_daa2_2168_c234),
+        (0, 0xc90f_daa2_2168_c235),
+    ] {
+        v.run(&[0xdb, 0xe3]).unwrap();
+        v.cpu.fpu.cw = 0x37f | (rc << 10);
+        v.run(&[0xd9, 0xeb]).unwrap();
+        assert_eq!(v.cpu.fpu.st_bits(0), (0x4000u128 << 64) | significand);
+        assert_eq!(v.cpu.fpu.sw & 0x3f, 0); // constants do not raise inexact
+    }
+    v.run(&[0xdb, 0xe3]).unwrap();
     v.load(0x4000_8000_0000_0000_0000); // 2
     v.run(&[0xd9, 0xfa]).unwrap();
     assert_eq!(v.cpu.fpu.st_bits(0), 0x3fff_b504_f333_f9de_6484);
