@@ -37,7 +37,7 @@ fn input(mem: &GuestMem, ptr: u32, len: u32, width: u32) -> Result<Vec<u8>, u32>
 pub fn dispatch(
     dll: &str,
     name: &str,
-    a: &[u32; 12],
+    a: &crate::api::Args,
     mem: &mut GuestMem,
     state: &mut ApiState,
 ) -> Option<(u32, String)> {

@@ -92,7 +92,7 @@ pub fn raise(
     state: &mut ApiState,
     log: &mut ApiLogger,
     sched: &mut Sched,
-    args: &[u32; 12],
+    args: &crate::api::Args,
     max_instr: u64,
 ) -> Result<(), String> {
     let saved = cpu.save_ctx();
@@ -220,7 +220,7 @@ pub fn unwind(
     state: &mut ApiState,
     log: &mut ApiLogger,
     sched: &mut Sched,
-    args: &[u32; 12],
+    args: &crate::api::Args,
     max_instr: u64,
 ) -> Result<(), String> {
     let saved = cpu.save_ctx();

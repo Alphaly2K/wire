@@ -13,6 +13,7 @@ use crate::thread::{
     target_mentions, Sched, ThreadState, WaitTarget, Wake, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use std::collections::{HashMap, VecDeque};
+pub type Args = [u32; 16];
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::sync::OnceLock;
@@ -56,10 +57,15 @@ impl ApiTable {
     pub fn register(&mut self, dll: &str, name: Option<&str>, ordinal: Option<u16>) -> u32 {
         let dll = dll.to_ascii_lowercase();
         let name = name
+            .or_else(|| ordinal.and_then(|o| crate::win32_abi::ordinal_name(&dll, o)))
             .map(|n| n.to_string())
             .unwrap_or_else(|| format!("#{}", ordinal.unwrap_or(0)));
         let key = (dll.clone(), name.clone());
         if let Some(&addr) = self.by_key.get(&key) {
+            if ordinal.is_some() {
+                let index = ((addr - STUB_BASE) / STUB_STRIDE) as usize;
+                self.entries[index].ordinal = ordinal;
+            }
             return addr;
         }
         let idx = self.entries.len();
@@ -116,6 +122,9 @@ pub enum HandleObj {
     Thread {
         tid: u32,
     },
+    Process {
+        access: u32,
+    },
 }
 
 /// Mutable host-side state for the emulated process.
@@ -144,8 +153,12 @@ pub struct ApiState {
     pub named_objs: HashMap<String, u32>, // event/mutex/semaphore name -> handle
     pub next_handle: u32,
     pub user32: crate::user32::User32,
+    pub(crate) menus: crate::menu::Menus,
     pub modules: crate::modules::Modules,
     pub gdiplus: crate::gdiplus::GdiPlus,
+    pub graphics: crate::graphics::Graphics,
+    pub(crate) bstrs: HashMap<u32, u32>,
+    pub(crate) com_threads: HashMap<u32, (u32, u32)>,
 }
 
 impl ApiState {
@@ -175,8 +188,12 @@ impl ApiState {
             named_objs: HashMap::new(),
             next_handle: 0x100,
             user32: crate::user32::User32::default(),
+            menus: crate::menu::Menus::default(),
             modules: crate::modules::Modules::default(),
             gdiplus: crate::gdiplus::GdiPlus::default(),
+            graphics: crate::graphics::Graphics::default(),
+            bstrs: HashMap::new(),
+            com_threads: HashMap::new(),
         };
         for dll in [
             "kernel32.dll",
@@ -667,7 +684,7 @@ fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("SetDefaultDllDirectories", 4),
                 ("EnumSystemLocalesEx", 16),
                 ("CompareStringEx", 36),
-                ("GetDateFormatEx", 24),
+                ("GetDateFormatEx", 28),
                 ("GetLocaleInfoEx", 16),
                 ("GetTimeFormatEx", 24),
                 ("GetUserDefaultLocaleName", 8),
@@ -710,8 +727,8 @@ fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetExitCodeProcess", 8),
                 ("CreateProcessW", 40),
                 ("CreatePipe", 16),
-                ("GetTimeFormatW", 16),
-                ("GetDateFormatW", 16),
+                ("GetTimeFormatW", 24),
+                ("GetDateFormatW", 24),
                 ("lstrcmpW", 8),
                 ("lstrcmpA", 8),
                 ("lstrlenW", 4),
@@ -826,7 +843,7 @@ fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetShellWindow", 0),
                 ("GetParent", 4),
                 ("SetParent", 8),
-                ("DrawIcon", 12),
+                ("DrawIcon", 16),
                 ("FillRect", 12),
                 ("FrameRect", 12),
                 ("InvertRect", 8),
@@ -877,6 +894,26 @@ fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetDlgItemTextW", 16),
                 ("GetMenu", 4),
                 ("SetMenu", 8),
+                ("CreateMenu", 0),
+                ("CreatePopupMenu", 0),
+                ("DestroyMenu", 4),
+                ("IsMenu", 4),
+                ("InsertMenuItemA", 16),
+                ("InsertMenuItemW", 16),
+                ("SetMenuItemInfoA", 16),
+                ("SetMenuItemInfoW", 16),
+                ("GetMenuItemInfoA", 16),
+                ("GetMenuItemInfoW", 16),
+                ("RemoveMenu", 12),
+                ("DeleteMenu", 12),
+                ("GetSubMenu", 8),
+                ("GetMenuItemID", 8),
+                ("GetMenuState", 12),
+                ("EnableMenuItem", 12),
+                ("CheckMenuItem", 12),
+                ("DrawMenuBar", 4),
+                ("TrackPopupMenuEx", 24),
+                ("GetKeyNameTextW", 12),
                 ("LoadMenuA", 8),
                 ("LoadMenuW", 8),
                 ("TrackPopupMenu", 28),
@@ -943,7 +980,7 @@ fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("BitBlt", 36),
                 ("StretchBlt", 44),
                 ("PatBlt", 24),
-                ("MaskBlt", 52),
+                ("MaskBlt", 48),
                 ("TransparentBlt", 44),
                 ("AlphaBlend", 44),
                 ("GradientFill", 24),
@@ -956,7 +993,7 @@ fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("CreateFontA", 56),
                 ("CreateFontW", 56),
                 ("CreatePen", 12),
-                ("CreatePenIndirect", 12),
+                ("CreatePenIndirect", 4),
                 ("CreateSolidBrush", 4),
                 ("CreateHatchBrush", 8),
                 ("CreatePatternBrush", 4),
@@ -965,7 +1002,7 @@ fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("CreateRectRgnIndirect", 4),
                 ("CreateEllipticRgn", 16),
                 ("CreateRoundRectRgn", 24),
-                ("CombineRgn", 20),
+                ("CombineRgn", 16),
                 ("SelectClipRgn", 8),
                 ("SetTextColor", 8),
                 ("GetTextColor", 4),
@@ -1031,8 +1068,8 @@ fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("SetBrushOrgEx", 16),
                 ("UnrealizeObject", 4),
                 ("GetClipBox", 8),
-                ("IntersectClipRect", 16),
-                ("ExcludeClipRect", 16),
+                ("IntersectClipRect", 20),
+                ("ExcludeClipRect", 20),
                 ("SaveDC", 4),
                 ("RestoreDC", 8),
                 ("GetTextFaceA", 12),
@@ -1235,6 +1272,31 @@ fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("IsWindowEnabled", 4),
                 ("SetPropW", 12),
                 ("GetMenuItemCount", 4),
+                ("CreateDialogIndirectParamW", 20),
+                ("DialogBoxIndirectParamW", 20),
+                ("CreateIconIndirect", 4),
+                ("DestroyIcon", 4),
+                ("EnumChildWindows", 12),
+                ("EnumDisplayMonitors", 16),
+                ("GetClassNameW", 12),
+                ("GetClassNameA", 12),
+                ("GetDialogBaseUnits", 0),
+                ("GetDlgCtrlID", 4),
+                ("GetDlgItemInt", 16),
+                ("GetScrollInfo", 12),
+                ("GetWindowPlacement", 8),
+                ("IsDialogMessageW", 8),
+                ("LockWindowUpdate", 4),
+                ("MapDialogRect", 8),
+                ("MonitorFromPoint", 12),
+                ("MonitorFromRect", 8),
+                ("SendDlgItemMessageW", 20),
+                ("SendDlgItemMessageA", 20),
+                ("SetDlgItemInt", 16),
+                ("SetScrollInfo", 16),
+                ("SetWindowPlacement", 8),
+                ("SetRectEmpty", 4),
+                ("EqualRect", 8),
                 ("SetClipboardData", 8),
                 ("CloseClipboard", 0),
                 ("GetPriorityClipboardFormat", 8),
@@ -1338,6 +1400,9 @@ fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
     });
     if let Some(&b) = t.get(&(dll, name)) {
         return Some(b);
+    }
+    if let Some(bytes) = crate::win32_abi::stack_bytes(dll, name) {
+        return Some(bytes);
     }
     // CRT DLLs are cdecl: caller cleans the stack. (msvcr## = MSVC runtime,
     // api-ms-win-crt-* / ucrtbase = UCRT.)
@@ -1459,11 +1524,21 @@ pub fn dispatch(
             .read_u32(cpu.fs_base + 0x34)
             .map_err(|e| e.to_string())?;
     }
-    let mut args = [0u32; 12];
-    for (i, a) in args.iter_mut().enumerate() {
-        *a = mem
-            .read_u32(esp.wrapping_add(4 + 4 * i as u32))
-            .unwrap_or(0xdead_beef);
+    let mut args = [0u32; 16];
+    let stack_bytes = stack_args_bytes(dll, name);
+    let cdecl = dll.contains("crt") || dll.starts_with("msvcr");
+    let count = if cdecl {
+        12
+    } else {
+        stack_bytes.map_or(12, |n| (n / 4).min(16) as usize)
+    };
+    for (i, a) in args.iter_mut().take(count).enumerate() {
+        let input = mem.read_u32(esp.wrapping_add(4 + 4 * i as u32));
+        *a = if stack_bytes.is_some() && !cdecl {
+            input.map_err(|e| e.to_string())?
+        } else {
+            input.unwrap_or(0xdead_beef)
+        };
     }
     let mut implemented = true;
     let mut note = String::new();
@@ -1500,23 +1575,29 @@ pub fn dispatch(
             return Ok(());
         }
         ("kernel32.dll", "CreateThread") => {
-            let (entry, param, flags) = (args[2], args[3], args[4]);
-            let tid = sched.alloc_tid();
-            let exit_stub = api.lookup("wire", "ExitThread").unwrap();
-            let handle = state.alloc_handle(HandleObj::Thread { tid });
-            sched.create_thread(mem, entry, param, flags & 4 != 0, tid, handle, exit_stub)?;
-            let teb = sched.threads.last().unwrap().teb;
-            state
-                .modules
-                .setup_tls_thread(mem, &mut state.heap, state.process_heap, teb)?;
-            if args[5] != 0 {
-                mem.write_u32(args[5], tid).map_err(|e| e.to_string())?;
+            if !sched.has_thread_capacity() {
+                state.last_error = 8;
+                ret = 0;
+                note = "guest thread resource limit".into();
+            } else {
+                let (entry, param, flags) = (args[2], args[3], args[4]);
+                let tid = sched.alloc_tid();
+                let exit_stub = api.lookup("wire", "ExitThread").unwrap();
+                let handle = state.alloc_handle(HandleObj::Thread { tid });
+                sched.create_thread(mem, entry, param, flags & 4 != 0, tid, handle, exit_stub)?;
+                let teb = sched.threads.last().unwrap().teb;
+                state
+                    .modules
+                    .setup_tls_thread(mem, &mut state.heap, state.process_heap, teb)?;
+                if args[5] != 0 {
+                    mem.write_u32(args[5], tid).map_err(|e| e.to_string())?;
+                }
+                note = format!(
+                    "tid {tid} entry={entry:#x} param={param:#x}{}",
+                    if flags & 4 != 0 { " (suspended)" } else { "" }
+                );
+                ret = handle;
             }
-            note = format!(
-                "tid {tid} entry={entry:#x} param={param:#x}{}",
-                if flags & 4 != 0 { " (suspended)" } else { "" }
-            );
-            ret = handle;
         }
         ("kernel32.dll", "GetCurrentThread") => ret = 0xffff_fffe,
         ("kernel32.dll", "GetCurrentThreadId") => ret = sched.current_tid(),
@@ -2362,7 +2443,6 @@ pub fn dispatch(
             note = format!("SHOWN: [{caption}] {text}");
             ret = 1; // IDOK
         }
-        ("user32.dll", "GetActiveWindow") | ("user32.dll", "GetLastActivePopup") => ret = 0,
         ("mpr.dll", "WNetGetUniversalNameA") | ("mpr.dll", "WNetGetUniversalNameW") => {
             ret = 2250; // ERROR_NOT_CONNECTED: sandbox C: is a local drive
         }
@@ -2456,7 +2536,25 @@ pub fn dispatch(
             note = "font resource backend not ported".into();
         }
         _ => {
-            if let Some((v, msg)) = crate::vmem_api::dispatch(dll, name, &args, mem, state) {
+            if let Some((v, msg, supported)) =
+                crate::common_api::dispatch(dll, name, &args, mem, state, sched)
+            {
+                ret = v;
+                note = msg;
+                implemented = supported;
+            } else if let Some((v, msg, supported)) =
+                crate::graphics::dispatch(dll, name, &args, mem, state)
+            {
+                ret = v;
+                note = msg;
+                implemented = supported;
+            } else if let Some((v, msg, supported)) =
+                crate::menu::dispatch(dll, name, &args, mem, state)
+            {
+                ret = v;
+                note = msg;
+                implemented = supported;
+            } else if let Some((v, msg)) = crate::vmem_api::dispatch(dll, name, &args, mem, state) {
                 ret = v;
                 note = msg;
             } else if let Some((v, msg)) = crate::file_api::dispatch(dll, name, &args, mem, state) {
@@ -2472,6 +2570,7 @@ pub fn dispatch(
                 dll, name, &args, cpu, mem, api, state, log, sched, max_instr,
             ) {
                 let (outcome, message) = result?;
+                implemented = !crate::user32_common::unimplemented(name);
                 match outcome {
                     crate::cpu::GuestCallOutcome::Returned(value) => {
                         ret = value;
@@ -2490,7 +2589,8 @@ pub fn dispatch(
                     Some(_) => return Ok(()),
                     None => {
                         implemented = false;
-                        ret = 0;
+                        state.last_error = 120;
+                        ret = if dll == "ole32.dll" { 0x80004001 } else { 0 };
                         if stack_args_bytes(dll, name).is_none() {
                             note = "unknown stdcall arity, assuming cdecl/0-byte cleanup".into();
                         }
@@ -2523,7 +2623,7 @@ pub fn dispatch(
 fn crt_dispatch(
     dll: &str,
     name: &str,
-    args: &[u32; 12],
+    args: &crate::api::Args,
     cpu: &mut Cpu,
     mem: &mut GuestMem,
     api: &mut ApiTable,

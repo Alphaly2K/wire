@@ -42,3 +42,29 @@ wire's creation order rather than complete Wine z-order.
 - `COPYING.LIB`: `e237fa56668030e928551ddd60f05df5fe957f75eab874bbd017e085ed722e7c`
 - Original complete `dlls/user32/win.c`: `dbe619a36144c31416c3e6320243b1f22aa98d05a6bd59fa79659dcab8436c58`
 - Original complete `dlls/gdiplus/gdiplus_private.h`: `942454ba766d0859c42e12eb0f8b4142f6f61206718fb4c9dc7b0f993399c256`
+
+## Menu, common USER32 and unified ABI additions (2026-10-06)
+
+user32/menu.c and win32u/menu.c are complete unchanged source snapshots.
+user32/dialog-controls.c and window-text.c are unchanged excerpts with original
+headers. They are adapted in src/menu.rs and src/user32_common.rs, replacing
+Wine backend calls with guest handles, checked memory and guest callbacks.
+Eleven unchanged abi/*.spec files supply named/ordinal x86 stdcall contracts
+to src/win32_abi.rs; they do not establish functional API coverage.
+All sources use the same pinned Wine 10.0 commit above.
+
+- `abi/comctl32.spec`: `575cf9d7ececcce0b42875e622ce578b6bb40d577693ee6ee27a79a61f0b08a3`
+- `abi/comdlg32.spec`: `7ee7eb6ef510b49164ff2f8c2e7aebea13a18209c5f9a0f50ead38f572b83c3b`
+- `abi/gdi32.spec`: `05e185aadfc199bdf9ba09db763c60155684bbb042cb0bab41146a1cfbeed6cb`
+- `abi/kernel32.spec`: `ff1804fb97457a32d42c07b9da285847cbd2abfcd23f0c3729fda967645eceff`
+- `abi/mpr.spec`: `825a52b81a8245e3b80a2d5ca0283ab3e8b1bce33683f88afced3627c195fd70`
+- `abi/ole32.spec`: `124fc1cf35aa234b5496fe5e1ebe85a3dd81da32da9920ffae28ccbd83a21f14`
+- `abi/oleaut32.spec`: `d8682694db5c65e1ac04b6a1c2f682bf34255a587d2198d1dac222e2af4abac2`
+- `abi/shell32.spec`: `3c654161b9c4adf9ba05af42a6c3d60ec270700eabaa06ab5fdd0582482bff90`
+- `abi/shlwapi.spec`: `93acc83072b0df0b43d1e6d6c104397f7bc6de221f23b4f57b3905b2112c979c`
+- `abi/user32.spec`: `0aa00fa0a8f7c648d919be22afe823fb52488366e5d9ec0ca2dd8c292e364930`
+- `abi/wininet.spec`: `a7ca36a207ad4f2edd3808b01a08e1232770f1c8c29e1e3e52ae24af46e6a4a3`
+- `user32/dialog-controls.c`: `df980dbb42ebffa0c3c884d15537471af25aa915ba4ac7cadf1c6fcff1eae97f`
+- `user32/menu.c`: `da08c13f8f817a526bf07a71f00779ccf8ef388aa311e0aa5c9cae01855cd0a2`
+- `user32/window-text.c`: `161c3e9b0b4bb04f967810e9cd7f3101ac41c03ae1de50f6a2294f273c000cb8`
+- `win32u/menu.c`: `1896b37ae70667e1ffafa73c13a4d1330093ae3da7f847f27cd9bc2d971b2a92`

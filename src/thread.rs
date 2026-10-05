@@ -18,9 +18,14 @@ pub const WAIT_TIMEOUT: u32 = 0x102;
 /// The main thread's stack comes from the loader.
 pub const THREAD_STACK_SIZE: u32 = 0x10_0000;
 const STACK_ARENA_BASE: u32 = 0x0200_0000;
-// Leave the main TEB/PEB at 0x7ffdf000/0x7ffde000 outside all 64 slots.
+// Leave the main TEB/PEB at 0x7ffdf000/0x7ffde000 outside all worker slots.
 const TEB_ARENA_BASE: u32 = 0x7ff0_0000;
-const MAX_THREADS: usize = 64;
+const MAX_THREADS: usize = 128;
+const _: () = assert!(
+    STACK_ARENA_BASE as u64 + MAX_THREADS as u64 * (THREAD_STACK_SIZE as u64) < 0x1000_0000
+);
+const _: () =
+    assert!(TEB_ARENA_BASE as u64 + MAX_THREADS as u64 * 0x1000 < crate::loader::PEB_ADDR as u64);
 
 /// Why a blocked thread was made runnable again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,6 +122,9 @@ impl Sched {
 
     pub fn current_tid(&self) -> u32 {
         self.threads[self.current].tid
+    }
+    pub fn has_thread_capacity(&self) -> bool {
+        self.threads.len() < MAX_THREADS
     }
 
     pub fn any_other_runnable(&self) -> bool {

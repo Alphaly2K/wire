@@ -1,7 +1,9 @@
 # Wine Win32 逻辑移植与游戏插件推进（2026-10-06）
 
 后续 VMM 已解除下文记录的 dirlist 内存阻塞，dirlist/extNagano 完成初始化；
-当前停在 menu.dll 缺少 InsertMenuItemW 导出，完整102项回归通过。
+随后菜单/基础GDI/常用USER32功能组已解除menu/win32dialog等插件边界，并创建真实游戏主窗口；
+当前推进与新阻塞见 [功能组记录](common-win32-progress-2026-10-06.md)。
+本页的102项是此前VMM检查点验证，后续Win32改为参考用户指定的Hangover。
 最新结果见 [VMM推进记录](vmm-progress-2026-10-06.md)，下一阶段见 [图形渲染设计](graphics-rendering-design.md)。
 以下保留 Wine 移植阶段的来源、实现与95项验证记录。
 

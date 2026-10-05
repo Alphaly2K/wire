@@ -23,6 +23,11 @@ pub struct User32 {
     next_atom: u32,
     next_window: u32,
     next_timer: u32,
+    pub(crate) focus: u32,
+    pub(crate) active: u32,
+    pub(crate) foreground: u32,
+    pub(crate) capture: u32,
+    pub(crate) cursor_pos: [i32; 2],
 }
 
 pub struct Timer {
@@ -53,6 +58,7 @@ pub struct Window {
     pub extra: Vec<u8>,
     pub wide: bool,
     pub tid: u32,
+    pub(crate) text: Vec<u16>,
     destroying: bool,
 }
 
@@ -66,6 +72,11 @@ impl Default for User32 {
             next_atom: 0xc000,
             next_window: 0x4001_0000,
             next_timer: 1,
+            focus: 0,
+            active: 0,
+            foreground: 0,
+            capture: 0,
+            cursor_pos: [0; 2],
         }
     }
 }
@@ -120,7 +131,7 @@ pub fn find_class(
 pub fn dispatch(
     dll: &str,
     name: &str,
-    a: &[u32; 12],
+    a: &crate::api::Args,
     cpu: &mut Cpu,
     mem: &mut GuestMem,
     api: &mut ApiTable,
@@ -131,6 +142,11 @@ pub fn dispatch(
 ) -> Option<Result<(GuestCallOutcome, String), String>> {
     if dll != "user32.dll" {
         return None;
+    }
+    if let Some(result) =
+        crate::user32_common::dispatch(name, a, cpu, mem, api, state, log, sched, max_instr)
+    {
+        return Some(result);
     }
     if matches!(name, "EnumWindows" | "EnumThreadWindows") {
         return Some(crate::user32_enum::enumerate(
@@ -210,7 +226,7 @@ pub fn dispatch(
 
 fn class_dispatch(
     name: &str,
-    a: &[u32; 12],
+    a: &crate::api::Args,
     mem: &mut GuestMem,
     state: &mut ApiState,
 ) -> Result<(u32, String), String> {
@@ -324,7 +340,7 @@ pub(crate) fn invoke(
 #[allow(clippy::too_many_arguments)]
 fn window_dispatch(
     name: &str,
-    a: &[u32; 12],
+    a: &crate::api::Args,
     cpu: &mut Cpu,
     mem: &mut GuestMem,
     api: &mut ApiTable,
@@ -335,6 +351,14 @@ fn window_dispatch(
 ) -> Result<(GuestCallOutcome, String), String> {
     let value = |value, note: String| Ok((GuestCallOutcome::Returned(value), note));
     if name.starts_with("DefWindowProc") {
+        if let Some(ret) = crate::user32_common::default_text(name, a, mem, state)? {
+            return value(ret, "default window text".into());
+        }
+        if a[1] == 0x47 {
+            return crate::user32_common::default_windowpos_changed(
+                a, cpu, mem, api, state, log, sched, max_instr,
+            );
+        }
         // Default acceptance of WM_NCCREATE; the implemented default subset
         // has no application action for WM_CREATE/DESTROY or unknown messages.
         return value((a[1] == 0x81) as u32, "default WndProc subset".into());
@@ -366,6 +390,9 @@ fn window_dispatch(
             extra: vec![0; class.fields[3] as usize],
             wide: class.wide,
             tid: sched.current_tid(),
+            text: crate::menu::read_text(mem, a[2], wide)
+                .map_err(|e| format!("window title error {e}"))?
+                .unwrap_or_default(),
             destroying: false,
         };
         let create = state.scratch_alloc(mem, 48, 4);
@@ -585,7 +612,22 @@ fn window_dispatch(
 }
 
 fn remove_window(state: &mut ApiState, hwnd: u32) {
-    state.user32.windows.remove(&hwnd);
+    state.graphics.remove_window(hwnd);
+    for owner in [
+        &mut state.user32.focus,
+        &mut state.user32.active,
+        &mut state.user32.foreground,
+        &mut state.user32.capture,
+    ] {
+        if *owner == hwnd {
+            *owner = 0;
+        }
+    }
+    if let Some(window) = state.user32.windows.remove(&hwnd) {
+        if window.style & 0x40000000 == 0 && window.menu != 0 {
+            state.menus.destroy(window.menu);
+        }
+    }
     state
         .user32
         .timers
@@ -652,7 +694,7 @@ fn put_message(state: &mut ApiState, sched: &mut Sched, tid: u32, message: Messa
 #[allow(clippy::too_many_arguments)]
 fn message_dispatch(
     name: &str,
-    a: &[u32; 12],
+    a: &crate::api::Args,
     cpu: &mut Cpu,
     mem: &mut GuestMem,
     api: &mut ApiTable,

@@ -5,14 +5,23 @@ M2 **尚未验收，不打 tag**。真实 guest DLL 装载、重定位、导出�
 按用户授权直接移植 Wine 的 GDI+ 矩阵/启动逻辑和窗口枚举，现已越过 `layerExDraw.dll` 的依赖缺失，
 继续装载 varfile、KaichoTrans、addFont、scriptsEx。随后补齐当前所需的 guest VMM，
 解除 `dirlist.dll` 的 reserve/commit 阻塞，dirlist 和 extNagano 完成初始化。
-游戏约 **289.2M 指令 / 835.6K API 调用**时，因 `menu.dll` 缺少 `user32!InsertMenuItemW` 导出而退出3。
+菜单/基础GDI/常用USER32/统一ABI成组实现后，真实游戏已经创建 TVPMainWindow，
+继续到约 **452.7M 指令 / 1.128M API**，因 AdjustWindowRectEx 缺实现走错误退出。
 还没有可见游戏画面或持续主循环。此前本地检查点包括 `75f90a6`（线程/SSE）、
 `852eba3`（资源/堆/I/O/基础SEH）、`ca94a36`（x87/系统/NLS）、`a3de840`（主IR优化）和`f97ab8d`（真实profile/x87热点优化）。
 
 2026-10-05 转入 no-JIT 性能路线，增加安装期预解码、8B typed I32 热路径与保守 FLAGS 分析，
 并实现 CALL_NATIVE/IAT guard；IR原型不等于M2验收。
 
-## 最新：Guest VMM 完成当前所需范围，准备图形渲染
+## 最新：主窗口逻辑建立，继续图形与呈现
+
+后续 Win32 以用户指定的 Hangover 为主要参考，已核查固定 Wine 子模块的逐文件 LGPL 许可。
+菜单/DC/bitmap/DIB/BitBlt、常用窗口/控件消息、BSTR、序号导出和16DWORD gateway 已实现。
+真实游戏插件已继续装载，TVPMainWindow 真正创建，但尚未可见呈现；退出0依然是错误路径。
+详细结果、限制和接续见 [功能组推进](common-win32-progress-2026-10-06.md) 与
+[Hangover路线](hangover-win32-design.md)。
+
+## 此前：Guest VMM 完成当前所需范围，准备图形渲染
 
 实现独立于宿主 backing 的 4KiB guest 页、reservation/allocation 元数据及 checked 读/写/执行权限。
 VirtualAlloc/Free/Protect/Query 和当前进程 Ex 变体支持 reserve/commit 分离、decommit/release、

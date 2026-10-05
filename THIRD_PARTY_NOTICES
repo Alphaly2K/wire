@@ -70,7 +70,32 @@ license notice obligations.
     Enumeration excerpts with original header preserved in
     user32/win-enumeration.c; adapted into src/user32_enum.rs using wire's
     logical window table and guest callback/control-transfer boundaries.
+  - dlls/user32/dialog.c and win.c: dialog-control/text excerpts adapted into
+    src/user32_common.rs. Copyright 1993, 1994, 1996 Alexandre Julliard.
+  - dlls/user32/menu.c and dlls/win32u/menu.c: menu item normalization,
+    masks, submenu lookup and lifetime adapted into src/menu.rs.
+    Copyright 1993 Martin Ayotte, 1993 Robert J. Amstadt, 1994 Alexandre
+    Julliard, 1995/2009 Alexandre Julliard, 1997 Morten Welinder,
+    2005 Maxime Bellengé, 2006 Phil Krylov.
+  - Eleven unchanged dlls/{kernel32,user32,gdi32,shell32,ole32,oleaut32,
+    comdlg32,shlwapi,wininet,comctl32,mpr}/*.spec export tables embedded by
+    src/win32_abi.rs as named/ordinal x86 stdcall ABI data. Each spec is
+    covered by Wine's project license; checksums in the source README.
   No Wine C code, Wine server or platform backend is built or linked.
+
+- Hangover, commit 56e385b7ff490edd281b288f420677093563560b,
+  https://github.com/AndreRH/hangover; its pinned AndreRH/wine submodule,
+  commit 3ea3a14941b6a122b892c84141ce9662c008081e, reviewed/adapted 2026-10-06.
+  The used files explicitly permit LGPL-2.1-or-later; LGPL 2.1 selected.
+  - dlls/oleaut32/oleaut.c: Copyright 1999, 2000 Marcus Meissner.
+    BSTR function excerpts adapted into src/common_api.rs with checked guest
+    memory, real guest allocations and ownership; no Wine BSTR cache.
+  - dlls/win32u/defwnd.c: Copyright 1993, 1996 Alexandre Julliard,
+    1995 Alex Korobka, 2022 Jacek Caban for CodeWeavers. Default window
+    position messages adapted into src/user32_common.rs with guest callbacks.
+  Original excerpts, COPYING.LIB and checksums in third_party/hangover/.
+  WoW64 USER/GDI conversion files were reviewed; no emulator or Linux backend
+  code was imported or linked. See docs/hangover-win32-design.md.
 
 QEMU license headers were reviewed at v10.1.0; no QEMU implementation was
 imported. See docs/ir-aot-design.md for the file-level LGPL/GPL distinction.

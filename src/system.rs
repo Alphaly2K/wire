@@ -9,7 +9,7 @@ const VIRTUAL: u64 = 0x7fff0000;
 pub fn dispatch(
     dll: &str,
     name: &str,
-    a: &[u32; 12],
+    a: &crate::api::Args,
     mem: &GuestMem,
     state: &mut ApiState,
 ) -> Option<(u32, String)> {

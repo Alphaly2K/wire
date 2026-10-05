@@ -9,6 +9,7 @@ pub const MEM_COMMIT: u32 = 0x1000;
 pub const MEM_RESERVE: u32 = 0x2000;
 pub const MEM_FREE: u32 = 0x10000;
 pub const MEM_PRIVATE: u32 = 0x20000;
+pub const MEM_MAPPED: u32 = 0x40000;
 pub const MEM_IMAGE: u32 = 0x1000000;
 pub const PAGE_NOACCESS: u32 = 1;
 pub const PAGE_READONLY: u32 = 2;
@@ -29,6 +30,7 @@ enum Owner {
     Runtime,
     Image,
     Guest,
+    Dib,
 }
 #[derive(Clone, Copy)]
 pub(super) struct Allocation {
@@ -173,7 +175,7 @@ impl GuestMem {
     pub(super) fn ensure_internal(&mut self, address: u32, len: u32) -> Result<u32, u32> {
         let (start, end) = round_range(address, len, GUEST_PAGE)?;
         if let Ok((_, allocation)) = self.containing(start, end) {
-            return if allocation.owner == Owner::Guest {
+            return if matches!(allocation.owner, Owner::Guest | Owner::Dib) {
                 Err(INVALID_ADDRESS)
             } else {
                 Ok(allocation.protect)
@@ -196,6 +198,26 @@ impl GuestMem {
     }
     pub(crate) fn map_image(&mut self, base: u32, len: u32) -> Result<(), u32> {
         self.map_owned(base, len, MEM_IMAGE, Owner::Image, PAGE_EXECUTE_READWRITE)
+    }
+    /// Anonymous DIB section storage: a real guest address with a dedicated
+    /// lifetime. VirtualFree must not release or recycle a selected bitmap.
+    pub(crate) fn alloc_dib(&mut self, len: u32) -> Result<u32, u32> {
+        let size = (len as u64).div_ceil(GUEST_PAGE as u64) * GUEST_PAGE as u64;
+        if size == 0 {
+            return Err(INVALID);
+        }
+        let base = self.find_free(size, false).ok_or(NO_MEMORY)?;
+        self.map_owned(base, size as u32, MEM_MAPPED, Owner::Dib, PAGE_READWRITE)?;
+        Ok(base)
+    }
+    pub(crate) fn free_dib(&mut self, base: u32) -> Result<(), u32> {
+        let (start, allocation) = self.allocation_at(base).ok_or(INVALID_ADDRESS)?;
+        if start != base || allocation.owner != Owner::Dib {
+            return Err(INVALID_ADDRESS);
+        }
+        self.decommit_pages(base, (allocation.end - base as u64) as u32);
+        self.allocations.remove(&base);
+        Ok(())
     }
     fn map_owned(
         &mut self,

@@ -1,6 +1,8 @@
 # 图形渲染实施设计（2026-10-06）
 
-本页是 VMM 完成后的实施准备，不表示渲染后端已经实现。
+本页记录 VMM 完成后的图形实施设计。菜单、DC/bitmap/DIB、像素及SRCCOPY BitBlt已实现，
+真实TVPMainWindow已创建；平台可见呈现尚未完成。最新结果见
+[功能组推进](common-win32-progress-2026-10-06.md)。下文起点描述保留此前状态。
 当前解释器为主路径，Wasm/JSC 仍是可用时的加速路线。图形 API 经现有 CALL_NATIVE/gateway 进入 host 后端，
 先建立可验证的像素与 Win32 对象语义，再接入 Metal 呈现。
 
@@ -49,9 +51,9 @@ flowchart LR
   Dirty rect 合并到 paint/frame 边界提交，避免每个 SetPixel 都上传或呈现。
 
 计划模块为 `graphics/{objects,surface,dib,raster,present}`，分别承载句柄、存储、DIB 转换、绘图语义和平台呈现。
-这些模块尚未创建；先用独立 fixture 确认接口和生命周期，再增加对应实现。
-当前 gateway 只缓存前 12 个 DWORD 参数，StretchDIBits（13 DWORD）/CreateFont（14 DWORD）等接入前，
-必须扩展 checked ABI 参数读取，不能让后续参数静默丢失。
+graphics/mod.rs和surface.rs已实现基础对象、DIB和blit，逐像素/生命周期fixture通过。
+gateway已扩到16个DWORD并按known stdcall实际arity检查读取，缺失第14参数会报fault。
+StretchDIBits/CreateFont等具体功能仍需各自后端和回归，ABI扩展不代表它们已完成。
 
 ## 实施与验收顺序
 

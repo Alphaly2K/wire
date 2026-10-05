@@ -156,7 +156,7 @@ fn output_bool(mem: &GuestMem, p: u32, value: bool) -> Result<(), u32> {
 #[allow(clippy::assign_op_pattern)] // Preserve Wine's floating-point operand order.
 pub fn dispatch(
     name: &str,
-    a: &[u32; 12],
+    a: &crate::api::Args,
     mem: &mut GuestMem,
     state: &mut ApiState,
 ) -> (u32, String, bool) {

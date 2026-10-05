@@ -11,6 +11,226 @@ const DATA: u32 = 0x20000;
 const CODE: u32 = 0x10000;
 const RET: u32 = CODE + 0x800;
 
+#[test]
+fn thread_resource_limit_returns_win32_failure_and_does_not_create_partial_handles() {
+    let mut v = Vm::new();
+    while v.sched.has_thread_capacity() {
+        assert_ne!(v.k("CreateThread", &[0, 0, CODE, 0, 4, 0]), 0);
+    }
+    let count = v.sched.threads.len();
+    let handles = v.state.handles.len();
+    let next_tid_output = DATA;
+    v.mem.write_u32(next_tid_output, 0xdeadbeef).unwrap();
+    assert_eq!(v.k("CreateThread", &[0, 0, CODE, 0, 4, next_tid_output]), 0);
+    assert_eq!(v.state.last_error, 8);
+    assert_eq!(v.sched.threads.len(), count);
+    assert_eq!(v.state.handles.len(), handles);
+    assert_eq!(v.mem.read_u32(next_tid_output).unwrap(), 0xdeadbeef);
+    for t in v.sched.threads.iter().skip(1) {
+        assert!(t.stack_base + wire::thread::THREAD_STACK_SIZE < 0x10000000);
+        assert!(t.teb < wire::loader::PEB_ADDR);
+    }
+}
+
+#[test]
+fn process_and_thread_affinity_match_single_cpu_profile_and_preserve_failed_outputs() {
+    let mut v = Vm::new();
+    v.mem.write_u32(DATA, 0xdeadbeef).unwrap();
+    assert_eq!(
+        v.k("GetProcessAffinityMask", &[u32::MAX, DATA, DATA + 4]),
+        1
+    );
+    assert_eq!(v.mem.read_u32(DATA).unwrap(), 1);
+    assert_eq!(v.mem.read_u32(DATA + 4).unwrap(), 1);
+    v.mem.write_u32(DATA, 0xdeadbeef).unwrap();
+    assert_eq!(v.k("GetProcessAffinityMask", &[u32::MAX, DATA, 0]), 0);
+    assert_eq!(v.mem.read_u32(DATA).unwrap(), 0xdeadbeef);
+    let h = v.k("OpenProcess", &[0x1600, 0, 4242]);
+    assert_ne!(h, 0);
+    assert_eq!(v.k("GetProcessId", &[h]), 4242);
+    assert_eq!(v.k("GetProcessAffinityMask", &[h, DATA, DATA + 4]), 1);
+    assert_eq!(v.k("SetProcessAffinityMask", &[h, 2]), 0);
+    assert_eq!(v.k("SetProcessAffinityMask", &[h, 1]), 1);
+    assert_eq!(v.k("GetExitCodeProcess", &[h, DATA]), 1);
+    assert_eq!(v.mem.read_u32(DATA).unwrap(), 259);
+    assert_eq!(v.k("CloseHandle", &[h]), 1);
+    assert_eq!(v.k("GetProcessId", &[h]), 0);
+    assert_eq!(v.state.last_error, 6);
+    assert_eq!(v.k("SetThreadAffinityMask", &[0xfffffffe, 1]), 1);
+    assert_eq!(v.k("SetThreadAffinityMask", &[0xfffffffe, 2]), 0);
+    assert_eq!(v.k("SetThreadIdealProcessor", &[0xfffffffe, 0]), 0);
+    assert_eq!(v.k("SetThreadIdealProcessor", &[0xfffffffe, 1]), u32::MAX);
+    assert_eq!(v.k("GetActiveProcessorCount", &[0xffff]), 1);
+}
+
+#[test]
+fn default_window_position_messages_use_actual_client_changes_and_destroy_clears_input_owners() {
+    let mut v = Vm::new();
+    // Record lParam indexed by message, and accept WM_NCCREATE.
+    let mut proc = vec![0x8b, 0x44, 0x24, 8, 0x8b, 0x54, 0x24, 16, 0x89, 0x14, 0x85];
+    proc.extend((DATA + 0x1000).to_le_bytes());
+    proc.extend([
+        0x3d, 0x81, 0, 0, 0, 0x0f, 0x94, 0xc0, 0x0f, 0xb6, 0xc0, 0xc2, 16, 0,
+    ]);
+    v.mem.write_bytes(CODE, &proc).unwrap();
+    let hwnd = test_window(&mut v, CODE);
+    assert_ne!(hwnd, 0);
+    let p = DATA + 0x800;
+    for (i, n) in [hwnd, 0, 3, 4, 640, 480, 0].into_iter().enumerate() {
+        v.mem.write_u32(p + i as u32 * 4, n).unwrap();
+    }
+    v.call("user32.dll", "DefWindowProcW", &[hwnd, 0x47, 0, p]);
+    assert_eq!(
+        v.mem.read_u32(DATA + 0x1000 + 3 * 4).unwrap(),
+        3 | (4 << 16)
+    );
+    assert_eq!(
+        v.mem.read_u32(DATA + 0x1000 + 5 * 4).unwrap(),
+        640 | (480 << 16)
+    );
+    v.mem.write_u32(DATA + 0x1000 + 5 * 4, 0xdeadbeef).unwrap();
+    v.mem.write_u32(p + 24, 0x1800).unwrap();
+    v.call("user32.dll", "DefWindowProcW", &[hwnd, 0x47, 0, p]);
+    assert_eq!(v.mem.read_u32(DATA + 0x1000 + 5 * 4).unwrap(), 0xdeadbeef);
+    v.call("user32.dll", "SetFocus", &[hwnd]);
+    v.call("user32.dll", "SetActiveWindow", &[hwnd]);
+    v.call("user32.dll", "SetCapture", &[hwnd]);
+    assert_eq!(v.call("user32.dll", "DestroyWindow", &[hwnd]), 1);
+    for name in [
+        "GetFocus",
+        "GetActiveWindow",
+        "GetForegroundWindow",
+        "GetCapture",
+    ] {
+        assert_eq!(v.call("user32.dll", name, &[]), 0);
+    }
+}
+
+#[test]
+fn common_strings_arithmetic_com_apartments_and_guid_use_checked_state() {
+    let mut v = Vm::new();
+    v.wide(DATA, "AbC\0tail");
+    v.wide(DATA + 64, "abc\0tail");
+    assert_eq!(v.k("CompareStringOrdinal", &[DATA, 3, DATA + 64, 3, 1]), 2);
+    assert_eq!(v.k("CompareStringOrdinal", &[DATA, 3, DATA + 64, 3, 0]), 1);
+    assert_eq!(v.k("CompareStringOrdinal", &[DATA, 0, DATA + 64, 0, 0]), 2);
+    assert_eq!(v.k("CompareStringOrdinal", &[0, 0, DATA, 0, 0]), 0);
+    for (n, multiplier, divisor, expected) in [
+        (5, 1, 2, 3),
+        (-5, 1, 2, -3),
+        (5, 1, -2, -3),
+        (i32::MIN, 1, 1, i32::MIN),
+        (i32::MAX, 2, 1, -1),
+        (1, 1, 0, -1),
+    ] {
+        assert_eq!(
+            v.k("MulDiv", &[n as u32, multiplier as u32, divisor as u32]),
+            expected as u32
+        );
+    }
+    assert_eq!(v.k("IsBadReadPtr", &[0, 0]), 0);
+    assert_eq!(v.k("IsBadReadPtr", &[0, 1]), 1);
+    assert_eq!(v.k("IsBadWritePtr", &[DATA, 4]), 0);
+    assert_eq!(v.call("ole32.dll", "CoInitializeEx", &[0, 2]), 0);
+    assert_eq!(v.call("ole32.dll", "CoInitializeEx", &[0, 2]), 1);
+    assert_eq!(v.call("ole32.dll", "CoInitializeEx", &[0, 0]), 0x80010106);
+    v.call("ole32.dll", "CoUninitialize", &[]);
+    assert_eq!(v.call("ole32.dll", "CoInitializeEx", &[0, 0]), 0x80010106);
+    v.call("ole32.dll", "CoUninitialize", &[]);
+    assert_eq!(v.call("ole32.dll", "CoInitializeEx", &[0, 0]), 0);
+    assert_eq!(v.call("ole32.dll", "CoCreateGuid", &[DATA + 128]), 0);
+    assert_eq!(v.mem.read_u8(DATA + 135).unwrap() & 0xf0, 0x40);
+    assert_eq!(v.mem.read_u8(DATA + 136).unwrap() & 0xc0, 0x80);
+    assert_eq!(v.call("ole32.dll", "CoCreateGuid", &[0]), 0x80004003);
+}
+
+#[test]
+fn bstr_preserves_embedded_nuls_reallocation_aliases_and_null_contracts() {
+    let mut v = Vm::new();
+    v.wide(DATA, "a\0日本");
+    let p = v.call("oleaut32.dll", "SysAllocStringLen", &[DATA, 4]);
+    assert_ne!(p, 0);
+    assert_eq!(v.mem.read_u32(p - 4).unwrap(), 8);
+    assert_eq!(v.call("oleaut32.dll", "SysStringLen", &[p]), 4);
+    assert_eq!(v.call("oleaut32.dll", "SysStringByteLen", &[p]), 8);
+    assert_eq!(v.mem.read_u16(p + 4).unwrap(), '日' as u16);
+    v.mem.write_u32(DATA + 64, p).unwrap();
+    assert_eq!(
+        v.call("oleaut32.dll", "SysReAllocStringLen", &[DATA + 64, 0, 6]),
+        1
+    );
+    let grown = v.mem.read_u32(DATA + 64).unwrap();
+    assert_eq!(v.call("oleaut32.dll", "SysStringLen", &[grown]), 6);
+    assert_eq!(v.mem.read_u16(grown + 4).unwrap(), '日' as u16);
+    assert_eq!(v.mem.read_u16(grown + 12).unwrap(), 0);
+    assert_eq!(
+        v.call(
+            "oleaut32.dll",
+            "SysReAllocStringLen",
+            &[DATA + 64, grown, 3]
+        ),
+        1
+    );
+    let shrunk = v.mem.read_u32(DATA + 64).unwrap();
+    assert_eq!(v.mem.read_u16(shrunk + 4).unwrap(), '日' as u16);
+    assert_eq!(v.mem.read_u16(shrunk + 6).unwrap(), 0);
+    assert_eq!(
+        v.call(
+            "oleaut32.dll",
+            "SysReAllocStringLen",
+            &[DATA + 64, shrunk, u32::MAX]
+        ),
+        0
+    );
+    assert_eq!(v.mem.read_u32(DATA + 64).unwrap(), shrunk);
+    assert_eq!(
+        v.call("oleaut32.dll", "SysReAllocString", &[DATA + 64, 0]),
+        1
+    );
+    assert_eq!(v.mem.read_u32(DATA + 64).unwrap(), 0);
+    assert_eq!(v.call("oleaut32.dll", "SysAllocString", &[0]), 0);
+    let empty = v.call("oleaut32.dll", "SysAllocStringLen", &[0, 0]);
+    assert_ne!(empty, 0);
+    assert_eq!(v.mem.read_u32(empty - 4).unwrap(), 0);
+    v.call("oleaut32.dll", "SysFreeString", &[empty]);
+    v.call("oleaut32.dll", "SysFreeString", &[0]);
+}
+
+#[test]
+fn spec_ordinals_share_named_stubs_and_large_abis_read_the_full_checked_stack() {
+    let mut v = Vm::new();
+    let named = v.api.register("oleaut32.dll", Some("SysAllocString"), None);
+    assert_eq!(v.api.register("oleaut32.dll", None, Some(2)), named);
+    assert_eq!(
+        v.api.entries[v.api.stub_index(named).unwrap()].name,
+        "SysAllocString"
+    );
+    v.wide(DATA, "oleaut32.dll");
+    let module = v.k("LoadLibraryW", &[DATA]);
+    assert_eq!(v.k("GetProcAddress", &[module, 2]), named);
+    assert_eq!(v.k("GetProcAddress", &[module, 65535]), 0);
+    let addr = v.api.register("gdi32.dll", Some("CreateFontW"), None);
+    let index = v.api.stub_index(addr).unwrap();
+    // The last of 14 arguments straddles an uncommitted page: gateway must fault.
+    v.cpu.eip = addr;
+    v.cpu.set_esp(DATA + 0x10000 - 56);
+    v.mem.write_u32(v.cpu.esp(), RET).unwrap();
+    assert!(api::dispatch(
+        index,
+        &mut v.cpu,
+        &mut v.mem,
+        &mut v.api,
+        &mut v.state,
+        &mut v.log,
+        &mut v.sched,
+        1_000_000
+    )
+    .is_err());
+    // With all arguments committed, the known stdcall ABI restores exactly 56 bytes.
+    v.call("gdi32.dll", "CreateFontW", &[0; 14]);
+    assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 4 + 56);
+}
+
 struct Vm {
     mem: GuestMem,
     cpu: Cpu,
@@ -71,7 +291,7 @@ impl Vm {
         self.cpu.set_esp(STACK_BASE + STACK_SIZE - 256);
         let sp = self.cpu.esp();
         self.mem.write_u32(sp, RET).unwrap();
-        for i in 0..12 {
+        for i in 0..16 {
             self.mem
                 .write_u32(sp + 4 + i * 4, args.get(i as usize).copied().unwrap_or(0))
                 .unwrap();
@@ -102,6 +322,367 @@ impl Drop for Vm {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+fn menu_info(v: &Vm, fields: [u32; 12]) -> u32 {
+    for (i, n) in fields.into_iter().enumerate() {
+        v.mem.write_u32(DATA + 0x800 + i as u32 * 4, n).unwrap();
+    }
+    DATA + 0x800
+}
+
+#[test]
+fn menus_copy_guest_strings_find_nested_commands_and_preserve_masked_fields() {
+    let mut v = Vm::new();
+    let root = v.call("user32.dll", "CreateMenu", &[]);
+    let child = v.call("user32.dll", "CreatePopupMenu", &[]);
+    assert_ne!(root, child);
+    assert_ne!(child, 0);
+    v.wide(DATA + 0x900, "日本語");
+    let p = menu_info(
+        &v,
+        [44, 0x33, 0, 8, 77, 0, 0, 0, 0x1234, DATA + 0x900, 1, 0],
+    );
+    assert_eq!(
+        v.call("user32.dll", "InsertMenuItemW", &[child, u32::MAX, 1, p]),
+        1
+    );
+    v.wide(DATA + 0x900, "changed"); // menu owns a copy; cch is ignored on input
+    let p = menu_info(&v, [48, 6, 0, 0, 77, child, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(v.call("user32.dll", "InsertMenuItemW", &[root, 0, 1, p]), 1);
+    assert_eq!(v.call("user32.dll", "GetSubMenu", &[root, 0]), child);
+    assert_eq!(v.call("user32.dll", "GetMenuItemID", &[root, 0]), u32::MAX);
+    // Descendant command 77 takes priority over popup command 77.
+    let p = menu_info(&v, [48, 0x63, 0, 0, 0, 0, 0, 0, 0, DATA + 0xa00, 3, 0]);
+    assert_eq!(
+        v.call("user32.dll", "GetMenuItemInfoW", &[root, 77, 0, p]),
+        1
+    );
+    assert_eq!(v.mem.read_wstr(DATA + 0xa00, 10).unwrap(), "日本");
+    assert_eq!(v.mem.read_u32(p + 40).unwrap(), 2);
+    assert_eq!(v.mem.read_u32(p + 32).unwrap(), 0x1234);
+    assert_eq!(v.mem.read_u32(p + 12).unwrap(), 8);
+    let p = menu_info(&v, [48, 1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(
+        v.call("user32.dll", "SetMenuItemInfoW", &[root, 77, 0, p]),
+        1
+    );
+    let p = menu_info(&v, [48, 0x62, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(
+        v.call("user32.dll", "GetMenuItemInfoA", &[root, 77, 0, p]),
+        1
+    );
+    assert_eq!(v.mem.read_u32(p + 40).unwrap(), 6); // CP932 bytes
+    assert_eq!(v.mem.read_u32(p + 16).unwrap(), 77);
+    assert_eq!(v.mem.read_u32(p + 32).unwrap(), 0x1234);
+    assert_eq!(v.call("user32.dll", "EnableMenuItem", &[root, 77, 0]), 3);
+    assert_eq!(v.call("user32.dll", "CheckMenuItem", &[root, 77, 8]), 0);
+    assert_eq!(v.call("user32.dll", "GetMenuState", &[root, 77, 0]), 8);
+    assert_eq!(v.call("user32.dll", "RemoveMenu", &[root, 0, 0x400]), 1);
+    assert_eq!(v.call("user32.dll", "GetMenuItemCount", &[root]), 0);
+    assert_eq!(v.call("user32.dll", "IsMenu", &[child]), 1); // Remove does not destroy
+    let p = menu_info(&v, [48, 4, 0, 0, 0, child, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(v.call("user32.dll", "InsertMenuItemW", &[root, 0, 1, p]), 1);
+    assert_eq!(v.call("user32.dll", "DeleteMenu", &[root, 0, 0x400]), 1);
+    assert_eq!(v.call("user32.dll", "IsMenu", &[child]), 0);
+    assert_eq!(v.call("user32.dll", "GetMenuItemCount", &[child]), u32::MAX);
+    assert_eq!(v.k("GetLastError", &[]), 1401);
+}
+
+#[test]
+fn menus_reject_invalid_structs_pointers_cycles_and_deep_graphs_without_partial_mutation() {
+    let mut v = Vm::new();
+    let root = v.call("user32.dll", "CreateMenu", &[]);
+    for fields in [
+        [40, 2, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0],
+        [48, 0x50, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0],
+        [48, 4, 0, 0, 1, root, 0, 0, 0, 0, 0, 0],
+        [48, 0x40, 0, 0, 1, 0, 0, 0, 0, 0x30000000, 0, 0],
+    ] {
+        let p = menu_info(&v, fields);
+        assert_eq!(v.call("user32.dll", "InsertMenuItemW", &[root, 0, 1, p]), 0);
+        assert_eq!(v.k("GetLastError", &[]), 87);
+        assert_eq!(v.call("user32.dll", "GetMenuItemCount", &[root]), 0);
+    }
+    let p = menu_info(&v, [48, 2, 0x800, 0, 42, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(v.call("user32.dll", "InsertMenuItemW", &[root, 0, 1, p]), 1);
+    let p = menu_info(&v, [48, 4, 0, 0, 0, root, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(
+        v.call("user32.dll", "SetMenuItemInfoW", &[root, 0, 1, p]),
+        0
+    );
+    assert_eq!(v.call("user32.dll", "GetMenuItemID", &[root, 0]), 42);
+    let p = menu_info(&v, [48, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    v.mem
+        .virtual_protect(DATA, 0x10000, wire::mem::PAGE_READONLY)
+        .unwrap();
+    assert_eq!(
+        v.call("user32.dll", "GetMenuItemInfoW", &[root, 0, 1, p]),
+        0
+    );
+    assert_eq!(v.mem.read_u32(p + 16).unwrap(), 0);
+    v.mem
+        .virtual_protect(DATA, 0x10000, wire::mem::PAGE_READWRITE)
+        .unwrap();
+    let mut parent = root;
+    for _ in 1..30 {
+        let child = v.call("user32.dll", "CreatePopupMenu", &[]);
+        let p = menu_info(&v, [48, 4, 0, 0, 0, child, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            v.call("user32.dll", "InsertMenuItemW", &[parent, u32::MAX, 1, p]),
+            1
+        );
+        parent = child;
+    }
+    let child = v.call("user32.dll", "CreatePopupMenu", &[]);
+    let p = menu_info(&v, [48, 4, 0, 0, 0, child, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(
+        v.call("user32.dll", "InsertMenuItemW", &[parent, 0, 1, p]),
+        0
+    );
+    assert_eq!(v.call("user32.dll", "GetMenuItemCount", &[parent]), 0);
+    assert_eq!(v.call("user32.dll", "DestroyMenu", &[root]), 1);
+    assert_eq!(v.call("user32.dll", "IsMenu", &[parent]), 0);
+    assert_eq!(v.call("user32.dll", "IsMenu", &[child]), 1);
+}
+
+#[test]
+fn window_menu_attachment_lifetime_and_coordinate_roundtrip_are_real() {
+    let mut v = Vm::new();
+    let def = v.api.register("user32.dll", Some("DefWindowProcW"), None);
+    let hwnd = test_window(&mut v, def);
+    let menu = v.call("user32.dll", "CreateMenu", &[]);
+    assert_eq!(v.call("user32.dll", "SetMenu", &[hwnd, menu]), 1);
+    assert_eq!(v.call("user32.dll", "GetMenu", &[hwnd]), menu);
+    assert_eq!(v.call("user32.dll", "SetMenu", &[hwnd, 123]), 0);
+    assert_eq!(v.call("user32.dll", "GetMenu", &[hwnd]), menu);
+    v.mem.write_u32(DATA + 0xb00, (-10i32) as u32).unwrap();
+    v.mem.write_u32(DATA + 0xb04, 20).unwrap();
+    assert_eq!(
+        v.call("user32.dll", "ClientToScreen", &[hwnd, DATA + 0xb00]),
+        1
+    );
+    assert_eq!(v.mem.read_u32(DATA + 0xb00).unwrap() as i32, -7);
+    assert_eq!(v.mem.read_u32(DATA + 0xb04).unwrap(), 24);
+    assert_eq!(
+        v.call("user32.dll", "ScreenToClient", &[hwnd, DATA + 0xb00]),
+        1
+    );
+    assert_eq!(v.mem.read_u32(DATA + 0xb00).unwrap() as i32, -10);
+    assert_eq!(v.mem.read_u32(DATA + 0xb04).unwrap(), 20);
+    assert_eq!(
+        v.call("user32.dll", "TrackPopupMenuEx", &[menu, 0, 0, 0, hwnd, 0]),
+        0
+    );
+    assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 28); // 6 DWORD stdcall
+    assert_eq!(v.k("GetLastError", &[]), 120);
+    assert_eq!(v.call("user32.dll", "DestroyWindow", &[hwnd]), 1);
+    assert_eq!(v.call("user32.dll", "IsMenu", &[menu]), 0);
+}
+
+#[test]
+fn window_text_dialog_numbers_and_geometry_use_real_control_state() {
+    let mut v = Vm::new();
+    let def = v.api.register("user32.dll", Some("DefWindowProcW"), None);
+    let parent = test_window(&mut v, def);
+    let atom = v.state.user32.windows[&parent].class as u32;
+    let ctrl = v.call(
+        "user32.dll",
+        "CreateWindowExW",
+        &[
+            0, atom, 0, 0x40000000, 10, 20, 100, 30, parent, 42, 0x400000, 0,
+        ],
+    );
+    assert_ne!(ctrl, 0);
+    assert_eq!(v.call("user32.dll", "GetDlgItem", &[parent, 42]), ctrl);
+    assert_eq!(v.call("user32.dll", "GetDlgCtrlID", &[ctrl]), 42);
+    assert_eq!(
+        v.call(
+            "user32.dll",
+            "SetDlgItemInt",
+            &[parent, 42, (-123i32) as u32, 1]
+        ),
+        1
+    );
+    assert_eq!(
+        v.call(
+            "user32.dll",
+            "GetDlgItemInt",
+            &[parent, 42, DATA + 0xc00, 1]
+        ),
+        (-123i32) as u32
+    );
+    assert_eq!(v.mem.read_u32(DATA + 0xc00).unwrap(), 1);
+    assert_eq!(v.call("user32.dll", "GetWindowTextLengthW", &[ctrl]), 4);
+    assert_eq!(
+        v.call(
+            "user32.dll",
+            "GetDlgItemTextW",
+            &[parent, 42, DATA + 0xc10, 3]
+        ),
+        2
+    );
+    assert_eq!(v.mem.read_wstr(DATA + 0xc10, 10).unwrap(), "-1");
+    v.wide(DATA + 0xc30, "2147483648");
+    assert_eq!(
+        v.call("user32.dll", "SetWindowTextW", &[ctrl, DATA + 0xc30]),
+        1
+    );
+    assert_eq!(
+        v.call(
+            "user32.dll",
+            "GetDlgItemInt",
+            &[parent, 42, DATA + 0xc00, 1]
+        ),
+        0
+    );
+    assert_eq!(v.mem.read_u32(DATA + 0xc00).unwrap(), 0);
+    assert_eq!(
+        v.call(
+            "user32.dll",
+            "GetDlgItemInt",
+            &[parent, 42, DATA + 0xc00, 0]
+        ),
+        0x80000000
+    );
+    assert_eq!(
+        v.call("user32.dll", "GetClassNameW", &[ctrl, DATA + 0xc30, 32]),
+        14
+    );
+    assert_eq!(v.mem.read_wstr(DATA + 0xc30, 32).unwrap(), "CallbackWindow");
+    assert_eq!(
+        v.call("user32.dll", "MoveWindow", &[ctrl, 12, 22, 120, 40, 1]),
+        1
+    );
+    v.mem.write_bytes(DATA + 0xc60, &[0; 8]).unwrap();
+    assert_eq!(
+        v.call("user32.dll", "MapWindowPoints", &[ctrl, 0, DATA + 0xc60, 1]),
+        15 | (26 << 16)
+    );
+    assert_eq!(v.mem.read_u32(DATA + 0xc60).unwrap(), 15);
+    assert_eq!(v.mem.read_u32(DATA + 0xc64).unwrap(), 26);
+    assert_eq!(v.call("user32.dll", "IsWindowEnabled", &[ctrl]), 1);
+    assert_eq!(v.call("user32.dll", "EnableWindow", &[ctrl, 0]), 0);
+    assert_eq!(v.call("user32.dll", "IsWindowEnabled", &[ctrl]), 0);
+    assert_eq!(v.call("user32.dll", "SetFocus", &[ctrl]), 0);
+    assert_eq!(v.call("user32.dll", "GetFocus", &[]), ctrl);
+    assert_eq!(v.call("user32.dll", "SetParent", &[parent, ctrl]), 0);
+    assert_eq!(v.k("GetLastError", &[]), 87);
+}
+
+#[test]
+fn gdi_color_probe_dc_bitmap_lifetimes_and_pixel_failures_are_real() {
+    let mut v = Vm::new();
+    let screen = v.call("user32.dll", "GetDC", &[0]);
+    let dc = v.call("gdi32.dll", "CreateCompatibleDC", &[screen]);
+    let bitmap = v.call("gdi32.dll", "CreateCompatibleBitmap", &[screen, 1, 1]);
+    assert_ne!(screen, 0);
+    assert_ne!(bitmap, 0);
+    let stock = v.call("gdi32.dll", "SelectObject", &[dc, bitmap]);
+    assert_ne!(stock, 0);
+    for component in 0..3 {
+        for value in 0..256 {
+            let color = value << (component * 8);
+            assert_eq!(v.call("gdi32.dll", "SetPixel", &[dc, 0, 0, color]), color);
+            assert_eq!(v.call("gdi32.dll", "GetPixel", &[dc, 0, 0]), color);
+        }
+    }
+    assert_eq!(v.call("gdi32.dll", "GetPixel", &[dc, 1, 0]), u32::MAX);
+    assert_eq!(v.call("gdi32.dll", "DeleteObject", &[bitmap]), 0);
+    assert_eq!(v.call("gdi32.dll", "SelectObject", &[dc, stock]), bitmap);
+    assert_eq!(v.call("gdi32.dll", "DeleteObject", &[bitmap]), 1);
+    assert_eq!(v.call("gdi32.dll", "GetObjectType", &[bitmap]), 0);
+    assert_eq!(v.call("gdi32.dll", "DeleteDC", &[screen]), 0);
+    assert_eq!(v.call("user32.dll", "ReleaseDC", &[0, dc]), 0);
+    assert_eq!(v.call("gdi32.dll", "DeleteDC", &[dc]), 1);
+    assert_eq!(v.call("user32.dll", "ReleaseDC", &[0, screen]), 1);
+}
+
+fn dib32(v: &mut Vm, dc: u32, width: u32, height: i32) -> (u32, u32) {
+    let bytes: Vec<_> = [40, width, height as u32, 0x00200001, 0, 0, 0, 0, 0, 0]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect();
+    v.mem.write_bytes(DATA + 0xd00, &bytes).unwrap();
+    let h = v.call(
+        "gdi32.dll",
+        "CreateDIBSection",
+        &[dc, DATA + 0xd00, 0, DATA + 0xd40, 0, 0],
+    );
+    assert_ne!(h, 0);
+    (h, v.mem.read_u32(DATA + 0xd40).unwrap())
+}
+
+#[test]
+fn dib_top_down_bottom_up_direct_writes_checked_permissions_and_release() {
+    let mut v = Vm::new();
+    let dc = v.call("gdi32.dll", "CreateCompatibleDC", &[0]);
+    for height in [-2, 2] {
+        let (h, bits) = dib32(&mut v, dc, 2, height);
+        let stock = v.call("gdi32.dll", "SelectObject", &[dc, h]);
+        assert_eq!(
+            v.mem.virtual_query(bits).unwrap().kind,
+            wire::mem::MEM_MAPPED
+        );
+        let offset = if height < 0 { 0 } else { 8 };
+        v.mem.write_u32(bits + offset, 0x7f123456).unwrap(); // CPU writes BGRA directly
+        assert_eq!(v.call("gdi32.dll", "GetPixel", &[dc, 0, 0]), 0x563412);
+        assert_eq!(
+            v.call("gdi32.dll", "SetPixel", &[dc, 1, 0, 0x332211]),
+            0x332211
+        );
+        assert_eq!(v.mem.read_u32(bits + offset + 4).unwrap(), 0x112233);
+        assert_eq!(
+            v.call("gdi32.dll", "GetObjectW", &[h, 84, DATA + 0xe00]),
+            84
+        );
+        assert_eq!(v.mem.read_u32(DATA + 0xe14).unwrap(), bits);
+        assert_eq!(v.mem.read_u32(DATA + 0xe20).unwrap() as i32, height);
+        assert_eq!(v.k("VirtualFree", &[bits, 0, 0x8000]), 0);
+        assert_eq!(
+            v.k(
+                "VirtualProtect",
+                &[bits, 1, wire::mem::PAGE_READONLY, DATA + 0xe80]
+            ),
+            1
+        );
+        assert_eq!(v.call("gdi32.dll", "SetPixel", &[dc, 0, 0, 0xff]), u32::MAX);
+        assert_eq!(v.mem.read_u32(bits + offset).unwrap(), 0x7f123456);
+        assert_eq!(v.call("gdi32.dll", "SelectObject", &[dc, stock]), h);
+        assert_eq!(v.call("gdi32.dll", "DeleteObject", &[h]), 1);
+        assert!(v.mem.read_u32(bits).is_err());
+    }
+}
+
+#[test]
+fn bitblt_overlap_clipping_origin_and_invalid_rop_preserve_expected_pixels() {
+    let mut v = Vm::new();
+    let dc = v.call("gdi32.dll", "CreateCompatibleDC", &[0]);
+    let (h, bits) = dib32(&mut v, dc, 4, -2);
+    v.call("gdi32.dll", "SelectObject", &[dc, h]);
+    for i in 0..8 {
+        v.mem
+            .write_u32(bits + i * 4, ((i + 1) << 16) | 0xff000000)
+            .unwrap();
+    }
+    assert_eq!(
+        v.call("gdi32.dll", "BitBlt", &[dc, 1, 0, 3, 1, dc, 0, 0, 0xcc0020]),
+        1
+    );
+    let (_, _, pixels) = v.state.graphics.snapshot(&v.mem, dc).unwrap();
+    assert_eq!(pixels, [1, 1, 2, 3, 5, 6, 7, 8]);
+    assert_eq!(v.call("gdi32.dll", "SetWindowOrgEx", &[dc, 1, 0, 0]), 1);
+    assert_eq!(
+        v.call("gdi32.dll", "BitBlt", &[dc, 0, 1, 3, 1, dc, 1, 0, 0xcc0020]),
+        1
+    );
+    let (_, _, pixels) = v.state.graphics.snapshot(&v.mem, dc).unwrap();
+    assert_eq!(pixels, [1, 1, 2, 3, 1, 2, 7, 8]);
+    assert_eq!(
+        v.call("gdi32.dll", "BitBlt", &[dc, 1, 0, 1, 1, dc, 1, 1, 0xdead]),
+        0
+    );
+    assert_eq!(v.state.graphics.snapshot(&v.mem, dc).unwrap().2, pixels);
 }
 
 /// Independently authored PE32: one section, a real stdcall DllMain, code/data

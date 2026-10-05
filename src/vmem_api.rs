@@ -6,7 +6,7 @@ use crate::mem::GuestMem;
 pub fn dispatch(
     dll: &str,
     name: &str,
-    a: &[u32; 12],
+    a: &crate::api::Args,
     mem: &mut GuestMem,
     state: &mut ApiState,
 ) -> Option<(u32, String)> {

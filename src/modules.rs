@@ -318,6 +318,8 @@ pub fn native_module(name: &str) -> bool {
             | "ddraw.dll"
             | "dsound.dll"
             | "dinput.dll"
+            | "oleaut32.dll"
+            | "wininet.dll"
     )
 }
 impl Modules {
@@ -698,6 +700,9 @@ fn resolve(
             {
                 Ok(api.register(&dll.clone(), Some(name), None))
             }
+            Symbol::Ordinal(ordinal) if crate::win32_abi::ordinal_name(dll, *ordinal).is_some() => {
+                Ok(api.register(&dll.clone(), None, Some(*ordinal)))
+            }
             Symbol::Ordinal(ordinal) => api
                 .entries
                 .iter()
@@ -910,7 +915,7 @@ fn unload(
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch(
     name: &str,
-    a: &[u32; 12],
+    a: &crate::api::Args,
     cpu: &mut Cpu,
     mem: &mut GuestMem,
     api: &mut ApiTable,

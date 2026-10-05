@@ -27,7 +27,7 @@ use crate::thread::Sched;
 #[allow(clippy::too_many_arguments)]
 pub fn enumerate(
     name: &str,
-    a: &[u32; 12],
+    a: &crate::api::Args,
     cpu: &mut Cpu,
     mem: &mut GuestMem,
     api: &mut ApiTable,
