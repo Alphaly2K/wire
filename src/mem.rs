@@ -4,6 +4,7 @@
 //! Every access is bounds- and commit-checked, producing a MemFault the CPU
 //! core can report as a guest access violation.
 
+use std::cell::Cell;
 use std::fmt;
 
 pub const SPACE_SIZE: u64 = 1 << 32;
@@ -32,6 +33,7 @@ pub struct GuestMem {
     pub base: *mut u8,
     committed: Vec<u64>, // 1 bit per host page
     host_page: usize,    // 16 KiB on Apple Silicon, 4 KiB on most x86 hosts
+    code_versions: Vec<Cell<u64>>,
 }
 
 unsafe impl Send for GuestMem {}
@@ -65,6 +67,7 @@ impl GuestMem {
             base: p as *mut u8,
             committed: vec![0u64; (SPACE_SIZE as usize / host_page) / 64],
             host_page,
+            code_versions: vec![Cell::new(0); SPACE_SIZE as usize / host_page],
         })
     }
 
@@ -78,6 +81,33 @@ impl GuestMem {
 
     pub fn is_committed(&self, addr: u32) -> bool {
         self.page_ok(addr as usize / self.host_page)
+    }
+
+    pub(crate) fn host_page_size(&self) -> u32 {
+        self.host_page as u32
+    }
+    pub(crate) fn watch_code(&self, address: u32) {
+        let version = &self.code_versions[address as usize / self.host_page];
+        if version.get() == 0 {
+            version.set(1);
+        }
+    }
+    #[inline]
+    pub(crate) fn code_version(&self, address: u32) -> u64 {
+        self.code_versions[address as usize / self.host_page].get()
+    }
+    fn note_write(&self, address: u32, len: usize) {
+        if len == 0 {
+            return;
+        }
+        let first = address as usize / self.host_page;
+        let last = (address as usize + len - 1) / self.host_page;
+        for page in first..=last {
+            let version = &self.code_versions[page];
+            if version.get() != 0 {
+                version.set(version.get().saturating_add(1));
+            }
+        }
     }
 
     /// Bytes committed below the guest's 2 GiB application-address ceiling.
@@ -145,6 +175,11 @@ impl GuestMem {
             if !self.page_ok(p) {
                 return Err(MemFault { addr, len, write });
             }
+        }
+        // Raw host writes (ReadFile, heap copies) use this accessor too.
+        // Invalidate conservatively even if the subsequent write fails.
+        if write {
+            self.note_write(addr, len as usize);
         }
         Ok(unsafe { self.base.add(addr as usize) })
     }

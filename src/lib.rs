@@ -4,6 +4,7 @@ pub mod cpu;
 pub mod file_api;
 pub mod fs;
 pub mod heap;
+pub mod ir;
 pub mod loader;
 pub mod mem;
 pub mod nls;

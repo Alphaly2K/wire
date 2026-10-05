@@ -2,6 +2,10 @@
 
 wire is licensed LGPL-2.1-only (see LICENSE). This file records the origin and
 version of third-party code used by this repository, per project policy.
+The license texts for the IR frontend/hash dependencies are preserved in
+licenses/third-party/. Include these notices and license texts with binary
+redistributions; linking rather than copying source does not remove the
+license notice obligations.
 
 ## Build dependencies (linked, not distributed as source)
 
@@ -13,6 +17,27 @@ version of third-party code used by this repository, per project policy.
   https://github.com/servo/rust-smallvec
 - bitflags 2.13.2 (MIT OR Apache-2.0) — transitive dependency of rustc_apfloat.
   https://github.com/bitflags/bitflags
+- iced-x86 1.21.0 (MIT) — installation-time x86 decoder, decoder/instr_info
+  features only; no assembler or runtime machine-code generation.
+  https://github.com/icedland/iced
+  Source commit: c50f29b7bc305696895c075f3fc7719751426b12.
+  Copyright (C) 2018-present iced project and contributors.
+- lazy_static 1.5.1 (MIT OR Apache-2.0; MIT selected) — iced-x86 dependency.
+  https://github.com/rust-lang-nursery/lazy-static.rs
+- sha2 0.10.9 (MIT OR Apache-2.0; MIT selected) — source EXE SHA-256 binding.
+  https://github.com/RustCrypto/hashes
+- digest 0.10.7 and crypto-common 0.1.7 (MIT OR Apache-2.0; MIT selected) —
+  sha2 traits and common types. https://github.com/RustCrypto/traits
+- block-buffer 0.10.4 and cpufeatures 0.2.17 (MIT OR Apache-2.0; MIT selected) —
+  sha2 buffering and host feature detection. https://github.com/RustCrypto/utils
+- generic-array 0.14.7 (MIT) — sha2 transitive dependency.
+  https://github.com/fizyk20/generic-array
+- typenum 1.20.1 (MIT OR Apache-2.0; MIT selected) — sha2 transitive dependency.
+  https://github.com/paholg/typenum
+- cfg-if 1.0.5 (MIT OR Apache-2.0; MIT selected) — host feature selection.
+  https://github.com/rust-lang/cfg-if
+- version_check 0.9.5 (MIT/Apache-2.0; MIT selected) — build dependency of
+  generic-array, not a guest runtime compiler. https://github.com/SergioBenitez/version_check
 - System libiconv (platform-provided) — CP932/UTF-8/Windows-1252 conversion,
   linked from the host OS rather than vendored. The exact implementation and
   version follow the platform. https://www.gnu.org/software/libiconv/
@@ -25,6 +50,8 @@ version of third-party code used by this repository, per project policy.
 
 ## Imported source code
 
-None as of M0. When Wine (or any other third-party) source is imported, each
+None as of 2026-10-05. QEMU license headers were reviewed at v10.1.0;
+no QEMU implementation was imported. See docs/ir-aot-design.md for the file-level
+LGPL/GPL distinction. When Wine (or any other third-party) source is imported, each
 file must keep its original copyright header and an entry is added here with
 source project, version/commit, and license.

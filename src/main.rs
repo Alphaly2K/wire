@@ -13,17 +13,70 @@ fn main() -> ExitCode {
         eprintln!("wire — Watari-Is-a-Runtime-Environment (M2 spike)");
         eprintln!("usage:");
         eprintln!("  wire imports <program.exe>");
+        eprintln!("  wire prepare <program.exe> [--out program.wir]");
         eprintln!(
-            "  wire run <program.exe> [--max-instr N] [--log-dir DIR] [--cwd DIR] [--trace-cpu]"
+            "  wire run <program.exe> [--ir program.wir] [--no-op-stats] [--max-instr N] [--log-dir DIR] [--cwd DIR] [--trace-cpu]"
         );
         return ExitCode::from(2);
     }
     match args[1].as_str() {
         "imports" => cmd_imports(&args[2]),
+        "prepare" => cmd_prepare(&args[2], &args[3..]),
         "run" => cmd_run(&args[2], &args[3..]),
         c => {
             eprintln!("unknown command: {c}");
             ExitCode::from(2)
+        }
+    }
+}
+
+fn cmd_prepare(path: &str, opts: &[String]) -> ExitCode {
+    let default = Path::new("wire-out").join(format!(
+        "{}.wir",
+        Path::new(path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+    ));
+    let out = match opts {
+        [] => default,
+        [flag, value] if flag == "--out" => value.into(),
+        _ => {
+            eprintln!("usage: wire prepare <program.exe> [--out program.wir]");
+            return ExitCode::from(2);
+        }
+    };
+    let result = (|| -> Result<(), String> {
+        let exe = std::fs::read(path).map_err(|e| e.to_string())?;
+        let start = std::time::Instant::now();
+        let image = wire::ir::Image::from_pe(&exe)?;
+        let bytes = image.encode();
+        if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&out, &bytes).map_err(|e| e.to_string())?;
+        println!("prepared: {}", out.display());
+        println!(
+            "  {} fixed {}-byte records; {} lifted ({} compact); {} flag writers partially deferred; {} native call sites",
+            image.records.len(),
+            wire::ir::RECORD_BYTES,
+            image.lifted_count(),
+            image.compact_count(),
+            image.elided_flag_writers(),
+            image.native_call_count()
+        );
+        println!(
+            "  {} bytes in {:.3}s; no host machine code generated",
+            bytes.len(),
+            start.elapsed().as_secs_f64()
+        );
+        Ok(())
+    })();
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("prepare: {e}");
+            ExitCode::FAILURE
         }
     }
 }
@@ -125,6 +178,8 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
     let mut log_dir = String::from("wire-out");
     let mut trace_cpu = false;
     let mut guest_cwd = None;
+    let mut ir_path = None;
+    let mut profile_opcodes = true;
     let mut i = 0;
     while i < opts.len() {
         match opts[i].as_str() {
@@ -142,6 +197,15 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
                 }
             }
             "--trace-cpu" => trace_cpu = true,
+            "--no-op-stats" => profile_opcodes = false,
+            "--ir" => {
+                i += 1;
+                let Some(path) = opts.get(i) else {
+                    eprintln!("--ir needs a file");
+                    return ExitCode::from(2);
+                };
+                ir_path = Some(path);
+            }
             "--cwd" => {
                 i += 1;
                 let Some(dir) = opts.get(i) else {
@@ -228,6 +292,22 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
     // --- execution reaches the entry point here ---
     let mut cpu = Cpu::new(loaded.entry, loaded.esp, loaded.teb);
     cpu.trace_enabled = trace_cpu;
+    cpu.profile_opcodes = profile_opcodes;
+    if let Some(path) = ir_path {
+        let result = (|| -> Result<usize, String> {
+            let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+            let exe = std::fs::read(exe_path).map_err(|e| e.to_string())?;
+            let image = wire::ir::Image::parse(&bytes, &exe)?;
+            if image.image_base != loaded.image_base {
+                return Err("IR image base does not match loaded PE".into());
+            }
+            cpu.install_ir(image, &mem)
+        })();
+        match result {
+            Ok(accepted) => println!("  installed IR: {accepted} instructions; unsupported/changed code uses x86 fallback"),
+            Err(e) => { eprintln!("load IR: {e}"); return ExitCode::FAILURE; }
+        }
+    }
     let mut sched = Sched::new();
     let main_tid = sched.alloc_tid();
     let main_handle = state.alloc_handle(HandleObj::Thread { tid: main_tid });
@@ -263,6 +343,12 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
         cpu.instr_count as f64 / wall.as_secs_f64().max(1e-9) / 1e6
     );
     println!("api calls: {}", logger.call_count);
+    if ir_path.is_some() {
+        println!(
+            "IR instructions: {}; x86 fallback: {}; CALL_NATIVE: {}",
+            cpu.ir_steps, cpu.ir_fallbacks, cpu.ir_native_calls
+        );
+    }
     println!(
         "final regs: eax={:#010x} ebx={:#010x} ecx={:#010x} edx={:#010x}",
         cpu.regs[0], cpu.regs[3], cpu.regs[1], cpu.regs[2]

@@ -15,7 +15,9 @@ use std::fmt;
 use std::time::Instant;
 
 mod fpu;
+mod ir_exec;
 pub use fpu::Fpu;
+use ir_exec::PendingFlags;
 
 pub const CF: u32 = 0x001;
 pub const PF: u32 = 0x004;
@@ -147,6 +149,12 @@ pub struct Cpu {
     pub instr_count: u64,
     pub op_stats: HashMap<u32, u64>,
     pub trace_enabled: bool,
+    pub profile_opcodes: bool,
+    pub ir_steps: u64,
+    pub ir_fallbacks: u64,
+    pub ir_native_calls: u64,
+    ir_cache: Option<crate::ir::Cache>,
+    pending_flags: Option<PendingFlags>,
     pub trace_ring: VecDeque<(u32, Vec<u8>)>,
     t0: Instant,
 }
@@ -167,6 +175,12 @@ impl Cpu {
             instr_count: 0,
             op_stats: HashMap::new(),
             trace_enabled: false,
+            profile_opcodes: true,
+            ir_steps: 0,
+            ir_fallbacks: 0,
+            ir_native_calls: 0,
+            ir_cache: None,
+            pending_flags: None,
             trace_ring: VecDeque::new(),
             t0: Instant::now(),
         };
@@ -184,10 +198,11 @@ impl Cpu {
     }
     #[inline]
     pub fn flag(&self, f: u32) -> bool {
-        self.eflags & f != 0
+        self.flags_for(f) & f != 0
     }
     #[inline]
     pub fn set_flag(&mut self, f: u32, v: bool) {
+        self.flush_flags();
         if v {
             self.eflags |= f;
         } else {
@@ -199,7 +214,7 @@ impl Cpu {
         ThreadCtx {
             regs: self.regs,
             eip: self.eip,
-            eflags: self.eflags,
+            eflags: self.effective_eflags(),
             fs_base: self.fs_base,
             gs_base: self.gs_base,
             fpu: self.fpu,
@@ -209,6 +224,7 @@ impl Cpu {
     }
 
     pub fn load_ctx(&mut self, c: &ThreadCtx) {
+        self.pending_flags = None;
         self.regs = c.regs;
         self.eip = c.eip;
         self.eflags = c.eflags;
@@ -1043,7 +1059,14 @@ impl Cpu {
 
     // ---- main dispatch ----
 
+    /// Single-step exposes canonical EFLAGS, including when using IR.
     pub fn step(&mut self, mem: &mut GuestMem) -> Result<(), CpuError> {
+        let result = self.step_cached(mem);
+        self.flush_flags();
+        result
+    }
+
+    fn step_x86(&mut self, mem: &mut GuestMem) -> Result<(), CpuError> {
         let eip0 = self.eip;
         if self.trace_enabled {
             let mut bytes = Vec::with_capacity(8);
@@ -1088,7 +1111,9 @@ impl Cpu {
         }
         let bits: u8 = if opsize16 { 16 } else { 32 };
         let op = self.fetch8(mem)?;
-        *self.op_stats.entry(op as u32).or_insert(0) += 1;
+        if self.profile_opcodes {
+            *self.op_stats.entry(op as u32).or_insert(0) += 1;
+        }
 
         match op {
             0x00..=0x05 => self.alu_forms(mem, seg, bits, op, Alu::Add)?,
@@ -1511,7 +1536,9 @@ impl Cpu {
         rep: Option<u8>,
     ) -> Result<(), CpuError> {
         let op = self.fetch8(mem)?;
-        *self.op_stats.entry(0x100 | op as u32).or_insert(0) += 1;
+        if self.profile_opcodes {
+            *self.op_stats.entry(0x100 | op as u32).or_insert(0) += 1;
+        }
         match op {
             0x0D | 0x18..=0x1F => {
                 // prefetch / multi-byte nop: consume modrm, do nothing
@@ -2705,23 +2732,27 @@ impl Cpu {
     ) -> RunOutcome {
         loop {
             if self.halted {
+                self.flush_flags();
                 return RunOutcome::Exited(self.exit_code.unwrap_or(0));
             }
             if let Some((exit, owner_teb)) = callback_exit {
                 if self.eip == exit && self.fs_base == owner_teb {
+                    self.flush_flags();
                     return RunOutcome::CallbackReturned;
                 }
             }
             if let Some(idx) = api.stub_index(self.eip) {
+                self.flush_flags();
                 if let Err(e) = api::dispatch(idx, self, mem, api, state, log, sched, max_instr) {
                     return RunOutcome::Crashed(format!("api dispatch: {e}"));
                 }
                 continue;
             }
             if self.instr_count >= max_instr {
+                self.flush_flags();
                 return RunOutcome::InstructionLimit;
             }
-            match self.step(mem) {
+            match self.step_cached(mem) {
                 Ok(()) => {
                     self.instr_count += 1;
                     // Cooperative timeslice: a guest thread that never calls a
@@ -2730,7 +2761,10 @@ impl Cpu {
                         sched.round_robin(self);
                     }
                 }
-                Err(e) => return RunOutcome::Crashed(e.to_string()),
+                Err(e) => {
+                    self.flush_flags();
+                    return RunOutcome::Crashed(e.to_string());
+                }
             }
         }
     }

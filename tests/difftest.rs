@@ -116,6 +116,10 @@ enum RunResult {
 }
 
 fn run_wire(code: &[u8], init: &Init, max_steps: u64) -> RunResult {
+    run_wire_engine(code, init, max_steps, false)
+}
+
+fn run_wire_engine(code: &[u8], init: &Init, max_steps: u64, ir: bool) -> RunResult {
     let mut mem = GuestMem::new().expect("mmap");
     mem.commit(CODE, CODE_SIZE as u32).unwrap();
     mem.commit(DATA, DATA_SIZE as u32).unwrap();
@@ -126,6 +130,10 @@ fn run_wire(code: &[u8], init: &Init, max_steps: u64) -> RunResult {
     cpu.regs = init.regs;
     cpu.eflags = init.eflags;
     cpu.xmm = init.xmm;
+    if ir {
+        cpu.install_ir(wire::ir::Image::from_code(CODE, code).unwrap(), &mem)
+            .unwrap();
+    }
     let code_end = CODE + code.len() as u32;
     let mut steps = 0u64;
     while cpu.eip != code_end {
@@ -872,6 +880,10 @@ fn run_family(t: &Template, cases: usize, seed: u64) {
             (t.gen)(&mut rng, &mut code);
         }
         let w = run_wire(&code, &init, 100_000);
+        let ir = run_wire_engine(&code, &init, 100_000, true);
+        if let Err(e) = compare("IR vs x86", &code, &init, &ir, &w, t.flag_mask) {
+            panic!("{e}");
+        }
         let u = run_unicorn(&code, &init, 100_000);
         if let Err(e) = compare(t.name, &code, &init, &w, &u, t.flag_mask) {
             panic!("case {case} (seed {seed:#x}): {e}");

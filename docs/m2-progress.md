@@ -1,9 +1,57 @@
-# M2 进行中：最新进度与交接（2026-10-04）
+# M2 进行中：最新进度与交接（2026-10-05）
 
 M2 **尚未验收，不打 tag**。前两次本地检查点为 `75f90a6`（线程/SSE）和
 `852eba3`（资源、堆、编码、文件 I/O、基础 SEH）。本轮完成软件 x87 与初始化系统/NLS 子集。
 目标程序从约 1200 万条指令推进到 **21,425,797 条指令**，当前停在 MSVC C++ 异常展开的 `RtlUnwind`。
 未读取 data.xp3，也还没有可见游戏窗口。
+
+2026-10-05 转入 no-JIT 性能路线，增加安装期预解码、8B typed I32 热路径与保守 FLAGS 分析，
+并实现 CALL_NATIVE/IAT guard。M2功能阻塞仍为 RtlUnwind；不能将 IR 原型计为 M2验收。
+最新软件 x87/系统/NLS 检查点是 `ca94a36`。
+
+## 本轮：安装期 IR 与计划评审（2026-10-05）
+
+- QEMU整体GPLv2，但v10.1.0的i386 translate.c/cc_helper.c为LGPL-2.1-or-later，tci.c为GPL-2.0-or-later。
+  本轮未导入QEMU实现；采用MIT iced-x86 decoder和独立wire语义。已补齐新增依赖/许可原文。
+- `wire prepare EXE --out FILE` 生成EXE SHA-256绑定的版本2 `.wir`；`wire run EXE --ir FILE` 使用IR。
+  默认后端仍为原解释器，`--no-op-stats`用于公平比较。运行时不生成宿主机器码。
+- 常见I32 GPR操作和直接分支已经是8B typed instruction，内存/窄寄存器等走预解码操作，
+  SSE/x87/其他未覆盖指令回退；不声称最终紧凑后端已完成。磁盘保留64B冷记录，内存热条目12B，
+  512B bank、紧凑文件、稀疏索引和block chaining尚未实现。
+- FLAGS只在连续直线段内证明后续确定覆盖、无读/观察时省去即时计算；调用/控制流/faultable访问全live。
+  有lazy recipe用于单步、预算、fault、线程与API边界完整恢复；不做跨块/函数猜测删除。
+- CALL_NATIVE是一等opcode，记录image-local IAT身份、bind后保存guest stub并每次验证当前IAT，
+  hook后调用真实guest目标；仍复用现有API dispatcher/stack cleanup/callback，不序列化宿主指针。
+- CPU/API/heap的checked writable pointer统一更新代码页代数；页写后回退，未预解码/重叠入口回退。
+  当前GuestMem仍只做范围/commit检查，不具备完整VMM权限，尚不能启用unchecked memory fast path。
+- 评审了用户提供的Project design.md：采纳两层IR、少分发、统一gateway/VMM和可测指标；
+  x86-64、整个Wine移植、Wasm/JSC JIT和通用codec replacement留作后续独立范围。
+  具体修正见 [方案评审](project-plan-review.md)，IR编码/寄存器/FP80/边界见 [设计](ir-aot-design.md)。
+
+验证：`cargo test --release` **66项通过**（1 unit、34 differential、5 FPU、6 IR、20 Win32）；
+34族CPU差分增加IR与raw x86对照，仍以Unicorn为参照。format/Clippy/build通过。
+IR边界回归包括FLAGS静态证明、预算/fault恢复、自修改、重叠入口、文件错误、FS/SIB/高字节及IAT hook。
+
+性能：关闭trace/opcode profiling，AOT/装载不计入运行时间。3对18M指令合成循环的raw为
+59.18/60.14/58.67 guest MIPS，IR为70.03/76.75/79.69；只是ALU/branch样本。
+control两后端均正常退出，641条指令、43 API调用、完全相同21B输出；IR638/fallback3/CALL_NATIVE7。
+
+完整目标目录、相同配置下两对真实游戏测量：
+
+| 对照 | raw guest MIPS | IR guest MIPS | guest指令 / API调用 |
+| --- | ---: | ---: | --- |
+| 1 | 23.32 | 25.02 | 两后端均21,422,574 / 24,560 |
+| 2 | 23.58 | 24.07 | 两后端均21,420,983 / 24,552 |
+
+每对的全部GPR、EIP、EFLAGS和RtlUnwind阻塞相同；不同重复之间guest路径也略有变化，
+不能把一次结果当稳定上限。第二对IR命中16,496,618条、fallback4,924,365条（约23%）、
+CALL_NATIVE23,414次。仅约2–7%的实际收益，**没有解决最终性能目标，也没有解除功能阻塞**。
+日志与report在忽略的 `wire-out/ir-validation/full-game/`，没有加入游戏代码/资产。
+曾另用只含.cf的临时文件根验证过短路径，不能与完整目录的21M路径混作同一个benchmark。
+
+目标IR文件69,373,688B、1,083,963条冷记录，320,634条compact。
+后续优先typed memory/寻址融合和顺序执行/块链接，降低每条指令取guest-PC索引与代数检查的成本；
+然后压缩持久格式与resident cache。不要优化AOT转换速度来代替运行时收益。
 
 ## 已完成并验证
 

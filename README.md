@@ -39,6 +39,13 @@ wire imports path/to/program.exe
 
 # 运行；API 全量 trace 与频率表写入 wire-out/api.log
 wire run path/to/program.exe [--max-instr N] [--log-dir DIR] [--cwd DIR] [--trace-cpu]
+
+# 实验性安装期预解码；运行时以 typed IR 解释常见指令，其余用原解释器
+wire prepare path/to/program.exe --out wire-out/program.wir
+wire run path/to/program.exe --ir wire-out/program.wir --no-op-stats
+
+# 相同观测配置下的 ALU/branch guest MIPS 对照（AOT不计入执行时间）
+cargo run --release --example ir_bench
 ```
 
 文件访问默认以 EXE 所在目录为根，将其映射为 guest `C:\`；`--cwd DIR` 可指定另一目录。
@@ -48,6 +55,11 @@ guest 当前目录独立于宿主目录，拒绝 `..` 越界、其他盘符、UN
 验证：`cargo test --release`（Unicorn 差分 + Win32 行为测试）。macOS 的受限执行沙箱
 可能禁止 Unicorn 的参照执行并导致 SIGILL；这种情况下需在普通终端运行该命令。
 发布的 wire 可执行文件始终只解释 guest 指令，不使用 Unicorn 或 JIT。
+
+实验性 IR 的常见 I32 热指令为8B、类型编进 opcode；磁盘仍是64B冷记录的过渡格式，
+不是最终64-vreg紧凑后端。FLAGS只在直线段内按极保守静态证明省去即时计算，观察点恢复完整状态；
+CALL_NATIVE 保留 IAT hook、现有 API 栈清理和 callback 行为。设计、许可核实与测量见
+[IR AOT 设计](docs/ir-aot-design.md)；长期计划的修正见 [方案评审](docs/project-plan-review.md)。
 
 对照程序（自编译，仓库只含源码）：
 
