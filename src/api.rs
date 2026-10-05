@@ -145,6 +145,7 @@ pub struct ApiState {
     pub next_handle: u32,
     pub user32: crate::user32::User32,
     pub modules: crate::modules::Modules,
+    pub gdiplus: crate::gdiplus::GdiPlus,
 }
 
 impl ApiState {
@@ -175,6 +176,7 @@ impl ApiState {
             next_handle: 0x100,
             user32: crate::user32::User32::default(),
             modules: crate::modules::Modules::default(),
+            gdiplus: crate::gdiplus::GdiPlus::default(),
         };
         for dll in [
             "kernel32.dll",
@@ -388,6 +390,9 @@ pub(crate) fn native_export(dll: &str, name: &str) -> bool {
 /// stdcall stack cleanup in bytes. Unknown functions retain the existing
 /// cdecl/zero-cleanup diagnostic path.
 fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
+    if dll == "gdiplus.dll" {
+        return crate::gdiplus::stack_bytes(name);
+    }
     static TABLE: OnceLock<HashMap<(&'static str, &'static str), u32>> = OnceLock::new();
     let t = TABLE.get_or_init(|| {
         let mut m = HashMap::new();
@@ -870,6 +875,7 @@ fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetSysColor", 4),
                 ("GetSysColorBrush", 4),
                 ("EnumWindows", 8),
+                ("EnumThreadWindows", 12),
                 ("FindWindowA", 8),
                 ("FindWindowW", 8),
                 ("GetWindowThreadProcessId", 8),
@@ -1019,6 +1025,12 @@ fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetFontData", 20),
                 ("AddFontResourceA", 4),
                 ("AddFontResourceW", 4),
+                ("AddFontMemResourceEx", 16),
+                ("RemoveFontMemResourceEx", 4),
+                ("AddFontResourceExA", 12),
+                ("AddFontResourceExW", 12),
+                ("RemoveFontResourceExA", 12),
+                ("RemoveFontResourceExW", 12),
                 ("RemoveFontResourceA", 4),
                 ("RemoveFontResourceW", 4),
                 ("CreateHalftonePalette", 4),
@@ -2408,6 +2420,23 @@ pub fn dispatch(
             cpu.exit_code = Some(args[0]);
             note = "CLR-style exit".into();
             ret = 0;
+        }
+        ("gdiplus.dll", _) => {
+            (ret, note, implemented) = crate::gdiplus::dispatch(name, &args, mem, state);
+        }
+        (
+            "gdi32.dll",
+            "AddFontMemResourceEx"
+            | "RemoveFontMemResourceEx"
+            | "AddFontResourceExA"
+            | "AddFontResourceExW"
+            | "RemoveFontResourceExA"
+            | "RemoveFontResourceExW",
+        ) => {
+            state.last_error = 120;
+            implemented = false;
+            ret = 0;
+            note = "font resource backend not ported".into();
         }
         _ => {
             if let Some((v, msg)) = crate::file_api::dispatch(dll, name, &args, mem, state) {

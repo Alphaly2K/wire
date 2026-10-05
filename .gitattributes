@@ -1,0 +1,2 @@
+# Preserve the upstream license bytes, including its original trailing spaces.
+third_party/wine-10.0/COPYING.LIB -whitespace

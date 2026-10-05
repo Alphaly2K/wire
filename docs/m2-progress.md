@@ -2,20 +2,33 @@
 
 M2 **尚未验收，不打 tag**。真实 guest DLL 装载、重定位、导出、DllMain 和无 callback 的静态 TLS 已实现，
 `kinglove.tpm` / `KAGParser.dll` 已初始化，确认读取 data.xp3 和 patch.xp3 的索引/脚本内容。
-游戏推进到约 **288M 指令 / 830K API 调用**，当前停在 `layerExDraw.dll` 缺少 GDI+ 兼容模块，
-随后 ExitProcess(3)。还没有可见游戏窗口或持续主循环。此前本地检查点包括 `75f90a6`（线程/SSE）、
+按用户授权直接移植 Wine 的 GDI+ 矩阵/启动逻辑和窗口枚举，现已越过 `layerExDraw.dll` 的依赖缺失，
+继续装载 varfile、KaichoTrans、addFont、scriptsEx。游戏约 **288.8M 指令 / 832K API 调用**时，
+停在 `dirlist.dll` 的 `VirtualAlloc(MEM_RESERVE, PAGE_NOACCESS)` 未实现路径，NULL 后发生 guest fault。
+还没有可见游戏画面或持续主循环。此前本地检查点包括 `75f90a6`（线程/SSE）、
 `852eba3`（资源/堆/I/O/基础SEH）、`ca94a36`（x87/系统/NLS）、`a3de840`（主IR优化）和`f97ab8d`（真实profile/x87热点优化）。
 
 2026-10-05 转入 no-JIT 性能路线，增加安装期预解码、8B typed I32 热路径与保守 FLAGS 分析，
 并实现 CALL_NATIVE/IAT guard；IR原型不等于M2验收。
 
-## 最新：真实 DLL/TLS 已装载，推进到绘图插件依赖
+## 最新：Wine Win32 逻辑移植，推进到 guest 内存保留
+
+逐文件核查 Wine 10.0 的 LGPL-2.1-or-later，选择 LGPL 2.1 与 wire 合并，保留原版权、源码快照、
+COPYING.LIB 与 SHA-256。GDI+ stdcall ABI 来自上游 spec；矩阵运算、逆变换、点/向量变换已移植，
+对象使用真实 guest heap 和生命周期记录。未实现绘图/字体/编码器等功能返回 NotImplemented，
+不将 GpStatus::Ok 用作默认返回；字体资源 API 目前只有 ABI，明确失败。
+窗口枚举遵循 Wine 的快照/销毁跳过/回调 FALSE 停止流程，保留 guest 控制权转移和 LastError。
+完整 **95 项回归**、Clippy all-targets、format 通过；IR/raw 重放停在同一内存 reserve 阻塞，全部 GPR/EIP/EFLAGS 相同。
+下一步补通用 guest VMM 的 reserve/commit/free/protection，再推进绘图和呈现；持续主循环形成后再扩大性能采样。
+详细实现、许可、限制和复现见 [Wine 移植推进记录](wine-win32-progress-2026-10-06.md)。
+
+## 此前：真实 DLL/TLS 已装载，推进到绘图插件依赖
 
 完整 90 项回归、Clippy all-targets、format 通过，自编译 MinGW DLL 的真实导入、DllMain、
 重定位和卸载探针通过。DLL 使用独立 0x50000000..0x60000000 arena；主栈按 PE reserve eager commit，
 解除 __chkstk 超出旧 128KiB 栈的问题。静态 TLS 对既有/新线程保持独立模板，失败/卸载清理已覆盖。
 非空 TLS callback/delay import、线程 DLL 通知、循环依赖 SCC 卸载、完整 loader 搜索及 guard stack 增长仍未实现。
-当前优先级为真实 GDI/GDI+ 与插件初始化，再推进呈现；进入持续主循环后再扩大性能 profile。
+当时优先级为真实 GDI/GDI+ 与插件初始化，再推进呈现；进入持续主循环后再扩大性能 profile。
 完整阶段结果及复现见 [DLL/脚本推进记录](game-dll-progress-2026-10-06.md)。
 
 ## 此前：推进到真实 guest DLL 装载边界

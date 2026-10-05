@@ -132,6 +132,11 @@ pub fn dispatch(
     if dll != "user32.dll" {
         return None;
     }
+    if matches!(name, "EnumWindows" | "EnumThreadWindows") {
+        return Some(crate::user32_enum::enumerate(
+            name, a, cpu, mem, api, state, log, sched, max_instr,
+        ));
+    }
     if matches!(
         name,
         "RegisterClassA"
@@ -169,6 +174,7 @@ pub fn dispatch(
             | "GetClientRect"
             | "GetWindowRect"
             | "GetParent"
+            | "GetWindowThreadProcessId"
             | "ShowWindow"
     ) {
         return Some(window_dispatch(
@@ -296,7 +302,7 @@ fn class_dispatch(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn invoke(
+pub(crate) fn invoke(
     cpu: &mut Cpu,
     mem: &mut GuestMem,
     api: &mut ApiTable,
@@ -507,6 +513,12 @@ fn window_dispatch(
             value(old, String::new())
         }
         "GetParent" => value(window.parent, String::new()),
+        "GetWindowThreadProcessId" => {
+            if a[1] != 0 {
+                mem.write_u32(a[1], 4242).map_err(|e| e.to_string())?;
+            }
+            value(window.tid, String::new())
+        }
         "GetClientRect" | "GetWindowRect" => {
             let [x, y, w, h] = window.rect;
             let rect = if name == "GetClientRect" {

@@ -54,8 +54,25 @@ license notice obligations.
 
 ## Imported source code
 
-None as of 2026-10-05. QEMU license headers were reviewed at v10.1.0;
-no QEMU implementation was imported. See docs/ir-aot-design.md for the file-level
-LGPL/GPL distinction. When Wine (or any other third-party) source is imported, each
-file must keep its original copyright header and an entry is added here with
-source project, version/commit, and license.
+- Wine 10.0, commit b073859675060c9211fcbccfd90e4e87520dc2c2
+  (https://github.com/wine-mirror/wine), imported/adapted 2026-10-06.
+  LGPL-2.1-or-later; LGPL 2.1 selected for wire's combined work.
+  Original file headers, COPYING.LIB, unchanged snapshots and checksums are
+  preserved in third_party/wine-10.0/; see that directory's README.md.
+  - dlls/gdiplus/matrix.c, gdiplus.c and gdiplus_private.h: Copyright (C) 2007 Google
+    (Evan Stade). Matrix logic and startup/allocation contract adapted into
+    src/gdiplus.rs with checked guest memory and object/token ownership.
+    Degree/rounding helper excerpts are preserved in gdiplus/float-helpers.h.
+  - dlls/gdiplus/gdiplus.spec: unchanged Wine named stdcall export ABI data,
+    embedded by src/gdiplus.rs. The file has no individual copyright header;
+    the upstream Wine LGPL license is retained.
+  - dlls/user32/win.c: Copyright 1993, 1994 Alexandre Julliard.
+    Enumeration excerpts with original header preserved in
+    user32/win-enumeration.c; adapted into src/user32_enum.rs using wire's
+    logical window table and guest callback/control-transfer boundaries.
+  No Wine C code, Wine server or platform backend is built or linked.
+
+QEMU license headers were reviewed at v10.1.0; no QEMU implementation was
+imported. See docs/ir-aot-design.md for the file-level LGPL/GPL distinction.
+Future imported files must retain their original notices and record their
+source project, version/commit and license here.

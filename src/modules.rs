@@ -300,6 +300,7 @@ pub fn native_module(name: &str) -> bool {
             | "ntdll.dll"
             | "user32.dll"
             | "gdi32.dll"
+            | "gdiplus.dll"
             | "msvcrt.dll"
             | "advapi32.dll"
             | "version.dll"

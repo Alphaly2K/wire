@@ -208,8 +208,12 @@ dense索引12,552,192B、native target表8,671,704B、区域页代数1,536B。
 此前游戏已越过RtlUnwind并推进到插件初始化，当时完整回归为79项；该阶段的真实CPU复测见
 [游戏推进记录](game-progress-2026-10-05.md)。guest回调内逐条识别非局部栈转移，普通主循环继续连续IR调度。
 2026-10-06 已装载真实 kinglove/KAGParser DLL、建立静态 TLS，并读取 data.xp3/patch.xp3 的脚本，
-推进到约288M指令的 GDI+ 依赖边界，完整90项回归通过；见 [最新推进记录](game-dll-progress-2026-10-06.md)。
-新DLL暂走raw fallback；后续可安装模块IR，但当前优先解除绘图/呈现功能阻塞。
+推进到约288M指令的 GDI+ 依赖边界，完整90项回归通过；见 [DLL推进记录](game-dll-progress-2026-10-06.md)。
+随后按用户授权移植 Wine 10.0 的 GDI+ 矩阵/启动及窗口枚举逻辑，并接入上游 named stdcall ABI，
+逐文件 LGPL 核查和来源保留已完成。多个绘图/脚本插件实际装载，现停在 dirlist 的 VirtualAlloc reserve 边界，
+完整95项回归通过，IR/raw终态全部GPR/EIP/EFLAGS相同；见 [最新推进记录](wine-win32-progress-2026-10-06.md)。
+新DLL暂走raw fallback；后续可安装模块IR，但当前优先补VMM并解除呈现功能阻塞。
+这些 Win32 变更未改变8B typed IR、FLAGS保守证明、代码页失效及x87精度规则。
 以下71项和MIPS表保留为此前整数IR优化阶段的记录。
 
 `cargo test --release` 共71项通过：1 unit、34 differential、5 FPU、10 IR、1 Wasm、20 Win32。
@@ -237,6 +241,6 @@ SIB load/add/store循环50,000,004条 retired guest 指令。
 对照程序两种后端都正常退出，641条指令、43个API调用，输出同为21B `wire control program\n`；
 IR命中638条，fallback3条，CALL_NATIVE7次。该程序过短，不能用它测性能。
 
-真实目标完整目录下的对照及文件尺寸见本轮进度记录；当前仍停在 RtlUnwind。
+真实目标完整目录下的对照及文件尺寸见该轮进度记录；该阶段仍停在 RtlUnwind。
 游戏 `.wir` 有1,083,963条记录，其中562,602条使用8B热指令（原为320,634），文件69,373,688B，
 说明下一版必须压缩持久记录、改进代码发现与索引，而不能宣称目标“IR规模小”已经达到。
