@@ -1,11 +1,17 @@
 //! Guest 32-bit address space.
 //!
-//! 4 GiB reserved as PROT_NONE up front; pages are committed (RW) on demand.
-//! Every access is bounds- and commit-checked, producing a MemFault the CPU
-//! core can report as a guest access violation.
+//! Windows 4 KiB commitment/protection is independent of host backing pages.
+//! Host backing is always data (RW, never executable). Every CPU/API access
+//! checks logical guest permissions before obtaining a host pointer.
 
 use std::cell::Cell;
 use std::fmt;
+mod vm;
+pub use vm::{
+    MemoryInfo, ALLOCATION_GRANULARITY, GUEST_PAGE, MEM_COMMIT, MEM_FREE, MEM_IMAGE, MEM_PRIVATE,
+    MEM_RESERVE, PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_GUARD,
+    PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE,
+};
 
 pub const SPACE_SIZE: u64 = 1 << 32;
 
@@ -14,14 +20,23 @@ pub struct MemFault {
     pub addr: u32,
     pub len: u32,
     pub write: bool,
+    pub execute: bool,
+    pub guard: bool,
 }
 
 impl fmt::Display for MemFault {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "guest memory {} fault at {:#010x} (len {})",
-            if self.write { "write" } else { "read" },
+            "guest memory {}{} fault at {:#010x} (len {})",
+            if self.guard { "guard " } else { "" },
+            if self.execute {
+                "execute"
+            } else if self.write {
+                "write"
+            } else {
+                "read"
+            },
             self.addr,
             self.len
         )
@@ -31,8 +46,10 @@ impl std::error::Error for MemFault {}
 
 pub struct GuestMem {
     pub base: *mut u8,
-    committed: Vec<u64>, // 1 bit per host page
-    host_page: usize,    // 16 KiB on Apple Silicon, 4 KiB on most x86 hosts
+    backed: Vec<u64>,           // 1 bit per host page; not guest commitment
+    protection: Vec<Cell<u16>>, // 0 = uncommitted, otherwise Windows PAGE_*
+    allocations: std::collections::BTreeMap<u32, vm::Allocation>,
+    host_page: usize, // 16 KiB on Apple Silicon, 4 KiB on most x86 hosts
     page_shift: u32,
     code_versions: Vec<Cell<u64>>,
 }
@@ -66,13 +83,18 @@ impl GuestMem {
         let host_page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
         // Supported hosts use power-of-two pages. Validate before replacing
         // runtime page divisions with shifts in checked guest accesses.
-        if !host_page.is_power_of_two() || host_page as u64 > SPACE_SIZE {
+        if !host_page.is_power_of_two()
+            || host_page < GUEST_PAGE as usize
+            || host_page as u64 > SPACE_SIZE
+        {
             unsafe { libc::munmap(p, SPACE_SIZE as usize) };
             return Err(std::io::Error::other("unsupported host page size"));
         }
         Ok(GuestMem {
             base: p as *mut u8,
-            committed: vec![0u64; (SPACE_SIZE as usize / host_page) / 64],
+            backed: vec![0u64; (SPACE_SIZE as usize / host_page) / 64],
+            protection: vec![Cell::new(0); SPACE_SIZE as usize / GUEST_PAGE as usize],
+            allocations: vm::layout_reservations(),
             host_page,
             page_shift: host_page.trailing_zeros(),
             code_versions: vec![Cell::new(0); SPACE_SIZE as usize / host_page],
@@ -81,15 +103,15 @@ impl GuestMem {
 
     #[inline]
     fn page_ok(&self, page: usize) -> bool {
-        self.committed[page / 64] & (1u64 << (page % 64)) != 0
+        self.protection[page].get() != 0
     }
 
-    fn page_mark(&mut self, page: usize) {
-        self.committed[page / 64] |= 1u64 << (page % 64);
+    fn host_backed(&self, page: usize) -> bool {
+        self.backed[page / 64] & (1u64 << (page % 64)) != 0
     }
 
     pub fn is_committed(&self, addr: u32) -> bool {
-        self.page_ok(addr as usize >> self.page_shift)
+        self.page_ok(addr as usize >> 12)
     }
 
     pub(crate) fn host_page_size(&self) -> u32 {
@@ -126,33 +148,44 @@ impl GuestMem {
 
     /// Bytes committed below the guest's 2 GiB application-address ceiling.
     pub fn application_committed_bytes(&self) -> u64 {
-        let words = (0x8000_0000usize / self.host_page) / 64;
-        self.committed[..words]
+        self.protection[..0x8000_0000usize / GUEST_PAGE as usize]
             .iter()
-            .map(|w| w.count_ones() as u64)
-            .sum::<u64>()
-            * self.host_page as u64
+            .filter(|p| p.get() != 0)
+            .count() as u64
+            * GUEST_PAGE as u64
     }
 
-    /// Commit the host pages covering [addr, addr+len). The range is rounded
-    /// out to host-page boundaries because mprotect(2) requires host-page
-    /// alignment (16 KiB on Apple Silicon — guest-visible allocation
-    /// granularity stays finer in the bitmap).
+    /// Internal allocation/fixture adapter. Runtime arenas default to RW;
+    /// standalone fixtures retain RWX guest permissions. No host executable
+    /// memory is produced. Guest VirtualAlloc uses the separate Windows API.
     pub fn commit(&mut self, addr: u32, len: u32) -> Result<(), MemFault> {
-        if addr as u64 + len as u64 > SPACE_SIZE {
-            return Err(MemFault {
-                addr,
-                len,
-                write: true,
-            });
-        }
         if len == 0 {
             return Ok(());
+        }
+        let protect = self
+            .ensure_internal(addr, len)
+            .map_err(|_| Self::fault(addr, len, Access::Write, false))?;
+        self.commit_pages(addr, len, protect)
+    }
+
+    fn fault(addr: u32, len: u32, access: Access, guard: bool) -> MemFault {
+        MemFault {
+            addr,
+            len,
+            write: matches!(access, Access::Write),
+            execute: matches!(access, Access::Execute),
+            guard,
+        }
+    }
+
+    fn commit_pages(&mut self, addr: u32, len: u32, protect: u32) -> Result<(), MemFault> {
+        if len == 0 || addr as u64 + len as u64 > SPACE_SIZE {
+            return Err(Self::fault(addr, len, Access::Write, false));
         }
         let first = (addr as u64 >> self.page_shift) as usize;
         let last = ((addr as u64 + len as u64 - 1) >> self.page_shift) as usize;
         for page in first..=last {
-            if !self.page_ok(page) {
+            if !self.host_backed(page) {
                 let r = unsafe {
                     libc::mprotect(
                         self.base.add(page * self.host_page) as *mut libc::c_void,
@@ -161,84 +194,138 @@ impl GuestMem {
                     )
                 };
                 if r != 0 {
-                    return Err(MemFault {
-                        addr,
-                        len,
-                        write: true,
-                    });
+                    return Err(Self::fault(addr, len, Access::Write, false));
                 }
-                self.page_mark(page);
+                self.backed[page / 64] |= 1u64 << (page % 64);
+            }
+        }
+        let first = addr as usize >> 12;
+        let last = ((addr as u64 + len as u64 - 1) >> 12) as usize;
+        for page in first..=last {
+            if !self.page_ok(page) {
+                // A decommitted 4 KiB page may share surviving host backing.
+                // Zero only this page, never its committed neighbors.
+                unsafe {
+                    self.base
+                        .add(page * GUEST_PAGE as usize)
+                        .write_bytes(0, GUEST_PAGE as usize)
+                };
+                self.protection[page].set(protect as u16);
+                self.note_write((page as u32) * GUEST_PAGE, GUEST_PAGE as usize);
             }
         }
         Ok(())
     }
 
-    /// Release complete host pages owned by a mapped image. Callers must not
-    /// share either edge page with another allocation.
+    /// Remove a loader-owned image and restore its address-space reservation.
     pub(crate) fn decommit_image(&mut self, addr: u32, len: u32) -> Result<(), MemFault> {
-        if !(addr as usize).is_multiple_of(self.host_page)
-            || !(len as usize).is_multiple_of(self.host_page)
-            || addr as u64 + len as u64 > SPACE_SIZE
-        {
-            return Err(MemFault {
-                addr,
-                len,
-                write: true,
-            });
-        }
-        if len == 0 {
-            return Ok(());
-        }
-        let result = unsafe {
-            libc::mprotect(
-                self.base.add(addr as usize).cast(),
-                len as usize,
-                libc::PROT_NONE,
-            )
-        };
-        if result != 0 {
-            return Err(MemFault {
-                addr,
-                len,
-                write: true,
-            });
+        self.unmap_image(addr, len)
+            .map_err(|_| Self::fault(addr, len, Access::Write, false))
+    }
+
+    fn decommit_pages(&mut self, addr: u32, len: u32) {
+        let end = addr as usize + len as usize;
+        for page in addr as usize / GUEST_PAGE as usize..end / GUEST_PAGE as usize {
+            self.protection[page].set(0);
         }
         self.note_write(addr, len as usize);
-        for page in
-            (addr as usize / self.host_page)..((addr as usize + len as usize) / self.host_page)
-        {
-            self.committed[page / 64] &= !(1u64 << (page % 64));
+        for page in (addr as usize >> self.page_shift)..=((end - 1) >> self.page_shift) {
+            let first = page * self.host_page / GUEST_PAGE as usize;
+            let last = first + self.host_page / GUEST_PAGE as usize;
+            if self.host_backed(page) && !self.protection[first..last].iter().any(|p| p.get() != 0)
+            {
+                let r = unsafe {
+                    libc::mprotect(
+                        self.base.add(page * self.host_page).cast(),
+                        self.host_page,
+                        libc::PROT_NONE,
+                    )
+                };
+                if r == 0 {
+                    self.backed[page / 64] &= !(1u64 << (page % 64));
+                    unsafe {
+                        libc::madvise(
+                            self.base.add(page * self.host_page).cast(),
+                            self.host_page,
+                            libc::MADV_DONTNEED,
+                        )
+                    };
+                }
+            }
         }
-        Ok(())
     }
 
     #[inline]
     pub(crate) fn ptr(&self, addr: u32, len: u32, write: bool) -> Result<*mut u8, MemFault> {
+        self.access_ptr(
+            addr,
+            len,
+            if write { Access::Write } else { Access::Read },
+            true,
+        )
+    }
+
+    #[inline]
+    fn access_ptr(
+        &self,
+        addr: u32,
+        len: u32,
+        access: Access,
+        consume_guard: bool,
+    ) -> Result<*mut u8, MemFault> {
         let end = addr as u64 + len as u64;
         if end > SPACE_SIZE {
-            return Err(MemFault { addr, len, write });
+            return Err(Self::fault(addr, len, access, false));
         }
         if len == 0 {
             return Ok(self.base.wrapping_add(addr as usize));
         }
-        let first = (addr as u64 >> self.page_shift) as usize;
-        let last = ((end - 1) >> self.page_shift) as usize;
-        if !self.page_ok(first) {
-            return Err(MemFault { addr, len, write });
-        }
-        // The common scalar access checks one page without setting up a
-        // range loop. Cross-page accesses still check every covered page.
-        for p in first + 1..=last {
-            if !self.page_ok(p) {
-                return Err(MemFault { addr, len, write });
+        let first = (addr as u64 >> 12) as usize;
+        let last = ((end - 1) >> 12) as usize;
+        // Scalar accesses usually check one logical page; crossing a 4 KiB
+        // boundary checks every page, even inside a single host page.
+        for p in first..=last {
+            let protect = self.protection[p].get() as u32;
+            if protect & PAGE_GUARD != 0 {
+                if consume_guard {
+                    self.protection[p].set((protect & !PAGE_GUARD) as u16);
+                    self.note_write(p as u32 * GUEST_PAGE, GUEST_PAGE as usize);
+                }
+                return Err(Self::fault(addr, len, access, true));
+            }
+            if protect & access.mask() == 0 {
+                return Err(Self::fault(addr, len, access, false));
             }
         }
         // Raw host writes (ReadFile, heap copies) use this accessor too.
         // Invalidate conservatively even if the subsequent write fails.
-        if write {
+        if matches!(access, Access::Write) {
             self.note_write(addr, len as usize);
         }
         Ok(unsafe { self.base.add(addr as usize) })
+    }
+
+    pub(crate) fn fetch_u8(&self, addr: u32) -> Result<u8, MemFault> {
+        Ok(unsafe { self.access_ptr(addr, 1, Access::Execute, true)?.read() })
+    }
+    pub(crate) fn fetch_u16(&self, addr: u32) -> Result<u16, MemFault> {
+        Ok(u16::from_le(unsafe {
+            self.access_ptr(addr, 2, Access::Execute, true)?
+                .cast::<u16>()
+                .read_unaligned()
+        }))
+    }
+    pub(crate) fn fetch_u32(&self, addr: u32) -> Result<u32, MemFault> {
+        Ok(u32::from_le(unsafe {
+            self.access_ptr(addr, 4, Access::Execute, true)?
+                .cast::<u32>()
+                .read_unaligned()
+        }))
+    }
+    pub(crate) fn inspect_code(&self, addr: u32, bytes: &mut [u8]) -> Result<(), MemFault> {
+        let p = self.access_ptr(addr, bytes.len() as u32, Access::Execute, false)?;
+        unsafe { std::ptr::copy_nonoverlapping(p, bytes.as_mut_ptr(), bytes.len()) };
+        Ok(())
     }
 
     #[inline]
@@ -288,12 +375,16 @@ impl GuestMem {
     }
 
     pub fn read_bytes(&self, addr: u32, buf: &mut [u8]) -> Result<(), MemFault> {
-        let p = self.ptr(addr, buf.len() as u32, false)?;
+        let len = u32::try_from(buf.len())
+            .map_err(|_| Self::fault(addr, u32::MAX, Access::Read, false))?;
+        let p = self.ptr(addr, len, false)?;
         unsafe { std::ptr::copy_nonoverlapping(p as *const u8, buf.as_mut_ptr(), buf.len()) };
         Ok(())
     }
     pub fn write_bytes(&self, addr: u32, buf: &[u8]) -> Result<(), MemFault> {
-        let p = self.ptr(addr, buf.len() as u32, true)?;
+        let len = u32::try_from(buf.len())
+            .map_err(|_| Self::fault(addr, u32::MAX, Access::Write, false))?;
+        let p = self.ptr(addr, len, true)?;
         unsafe { std::ptr::copy_nonoverlapping(buf.as_ptr(), p, buf.len()) };
         Ok(())
     }
@@ -320,5 +411,29 @@ impl GuestMem {
             s.push(u);
         }
         Ok(String::from_utf16_lossy(&s))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Access {
+    Read,
+    Write,
+    Execute,
+}
+impl Access {
+    #[inline]
+    fn mask(self) -> u32 {
+        match self {
+            Self::Read => {
+                PAGE_READONLY
+                    | PAGE_READWRITE
+                    | 8
+                    | PAGE_EXECUTE_READ
+                    | PAGE_EXECUTE_READWRITE
+                    | 128
+            }
+            Self::Write => PAGE_READWRITE | 8 | PAGE_EXECUTE_READWRITE | 128,
+            Self::Execute => PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | 128,
+        }
     }
 }

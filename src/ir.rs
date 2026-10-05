@@ -687,7 +687,7 @@ impl Cache {
             }
             let len = (r.next_ip() - r.ip()) as usize;
             let mut raw = [0; 16];
-            if mem.read_bytes(r.ip(), &mut raw[..len]).is_err() || raw[..len] != r.raw()[..len] {
+            if mem.inspect_code(r.ip(), &mut raw[..len]).is_err() || raw[..len] != r.raw()[..len] {
                 continue;
             }
             if let Some(rva) = r.native_import() {

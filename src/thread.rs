@@ -170,8 +170,8 @@ impl Sched {
         }
         let i = (self.threads.len() - 1) as u32; // slot 0 is the main thread
         let stack_base = STACK_ARENA_BASE + i * THREAD_STACK_SIZE;
-        mem.commit(stack_base, THREAD_STACK_SIZE)
-            .map_err(|e| format!("thread stack: {e}"))?;
+        mem.map_runtime(stack_base, THREAD_STACK_SIZE)
+            .map_err(|e| format!("thread stack: Win32 error {e}"))?;
         let teb = TEB_ARENA_BASE + i * 0x1000;
         mem.commit(teb, 0x1000).map_err(|e| format!("teb: {e}"))?;
         let stack_top = stack_base + THREAD_STACK_SIZE;

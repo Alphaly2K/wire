@@ -229,9 +229,22 @@ impl ApiState {
 
     /// Bump-allocate guest scratch memory (for fake CRT structures).
     pub fn scratch_alloc(&mut self, mem: &mut GuestMem, size: u32, align: u32) -> u32 {
-        let a = (self.scratch_top + align - 1) & !(align - 1);
-        mem.commit(a, size.max(1)).ok();
-        self.scratch_top = a + size.max(1);
+        let allocation = (|| {
+            if !align.is_power_of_two() {
+                return None;
+            }
+            let a = self.scratch_top.checked_add(align - 1)? & !(align - 1);
+            let end = a.checked_add(size.max(1))?;
+            if end > 0x01000000 || mem.commit(a, size.max(1)).is_err() {
+                return None;
+            }
+            Some((a, end))
+        })();
+        let Some((a, end)) = allocation else {
+            self.last_error = 8;
+            return 0;
+        };
+        self.scratch_top = end;
         a
     }
 
@@ -495,6 +508,10 @@ fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("VirtualFree", 12),
                 ("VirtualProtect", 16),
                 ("VirtualQuery", 12),
+                ("VirtualAllocEx", 20),
+                ("VirtualFreeEx", 16),
+                ("VirtualProtectEx", 20),
+                ("VirtualQueryEx", 16),
                 ("HeapCreate", 12),
                 ("HeapAlloc", 12),
                 ("HeapFree", 12),
@@ -2439,7 +2456,10 @@ pub fn dispatch(
             note = "font resource backend not ported".into();
         }
         _ => {
-            if let Some((v, msg)) = crate::file_api::dispatch(dll, name, &args, mem, state) {
+            if let Some((v, msg)) = crate::vmem_api::dispatch(dll, name, &args, mem, state) {
+                ret = v;
+                note = msg;
+            } else if let Some((v, msg)) = crate::file_api::dispatch(dll, name, &args, mem, state) {
                 ret = v;
                 note = msg;
             } else if let Some((v, msg)) = crate::system::dispatch(dll, name, &args, mem, state) {

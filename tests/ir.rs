@@ -167,6 +167,113 @@ fn flags_are_elided_only_before_definite_overwrite_in_a_straight_line() {
     let image = Image::from_code(CODE, &[0x83, 0x03, 1, 0x31, 0xc9]).unwrap();
     assert_eq!(image.records[0].eager_flags(), FLAGS);
 }
+
+#[test]
+fn runtime_protection_changes_invalidate_ir_and_execute_only_code_still_runs() {
+    use wire::mem::{GUEST_PAGE, PAGE_EXECUTE, PAGE_EXECUTE_READWRITE, PAGE_READWRITE};
+    let code = [0xb8, 42, 0, 0, 0, 0xcc];
+    for use_ir in [false, true] {
+        let (mut cpu, mut mem) = machine(&code, use_ir);
+        assert_eq!(
+            mem.virtual_protect(CODE, GUEST_PAGE, PAGE_READWRITE),
+            Ok(PAGE_EXECUTE_READWRITE)
+        );
+        let outcome = run(&mut cpu, &mut mem, 1);
+        assert!(matches!(outcome, RunOutcome::Crashed(ref e) if e.contains("execute fault")));
+        assert_eq!(cpu.instr_count, 0);
+        assert_eq!(cpu.eip, CODE);
+        assert_eq!(
+            mem.virtual_protect(CODE, GUEST_PAGE, PAGE_EXECUTE),
+            Ok(PAGE_READWRITE)
+        );
+        assert!(mem.read_u8(CODE).is_err());
+        // Binding inspects execute permissions, rather than treating code as a data read.
+        if use_ir {
+            assert!(
+                cpu.install_ir(Image::from_code(CODE, &code).unwrap(), &mem)
+                    .unwrap()
+                    > 0
+            );
+        }
+        assert!(matches!(
+            run(&mut cpu, &mut mem, 1),
+            RunOutcome::InstructionLimit
+        ));
+        assert_eq!(cpu.regs[0], 42);
+        assert_eq!(cpu.instr_count, 1);
+    }
+}
+
+#[test]
+fn readonly_data_fault_and_one_shot_guard_keep_raw_ir_state_and_retirement_equal() {
+    use wire::mem::{GUEST_PAGE, PAGE_EXECUTE_READWRITE, PAGE_GUARD, PAGE_READONLY};
+    let code = [0x83, 0xc0, 1, 0x89, 0x03, 0xcc];
+    let mut results = Vec::new();
+    for use_ir in [false, true] {
+        let (mut cpu, mut mem) = machine(&code, use_ir);
+        cpu.regs[0] = u32::MAX;
+        cpu.regs[3] = DATA;
+        mem.write_u32(DATA, 0xdeadbeef).unwrap();
+        mem.virtual_protect(DATA, GUEST_PAGE, PAGE_READONLY)
+            .unwrap();
+        let outcome = run(&mut cpu, &mut mem, 100);
+        assert!(matches!(outcome, RunOutcome::Crashed(ref e) if e.contains("write fault")));
+        assert_eq!(cpu.instr_count, 1);
+        assert_eq!(mem.read_u32(DATA).unwrap(), 0xdeadbeef);
+        results.push((cpu.regs, cpu.eflags, cpu.eip));
+    }
+    assert_eq!(results[0], results[1]);
+    for use_ir in [false, true] {
+        let (mut cpu, mut mem) = machine(&code, false);
+        let protection = PAGE_EXECUTE_READWRITE | PAGE_GUARD;
+        mem.virtual_protect(CODE, GUEST_PAGE, protection).unwrap();
+        if use_ir {
+            cpu.install_ir(Image::from_code(CODE, &code).unwrap(), &mem)
+                .unwrap();
+        }
+        assert_eq!(mem.virtual_query(CODE).unwrap().protect, protection); // IR binding must not consume a guard
+        assert!(
+            matches!(run(&mut cpu, &mut mem, 1), RunOutcome::Crashed(ref e) if e.contains("guard execute fault"))
+        );
+        assert_eq!(cpu.instr_count, 0);
+        assert_eq!(cpu.eip, CODE);
+        assert_eq!(
+            mem.virtual_query(CODE).unwrap().protect,
+            PAGE_EXECUTE_READWRITE
+        );
+        assert!(matches!(
+            run(&mut cpu, &mut mem, 1),
+            RunOutcome::InstructionLimit
+        ));
+        assert_eq!(cpu.instr_count, 1);
+        assert_eq!(cpu.regs[0], 1);
+    }
+}
+
+#[test]
+fn address16_absolute_mov_zero_extends_offset_before_adding_fs_base() {
+    let code = [
+        0x64, 0x67, 0xa1, 0x10, 0, 0x66, 0x64, 0x67, 0xa3, 0x20, 0, 0x64, 0x67, 0x89, 0x1e, 0x30,
+        0, 0xcc,
+    ];
+    let mut results = Vec::new();
+    for use_ir in [false, true] {
+        let (mut cpu, mut mem) = machine(&code, use_ir);
+        cpu.fs_base = DATA;
+        cpu.regs[3] = 0x13579bdf;
+        mem.write_u32(DATA + 0x10, 0xfedc9876).unwrap();
+        mem.write_u32(DATA + 0x20, 0x12345678).unwrap();
+        assert!(matches!(
+            run(&mut cpu, &mut mem, 3),
+            RunOutcome::InstructionLimit
+        ));
+        assert_eq!(cpu.regs[0], 0xfedc9876);
+        assert_eq!(mem.read_u32(DATA + 0x20).unwrap(), 0x12349876);
+        assert_eq!(mem.read_u32(DATA + 0x30).unwrap(), 0x13579bdf);
+        results.push((cpu.regs, cpu.eip, cpu.eflags));
+    }
+    assert_eq!(results[0], results[1]);
+}
 #[test]
 fn lazy_flags_are_restored_at_instruction_limits_and_before_faults() {
     let code = [0x83, 0xc0, 1, 0x31, 0xc9, 0xcc];

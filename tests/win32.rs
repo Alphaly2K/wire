@@ -560,6 +560,23 @@ fn main_image_registers_real_exports_and_honors_pe_stack_reserve() {
     assert!(mem.is_committed(top - 0x100000));
     assert!(!mem.is_committed(top - 0x100000 - 0x10000));
     assert!(mem.read_u8(0x17f000).is_ok()); // actual CRT stack probe previously faulted here
+    assert_eq!(
+        mem.virtual_query(0x400000).unwrap().kind,
+        wire::mem::MEM_IMAGE
+    );
+    assert_eq!(
+        mem.virtual_query(0x400000).unwrap().protect,
+        wire::mem::PAGE_READONLY
+    );
+    assert_eq!(
+        mem.virtual_query(0x401000).unwrap().protect,
+        wire::mem::PAGE_EXECUTE_READWRITE
+    );
+    assert_eq!(
+        mem.virtual_query(top - 4096).unwrap().protect,
+        wire::mem::PAGE_READWRITE
+    );
+    assert!(mem.write_u32(0x400000, 0).is_err());
     v.mem = mem;
     v.api = table;
     v.mem.commit(DATA, 0x10000).unwrap();
@@ -2118,4 +2135,218 @@ fn window_enumeration_filters_threads_and_children_stops_on_false_and_skips_dest
     assert_eq!(v.mem.read_u32(DATA + 0x500).unwrap(), 1);
     assert_eq!(v.cpu.exit_code, Some(37));
     assert_eq!(v.cpu.eip, exit);
+}
+
+#[test]
+fn virtual_memory_reservation_commit_rounding_query_and_recommit_preserve_permissions() {
+    use wire::mem::*;
+    let mut v = Vm::new();
+    let p = v.k(
+        "VirtualAlloc",
+        &[0x31000123, 0x1001, MEM_RESERVE, PAGE_NOACCESS],
+    );
+    assert_eq!(p, 0x31000000);
+    let info = v.mem.virtual_query(p + 123).unwrap();
+    assert_eq!(
+        (
+            info.base,
+            info.allocation_base,
+            info.region_size,
+            info.state,
+            info.protect
+        ),
+        (p, p, 0x2000, MEM_RESERVE, 0)
+    );
+    assert!(!v.mem.is_committed(p));
+    assert!(v.mem.read_u8(p).is_err());
+    assert_eq!(
+        v.k("VirtualAlloc", &[p + 0x1001, 1, MEM_COMMIT, PAGE_READWRITE]),
+        p + 0x1000
+    );
+    v.mem.write_u32(p + 0x1000, 0xcafefeed).unwrap();
+    assert!(v.mem.read_u8(p).is_err());
+    assert_eq!(v.mem.virtual_query(p).unwrap().region_size, 0x1000);
+    assert_eq!(v.k("VirtualQuery", &[p + 0x1003, DATA, 28]), 28);
+    let fields: Vec<_> = (0..7)
+        .map(|i| v.mem.read_u32(DATA + i * 4).unwrap())
+        .collect();
+    assert_eq!(
+        fields,
+        [
+            p + 0x1000,
+            p,
+            PAGE_NOACCESS,
+            0x1000,
+            MEM_COMMIT,
+            PAGE_READWRITE,
+            MEM_PRIVATE
+        ]
+    );
+    // Recommit never changes existing contents or page protection.
+    assert_eq!(
+        v.k(
+            "VirtualAlloc",
+            &[p + 0x1000, 0x1000, MEM_COMMIT, PAGE_READONLY]
+        ),
+        p + 0x1000
+    );
+    assert_eq!(v.mem.read_u32(p + 0x1000).unwrap(), 0xcafefeed);
+    v.mem.write_u32(p + 0x1000, 42).unwrap();
+    v.mem.write_u32(DATA + 64, 0xfeed).unwrap();
+    assert_eq!(
+        v.k("VirtualProtect", &[p, 0x2000, PAGE_READONLY, DATA + 64]),
+        0
+    );
+    assert_eq!(v.k("GetLastError", &[]), 487);
+    assert_eq!(v.mem.read_u32(DATA + 64).unwrap(), 0xfeed);
+    assert_eq!(
+        v.mem.virtual_query(p + 0x1000).unwrap().protect,
+        PAGE_READWRITE
+    );
+    assert_eq!(v.k("VirtualAlloc", &[p, 1, MEM_COMMIT, PAGE_NOACCESS]), p);
+    assert!(v.mem.is_committed(p));
+    assert!(v.mem.read_u8(p).is_err());
+    assert_eq!(v.mem.virtual_query(p).unwrap().protect, PAGE_NOACCESS);
+}
+
+#[test]
+fn virtual_memory_4k_decommit_recommit_zeroing_and_release_keep_neighbors_intact() {
+    use wire::mem::*;
+    let mut v = Vm::new();
+    let p = v.k(
+        "VirtualAlloc",
+        &[0x31000000, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE],
+    );
+    assert_eq!(p, 0x31000000);
+    for i in 0..4 {
+        v.mem.write_u32(p + i * GUEST_PAGE, i + 100).unwrap();
+    }
+    assert_eq!(v.k("VirtualFree", &[p + 0x1003, 1, 0x4000]), 1);
+    assert!(v.mem.read_u32(p + GUEST_PAGE).is_err());
+    assert_eq!(
+        v.mem.virtual_query(p + GUEST_PAGE).unwrap().state,
+        MEM_RESERVE
+    );
+    for i in [0, 2, 3] {
+        assert_eq!(v.mem.read_u32(p + i * GUEST_PAGE).unwrap(), i + 100);
+    }
+    assert_eq!(
+        v.k(
+            "VirtualAlloc",
+            &[p + GUEST_PAGE, GUEST_PAGE, MEM_COMMIT, PAGE_READONLY]
+        ),
+        p + GUEST_PAGE
+    );
+    assert_eq!(v.mem.read_u32(p + GUEST_PAGE).unwrap(), 0);
+    assert!(v.mem.write_u32(p + GUEST_PAGE, 77).is_err());
+    assert_eq!(
+        v.k("VirtualProtect", &[p + GUEST_PAGE, 1, PAGE_READWRITE, DATA]),
+        1
+    );
+    assert_eq!(v.mem.read_u32(DATA).unwrap(), PAGE_READONLY);
+    // lpflOldProtect may alias the newly readonly range; validate it at entry.
+    assert_eq!(
+        v.k(
+            "VirtualProtect",
+            &[p + GUEST_PAGE, GUEST_PAGE, PAGE_READONLY, p + GUEST_PAGE]
+        ),
+        1
+    );
+    assert_eq!(v.mem.read_u32(p + GUEST_PAGE).unwrap(), PAGE_READWRITE);
+    assert_eq!(v.k("VirtualFree", &[p + GUEST_PAGE, 0, 0x8000]), 0);
+    assert_eq!(v.k("VirtualFree", &[p, 0x4000, 0x8000]), 0);
+    assert!(v.mem.is_committed(p));
+    assert_eq!(v.k("VirtualFree", &[p, 0, 0x8000]), 1);
+    assert!(v.mem.read_u32(p).is_err());
+    assert_eq!(v.mem.virtual_query(p).unwrap().state, MEM_FREE);
+    assert_eq!(
+        v.k(
+            "VirtualAlloc",
+            &[p, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE]
+        ),
+        p
+    );
+    for i in 0..4 {
+        assert_eq!(v.mem.read_u32(p + i * GUEST_PAGE).unwrap(), 0);
+    }
+}
+
+#[test]
+fn virtual_memory_rejects_collisions_invalid_flags_cross_allocations_and_invalid_outputs() {
+    use wire::mem::*;
+    let mut v = Vm::new();
+    for base in [
+        CODE, STACK_BASE, 0x00f00000, 0x02000000, 0x10000000, 0x50000000, 0x6fff0000, TEB_ADDR,
+    ] {
+        assert_eq!(
+            v.k("VirtualAlloc", &[base, 4096, MEM_RESERVE, PAGE_READWRITE]),
+            0
+        );
+        assert_eq!(v.k("GetLastError", &[]), 487);
+    }
+    assert_eq!(v.k("VirtualFree", &[CODE, 0, 0x8000]), 0);
+    for (address, size, flags, protect, error) in [
+        (0, 0, MEM_COMMIT, 4, 87),
+        (0, 1, 0, 4, 87),
+        (0, 1, MEM_RESERVE, 6, 87),
+        (0, 1, MEM_RESERVE, 8, 87),
+        (0, 1, MEM_RESERVE, PAGE_GUARD | PAGE_NOACCESS, 87),
+        (0, 1, MEM_RESERVE | 0x20000000, 4, 50),
+        (0xfffff000, 0x2000, MEM_RESERVE, 4, 487),
+    ] {
+        assert_eq!(v.k("VirtualAlloc", &[address, size, flags, protect]), 0);
+        assert_eq!(v.k("GetLastError", &[]), error);
+    }
+    let first = v.k(
+        "VirtualAlloc",
+        &[
+            0x31000000,
+            0x10000,
+            MEM_RESERVE | MEM_COMMIT,
+            PAGE_READWRITE,
+        ],
+    );
+    let second = v.k(
+        "VirtualAllocEx",
+        &[
+            u32::MAX,
+            0x31010000,
+            4096,
+            MEM_RESERVE | MEM_COMMIT,
+            PAGE_READWRITE,
+        ],
+    );
+    assert_ne!(first, 0);
+    assert_ne!(second, 0);
+    assert_eq!(
+        v.k("VirtualProtect", &[first, 0x11000, PAGE_READONLY, DATA]),
+        0
+    );
+    assert_eq!(v.mem.virtual_query(first).unwrap().protect, PAGE_READWRITE);
+    assert_eq!(
+        v.k("VirtualProtect", &[first, 4096, PAGE_READONLY, 0x30000000]),
+        0
+    );
+    assert_eq!(v.mem.virtual_query(first).unwrap().protect, PAGE_READWRITE);
+    assert_eq!(
+        v.k(
+            "VirtualAllocEx",
+            &[123, 0, 4096, MEM_RESERVE, PAGE_READWRITE]
+        ),
+        0
+    );
+    assert_eq!(v.k("GetLastError", &[]), 6);
+    v.mem.write_bytes(DATA, &[0x55; 32]).unwrap();
+    assert_eq!(v.k("VirtualQuery", &[first, DATA, 27]), 0);
+    let mut sentinel = [0; 32];
+    v.mem.read_bytes(DATA, &mut sentinel).unwrap();
+    assert_eq!(sentinel, [0x55; 32]);
+    assert_eq!(v.k("VirtualQueryEx", &[u32::MAX, first, DATA, 32]), 28);
+    assert_eq!(v.mem.read_u32(DATA + 28).unwrap(), 0x55555555);
+    let top = v.k(
+        "VirtualAlloc",
+        &[0, 4096, MEM_RESERVE | 0x100000, PAGE_READWRITE],
+    );
+    assert!(top > second && top < 0x7ff00000);
+    assert_eq!(top % ALLOCATION_GRANULARITY, 0);
 }

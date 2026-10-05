@@ -163,6 +163,7 @@ pub struct Cpu {
     ir_cache: Option<crate::ir::Cache>,
     ir_hint: (u32, u32),
     pending_flags: Option<PendingFlags>,
+    decode_address16: bool, // transient raw-decoder state, never a thread register
     pub trace_ring: VecDeque<(u32, Vec<u8>)>,
     t0: Instant,
 }
@@ -190,6 +191,7 @@ impl Cpu {
             ir_cache: None,
             ir_hint: (0, 0),
             pending_flags: None,
+            decode_address16: false,
             trace_ring: VecDeque::new(),
             t0: Instant::now(),
         };
@@ -333,17 +335,17 @@ impl Cpu {
     // ---- fetch ----
 
     fn fetch8(&mut self, mem: &GuestMem) -> Result<u8, CpuError> {
-        let v = mem.read_u8(self.eip)?;
+        let v = mem.fetch_u8(self.eip)?;
         self.eip = self.eip.wrapping_add(1);
         Ok(v)
     }
     fn fetch16(&mut self, mem: &GuestMem) -> Result<u16, CpuError> {
-        let v = mem.read_u16(self.eip)?;
+        let v = mem.fetch_u16(self.eip)?;
         self.eip = self.eip.wrapping_add(2);
         Ok(v)
     }
     fn fetch32(&mut self, mem: &GuestMem) -> Result<u32, CpuError> {
-        let v = mem.read_u32(self.eip)?;
+        let v = mem.fetch_u32(self.eip)?;
         self.eip = self.eip.wrapping_add(4);
         Ok(v)
     }
@@ -411,6 +413,29 @@ impl Cpu {
                 reg,
                 addr: None,
                 idx: rm,
+            });
+        }
+        if self.decode_address16 {
+            let mut ea = match rm {
+                0 => self.regs[EBX].wrapping_add(self.regs[ESI]),
+                1 => self.regs[EBX].wrapping_add(self.regs[EDI]),
+                2 => self.regs[EBP].wrapping_add(self.regs[ESI]),
+                3 => self.regs[EBP].wrapping_add(self.regs[EDI]),
+                4 => self.regs[ESI],
+                5 => self.regs[EDI],
+                6 if md == 0 => self.fetch16(mem)? as u32,
+                6 => self.regs[EBP],
+                _ => self.regs[EBX],
+            };
+            ea = match md {
+                1 => ea.wrapping_add(self.fetch8(mem)? as i8 as i32 as u32),
+                2 => ea.wrapping_add(self.fetch16(mem)? as u32),
+                _ => ea,
+            } & 0xffff;
+            return Ok(Rm {
+                reg,
+                addr: Some(ea),
+                idx: 0,
             });
         }
         let mut ea: u32;
@@ -1077,6 +1102,7 @@ impl Cpu {
     }
 
     fn step_x86(&mut self, mem: &mut GuestMem) -> Result<(), CpuError> {
+        self.decode_address16 = false;
         let eip0 = self.eip;
         if self.trace_enabled {
             let mut bytes = Vec::with_capacity(8);
@@ -1092,16 +1118,20 @@ impl Cpu {
             }
         }
         let mut opsize16 = false;
+        let mut address16 = false;
         let mut seg: u32 = 0;
         let mut rep: Option<u8> = None;
         loop {
-            let b = mem.read_u8(self.eip)?;
+            let b = mem.fetch_u8(self.eip)?;
             match b {
                 0x66 => {
                     opsize16 = !opsize16;
                     self.eip = self.eip.wrapping_add(1);
                 }
-                0x67 => return Err(self.unsupported(mem, eip0, "address-size prefix")),
+                0x67 => {
+                    address16 = true;
+                    self.eip = self.eip.wrapping_add(1);
+                }
                 0x2E | 0x36 | 0x3E | 0x26 => self.eip = self.eip.wrapping_add(1),
                 0x64 => {
                     seg = self.fs_base;
@@ -1121,6 +1151,10 @@ impl Cpu {
         }
         let bits: u8 = if opsize16 { 16 } else { 32 };
         let op = self.fetch8(mem)?;
+        if address16 && !matches!(op, 0x88..=0x8b | 0x8d | 0xa0..=0xa3 | 0xc6 | 0xc7) {
+            return Err(self.unsupported(mem, eip0, "16-bit addressing outside MOV/LEA"));
+        }
+        self.decode_address16 = address16;
         if self.profile_opcodes {
             *self.op_stats.entry(op as u32).or_insert(0) += 1;
         }
@@ -1335,22 +1369,30 @@ impl Cpu {
                 self.regs[EAX] = (self.regs[EAX] & !0xff00) | (v << 8);
             }
             0xA0 => {
-                let a = self.fetch32(mem)?.wrapping_add(seg);
+                let a = self
+                    .fetch_sized(mem, if address16 { 16 } else { 32 })?
+                    .wrapping_add(seg);
                 let v = mem.read_u8(a)?;
                 self.set_r(EAX, v as u32, 8);
             }
             0xA1 => {
-                let a = self.fetch32(mem)?.wrapping_add(seg);
+                let a = self
+                    .fetch_sized(mem, if address16 { 16 } else { 32 })?
+                    .wrapping_add(seg);
                 let v = read_sized(mem, a, (bits / 8) as u32)?;
                 self.set_r(EAX, v, bits);
             }
             0xA2 => {
-                let a = self.fetch32(mem)?.wrapping_add(seg);
+                let a = self
+                    .fetch_sized(mem, if address16 { 16 } else { 32 })?
+                    .wrapping_add(seg);
                 let v = self.get_r(EAX, 8);
                 mem.write_u8(a, v as u8)?;
             }
             0xA3 => {
-                let a = self.fetch32(mem)?.wrapping_add(seg);
+                let a = self
+                    .fetch_sized(mem, if address16 { 16 } else { 32 })?
+                    .wrapping_add(seg);
                 let v = self.get_r(EAX, bits);
                 write_sized(mem, a, v, (bits / 8) as u32)?;
             }

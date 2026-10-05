@@ -3,15 +3,35 @@
 M2 **尚未验收，不打 tag**。真实 guest DLL 装载、重定位、导出、DllMain 和无 callback 的静态 TLS 已实现，
 `kinglove.tpm` / `KAGParser.dll` 已初始化，确认读取 data.xp3 和 patch.xp3 的索引/脚本内容。
 按用户授权直接移植 Wine 的 GDI+ 矩阵/启动逻辑和窗口枚举，现已越过 `layerExDraw.dll` 的依赖缺失，
-继续装载 varfile、KaichoTrans、addFont、scriptsEx。游戏约 **288.8M 指令 / 832K API 调用**时，
-停在 `dirlist.dll` 的 `VirtualAlloc(MEM_RESERVE, PAGE_NOACCESS)` 未实现路径，NULL 后发生 guest fault。
+继续装载 varfile、KaichoTrans、addFont、scriptsEx。随后补齐当前所需的 guest VMM，
+解除 `dirlist.dll` 的 reserve/commit 阻塞，dirlist 和 extNagano 完成初始化。
+游戏约 **289.2M 指令 / 835.6K API 调用**时，因 `menu.dll` 缺少 `user32!InsertMenuItemW` 导出而退出3。
 还没有可见游戏画面或持续主循环。此前本地检查点包括 `75f90a6`（线程/SSE）、
 `852eba3`（资源/堆/I/O/基础SEH）、`ca94a36`（x87/系统/NLS）、`a3de840`（主IR优化）和`f97ab8d`（真实profile/x87热点优化）。
 
 2026-10-05 转入 no-JIT 性能路线，增加安装期预解码、8B typed I32 热路径与保守 FLAGS 分析，
 并实现 CALL_NATIVE/IAT guard；IR原型不等于M2验收。
 
-## 最新：Wine Win32 逻辑移植，推进到 guest 内存保留
+## 最新：Guest VMM 完成当前所需范围，准备图形渲染
+
+实现独立于宿主 backing 的 4KiB guest 页、reservation/allocation 元数据及 checked 读/写/执行权限。
+VirtualAlloc/Free/Protect/Query 和当前进程 Ex 变体支持 reserve/commit 分离、decommit/release、
+保护与查询；PAGE_GUARD 一次性触发，PE 装载后应用 section 权限。
+保护改变、写入、decommit/release 和重映射都失效 watched code，IR 绑定不消耗 guard。
+没有生成 host 可执行页，也未启用 unchecked 访问。Windows VM 扩展、自动 stack 增长及 CPU-fault→SEH 仍待实现。
+
+真实游戏的 4MiB reservation 和后续16个4KiB commit 成功，dirlist/extNagano 初始化完成。
+补齐 Borland CRT 命中的 0x67 MOV/LEA 16位寻址，其他0x67指令保持明确拒绝。
+最终 IR/raw 退休 **289,176,536 / 289,185,350** 条指令，全部 GPR/EIP/EFLAGS 相同，均退出3。
+当前阻塞是 menu.dll 静态导入的 InsertMenuItemW，不把退出 API 或初始化轮询计数视为启动/性能验收。
+完整 **102 项回归**、Clippy release all-targets、format 通过。
+
+图形实施准备已写入设计：先补菜单真实状态解除插件边界，再建立 DC/bitmap/DIB 与逐像素 fixture，
+然后推进 blit/混合、GDI+ 绘制和 Metal 窗口呈现。现有 SetPixel/GetPixel 尚未实现，不能当 framebuffer。
+详情与复现见 [VMM 推进记录](vmm-progress-2026-10-06.md) 和 [图形渲染设计](graphics-rendering-design.md)。
+进入可重复的持续主循环后，再做至少60秒、多场景、多次 profile 与性能复测。
+
+## 此前：Wine Win32 逻辑移植，推进到 guest 内存保留
 
 逐文件核查 Wine 10.0 的 LGPL-2.1-or-later，选择 LGPL 2.1 与 wire 合并，保留原版权、源码快照、
 COPYING.LIB 与 SHA-256。GDI+ stdcall ABI 来自上游 spec；矩阵运算、逆变换、点/向量变换已移植，
@@ -19,7 +39,7 @@ COPYING.LIB 与 SHA-256。GDI+ stdcall ABI 来自上游 spec；矩阵运算、�
 不将 GpStatus::Ok 用作默认返回；字体资源 API 目前只有 ABI，明确失败。
 窗口枚举遵循 Wine 的快照/销毁跳过/回调 FALSE 停止流程，保留 guest 控制权转移和 LastError。
 完整 **95 项回归**、Clippy all-targets、format 通过；IR/raw 重放停在同一内存 reserve 阻塞，全部 GPR/EIP/EFLAGS 相同。
-下一步补通用 guest VMM 的 reserve/commit/free/protection，再推进绘图和呈现；持续主循环形成后再扩大性能采样。
+该阶段之后的 VMM 和新阻塞见上方最新记录；持续主循环形成后再扩大性能采样。
 详细实现、许可、限制和复现见 [Wine 移植推进记录](wine-win32-progress-2026-10-06.md)。
 
 ## 此前：真实 DLL/TLS 已装载，推进到绘图插件依赖
@@ -73,7 +93,7 @@ guest初始化有轻微计时路径差异，并非严格同路径；一次Instru
 仍停在RtlUnwind，性能目标和M2均未验收。详细口径、热点表、复现命令与本机trace位置见
 [CPU profile记录](cpu-profile-2026-10-05.md)。下一瓶颈仍是软件浮点division及IR调度，按profile继续定位。
 
-## 最新：解释器主路径的运行时优化
+## 此前：解释器主路径的运行时优化
 
 用户再次明确：**解释执行为主，Wasm仅作可用时的加速；当前急需提升主解释器吞吐。**
 本轮沿`dd17853`的IR原型继续，`6813158`已记录JSC可行性首个探针。

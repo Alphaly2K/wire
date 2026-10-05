@@ -1,8 +1,13 @@
 # Wine Win32 逻辑移植与游戏插件推进（2026-10-06）
 
+后续 VMM 已解除下文记录的 dirlist 内存阻塞，dirlist/extNagano 完成初始化；
+当前停在 menu.dll 缺少 InsertMenuItemW 导出，完整102项回归通过。
+最新结果见 [VMM推进记录](vmm-progress-2026-10-06.md)，下一阶段见 [图形渲染设计](graphics-rendering-design.md)。
+以下保留 Wine 移植阶段的来源、实现与95项验证记录。
+
 按用户“Win32 API 部分逻辑可以照搬 Wine”的授权，逐文件核查许可后直接移植已需要的逻辑。
 基线为 `53c6190` 的真实 DLL/静态 TLS 装载器。本轮越过 layerExDraw 的 GDI+ 依赖缺失，
-继续装载多个真实插件，当前阻塞为 dirlist.dll 的 `VirtualAlloc` 内存保留路径。
+继续装载多个真实插件，该阶段阻塞为 dirlist.dll 的 `VirtualAlloc` 内存保留路径。
 仍无可见游戏画面或持续主循环，**M2 未验收**。解释器为主路径，本轮没有性能优化结论。
 
 ## 许可与来源

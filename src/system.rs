@@ -58,7 +58,7 @@ pub fn dispatch(
                     PHYSICAL * 2,
                     PHYSICAL * 2 - used.min(PHYSICAL * 2),
                     VIRTUAL,
-                    VIRTUAL.saturating_sub(used),
+                    VIRTUAL.saturating_sub(mem.application_reserved_bytes()),
                     0,
                 ];
                 if name.ends_with("Ex") {

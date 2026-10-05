@@ -335,8 +335,9 @@ impl Modules {
             if pe.size_of_image == 0 || pe.size_of_image > 64 * 1024 * 1024 {
                 return Err(bad("main image too large"));
             }
-            let mut image = vec![0; pe.size_of_image as usize];
-            mem.read_bytes(base, &mut image).map_err(memory)?;
+            let image = mem
+                .image_snapshot(base, pe.size_of_image)
+                .map_err(|e| bad(format!("main image snapshot: error {e}")))?;
             let table = exports(&pe, &image)?;
             self.paths.insert(path.clone(), base);
             self.images.insert(
@@ -602,7 +603,8 @@ fn link(
         None
     };
     image.resize(size as usize, 0);
-    mem.commit(base, size).map_err(memory)?;
+    mem.map_image(base, size)
+        .map_err(|e| Failure::Expected(e, "image mapping failed".into()))?;
     mem.write_bytes(base, &image).map_err(memory)?;
     let guest_path = fs.guest_path(&path);
     state.modules.paths.insert(path.clone(), base);
@@ -651,6 +653,8 @@ fn link(
                 .map_err(memory)?;
         }
     }
+    mem.protect_image(base, &pe)
+        .map_err(|e| Failure::Expected(e, "image protection failed".into()))?;
     state.modules.images.get_mut(&base).unwrap().phase = Phase::Linked;
     Ok(base)
 }

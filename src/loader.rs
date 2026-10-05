@@ -40,8 +40,8 @@ pub fn load_image(
             pe.size_of_image
         ));
     }
-    mem.commit(base, pe.size_of_image)
-        .map_err(|e| format!("commit image: {e}"))?;
+    mem.map_image(base, pe.size_of_image)
+        .map_err(|e| format!("map image: Win32 error {e}"))?;
     mem.write_bytes(
         base,
         &buf[..pe.size_of_headers.min(buf.len() as u32) as usize],
@@ -94,8 +94,8 @@ pub fn load_image(
         return Err("main stack overlaps a mapped image".into());
     }
     // Return address points at stub #0 (ExitEmulation).
-    mem.commit(stack_bottom, stack_size)
-        .map_err(|e| format!("commit stack: {e}"))?;
+    mem.map_runtime(stack_bottom, stack_size)
+        .map_err(|e| format!("map stack: Win32 error {e}"))?;
     let esp = (stack_top - 64) & !15;
     let exit_stub = api.lookup("wire", "ExitEmulation").unwrap();
     mem.write_u32(esp, exit_stub).map_err(|e| e.to_string())?;
@@ -139,6 +139,9 @@ pub fn load_image(
     }
     mem.write_u16(cmdline_w_addr + 2 * wide.len() as u32, 0)
         .map_err(|e| e.to_string())?;
+
+    mem.protect_image(base, &pe)
+        .map_err(|e| format!("protect image: Win32 error {e}"))?;
 
     Ok(LoadedImage {
         entry: base.wrapping_add(pe.entry_rva),

@@ -159,14 +159,16 @@ Native replacement（FFmpeg/zlib 等）是另一层优化，只有版本、完�
 融合后不得按一条 IR 算一条 guest；分时片/预算/调试也遵守原始边界。内部临时操作不能暴露半更新的 GPR/FLAGS。
 当前原型是一条 guest 对一条热路径/预解码操作；故障行为对照现有 wire，尚未补齐完整 x86 fault→SEH。
 
-guest memory check 与 FLAGS 消除相互独立。当前 GuestMem 只做32位范围和 committed-page 检查，
-并无完整 VirtualProtect/PAGE_GUARD/4KiB guest protection；不能声称已有权限语义。
-VMM 应在任何省略访问检查的快路径前实现。Apple Silicon 的16KiB宿主页不等于 Windows 的4KiB保护页。
+guest memory check 与 FLAGS 消除相互独立。GuestMem 已实现独立的4KiB guest commitment/protection、
+checked 读/写/执行权限、VirtualProtect 和一次性 PAGE_GUARD；Apple Silicon 的16KiB宿主页仅管理 backing。
+宿主 backing 为 RW/PROT_NONE，不创建可执行页。IR bind 检查执行权限但不消耗 guard，
+权限改变后缓存失效并回到 checked raw fetch；没有启用 unchecked memory，完整 x86 fault→SEH 仍未实现。
 
 所有经 checked writable pointer 的 CPU/API/heap 写入，均递增 watched-code-page generation。
 代码页写后永久回退原解释器，本轮不运行时重译；跨页指令检查两页。未预解码、重叠入口、
 修改/重定位导致源字节不一致时也回退。PE 节混有数据，线性扫描不是完整代码发现证明。
-宿主写、解除映射、保护变化和将来的多宿主线程都需由统一 VMM 纳入失效规则；当前只支持单宿主 CPU 协作调度。
+宿主写、解除映射、保护变化和重映射已统一纳入失效规则；generation 仍按 host page 保守失效。
+当前只支持单宿主 CPU 协作调度，多宿主线程的同步证明留待后续。
 
 ## 当前实现与目标格式的距离
 
@@ -182,8 +184,8 @@ VMM 应在任何省略访问检查的快路径前实现。Apple Silicon 的16KiB
 CLI的opcode统计现默认关闭，`--op-stats`显式开启；旧`--no-op-stats`保留兼容。
 分支、冷记录、fallback与stub边界返回外层。预算和1,048,576条指令的协作分时边界精确截断，
 中途fault只计已成功退休的前缀。单步与开启观测时仍逐条返回，FLAGS恢复规则不变。
-GuestMem预先验证宿主页尺寸为2的幂，checked访问用shift定位页；标量访问先检查首个页，
-跨页继续检查剩余所有页，写入继续递增代码代数。没有unchecked访存路径。
+GuestMem预先验证宿主页尺寸为2的幂，代码代数用shift定位宿主页；checked权限用固定4KiB guest页，
+标量访问通常只检查一页，跨页继续检查剩余所有页，写入继续递增代码代数。没有unchecked访存路径。
 内存算术、其他窄寄存器和 CALL_NATIVE 使用64B预解码慢路径；SSE/x87/其他未覆盖指令用原解释器。
 
 **解释器的512B vreg bank、完整 Semantic IR、所有类型的8B lowering、紧凑持久文件与通用 block chaining 还未实现。**
@@ -198,7 +200,7 @@ dense索引12,552,192B、native target表8,671,704B、区域页代数1,536B。
 并设计紧凑热代码与必要 side tables、稀疏索引和完整 vreg bank。任何减少页代数检查的措施需另有正确性证明。
 64B格式是可回归比较的过渡原型，不是最终小规模 IR。
 
-## 验证与测量（2026-10-05）
+## 验证与测量（更新至2026-10-06）
 
 后续短性能检查点将Jcc/Jmp链接到同一紧凑解释链，仍逐条验证代码页并精确保留预算、
 线程、回调与API边界；磁盘v3、8B指令/16B热条目不变。FLAGS静态证明未放宽。
@@ -210,9 +212,13 @@ dense索引12,552,192B、native target表8,671,704B、区域页代数1,536B。
 2026-10-06 已装载真实 kinglove/KAGParser DLL、建立静态 TLS，并读取 data.xp3/patch.xp3 的脚本，
 推进到约288M指令的 GDI+ 依赖边界，完整90项回归通过；见 [DLL推进记录](game-dll-progress-2026-10-06.md)。
 随后按用户授权移植 Wine 10.0 的 GDI+ 矩阵/启动及窗口枚举逻辑，并接入上游 named stdcall ABI，
-逐文件 LGPL 核查和来源保留已完成。多个绘图/脚本插件实际装载，现停在 dirlist 的 VirtualAlloc reserve 边界，
-完整95项回归通过，IR/raw终态全部GPR/EIP/EFLAGS相同；见 [最新推进记录](wine-win32-progress-2026-10-06.md)。
-新DLL暂走raw fallback；后续可安装模块IR，但当前优先补VMM并解除呈现功能阻塞。
+逐文件 LGPL 核查和来源保留已完成。该阶段停在 dirlist 的 VirtualAlloc reserve 边界，
+完整95项回归通过，IR/raw终态全部GPR/EIP/EFLAGS相同；见 [Wine推进记录](wine-win32-progress-2026-10-06.md)。
+随后补齐当前所需的 VMM reserve/commit/free/protect/query 和4KiB权限，dirlist/extNagano 初始化完成。
+Borland CRT 命中的0x67 MOV/LEA 保持 raw fallback，完整寻址/宽度/回绕与 Unicorn 对照通过。
+完整102项回归通过；最终IR/raw约289.2M指令、全部GPR/EIP/EFLAGS相同，均因menu.dll缺少InsertMenuItemW退出3。
+见 [VMM推进记录](vmm-progress-2026-10-06.md)；菜单、像素fixture及呈现准备见 [图形渲染设计](graphics-rendering-design.md)。
+新DLL暂走raw fallback；后续可安装模块IR，当前优先解除菜单依赖并实现绘图/呈现。
 这些 Win32 变更未改变8B typed IR、FLAGS保守证明、代码页失效及x87精度规则。
 以下71项和MIPS表保留为此前整数IR优化阶段的记录。
 

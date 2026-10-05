@@ -950,6 +950,89 @@ fn mov_family() {
 }
 
 #[test]
+fn mov_lea_address16_offsets_operand_sizes_and_wrapping_match_unicorn() {
+    let mut code = vec![
+        0x67, 0xa0, 0, 0x40, 0x67, 0xa2, 0x10, 0x40, 0x66, 0x67, 0xa1, 0x20, 0x40, 0x66, 0x67,
+        0xa3, 0x30, 0x40, 0x67, 0xa1, 0x40, 0x40, 0x67, 0xa3, 0x50, 0x40,
+    ];
+    for mode in 0..3u8 {
+        for rm in 0..8u8 {
+            for (size16, load, store) in
+                [(false, 0x8a, 0x88), (true, 0x8b, 0x89), (false, 0x8b, 0x89)]
+            {
+                for (opcode, reg) in [(load, 0), (store, 2)] {
+                    if size16 {
+                        code.push(0x66);
+                    }
+                    code.extend([0x67, opcode, (mode << 6) | (reg << 3) | rm]);
+                    match mode {
+                        0 if rm == 6 => code.extend([0x21, 0x43]),
+                        1 => code.push(0xf1),           // signed -15
+                        2 => code.extend([0xf0, 0xff]), // wraps modulo 65536
+                        _ => {}
+                    }
+                }
+            }
+            code.extend([0x67, 0x8d, (mode << 6) | rm]);
+            match mode {
+                0 if rm == 6 => code.extend([0x21, 0x43]),
+                1 => code.push(0xf1),
+                2 => code.extend([0xf0, 0xff]),
+                _ => {}
+            }
+        }
+    }
+    code.extend([
+        0x67, 0xc6, 0x06, 0x21, 0x43, 0x77, 0x66, 0x67, 0xc7, 0x06, 0x21, 0x43, 0xef, 0xbe,
+    ]);
+    let initial: Vec<_> = (0..65536).map(|i| (i * 37 + 19) as u8).collect();
+    let regs = [
+        0xabcdef01, 0, 0xfedcabcd, 0xabcdfff0, STACK_TOP, 0xdead4000, 0xbeef4020, 0xface8020,
+    ];
+    let mut reference = Unicorn::new(Arch::X86, Mode::MODE_32).unwrap();
+    reference.mem_map(CODE as u64, 4096, Prot::ALL).unwrap();
+    reference.mem_map(0, 65536, Prot::ALL).unwrap();
+    reference.mem_write(CODE as u64, &code).unwrap();
+    reference.mem_write(0, &initial).unwrap();
+    for (i, reg) in UREGS.iter().enumerate() {
+        reference.reg_write(*reg, regs[i] as u64).unwrap();
+    }
+    reference.reg_write(RegisterX86::EFLAGS, 0x247).unwrap();
+    reference
+        .emu_start(CODE as u64, CODE as u64 + code.len() as u64, 0, 1000)
+        .unwrap();
+    let expected = reference.mem_read_as_vec(0, 65536).unwrap();
+    for use_ir in [false, true] {
+        let mut mem = GuestMem::new().unwrap();
+        mem.commit(CODE, 4096).unwrap();
+        mem.commit(0, 65536).unwrap();
+        mem.write_bytes(CODE, &code).unwrap();
+        mem.write_bytes(0, &initial).unwrap();
+        let mut cpu = Cpu::new(CODE, STACK_TOP, 0);
+        cpu.regs = regs;
+        cpu.eflags = 0x247;
+        if use_ir {
+            cpu.install_ir(wire::ir::Image::from_code(CODE, &code).unwrap(), &mem)
+                .unwrap();
+        }
+        for _ in 0..176 {
+            cpu.step(&mut mem).unwrap();
+        }
+        assert_eq!(cpu.eip, CODE + code.len() as u32);
+        for (i, reg) in UREGS.iter().enumerate() {
+            assert_eq!(cpu.regs[i] as u64, reference.reg_read(*reg).unwrap());
+        }
+        assert_eq!(
+            cpu.eflags as u64,
+            reference.reg_read(RegisterX86::EFLAGS).unwrap()
+        );
+        let mut actual = vec![0; 65536];
+        mem.read_bytes(0, &mut actual).unwrap();
+        assert_eq!(actual, expected);
+    }
+}
+
+#[test]
 fn xchg_family() {
     run_family(
         &Template {
