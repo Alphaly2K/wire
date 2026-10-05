@@ -1,8 +1,8 @@
 # 对 Project design.md 的评审与近期执行顺序（2026-10-05）
 
-本文件评审用户提供的 [Project design.md](Project%20design.md)，将其中内容视为方案建议，
-并不把它自动当成启用 Wasm、移植整个 Wine 或扩展 x86-64 的任务授权。
-当前明确约束仍为 PE32、无自身 JIT、提高解释执行吞吐、极度保守的静态 FLAGS 消除。
+本文件评审用户提供的 [Project design.md](Project%20design.md)，按提高运行时吞吐确定近期优先级。
+用户已明确接受 Wasm 经系统 JSC 使用 JIT；项目不自建宿主机器码 JIT。
+当前以 PE32 为主，解释器和可选 Wasm 加速共用语义与极度保守的静态 FLAGS 分析。
 具体编码与状态模型见 [IR AOT 设计](ir-aot-design.md)。
 
 ## 适合采用的部分
@@ -21,11 +21,11 @@
    是后续产品范围。十八个阶段不能都变成当前性能优化的前置任务。现有 loader、TEB、堆、SEH 等已有实现，
    应直接列缺口，避免从 Phase 1 重新建设。Wine 的每个拟移植文件仍要审核许可、依赖和宿主适配，不能当普通库直接链接。
 
-2. **Wasm 与 no-JIT。** 文档的 WebKit/JSC 路线最终使用 JIT。如果约束是全链路禁止 JIT，则这条加速路线不成立；
-   若只是 wire 进程不能生成宿主机器码，WKWebView 的系统引擎可以作为独立可行性实验。
-   不能假定原生 App 具有可任意使用的 JSC JIT entitlement，也不能把内部 WebKit 接口当公开可用 API。
-   WKWebView 往往跨进程；JS typed-array 可访问 linear memory，不代表 native Rust 能拿到可长期共享的裸指针。
-   在公共 API 下完成真实 memory/callback/调度测试前，不把“near zero-copy”列成架构事实。
+2. **JSC Wasm 加速可纳入路线。** no-JIT约束针对wire自建JIT，平台JSC的Wasm JIT已获用户接受。
+   优先分别验证进程内JavaScriptCore.framework和WKWebView，不能将两者的JIT权限、进程和内存模型混用。
+   本机macOS已验证公开TypedArray API的native→Wasm内存写入；返回的是临时指针，不能跨任意JSC调用长期缓存。
+   目标iOS进程内JSC是否实际启用JIT仍需真机/签名配置验证，macOS entitlement不能直接外推。
+   Wasm直接表达IR语义，避免在Wasm里再解释一套IR。首个探针与验证边界见 [JSC可行性记录](wasm-jsc-feasibility.md)。
 
 3. **FLAGS 与融合。** 暂不自动升级为跨块/跨函数消除。所有未知出口、调用、faultable 访问和恢复边界全 live。
    CMP_BRANCH 等也须保留两条 guest 的退休计数、预算/单步边界和分支后的完整可恢复 FLAGS。
@@ -59,12 +59,13 @@
 | 顺序 | 交付 | 验收依据 |
 | --- | --- | --- |
 | 1 | 原解释器/64B预解码/8B typed热路径的可重复对照 | 差分和边界回归；关闭观测开销的 runtime 数据；完整记录 total IR/cache footprint |
+| 优先可行性验证 | JSC Wasm执行、内存、native gateway | 区分进程内JSC/WKWebView；测目标平台JIT、同步内存写入、运行时调用成本与状态一致性 |
 | 2 | 扩大热指令覆盖：typed load/store、寻址融合、顺序 IR PC | ALU/branch/memory三类测试；不能增加过多dispatch或减少必要访问检查 |
 | 3 | guest边界/恢复表、有限 CMP/TEST fusion、block chaining | 每个预算/故障/单步/回调位置恢复一致；FLAGS只按静态证明消除 |
 | 4 | 紧凑持久格式、512B bank、稀疏 guest-PC 索引 | 文件与resident尺寸下降；正确性和runtime吞吐不退化 |
 | 5 | 根据真实目标补齐 RtlUnwind、窗口/消息循环及 GDI | 原先21M指令处的功能阻塞被解除，获得更长且可代表应用的性能区段 |
 | 6 | VMM权限/映射、gateway ABI、热点 native replacement | Win32行为/异常/线程/回调回归与可量化端到端收益 |
-| 后续独立实验 | 公共 WebKit API 下的 Wasm feasibility | 明确 no-JIT 的产品边界；测真实跨进程内存、调用和状态恢复成本 |
 
 本轮已完成第1项的过渡原型、I32 typed热路径子集和 CALL_NATIVE 的受控分发/IAT guard。
-64B文件仍偏大，尚未完成最终 Execution IR，也未启动 Wasm/Wine整体移植；不能将当前原型记为上述全部阶段完成。
+64B文件仍偏大，尚未完成最终 Execution IR。已完成本机JSC Wasm执行/TypedArray内存写入探针，
+完整Wasm lowering、gateway/双后端调度与Wine整体移植尚未实现。

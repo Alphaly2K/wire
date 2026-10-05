@@ -30,7 +30,8 @@ SHA-256 内容绑定选用 sha2 的 MIT 许可选项。第三方代码留在各�
 - 4.7 明确允许 retro game console 和 PC emulator apps 提供游戏下载，同时适用 4.7.1–4.7.5。
 - 4.7.2 限制未获许可向这些软件暴露原生平台 API/技术。
 
-所以不生成宿主机器码符合本项目的 no-JIT 技术约束，但 IR 不自动免除审核规则。
+本项目的约束是wire不自建宿主机器码JIT；用户已接受将Wasm交由系统JSC执行/JIT的可选加速路线。
+IR不自动免除审核规则，使用JSC也不等于任何平台/签名配置都能获得相同JIT能力。
 合法分发应建立在实际模拟器类别、内容/导入方式和 API 能力边界上，不能把改格式当作审核保证。
 安装期 IR 仍然派生于原游戏代码，不自动消除原游戏的版权或分发限制。
 
@@ -43,6 +44,9 @@ SHA-256 内容绑定选用 sha2 的 MIT 许可选项。第三方代码留在各�
 Semantic IR 可以有 SSA、类型、地址表达式和完整 guest 边界信息，不必强求定长；它不在每条指令热路径上解析。
 Execution IR 保持 opcode 集合小、类型明确、取指简单。AOT 优化在导出执行格式前完成，
 运行时不做 x86 变长解码，未覆盖入口和动态/修改过的代码由原 x86 解释器兜底。
+
+同一Semantic IR也可直接lower为Wasm操作，由平台JSC编译/执行；不在Wasm里再次解释Execution IR。
+进程内JavaScriptCore与WKWebView的内存/gateway条件分别测量，详见 [JSC可行性记录](wasm-jsc-feasibility.md)。
 
 执行成本同时取决于每次分发成本与分发次数。`IR ops / retired guest instruction ≤ 1.5` 是测量目标，
 不是正确性约束；复杂 x87 指令可以调用预编译的软件实现。优先用 fused typed opcode/共享寻址描述符，

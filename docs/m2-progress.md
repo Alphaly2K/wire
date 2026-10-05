@@ -25,7 +25,8 @@ M2 **尚未验收，不打 tag**。前两次本地检查点为 `75f90a6`（线�
 - CPU/API/heap的checked writable pointer统一更新代码页代数；页写后回退，未预解码/重叠入口回退。
   当前GuestMem仍只做范围/commit检查，不具备完整VMM权限，尚不能启用unchecked memory fast path。
 - 评审了用户提供的Project design.md：采纳两层IR、少分发、统一gateway/VMM和可测指标；
-  x86-64、整个Wine移植、Wasm/JSC JIT和通用codec replacement留作后续独立范围。
+  用户进一步明确接受Wasm经JSC使用系统JIT，并已完成本机公开API执行/内存探针。
+  x86-64、整个Wine移植和通用codec replacement留作后续范围；完整Wasm后端尚未实现。
   具体修正见 [方案评审](project-plan-review.md)，IR编码/寄存器/FP80/边界见 [设计](ir-aot-design.md)。
 
 验证：`cargo test --release` **66项通过**（1 unit、34 differential、5 FPU、6 IR、20 Win32）；
@@ -52,6 +53,11 @@ CALL_NATIVE23,414次。仅约2–7%的实际收益，**没有解决最终性能�
 目标IR文件69,373,688B、1,083,963条冷记录，320,634条compact。
 后续优先typed memory/寻址融合和顺序执行/块链接，降低每条指令取guest-PC索引与代数检查的成本；
 然后压缩持久格式与resident cache。不要优化AOT转换速度来代替运行时收益。
+
+JSC路线补充：`examples/jsc_wasm_probe.c`通过系统JavaScriptCore.framework得到Wasm add=42，
+再经`JSObjectGetTypedArrayBytesPtr`同步写linear memory，由Wasm读回123456。
+直接ArrayBuffer API会拒绝WebAssembly.Memory，TypedArray API路径可用但指针有效期受限。
+此为本机macOS执行/内存可行性，尚未证明目标iOS的实际JIT或性能；见 [验证记录](wasm-jsc-feasibility.md)。
 
 ## 已完成并验证
 

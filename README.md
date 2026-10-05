@@ -22,7 +22,8 @@ M2 已加入协作式线程/同步、SSE/SSE2 子集、可复用堆、PE 资源�
 - Rust；核心库与平台无关，宿主（macOS/iOS）走薄移植层
 - 单进程；guest 4 GiB 地址空间经 mmap 保留、按宿主页提交
   （Apple Silicon 为 16 KiB 页，提交粒度须对齐——M0 实测排掉的第一个坑）
-- 全部 Win32 API 在宿主机原生实现；guest 代码永不原生执行（无 JIT 前提从第一天成立）
+- Win32 API 由预编译宿主shim实现；wire不自建x86→宿主机器码JIT。
+  可选Wasm加速由平台JSC编译/执行，当前主程序仍只提供解释器后端
 - IAT 指向保留 stub 地址区间（0x6fff0000..），EIP 进入即陷入宿主分发；
   stdcall 栈清理由内置 arity 表驱动，未知函数按 cdecl 处理并打警告日志
 - 宿主→guest 回调机制已就位（CRT `_initterm` 已在用）
@@ -60,6 +61,7 @@ guest 当前目录独立于宿主目录，拒绝 `..` 越界、其他盘符、UN
 不是最终64-vreg紧凑后端。FLAGS只在直线段内按极保守静态证明省去即时计算，观察点恢复完整状态；
 CALL_NATIVE 保留 IAT hook、现有 API 栈清理和 callback 行为。设计、许可核实与测量见
 [IR AOT 设计](docs/ir-aot-design.md)；长期计划的修正见 [方案评审](docs/project-plan-review.md)。
+JSC Wasm路线的首个公开API执行/内存探针见 [可行性记录](docs/wasm-jsc-feasibility.md)。
 
 对照程序（自编译，仓库只含源码）：
 
