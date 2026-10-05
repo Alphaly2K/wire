@@ -2,7 +2,8 @@
 
 菜单、基础 GDI、常用 USER32、统一 stdcall ABI 已成组实现；后续参考切换为
 用户指定的 Hangover，固定提交与许可结论见 [Hangover 路线](hangover-win32-design.md)。
-真实游戏已经创建 **TVPMainWindow（HWND=0x40010008）**，仍未可见呈现，M2 未验收。
+真实游戏已经创建 **TVPMainWindow（HWND=0x40010008）**并输出真实提示页/STAFF像素，
+已接入macOS上传呈现；完整可玩M2未验收。最新见[渲染检查点](graphics-progress-2026-10-06.md)。
 
 ## 当前实现
 

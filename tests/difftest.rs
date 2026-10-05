@@ -1847,3 +1847,28 @@ fn x87_transcendental_exact_identities() {
         x87_check(&code, &init, "exp2 identity");
     }
 }
+
+#[test]
+fn sse_variable_packed_shifts_use_full_low_qword_count_and_preserve_flags() {
+    let mut rng = Rng(0x661fd3);
+    for op in [0xd1, 0xd2, 0xd3, 0xe1, 0xe2, 0xf1, 0xf2, 0xf3] {
+        for count in [0u64, 1, 15, 16, 31, 32, 63, 64, 255, 1 << 32, u64::MAX] {
+            for operand in [0xd1, 0xc9, 0x13] {
+                // xmm2,xmm1; xmm1,xmm1; xmm2,[ebx]
+                let mut init = Init::random(&mut rng);
+                init.regs[3] = DATA + 0x80;
+                init.xmm[1][..8].copy_from_slice(&count.to_le_bytes());
+                init.xmm[1][8..].fill(0xff); // high qword must not affect the count
+                init.data[0x80..0x90].copy_from_slice(&init.xmm[1]);
+                let code = sse_op(0x66, op, operand);
+                let w = run_wire(&code, &init, 10_000);
+                let u = run_unicorn(&code, &init, 10_000);
+                if let Err(e) =
+                    compare("SSE variable packed shift", &code, &init, &w, &u, FLAG_MASK)
+                {
+                    panic!("count {count:#x}: {e}");
+                }
+            }
+        }
+    }
+}

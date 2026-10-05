@@ -2499,6 +2499,42 @@ impl Cpu {
                     _ => return Err(self.unsupported(mem, eip0, "0f ae group /n")),
                 }
             }
+            0xD1..=0xD3 | 0xE1 | 0xE2 | 0xF1..=0xF3 if op66 && rep.is_none() => {
+                // PSRLW/D/Q, PSRAW/D, PSLLW/D/Q. The count is the full
+                // unsigned low qword, never x86's scalar masked shift count.
+                let rm = self.modrm(mem)?;
+                let count_source = self.xmm_rm(mem, &rm, seg)?;
+                let count = u64::from_le_bytes(count_source[..8].try_into().unwrap());
+                let width = match op & 0xf {
+                    1 => 2,
+                    2 => 4,
+                    _ => 8,
+                };
+                let bits = (width * 8) as u64;
+                let source = self.xmm[rm.reg];
+                let mut out = [0; 16];
+                for (src, dst) in source.chunks_exact(width).zip(out.chunks_exact_mut(width)) {
+                    let mut bytes = [0; 8];
+                    bytes[..width].copy_from_slice(src);
+                    let value = u64::from_le_bytes(bytes);
+                    let shifted = if matches!(op, 0xE1 | 0xE2) {
+                        let signed = if width == 2 {
+                            value as i16 as i64
+                        } else {
+                            value as i32 as i64
+                        };
+                        (signed >> count.min(bits - 1)) as u64
+                    } else if count >= bits {
+                        0
+                    } else if op >= 0xF1 {
+                        value << count
+                    } else {
+                        value >> count
+                    };
+                    dst.copy_from_slice(&shifted.to_le_bytes()[..width]);
+                }
+                self.xmm[rm.reg] = out;
+            }
             0xF0 if rep == Some(0xF2) => {
                 // lddqu: same as movdqu without alignment faults
                 let rm = self.modrm(mem)?;
@@ -2830,6 +2866,7 @@ impl Cpu {
                     // Cooperative timeslice: a guest thread that never calls a
                     // blocking API (spin loop) must not starve the others.
                     if self.instr_count & 0xF_FFFF == 0 {
+                        crate::platform::poll(mem, state, sched);
                         sched.round_robin(self);
                     }
                 }

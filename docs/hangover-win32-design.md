@@ -36,4 +36,5 @@ wow64win_private.h、wow64/syscall.c、oleaut32/oleaut.c、win32u/defwnd.c
 
 解释执行仍为主路径；这里不引入 FEX/Box64 JIT 或运行时机器码。
 保持 FLAGS 保守分析、fault/预算/线程/回调边界和 x87 精度。
-下一步成组补窗口 paint、字体/DC、DIB blit 和真实游戏主窗口呈现。
+窗口paint、logical字体/DC、DIB blit和有限D3D9已成组接通，真实游戏输出图片。
+新移植的geometry和D3D9公共ABI来源已登记；下一步按用户要求先做启动性能优化。

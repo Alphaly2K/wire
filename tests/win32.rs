@@ -12,6 +12,181 @@ const CODE: u32 = 0x10000;
 const RET: u32 = CODE + 0x800;
 
 #[test]
+fn frame_adjustment_client_geometry_and_paint_clipping_share_the_same_pixels() {
+    let mut v = Vm::new();
+    let def = v.api.register("user32.dll", Some("DefWindowProcW"), None);
+    let hwnd = test_window(&mut v, def);
+    v.call("user32.dll", "SetRect", &[DATA + 0x800, 0, 0, 200, 100]);
+    assert_eq!(
+        v.call(
+            "user32.dll",
+            "AdjustWindowRectEx",
+            &[DATA + 0x800, 0xc40000, 0, 0]
+        ),
+        1
+    );
+    for (i, n) in [-4i32, -27, 204, 104].into_iter().enumerate() {
+        assert_eq!(
+            v.mem.read_u32(DATA + 0x800 + i as u32 * 4).unwrap() as i32,
+            n
+        );
+    }
+    v.call(
+        "user32.dll",
+        "SetWindowLongW",
+        &[hwnd, (-16i32) as u32, 0xc40000],
+    );
+    v.call(
+        "user32.dll",
+        "SetWindowPos",
+        &[hwnd, 0, 30, 40, 208, 131, 0x14],
+    );
+    v.call("user32.dll", "GetClientRect", &[hwnd, DATA + 0x820]);
+    assert_eq!(v.mem.read_u32(DATA + 0x828).unwrap(), 200);
+    assert_eq!(v.mem.read_u32(DATA + 0x82c).unwrap(), 100);
+    let class = v.state.user32.windows[&hwnd].class;
+    v.state.user32.classes.get_mut(&class).unwrap().fields[7] = 6;
+    v.call("user32.dll", "ShowWindow", &[hwnd, 1]);
+    assert_eq!(
+        v.call("user32.dll", "GetUpdateRect", &[hwnd, DATA + 0x840, 0]),
+        1
+    );
+    let dc = v.call("user32.dll", "BeginPaint", &[hwnd, DATA + 0x880]);
+    assert_ne!(dc, 0);
+    assert_eq!(v.mem.read_u32(DATA + 0x884).unwrap(), 0); // background was truly erased
+    assert_eq!(v.call("gdi32.dll", "GetPixel", &[dc, 0, 0]), 0xffffff);
+    assert_eq!(v.call("user32.dll", "GetUpdateRect", &[hwnd, 0, 0]), 0);
+    assert_eq!(v.call("user32.dll", "EndPaint", &[hwnd, DATA + 0x880]), 1);
+    assert_eq!(v.call("gdi32.dll", "GetPixel", &[dc, 0, 0]), u32::MAX);
+    v.call("user32.dll", "SetRect", &[DATA + 0x800, 10, 20, 14, 22]);
+    v.call("user32.dll", "InvalidateRect", &[hwnd, DATA + 0x800, 0]);
+    let dc = v.call("user32.dll", "BeginPaint", &[hwnd, DATA + 0x880]);
+    assert_eq!(v.call("gdi32.dll", "SetPixel", &[dc, 10, 20, 0xff]), 0xff);
+    assert_eq!(v.call("gdi32.dll", "SetPixel", &[dc, 0, 0, 0xff]), u32::MAX);
+    v.call("user32.dll", "EndPaint", &[hwnd, DATA + 0x880]);
+    let (w, h, pixels) = v.state.graphics.window_snapshot(&v.mem, hwnd).unwrap();
+    assert_eq!((w, h), (200, 100));
+    assert_eq!(pixels[20 * 200 + 10], 0xff);
+    assert_eq!(pixels[0], 0xffffff);
+}
+
+#[test]
+fn logical_fonts_preserve_logfont_encoding_selection_and_14_argument_creation() {
+    let mut v = Vm::new();
+    let dc = v.call("gdi32.dll", "CreateCompatibleDC", &[0]);
+    let stock = v.call("gdi32.dll", "GetStockObject", &[17]);
+    assert_ne!(stock, 0);
+    assert_eq!(v.call("gdi32.dll", "GetObjectW", &[stock, 92, DATA]), 92);
+    assert_eq!(v.mem.read_u32(DATA).unwrap() as i32, -16);
+    v.wide(DATA + 0x400, "日本語font");
+    let font = v.call(
+        "gdi32.dll",
+        "CreateFontW",
+        &[
+            (-20i32) as u32,
+            0,
+            0,
+            0,
+            700,
+            1,
+            0,
+            0,
+            128,
+            0,
+            0,
+            4,
+            0,
+            DATA + 0x400,
+        ],
+    );
+    assert_ne!(font, 0);
+    assert_eq!(v.call("gdi32.dll", "GetObjectType", &[font]), 6);
+    assert_eq!(v.call("gdi32.dll", "GetObjectW", &[font, 92, DATA]), 92);
+    assert_eq!(v.mem.read_u32(DATA + 16).unwrap(), 700);
+    assert_eq!(v.mem.read_wstr(DATA + 28, 32).unwrap(), "日本語font");
+    let old = v.call("gdi32.dll", "SelectObject", &[dc, font]);
+    assert_ne!(old, 0);
+    assert_eq!(v.call("gdi32.dll", "DeleteObject", &[font]), 0);
+    assert_eq!(v.call("gdi32.dll", "GetCurrentObject", &[dc, 6]), font);
+    v.call("gdi32.dll", "SelectObject", &[dc, old]);
+    assert_eq!(v.call("gdi32.dll", "DeleteObject", &[font]), 1);
+    assert_eq!(v.call("gdi32.dll", "DeleteObject", &[stock]), 1);
+    assert_eq!(v.call("gdi32.dll", "GetObjectA", &[stock, 60, DATA]), 60);
+    let a = v.call("gdi32.dll", "CreateFontIndirectA", &[DATA]);
+    assert_ne!(a, 0);
+    assert_eq!(
+        v.call("gdi32.dll", "GetObjectW", &[a, 92, DATA + 0x100]),
+        92
+    );
+    assert_eq!(
+        v.mem.read_wstr(DATA + 0x100 + 28, 32).unwrap(),
+        "MS UI Gothic"
+    );
+}
+
+#[test]
+fn dib_stretch_and_readback_use_real_bgra_rows_and_checked_scan_ranges() {
+    let mut v = Vm::new();
+    let screen = v.call("user32.dll", "GetDC", &[0]);
+    let dc = v.call("gdi32.dll", "CreateCompatibleDC", &[screen]);
+    let bitmap = v.call("gdi32.dll", "CreateCompatibleBitmap", &[screen, 4, 4]);
+    let old = v.call("gdi32.dll", "SelectObject", &[dc, bitmap]);
+    for (i, n) in [40, 2, (-2i32) as u32, 1 | (32 << 16), 0, 16, 0, 0, 0, 0]
+        .into_iter()
+        .enumerate()
+    {
+        v.mem.write_u32(DATA + i as u32 * 4, n).unwrap();
+    }
+    for (i, n) in [0xff0000, 0xff00, 0xff, 0xffffff].into_iter().enumerate() {
+        v.mem.write_u32(DATA + 0x100 + i as u32 * 4, n).unwrap();
+    }
+    assert_eq!(
+        v.call(
+            "gdi32.dll",
+            "StretchDIBits",
+            &[dc, 0, 0, 4, 4, 0, 0, 2, 2, DATA + 0x100, DATA, 0, 0xcc0020]
+        ),
+        2
+    );
+    assert_eq!(v.call("gdi32.dll", "GetPixel", &[dc, 0, 0]), 0xff);
+    assert_eq!(v.call("gdi32.dll", "GetPixel", &[dc, 3, 3]), 0xffffff);
+    assert_eq!(v.call("gdi32.dll", "GetPixel", &[dc, 0, 3]), 0xff0000);
+    assert_eq!(
+        v.call(
+            "gdi32.dll",
+            "StretchDIBits",
+            &[dc, 0, 0, 4, 4, 0, 0, 2, 2, 0, DATA, 0, 0xcc0020]
+        ),
+        0
+    );
+    assert_eq!(v.call("gdi32.dll", "GetPixel", &[dc, 0, 0]), 0xff);
+    v.call("gdi32.dll", "SelectObject", &[dc, old]);
+    assert_eq!(
+        v.call("gdi32.dll", "GetDIBits", &[dc, bitmap, 0, 4, 0, DATA, 0]),
+        4
+    );
+    assert_eq!(v.mem.read_u32(DATA + 4).unwrap(), 4);
+    assert_eq!(
+        v.call(
+            "gdi32.dll",
+            "GetDIBits",
+            &[dc, bitmap, 0, 4, DATA + 0x200, DATA, 0]
+        ),
+        4
+    );
+    assert_eq!(v.mem.read_u32(DATA + 0x200).unwrap(), 0xff); // bottom row: blue
+    assert_eq!(v.mem.read_u32(DATA + 0x200 + 3 * 16).unwrap(), 0xff0000); // top row: red
+    assert_eq!(
+        v.call(
+            "gdi32.dll",
+            "GetDIBits",
+            &[dc, bitmap, 4, 1, DATA + 0x200, DATA, 0]
+        ),
+        0
+    );
+}
+
+#[test]
 fn thread_resource_limit_returns_win32_failure_and_does_not_create_partial_handles() {
     let mut v = Vm::new();
     while v.sched.has_thread_capacity() {
@@ -463,7 +638,7 @@ fn window_menu_attachment_lifetime_and_coordinate_roundtrip_are_real() {
         1
     );
     assert_eq!(v.mem.read_u32(DATA + 0xb00).unwrap() as i32, -7);
-    assert_eq!(v.mem.read_u32(DATA + 0xb04).unwrap(), 24);
+    assert_eq!(v.mem.read_u32(DATA + 0xb04).unwrap(), 43); // client begins below the menu
     assert_eq!(
         v.call("user32.dll", "ScreenToClient", &[hwnd, DATA + 0xb00]),
         1
@@ -2930,4 +3105,310 @@ fn virtual_memory_rejects_collisions_invalid_flags_cross_allocations_and_invalid
     );
     assert!(top > second && top < 0x7ff00000);
     assert_eq!(top % ALLOCATION_GRANULARITY, 0);
+}
+
+fn d3d_com(v: &mut Vm, object: u32, slot: u32, args: &[u32]) -> u32 {
+    let table = v.mem.read_u32(object).unwrap();
+    let stub = v.mem.read_u32(table + slot * 4).unwrap();
+    let mut all = vec![object];
+    all.extend_from_slice(args);
+    let result = v
+        .cpu
+        .call_guest(
+            &mut v.mem,
+            &mut v.api,
+            &mut v.state,
+            &mut v.log,
+            &mut v.sched,
+            stub,
+            &all,
+            1_000_000,
+        )
+        .unwrap();
+    match result {
+        wire::cpu::GuestCallOutcome::Returned(n) => n,
+        _ => panic!("COM control transfer escaped"),
+    }
+}
+fn d3d_device(v: &mut Vm) -> (u32, u32, u32) {
+    v.mem
+        .write_bytes(CODE, &[0xb8, 1, 0, 0, 0, 0xc2, 16, 0])
+        .unwrap();
+    let hwnd = test_window(v, CODE);
+    let factory = v.call("d3d9.dll", "Direct3DCreate9", &[32]);
+    assert_ne!(factory, 0);
+    let p = DATA + 0x800;
+    for (i, n) in [4, 4, 21, 1, 0, 0, 1, hwnd, 1, 0, 0, 0, 0, 0]
+        .into_iter()
+        .enumerate()
+    {
+        v.mem.write_u32(p + i as u32 * 4, n).unwrap();
+    }
+    assert_eq!(
+        d3d_com(v, factory, 16, &[0, 1, hwnd, 0x20, p, DATA + 0x900]),
+        0
+    );
+    let device = v.mem.read_u32(DATA + 0x900).unwrap();
+    assert_ne!(device, 0);
+    (factory, device, hwnd)
+}
+#[test]
+fn d3d9_com_texture_quad_present_has_real_pixels_and_releases_bound_resources() {
+    let mut v = Vm::new();
+    let (factory, device, hwnd) = d3d_device(&mut v);
+    assert_eq!(
+        d3d_com(&mut v, device, 23, &[2, 2, 1, 0, 21, 1, DATA + 0x900, 0]),
+        0
+    );
+    let texture = v.mem.read_u32(DATA + 0x900).unwrap();
+    assert_eq!(d3d_com(&mut v, texture, 19, &[0, DATA + 0x910, 0, 0]), 0);
+    assert_eq!(v.mem.read_u32(DATA + 0x910).unwrap(), 8);
+    let bits = v.mem.read_u32(DATA + 0x914).unwrap();
+    for (i, n) in [0xffff0000, 0xff00ff00, 0xff0000ff, 0xffffffff]
+        .into_iter()
+        .enumerate()
+    {
+        v.mem.write_u32(bits + i as u32 * 4, n).unwrap();
+    }
+    assert_eq!(d3d_com(&mut v, texture, 20, &[0]), 0);
+    assert_eq!(d3d_com(&mut v, device, 65, &[0, texture]), 0);
+    assert_eq!(d3d_com(&mut v, device, 89, &[0x104]), 0);
+    assert_eq!(d3d_com(&mut v, device, 57, &[22, 1]), 0);
+    for (i, vertex) in [
+        [-0.5f32, -0.5, 0.5, 1., 0., 0.],
+        [3.5, -0.5, 0.5, 1., 1., 0.],
+        [-0.5, 3.5, 0.5, 1., 0., 1.],
+        [3.5, 3.5, 0.5, 1., 1., 1.],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for (j, n) in vertex.into_iter().enumerate() {
+            v.mem
+                .write_u32(DATA + 0xa00 + i as u32 * 24 + j as u32 * 4, n.to_bits())
+                .unwrap();
+        }
+    }
+    assert_eq!(d3d_com(&mut v, device, 41, &[]), 0);
+    assert_eq!(d3d_com(&mut v, device, 83, &[5, 2, DATA + 0xa00, 24]), 0);
+    assert_eq!(d3d_com(&mut v, device, 42, &[]), 0);
+    assert_eq!(d3d_com(&mut v, device, 17, &[0, 0, 0, 0]), 0);
+    let (w, h, pixels) = v.state.graphics.window_snapshot(&v.mem, hwnd).unwrap();
+    assert_eq!((w, h), (640, 480));
+    assert_eq!(pixels[0], 0xff);
+    assert_eq!(pixels[639], 0xff00);
+    assert_eq!(pixels[479 * 640], 0xff0000);
+    assert_eq!(pixels[480 * 640 - 1], 0xffffff);
+    assert_eq!(v.state.d3d9.frames, 1);
+    assert_eq!(v.state.d3d9.draws, 1);
+    // Device owns the binding after the guest drops its COM reference.
+    assert_eq!(d3d_com(&mut v, texture, 2, &[]), 0);
+    assert_ne!(v.k("HeapSize", &[v.state.process_heap, 0, bits]), u32::MAX);
+    assert_eq!(d3d_com(&mut v, factory, 2, &[]), 0);
+    assert_eq!(d3d_com(&mut v, device, 2, &[]), 0);
+    assert_eq!(v.k("HeapSize", &[v.state.process_heap, 0, bits]), u32::MAX);
+    assert_eq!(
+        v.k("HeapSize", &[v.state.process_heap, 0, texture]),
+        u32::MAX
+    );
+    assert_eq!(
+        v.k("HeapSize", &[v.state.process_heap, 0, device]),
+        u32::MAX
+    );
+    assert_eq!(
+        v.k("HeapSize", &[v.state.process_heap, 0, factory]),
+        u32::MAX
+    );
+}
+#[test]
+fn d3d9_surface_locks_and_external_child_references_preserve_com_owners() {
+    let mut v = Vm::new();
+    let (factory, device, _) = d3d_device(&mut v);
+    assert_eq!(d3d_com(&mut v, device, 18, &[0, 0, 0, DATA + 0x900]), 0);
+    let surface = v.mem.read_u32(DATA + 0x900).unwrap();
+    assert_eq!(d3d_com(&mut v, surface, 13, &[DATA + 0x910, 0, 0]), 0);
+    let bits = v.mem.read_u32(DATA + 0x914).unwrap();
+    assert_eq!(
+        d3d_com(&mut v, surface, 13, &[DATA + 0x920, 0, 0]),
+        0x8876086c
+    );
+    assert_eq!(
+        d3d_com(&mut v, device, 43, &[0, 0, 1, 0xff123456, 0, 0]),
+        0x8876086c
+    );
+    assert_eq!(d3d_com(&mut v, surface, 14, &[]), 0);
+    assert_eq!(d3d_com(&mut v, surface, 14, &[]), 0x8876086c);
+    assert_eq!(d3d_com(&mut v, device, 43, &[0, 0, 1, 0xff123456, 0, 0]), 0);
+    assert_eq!(v.mem.read_u32(bits).unwrap(), 0xff123456);
+    assert_eq!(d3d_com(&mut v, device, 2, &[]), 0);
+    assert_eq!(d3d_com(&mut v, surface, 3, &[DATA + 0x920]), 0);
+    assert_eq!(v.mem.read_u32(DATA + 0x920).unwrap(), device);
+    assert_eq!(d3d_com(&mut v, device, 2, &[]), 0);
+    assert_eq!(d3d_com(&mut v, surface, 2, &[]), 0);
+    assert_eq!(v.k("HeapSize", &[v.state.process_heap, 0, bits]), u32::MAX);
+    assert_eq!(d3d_com(&mut v, factory, 2, &[]), 0);
+}
+#[test]
+fn d3d9_failed_outputs_formats_and_vertex_reads_leave_pixels_unchanged() {
+    let mut v = Vm::new();
+    let (factory, device, _) = d3d_device(&mut v);
+    let available = d3d_com(&mut v, device, 4, &[]);
+    assert_eq!(
+        d3d_com(&mut v, device, 23, &[2, 2, 1, 0, 21, 1, 0x30000000, 0]),
+        0x8876086c
+    );
+    assert_eq!(
+        d3d_com(&mut v, device, 23, &[2, 2, 1, 0, 23, 1, DATA + 0x900, 0]),
+        0x8876086a
+    );
+    assert_eq!(v.mem.read_u32(DATA + 0x900).unwrap(), 0);
+    assert_eq!(d3d_com(&mut v, device, 4, &[]), available);
+    assert_eq!(d3d_com(&mut v, device, 89, &[0x104]), 0);
+    assert_eq!(d3d_com(&mut v, device, 41, &[]), 0);
+    assert_eq!(
+        d3d_com(&mut v, device, 83, &[5, 2, 0x30000000, 24]),
+        0x8876086c
+    );
+    assert_eq!(v.state.d3d9.draws, 0);
+    assert_eq!(d3d_com(&mut v, device, 42, &[]), 0);
+    assert_eq!(d3d_com(&mut v, device, 2, &[]), 0);
+    assert_eq!(d3d_com(&mut v, factory, 2, &[]), 0);
+}
+
+#[test]
+fn d3d9_alpha_quad_shared_edges_scissor_and_diffuse_vertices_are_exact() {
+    let mut v = Vm::new();
+    let (factory, device, _) = d3d_device(&mut v);
+    assert_eq!(
+        d3d_com(&mut v, device, 23, &[1, 1, 1, 0, 21, 1, DATA + 0x900, 0]),
+        0
+    );
+    let texture = v.mem.read_u32(DATA + 0x900).unwrap();
+    assert_eq!(
+        d3d_com(&mut v, texture, 19, &[0, DATA + 0x910, 0, 0x8000]),
+        0
+    );
+    let bits = v.mem.read_u32(DATA + 0x914).unwrap();
+    v.mem.write_u32(bits, 0x80ffffff).unwrap();
+    assert_eq!(d3d_com(&mut v, texture, 20, &[0]), 0);
+    assert_eq!(d3d_com(&mut v, device, 65, &[0, texture]), 0);
+    assert_eq!(d3d_com(&mut v, device, 89, &[0x144]), 0);
+    for (n, value) in [(22, 1), (27, 1), (19, 5), (20, 6), (174, 1)] {
+        assert_eq!(d3d_com(&mut v, device, 57, &[n, value]), 0);
+    }
+    for (i, n) in [1, 1, 3, 3].into_iter().enumerate() {
+        v.mem.write_u32(DATA + 0x940 + i as u32 * 4, n).unwrap();
+    }
+    assert_eq!(d3d_com(&mut v, device, 75, &[DATA + 0x940]), 0);
+    assert_eq!(d3d_com(&mut v, device, 43, &[0, 0, 1, 0xff0000ff, 0, 0]), 0);
+    for (i, [x, y, u, t]) in [
+        [-0.5f32, -0.5, 0., 0.],
+        [3.5, -0.5, 1., 0.],
+        [-0.5, 3.5, 0., 1.],
+        [3.5, 3.5, 1., 1.],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let words = [
+            x.to_bits(),
+            y.to_bits(),
+            1f32.to_bits(),
+            1f32.to_bits(),
+            0xffffffff,
+            u.to_bits(),
+            t.to_bits(),
+        ];
+        for (j, n) in words.into_iter().enumerate() {
+            v.mem
+                .write_u32(DATA + 0xa00 + i as u32 * 28 + j as u32 * 4, n)
+                .unwrap();
+        }
+    }
+    assert_eq!(d3d_com(&mut v, device, 41, &[]), 0);
+    assert_eq!(d3d_com(&mut v, device, 83, &[5, 2, DATA + 0xa00, 28]), 0);
+    assert_eq!(d3d_com(&mut v, device, 42, &[]), 0);
+    assert_eq!(d3d_com(&mut v, device, 18, &[0, 0, 0, DATA + 0x900]), 0);
+    let back = v.mem.read_u32(DATA + 0x900).unwrap();
+    assert_eq!(d3d_com(&mut v, back, 13, &[DATA + 0x910, 0, 0x10]), 0);
+    let pixels = v.mem.read_u32(DATA + 0x914).unwrap();
+    for y in 0..4 {
+        for x in 0..4 {
+            assert_eq!(
+                v.mem.read_u32(pixels + (y * 4 + x) * 4).unwrap(),
+                if (1..3).contains(&x) && (1..3).contains(&y) {
+                    0xbf8080ff
+                } else {
+                    0xff0000ff
+                }
+            );
+        }
+    }
+    d3d_com(&mut v, back, 14, &[]);
+    d3d_com(&mut v, back, 2, &[]);
+    d3d_com(&mut v, texture, 2, &[]);
+    d3d_com(&mut v, device, 2, &[]);
+    d3d_com(&mut v, factory, 2, &[]);
+}
+#[test]
+fn unsupported_audio_returns_real_failure_and_never_a_success_with_null_object() {
+    let mut v = Vm::new();
+    v.mem.write_u32(DATA, 0xdeadbeef).unwrap();
+    assert_eq!(
+        v.call("dsound.dll", "DirectSoundCreate", &[0, DATA, 0]),
+        0x88780078
+    );
+    assert_eq!(v.mem.read_u32(DATA).unwrap(), 0);
+    assert_eq!(v.call("winmm.dll", "waveOutGetNumDevs", &[]), 0);
+    v.mem.write_u32(DATA, 0xdeadbeef).unwrap();
+    assert_eq!(
+        v.call(
+            "winmm.dll",
+            "waveOutOpen",
+            &[DATA, u32::MAX, DATA + 100, 0, 0, 0]
+        ),
+        6
+    );
+    assert_eq!(v.mem.read_u32(DATA).unwrap(), 0);
+}
+#[test]
+fn validated_paint_drops_only_synthetic_messages_and_default_close_destroys_window() {
+    let mut v = Vm::new();
+    v.mem
+        .write_bytes(CODE, &[0xb8, 1, 0, 0, 0, 0xc2, 16, 0])
+        .unwrap();
+    let hwnd = test_window(&mut v, CODE);
+    v.call("user32.dll", "ShowWindow", &[hwnd, 5]);
+    assert_eq!(
+        v.call(
+            "user32.dll",
+            "PeekMessageW",
+            &[DATA + 0x900, hwnd, 0xf, 0xf, 0]
+        ),
+        1
+    );
+    v.call("user32.dll", "ValidateRect", &[hwnd, 0]);
+    assert_eq!(
+        v.call(
+            "user32.dll",
+            "PeekMessageW",
+            &[DATA + 0x900, hwnd, 0xf, 0xf, 0]
+        ),
+        0
+    );
+    v.call("user32.dll", "PostMessageW", &[hwnd, 0xf, 0, 0]);
+    v.call("user32.dll", "ValidateRect", &[hwnd, 0]);
+    assert_eq!(
+        v.call(
+            "user32.dll",
+            "PeekMessageW",
+            &[DATA + 0x900, hwnd, 0xf, 0xf, 1]
+        ),
+        1
+    );
+    assert_eq!(
+        v.call("user32.dll", "DefWindowProcW", &[hwnd, 0x10, 0, 0]),
+        1
+    );
+    assert_eq!(v.call("user32.dll", "IsWindow", &[hwnd]), 0);
 }

@@ -1,10 +1,14 @@
 # 图形渲染实施设计（2026-10-06）
 
-本页记录 VMM 完成后的图形实施设计。菜单、DC/bitmap/DIB、像素及SRCCOPY BitBlt已实现，
-真实TVPMainWindow已创建；平台可见呈现尚未完成。最新结果见
-[功能组推进](common-win32-progress-2026-10-06.md)。下文起点描述保留此前状态。
-当前解释器为主路径，Wasm/JSC 仍是可用时的加速路线。图形 API 经现有 CALL_NATIVE/gateway 进入 host 后端，
-先建立可验证的像素与 Win32 对象语义，再接入 Metal 呈现。
+本页记录图形设计及最初实施起点。当前已完成基础 GDI、窗口 geometry/paint、logical font、
+32bpp DIB blit、有限 CPU D3D9 和 macOS AppKit/CoreGraphics 帧上传。
+真实游戏已输出提示页与 STAFF 图像；实现/截图/限制见
+[首次真实游戏渲染](graphics-progress-2026-10-06.md)。完整可玩验收尚未完成。
+
+解释器仍为主路径，Wasm/JSC只作可用时加速。图形经过 CALL_NATIVE/gateway，
+CPU像素面为真值；Metal/GPU栅格化仍留待后续。
+用户要求此检查点之后暂停功能扩展，先优化启动到真实画面的耗时。
+下文起点描述为历史状态，不代表当前进度。
 
 ## 从当前实测入口开始
 

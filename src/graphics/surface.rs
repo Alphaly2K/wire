@@ -104,6 +104,6 @@ pub(super) fn dimensions(width: u32, height: u32) -> Result<u32, u32> {
     }
     Ok(count)
 }
-fn swap_rb(c: u32) -> u32 {
+pub(super) fn swap_rb(c: u32) -> u32 {
     (c & 0xff00ff00) | ((c & 255) << 16) | ((c >> 16) & 255)
 }

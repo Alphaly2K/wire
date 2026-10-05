@@ -1,5 +1,7 @@
 //! Initial GDI object/pixel backend. Public snapshots are real CPU pixels for
 //! independent fixtures; platform presentation and drawing APIs are separate.
+mod dib;
+mod font;
 mod surface;
 use crate::{api::ApiState, mem::GuestMem};
 use std::collections::BTreeMap;
@@ -13,6 +15,8 @@ struct Dc {
     viewport: [i32; 2],
     text_color: u32,
     bk_color: u32,
+    font: u32,
+    clip: Option<[i32; 4]>,
 }
 impl Dc {
     fn new(window: Option<u32>, bitmap: u32) -> Self {
@@ -23,6 +27,8 @@ impl Dc {
             viewport: [0; 2],
             text_color: 0,
             bk_color: 0xffffff,
+            font: font::SYSTEM_FONT,
+            clip: None,
         }
     }
     fn point(&self, x: u32, y: u32) -> [i64; 2] {
@@ -31,12 +37,22 @@ impl Dc {
             point[i] as i32 as i64 - self.origin[i] as i64 + self.viewport[i] as i64
         })
     }
+    fn bounds(&self, width: u32, height: u32) -> [i64; 4] {
+        let r = self.clip.unwrap_or([0, 0, width as i32, height as i32]);
+        [
+            r[0].max(0) as i64,
+            r[1].max(0) as i64,
+            r[2].min(width as i32) as i64,
+            r[3].min(height as i32) as i64,
+        ]
+    }
 }
 pub struct Graphics {
     dcs: BTreeMap<u32, Dc>,
     bitmaps: BTreeMap<u32, Bitmap>,
     windows: BTreeMap<u32, u32>,
     next: u32,
+    fonts: BTreeMap<u32, font::Font>,
 }
 impl Default for Graphics {
     fn default() -> Self {
@@ -45,12 +61,33 @@ impl Default for Graphics {
             bitmaps: BTreeMap::from([(STOCK_BITMAP, Bitmap::owned(1, 1, 1, true).unwrap())]),
             windows: BTreeMap::new(),
             next: 0x42010000,
+            fonts: font::stock_fonts(),
         }
     }
 }
 impl Graphics {
+    /// Upload checked top-down D3D pixels to the same surface read by GDI.
+    pub(crate) fn upload(
+        &mut self,
+        hwnd: u32,
+        width: u32,
+        height: u32,
+        bgra: &[u32],
+    ) -> Result<(), u32> {
+        if bgra.len() != dimensions(width, height)? as usize {
+            return Err(87);
+        }
+        let dc = self.window_dc(hwnd, width, height)?;
+        let bitmap = self.dcs[&dc].bitmap;
+        if let Storage::Owned(pixels) = &mut self.bitmaps.get_mut(&bitmap).unwrap().storage {
+            for (dst, &src) in pixels.iter_mut().zip(bgra) {
+                *dst = surface::swap_rb(src) & 0xffffff;
+            }
+        }
+        self.release_window_dc(hwnd, dc)
+    }
     fn handle(&mut self) -> Result<u32, u32> {
-        if self.dcs.len() + self.bitmaps.len() >= 4096 {
+        if self.dcs.len() + self.bitmaps.len() + self.fonts.len() >= 4096 {
             return Err(8);
         }
         let h = self.next;
@@ -67,6 +104,77 @@ impl Graphics {
     }
     fn dc(&self, h: u32) -> Result<&Dc, u32> {
         self.dcs.get(&h).ok_or(6)
+    }
+    pub(crate) fn window_dc(&mut self, hwnd: u32, width: u32, height: u32) -> Result<u32, u32> {
+        let dc = self.handle()?;
+        let bitmap = if let Some(&h) = self.windows.get(&hwnd) {
+            let old = &self.bitmaps[&h];
+            if old.width != width || old.height != height {
+                self.capacity(width, height)?;
+                let mut new = Bitmap::owned(width, height, 32, true)?;
+                if let (Storage::Owned(src), Storage::Owned(dst)) = (&old.storage, &mut new.storage)
+                {
+                    for y in 0..height.min(old.height) {
+                        let count = width.min(old.width) as usize;
+                        dst[y as usize * width as usize..y as usize * width as usize + count]
+                            .copy_from_slice(
+                                &src[y as usize * old.width as usize
+                                    ..y as usize * old.width as usize + count],
+                            );
+                    }
+                }
+                self.bitmaps.insert(h, new);
+            }
+            h
+        } else {
+            self.capacity(width, height)?;
+            let h = self.handle()?;
+            self.bitmaps
+                .insert(h, Bitmap::owned(width, height, 32, true)?);
+            self.windows.insert(hwnd, h);
+            h
+        };
+        self.dcs.insert(dc, Dc::new(Some(hwnd), bitmap));
+        Ok(dc)
+    }
+    pub(crate) fn release_window_dc(&mut self, hwnd: u32, dc: u32) -> Result<(), u32> {
+        if self.dc(dc)?.window != Some(hwnd) {
+            return Err(6);
+        }
+        self.dcs.remove(&dc);
+        Ok(())
+    }
+    pub(crate) fn set_clip(&mut self, dc: u32, rect: [i32; 4]) -> Result<(), u32> {
+        self.dcs.get_mut(&dc).ok_or(6u32)?.clip = Some(rect);
+        Ok(())
+    }
+    pub(crate) fn fill_color(&mut self, mem: &GuestMem, dc: u32, color: u32) -> Result<(), u32> {
+        let dc = self.dc(dc)?;
+        let b = &self.bitmaps[&dc.bitmap];
+        let r = dc.bounds(b.width, b.height);
+        let h = dc.bitmap;
+        let bitmap = self.bitmaps.get_mut(&h).unwrap();
+        bitmap.check(mem, true)?;
+        for y in r[1]..r[3] {
+            for x in r[0]..r[2] {
+                bitmap.write(mem, x as u32, y as u32, color)?;
+            }
+        }
+        Ok(())
+    }
+    pub fn window_snapshot(&self, mem: &GuestMem, hwnd: u32) -> Result<(u32, u32, Vec<u32>), u32> {
+        let bitmap = self
+            .bitmaps
+            .get(self.windows.get(&hwnd).ok_or(6u32)?)
+            .ok_or(6u32)?;
+        bitmap.check(mem, false)?;
+        let mut pixels = Vec::with_capacity((bitmap.width * bitmap.height) as usize);
+        for y in 0..bitmap.height {
+            for x in 0..bitmap.width {
+                pixels.push(bitmap.read(mem, x, y)?);
+            }
+        }
+        Ok((bitmap.width, bitmap.height, pixels))
     }
     pub(crate) fn remove_window(&mut self, hwnd: u32) {
         self.dcs.retain(|_, dc| dc.window != Some(hwnd));
@@ -162,10 +270,11 @@ fn blit(a: &crate::api::Args, mem: &GuestMem, gfx: &mut Graphics) -> Result<u32,
         return Err(87);
     }
     let d = gfx.bitmaps.get(&target).ok_or(6u32)?;
-    let x0 = 0.max(-dx);
-    let y0 = 0.max(-dy);
-    let x1 = w.min(d.width as i64 - dx);
-    let y1 = h.min(d.height as i64 - dy);
+    let clip = dst.bounds(d.width, d.height);
+    let x0 = 0.max(clip[0] - dx);
+    let y0 = 0.max(clip[1] - dy);
+    let x1 = w.min(clip[2] - dx);
+    let y1 = h.min(clip[3] - dy);
     if x1 <= x0 || y1 <= y0 {
         return Ok(1);
     }
@@ -232,39 +341,38 @@ pub(crate) fn dispatch(
                 | "SetBkColor"
                 | "GetBkColor"
                 | "GdiFlush"
+                | "StretchDIBits"
+                | "GetDIBits"
+                | "GetDeviceCaps"
+                | "CreateFontA"
+                | "CreateFontW"
+                | "CreateFontIndirectA"
+                | "CreateFontIndirectW"
         );
     if !user && !gdi {
         return None;
     }
     let result = (|| -> Result<u32, u32> {
         let gfx = &mut state.graphics;
+        if let Some(result) = font::dispatch(name, a, mem, gfx) {
+            return result;
+        }
+        if let Some(result) = dib::dispatch(name, a, mem, gfx) {
+            return result;
+        }
         match name {
             "GetDC" => {
                 let (width, height) = if a[0] == 0 {
                     (1024, 768)
                 } else {
                     let w = state.user32.windows.get(&a[0]).ok_or(1400u32)?;
-                    (w.rect[2].max(1) as u32, w.rect[3].max(1) as u32)
+                    let [width, height] = w.client_size();
+                    (width.max(1) as u32, height.max(1) as u32)
                 };
-                let dc = gfx.handle()?;
-                let bitmap = if let Some(&bitmap) = gfx.windows.get(&a[0]) {
-                    bitmap
-                } else {
-                    gfx.capacity(width, height)?;
-                    let bitmap = gfx.handle()?;
-                    gfx.bitmaps
-                        .insert(bitmap, Bitmap::owned(width, height, 32, true)?);
-                    gfx.windows.insert(a[0], bitmap);
-                    bitmap
-                };
-                gfx.dcs.insert(dc, Dc::new(Some(a[0]), bitmap));
-                Ok(dc)
+                gfx.window_dc(a[0], width, height)
             }
             "ReleaseDC" => {
-                if gfx.dc(a[1])?.window != Some(a[0]) {
-                    return Err(6);
-                }
-                gfx.dcs.remove(&a[1]);
+                gfx.release_window_dc(a[0], a[1])?;
                 Ok(1)
             }
             "CreateCompatibleDC" => {
@@ -407,6 +515,11 @@ pub(crate) fn dispatch(
                 let dc = gfx.dc(a[0])?;
                 let bitmap = dc.bitmap;
                 let [x, y] = dc.point(a[1], a[2]);
+                let b = gfx.bitmaps.get(&bitmap).ok_or(6u32)?;
+                let clip = dc.bounds(b.width, b.height);
+                if x < clip[0] || x >= clip[2] || y < clip[1] || y >= clip[3] {
+                    return Err(87);
+                }
                 if x < 0 || y < 0 || x > u32::MAX as i64 || y > u32::MAX as i64 {
                     return Err(87);
                 }

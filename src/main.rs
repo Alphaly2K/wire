@@ -180,6 +180,8 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
     let mut guest_cwd = None;
     let mut ir_path = None;
     let mut profile_opcodes = false;
+    let mut present = cfg!(target_os = "macos");
+    let mut capture_frames = None;
     let mut i = 0;
     while i < opts.len() {
         match opts[i].as_str() {
@@ -199,6 +201,16 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
             "--trace-cpu" => trace_cpu = true,
             "--op-stats" => profile_opcodes = true,
             "--no-op-stats" => profile_opcodes = false,
+            "--headless" => present = false,
+            "--present" => present = true,
+            "--capture-frames" => {
+                i += 1;
+                let Some(dir) = opts.get(i) else {
+                    eprintln!("--capture-frames needs a directory");
+                    return ExitCode::from(2);
+                };
+                capture_frames = Some(std::path::PathBuf::from(dir));
+            }
             "--ir" => {
                 i += 1;
                 let Some(path) = opts.get(i) else {
@@ -275,6 +287,13 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
         loaded.cmdline_w,
     );
     state.fs = Some(fs);
+    state.presenter = match wire::platform::Presenter::new(present, capture_frames) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("presenter: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     if let Err(e) = state.modules.register_main(
         &mem,
         loaded.image_base,
@@ -360,6 +379,13 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
         cpu.instr_count as f64 / wall.as_secs_f64().max(1e-9) / 1e6
     );
     println!("api calls: {}", logger.call_count);
+    println!(
+        "D3D9 draws: {}; presents: {}; displayed: {}",
+        state.d3d9.draws, state.d3d9.frames, state.presenter.displayed
+    );
+    if let Some(e) = &state.presenter.error {
+        eprintln!("presenter: {e}");
+    }
     if ir_path.is_some() {
         println!(
             "IR instructions: {}; x86 fallback: {}; CALL_NATIVE: {}",

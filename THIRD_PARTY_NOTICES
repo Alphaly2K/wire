@@ -42,6 +42,10 @@ license notice obligations.
   linked from the host OS rather than vendored. The exact implementation and
   version follow the platform. https://www.gnu.org/software/libiconv/
 
+- System AppKit.framework and CoreGraphics.framework (platform-provided) —
+  public macOS window/event and CPU image presentation APIs. No Apple source
+  is copied. The optional visible backend is linked on macOS only.
+
 ## Test dependencies (not linked into wire)
 
 - System JavaScriptCore.framework (platform-provided) — public C API used by
@@ -92,7 +96,11 @@ license notice obligations.
     memory, real guest allocations and ownership; no Wine BSTR cache.
   - dlls/win32u/defwnd.c: Copyright 1993, 1996 Alexandre Julliard,
     1995 Alex Korobka, 2022 Jacek Caban for CodeWeavers. Default window
-    position messages adapted into src/user32_common.rs with guest callbacks.
+    position messages and nonclient geometry adapted into src/user32_common.rs
+    and src/user32_geometry.rs with guest callbacks.
+  - include/d3d9.h: Copyright 2002–2003 Jason Edmeades and Raphael Junqueira.
+    Unmodified header and derived COM slot/stdcall table preserved. Only ABI
+    data is embedded; the CPU raster backend is independently implemented.
   Original excerpts, COPYING.LIB and checksums in third_party/hangover/.
   WoW64 USER/GDI conversion files were reviewed; no emulator or Linux backend
   code was imported or linked. See docs/hangover-win32-design.md.

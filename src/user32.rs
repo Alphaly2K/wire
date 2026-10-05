@@ -43,6 +43,7 @@ struct Message {
     wparam: u32,
     lparam: u32,
     time: u32,
+    synthetic_paint: bool,
 }
 
 pub struct Window {
@@ -59,7 +60,32 @@ pub struct Window {
     pub wide: bool,
     pub tid: u32,
     pub(crate) text: Vec<u16>,
+    pub(crate) update: Option<[i32; 4]>,
+    pub(crate) erase: bool,
     destroying: bool,
+}
+impl Window {
+    pub(crate) fn frame(&self) -> [i32; 4] {
+        crate::user32_geometry::frame(
+            self.style,
+            self.ex_style,
+            self.style & 0x40000000 == 0 && self.menu != 0,
+            true,
+        )
+    }
+    pub(crate) fn client_size(&self) -> [i32; 2] {
+        let f = self.frame();
+        [
+            self.rect[2]
+                .saturating_sub(f[0])
+                .saturating_sub(f[2])
+                .max(0),
+            self.rect[3]
+                .saturating_sub(f[1])
+                .saturating_sub(f[3])
+                .max(0),
+        ]
+    }
 }
 
 impl Default for User32 {
@@ -79,6 +105,34 @@ impl Default for User32 {
             cursor_pos: [0; 2],
         }
     }
+}
+
+pub(crate) fn host_message(
+    state: &mut ApiState,
+    sched: &mut Sched,
+    hwnd: u32,
+    message: u32,
+    wparam: u32,
+    lparam: u32,
+) {
+    let Some(w) = state.user32.windows.get(&hwnd) else {
+        return;
+    };
+    let tid = w.tid;
+    let time = clock_ms(state);
+    put_message(
+        state,
+        sched,
+        tid,
+        Message {
+            hwnd,
+            message,
+            wparam,
+            lparam,
+            time,
+            synthetic_paint: false,
+        },
+    );
 }
 
 fn persistent_strings(
@@ -142,6 +196,19 @@ pub fn dispatch(
 ) -> Option<Result<(GuestCallOutcome, String), String>> {
     if dll != "user32.dll" {
         return None;
+    }
+    if let Some(result) = crate::user32_geometry::adjust(name, a, mem, state) {
+        return Some(result.map(|n| {
+            (
+                GuestCallOutcome::Returned(n),
+                "96 DPI window frame geometry".into(),
+            )
+        }));
+    }
+    if let Some(result) =
+        crate::user32_paint::dispatch(name, a, cpu, mem, api, state, log, sched, max_instr)
+    {
+        return Some(result);
     }
     if let Some(result) =
         crate::user32_common::dispatch(name, a, cpu, mem, api, state, log, sched, max_instr)
@@ -351,6 +418,19 @@ fn window_dispatch(
 ) -> Result<(GuestCallOutcome, String), String> {
     let value = |value, note: String| Ok((GuestCallOutcome::Returned(value), note));
     if name.starts_with("DefWindowProc") {
+        if a[1] == 0x10 {
+            return window_dispatch(
+                "DestroyWindow",
+                a,
+                cpu,
+                mem,
+                api,
+                state,
+                log,
+                sched,
+                max_instr,
+            );
+        }
         if let Some(ret) = crate::user32_common::default_text(name, a, mem, state)? {
             return value(ret, "default window text".into());
         }
@@ -358,6 +438,76 @@ fn window_dispatch(
             return crate::user32_common::default_windowpos_changed(
                 a, cpu, mem, api, state, log, sched, max_instr,
             );
+        }
+        if a[1] == 0x83 {
+            if let Some(w) = state.user32.windows.get(&a[0]) {
+                let f = w.frame();
+                let mut bytes = [0; 16];
+                mem.read_bytes(a[3], &mut bytes)
+                    .map_err(|e| e.to_string())?;
+                let mut r: [i32; 4] = std::array::from_fn(|i| {
+                    i32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap())
+                });
+                for i in 0..4 {
+                    r[i] = if i < 2 {
+                        r[i].saturating_add(f[i])
+                    } else {
+                        r[i].saturating_sub(f[i])
+                    };
+                }
+                r[2] = r[2].max(r[0]);
+                r[3] = r[3].max(r[1]);
+                mem.write_bytes(
+                    a[3],
+                    &r.into_iter().flat_map(i32::to_le_bytes).collect::<Vec<_>>(),
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            return value(0, "default nonclient geometry".into());
+        }
+        if a[1] == 0xf {
+            let mut pa = [0; 16];
+            pa[0] = a[0];
+            pa[1] = state.scratch_alloc(mem, 64, 4);
+            let (result, _) = crate::user32_paint::dispatch(
+                "BeginPaint",
+                &pa,
+                cpu,
+                mem,
+                api,
+                state,
+                log,
+                sched,
+                max_instr,
+            )
+            .unwrap()?;
+            if !matches!(result, GuestCallOutcome::Returned(_)) {
+                return Ok((result, "default paint transferred".into()));
+            }
+            crate::user32_paint::dispatch(
+                "EndPaint", &pa, cpu, mem, api, state, log, sched, max_instr,
+            )
+            .unwrap()?;
+            return value(0, "default paint validated".into());
+        }
+        if a[1] == 0x14 {
+            let brush = state
+                .user32
+                .windows
+                .get(&a[0])
+                .and_then(|w| state.user32.classes.get(&w.class))
+                .map_or(0, |c| c.fields[7]);
+            if (1..=31).contains(&brush) {
+                let color = match brush - 1 {
+                    5 => 0xffffff,
+                    8 | 18 => 0,
+                    15 => 0xf0f0f0,
+                    _ => 0xc0c0c0,
+                };
+                let result = state.graphics.fill_color(mem, a[2], color).is_ok() as u32;
+                return value(result, "default system-color background".into());
+            }
+            return value(0, "no supported class background brush".into());
         }
         // Default acceptance of WM_NCCREATE; the implemented default subset
         // has no application action for WM_CREATE/DESTROY or unknown messages.
@@ -394,6 +544,8 @@ fn window_dispatch(
                 .map_err(|e| format!("window title error {e}"))?
                 .unwrap_or_default(),
             destroying: false,
+            update: None,
+            erase: false,
         };
         let create = state.scratch_alloc(mem, 48, 4);
         let mut fields = [
@@ -495,6 +647,20 @@ fn window_dispatch(
         });
         return value(result as u32, String::new());
     }
+    let parent_origin = if name == "GetWindowRect" {
+        if let Some(w) = state
+            .user32
+            .windows
+            .get(&a[0])
+            .filter(|w| w.style & 0x40000000 != 0)
+        {
+            crate::user32_geometry::client_origin(state, w.parent)?
+        } else {
+            [0; 2]
+        }
+    } else {
+        [0; 2]
+    };
     let Some(window) = state.user32.windows.get_mut(&a[0]) else {
         state.last_error = 1400;
         return value(0, "invalid HWND".into());
@@ -549,8 +715,11 @@ fn window_dispatch(
         "GetClientRect" | "GetWindowRect" => {
             let [x, y, w, h] = window.rect;
             let rect = if name == "GetClientRect" {
-                [0, 0, w.max(0), h.max(0)]
+                let size = window.client_size();
+                [0, 0, size[0], size[1]]
             } else {
+                let x = x.wrapping_add(parent_origin[0]);
+                let y = y.wrapping_add(parent_origin[1]);
                 [x, y, x.saturating_add(w), y.saturating_add(h)]
             };
             for (i, n) in rect.into_iter().enumerate() {
@@ -573,8 +742,29 @@ fn window_dispatch(
                 window.style &= !0x1000_0000;
             } else {
                 window.style |= 0x1000_0000;
+                let [width, height] = window.client_size();
+                window.update = Some([0, 0, width, height]);
+                window.erase = true;
             }
-            value(old, "logical visibility; presentation pending".into())
+            let changed = old != (a[1] != 0) as u32;
+            if changed {
+                let proc = window.wndproc;
+                let result = invoke(
+                    cpu,
+                    mem,
+                    api,
+                    state,
+                    log,
+                    sched,
+                    proc,
+                    &[a[0], 0x18, (a[1] != 0) as u32, 0],
+                    max_instr,
+                )?;
+                if !matches!(result, GuestCallOutcome::Returned(_)) {
+                    return Ok((result, "WM_SHOWWINDOW transferred".into()));
+                }
+            }
+            value(old, "window visibility and paint state".into())
         }
         "DestroyWindow" => {
             if window.tid != sched.current_tid() {
@@ -658,6 +848,7 @@ fn refresh_timers(state: &mut ApiState, tid: u32) {
                     wparam: id,
                     lparam: timer.proc,
                     time,
+                    synthetic_paint: false,
                 });
             }
         }
@@ -771,6 +962,7 @@ fn message_dispatch(
                     wparam: a[0],
                     lparam: 0,
                     time: clock_ms(state),
+                    synthetic_paint: false,
                 }
             } else {
                 Message {
@@ -779,6 +971,7 @@ fn message_dispatch(
                     wparam: a[2],
                     lparam: a[3],
                     time: clock_ms(state),
+                    synthetic_paint: false,
                 }
             };
             let ok = put_message(state, sched, owner, message);
@@ -787,6 +980,34 @@ fn message_dispatch(
         "PeekMessageA" | "PeekMessageW" | "GetMessageA" | "GetMessageW" | "WaitMessage" => {
             sched.take_wake();
             refresh_timers(state, tid);
+            let time = clock_ms(state);
+            let queue = state.user32.queues.entry(tid).or_default();
+            queue.retain(|m| {
+                !m.synthetic_paint
+                    || state
+                        .user32
+                        .windows
+                        .get(&m.hwnd)
+                        .is_some_and(|w| w.update.is_some() && w.style & 0x10000000 != 0)
+            });
+            // Paint follows already posted messages and timers; retrieving it
+            // never validates the region. BeginPaint/ValidateRect does that.
+            for (&hwnd, w) in &state.user32.windows {
+                if w.tid == tid
+                    && w.style & 0x10000000 != 0
+                    && w.update.is_some()
+                    && !queue.iter().any(|m| m.hwnd == hwnd && m.message == 0xf)
+                {
+                    queue.push_back(Message {
+                        hwnd,
+                        message: 0xf,
+                        wparam: 0,
+                        lparam: 0,
+                        time,
+                        synthetic_paint: true,
+                    });
+                }
+            }
             let wait_only = name == "WaitMessage";
             if !wait_only
                 && ((a[1] != 0 && a[1] != u32::MAX && !state.user32.windows.contains_key(&a[1]))
@@ -842,13 +1063,17 @@ fn message_dispatch(
             if name.starts_with("Peek") {
                 return value(0, String::new());
             }
-            let deadline = state
+            let mut deadline = state
                 .user32
                 .timers
                 .iter()
                 .filter(|((owner, _, _), _)| *owner == tid)
                 .map(|(_, timer)| timer.deadline)
                 .min();
+            if state.presenter.active() {
+                let ui = Instant::now() + Duration::from_millis(16);
+                deadline = Some(deadline.map_or(ui, |d| d.min(ui)));
+            }
             sched.block_current(cpu, WaitTarget::Messages(tid), deadline)?;
             Ok((
                 GuestCallOutcome::Transferred,

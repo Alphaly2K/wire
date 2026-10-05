@@ -157,6 +157,8 @@ pub struct ApiState {
     pub modules: crate::modules::Modules,
     pub gdiplus: crate::gdiplus::GdiPlus,
     pub graphics: crate::graphics::Graphics,
+    pub d3d9: crate::d3d9::D3D9,
+    pub presenter: crate::platform::Presenter,
     pub(crate) bstrs: HashMap<u32, u32>,
     pub(crate) com_threads: HashMap<u32, (u32, u32)>,
 }
@@ -192,6 +194,8 @@ impl ApiState {
             modules: crate::modules::Modules::default(),
             gdiplus: crate::gdiplus::GdiPlus::default(),
             graphics: crate::graphics::Graphics::default(),
+            d3d9: crate::d3d9::D3D9::default(),
+            presenter: crate::platform::Presenter::default(),
             bstrs: HashMap::new(),
             com_threads: HashMap::new(),
         };
@@ -420,6 +424,9 @@ pub(crate) fn native_export(dll: &str, name: &str) -> bool {
 /// stdcall stack cleanup in bytes. Unknown functions retain the existing
 /// cdecl/zero-cleanup diagnostic path.
 fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
+    if dll == "d3d9.dll" {
+        return crate::d3d9::stack_bytes(name);
+    }
     if dll == "gdiplus.dll" {
         return crate::gdiplus::stack_bytes(name);
     }
@@ -1516,6 +1523,7 @@ pub fn dispatch(
     max_instr: u64,
 ) -> Result<(), String> {
     let entry = api.entries[idx].clone();
+    crate::platform::poll(mem, state, sched);
     let dll = entry.dll.as_str();
     let name = entry.name.as_str();
     let esp = cpu.esp();
@@ -2520,6 +2528,28 @@ pub fn dispatch(
         }
         ("gdiplus.dll", _) => {
             (ret, note, implemented) = crate::gdiplus::dispatch(name, &args, mem, state);
+        }
+        ("d3d9.dll", _) => {
+            (ret, note, implemented) =
+                crate::d3d9::dispatch(dll, name, &args, mem, api, state).unwrap();
+        }
+        ("dsound.dll", "DirectSoundCreate" | "DirectSoundCreate8") => {
+            mem.write_u32(args[1], 0).map_err(|e| e.to_string())?;
+            ret = 0x88780078; // DSERR_NODRIVER; no audio device backend yet
+            implemented = false;
+            note = "DirectSound device backend unavailable".into();
+        }
+        ("winmm.dll", "waveOutGetNumDevs") => {
+            ret = 0;
+            note = "no audio output backend".into();
+        }
+        ("winmm.dll", "waveOutOpen") => {
+            if args[0] != 0 {
+                mem.write_u32(args[0], 0).map_err(|e| e.to_string())?;
+            }
+            ret = 6; // MMSYSERR_NODRIVER
+            implemented = false;
+            note = "wave output backend unavailable".into();
         }
         (
             "gdi32.dll",

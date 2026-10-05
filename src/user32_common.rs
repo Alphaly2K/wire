@@ -88,27 +88,8 @@ fn child(state: &ApiState, parent: u32, id: u32) -> Option<u32> {
         (w.parent == parent && w.style & 0x40000000 != 0 && w.menu == id).then_some(h)
     })
 }
-fn origin(state: &ApiState, mut h: u32) -> Result<[i32; 2], String> {
-    let mut result = [0i32; 2];
-    let mut seen = BTreeSet::new();
-    while h != 0 {
-        if !seen.insert(h) {
-            return Err("cyclic window parent".into());
-        }
-        let w = state
-            .user32
-            .windows
-            .get(&h)
-            .ok_or("invalid window coordinates")?;
-        for (i, value) in result.iter_mut().enumerate() {
-            *value = value.wrapping_add(w.rect[i]);
-        }
-        if w.style & 0x40000000 == 0 {
-            break;
-        }
-        h = w.parent;
-    }
-    Ok(result)
+fn origin(state: &ApiState, h: u32) -> Result<[i32; 2], String> {
+    crate::user32_geometry::client_origin(state, h)
 }
 fn words(mem: &GuestMem, p: u32, count: usize) -> Result<Vec<i32>, String> {
     let mut bytes = vec![0; count * 4];
@@ -151,6 +132,7 @@ pub(crate) fn default_windowpos_changed(
         return value(0, "window no longer exists");
     };
     let rect = w.rect;
+    let f = w.frame();
     let pack = |x: i32, y: i32| (x as u32 & 0xffff) | ((y as u32) << 16);
     if flags & 0x1000 == 0 {
         let proc = w.wndproc;
@@ -162,7 +144,7 @@ pub(crate) fn default_windowpos_changed(
             log,
             sched,
             proc,
-            &[a[0], 3, 0, pack(rect[0], rect[1])],
+            &[a[0], 3, 0, pack(rect[0] + f[0], rect[1] + f[1])],
             max_instr,
         )?;
         if !matches!(result, GuestCallOutcome::Returned(_)) {
@@ -176,7 +158,7 @@ pub(crate) fn default_windowpos_changed(
         } else {
             (
                 (w.style & 0x01000000 != 0) as u32 * 2,
-                pack(w.rect[2], w.rect[3]),
+                pack(w.client_size()[0], w.client_size()[1]),
             )
         };
         let result = crate::user32::invoke(

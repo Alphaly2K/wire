@@ -509,22 +509,8 @@ pub(crate) fn dispatch(
                 }
             }
             "ClientToScreen" | "ScreenToClient" => {
-                let mut h = a[0];
-                let mut origin = [0i32; 2];
-                let mut seen = BTreeSet::new();
-                loop {
-                    if !seen.insert(h) {
-                        return Err(INVALID);
-                    }
-                    let w = state.user32.windows.get(&h).ok_or(1400u32)?;
-                    for (i, value) in origin.iter_mut().enumerate() {
-                        *value = value.wrapping_add(w.rect[i]);
-                    }
-                    if w.style & 0x40000000 == 0 || w.parent == 0 {
-                        break;
-                    }
-                    h = w.parent;
-                }
+                let origin =
+                    crate::user32_geometry::client_origin(state, a[0]).map_err(|_| 1400u32)?;
                 let mut bytes = [0; 8];
                 mem.read_bytes(a[1], &mut bytes).map_err(|_| INVALID)?;
                 for (i, offset) in origin.into_iter().enumerate() {
