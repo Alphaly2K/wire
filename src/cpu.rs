@@ -73,6 +73,13 @@ pub enum RunOutcome {
     InstructionLimit,
     Crashed(String),
     CallbackReturned, // internal: guest callback frame completed
+    CallbackUnwound,  // internal: a nonlocal transfer discarded the callback stack
+}
+
+pub enum GuestCallOutcome {
+    Returned(u32),
+    Transferred,
+    Exited(u32),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -2731,17 +2738,23 @@ impl Cpu {
         log: &mut ApiLogger,
         sched: &mut Sched,
         max_instr: u64,
-        callback_exit: Option<(u32, u32)>,
+        callback_exit: Option<(u32, u32, u32)>,
     ) -> RunOutcome {
         loop {
             if self.halted {
                 self.flush_flags();
                 return RunOutcome::Exited(self.exit_code.unwrap_or(0));
             }
-            if let Some((exit, owner_teb)) = callback_exit {
-                if self.eip == exit && self.fs_base == owner_teb {
-                    self.flush_flags();
-                    return RunOutcome::CallbackReturned;
+            if let Some((exit, owner_teb, stack_ceiling)) = callback_exit {
+                if self.fs_base == owner_teb {
+                    if self.eip == exit && self.esp() <= stack_ceiling {
+                        self.flush_flags();
+                        return RunOutcome::CallbackReturned;
+                    }
+                    if self.esp() >= stack_ceiling {
+                        self.flush_flags();
+                        return RunOutcome::CallbackUnwound;
+                    }
                 }
             }
             if let Some(idx) = api.stub_index(self.eip) {
@@ -2759,7 +2772,11 @@ impl Cpu {
             // The inner loop retains per-guest fault/code-generation checks.
             // End exactly at budget or cooperative scheduling boundaries.
             let slice_remaining = 0x10_0000 - (self.instr_count & 0xF_FFFF);
-            let limit = if self.ir_cache.is_some() && !self.trace_enabled && !self.profile_opcodes {
+            let limit = if self.ir_cache.is_some()
+                && !self.trace_enabled
+                && !self.profile_opcodes
+                && callback_exit.is_none()
+            {
                 (max_instr - self.instr_count).min(slice_remaining)
             } else {
                 1
@@ -2785,7 +2802,9 @@ impl Cpu {
     /// Call a guest function from the host (e.g. CRT initializers in
     /// _initterm, later window procs). Pushes a fresh frame whose return
     /// address is the ExitEmulation stub and runs until the guest `ret`s
-    /// into it. Returns EAX. Nested callbacks are supported.
+    /// into it. A nonlocal stack transfer or process exit is returned separately
+    /// so the host must not restore a callback frame that no longer exists.
+    /// Nested callbacks are supported.
     #[allow(clippy::too_many_arguments)]
     pub fn call_guest(
         &mut self,
@@ -2797,10 +2816,11 @@ impl Cpu {
         func: u32,
         args: &[u32],
         max_instr: u64,
-    ) -> Result<u32, String> {
+    ) -> Result<GuestCallOutcome, String> {
         let exit_stub = api
             .lookup("wire", "ExitEmulation")
             .ok_or("missing exit stub")?;
+        let stack_ceiling = self.esp();
         for a in args.iter().rev() {
             self.push32(mem, *a).map_err(|e| e.to_string())?;
         }
@@ -2814,17 +2834,15 @@ impl Cpu {
             log,
             sched,
             max_instr,
-            Some((exit_stub, self.fs_base)),
+            Some((exit_stub, self.fs_base, stack_ceiling)),
         );
         match r {
             RunOutcome::CallbackReturned => {
                 self.eip = saved_eip;
-                Ok(self.regs[EAX])
+                Ok(GuestCallOutcome::Returned(self.regs[EAX]))
             }
-            RunOutcome::Exited(c) => {
-                // guest called exit() inside the callback; keep halted state
-                Err(format!("guest exited during callback (code {c})"))
-            }
+            RunOutcome::CallbackUnwound => Ok(GuestCallOutcome::Transferred),
+            RunOutcome::Exited(c) => Ok(GuestCallOutcome::Exited(c)),
             RunOutcome::InstructionLimit => Err("instruction limit inside callback".into()),
             RunOutcome::Crashed(e) => Err(e),
         }

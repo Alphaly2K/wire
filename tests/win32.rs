@@ -40,6 +40,9 @@ impl Vm {
             mem.commit(p, n).unwrap();
         }
         mem.write_u32(TEB_ADDR, u32::MAX).unwrap();
+        mem.write_u32(TEB_ADDR + 4, STACK_BASE + STACK_SIZE)
+            .unwrap();
+        mem.write_u32(TEB_ADDR + 8, STACK_BASE).unwrap();
         let cpu = Cpu::new(CODE, STACK_BASE + STACK_SIZE - 256, TEB_ADDR);
         let api = ApiTable::new();
         let mut state = ApiState::new(0x400000, "C:\\test.exe".into(), 0, 0);
@@ -337,6 +340,495 @@ fn unhandled_filter_is_registered_invoked_and_prior_filter_returned() {
         .try_call("kernel32.dll", "RaiseException", &[0xe06d7363, 1, 0, 0])
         .unwrap_err();
     assert!(error.contains("unhandled guest exception"));
+}
+
+#[test]
+fn seh_unwind_cleans_inner_frames_keeps_target_and_restores_context() {
+    let mut v = Vm::new();
+    let first = STACK_BASE + STACK_SIZE - 128;
+    let target = first + 32;
+    // Each handler records its own frame, current FS head, flags and code.
+    for (i, frame) in [first, first + 16].into_iter().enumerate() {
+        let handler = CODE + i as u32 * 64;
+        let out = DATA + i as u32 * 16;
+        let mut code = vec![0x8b, 0x54, 0x24, 8, 0x89, 0x15];
+        code.extend(out.to_le_bytes());
+        code.extend([0x64, 0xa1, 0, 0, 0, 0, 0xa3]);
+        code.extend((out + 4).to_le_bytes());
+        code.extend([0x8b, 0x54, 0x24, 4, 0x8b, 0x42, 4, 0xa3]);
+        code.extend((out + 8).to_le_bytes());
+        code.extend([0x8b, 0x02, 0xa3]);
+        code.extend((out + 12).to_le_bytes());
+        code.extend([0xb8, 1, 0, 0, 0, 0xc3]);
+        v.mem.write_bytes(handler, &code).unwrap();
+        v.mem.write_u32(frame, frame + 16).unwrap();
+        v.mem.write_u32(frame + 4, handler).unwrap();
+    }
+    v.mem.write_u32(target, u32::MAX).unwrap();
+    v.mem.write_u32(target + 4, CODE + 0x500).unwrap();
+    v.mem.write_u8(CODE + 0x500, 0xcc).unwrap(); // target must never be invoked
+    v.mem.write_u32(TEB_ADDR, first).unwrap();
+    v.mem.write_u32(DATA + 64, 0x1234).unwrap();
+    v.mem.write_u32(DATA + 68, 1).unwrap();
+    v.cpu.regs[3] = 0xfeed_beef;
+    assert_eq!(
+        v.k("RtlUnwind", &[target, CODE + 0x500, DATA + 64, 0xface]),
+        0xface
+    );
+    assert_eq!(v.cpu.regs[3], 0xfeed_beef);
+    assert_eq!(v.cpu.eip, RET); // x86 TargetIp is ignored
+    assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 236);
+    assert_eq!(v.mem.read_u32(TEB_ADDR).unwrap(), target);
+    for (i, frame) in [first, first + 16].into_iter().enumerate() {
+        let out = DATA + i as u32 * 16;
+        assert_eq!(v.mem.read_u32(out).unwrap(), frame);
+        assert_eq!(v.mem.read_u32(out + 4).unwrap(), frame);
+        assert_eq!(v.mem.read_u32(out + 8).unwrap(), 3);
+        assert_eq!(v.mem.read_u32(out + 12).unwrap(), 0x1234);
+    }
+    // Null record/target generates STATUS_UNWIND and marks exit unwind.
+    v.mem.write_u32(TEB_ADDR, first).unwrap();
+    v.mem.write_u32(first, u32::MAX).unwrap();
+    v.k("RtlUnwind", &[0, 0, 0, 7]);
+    assert_eq!(v.mem.read_u32(DATA + 8).unwrap(), 6);
+    assert_eq!(v.mem.read_u32(DATA + 12).unwrap(), 0xc000_0027);
+    assert_eq!(v.mem.read_u32(TEB_ADDR).unwrap(), u32::MAX);
+}
+
+#[test]
+fn seh_unwind_rejects_corrupt_or_absent_targets_before_cleanup() {
+    let mut v = Vm::new();
+    let first = STACK_BASE + STACK_SIZE - 128;
+    v.mem.write_u32(first, u32::MAX).unwrap();
+    v.mem.write_u32(first + 4, CODE).unwrap();
+    v.mem.write_u8(CODE, 0xcc).unwrap(); // validation must not run this handler
+    v.mem.write_u32(TEB_ADDR, first).unwrap();
+    assert!(v
+        .try_call("kernel32.dll", "RtlUnwind", &[first + 16, 0, 0, 0])
+        .unwrap_err()
+        .contains("not in the chain"));
+    assert_eq!(v.mem.read_u32(TEB_ADDR).unwrap(), first);
+    v.mem.write_u32(first, first).unwrap();
+    assert!(v
+        .try_call("ntdll.dll", "RtlUnwind", &[0, 0, 0, 0])
+        .unwrap_err()
+        .contains("cyclic"));
+    v.mem.write_u32(TEB_ADDR, DATA).unwrap();
+    assert!(v
+        .try_call("kernel32.dll", "RtlUnwind", &[0, 0, 0, 0])
+        .unwrap_err()
+        .contains("invalid SEH unwind frame"));
+}
+
+#[test]
+fn seh_catch_transfer_escapes_raise_and_initializer_host_callbacks() {
+    for initializer in [false, true] {
+        let mut v = Vm::new();
+        let first = STACK_BASE + STACK_SIZE - 128;
+        let target = first + 32;
+        let unwind = v.api.register("kernel32.dll", Some("RtlUnwind"), None);
+        let raise = v.api.register("kernel32.dll", Some("RaiseException"), None);
+        v.mem.write_bytes(CODE, &[0xb8, 1, 0, 0, 0, 0xc3]).unwrap();
+        v.mem.write_u32(first, target).unwrap();
+        v.mem.write_u32(first + 4, CODE).unwrap();
+        v.mem.write_u32(target, u32::MAX).unwrap();
+        v.mem.write_u32(target + 4, CODE + 64).unwrap();
+        v.mem.write_u32(TEB_ADDR, first).unwrap();
+        // Outer search handler: global unwind, then discard the callback stack
+        // and jump to a catch outside both RaiseException and _initterm.
+        let mut handler = vec![0x8b, 0x44, 0x24, 4, 0x6a, 0, 0x50, 0x6a, 0, 0x68];
+        handler.extend(target.to_le_bytes());
+        handler.push(0xb8);
+        handler.extend(unwind.to_le_bytes());
+        handler.extend([0xff, 0xd0, 0xbc]);
+        handler.extend((target - 16).to_le_bytes());
+        handler.push(0xb8);
+        handler.extend((CODE + 256).to_le_bytes());
+        handler.extend([0xff, 0xe0]);
+        v.mem.write_bytes(CODE + 64, &handler).unwrap();
+        let mut catch = vec![0xc7, 0x05];
+        catch.extend(DATA.to_le_bytes());
+        catch.extend(0xcafe_beefu32.to_le_bytes());
+        catch.push(0xcc);
+        v.mem.write_bytes(CODE + 256, &catch).unwrap();
+        if initializer {
+            let mut code = vec![0x6a, 0, 0x6a, 0, 0x6a, 1, 0x68];
+            code.extend(0xe06d_7363u32.to_le_bytes());
+            code.push(0xb8);
+            code.extend(raise.to_le_bytes());
+            code.extend([0xff, 0xd0, 0xcc]); // cannot return here
+            v.mem.write_bytes(CODE + 512, &code).unwrap();
+            v.mem.write_u32(DATA + 64, CODE + 512).unwrap();
+            v.call("msvcrt.dll", "_initterm", &[DATA + 64, DATA + 68]);
+        } else {
+            v.k("RaiseException", &[0xe06d_7363, 1, 0, 0]);
+        }
+        assert_eq!(v.cpu.esp(), target - 16);
+        assert_ne!(v.cpu.eip, RET); // no stub epilogue/saved callback restoration
+        let outcome = v.cpu.run(
+            &mut v.mem,
+            &mut v.api,
+            &mut v.state,
+            &mut v.log,
+            &mut v.sched,
+            1_000_000,
+        );
+        assert!(
+            matches!(outcome, wire::cpu::RunOutcome::Crashed(ref e) if e.contains("breakpoint"))
+        );
+        assert_eq!(v.mem.read_u32(DATA).unwrap(), 0xcafe_beef);
+        assert_eq!(v.mem.read_u32(TEB_ADDR).unwrap(), target);
+    }
+}
+
+#[test]
+fn window_classes_keep_metadata_support_atoms_and_share_ansi_unicode_names() {
+    let mut v = Vm::new();
+    v.wide(DATA + 128, "WireWindow");
+    v.mem.write_bytes(DATA + 160, b"wirewindow\0").unwrap();
+    assert_eq!(
+        v.call(
+            "user32.dll",
+            "GetClassInfoExW",
+            &[0x400000, DATA + 128, DATA + 256]
+        ),
+        0
+    );
+    assert_eq!(v.state.last_error, 1411);
+    let words = [48, 3, CODE, 4, 8, 0x400000, 2, 3, 4, 0, DATA + 128, 5];
+    for (i, value) in words.into_iter().enumerate() {
+        v.mem.write_u32(DATA + i as u32 * 4, value).unwrap();
+    }
+    let atom = v.call("user32.dll", "RegisterClassExW", &[DATA]);
+    assert!((0xc000..=0xffff).contains(&atom));
+    assert_eq!(v.call("user32.dll", "RegisterClassExW", &[DATA]), 0);
+    assert_eq!(v.state.last_error, 1410);
+    assert_eq!(
+        v.call(
+            "user32.dll",
+            "GetClassInfoExA",
+            &[0x400000, DATA + 160, DATA + 256]
+        ),
+        1
+    );
+    for (i, value) in words.into_iter().enumerate().filter(|(i, _)| *i != 10) {
+        assert_eq!(v.mem.read_u32(DATA + 256 + i as u32 * 4).unwrap(), value);
+    }
+    let name = v.mem.read_u32(DATA + 296).unwrap();
+    assert_eq!(v.mem.read_cstr(name, 256).unwrap(), "WireWindow");
+    assert_eq!(
+        v.call("user32.dll", "GetClassInfoW", &[0x400000, atom, DATA + 320]),
+        1
+    );
+    assert_eq!(v.mem.read_u32(DATA + 324).unwrap(), CODE);
+    let name = v.mem.read_u32(DATA + 356).unwrap();
+    assert_eq!(v.mem.read_wstr(name, 256).unwrap(), "WireWindow");
+    assert_eq!(
+        v.call(
+            "user32.dll",
+            "GetClassInfoExA",
+            &[0x500000, atom, DATA + 256]
+        ),
+        0
+    );
+    assert_eq!(
+        v.call("user32.dll", "UnregisterClassA", &[atom, 0x400000]),
+        1
+    );
+    assert_eq!(
+        v.call(
+            "user32.dll",
+            "GetClassInfoExW",
+            &[0x400000, DATA + 128, DATA + 256]
+        ),
+        0
+    );
+    // WNDCLASS (40 bytes) has no cbSize/hIconSm and remains interoperable.
+    for (i, value) in words[1..11].iter().enumerate() {
+        v.mem.write_u32(DATA + i as u32 * 4, *value).unwrap();
+    }
+    let atom = v.call("user32.dll", "RegisterClassW", &[DATA]);
+    assert_ne!(atom, 0);
+    assert_eq!(
+        v.call(
+            "user32.dll",
+            "GetClassInfoExW",
+            &[0x400000, atom, DATA + 256]
+        ),
+        1
+    );
+    assert_eq!(v.mem.read_u32(DATA + 300).unwrap(), 0);
+}
+
+fn test_window(v: &mut Vm, wndproc: u32) -> u32 {
+    v.wide(DATA + 128, "CallbackWindow");
+    let words = [48, 0, wndproc, 0, 8, 0x400000, 0, 0, 0, 0, DATA + 128, 0];
+    for (i, n) in words.into_iter().enumerate() {
+        v.mem.write_u32(DATA + i as u32 * 4, n).unwrap();
+    }
+    let atom = v.call("user32.dll", "RegisterClassExW", &[DATA]);
+    assert_ne!(atom, 0);
+    v.call(
+        "user32.dll",
+        "CreateWindowExW",
+        &[0, atom, 0, 0, 3, 4, 640, 480, 0, 0, 0x400000, 0x1234],
+    )
+}
+
+#[test]
+fn windows_invoke_creation_forwarding_and_destruction_callbacks() {
+    let mut v = Vm::new();
+    // Record message/count; return TRUE only for WM_NCCREATE, stdcall 16.
+    let mut proc = vec![0x8b, 0x44, 0x24, 8, 0xa3];
+    proc.extend((DATA + 256).to_le_bytes());
+    proc.extend([0xff, 0x05]);
+    proc.extend((DATA + 260).to_le_bytes());
+    proc.extend([0x8b, 0x54, 0x24, 16, 0x89, 0x15]);
+    proc.extend((DATA + 264).to_le_bytes());
+    proc.extend([
+        0x3d, 0x81, 0, 0, 0, 0x0f, 0x94, 0xc0, 0x0f, 0xb6, 0xc0, 0xc2, 16, 0,
+    ]);
+    v.mem.write_bytes(CODE, &proc).unwrap();
+    let hwnd = test_window(&mut v, CODE);
+    assert_ne!(hwnd, 0);
+    assert_eq!(v.mem.read_u32(DATA + 256).unwrap(), 1);
+    assert_eq!(v.mem.read_u32(DATA + 260).unwrap(), 2);
+    assert_eq!(v.call("user32.dll", "IsWindow", &[hwnd]), 1);
+    assert_eq!(v.call("user32.dll", "IsWindowUnicode", &[hwnd]), 1);
+    assert_eq!(
+        v.call(
+            "user32.dll",
+            "SetWindowLongA",
+            &[hwnd, (-21i32) as u32, 0xfeed]
+        ),
+        0
+    );
+    assert_eq!(
+        v.call("user32.dll", "GetWindowLongW", &[hwnd, (-21i32) as u32]),
+        0xfeed
+    );
+    assert_eq!(
+        v.call("user32.dll", "SetWindowLongW", &[hwnd, 4, 0xabcd]),
+        0
+    );
+    assert_eq!(v.call("user32.dll", "GetWindowLongW", &[hwnd, 4]), 0xabcd);
+    assert_eq!(v.call("user32.dll", "GetWindowLongW", &[hwnd, 8]), 0);
+    assert_eq!(v.state.last_error, 1413);
+    assert_eq!(
+        v.call("user32.dll", "GetClientRect", &[hwnd, DATA + 320]),
+        1
+    );
+    assert_eq!(v.mem.read_u32(DATA + 328).unwrap(), 640);
+    assert_eq!(v.mem.read_u32(DATA + 332).unwrap(), 480);
+    v.mem
+        .write_bytes(CODE + 128, &[0x8b, 0x44, 0x24, 12, 0x40, 0xc2, 16, 0])
+        .unwrap();
+    assert_eq!(
+        v.call(
+            "user32.dll",
+            "SetWindowLongW",
+            &[hwnd, (-4i32) as u32, CODE + 128]
+        ),
+        CODE
+    );
+    assert_eq!(
+        v.call("user32.dll", "SendMessageW", &[hwnd, 0x401, 42, 0]),
+        43
+    );
+    assert_eq!(
+        v.call("user32.dll", "CallWindowProcW", &[CODE, hwnd, 0x402, 0, 0]),
+        0
+    );
+    assert_eq!(v.mem.read_u32(DATA + 256).unwrap(), 0x402);
+    assert_eq!(
+        v.call("user32.dll", "UnregisterClassW", &[DATA + 128, 0x400000]),
+        0
+    );
+    assert_eq!(v.state.last_error, 1412);
+    v.call(
+        "user32.dll",
+        "SetWindowLongW",
+        &[hwnd, (-4i32) as u32, CODE],
+    );
+    let before = v.mem.read_u32(DATA + 260).unwrap();
+    assert_eq!(v.call("user32.dll", "DestroyWindow", &[hwnd]), 1);
+    assert_eq!(v.mem.read_u32(DATA + 256).unwrap(), 0x82);
+    assert_eq!(v.mem.read_u32(DATA + 260).unwrap(), before + 2);
+    assert_eq!(v.call("user32.dll", "IsWindow", &[hwnd]), 0);
+    // An ANSI caller creating a Unicode class supplies a converted CREATESTRUCT.
+    v.mem.write_bytes(DATA + 160, b"mixed title\0").unwrap();
+    v.mem.write_bytes(DATA + 192, b"MissingClass\0").unwrap();
+    let another = v.call(
+        "user32.dll",
+        "CreateWindowExA",
+        &[
+            0,
+            DATA + 160 + 32,
+            DATA + 160,
+            0,
+            0,
+            0,
+            10,
+            10,
+            0,
+            0,
+            0x400000,
+            0x2222,
+        ],
+    );
+    // Unknown class is rejected rather than creating a generic placeholder.
+    assert_eq!(another, 0);
+    v.mem.write_bytes(DATA + 192, b"CallbackWindow\0").unwrap();
+    let another = v.call(
+        "user32.dll",
+        "CreateWindowExA",
+        &[
+            0,
+            DATA + 192,
+            DATA + 160,
+            0,
+            0,
+            0,
+            10,
+            10,
+            0,
+            0,
+            0x400000,
+            0x2222,
+        ],
+    );
+    assert_ne!(another, 0);
+    assert_eq!(v.call("user32.dll", "IsWindowUnicode", &[another]), 1);
+    let cs = v.mem.read_u32(DATA + 264).unwrap();
+    assert_eq!(v.mem.read_u32(cs).unwrap(), 0x2222);
+    let title = v.mem.read_u32(cs + 36).unwrap();
+    assert_eq!(v.mem.read_wstr(title, 64).unwrap(), "mixed title");
+    v.call("user32.dll", "DestroyWindow", &[another]);
+    assert_eq!(
+        v.call("user32.dll", "UnregisterClassW", &[DATA + 128, 0x400000]),
+        1
+    );
+    v.mem.write_bytes(CODE, &[0x31, 0xc0, 0xc2, 16, 0]).unwrap();
+    assert_eq!(test_window(&mut v, CODE), 0);
+    assert!(v.state.user32.windows.is_empty());
+}
+
+#[test]
+fn message_filters_quit_and_timers_preserve_queue_and_callback_semantics() {
+    let mut v = Vm::new();
+    let def = v.api.register("user32.dll", Some("DefWindowProcW"), None);
+    let hwnd = test_window(&mut v, def);
+    let msg = DATA + 512;
+    v.mem.write_u32(msg, 0xeeee).unwrap();
+    assert_eq!(v.call("user32.dll", "PeekMessageW", &[msg, 0, 0, 0, 1]), 0);
+    assert_eq!(v.mem.read_u32(msg).unwrap(), 0xeeee);
+    v.call("user32.dll", "PostMessageW", &[hwnd, 0x400, 11, 22]);
+    v.call("user32.dll", "PostMessageA", &[hwnd, 0x401, 33, 44]);
+    assert_eq!(
+        v.call("user32.dll", "PeekMessageW", &[msg, hwnd, 0x401, 0x401, 0]),
+        1
+    );
+    assert_eq!(v.mem.read_u32(msg + 8).unwrap(), 33);
+    assert_eq!(v.call("user32.dll", "GetMessageA", &[msg, 0, 0, 0]), 1);
+    assert_eq!(v.mem.read_u32(msg + 4).unwrap(), 0x400);
+    assert_eq!(v.call("user32.dll", "PeekMessageW", &[msg, 0, 0, 0, 1]), 1);
+    assert_eq!(v.mem.read_u32(msg + 4).unwrap(), 0x401);
+    assert_eq!(v.call("user32.dll", "SetTimer", &[hwnd, 7, 50, 0]), 7);
+    assert_eq!(v.call("user32.dll", "SetTimer", &[hwnd, 1, 50, 0]), 1);
+    let automatic = v.call("user32.dll", "SetTimer", &[hwnd, 0, 50, 0]);
+    assert_ne!(automatic, 1);
+    v.call("user32.dll", "KillTimer", &[hwnd, automatic]);
+    v.call("user32.dll", "KillTimer", &[hwnd, 1]);
+    v.state
+        .user32
+        .timers
+        .get_mut(&(1, hwnd, 7))
+        .unwrap()
+        .deadline = std::time::Instant::now();
+    assert_eq!(
+        v.call("user32.dll", "PeekMessageW", &[msg, hwnd, 0, 0, 0]),
+        1
+    );
+    assert_eq!(v.mem.read_u32(msg + 4).unwrap(), 0x113);
+    assert_eq!(v.mem.read_u32(msg + 8).unwrap(), 7);
+    v.call("user32.dll", "KillTimer", &[hwnd, 7]);
+    assert_eq!(
+        v.call("user32.dll", "PeekMessageW", &[msg, hwnd, 0, 0, 1]),
+        1
+    );
+    assert_eq!(v.call("user32.dll", "DispatchMessageW", &[msg]), 0);
+    let mut proc = vec![0x8b, 0x44, 0x24, 12, 0xa3];
+    proc.extend((DATA + 400).to_le_bytes());
+    proc.extend([0x8b, 0x44, 0x24, 16, 0xa3]);
+    proc.extend((DATA + 404).to_le_bytes());
+    proc.extend([0x31, 0xc0, 0xc2, 16, 0]);
+    v.mem.write_bytes(CODE, &proc).unwrap();
+    v.call("user32.dll", "SetTimer", &[hwnd, 9, 50, CODE]);
+    v.state
+        .user32
+        .timers
+        .get_mut(&(1, hwnd, 9))
+        .unwrap()
+        .deadline = std::time::Instant::now();
+    v.call("user32.dll", "PeekMessageW", &[msg, hwnd, 0, 0, 1]);
+    let time = v.mem.read_u32(msg + 16).unwrap();
+    v.call("user32.dll", "DispatchMessageW", &[msg]);
+    assert_eq!(v.mem.read_u32(DATA + 400).unwrap(), 9);
+    assert_eq!(v.mem.read_u32(DATA + 404).unwrap(), time);
+    v.call("user32.dll", "PostQuitMessage", &[17]);
+    assert_eq!(
+        v.call("user32.dll", "GetMessageW", &[msg, hwnd, 0x900, 0x900]),
+        0
+    );
+    assert_eq!(v.mem.read_u32(msg + 4).unwrap(), 0x12);
+    assert_eq!(v.mem.read_u32(msg + 8).unwrap(), 17);
+    v.call("user32.dll", "DestroyWindow", &[hwnd]);
+    assert!(v.state.user32.timers.is_empty());
+    assert_eq!(
+        v.call("user32.dll", "GetMessageW", &[msg, hwnd, 0, 0]),
+        u32::MAX
+    );
+}
+
+#[test]
+fn blocked_message_thread_resumes_after_worker_posts_without_fake_quit() {
+    let mut v = Vm::new();
+    let post = v
+        .api
+        .register("user32.dll", Some("PostThreadMessageW"), None);
+    let exit = v.api.register("kernel32.dll", Some("ExitThread"), None);
+    let mut worker = vec![0x6a, 44, 0x6a, 33, 0x68];
+    worker.extend(0x501u32.to_le_bytes());
+    worker.extend([0x6a, 1, 0xb8]);
+    worker.extend(post.to_le_bytes());
+    worker.extend([0xff, 0xd0, 0x6a, 0, 0xb8]);
+    worker.extend(exit.to_le_bytes());
+    worker.extend([0xff, 0xd0, 0xcc]);
+    v.mem.write_bytes(CODE, &worker).unwrap();
+    v.k("CreateThread", &[0, 0, CODE, 0, 0, DATA]);
+    let get = v.api.register("user32.dll", Some("GetMessageW"), None);
+    let msg = DATA + 512;
+    v.cpu.eip = get;
+    let sp = v.cpu.esp();
+    v.mem.write_u32(sp, RET).unwrap();
+    for (i, n) in [msg, 0, 0, 0].into_iter().enumerate() {
+        v.mem.write_u32(sp + 4 + i as u32 * 4, n).unwrap();
+    }
+    v.mem.write_u8(RET, 0xcc).unwrap();
+    let outcome = v.cpu.run(
+        &mut v.mem,
+        &mut v.api,
+        &mut v.state,
+        &mut v.log,
+        &mut v.sched,
+        1_000_000,
+    );
+    assert!(matches!(outcome, wire::cpu::RunOutcome::Crashed(ref e) if e.contains("breakpoint")));
+    assert_eq!(v.sched.current_tid(), 1);
+    assert_eq!(v.cpu.regs[0], 1);
+    assert_eq!(v.mem.read_u32(msg + 4).unwrap(), 0x501);
+    assert_eq!(v.mem.read_u32(msg + 8).unwrap(), 33);
+    assert_eq!(v.mem.read_u32(msg + 12).unwrap(), 44);
 }
 
 #[test]

@@ -37,6 +37,7 @@ pub enum WaitTarget {
     Multi(Vec<u32>, bool), // handles, wait_all
     CriticalSection(u32),  // guest CRITICAL_SECTION address
     Sleep,
+    Messages(u32), // thread's user32 queue/timer wait
 }
 
 pub fn target_mentions(t: &WaitTarget, h: u32) -> bool {

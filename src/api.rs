@@ -143,6 +143,7 @@ pub struct ApiState {
     pub handles: HashMap<u32, HandleObj>,
     pub named_objs: HashMap<String, u32>, // event/mutex/semaphore name -> handle
     pub next_handle: u32,
+    pub user32: crate::user32::User32,
 }
 
 impl ApiState {
@@ -171,6 +172,7 @@ impl ApiState {
             handles: HashMap::new(),
             named_objs: HashMap::new(),
             next_handle: 0x100,
+            user32: crate::user32::User32::default(),
         };
         for dll in [
             "kernel32.dll",
@@ -680,6 +682,8 @@ fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("DestroyWindow", 4),
                 ("DefWindowProcA", 16),
                 ("DefWindowProcW", 16),
+                ("CallWindowProcA", 20),
+                ("CallWindowProcW", 20),
                 ("ShowWindow", 8),
                 ("UpdateWindow", 4),
                 ("IsWindow", 4),
@@ -2120,14 +2124,22 @@ pub fn dispatch(
             } else {
                 let saved = cpu.save_ctx();
                 let filter = state.unhandled_filter;
-                let result =
-                    cpu.call_guest(mem, api, state, log, sched, filter, &[args[0]], max_instr);
-                cpu.load_ctx(&saved);
-                ret = result?;
+                match cpu.call_guest(mem, api, state, log, sched, filter, &[args[0]], max_instr) {
+                    Ok(crate::cpu::GuestCallOutcome::Returned(value)) => {
+                        cpu.load_ctx(&saved);
+                        ret = value;
+                    }
+                    Ok(_) => return Ok(()),
+                    Err(error) => {
+                        cpu.load_ctx(&saved);
+                        return Err(error);
+                    }
+                }
             }
         }
         ("kernel32.dll", "RtlUnwind") | ("ntdll.dll", "RtlUnwind") => {
-            return Err("RtlUnwind/MSVC stack unwind is not yet implemented".into());
+            log.log_call(dll, name, &args[..4], args[3], true, "SEH unwind");
+            return crate::seh::unwind(cpu, mem, api, state, log, sched, &args, max_instr);
         }
         // --- critical sections: real owner/recursion bookkeeping in the guest
         // CRITICAL_SECTION struct; contention blocks cooperatively. The
@@ -2417,14 +2429,26 @@ pub fn dispatch(
             } else if let Some((v, msg)) = crate::nls::dispatch(dll, name, &args, mem, state) {
                 ret = v;
                 note = msg;
+            } else if let Some(result) = crate::user32::dispatch(
+                dll, name, &args, cpu, mem, api, state, log, sched, max_instr,
+            ) {
+                let (outcome, message) = result?;
+                match outcome {
+                    crate::cpu::GuestCallOutcome::Returned(value) => {
+                        ret = value;
+                        note = message;
+                    }
+                    _ => return Ok(()),
+                }
             } else {
                 match crt_dispatch(
                     dll, name, &args, cpu, mem, api, state, log, sched, max_instr,
                 )? {
-                    Some(v) => {
+                    Some(crate::cpu::GuestCallOutcome::Returned(v)) => {
                         ret = v;
                         note = "crt shim".into();
                     }
+                    Some(_) => return Ok(()),
                     None => {
                         implemented = false;
                         ret = 0;
@@ -2468,7 +2492,7 @@ fn crt_dispatch(
     log: &mut ApiLogger,
     sched: &mut Sched,
     max_instr: u64,
-) -> Result<Option<u32>, String> {
+) -> Result<Option<crate::cpu::GuestCallOutcome>, String> {
     if !(dll.starts_with("api-ms-win-crt-")
         || dll == "ucrtbase.dll"
         || dll == "msvcrt.dll"
@@ -2533,7 +2557,10 @@ fn crt_dispatch(
             while a < end {
                 let f = mem.read_u32(a).unwrap_or(0);
                 if f != 0 {
-                    let v = cpu.call_guest(mem, api, state, log, sched, f, &[], max_instr)?;
+                    let v = match cpu.call_guest(mem, api, state, log, sched, f, &[], max_instr)? {
+                        crate::cpu::GuestCallOutcome::Returned(value) => value,
+                        transfer => return Ok(Some(transfer)),
+                    };
                     if name.ends_with("_e") && v != 0 && first_err == 0 {
                         first_err = v;
                     }
@@ -2607,7 +2634,7 @@ fn crt_dispatch(
         }
         _ => return Ok(None),
     };
-    Ok(Some(r))
+    Ok(Some(crate::cpu::GuestCallOutcome::Returned(r)))
 }
 
 #[cfg(test)]

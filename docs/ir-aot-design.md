@@ -200,6 +200,10 @@ dense索引12,552,192B、native target表8,671,704B、区域页代数1,536B。
 
 ## 验证与测量（2026-10-05）
 
+后续游戏已越过RtlUnwind并推进到插件初始化，最新完整回归为79项；当前阶段的真实CPU复测见
+[游戏推进记录](game-progress-2026-10-05.md)。guest回调内逐条识别非局部栈转移，普通主循环继续连续IR调度。
+以下71项和MIPS表保留为此前整数IR优化阶段的记录。
+
 `cargo test --release` 共71项通过：1 unit、34 differential、5 FPU、10 IR、1 Wasm、20 Win32。
 34族差分同时比较 raw x86、IR 与 Unicorn；IR 测试检查静态 FLAGS 边界、预算/fault 恢复、
 自修改/重叠入口、格式错误/EXE不匹配、SIB/FS/高字节以及 CALL_NATIVE/IAT hook。

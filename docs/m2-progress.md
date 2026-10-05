@@ -1,15 +1,31 @@
 # M2 进行中：最新进度与交接（2026-10-05）
 
-M2 **尚未验收，不打 tag**。前两次本地检查点为 `75f90a6`（线程/SSE）和
-`852eba3`（资源、堆、编码、文件 I/O、基础 SEH）。本轮完成软件 x87 与初始化系统/NLS 子集。
-目标程序从约 1200 万条指令推进到 **21,425,797 条指令**，当前停在 MSVC C++ 异常展开的 `RtlUnwind`。
-未读取 data.xp3，也还没有可见游戏窗口。
+M2 **尚未验收，不打 tag**。最新目标已越过原 RtlUnwind 阻塞，建立队列/计时器窗口对象，
+执行至约 **24.40M 指令**的插件初始化。当前 guest DLL 装载尚未实现，游戏报 `Not Susie Plugin` 后退出。
+还没有可见游戏窗口，未确认读取 data.xp3 内容。此前本地检查点包括 `75f90a6`（线程/SSE）、
+`852eba3`（资源/堆/I/O/基础SEH）、`ca94a36`（x87/系统/NLS）、`a3de840`（主IR优化）和`f97ab8d`（真实profile/x87热点优化）。
 
 2026-10-05 转入 no-JIT 性能路线，增加安装期预解码、8B typed I32 热路径与保守 FLAGS 分析，
-并实现 CALL_NATIVE/IAT guard。M2功能阻塞仍为 RtlUnwind；不能将 IR 原型计为 M2验收。
-最新软件 x87/系统/NLS 检查点是 `ca94a36`。
+并实现 CALL_NATIVE/IAT guard；IR原型不等于M2验收。
 
-## 最新：真实 CPU profile 与 x87 热点优化
+## 最新：推进到真实 guest DLL 装载边界
+
+按用户要求先推进游戏，再复测：加入基本 x86 RtlUnwind、异常跳出宿主回调的控制权传递，
+类/窗口对象、创建/销毁/转发 guest WndProc、线程消息队列及消息定时器。
+原游戏21.43M的RtlUnwind阻塞解除；先进入真实catch并报Unknown error，随后补齐类/窗口/SetTimer，
+到达约24.40M指令、38.36K APIs的`kinglove.tpm`插件加载路径。
+当前失败为`Not Susie Plugin`：旧LoadLibrary只是模块句柄，GetProcAddress仍为所有导出制造stub，
+真实PE仅导出V2Link/V2Unlink，没有GetPluginInfo。下一步通用PE DLL装载需处理首选基址0x10000000与heap冲突、
+重定位、imports/exports及DllMain；缺失导出应返回NULL。
+
+完整79项回归、release build、Clippy/format通过。回调内逐条检查非局部栈转移，主解释循环继续使用连续IR。
+collided unwind/自动CPU-fault SEH、窗口呈现/GDI/完整输入等仍待实现；逻辑窗口对象不等于屏幕上可见窗口。
+推进后3次profile共2,938运行期样本，x87 42.65%、IR/cache 34.96%，未再采到常量解析热点。
+无profiler的当前阶段IR/raw对照及功能/ABI边界见 [游戏推进记录](game-progress-2026-10-05.md)。
+当前阶段IR三次为27.53/27.18/23.56 guest MIPS，raw为21.49/21.32/22.48；终态全部GPR/EIP/EFLAGS相同，
+初始化计数略有差异，调度仍有波动，不能跨阶段构造加速比。
+
+## 此前：真实 CPU profile 与 x87 热点优化
 
 沿解释器主路径检查点 `a3de840`，使用完整游戏目录抓取四次 IR、两次 raw 的 macOS sample，
 另抓一份 Instruments Time Profiler；排除启动/IR绑定，只分析 `Cpu::run_loop` 的运行期样本。
@@ -258,12 +274,12 @@ RaiseException(0xe06d7363, 1, 3, 0x0019fd6c)
 不能把绕过异常或模拟窗口成功当成完成 C++ unwind。
 本轮仍未读到 data.xp3 或进入可见游戏画面。
 
-## 下一步（按序）
+## 最新下一步（按序）
 
-1. 排查 MSVC C++ 异常原因；实现并用独立对照程序验证 RtlUnwind 的帧遍历、unwind handler、
-   FS:[0] 链更新和恢复语义。nested/collided unwind 仍需单独验证。
-2. user32 类/窗口注册与消息队列、guest WndProc 回调；重点检查现有 RegisterClassExW 失败路径。
-3. 图形推进后检查 XP3 大文件读取、存档目录、插件 guest DLL 装载与导出解析。
+1. 实现通用 guest PE DLL 装载、重定位、真实 imports/exports 与 DllMain，先用自编译DLL验证，
+   再解除kinglove.tpm的stub路径；不要伪造不存在的GetPluginInfo导出。已有RtlUnwind正常展开，nested/collided特殊路径仍需单独验证。
+2. 接入真实窗口呈现/GDI，并补当前逻辑窗口/消息子集未实现的可见主循环需求。
+3. 检查 XP3 大文件读取、存档目录与插件调用后的实际需求。
 4. 补剩余实际触发的 x87/Win32 语义，并继续差分与独立行为测试。
 5. 达到可见主循环后再验收 M2，开始 M3 的 GDI 帧缓冲/音频/输入接入。
 

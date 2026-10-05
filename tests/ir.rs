@@ -289,6 +289,7 @@ impl Outcome for RunOutcome {
             Self::InstructionLimit => "limit".into(),
             Self::Crashed(s) => s.clone(),
             Self::CallbackReturned => "callback".into(),
+            Self::CallbackUnwound => "callback unwound".into(),
         }
     }
 }

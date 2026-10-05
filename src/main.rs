@@ -333,7 +333,7 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
         RunOutcome::Exited(code) => println!("outcome: exited cleanly, guest code {code}"),
         RunOutcome::InstructionLimit => println!("outcome: instruction limit hit ({max_instr})"),
         RunOutcome::Crashed(e) => println!("outcome: CRASHED: {e}"),
-        RunOutcome::CallbackReturned => {
+        RunOutcome::CallbackReturned | RunOutcome::CallbackUnwound => {
             println!("outcome: internal error (callback frame escaped top level)")
         }
     }
