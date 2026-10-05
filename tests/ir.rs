@@ -349,6 +349,75 @@ fn compact_store_invalidates_a_prelinked_successor_and_rejected_records_are_not_
 }
 
 #[test]
+fn chained_branches_validate_taken_targets_and_keep_every_budget_boundary() {
+    // Both JNZ outcomes and a direct JMP stay within the interpreter chain.
+    // The JMP target is deliberately an overlapping, unrecognized entry.
+    let code = [
+        0xb9, 2, 0, 0, 0, // MOV ECX,2
+        0x83, 0xc0, 1, 0x49, 0x75, 0xfa, // ADD; DEC; JNZ ADD
+        0xeb, 1, // JMP into the immediate below
+        0xb8, 0x90, 0x90, 0x90, 0x90, 0xcc,
+    ];
+    for budget in 0..=15 {
+        let mut results = Vec::new();
+        for use_ir in [false, true] {
+            let (mut cpu, mut mem) = machine(&code, use_ir);
+            cpu.regs[0] = u32::MAX;
+            let outcome = run(&mut cpu, &mut mem, budget);
+            results.push((
+                outcome.to_string_for_test(),
+                cpu.regs,
+                cpu.eflags,
+                cpu.eip,
+                cpu.instr_count,
+            ));
+        }
+        assert_eq!(results[0], results[1], "overlapping entry budget {budget}");
+    }
+
+    // A compact store patches a different code page. The valid JMP source
+    // must not permit its linked, now stale target to execute from IR.
+    let target = CODE + 0x10000;
+    let mut code = vec![0xb8, 0x49, 0, 0, 0, 0xa2];
+    code.extend(target.to_le_bytes());
+    code.push(0xe9);
+    code.extend((target - (CODE + 15)).to_le_bytes());
+    code.resize(0x10000, 0x90);
+    code.extend([0x41, 0xcc]); // INC ECX is patched to DEC ECX
+    for patched_before_bind in [false, true] {
+        for budget in 0..=6 {
+            let mut results = Vec::new();
+            for use_ir in [false, true] {
+                let (mut cpu, mut mem) = machine(&code, false);
+                if patched_before_bind {
+                    mem.write_u8(target, 0x49).unwrap();
+                }
+                if use_ir {
+                    cpu.install_ir(Image::from_code(CODE, &code).unwrap(), &mem)
+                        .unwrap();
+                }
+                cpu.regs[1] = 3;
+                let outcome = run(&mut cpu, &mut mem, budget);
+                results.push((
+                    outcome.to_string_for_test(),
+                    cpu.regs,
+                    cpu.eflags,
+                    cpu.eip,
+                    cpu.instr_count,
+                ));
+                if budget >= 4 {
+                    assert_eq!(cpu.regs[1], 2);
+                    if use_ir {
+                        assert_eq!((cpu.ir_steps, cpu.ir_fallbacks), (3, budget.min(5) - 3));
+                    }
+                }
+            }
+            assert_eq!(results[0], results[1], "patched target budget {budget}");
+        }
+    }
+}
+
+#[test]
 fn typed_memory_access_keeps_exact_width_fault_state_and_flags() {
     let address = STACK + 0xffff;
     for second in [0xb6, 0xb7] {

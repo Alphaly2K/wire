@@ -43,6 +43,32 @@ static LOAD_CONSTANTS: LazyLock<[[Ext; 7]; 4]> = LazyLock::new(|| {
     })
 });
 
+// ceil(2^64 / n), computed at compile time. Each quotient estimate below is
+// at most one too large and is corrected with an exact integer product.
+static SMALL_RECIPROCALS: [u64; 256] = {
+    let mut table = [0; 256];
+    let mut n = 2;
+    while n < 256 {
+        table[n] = (1u128 << 64).div_ceil(n as u128) as u64;
+        n += 1;
+    }
+    table
+};
+
+#[inline]
+fn divide_small_digit(value: u64, divisor: u64, reciprocal: u64) -> (u64, u64) {
+    // Callers supply at most 57 bits, leaving room for the trial product.
+    // ceil reciprocal adds <value/2^64 <1 to the true quotient. Therefore
+    // floor(product/2^64) is either floor(value/divisor) or that plus one.
+    let trial = ((value as u128 * reciprocal as u128) >> 64) as u64;
+    let product = trial * divisor;
+    if product > value {
+        (trial - 1, value + divisor - product)
+    } else {
+        (trial, value - product)
+    }
+}
+
 /// The series divides binary128 terms by integers <=255. Divide their exact
 /// significand using u128 quotient/remainder, then round once to nearest-even.
 /// This produces the same bits as APFloat, without its general float division.
@@ -59,12 +85,26 @@ fn quad_divide_small(x: Quad, n: u32) -> Quad {
     if !(1..=255).contains(&n) || exponent <= shift || exponent == 0x7fff {
         return (x / Quad::from_u128(n as u128).value).value;
     }
+    if n.is_power_of_two() {
+        return Quad::from_bits(bits - ((shift as u128) << 112));
+    }
     const FRACTION: u128 = (1 << 112) - 1;
     let significand = (bits & FRACTION) | (1 << 112);
     let numerator = significand << shift; // at most 121 bits
     let mut divisor = n as u128;
-    let mut quotient = numerator / divisor;
-    let mut remainder = numerator % divisor;
+    // Base-2^32 long division with exact reciprocal-corrected digits. A
+    // remainder is <256, so its combination with the next digit fits in
+    // 40 bits. The first dividend fits in 57 bits (121-bit numerator).
+    let d = n as u64;
+    let reciprocal = SMALL_RECIPROCALS[n as usize];
+    let high = (numerator >> 64) as u64;
+    let (q_high, r_high) = divide_small_digit(high, d, reciprocal);
+    let middle = (r_high << 32) | ((numerator as u64) >> 32);
+    let (q_middle, r_middle) = divide_small_digit(middle, d, reciprocal);
+    let low = (r_middle << 32) | (numerator as u64 & 0xffff_ffff);
+    let (q_low, r_low) = divide_small_digit(low, d, reciprocal);
+    let mut quotient = ((q_high as u128) << 64) | ((q_middle as u128) << 32) | q_low as u128;
+    let mut remainder = r_low as u128;
     if quotient >= 1 << 113 {
         // Normalize one bit without losing its contribution to the remainder.
         remainder += (quotient & 1) * divisor;
@@ -888,6 +928,31 @@ impl Cpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reciprocal_digits_match_integer_quotients_and_remainders() {
+        for n in 2..=255u64 {
+            for quotient in [0, 1, (1 << 32) / n, (1 << 40) / n, ((1 << 57) - 1) / n - 1] {
+                for remainder in 0..n {
+                    check(quotient * n + remainder, n);
+                }
+            }
+        }
+        let mut seed = 0x9137_eada_3745_729bu64;
+        for _ in 0..4096 {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            check(seed & ((1 << 57) - 1), (seed % 254) + 2);
+        }
+        fn check(value: u64, n: u64) {
+            assert_eq!(
+                divide_small_digit(value, n, SMALL_RECIPROCALS[n as usize]),
+                (value / n, value % n),
+                "{value} / {n}"
+            );
+        }
+    }
 
     #[test]
     fn small_integer_quad_division_matches_apfloat_bits() {

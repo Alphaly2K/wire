@@ -720,6 +720,14 @@ impl Cache {
                 .and_then(|offset| cache.slots.get(offset as usize))
                 .copied()
                 .unwrap_or(0);
+            let target_slot = hot
+                .inst
+                .aux
+                .checked_sub(base)
+                .and_then(|offset| cache.slots.get(offset as usize))
+                .copied()
+                .unwrap_or(0);
+            hot.inst.link_branch(target_slot);
         }
         Ok(cache)
     }

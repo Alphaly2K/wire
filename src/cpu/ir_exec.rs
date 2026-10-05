@@ -88,9 +88,13 @@ impl Cpu {
         // dead ZF/SF/PF/AF/OF formula. Full writers discard that formula.
         if let Some(previous) = self.pending_flags.take() {
             let keep = previous.deferred & !defs;
-            self.eflags = (self.eflags & !keep) | previous.compute(keep);
+            if keep != 0 {
+                self.eflags = (self.eflags & !keep) | previous.compute(keep);
+            }
         }
-        self.eflags = (self.eflags & !eager) | flags.compute(eager);
+        if eager != 0 {
+            self.eflags = (self.eflags & !eager) | flags.compute(eager);
+        }
         flags.deferred = defs & !eager;
         self.pending_flags = if flags.deferred != 0 {
             Some(flags)
@@ -101,9 +105,10 @@ impl Cpu {
     pub(super) fn step_cached(&mut self, mem: &mut GuestMem) -> Result<(), CpuError> {
         self.steps_cached(mem, 1).1
     }
-    /// Run a straight-line typed segment, retaining a guest boundary after
-    /// every operation. Cold/fallback/control-flow operations return to the
-    /// outer API/callback dispatcher immediately.
+    /// Chain typed operations across scalar branches, retaining a guest
+    /// boundary after every operation. Budgets and cooperative timeslices
+    /// bound the chain; callbacks/observers use a one-instruction limit.
+    /// Cold/fallback operations and API targets return to the outer dispatcher.
     pub(super) fn steps_cached(
         &mut self,
         mem: &mut GuestMem,
@@ -147,6 +152,11 @@ impl Cpu {
                 };
                 self.ir_hint = if result.is_ok() && self.eip == r.hot.next_ip {
                     (r.hot.next_ip, r.hot.next_slot)
+                } else if result.is_ok()
+                    && matches!(op, compact::JCC_BASE..=compact::JMP_I32)
+                    && self.eip == r.hot.inst.aux
+                {
+                    (self.eip, r.hot.inst.branch_slot())
                 } else {
                     (0, 0)
                 };
@@ -155,13 +165,9 @@ impl Cpu {
                 }
                 retired += 1;
                 // API stubs and callback sentinels stay in the outer run loop.
-                // Any branch also leaves the segment, including not-taken Jcc.
-                if retired >= limit
-                    || op == 0
-                    || matches!(op, compact::JCC_BASE..=compact::JMP_I32)
-                    || self.eip >= crate::api::STUB_BASE
-                    || r.hot.next_slot == 0
-                {
+                // A branch itself has no host action. The next get() still
+                // validates changed code and rejects unrecognized entries.
+                if retired >= limit || op == 0 || self.eip >= crate::api::STUB_BASE {
                     return (retired, Ok(()));
                 }
             } else {
@@ -324,6 +330,9 @@ impl Cpu {
         };
         Ok(())
     }
+    // Keep the large compatibility dispatcher out of the compact loop's
+    // instruction cache and register allocation. It ends a chain anyway.
+    #[inline(never)]
     fn execute_ir(&mut self, r: Record, mem: &mut GuestMem) -> Result<(), CpuError> {
         self.eip = r.next_ip();
         let a = r.operand(0);

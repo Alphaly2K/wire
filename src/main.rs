@@ -375,7 +375,9 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
         println!("\ntop executed opcodes ({} distinct):", cpu.op_stats.len());
         let mut v: Vec<(&u32, &u64)> = cpu.op_stats.iter().collect();
         v.sort_by(|a, b| b.1.cmp(a.1));
-        for (k, c) in v.iter().take(15) {
+        // Include the secondary 0F opcodes, whose aggregate otherwise hides
+        // the actual instruction mix below the first few scalar operations.
+        for (k, c) in v.iter().take(40) {
             let name = if **k >= 0x100 {
                 format!("0f {:02x}", **k & 0xff)
             } else {

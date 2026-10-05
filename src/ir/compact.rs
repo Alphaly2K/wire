@@ -51,6 +51,16 @@ impl Inst {
     pub fn opcode(self) -> u8 {
         self.bits as u8
     }
+    /// Bound-cache slot, not part of the persisted instruction. Branches do
+    /// not use register/FLAGS fields, so keep their link in those spare bits.
+    pub fn branch_slot(self) -> u32 {
+        self.bits >> 8
+    }
+    pub fn link_branch(&mut self, slot: u32) {
+        if matches!(self.opcode(), JCC_BASE..=JMP_I32) && slot < 1 << 24 {
+            self.bits |= slot << 8;
+        }
+    }
     pub fn dst(self) -> usize {
         ((self.bits >> 8) & 63) as usize
     }

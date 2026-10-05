@@ -8,10 +8,56 @@ import argparse
 import collections
 import html
 import json
+import os
 import pathlib
 import re
+import statistics
 import subprocess
 import sys
+import time
+
+
+def compare(args):
+    """Alternate unchanged IR inputs across two frozen interpreter builds."""
+    args.out.mkdir(parents=True, exist_ok=True)
+    runs = []
+    for pair in range(args.pairs):
+        order = ["before", "after"] if pair % 2 == 0 else ["after", "before"]
+        for version in order:
+            folder = args.out / f"pair-{pair}-{version}"
+            folder.mkdir(exist_ok=True)
+            command = [str(getattr(args, version).resolve()), "run", str(args.exe.resolve()),
+                       "--ir", str(args.ir.resolve()), "--max-instr", str(args.max_instr),
+                       "--log-dir", str(folder.resolve())]
+            with (folder / "report.txt").open("w") as output:
+                start = time.perf_counter()
+                process = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT)
+                _, status, usage = os.wait4(process.pid, 0)
+                process.returncode = os.waitstatus_to_exitcode(status)
+                wall = time.perf_counter() - start
+            report = (folder / "report.txt").read_text()
+            timing = re.search(r"instructions: (\d+) in ([\d.]+)s \(([\d.]+) Minstr/s\)", report)
+            state = re.search(r"final regs:.*\n.*\n.*", report)
+            outcome = re.search(r"^outcome: (.*)$", report, re.MULTILINE)
+            apis = re.search(r"^api calls: (\d+)$", report, re.MULTILINE)
+            if not all([timing, state, outcome, apis]):
+                raise SystemExit(f"missing guest report in {folder}/report.txt")
+            run = dict(pair=pair, version=version, process_cpu_s=usage.ru_utime + usage.ru_stime,
+                       process_wall_s=wall, guest_wall_s=float(timing[2]),
+                       guest_mips=float(timing[3]), instructions=int(timing[1]),
+                       api_calls=int(apis[1]), state=state[0], outcome=outcome[1],
+                       exit_code=process.returncode)
+            runs.append(run)
+            print(f"pair {pair} {version}: {run['guest_mips']:.2f} MIPS, "
+                  f"process CPU {run['process_cpu_s']:.4f}s", flush=True)
+    medians = {version: {key: statistics.median(r[key] for r in runs if r['version'] == version)
+                         for key in ['guest_mips', 'process_cpu_s', 'process_wall_s']}
+               for version in ['before', 'after']}
+    summary = dict(commands=dict(before=str(args.before.resolve()), after=str(args.after.resolve()),
+                                 exe=str(args.exe.resolve()), ir=str(args.ir.resolve()),
+                                 max_instr=args.max_instr), medians=medians, runs=runs)
+    (args.out / "compare.json").write_text(json.dumps(summary, indent=2) + "\n")
+    print(json.dumps(medians, indent=2))
 
 
 def capture(args):
@@ -176,11 +222,23 @@ def main():
     report = commands.add_parser("summarize")
     report.add_argument("samples", type=pathlib.Path, nargs="+")
     report.add_argument("--out", type=pathlib.Path, required=True)
+    bench = commands.add_parser("compare")
+    bench.add_argument("exe", type=pathlib.Path)
+    bench.add_argument("--before", type=pathlib.Path, required=True)
+    bench.add_argument("--after", type=pathlib.Path, default=pathlib.Path("target/release/wire"))
+    bench.add_argument("--ir", type=pathlib.Path, required=True)
+    bench.add_argument("--out", type=pathlib.Path, required=True)
+    bench.add_argument("--pairs", type=int, default=5)
+    bench.add_argument("--max-instr", type=int, default=50_000_000)
     args = parser.parse_args()
     if args.command == "capture":
         capture(args)
-    else:
+    elif args.command == "summarize":
         summarize(args)
+    else:
+        if args.pairs < 1:
+            parser.error("--pairs must be positive")
+        compare(args)
 
 
 if __name__ == "__main__":
