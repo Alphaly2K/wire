@@ -275,6 +275,22 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
         loaded.cmdline_w,
     );
     state.fs = Some(fs);
+    if let Err(e) = state.modules.register_main(
+        &mem,
+        loaded.image_base,
+        Path::new(exe_path)
+            .canonicalize()
+            .unwrap_or_else(|_| Path::new(exe_path).to_path_buf()),
+        state.exe_path.clone(),
+    ) {
+        eprintln!("register main module: {e}");
+        return ExitCode::FAILURE;
+    }
+    for entry in &api.entries {
+        if wire::modules::native_module(&entry.dll) {
+            state.module_handle_for(&entry.dll);
+        }
+    }
 
     println!("loaded: {display_name}");
     println!(

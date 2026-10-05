@@ -94,7 +94,7 @@ impl PeFile {
         let size_opt = rd16(buf, coff + 16)? as usize;
         let characteristics = rd16(buf, coff + 18)?;
         let opt = coff + 20;
-        if buf.len() < opt + size_opt {
+        if size_opt < 96 || buf.len() < opt + size_opt {
             return Err("truncated optional header".into());
         }
         let magic = rd16(buf, opt)?;
@@ -113,6 +113,9 @@ impl PeFile {
         let heap_reserve = rd32(buf, opt + 80)?;
         let heap_commit = rd32(buf, opt + 84)?;
         let num_dirs = (rd32(buf, opt + 92)? as usize).min(16);
+        if 96 + num_dirs * 8 > size_opt {
+            return Err("data directories exceed optional header".into());
+        }
         let mut dirs = Vec::with_capacity(num_dirs);
         for i in 0..num_dirs {
             dirs.push(DataDir {
@@ -216,7 +219,7 @@ impl PeFile {
                 if v == 0 {
                     break;
                 }
-                let iat_rva = ft + idx * 4;
+                let iat_rva = ft.checked_add(idx * 4).ok_or("IAT RVA overflow")?;
                 if v & 0x8000_0000 != 0 {
                     functions.push(ImportFunc {
                         iat_rva,

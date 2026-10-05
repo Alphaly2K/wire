@@ -8,7 +8,7 @@ use crate::pe::PeFile;
 use std::path::Path;
 
 pub const STACK_BASE: u32 = 0x0018_0000;
-pub const STACK_SIZE: u32 = 0x0002_0000; // 128 KiB committed; growth is M2 scope
+pub const STACK_SIZE: u32 = 0x0002_0000; // minimum reserve; preserve the original stack top
 pub const TEB_ADDR: u32 = 0x7ffd_f000;
 pub const PEB_ADDR: u32 = 0x7ffd_e000;
 pub const CMDLINE_ADDR: u32 = 0x00fe_0000;
@@ -61,8 +61,8 @@ pub fn load_image(
     }
 
     // Relocations: we always map at the preferred base (we own the entire
-    // guest address space), so no fixups are needed. DLL loading (M2+) will
-    // need DIR_BASERELOC applied here.
+    // guest address space), so no fixups are needed. DLL relocations are
+    // handled separately by modules.rs.
 
     let imports = pe.imports(&buf)?;
     let mut import_count = 0usize;
@@ -75,10 +75,28 @@ pub fn load_image(
         }
     }
 
-    // Initial thread stack. Return address points at stub #0 (ExitEmulation).
-    mem.commit(STACK_BASE, STACK_SIZE)
+    // Honor the PE reserve so compiler stack probes can reach large locals.
+    // Commit it eagerly until guard-page growth is implemented. Preserve the
+    // initial top/address layout used by existing guest startup code.
+    let stack_top = STACK_BASE + STACK_SIZE;
+    let stack_size = pe
+        .stack_reserve
+        .max(STACK_SIZE)
+        .checked_add(0xffff)
+        .map(|n| n & !0xffff)
+        .filter(|&n| n <= stack_top - 0x10000)
+        .ok_or("main stack reserve does not fit the current address layout")?;
+    let stack_bottom = stack_top - stack_size;
+    if (stack_bottom..stack_top)
+        .step_by(mem.host_page_size() as usize)
+        .any(|p| mem.is_committed(p))
+    {
+        return Err("main stack overlaps a mapped image".into());
+    }
+    // Return address points at stub #0 (ExitEmulation).
+    mem.commit(stack_bottom, stack_size)
         .map_err(|e| format!("commit stack: {e}"))?;
-    let esp = (STACK_BASE + STACK_SIZE - 64) & !15;
+    let esp = (stack_top - 64) & !15;
     let exit_stub = api.lookup("wire", "ExitEmulation").unwrap();
     mem.write_u32(esp, exit_stub).map_err(|e| e.to_string())?;
 
@@ -87,9 +105,9 @@ pub fn load_image(
     mem.commit(PEB_ADDR, 0x1000).map_err(|e| e.to_string())?;
     mem.write_u32(TEB_ADDR, 0xffff_ffff)
         .map_err(|e| e.to_string())?; // SEH chain: empty
-    mem.write_u32(TEB_ADDR + 0x04, STACK_BASE + STACK_SIZE)
+    mem.write_u32(TEB_ADDR + 0x04, stack_top)
         .map_err(|e| e.to_string())?; // StackBase
-    mem.write_u32(TEB_ADDR + 0x08, STACK_BASE)
+    mem.write_u32(TEB_ADDR + 0x08, stack_bottom)
         .map_err(|e| e.to_string())?; // StackLimit
     mem.write_u32(TEB_ADDR + 0x18, TEB_ADDR)
         .map_err(|e| e.to_string())?; // Self

@@ -144,6 +144,7 @@ pub struct ApiState {
     pub named_objs: HashMap<String, u32>, // event/mutex/semaphore name -> handle
     pub next_handle: u32,
     pub user32: crate::user32::User32,
+    pub modules: crate::modules::Modules,
 }
 
 impl ApiState {
@@ -173,6 +174,7 @@ impl ApiState {
             named_objs: HashMap::new(),
             next_handle: 0x100,
             user32: crate::user32::User32::default(),
+            modules: crate::modules::Modules::default(),
         };
         for dll in [
             "kernel32.dll",
@@ -339,7 +341,7 @@ fn filetime_now() -> u64 {
     unix / 100 + 116_444_736_000_000_000
 }
 
-fn read_str(mem: &GuestMem, addr: u32, wide: bool) -> String {
+pub(crate) fn read_str(mem: &GuestMem, addr: u32, wide: bool) -> String {
     if addr == 0 {
         return String::new();
     }
@@ -352,8 +354,39 @@ fn read_str(mem: &GuestMem, addr: u32, wide: bool) -> String {
     }
 }
 
-/// stdcall stack cleanup (in bytes) for known APIs. None = unknown (caller is
-/// warned that we assume 0, which is only correct for cdecl).
+/// Native exports with a known ABI, including supported cdecl CRT helpers.
+pub(crate) fn native_export(dll: &str, name: &str) -> bool {
+    stack_args_bytes(dll, name).is_some()
+        || (dll == "msvcrt.dll"
+            && matches!(
+                name,
+                "malloc"
+                    | "calloc"
+                    | "realloc"
+                    | "free"
+                    | "memcpy"
+                    | "memmove"
+                    | "memset"
+                    | "memcmp"
+                    | "strlen"
+                    | "strcmp"
+                    | "strncmp"
+                    | "strcpy"
+                    | "strncpy"
+                    | "__getmainargs"
+                    | "__wgetmainargs"
+                    | "_initterm"
+                    | "_initterm_e"
+                    | "_onexit"
+                    | "atexit"
+                    | "exit"
+                    | "_exit"
+                    | "abort"
+            ))
+}
+
+/// stdcall stack cleanup in bytes. Unknown functions retain the existing
+/// cdecl/zero-cleanup diagnostic path.
 fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
     static TABLE: OnceLock<HashMap<(&'static str, &'static str), u32>> = OnceLock::new();
     let t = TABLE.get_or_init(|| {
@@ -383,6 +416,7 @@ fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetCommandLineA", 0),
                 ("GetCommandLineW", 0),
                 ("GetStdHandle", 4),
+                ("SetHandleCount", 4),
                 ("SetStdHandle", 8),
                 ("GetFileType", 4),
                 ("CreateFileA", 28),
@@ -408,6 +442,8 @@ fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetFullPathNameW", 16),
                 ("FindFirstFileA", 8),
                 ("FindFirstFileW", 8),
+                ("FindFirstFileExA", 24),
+                ("FindFirstFileExW", 24),
                 ("FindNextFileA", 8),
                 ("FindNextFileW", 8),
                 ("FindClose", 4),
@@ -493,6 +529,8 @@ fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("InterlockedDecrement", 4),
                 ("InterlockedExchange", 8),
                 ("InterlockedCompareExchange", 12),
+                ("InitializeSListHead", 4),
+                ("InterlockedFlushSList", 4),
                 ("GetACP", 0),
                 ("GetOEMCP", 0),
                 ("GetCPInfo", 8),
@@ -542,6 +580,7 @@ fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("OpenMutexA", 12),
                 ("OpenMutexW", 12),
                 ("WaitForSingleObject", 8),
+                ("WaitForSingleObjectEx", 12),
                 ("WaitForMultipleObjects", 16),
                 ("SleepEx", 8),
                 ("GetExitCodeThread", 8),
@@ -626,6 +665,7 @@ fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("FreeConsole", 0),
                 ("AttachConsole", 4),
                 ("GetConsoleMode", 8),
+                ("WriteConsoleA", 20),
                 ("WriteConsoleW", 20),
                 ("SetConsoleTitleW", 4),
                 ("GetConsoleTitleW", 8),
@@ -1410,6 +1450,9 @@ pub fn dispatch(
             // A worker thread function returned; its EAX is the exit code.
             let code = cpu.regs[0];
             log.log_call(dll, name, &args[..1], 0, true, "thread function returned");
+            state
+                .modules
+                .release_tls_thread(&mut state.heap, state.process_heap, cpu.fs_base);
             sched.exit_current(cpu, code)?;
             return Ok(());
         }
@@ -1421,6 +1464,9 @@ pub fn dispatch(
         }
         ("kernel32.dll", "ExitThread") => {
             log.log_call(dll, name, &args[..1], 0, true, "thread exit");
+            state
+                .modules
+                .release_tls_thread(&mut state.heap, state.process_heap, cpu.fs_base);
             sched.exit_current(cpu, args[0])?;
             return Ok(());
         }
@@ -1430,6 +1476,10 @@ pub fn dispatch(
             let exit_stub = api.lookup("wire", "ExitThread").unwrap();
             let handle = state.alloc_handle(HandleObj::Thread { tid });
             sched.create_thread(mem, entry, param, flags & 4 != 0, tid, handle, exit_stub)?;
+            let teb = sched.threads.last().unwrap().teb;
+            state
+                .modules
+                .setup_tls_thread(mem, &mut state.heap, state.process_heap, teb)?;
             if args[5] != 0 {
                 mem.write_u32(args[5], tid).map_err(|e| e.to_string())?;
             }
@@ -1653,7 +1703,7 @@ pub fn dispatch(
             }
         },
         // --- waits ---
-        ("kernel32.dll", "WaitForSingleObject") => {
+        ("kernel32.dll", "WaitForSingleObject" | "WaitForSingleObjectEx") => {
             let (h, timeout) = (args[0], args[1]);
             match sched.take_wake() {
                 Some(Wake::Completed(r)) => {
@@ -1687,6 +1737,23 @@ pub fn dispatch(
                         return Ok(());
                     }
                 }
+            }
+        }
+        // Cooperative execution makes each host API operation atomic. The
+        // x86 header is Next:u32, Depth:u16, Sequence:u16 (8-byte aligned).
+        ("kernel32.dll", "InitializeSListHead" | "InterlockedFlushSList") => {
+            if args[0] & 7 != 0 {
+                return Err("unaligned SLIST_HEADER".into());
+            }
+            let previous = mem.read_u64(args[0]).map_err(|e| e.to_string())?;
+            if name == "InitializeSListHead" {
+                mem.write_u64(args[0], 0).map_err(|e| e.to_string())?;
+                ret = 0;
+            } else {
+                let sequence = ((previous >> 48) as u16).wrapping_add(1);
+                mem.write_u64(args[0], (sequence as u64) << 48)
+                    .map_err(|e| e.to_string())?;
+                ret = previous as u32;
             }
         }
         ("kernel32.dll", "WaitForMultipleObjects") => {
@@ -1944,51 +2011,30 @@ pub fn dispatch(
             note = "zeroed STARTUPINFO".into();
             ret = 0;
         }
-        ("kernel32.dll", "GetModuleHandleA") | ("kernel32.dll", "GetModuleHandleW") => {
-            if args[0] == 0 {
-                ret = state.exe_base;
-            } else {
-                let wide = name.ends_with('W');
-                let n = read_str(mem, args[0], wide);
-                let mut base = n.to_ascii_lowercase();
-                if !base.ends_with(".dll") {
-                    base.push_str(".dll");
+        (
+            "kernel32.dll",
+            "GetModuleHandleA" | "GetModuleHandleW" | "GetModuleHandleExA" | "GetModuleHandleExW"
+            | "GetModuleFileNameA" | "GetModuleFileNameW" | "LoadLibraryA" | "LoadLibraryW"
+            | "LoadLibraryExA" | "LoadLibraryExW" | "GetProcAddress" | "FreeLibrary",
+        ) => {
+            let (outcome, message) =
+                crate::modules::dispatch(name, &args, cpu, mem, api, state, log, sched, max_instr)?;
+            match outcome {
+                crate::cpu::GuestCallOutcome::Returned(value) => {
+                    ret = value;
+                    note = message;
                 }
-                note = format!("module \"{n}\"");
-                ret = state.module_handle_for(&base);
+                _ => return Ok(()),
             }
-        }
-        ("kernel32.dll", "LoadLibraryA") | ("kernel32.dll", "LoadLibraryW") => {
-            let wide = name.ends_with('W');
-            let n = read_str(mem, args[0], wide);
-            let base = n.to_ascii_lowercase();
-            note = format!("\"{n}\" (fake handle; guest DLL loading is M2+ scope)");
-            ret = state.module_handle_for(&base);
-        }
-        ("kernel32.dll", "GetProcAddress") => {
-            let hmod = args[0];
-            let dll_name = state
-                .handle_to_dll
-                .get(&hmod)
-                .cloned()
-                .unwrap_or_else(|| "unknown.dll".to_string());
-            if args[1] & 0xffff_0000 == 0 {
-                let ord = (args[1] & 0xffff) as u16;
-                note = format!("ordinal {ord} from {dll_name}");
-                ret = api.register(&dll_name, None, Some(ord));
-            } else {
-                let n = mem.read_cstr(args[1], 256).map_err(|e| e.to_string())?;
-                note = format!("\"{n}\" from {dll_name}");
-                ret = api.register(&dll_name, Some(n.as_str()), None);
-            }
-        }
-        ("kernel32.dll", "FreeLibrary") => {
-            ret = 1;
-            note = "no-op".into();
         }
         ("kernel32.dll", "GetStdHandle") => {
             ret = 0;
             note = "fake null handle".into();
+        }
+        ("kernel32.dll", "SetHandleCount") => {
+            // Legacy CRT hint; NT-style handle tables grow automatically.
+            ret = args[0];
+            note = "automatic handle table capacity".into();
         }
         ("kernel32.dll", "GetProcessHeap") => ret = state.process_heap,
         ("kernel32.dll", "HeapAlloc") => {
@@ -2050,39 +2096,6 @@ pub fn dispatch(
         ("kernel32.dll", "EncodePointer") | ("kernel32.dll", "DecodePointer") => {
             ret = args[0];
             note = "identity encoding".into();
-        }
-        ("kernel32.dll", "GetModuleFileNameA") | ("kernel32.dll", "GetModuleFileNameW") => {
-            let wide = name.ends_with('W');
-            let (buf, bufsize) = (args[1], args[2]);
-            let path = state.exe_path.clone();
-            if args[0] == 0 || args[0] == state.exe_base {
-                if wide {
-                    let w: Vec<u16> = path.encode_utf16().collect();
-                    let n = (w.len() as u32).min(bufsize.saturating_sub(1));
-                    for i in 0..n {
-                        mem.write_u16(buf + 2 * i, w[i as usize])
-                            .map_err(|e| e.to_string())?;
-                    }
-                    if bufsize > 0 {
-                        mem.write_u16(buf + 2 * n, 0).map_err(|e| e.to_string())?;
-                    }
-                    ret = n;
-                } else {
-                    let (b, _) = crate::codepage::encode(&path, 932)
-                        .map_err(|e| format!("module filename encoding: {e}"))?;
-                    let n = (b.len() as u32).min(bufsize.saturating_sub(1));
-                    mem.write_bytes(buf, &b[..n as usize])
-                        .map_err(|e| e.to_string())?;
-                    if bufsize > 0 {
-                        mem.write_u8(buf + n, 0).map_err(|e| e.to_string())?;
-                    }
-                    ret = n;
-                }
-                note = format!("\"{path}\"");
-            } else {
-                ret = 0;
-                note = "module handle not the exe".into();
-            }
         }
         ("kernel32.dll", "GetFileType") => {
             ret = matches!(state.handles.get(&args[0]), Some(HandleObj::File { .. })) as u32;
@@ -2271,29 +2284,6 @@ pub fn dispatch(
         }
         ("kernel32.dll", "FlsFree") => {
             state.fls.retain(|&(_, slot), _| slot != args[0]);
-            ret = 1;
-        }
-        ("kernel32.dll", "LoadLibraryExA") | ("kernel32.dll", "LoadLibraryExW") => {
-            let wide = name.ends_with('W');
-            let n = read_str(mem, args[0], wide);
-            let base = n.to_ascii_lowercase();
-            note = format!("\"{n}\" flags={:#x} (fake handle)", args[2]);
-            ret = state.module_handle_for(&base);
-        }
-        ("kernel32.dll", "GetModuleHandleExA") | ("kernel32.dll", "GetModuleHandleExW") => {
-            let wide = name.ends_with('W');
-            let n = read_str(mem, args[1], wide);
-            let mut base = n.to_ascii_lowercase();
-            if !base.is_empty() && !base.ends_with(".dll") {
-                base.push_str(".dll");
-            }
-            let h = if base.is_empty() {
-                state.exe_base
-            } else {
-                state.module_handle_for(&base)
-            };
-            mem.write_u32(args[2], h).map_err(|e| e.to_string())?;
-            note = format!("module \"{n}\"");
             ret = 1;
         }
         ("kernel32.dll", "GetCurrentPackageId") => {

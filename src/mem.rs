@@ -173,6 +173,45 @@ impl GuestMem {
         Ok(())
     }
 
+    /// Release complete host pages owned by a mapped image. Callers must not
+    /// share either edge page with another allocation.
+    pub(crate) fn decommit_image(&mut self, addr: u32, len: u32) -> Result<(), MemFault> {
+        if !(addr as usize).is_multiple_of(self.host_page)
+            || !(len as usize).is_multiple_of(self.host_page)
+            || addr as u64 + len as u64 > SPACE_SIZE
+        {
+            return Err(MemFault {
+                addr,
+                len,
+                write: true,
+            });
+        }
+        if len == 0 {
+            return Ok(());
+        }
+        let result = unsafe {
+            libc::mprotect(
+                self.base.add(addr as usize).cast(),
+                len as usize,
+                libc::PROT_NONE,
+            )
+        };
+        if result != 0 {
+            return Err(MemFault {
+                addr,
+                len,
+                write: true,
+            });
+        }
+        self.note_write(addr, len as usize);
+        for page in
+            (addr as usize / self.host_page)..((addr as usize + len as usize) / self.host_page)
+        {
+            self.committed[page / 64] &= !(1u64 << (page % 64));
+        }
+        Ok(())
+    }
+
     #[inline]
     pub(crate) fn ptr(&self, addr: u32, len: u32, write: bool) -> Result<*mut u8, MemFault> {
         let end = addr as u64 + len as u64;

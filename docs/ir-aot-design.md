@@ -205,8 +205,11 @@ dense索引12,552,192B、native target表8,671,704B、区域页代数1,536B。
 空mask计算跳过和精确小整数倒数除法已通过81项回归，但短启动阶段仅约9%收益。
 按用户要求恢复游戏推进，持续主循环形成后再扩大样本；见 [记录](perf-sprint-2026-10-05.md)。
 
-后续游戏已越过RtlUnwind并推进到插件初始化，最新完整回归为79项；当前阶段的真实CPU复测见
+此前游戏已越过RtlUnwind并推进到插件初始化，当时完整回归为79项；该阶段的真实CPU复测见
 [游戏推进记录](game-progress-2026-10-05.md)。guest回调内逐条识别非局部栈转移，普通主循环继续连续IR调度。
+2026-10-06 已装载真实 kinglove/KAGParser DLL、建立静态 TLS，并读取 data.xp3/patch.xp3 的脚本，
+推进到约288M指令的 GDI+ 依赖边界，完整90项回归通过；见 [最新推进记录](game-dll-progress-2026-10-06.md)。
+新DLL暂走raw fallback；后续可安装模块IR，但当前优先解除绘图/呈现功能阻塞。
 以下71项和MIPS表保留为此前整数IR优化阶段的记录。
 
 `cargo test --release` 共71项通过：1 unit、34 differential、5 FPU、10 IR、1 Wasm、20 Win32。

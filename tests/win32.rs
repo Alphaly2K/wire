@@ -104,6 +104,527 @@ impl Drop for Vm {
     }
 }
 
+/// Independently authored PE32: one section, a real stdcall DllMain, code/data
+/// exports, a forwarder and an ordinal hole. Absolute image pointers require
+/// HIGHLOW relocation; host test result addresses are deliberately external.
+fn test_dll(import: &str, attach_ok: bool, value: u32) -> Vec<u8> {
+    fn w16(bytes: &mut [u8], at: usize, value: u16) {
+        bytes[at..at + 2].copy_from_slice(&value.to_le_bytes());
+    }
+    fn w32(bytes: &mut [u8], at: usize, value: u32) {
+        bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    fn put(bytes: &mut [u8], rva: usize, data: &[u8]) {
+        bytes[0x200 + rva - 0x1000..0x200 + rva - 0x1000 + data.len()].copy_from_slice(data);
+    }
+    let mut bytes = vec![0; 0x2200];
+    bytes[..2].copy_from_slice(b"MZ");
+    w32(&mut bytes, 0x3c, 0x80);
+    bytes[0x80..0x84].copy_from_slice(b"PE\0\0");
+    w16(&mut bytes, 0x84, 0x14c);
+    w16(&mut bytes, 0x86, 1);
+    w16(&mut bytes, 0x94, 0xe0);
+    w16(&mut bytes, 0x96, 0x2102);
+    let opt = 0x98;
+    w16(&mut bytes, opt, 0x10b);
+    w32(&mut bytes, opt + 16, 0x1000);
+    w32(&mut bytes, opt + 28, 0x10000000);
+    w32(&mut bytes, opt + 32, 0x1000);
+    w32(&mut bytes, opt + 36, 0x200);
+    w32(&mut bytes, opt + 56, 0x4000);
+    w32(&mut bytes, opt + 60, 0x200);
+    w32(&mut bytes, opt + 92, 16);
+    w32(&mut bytes, opt + 96, 0x1500);
+    w32(&mut bytes, opt + 100, 0x200);
+    w32(&mut bytes, opt + 104, 0x1300);
+    w32(&mut bytes, opt + 108, 40);
+    w32(&mut bytes, opt + 136, 0x1700);
+    bytes[0x178..0x180].copy_from_slice(b".test\0\0\0");
+    w32(&mut bytes, 0x180, 0x3000);
+    w32(&mut bytes, 0x184, 0x1000);
+    w32(&mut bytes, 0x188, 0x2000);
+    w32(&mut bytes, 0x18c, 0x200);
+    w32(&mut bytes, 0x19c, 0xe0000020);
+    let mut body = vec![
+        0x53, 0x8b, 0x5c, 0x24, 8, 0x8b, 0x44, 0x24, 12, 0x85, 0xc0, 0x74, 0,
+    ];
+    body.extend([0xff, 5]);
+    body.extend((DATA + 0x700).to_le_bytes());
+    body.extend([0x89, 0x1d]);
+    body.extend((DATA + 0x708).to_le_bytes());
+    body.extend([0xff, 0x15]);
+    let iat_reloc = body.len() as u16;
+    body.extend(0x10001400u32.to_le_bytes());
+    body.push(0xa3);
+    body.extend((DATA + 0x70c).to_le_bytes());
+    body.push(0xb8);
+    body.extend(u32::from(attach_ok).to_le_bytes());
+    body.extend([0x5b, 0xc2, 12, 0]);
+    body[12] = (body.len() - 13) as u8;
+    body.extend([0xff, 5]);
+    body.extend((DATA + 0x704).to_le_bytes());
+    body.extend([0xb8, 1, 0, 0, 0, 0x5b, 0xc2, 12, 0]);
+    put(&mut bytes, 0x1000, &body);
+    put(&mut bytes, 0x1080, &[0xa1, 0, 0x12, 0, 0x10, 0xc3]);
+    put(&mut bytes, 0x1200, &value.to_le_bytes());
+    put(&mut bytes, 0x1210, &0x10001200u32.to_le_bytes());
+    let mut imports = [0; 40];
+    w32(&mut imports, 0, 0x1380);
+    w32(&mut imports, 12, 0x1340);
+    w32(&mut imports, 16, 0x1400);
+    put(&mut bytes, 0x1300, &imports);
+    let (dll, function) = import.rsplit_once('!').unwrap();
+    put(&mut bytes, 0x1340, format!("{dll}\0").as_bytes());
+    put(&mut bytes, 0x1380, &0x13a0u32.to_le_bytes());
+    put(&mut bytes, 0x13a2, format!("{function}\0").as_bytes());
+    put(&mut bytes, 0x1400, &0x13a0u32.to_le_bytes());
+    let mut table = [0; 40];
+    for (offset, val) in [
+        (16, 7),
+        (20, 5),
+        (24, 4),
+        (28, 0x1530),
+        (32, 0x1548),
+        (36, 0x1560),
+    ] {
+        w32(&mut table, offset, val);
+    }
+    put(&mut bytes, 0x1500, &table);
+    for (index, rva) in [0x1080u32, 0x1200, 0x1210, 0x15e0, 0]
+        .into_iter()
+        .enumerate()
+    {
+        put(&mut bytes, 0x1530 + index * 4, &rva.to_le_bytes());
+    }
+    let mut at = 0x1570;
+    for (index, (name, ordinal)) in [("Alias", 3u16), ("Data", 1), ("GetValue", 0), ("Ptr", 2)]
+        .into_iter()
+        .enumerate()
+    {
+        put(&mut bytes, 0x1548 + index * 4, &(at as u32).to_le_bytes());
+        put(&mut bytes, 0x1560 + index * 2, &ordinal.to_le_bytes());
+        let text = format!("{name}\0");
+        put(&mut bytes, at, text.as_bytes());
+        at += text.len();
+    }
+    put(&mut bytes, 0x15e0, b"kernel32.GetCurrentProcessId\0");
+    let mut relocations = vec![0; 8];
+    w32(&mut relocations, 0, 0x1000);
+    for offset in [iat_reloc, 0x81, 0x210, 0] {
+        relocations.extend((if offset == 0 { 0 } else { 0x3000 | offset }).to_le_bytes());
+    }
+    let reloc_size = relocations.len() as u32;
+    w32(&mut relocations, 4, reloc_size);
+    put(&mut bytes, 0x1700, &relocations);
+    w32(&mut bytes, opt + 140, reloc_size);
+    bytes
+}
+
+fn dll_export(v: &mut Vm, module: u32, name: &str) -> u32 {
+    v.mem
+        .write_bytes(DATA + 0x100, format!("{name}\0").as_bytes())
+        .unwrap();
+    v.k("GetProcAddress", &[module, DATA + 0x100])
+}
+
+fn test_tls_dll(attach_ok: bool) -> Vec<u8> {
+    let mut bytes = test_dll("kernel32.dll!GetCurrentProcessId", attach_ok, 0);
+    let put = |bytes: &mut [u8], rva: usize, data: &[u8]| {
+        let at = 0x200 + rva - 0x1000;
+        bytes[at..at + data.len()].copy_from_slice(data);
+    };
+    bytes[0x140..0x144].copy_from_slice(&0x1800u32.to_le_bytes());
+    bytes[0x144..0x148].copy_from_slice(&24u32.to_le_bytes());
+    for (i, value) in [
+        0x10001900u32,
+        0x10001904,
+        0x10001920,
+        0x10001930,
+        12,
+        0x500000,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        put(&mut bytes, 0x1800 + i * 4, &value.to_le_bytes());
+    }
+    put(&mut bytes, 0x1900, &37u32.to_le_bytes());
+    let mut access = vec![0x64, 0x8b, 0x0d, 0x2c, 0, 0, 0, 0xa1];
+    access.extend(0x10001920u32.to_le_bytes());
+    access.extend([0x8b, 0x04, 0x81, 0x8b, 0x10]);
+    let mut entry = access.clone();
+    entry.extend([0x89, 0x15]);
+    entry.extend((DATA + 0x720).to_le_bytes());
+    entry.push(0xb8);
+    entry.extend(u32::from(attach_ok).to_le_bytes());
+    entry.extend([0xc2, 12, 0]);
+    put(&mut bytes, 0x1000, &entry);
+    access.extend([0xff, 0x00, 0x89, 0xd0, 0xc3]); // return previous TLS value, increment it
+    put(&mut bytes, 0x1080, &access);
+    let mut reloc = Vec::from(0x1000u32.to_le_bytes());
+    reloc.extend(20u32.to_le_bytes());
+    for offset in [0x3008u16, 0x3088, 0x3800, 0x3804, 0x3808, 0x380c] {
+        reloc.extend(offset.to_le_bytes());
+    }
+    put(&mut bytes, 0x1700, &reloc);
+    bytes[0x124..0x128].copy_from_slice(&(reloc.len() as u32).to_le_bytes());
+    bytes
+}
+
+#[test]
+fn dll_static_tls_is_ready_for_dllmain_and_isolated_for_existing_and_new_threads() {
+    let mut v = Vm::new();
+    let existing = v.k("CreateThread", &[0, 0, CODE, 0, 4, 0]);
+    let existing_teb = v.sched.threads[v.sched.thread_index_by_handle(existing).unwrap()].teb;
+    std::fs::write(v.dir.join("tls.dll"), test_tls_dll(true)).unwrap();
+    v.mem.write_bytes(DATA, b"tls.dll\0").unwrap();
+    let module = v.k("LoadLibraryA", &[DATA]);
+    assert_eq!(module, 0x50000000);
+    assert_eq!(v.mem.read_u32(DATA + 0x720).unwrap(), 37); // read by actual guest DllMain
+    let function = dll_export(&mut v, module, "GetValue");
+    let call = |v: &mut Vm| {
+        v.cpu
+            .call_guest(
+                &mut v.mem,
+                &mut v.api,
+                &mut v.state,
+                &mut v.log,
+                &mut v.sched,
+                function,
+                &[],
+                1_000_000,
+            )
+            .unwrap()
+    };
+    assert!(matches!(
+        call(&mut v),
+        wire::cpu::GuestCallOutcome::Returned(37)
+    ));
+    assert!(matches!(
+        call(&mut v),
+        wire::cpu::GuestCallOutcome::Returned(38)
+    ));
+    let new = v.k("CreateThread", &[0, 0, CODE, 0, 4, 0]);
+    let new_teb = v.sched.threads[v.sched.thread_index_by_handle(new).unwrap()].teb;
+    let index = v.mem.read_u32(module + 0x1920).unwrap();
+    let main_vector = v.mem.read_u32(TEB_ADDR + 0x2c).unwrap();
+    let main_block = v.mem.read_u32(main_vector + index * 4).unwrap();
+    assert_eq!(v.mem.read_u32(main_block).unwrap(), 39);
+    for teb in [existing_teb, new_teb] {
+        let vector = v.mem.read_u32(teb + 0x2c).unwrap();
+        let block = v.mem.read_u32(vector + index * 4).unwrap();
+        assert_ne!(block, main_block);
+        assert_eq!(v.mem.read_u32(block).unwrap(), 37);
+        let mut zero = [1; 12];
+        v.mem.read_bytes(block + 4, &mut zero).unwrap();
+        assert_eq!(zero, [0; 12]);
+        let saved_teb = v.cpu.fs_base;
+        v.cpu.fs_base = teb;
+        assert!(matches!(
+            call(&mut v),
+            wire::cpu::GuestCallOutcome::Returned(37)
+        ));
+        v.cpu.fs_base = saved_teb;
+    }
+    assert_eq!(v.k("FreeLibrary", &[module]), 1);
+    assert_eq!(
+        v.k("HeapSize", &[v.state.process_heap, 0, main_block]),
+        u32::MAX
+    );
+    for teb in [TEB_ADDR, existing_teb, new_teb] {
+        let vector = v.mem.read_u32(teb + 0x2c).unwrap();
+        assert_eq!(v.mem.read_u32(vector + index * 4).unwrap(), 0);
+    }
+    v.mem.write_bytes(DATA, b"tls.dll\0").unwrap();
+    assert_eq!(v.k("LoadLibraryA", &[DATA]), module);
+    assert_eq!(v.mem.read_u32(DATA + 0x720).unwrap(), 37); // fresh template after reload
+}
+
+#[test]
+fn dll_tls_failure_rolls_back_and_unsupported_callbacks_are_rejected() {
+    let mut v = Vm::new();
+    std::fs::write(v.dir.join("tls.dll"), test_tls_dll(false)).unwrap();
+    v.mem.write_bytes(DATA, b"tls.dll\0").unwrap();
+    assert_eq!(v.k("LoadLibraryA", &[DATA]), 0);
+    assert_eq!(v.k("GetLastError", &[]), 1114);
+    assert!(!v.mem.is_committed(0x50000000));
+    let vector = v.mem.read_u32(TEB_ADDR + 0x2c).unwrap();
+    assert_eq!(v.mem.read_u32(vector).unwrap(), 0);
+    let mut callback = test_tls_dll(true);
+    callback[0xb30..0xb34].copy_from_slice(&0x10001000u32.to_le_bytes());
+    std::fs::write(v.dir.join("tls.dll"), callback).unwrap();
+    assert_eq!(v.k("LoadLibraryA", &[DATA]), 0);
+    assert_eq!(v.k("GetLastError", &[]), 193);
+    assert!(!v.mem.is_committed(0x50000000));
+    let mut bad = test_tls_dll(true);
+    bad[0xa08..0xa0c].copy_from_slice(&0x10004000u32.to_le_bytes());
+    std::fs::write(v.dir.join("tls.dll"), bad).unwrap();
+    assert_eq!(v.k("LoadLibraryA", &[DATA]), 0);
+    assert_eq!(v.k("GetLastError", &[]), 193);
+    assert!(!v.mem.is_committed(0x50000000));
+}
+
+#[test]
+fn dll_mapping_relocation_exports_initialization_and_reference_counts() {
+    let mut v = Vm::new();
+    let heap = v.state.process_heap;
+    let allocation = v.k("HeapAlloc", &[heap, 0, 64]);
+    v.mem.write_u32(allocation, 0xdead1234).unwrap();
+    std::fs::write(
+        v.dir.join("demo.dll"),
+        test_dll("kernel32.dll!GetCurrentProcessId", true, 0x12345678),
+    )
+    .unwrap();
+    v.wide(DATA, "C:\\demo.dll");
+    let handle = v.k("LoadLibraryW", &[DATA]);
+    assert_eq!(handle, 0x50000000);
+    assert_eq!(v.mem.read_u32(handle + 0x1210).unwrap(), handle + 0x1200);
+    assert_eq!(v.mem.read_u32(allocation).unwrap(), 0xdead1234);
+    assert_eq!(v.mem.read_u32(DATA + 0x700).unwrap(), 1);
+    assert_eq!(v.mem.read_u32(DATA + 0x708).unwrap(), handle);
+    assert_eq!(v.mem.read_u32(DATA + 0x70c).unwrap(), 4242);
+    let function = dll_export(&mut v, handle, "GetValue");
+    assert_eq!(function, handle + 0x1080);
+    assert_eq!(v.k("GetProcAddress", &[handle, 7]), function);
+    assert_eq!(dll_export(&mut v, handle, "Data"), handle + 0x1200);
+    assert_eq!(dll_export(&mut v, handle, "getvalue"), 0);
+    assert_eq!(dll_export(&mut v, handle, "GetPluginInfo"), 0);
+    assert_eq!(v.k("GetLastError", &[]), 127);
+    assert_eq!(v.k("GetProcAddress", &[handle, 11]), 0);
+    assert_eq!(
+        dll_export(&mut v, handle, "Alias"),
+        v.api.lookup("kernel32.dll", "GetCurrentProcessId").unwrap()
+    );
+    assert!(matches!(
+        v.cpu
+            .call_guest(
+                &mut v.mem,
+                &mut v.api,
+                &mut v.state,
+                &mut v.log,
+                &mut v.sched,
+                function,
+                &[],
+                1_000_000
+            )
+            .unwrap(),
+        wire::cpu::GuestCallOutcome::Returned(0x12345678)
+    ));
+    v.mem.write_bytes(DATA, b"DEMO.dll\0").unwrap();
+    assert_eq!(v.k("LoadLibraryA", &[DATA]), handle);
+    assert_eq!(v.mem.read_u32(DATA + 0x700).unwrap(), 1);
+    assert_eq!(v.k("GetModuleHandleA", &[DATA]), handle);
+    assert_eq!(v.k("GetModuleHandleExA", &[6, function, DATA + 0x300]), 1);
+    assert_eq!(v.mem.read_u32(DATA + 0x300).unwrap(), handle);
+    assert_eq!(v.k("GetModuleFileNameW", &[handle, DATA + 0x400, 260]), 11);
+    assert_eq!(v.mem.read_wstr(DATA + 0x400, 260).unwrap(), "C:\\demo.dll");
+    assert_eq!(v.k("GetModuleFileNameW", &[handle, DATA + 0x400, 4]), 4);
+    assert_eq!(v.mem.read_wstr(DATA + 0x400, 4).unwrap(), "C:\\");
+    assert_eq!(v.k("FreeLibrary", &[handle]), 1);
+    assert!(v.mem.is_committed(handle));
+    assert_eq!(v.k("FreeLibrary", &[handle]), 1);
+    assert!(!v.mem.is_committed(handle));
+    assert_eq!(v.mem.read_u32(DATA + 0x704).unwrap(), 1);
+    assert_eq!(v.k("GetModuleHandleA", &[DATA]), 0);
+    assert_eq!(v.k("GetProcAddress", &[handle, 7]), 0);
+    assert_eq!(v.k("GetLastError", &[]), 6);
+    assert_eq!(v.k("LoadLibraryA", &[DATA]), handle);
+    assert_eq!(v.mem.read_u32(DATA + 0x700).unwrap(), 2);
+    assert_eq!(v.mem.read_u32(handle + 0x1200).unwrap(), 0x12345678);
+}
+
+#[test]
+fn dll_dependencies_initialize_before_parent_and_failure_rolls_back() {
+    let mut v = Vm::new();
+    std::fs::write(
+        v.dir.join("child.dll"),
+        test_dll("kernel32.dll!GetCurrentProcessId", true, 0xcafe),
+    )
+    .unwrap();
+    std::fs::write(
+        v.dir.join("parent.dll"),
+        test_dll("child.dll!GetValue", true, 0xbeef),
+    )
+    .unwrap();
+    v.mem.write_bytes(DATA, b"parent.dll\0").unwrap();
+    let parent = v.k("LoadLibraryA", &[DATA]);
+    assert_eq!(parent, 0x50000000);
+    assert_eq!(v.mem.read_u32(DATA + 0x700).unwrap(), 2);
+    assert_eq!(v.mem.read_u32(DATA + 0x70c).unwrap(), 0xcafe);
+    assert_eq!(v.mem.read_u32(parent + 0x1400).unwrap(), 0x50011080);
+    assert_eq!(v.k("FreeLibrary", &[parent]), 1);
+    assert_eq!(v.mem.read_u32(DATA + 0x704).unwrap(), 2);
+    assert!(!v.mem.is_committed(0x50010000));
+
+    std::fs::write(
+        v.dir.join("bad.dll"),
+        test_dll("child.dll!GetValue", false, 0xbeef),
+    )
+    .unwrap();
+    v.mem.write_bytes(DATA, b"bad.dll\0").unwrap();
+    assert_eq!(v.k("LoadLibraryA", &[DATA]), 0);
+    assert_eq!(v.k("GetLastError", &[]), 1114);
+    assert_eq!(v.mem.read_u32(DATA + 0x700).unwrap(), 4);
+    assert_eq!(v.mem.read_u32(DATA + 0x704).unwrap(), 4); // failed parent and successful child detached
+    assert!(!v.mem.is_committed(0x50000000));
+    assert!(!v.mem.is_committed(0x50010000));
+    assert_eq!(v.k("GetModuleHandleA", &[DATA]), 0);
+}
+
+#[test]
+fn dll_guest_forwarders_deduplicate_dependencies_and_failed_load_preserves_existing_modules() {
+    let mut v = Vm::new();
+    let child = test_dll("kernel32.dll!GetCurrentProcessId", true, 73);
+    std::fs::write(v.dir.join("child.dll"), &child).unwrap();
+    v.mem.write_bytes(DATA, b"child.dll\0").unwrap();
+    let child_handle = v.k("LoadLibraryA", &[DATA]);
+    std::fs::write(
+        v.dir.join("bad.dll"),
+        test_dll("child.dll!GetValue", false, 0),
+    )
+    .unwrap();
+    v.mem.write_bytes(DATA, b"bad.dll\0").unwrap();
+    assert_eq!(v.k("LoadLibraryA", &[DATA]), 0);
+    assert_eq!(v.mem.read_u32(DATA + 0x704).unwrap(), 1); // failed parent detached, existing child kept
+    assert!(v.mem.is_committed(child_handle));
+    assert_eq!(v.k("FreeLibrary", &[child_handle]), 1); // failed transaction released its ref
+    assert!(!v.mem.is_committed(child_handle));
+
+    let alias = |forward: &str| {
+        let mut bytes = test_dll("kernel32.dll!GetCurrentProcessId", true, 81);
+        bytes[0x7e0..0x800].fill(0);
+        bytes[0x7e0..0x7e0 + forward.len()].copy_from_slice(forward.as_bytes());
+        bytes
+    };
+    std::fs::write(v.dir.join("alias.dll"), alias("child.#7")).unwrap();
+    v.mem.write_bytes(DATA, b"alias.dll\0").unwrap();
+    let parent = v.k("LoadLibraryA", &[DATA]);
+    for _ in 0..3 {
+        assert_eq!(dll_export(&mut v, parent, "Alias"), 0x50011080);
+    }
+    assert_eq!(v.k("FreeLibrary", &[parent]), 1);
+    assert!(!v.mem.is_committed(0x50010000));
+    std::fs::write(v.dir.join("a.dll"), alias("b.Alias")).unwrap();
+    std::fs::write(v.dir.join("b.dll"), alias("a.Alias")).unwrap();
+    v.mem.write_bytes(DATA, b"a.dll\0").unwrap();
+    let a = v.k("LoadLibraryA", &[DATA]);
+    assert_eq!(dll_export(&mut v, a, "Alias"), 0);
+    assert_eq!(v.k("GetLastError", &[]), 127);
+    assert!(!v.mem.is_committed(0x50010000));
+    assert!(v.mem.is_committed(a));
+    assert_eq!(v.k("FreeLibrary", &[a]), 1);
+    assert!(!v.mem.is_committed(a));
+}
+
+#[test]
+fn dll_qualified_module_names_and_native_stub_addresses_resolve_correctly() {
+    let mut v = Vm::new();
+    let bytes = test_dll("kernel32.dll!GetCurrentProcessId", true, 9);
+    for dir in ["one", "two"] {
+        std::fs::create_dir(v.dir.join(dir)).unwrap();
+        std::fs::write(v.dir.join(dir).join("same.dll"), &bytes).unwrap();
+    }
+    v.wide(DATA, "C:\\one\\same.dll");
+    let one = v.k("LoadLibraryW", &[DATA]);
+    v.wide(DATA, "C:\\two\\same.dll");
+    let two = v.k("LoadLibraryW", &[DATA]);
+    assert_ne!(one, two);
+    assert_eq!(v.k("GetModuleHandleW", &[DATA]), two);
+    v.wide(DATA, "C:\\one\\same.dll");
+    assert_eq!(v.k("GetModuleHandleW", &[DATA]), one);
+    v.wide(DATA, "C:\\absent\\same.dll");
+    assert_eq!(v.k("GetModuleHandleW", &[DATA]), 0);
+    let stub = v.api.lookup("kernel32.dll", "GetCurrentProcessId").unwrap();
+    assert_eq!(v.k("GetModuleHandleExW", &[6, stub, DATA + 0x300]), 1);
+    assert_eq!(
+        v.mem.read_u32(DATA + 0x300).unwrap(),
+        v.state.module_handles["kernel32.dll"]
+    );
+}
+
+#[test]
+fn main_image_registers_real_exports_and_honors_pe_stack_reserve() {
+    let mut v = Vm::new();
+    let mut exe = test_dll("kernel32.dll!GetCurrentProcessId", true, 19);
+    exe[0x96..0x98].copy_from_slice(&0x102u16.to_le_bytes());
+    exe[0xb4..0xb8].copy_from_slice(&0x400000u32.to_le_bytes());
+    exe[0xe0..0xe4].copy_from_slice(&0x100000u32.to_le_bytes());
+    let path = v.dir.join("test.exe");
+    std::fs::write(&path, &exe).unwrap();
+    let mut mem = GuestMem::new().unwrap();
+    let mut table = ApiTable::new();
+    let loaded = wire::loader::load_image(&mut mem, &mut table, &path, "test.exe").unwrap();
+    let top = STACK_BASE + STACK_SIZE;
+    assert_eq!(mem.read_u32(TEB_ADDR + 4).unwrap(), top);
+    assert_eq!(mem.read_u32(TEB_ADDR + 8).unwrap(), top - 0x100000);
+    assert!(mem.is_committed(top - 0x100000));
+    assert!(!mem.is_committed(top - 0x100000 - 0x10000));
+    assert!(mem.read_u8(0x17f000).is_ok()); // actual CRT stack probe previously faulted here
+    v.mem = mem;
+    v.api = table;
+    v.mem.commit(DATA, 0x10000).unwrap();
+    v.state
+        .modules
+        .register_main(
+            &v.mem,
+            loaded.image_base,
+            path.clone(),
+            "C:\\test.exe".into(),
+        )
+        .unwrap();
+    assert_eq!(v.k("GetModuleHandleA", &[0]), 0x400000);
+    assert_eq!(dll_export(&mut v, 0x400000, "GetValue"), 0x401080);
+    assert_eq!(dll_export(&mut v, 0x400000, "Data"), 0x401200);
+    assert_eq!(v.k("FreeLibrary", &[0x400000]), 1);
+    assert!(v.mem.is_committed(0x400000));
+
+    exe[0xe0..0xe4].copy_from_slice(&0x200000u32.to_le_bytes());
+    std::fs::write(&path, &exe).unwrap();
+    let mut mem = GuestMem::new().unwrap();
+    assert!(
+        wire::loader::load_image(&mut mem, &mut v.api, &path, "test.exe")
+            .err()
+            .unwrap()
+            .contains("stack reserve")
+    );
+}
+
+#[test]
+fn dll_missing_imports_and_malformed_images_fail_without_fake_modules() {
+    let mut v = Vm::new();
+    let valid = test_dll("kernel32.dll!GetCurrentProcessId", true, 123);
+    let mut cases = vec![
+        (test_dll("missing.dll!Absent", true, 0), 126),
+        (test_dll("kernel32.dll!MadeUpExport", true, 0), 127),
+    ];
+    let mut no_reloc = valid.clone();
+    no_reloc[0x120..0x128].fill(0);
+    cases.push((no_reloc, 193));
+    let mut wrong_reloc = valid.clone();
+    wrong_reloc[0x908..0x90a].copy_from_slice(&0x7001u16.to_le_bytes());
+    cases.push((wrong_reloc, 193));
+    let mut bad_export = valid.clone();
+    bad_export[0x740..0x744].copy_from_slice(&0x4000u32.to_le_bytes());
+    cases.push((bad_export, 193));
+    let mut bad_section = valid.clone();
+    bad_section[0x188..0x18c].copy_from_slice(&0x4000u32.to_le_bytes());
+    cases.push((bad_section, 193));
+    for (index, (bytes, error)) in cases.into_iter().enumerate() {
+        let name = format!("bad{index}.dll");
+        std::fs::write(v.dir.join(&name), bytes).unwrap();
+        v.mem
+            .write_bytes(DATA, format!("{name}\0").as_bytes())
+            .unwrap();
+        assert_eq!(v.k("LoadLibraryA", &[DATA]), 0, "{name}");
+        assert_eq!(v.k("GetLastError", &[]), error, "{name}");
+        assert_eq!(v.k("GetModuleHandleA", &[DATA]), 0);
+        assert!(!v.mem.is_committed(0x50000000));
+        assert_eq!(v.mem.read_u32(DATA + 0x700).unwrap(), 0);
+    }
+    assert_eq!(v.k("LoadLibraryExA", &[DATA, 0, 2]), 0);
+    assert_eq!(v.k("GetLastError", &[]), 87);
+}
+
 #[test]
 fn heap_reuses_coalesces_and_preserves_realloc() {
     let mut v = Vm::new();
@@ -266,6 +787,30 @@ fn directory_queries_and_enumeration() {
     assert_eq!(v.k("GetCurrentDirectoryW", &[2, DATA + 256]), 4);
     assert_eq!(v.k("GetCurrentDirectoryW", &[4, DATA + 256]), 3);
     assert_eq!(v.mem.read_wstr(DATA + 256, 4).unwrap(), "C:\\");
+    let h = v.k("FindFirstFileExW", &[DATA, 1, DATA + 256, 0, 0, 2]);
+    assert_ne!(h, u32::MAX);
+    assert_eq!(v.mem.read_wstr(DATA + 256 + 44, 260).unwrap(), "one.cf");
+    assert_eq!(v.k("FindClose", &[h]), 1);
+    assert_eq!(
+        v.k("FindFirstFileExW", &[DATA, 2, DATA + 256, 0, 0, 0]),
+        u32::MAX
+    );
+    assert_eq!(v.k("GetLastError", &[]), 87);
+}
+
+#[test]
+fn x86_slist_init_and_flush_preserve_sequence_and_return_chain() {
+    let mut v = Vm::new();
+    v.mem.write_u64(DATA, u64::MAX).unwrap();
+    v.k("InitializeSListHead", &[DATA]);
+    assert_eq!(v.mem.read_u64(DATA).unwrap(), 0);
+    v.mem
+        .write_u64(DATA, (0xffffu64 << 48) | (2u64 << 32) | (DATA + 16) as u64)
+        .unwrap();
+    assert_eq!(v.k("InterlockedFlushSList", &[DATA]), DATA + 16);
+    assert_eq!(v.mem.read_u64(DATA).unwrap(), 0); // sequence wrapped, depth/pointer cleared
+    assert_eq!(v.k("InterlockedFlushSList", &[DATA]), 0);
+    assert_eq!(v.mem.read_u64(DATA).unwrap(), 1u64 << 48);
 }
 
 #[test]
@@ -913,6 +1458,12 @@ fn wait_all_acquires_objects_atomically() {
         })
     ));
     assert_eq!(v.k("WaitForSingleObject", &[sem, 0]), 0x102);
+    assert_eq!(v.k("SetEvent", &[event]), 1);
+    assert_eq!(v.k("WaitForSingleObjectEx", &[event, 0, 1]), 0);
+    assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 240); // stdcall: return + 3 arguments
+    assert_eq!(v.k("WaitForSingleObjectEx", &[event, 0, 0]), 0x102);
+    assert_eq!(v.k("WaitForSingleObjectEx", &[0xdead, 0, 0]), u32::MAX);
+    assert_eq!(v.k("GetLastError", &[]), 6);
 }
 
 #[test]

@@ -7,6 +7,7 @@ pub mod heap;
 pub mod ir;
 pub mod loader;
 pub mod mem;
+pub mod modules;
 pub mod nls;
 pub mod pe;
 pub mod resource;

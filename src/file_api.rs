@@ -111,6 +111,8 @@ pub fn dispatch(
                 | "CreateDirectoryW"
                 | "FindFirstFileA"
                 | "FindFirstFileW"
+                | "FindFirstFileExA"
+                | "FindFirstFileExW"
                 | "FindNextFileA"
                 | "FindNextFileW"
                 | "FindClose"
@@ -134,6 +136,8 @@ pub fn dispatch(
             | "GetFileAttributesW"
             | "FindFirstFileA"
             | "FindFirstFileW"
+            | "FindFirstFileExA"
+            | "FindFirstFileExW"
     ) {
         u32::MAX
     } else {
@@ -326,7 +330,12 @@ pub fn dispatch(
                 std::fs::create_dir(path).map_err(|e| win_error(&e))?;
                 Ok((1, text))
             }
-            "FindFirstFileA" | "FindFirstFileW" => {
+            "FindFirstFileA" | "FindFirstFileW" | "FindFirstFileExA" | "FindFirstFileExW" => {
+                let extended = name.starts_with("FindFirstFileEx");
+                if extended && (a[1] > 1 || a[3] != 0 || a[4] != 0 || a[5] & !2 != 0) {
+                    return Err(87);
+                }
+                let output = if extended { a[2] } else { a[1] };
                 let text = read_name(mem, a[0], wide)?.replace('\\', "/");
                 let (dir, pattern) = text.rsplit_once('/').unwrap_or((".", text.as_str()));
                 let fs = state.fs.as_ref().ok_or(3u32)?;
@@ -350,7 +359,7 @@ pub fn dispatch(
                 }
                 entries.sort_by_key(|p| p.to_string_lossy().to_lowercase());
                 let first = entries.first().ok_or(2u32)?;
-                find_data(mem, a[1], first, wide)?;
+                find_data(mem, output, first, wide)?;
                 Ok((
                     state.alloc_handle(HandleObj::Search { entries, next: 1 }),
                     text,
@@ -379,7 +388,14 @@ pub fn dispatch(
         Ok(v) => v,
         Err(e) => {
             state.last_error = e;
-            (failure, format!("Win32 error {e}"))
+            let path = if matches!(name, "CreateFileA" | "CreateFileW") {
+                read_name(mem, a[0], wide)
+                    .map(|path| format!("; file {path:?}"))
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            (failure, format!("Win32 error {e}{path}"))
         }
     })
 }
