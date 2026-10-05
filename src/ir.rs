@@ -6,6 +6,7 @@ use crate::pe::PeFile;
 use iced_x86::{Code, Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
 use sha2::{Digest, Sha256};
 pub(crate) mod compact;
+pub mod wasm;
 
 pub const RECORD_BYTES: usize = 64;
 const HEADER_BYTES: usize = 56;
@@ -308,7 +309,7 @@ impl Image {
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(HEADER_BYTES + self.records.len() * RECORD_BYTES);
         out.extend(MAGIC);
-        out.extend(2u32.to_le_bytes());
+        out.extend(3u32.to_le_bytes());
         out.extend((RECORD_BYTES as u32).to_le_bytes());
         out.extend(self.image_base.to_le_bytes());
         out.extend((self.records.len() as u32).to_le_bytes());
@@ -325,7 +326,7 @@ impl Image {
             return Err("invalid IR header".into());
         }
         let word = |offset| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
-        if word(8) != 2 || word(12) != RECORD_BYTES as u32 {
+        if word(8) != 3 || word(12) != RECORD_BYTES as u32 {
             return Err("unsupported IR version/record size".into());
         }
         let count = word(20) as usize;
@@ -615,9 +616,10 @@ fn pack_hot(records: &mut [Record]) {
     }
 }
 
-pub(crate) enum Cached {
-    Compact(compact::Hot, u32),
-    Predecoded(Record),
+pub(crate) struct Hit {
+    pub hot: compact::Hot,
+    pub opcode: u32,
+    pub index: usize,
 }
 
 /// Address lookup is dense within the image span, avoiding hashing per step.
@@ -629,7 +631,7 @@ pub struct Cache {
     hot: Vec<compact::Hot>,
     versions: Vec<u64>,
     native_targets: Vec<Option<u32>>,
-    page_size: u32,
+    page_shift: u32,
     pub accepted: usize,
 }
 impl Cache {
@@ -642,7 +644,7 @@ impl Cache {
                 hot: Vec::new(),
                 versions: Vec::new(),
                 native_targets: Vec::new(),
-                page_size: mem.host_page_size(),
+                page_shift: mem.host_page_size().trailing_zeros(),
                 accepted: 0,
             });
         };
@@ -670,11 +672,12 @@ impl Cache {
                         aux: r.words[10],
                     },
                     next_ip: r.next_ip(),
+                    next_slot: 0,
                 })
                 .collect(),
             records: image.records,
             versions: vec![0; span.div_ceil(page_size) as usize],
-            page_size,
+            page_shift: page_size.trailing_zeros(),
             accepted: 0,
         };
         for (index, r) in cache.records.iter().enumerate() {
@@ -710,33 +713,55 @@ impl Cache {
                 cache.versions[page] = mem.code_version(address);
             }
         }
+        for hot in &mut cache.hot {
+            hot.next_slot = hot
+                .next_ip
+                .checked_sub(base)
+                .and_then(|offset| cache.slots.get(offset as usize))
+                .copied()
+                .unwrap_or(0);
+        }
         Ok(cache)
     }
-    pub(crate) fn get(&self, ip: u32, mem: &GuestMem, profile: bool) -> Option<Cached> {
+    #[inline]
+    pub(crate) fn get(
+        &self,
+        ip: u32,
+        mem: &GuestMem,
+        profile: bool,
+        hint: (u32, u32),
+    ) -> Option<Hit> {
         let offset = ip.checked_sub(self.base)? as usize;
-        let slot = *self.slots.get(offset)?;
+        let slot = if hint.0 == ip && hint.1 != 0 {
+            hint.1
+        } else {
+            *self.slots.get(offset)?
+        };
         if slot == 0 {
             return None;
         }
         let index = slot as usize - 1;
         let hot = self.hot[index];
-        let first = offset / self.page_size as usize;
-        let last = ((hot.next_ip - 1 - self.base) / self.page_size) as usize;
-        if self.versions[first] != mem.code_version(ip)
-            || (last != first && self.versions[last] != mem.code_version(hot.next_ip - 1))
+        let first = offset >> self.page_shift;
+        let last = ((hot.next_ip - 1 - self.base) >> self.page_shift) as usize;
+        if self.versions[first] != mem.code_page_version(ip as usize >> self.page_shift)
+            || (last != first
+                && self.versions[last]
+                    != mem.code_page_version((hot.next_ip - 1) as usize >> self.page_shift))
         {
             return None;
         }
-        if hot.inst.opcode() != 0 {
-            return Some(Cached::Compact(
-                hot,
-                if profile {
-                    self.records[index].opcode()
-                } else {
-                    0
-                },
-            ));
-        }
+        Some(Hit {
+            hot,
+            index,
+            opcode: if profile {
+                self.records[index].opcode()
+            } else {
+                0
+            },
+        })
+    }
+    pub(crate) fn predecoded(&self, index: usize, mem: &GuestMem) -> Record {
         let mut r = self.records[index];
         if r.op() == Op::CallNative
             && (self.native_targets[index].is_none()
@@ -746,6 +771,6 @@ impl Cache {
             // CALL semantics rather than bypassing the patched import slot.
             r.words[2] = Op::Call as u32 | (32 << 8);
         }
-        Some(Cached::Predecoded(r))
+        r
     }
 }

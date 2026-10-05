@@ -9,15 +9,25 @@ fn main() {
     let iterations = std::env::args()
         .nth(1)
         .and_then(|s| s.parse::<u32>().ok())
+        .filter(|&n| n != 0)
         .unwrap_or(3_000_000);
+    let memory = std::env::args().nth(2).as_deref() == Some("memory");
     let mut code = vec![0xb9];
     code.extend(iterations.to_le_bytes());
-    code.extend([0xba, 1, 0, 0, 0, 0x31, 0xc0]);
-    // Six instructions per iteration: redundant flags, one live carry chain,
-    // DEC/JNZ. End on INT3 so both engines stop at exactly the same boundary.
-    code.extend([
-        0x01, 0xd0, 0x83, 0xc2, 1, 0x31, 0xc3, 0x39, 0xd0, 0x49, 0x75, 0xf4, 0xcc,
-    ]);
+    code.extend([0xba, 1, 0, 0, 0]);
+    if memory {
+        code.extend([0xbe, 0, 0, 2, 0, 0xbf, 7, 0, 0, 0]);
+        // SIB load/add/store, DEC/JNZ; checks remain enabled in both engines.
+        code.extend([
+            0x8b, 0x44, 0xbe, 8, 0x01, 0xd0, 0x89, 0x44, 0xbe, 8, 0x49, 0x75, 0xf3, 0xcc,
+        ]);
+    } else {
+        code.extend([0x31, 0xc0]);
+        // Six instructions per iteration; end at the same INT3 boundary.
+        code.extend([
+            0x01, 0xd0, 0x83, 0xc2, 1, 0x31, 0xc3, 0x39, 0xd0, 0x49, 0x75, 0xf4, 0xcc,
+        ]);
+    }
     let image = Image::from_code(0x10000, &code).unwrap();
     let bytes = image.encode();
     println!(
@@ -31,8 +41,10 @@ fn main() {
         let ir = round % 2 == 1;
         let mut mem = GuestMem::new().unwrap();
         mem.commit(0x10000, 0x10000).unwrap();
+        mem.commit(0x20000, 0x10000).unwrap();
         mem.commit(0x30000, 0x10000).unwrap();
         mem.write_bytes(0x10000, &code).unwrap();
+        mem.write_u32(0x20024, 0x12345678).unwrap();
         let mut cpu = Cpu::new(0x10000, 0x3fff0, 0);
         cpu.profile_opcodes = false;
         if ir {
@@ -58,7 +70,13 @@ fn main() {
         );
         let elapsed = start.elapsed().as_secs_f64();
         assert!(matches!(outcome,RunOutcome::Crashed(ref s) if s.contains("breakpoint")));
-        let result = (cpu.regs, cpu.eflags, cpu.eip, cpu.instr_count);
+        let result = (
+            cpu.regs,
+            cpu.eflags,
+            cpu.eip,
+            cpu.instr_count,
+            mem.read_u32(0x20024).unwrap(),
+        );
         if let Some(expected) = reference {
             assert_eq!(result, expected);
         } else {

@@ -15,7 +15,7 @@ fn main() -> ExitCode {
         eprintln!("  wire imports <program.exe>");
         eprintln!("  wire prepare <program.exe> [--out program.wir]");
         eprintln!(
-            "  wire run <program.exe> [--ir program.wir] [--no-op-stats] [--max-instr N] [--log-dir DIR] [--cwd DIR] [--trace-cpu]"
+            "  wire run <program.exe> [--ir program.wir] [--op-stats] [--max-instr N] [--log-dir DIR] [--cwd DIR] [--trace-cpu]"
         );
         return ExitCode::from(2);
     }
@@ -179,7 +179,7 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
     let mut trace_cpu = false;
     let mut guest_cwd = None;
     let mut ir_path = None;
-    let mut profile_opcodes = true;
+    let mut profile_opcodes = false;
     let mut i = 0;
     while i < opts.len() {
         match opts[i].as_str() {
@@ -197,6 +197,7 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
                 }
             }
             "--trace-cpu" => trace_cpu = true,
+            "--op-stats" => profile_opcodes = true,
             "--no-op-stats" => profile_opcodes = false,
             "--ir" => {
                 i += 1;
@@ -370,7 +371,7 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
             println!("  {c:>6}  {k}");
         }
     }
-    {
+    if cpu.profile_opcodes {
         println!("\ntop executed opcodes ({} distinct):", cpu.op_stats.len());
         let mut v: Vec<(&u32, &u64)> = cpu.op_stats.iter().collect();
         v.sort_by(|a, b| b.1.cmp(a.1));

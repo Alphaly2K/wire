@@ -34,6 +34,17 @@ pub(crate) const INC_I32: u8 = 22;
 pub(crate) const DEC_I32: u8 = 23;
 pub(crate) const JCC_BASE: u8 = 32; // Sixteen separate condition opcodes.
 pub(crate) const JMP_I32: u8 = 48;
+pub(crate) const LOAD_I32: u8 = 49;
+pub(crate) const STORE_I32: u8 = 50;
+pub(crate) const LEA_I32: u8 = 51;
+pub(crate) const LOAD_GPR8: u8 = 52;
+pub(crate) const LOAD_GPR16: u8 = 53;
+pub(crate) const STORE_GPR8: u8 = 54;
+pub(crate) const STORE_GPR16: u8 = 55;
+pub(crate) const LOAD_U8_I32: u8 = 56;
+pub(crate) const LOAD_U16_I32: u8 = 57;
+pub(crate) const LOAD_S8_I32: u8 = 58;
+pub(crate) const LOAD_S16_I32: u8 = 59;
 
 const FLAG_BITS: [u32; 6] = [CF, PF, AF, ZF, SF, OF];
 impl Inst {
@@ -51,9 +62,49 @@ impl Inst {
     }
     pub fn eager_flags(self) -> u32 {
         let packed = self.bits >> 26;
-        FLAG_BITS.iter().enumerate().fold(0, |flags, (i, bit)| {
-            flags | if packed & (1 << i) != 0 { *bit } else { 0 }
-        })
+        (packed & 1)
+            | ((packed & 2) << 1)
+            | ((packed & 4) << 2)
+            | ((packed & 8) << 3)
+            | ((packed & 16) << 3)
+            | ((packed & 32) << 6)
+    }
+    pub fn address_scale(self) -> u32 {
+        (self.bits >> 26) & 3
+    }
+    pub fn address_segment(self) -> u32 {
+        (self.bits >> 28) & 3
+    }
+    pub fn has_base(self) -> bool {
+        self.bits & (1 << 30) != 0
+    }
+    pub fn has_index(self) -> bool {
+        self.bits & (1 << 31) != 0
+    }
+    fn memory(op: u8, register: usize, address: super::Operand) -> Self {
+        // Non-FLAGS opcodes reuse the top six bits for address metadata.
+        // Presence bits avoid stealing a virtual register as a zero sentinel.
+        Self {
+            bits: op as u32
+                | ((register as u32) << 8)
+                | (((if address.base() == 15 {
+                    0
+                } else {
+                    address.base()
+                }) as u32)
+                    << 14)
+                | (((if address.index() == 15 {
+                    0
+                } else {
+                    address.index()
+                }) as u32)
+                    << 20)
+                | (address.scale() << 26)
+                | (address.segment() << 28)
+                | (u32::from(address.base() != 15) << 30)
+                | (u32::from(address.index() != 15) << 31),
+            aux: address.value,
+        }
     }
     fn new(op: u8, dst: usize, a: usize, b: usize, flags: u32, aux: u32) -> Self {
         let packed = FLAG_BITS.iter().enumerate().fold(0, |n, (i, bit)| {
@@ -76,6 +127,37 @@ impl Inst {
             Op::Nop => (NOP, 0, 0, 0, 0),
             Op::Mov if reg32(a) && reg32(b) => (MOV_I32, a.base(), b.base(), 0, 0),
             Op::Mov if reg32(a) && b.kind() == 2 => (CONST_I32, a.base(), 0, 0, b.value),
+            Op::Mov if a.kind() == 1 && b.kind() == 3 => {
+                let op = match a.width() {
+                    8 => LOAD_GPR8,
+                    16 => LOAD_GPR16,
+                    32 => LOAD_I32,
+                    _ => return None,
+                };
+                return Some(Self::memory(op, a.base(), b));
+            }
+            Op::Mov if a.kind() == 3 && b.kind() == 1 => {
+                let op = match a.width() {
+                    8 => STORE_GPR8,
+                    16 => STORE_GPR16,
+                    32 => STORE_I32,
+                    _ => return None,
+                };
+                return Some(Self::memory(op, b.base(), a));
+            }
+            Op::Lea if reg32(a) && b.kind() == 3 => {
+                return Some(Self::memory(LEA_I32, a.base(), b));
+            }
+            Op::Movzx | Op::Movsx if reg32(a) && b.kind() == 3 => {
+                let op = match (r.op(), b.width()) {
+                    (Op::Movzx, 8) => LOAD_U8_I32,
+                    (Op::Movzx, 16) => LOAD_U16_I32,
+                    (Op::Movsx, 8) => LOAD_S8_I32,
+                    (Op::Movsx, 16) => LOAD_S16_I32,
+                    _ => return None,
+                };
+                return Some(Self::memory(op, a.base(), b));
+            }
             Op::Alu if r.width() == 32 && reg32(a) => {
                 if r.sub() >= 9 {
                     (INC_I32 + (r.sub() - 9), a.base(), a.base(), 0, 1)
@@ -101,4 +183,5 @@ impl Inst {
 pub(crate) struct Hot {
     pub inst: Inst,
     pub next_ip: u32,
+    pub next_slot: u32,
 }

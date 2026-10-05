@@ -1,6 +1,6 @@
 //! Fixed-record interpreter, sharing wire's guest-memory/register semantics.
 use super::{mask, read_sized, sign_extend, write_sized, Cpu, CpuError, AF, CF, OF, PF, SF, ZF};
-use crate::ir::{compact, Cached, Image, Op, Operand, Record, FLAGS};
+use crate::ir::{compact, Image, Op, Operand, Record, FLAGS};
 use crate::mem::GuestMem;
 
 #[derive(Clone, Copy)]
@@ -63,6 +63,7 @@ impl Cpu {
         let cache = crate::ir::Cache::bind(image, mem)?;
         let accepted = cache.accepted;
         self.ir_cache = Some(cache);
+        self.ir_hint = (0, 0);
         Ok(accepted)
     }
     pub fn effective_eflags(&self) -> u32 {
@@ -98,52 +99,83 @@ impl Cpu {
         };
     }
     pub(super) fn step_cached(&mut self, mem: &mut GuestMem) -> Result<(), CpuError> {
-        let record = self
-            .ir_cache
-            .as_ref()
-            .and_then(|c| c.get(self.eip, mem, self.profile_opcodes));
-        if let Some(r) = record {
-            self.ir_steps += 1;
-            if self.trace_enabled {
-                let mut bytes = Vec::with_capacity(8);
-                for i in 0..8 {
-                    match mem.read_u8(self.eip.wrapping_add(i)) {
-                        Ok(b) => bytes.push(b),
-                        Err(_) => break,
+        self.steps_cached(mem, 1).1
+    }
+    /// Run a straight-line typed segment, retaining a guest boundary after
+    /// every operation. Cold/fallback/control-flow operations return to the
+    /// outer API/callback dispatcher immediately.
+    pub(super) fn steps_cached(
+        &mut self,
+        mem: &mut GuestMem,
+        limit: u64,
+    ) -> (u64, Result<(), CpuError>) {
+        let mut retired = 0;
+        loop {
+            let record = self
+                .ir_cache
+                .as_ref()
+                .and_then(|c| c.get(self.eip, mem, self.profile_opcodes, self.ir_hint));
+            if let Some(r) = record {
+                self.ir_steps += 1;
+                if self.trace_enabled {
+                    let mut bytes = Vec::with_capacity(8);
+                    for i in 0..8 {
+                        match mem.read_u8(self.eip.wrapping_add(i)) {
+                            Ok(b) => bytes.push(b),
+                            Err(_) => break,
+                        }
+                    }
+                    self.trace_ring.push_back((self.eip, bytes));
+                    if self.trace_ring.len() > 256 {
+                        self.trace_ring.pop_front();
                     }
                 }
-                self.trace_ring.push_back((self.eip, bytes));
-                if self.trace_ring.len() > 256 {
-                    self.trace_ring.pop_front();
+                if self.profile_opcodes {
+                    let opcode = r.opcode;
+                    let primary = opcode & 0xff;
+                    *self.op_stats.entry(primary).or_insert(0) += 1;
+                    if primary == 0x0f {
+                        *self.op_stats.entry(0x100 | (opcode >> 16)).or_insert(0) += 1;
+                    }
                 }
-            }
-            if self.profile_opcodes {
-                let opcode = match &r {
-                    Cached::Compact(_, opcode) => *opcode,
-                    Cached::Predecoded(r) => r.opcode(),
+                let op = r.hot.inst.opcode();
+                let result = if op != 0 {
+                    self.execute_compact(r.hot, mem)
+                } else {
+                    let record = self.ir_cache.as_ref().unwrap().predecoded(r.index, mem);
+                    self.execute_ir(record, mem)
                 };
-                let primary = opcode & 0xff;
-                *self.op_stats.entry(primary).or_insert(0) += 1;
-                if primary == 0x0f {
-                    *self.op_stats.entry(0x100 | (opcode >> 16)).or_insert(0) += 1;
+                self.ir_hint = if result.is_ok() && self.eip == r.hot.next_ip {
+                    (r.hot.next_ip, r.hot.next_slot)
+                } else {
+                    (0, 0)
+                };
+                if let Err(error) = result {
+                    return (retired, Err(error));
                 }
-            }
-            match r {
-                Cached::Compact(hot, _) => {
-                    self.execute_compact(hot);
-                    Ok(())
+                retired += 1;
+                // API stubs and callback sentinels stay in the outer run loop.
+                // Any branch also leaves the segment, including not-taken Jcc.
+                if retired >= limit
+                    || op == 0
+                    || matches!(op, compact::JCC_BASE..=compact::JMP_I32)
+                    || self.eip >= crate::api::STUB_BASE
+                    || r.hot.next_slot == 0
+                {
+                    return (retired, Ok(()));
                 }
-                Cached::Predecoded(r) => self.execute_ir(r, mem),
+            } else {
+                if self.ir_cache.is_some() {
+                    self.ir_fallbacks += 1;
+                }
+                self.flush_flags();
+                self.ir_hint = (0, 0);
+                let result = self.step_x86(mem);
+                return (retired + u64::from(result.is_ok()), result);
             }
-        } else {
-            if self.ir_cache.is_some() {
-                self.ir_fallbacks += 1;
-            }
-            self.flush_flags();
-            self.step_x86(mem)
         }
     }
-    fn execute_compact(&mut self, hot: compact::Hot) {
+    fn execute_compact(&mut self, hot: compact::Hot, mem: &GuestMem) -> Result<(), CpuError> {
         use compact::*;
         let i = hot.inst;
         self.eip = hot.next_ip;
@@ -152,6 +184,45 @@ impl Cpu {
             NOP => {}
             MOV_I32 => self.regs[i.dst()] = self.regs[i.a()],
             CONST_I32 => self.regs[i.dst()] = i.aux,
+            LOAD_I32..=LOAD_S16_I32 => {
+                let base = if i.has_base() { self.regs[i.a()] } else { 0 };
+                let index = if i.has_index() {
+                    self.regs[i.b()].wrapping_shl(i.address_scale())
+                } else {
+                    0
+                };
+                let segment = if op == LEA_I32 {
+                    0
+                } else {
+                    match i.address_segment() {
+                        1 => self.fs_base,
+                        2 => self.gs_base,
+                        _ => 0,
+                    }
+                };
+                let address = base
+                    .wrapping_add(index)
+                    .wrapping_add(i.aux)
+                    .wrapping_add(segment);
+                // All guest range/commit checks and code-write tracking stay in
+                // GuestMem. Only x86 operand decoding/record copies disappear.
+                match op {
+                    LOAD_I32 => self.regs[i.dst()] = mem.read_u32(address)?,
+                    STORE_I32 => mem.write_u32(address, self.regs[i.dst()])?,
+                    LEA_I32 => self.regs[i.dst()] = address,
+                    LOAD_GPR8 => self.set_r8(i.dst(), mem.read_u8(address)?),
+                    LOAD_GPR16 => self.set_r(i.dst(), mem.read_u16(address)? as u32, 16),
+                    STORE_GPR8 => mem.write_u8(address, self.r8(i.dst()))?,
+                    STORE_GPR16 => mem.write_u16(address, self.regs[i.dst()] as u16)?,
+                    LOAD_U8_I32 => self.regs[i.dst()] = mem.read_u8(address)? as u32,
+                    LOAD_U16_I32 => self.regs[i.dst()] = mem.read_u16(address)? as u32,
+                    LOAD_S8_I32 => self.regs[i.dst()] = mem.read_u8(address)? as i8 as i32 as u32,
+                    LOAD_S16_I32 => {
+                        self.regs[i.dst()] = mem.read_u16(address)? as i16 as i32 as u32
+                    }
+                    _ => unreachable!(),
+                }
+            }
             JMP_I32 => self.eip = i.aux,
             JCC_BASE..=47 => {
                 if self.cc(op - JCC_BASE) {
@@ -206,6 +277,7 @@ impl Cpu {
             }
             _ => unreachable!("compact instructions are validated before binding"),
         }
+        Ok(())
     }
     fn ir_address(&self, o: Operand, segment: bool) -> u32 {
         let base = if o.base() == 15 {

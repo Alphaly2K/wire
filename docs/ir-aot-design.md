@@ -45,7 +45,8 @@ Semantic IR 可以有 SSA、类型、地址表达式和完整 guest 边界信息
 Execution IR 保持 opcode 集合小、类型明确、取指简单。AOT 优化在导出执行格式前完成，
 运行时不做 x86 变长解码，未覆盖入口和动态/修改过的代码由原 x86 解释器兜底。
 
-同一Semantic IR也可直接lower为Wasm操作，由平台JSC编译/执行；不在Wasm里再次解释Execution IR。
+**解释执行是主路径**，优化优先依据该路径的实测热点。Wasm仅在平台能力、语义与状态同步均满足时加速；
+当前wire主程序未接入Wasm调度。同一Semantic IR也可直接lower为Wasm操作，由平台JSC编译/执行；不在Wasm里再次解释Execution IR。
 进程内JavaScriptCore与WKWebView的内存/gateway条件分别测量，详见 [JSC可行性记录](wasm-jsc-feasibility.md)。
 
 执行成本同时取决于每次分发成本与分发次数。`IR ops / retired guest instruction ≤ 1.5` 是测量目标，
@@ -62,13 +63,21 @@ Execution IR 保持 opcode 集合小、类型明确、取指简单。AOT 优化�
 | dst | 6 | 目标 vreg，0–63 |
 | srcA | 6 | 第一源 vreg，0–63 |
 | srcB | 6 | 第二源 vreg，0–63 |
-| eager_flags | 6 | CF、PF、AF、ZF、SF、OF 的保守计算掩码 |
+| metadata | 6 | 算术为 eager_flags；内存/LEA 为 scale、segment、base/index presence |
 | aux | 32 | 由 opcode 唯一决定：立即数、常量池/地址描述符/分支/导入编号 |
 
-第一 word 从低到高为 `opcode:8 | dst:6 | srcA:6 | srcB:6 | eager_flags:6`。
+第一 word 从低到高为 `opcode:8 | dst:6 | srcA:6 | srcB:6 | metadata:6`。
+算术 opcode 的 metadata 为 eager_flags。
 标志掩码是六位紧凑编号，不能与 x86 EFLAGS 原位值混用。未用字段必须置零；不把 vreg63 当 sentinel。
 寄存器型 ADD_I32 与立即数型 ADD_IMM_I32 是不同 opcode，handler 不再读取独立 width 字段。
 Jcc 采用 16 个条件 opcode，aux 为目标；控制流的最终持久格式应使用 image RVA 或 block ID。
+
+LOAD/STORE/LEA 不改 FLAGS，复用 metadata：bit26–27 为 scale 的 log2，bit28–29 为
+segment（0=平坦、1=FS、2=GS），bit30/31 分别表示 base/index 存在。
+srcA/srcB 是 base/index，aux 是32位 displacement；dst 在 STORE 中是待写源寄存器。
+LOAD/STORE_I32、LOAD/STORE_GPR8/16、LOAD_U8/U16/S8/S16_I32 与 LEA_I32 都是一条8B操作，
+无需额外寻址 dispatch。GPR8 的编号4–7沿用 x86 AH/CH/DH/BH 编码；GPR16/8 load 保留未写位。
+FS/GS 在运行时读取线程基址，LEA 不加 segment。
 
 最小核心包含常量/移动、整数算术/扩展、guest load/store、条件与控制流、CALL_NATIVE、
 受控 fallback；暂时不为整个 x86 ISA 枚举一套 IR opcode。只有新增热点、能减少总执行成本时才加融合指令。
@@ -161,41 +170,61 @@ VMM 应在任何省略访问检查的快路径前实现。Apple Silicon 的16KiB
 
 ## 当前实现与目标格式的距离
 
-当前 `.wir` **版本2**仍使用56B头和64B固定预解码记录，以 EXE SHA-256 绑定源文件，字段显式 LE。
-常见 I32 GPR 移动/算术/比较/立即数、NOP 和直接分支，在 AOT 时生成上面8B typed instruction，
-放入记录原先未用的两个 word。装载后建立独立的 **12B 热条目（8B指令 + 4B next guest PC）**，
-运行时整数热路径不复制/解析完整64B记录，也不解码 x86 的 operand/width。
-内存、窄寄存器和 CALL_NATIVE 使用64B预解码慢路径；SSE/x87/其他未覆盖指令用原解释器。
+当前 `.wir` **版本3**仍使用56B头和64B固定预解码记录，以 EXE SHA-256 绑定源文件，字段显式 LE。
+版本2文件需重新 `wire prepare`。常见 I32 GPR 移动/算术/比较/立即数、NOP、直接分支、
+上述 typed load/store/LEA，在 AOT 时生成上面8B instruction，放入冷记录的两个 word。
+装载后建立独立的 **16B 热条目（8B指令 + 4B next guest PC + 4B next slot）**。
+命中结果只含热条目及索引，慢路径才复制完整64B记录；避免大 enum 让每次命中都搬运冷数据。
+顺序 successor 在 bind 完成源字节验证后建立，只能指向已接受记录；运行时用 expected PC 验证 hint，
+每条指令仍检查代码页 generation，跨页检查两页。修改代码、分支、fault、fallback 和线程恢复
+不会绕过这些检查。页索引使用 shift，消除热路径动态除法。
+无trace/opcode统计时，连续typed指令在一个解释段内调度，减少每条指令重复的外层halt/API分发；
+CLI的opcode统计现默认关闭，`--op-stats`显式开启；旧`--no-op-stats`保留兼容。
+分支、冷记录、fallback与stub边界返回外层。预算和1,048,576条指令的协作分时边界精确截断，
+中途fault只计已成功退休的前缀。单步与开启观测时仍逐条返回，FLAGS恢复规则不变。
+GuestMem预先验证宿主页尺寸为2的幂，checked访问用shift定位页；标量访问先检查首个页，
+跨页继续检查剩余所有页，写入继续递增代码代数。没有unchecked访存路径。
+内存算术、其他窄寄存器和 CALL_NATIVE 使用64B预解码慢路径；SSE/x87/其他未覆盖指令用原解释器。
 
-**512B vreg bank、完整 Semantic IR、所有类型的8B lowering、紧凑持久文件与 block chaining 还未实现。**
+**解释器的512B vreg bank、完整 Semantic IR、所有类型的8B lowering、紧凑持久文件与通用 block chaining 还未实现。**
 当前热子集借用现有 EAX…EDI 存储，不能将其包装成已经完成的64-vreg后端。
 64B冷记录包含原始字节、PC、操作数和分析信息；磁盘与 resident footprint 仍偏大。
 当前 dense PC 索引每个源字节占4B，另有 hot/cold records 和页代数；不能只报告8B热指令的尺寸。
+本机目标的cache向量有效载荷约107,942,472B：冷记录69,373,632B、热条目17,343,408B、
+dense索引12,552,192B、native target表8,671,704B、区域页代数1,536B。
+不含allocator容量/元数据、GuestMem页表、guest commit页及临时输入buffer，不能当peak RSS。
 
-下一步按运行时收益排序：扩大常见 typed load/store 与寻址融合覆盖、顺序 IR PC/block chaining，
-减少每条指令的 guest-PC 查表和页代数检查；然后才是保存紧凑热代码与必要 side tables、稀疏索引和完整 vreg bank。
+本轮已扩大 typed memory 与顺序链接覆盖。下一步按真实热点扩展融合、通用 block chaining，
+并设计紧凑热代码与必要 side tables、稀疏索引和完整 vreg bank。任何减少页代数检查的措施需另有正确性证明。
 64B格式是可回归比较的过渡原型，不是最终小规模 IR。
 
 ## 验证与测量（2026-10-05）
 
-`cargo test --release` 共66项通过：1 unit、34 differential、5 FPU、6 IR、20 Win32。
+`cargo test --release` 共71项通过：1 unit、34 differential、5 FPU、10 IR、1 Wasm、20 Win32。
 34族差分同时比较 raw x86、IR 与 Unicorn；IR 测试检查静态 FLAGS 边界、预算/fault 恢复、
 自修改/重叠入口、格式错误/EXE不匹配、SIB/FS/高字节以及 CALL_NATIVE/IAT hook。
+本轮增加 typed store 对顺序链接的代码失效、拒绝记录不可经 successor 到达、
+MOVZX窄访问在未commit边界上的精确宽度与FLAGS/fault恢复检查。
+连续段额外验证每个预算位置、分支/fallback/fault退休计数与精确协作分时/保存FLAGS。
 `cargo clippy --all-targets -- -D warnings` 与 format 检查通过。
 
-合成测试 `cargo run --release --example ir_bench`：3M轮，18,000,003条 retired guest 指令，
+合成测试 `cargo run --release --example ir_bench -- 10000000 [memory]`：整数60,000,003条、
+SIB load/add/store循环50,000,004条 retired guest 指令。
 关闭 trace/opcode profiling，无 API 调用；AOT/绑定不计入执行时间，交替运行3对，终态寄存器/FLAGS/PC/指令数严格相同。
+访存循环还比较最终数据word。Apple M4（Mac16,12），macOS26.5.1；顺序测量，不与build/test并发。
 
-| 执行器 | 三次 guest MIPS |
-| --- | --- |
-| 原 x86 解释 | 59.18 / 60.14 / 58.67 |
-| 8B typed 热路径 + 预解码 fallback | 70.03 / 76.75 / 79.69 |
+| 循环 | 优化版raw x86 | 优化版IR guest MIPS |
+| --- | --- | --- |
+| ALU/branch | 43.49 / 35.30 / 36.40 | 66.99 / 61.56 / 55.17 |
+| checked SIB load/add/store | 42.04 / 36.66 / 38.74 | 79.32 / 78.11 / 75.93 |
 
-这些是一次本机运行的短 ALU/branch 循环，不能外推为游戏吞吐或100–200 MIPS承诺。
-原64B-only版本曾只提高约2–8%；这一差异支持继续降低运行时取指/分发成本，而非优化 AOT 吞吐。
+同批连续调度优化前的IR为ALU57.81/50.56/56.32、访存75.05/67.16/66.89。
+最初typed-memory/顺序链接前的IR访存样本曾为63.64/63.34/63.26，第一阶段为90.30/90.40/87.74；
+后续测试raw本身也显著下降，说明本机负载/调度存在大幅波动，不能跨批次把这些绝对值相减。
+保留全部分阶段数据于 `wire-out/ir-performance/`。这些是合成循环，不能外推为游戏吞吐或100–200 MIPS承诺。
 对照程序两种后端都正常退出，641条指令、43个API调用，输出同为21B `wire control program\n`；
 IR命中638条，fallback3条，CALL_NATIVE7次。该程序过短，不能用它测性能。
 
 真实目标完整目录下的对照及文件尺寸见本轮进度记录；当前仍停在 RtlUnwind。
-游戏 `.wir` 有1,083,963条记录，其中320,634条使用8B热指令，文件69,373,688B，
+游戏 `.wir` 有1,083,963条记录，其中562,602条使用8B热指令（原为320,634），文件69,373,688B，
 说明下一版必须压缩持久记录、改进代码发现与索引，而不能宣称目标“IR规模小”已经达到。

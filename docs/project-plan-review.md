@@ -2,7 +2,8 @@
 
 本文件评审用户提供的 [Project design.md](Project%20design.md)，按提高运行时吞吐确定近期优先级。
 用户已明确接受 Wasm 经系统 JSC 使用 JIT；项目不自建宿主机器码 JIT。
-当前以 PE32 为主，解释器和可选 Wasm 加速共用语义与极度保守的静态 FLAGS 分析。
+当前以 PE32 为主，**解释执行是主路径，Wasm仅作可用时的加速路径**；运行时优化优先投入解释器。
+两条路线共用语义与极度保守的静态 FLAGS 分析。
 具体编码与状态模型见 [IR AOT 设计](ir-aot-design.md)。
 
 ## 适合采用的部分
@@ -67,5 +68,9 @@
 | 6 | VMM权限/映射、gateway ABI、热点 native replacement | Win32行为/异常/线程/回调回归与可量化端到端收益 |
 
 本轮已完成第1项的过渡原型、I32 typed热路径子集和 CALL_NATIVE 的受控分发/IAT guard。
-64B文件仍偏大，尚未完成最终 Execution IR。已完成本机JSC Wasm执行/TypedArray内存写入探针，
-完整Wasm lowering、gateway/双后端调度与Wine整体移植尚未实现。
+第2项已有typed load/store/LEA、顺序successor和连续解释段；checked访存移除动态页尺寸除法，
+精确保留原始guest预算、fault计数和线程分时。71项回归通过。当前游戏仍约23%的指令走raw fallback，
+下一轮应细分0f/SSE、x87与冷预解码热点，继续降低主解释器成本；合成循环不能替代端到端数据。
+64B文件仍偏大，尚未完成最终 Execution IR。JSC实验已经直接lower单个寄存器自然循环，
+测了macOS系统JIT、native调用、同步I/O、memory.grow和嵌套回调；签名与fast-memory限制详见
+[验证记录](wasm-jsc-feasibility.md)。完整Wasm lowering、gateway/双后端调度与Wine整体移植尚未实现。

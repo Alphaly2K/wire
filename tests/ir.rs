@@ -203,6 +203,85 @@ fn lazy_flags_are_restored_at_instruction_limits_and_before_faults() {
 trait Outcome {
     fn to_string_for_test(&self) -> String;
 }
+
+#[test]
+fn typed_segments_preserve_every_budget_and_fault_retirement_boundary() {
+    let code = [
+        0xb9, 3, 0, 0, 0, // MOV ECX,3
+        0x89, 0x03, 0x83, 0xc0, 1, 0x0f, 0xb6, 0x13, 0x49, 0x75, 0xf5, 0xd1,
+        0xc0, // ROL EAX,1: raw fallback boundary
+        0x8b, 0x06, // MOV EAX,[ESI]: fault after successful instructions
+        0xcc,
+    ];
+    for budget in 0..=20 {
+        let mut states = Vec::new();
+        for use_ir in [false, true] {
+            let (mut cpu, mut mem) = machine(&code, use_ir);
+            cpu.regs[0] = 0xffff_fffe;
+            cpu.regs[3] = DATA;
+            cpu.regs[6] = 0x700000; // uncommitted
+            let outcome = run(&mut cpu, &mut mem, budget);
+            states.push((
+                outcome.to_string_for_test(),
+                cpu.regs,
+                cpu.eflags,
+                cpu.eip,
+                cpu.instr_count,
+                mem.read_u32(DATA).unwrap(),
+            ));
+        }
+        assert_eq!(states[0], states[1], "budget {budget}");
+    }
+}
+
+#[test]
+fn typed_segment_stops_at_the_exact_cooperative_timeslice() {
+    let mut code = vec![0x83, 0xc0, 1, 0x83, 0xc0, 1, 0xb8, 0xad, 0xde, 0, 0];
+    code.resize(0x80, 0x90);
+    code.extend([0xb8, 9, 0, 0, 0, 0x83, 0xc0, 1, 0xcc]);
+    let mut states = Vec::new();
+    for use_ir in [false, true] {
+        let (mut cpu, mut mem) = machine(&code, use_ir);
+        cpu.regs[0] = 0xffff_fffe;
+        cpu.instr_count = 0x10_0000 - 2;
+        let mut api = ApiTable::new();
+        let mut state = ApiState::new(CODE, "C:\\slice.exe".into(), 0, 0);
+        let path =
+            std::env::temp_dir().join(format!("wire-ir-slice-{}-{use_ir}.log", std::process::id()));
+        let mut log = ApiLogger::new(&path).unwrap();
+        let mut sched = Sched::new();
+        let tid = sched.alloc_tid();
+        let handle = state.alloc_handle(HandleObj::Thread { tid });
+        sched.add_main(tid, handle, 0);
+        let worker = sched.alloc_tid();
+        let handle = state.alloc_handle(HandleObj::Thread { tid: worker });
+        sched
+            .create_thread(&mut mem, CODE + 0x80, 0, false, worker, handle, 0)
+            .unwrap();
+        let outcome = cpu.run(
+            &mut mem,
+            &mut api,
+            &mut state,
+            &mut log,
+            &mut sched,
+            0x10_0000 + 2,
+        );
+        assert!(matches!(outcome, RunOutcome::InstructionLimit));
+        assert_eq!(cpu.regs[0], 10); // two instructions in the worker
+        assert_eq!(sched.threads[0].ctx.regs[0], 0); // exactly two in main
+        assert_eq!(sched.threads[0].ctx.eip, CODE + 6);
+        states.push((
+            cpu.regs,
+            cpu.eflags,
+            cpu.eip,
+            cpu.instr_count,
+            sched.threads[0].ctx.eflags,
+        ));
+        drop(log);
+        std::fs::remove_file(path).unwrap();
+    }
+    assert_eq!(states[0], states[1]);
+}
 impl Outcome for RunOutcome {
     fn to_string_for_test(&self) -> String {
         match self {
@@ -239,6 +318,63 @@ fn changed_code_and_unrecognized_entry_points_fall_back() {
             .unwrap(),
         0
     );
+}
+
+#[test]
+fn compact_store_invalidates_a_prelinked_successor_and_rejected_records_are_not_linked() {
+    let mut code = vec![0xb8, 0x49, 0, 0, 0, 0xa2]; // MOV AL -> code byte
+    code.extend((CODE + 10).to_le_bytes());
+    code.extend([0x41, 0xcc]); // INC ECX becomes DEC ECX
+    let (mut cpu, mut mem) = machine(&code, true);
+    cpu.regs[1] = 3;
+    cpu.step(&mut mem).unwrap();
+    cpu.step(&mut mem).unwrap();
+    cpu.step(&mut mem).unwrap();
+    assert_eq!(cpu.regs[1], 2);
+    assert_eq!((cpu.ir_steps, cpu.ir_fallbacks), (2, 1));
+
+    // The first record binds but the subsequent patched one must not be
+    // reachable through the precomputed sequential index.
+    let code = [0xb8, 1, 0, 0, 0, 0x41, 0xcc];
+    let (mut cpu, mut mem) = machine(&code, false);
+    mem.write_u8(CODE + 5, 0x49).unwrap();
+    cpu.install_ir(Image::from_code(CODE, &code).unwrap(), &mem)
+        .unwrap();
+    cpu.regs[1] = 3;
+    cpu.step(&mut mem).unwrap();
+    cpu.step(&mut mem).unwrap();
+    assert_eq!(cpu.regs[1], 2);
+    assert_eq!((cpu.ir_steps, cpu.ir_fallbacks), (1, 1));
+}
+
+#[test]
+fn typed_memory_access_keeps_exact_width_fault_state_and_flags() {
+    let address = STACK + 0xffff;
+    for second in [0xb6, 0xb7] {
+        // MOVZX byte succeeds; word crosses the boundary
+        let mut code = vec![0x83, 0xc0, 1, 0x0f, second, 0x1d];
+        code.extend(address.to_le_bytes());
+        code.push(0xcc);
+        let mut results = Vec::new();
+        for ir in [false, true] {
+            let (mut cpu, mut mem) = machine(&code, ir);
+            cpu.regs[0] = u32::MAX;
+            mem.write_u8(address, 0x80).unwrap();
+            let outcome = run(&mut cpu, &mut mem, 10);
+            results.push((
+                cpu.regs,
+                cpu.eflags,
+                cpu.eip,
+                cpu.instr_count,
+                outcome.to_string_for_test(),
+            ));
+            if ir {
+                assert!(cpu.ir_steps >= 2);
+            }
+        }
+        assert_eq!(results[0], results[1]);
+        assert_eq!(results[0].0[3], if second == 0xb6 { 0x80 } else { 0 });
+    }
 }
 #[test]
 fn fixed_ir_roundtrips_and_rejects_invalid_files_or_wrong_exe() {

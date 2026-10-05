@@ -39,17 +39,20 @@ cargo build --release
 wire imports path/to/program.exe
 
 # 运行；API 全量 trace 与频率表写入 wire-out/api.log
-wire run path/to/program.exe [--max-instr N] [--log-dir DIR] [--cwd DIR] [--trace-cpu]
+wire run path/to/program.exe [--max-instr N] [--log-dir DIR] [--cwd DIR] [--trace-cpu] [--op-stats]
 
 # 实验性安装期预解码；运行时以 typed IR 解释常见指令，其余用原解释器
 wire prepare path/to/program.exe --out wire-out/program.wir
-wire run path/to/program.exe --ir wire-out/program.wir --no-op-stats
+wire run path/to/program.exe --ir wire-out/program.wir
 
 # 相同观测配置下的 ALU/branch guest MIPS 对照（AOT不计入执行时间）
 cargo run --release --example ir_bench
+cargo run --release --example ir_bench -- 10000000 memory
 ```
 
 文件访问默认以 EXE 所在目录为根，将其映射为 guest `C:\`；`--cwd DIR` 可指定另一目录。
+opcode统计默认关闭，`--op-stats`开启频率表；`--trace-cpu`开启逐条CPU trace，均有运行开销。
+旧`--no-op-stats`参数继续接受。默认IR运行可使用连续段调度，无需额外关闭统计。
 guest 当前目录独立于宿主目录，拒绝 `..` 越界、其他盘符、UNC/device 路径以及指向根目录外的符号链接。
 已实现同步读取、写入、64 位 seek、文件大小与目录枚举；OVERLAPPED、文件映射与共享锁尚未实现。
 
@@ -61,7 +64,10 @@ guest 当前目录独立于宿主目录，拒绝 `..` 越界、其他盘符、UN
 不是最终64-vreg紧凑后端。FLAGS只在直线段内按极保守静态证明省去即时计算，观察点恢复完整状态；
 CALL_NATIVE 保留 IAT hook、现有 API 栈清理和 callback 行为。设计、许可核实与测量见
 [IR AOT 设计](docs/ir-aot-design.md)；长期计划的修正见 [方案评审](docs/project-plan-review.md)。
-JSC Wasm路线的首个公开API执行/内存探针见 [可行性记录](docs/wasm-jsc-feasibility.md)。
+版本3增加typed load/store/LEA、顺序链接和连续解释段，保留所有访存/代码失效检查；版本2 `.wir` 需重新生成。
+解释执行是主路径，性能优化以此为优先；Wasm只作可用时的可选加速。
+实验性单循环IR→Wasm lowering、系统JSC JIT和native bridge的验证见 [可行性记录](docs/wasm-jsc-feasibility.md)，
+尚未接入主程序或完整guest内存模型。
 
 对照程序（自编译，仓库只含源码）：
 

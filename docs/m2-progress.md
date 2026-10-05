@@ -9,7 +9,50 @@ M2 **尚未验收，不打 tag**。前两次本地检查点为 `75f90a6`（线�
 并实现 CALL_NATIVE/IAT guard。M2功能阻塞仍为 RtlUnwind；不能将 IR 原型计为 M2验收。
 最新软件 x87/系统/NLS 检查点是 `ca94a36`。
 
-## 本轮：安装期 IR 与计划评审（2026-10-05）
+## 最新：解释器主路径的运行时优化
+
+用户再次明确：**解释执行为主，Wasm仅作可用时的加速；当前急需提升主解释器吞吐。**
+本轮沿`dd17853`的IR原型继续，`6813158`已记录JSC可行性首个探针。
+
+- `.wir`升级版本3，旧文件重新prepare；磁盘仍是64B冷记录，持久紧凑格式未完成。
+- 8B typed load/store/LEA与MOVZX/MOVSX memory覆盖常见SIB、FS/GS、AH及窄寄存器保留语义。
+  真实目标compact记录从320,634增至562,602；总记录1,083,963，文件仍69,373,688B。
+- 热命中结果减少冷记录复制，16B热条目带next PC/slot；源绑定拒绝记录不能被预链接。
+  顺序执行仍逐条检查代码页代数，跨页查两页，自修改继续回退。
+- 连续typed解释段摊薄外层调度，遇分支、冷操作、fallback与stub返回；无观测时批量，单步/trace/stats逐条。
+  精确停在预算与协作分时边界，中途fault仅累计成功退休的前缀，线程FLAGS完整保存。
+- CLI默认关闭opcode频率计数，避免每条指令更新HashMap并使普通IR运行自动获得连续调度；
+  `--op-stats`显式开启，旧`--no-op-stats`兼容。CPU trace继续按需开启。
+- checked GuestMem将动态页尺寸除法换成经过验证的shift，首个页单独检查，跨页逐页验证；代码写跟踪保留。
+- FLAGS静态证明未放宽，全部恢复边界继续有效，没有unchecked memory路径。
+
+`cargo test --release` **71项通过**：1 unit、34 differential、5 FPU、10 IR、1 Wasm、20 Win32。
+新增预算各位置/中途fault退休计数、精确分时、链接失效及精确窄访存检查。
+Clippy all-targets、format、build通过。control两后端仍为641指令/43 APIs/相同21B输出。
+
+Apple M4/macOS26.5.1，关闭trace/opcode profiling、顺序运行、AOT/装载不计时。
+10M轮合成样本，完整终态对照：
+
+| 循环 | raw guest MIPS | 主IR guest MIPS |
+| --- | --- | --- |
+| ALU/branch（60,000,003 guest） | 43.49 / 35.30 / 36.40 | 66.99 / 61.56 / 55.17 |
+| checked SIB load/add/store（50,000,004 guest） | 42.04 / 36.66 / 38.74 | 79.32 / 78.11 / 75.93 |
+
+完整游戏目录最终三对旧IR/新IR：13.44→17.46、15.32→16.15、14.85→15.67 guest MIPS。
+**第一对路径完全一致**：21,423,118指令、24,568 APIs、全部GPR/EIP/EFLAGS及RtlUnwind阻塞相同，吞吐约+30%。
+其他两对存在轻微guest初始化路径差异，不能视为严格同路径加速比；本机raw与各阶段绝对值也有显著负载波动。
+所有结果在`wire-out/ir-performance/`，不能与此前23–25 MIPS游戏样本直接相减。
+主路径仍偏低，尚未达到长期性能目标。约23%指令raw fallback；一次开启统计的独立采样中0f共4.03M、
+x87 d9约0.786M，应继续细分未提升0f/SSE、x87、内存算术与其他冷操作，而非转去依赖Wasm。
+游戏仍停在RtlUnwind，没有data.xp3读取/可见窗口，M2不验收。
+
+可选Wasm实验已从执行探针推进至**实际IR直接lower单个寄存器自然循环**，全FLAGS与每guest预算恢复，
+ALU50/FLAGS86个512B状态对照通过；公开JSC native shim、嵌套回调、临时TypedArray指针同步fread、
+grow/旧view/短读边界已验证。macOS需公开allow-jit签名才能证明实际JIT；本机默认fast-memory越界探针SIGBUS，
+诊断关闭该引擎选项后通过，尚无公共API生产解法。该实验未接入wire主程序，不是完整guest backend，
+目标iOS仍未验收。详见 [JSC记录](wasm-jsc-feasibility.md)；解释器编码/性能/总cache尺寸见 [IR设计](ir-aot-design.md)。
+
+## 此前检查点：安装期 IR 与计划评审（2026-10-05）
 
 - QEMU整体GPLv2，但v10.1.0的i386 translate.c/cc_helper.c为LGPL-2.1-or-later，tci.c为GPL-2.0-or-later。
   本轮未导入QEMU实现；采用MIT iced-x86 decoder和独立wire语义。已补齐新增依赖/许可原文。
@@ -51,8 +94,8 @@ CALL_NATIVE23,414次。仅约2–7%的实际收益，**没有解决最终性能�
 曾另用只含.cf的临时文件根验证过短路径，不能与完整目录的21M路径混作同一个benchmark。
 
 目标IR文件69,373,688B、1,083,963条冷记录，320,634条compact。
-后续优先typed memory/寻址融合和顺序执行/块链接，降低每条指令取guest-PC索引与代数检查的成本；
-然后压缩持久格式与resident cache。不要优化AOT转换速度来代替运行时收益。
+当时优先级为typed memory/寻址融合和顺序执行；本轮已落地，后续继续按运行热点扩大覆盖与优化块调度，
+再压缩持久格式与resident cache。不要优化AOT转换速度来代替运行时收益。
 
 JSC路线补充：`examples/jsc_wasm_probe.c`通过系统JavaScriptCore.framework得到Wasm add=42，
 再经`JSObjectGetTypedArrayBytesPtr`同步写linear memory，由Wasm读回123456。

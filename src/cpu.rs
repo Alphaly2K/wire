@@ -154,6 +154,7 @@ pub struct Cpu {
     pub ir_fallbacks: u64,
     pub ir_native_calls: u64,
     ir_cache: Option<crate::ir::Cache>,
+    ir_hint: (u32, u32),
     pending_flags: Option<PendingFlags>,
     pub trace_ring: VecDeque<(u32, Vec<u8>)>,
     t0: Instant,
@@ -180,6 +181,7 @@ impl Cpu {
             ir_fallbacks: 0,
             ir_native_calls: 0,
             ir_cache: None,
+            ir_hint: (0, 0),
             pending_flags: None,
             trace_ring: VecDeque::new(),
             t0: Instant::now(),
@@ -225,6 +227,7 @@ impl Cpu {
 
     pub fn load_ctx(&mut self, c: &ThreadCtx) {
         self.pending_flags = None;
+        self.ir_hint = (0, 0);
         self.regs = c.regs;
         self.eip = c.eip;
         self.eflags = c.eflags;
@@ -2752,9 +2755,19 @@ impl Cpu {
                 self.flush_flags();
                 return RunOutcome::InstructionLimit;
             }
-            match self.step_cached(mem) {
+            // Amortize outer halt/API/budget dispatch over straight-line IR.
+            // The inner loop retains per-guest fault/code-generation checks.
+            // End exactly at budget or cooperative scheduling boundaries.
+            let slice_remaining = 0x10_0000 - (self.instr_count & 0xF_FFFF);
+            let limit = if self.ir_cache.is_some() && !self.trace_enabled && !self.profile_opcodes {
+                (max_instr - self.instr_count).min(slice_remaining)
+            } else {
+                1
+            };
+            let (retired, result) = self.steps_cached(mem, limit);
+            self.instr_count += retired;
+            match result {
                 Ok(()) => {
-                    self.instr_count += 1;
                     // Cooperative timeslice: a guest thread that never calls a
                     // blocking API (spin loop) must not starve the others.
                     if self.instr_count & 0xF_FFFF == 0 {

@@ -33,6 +33,7 @@ pub struct GuestMem {
     pub base: *mut u8,
     committed: Vec<u64>, // 1 bit per host page
     host_page: usize,    // 16 KiB on Apple Silicon, 4 KiB on most x86 hosts
+    page_shift: u32,
     code_versions: Vec<Cell<u64>>,
 }
 
@@ -63,14 +64,22 @@ impl GuestMem {
             return Err(std::io::Error::last_os_error());
         }
         let host_page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        // Supported hosts use power-of-two pages. Validate before replacing
+        // runtime page divisions with shifts in checked guest accesses.
+        if !host_page.is_power_of_two() || host_page as u64 > SPACE_SIZE {
+            unsafe { libc::munmap(p, SPACE_SIZE as usize) };
+            return Err(std::io::Error::other("unsupported host page size"));
+        }
         Ok(GuestMem {
             base: p as *mut u8,
             committed: vec![0u64; (SPACE_SIZE as usize / host_page) / 64],
             host_page,
+            page_shift: host_page.trailing_zeros(),
             code_versions: vec![Cell::new(0); SPACE_SIZE as usize / host_page],
         })
     }
 
+    #[inline]
     fn page_ok(&self, page: usize) -> bool {
         self.committed[page / 64] & (1u64 << (page % 64)) != 0
     }
@@ -80,28 +89,33 @@ impl GuestMem {
     }
 
     pub fn is_committed(&self, addr: u32) -> bool {
-        self.page_ok(addr as usize / self.host_page)
+        self.page_ok(addr as usize >> self.page_shift)
     }
 
     pub(crate) fn host_page_size(&self) -> u32 {
         self.host_page as u32
     }
     pub(crate) fn watch_code(&self, address: u32) {
-        let version = &self.code_versions[address as usize / self.host_page];
+        let version = &self.code_versions[address as usize >> self.page_shift];
         if version.get() == 0 {
             version.set(1);
         }
     }
     #[inline]
     pub(crate) fn code_version(&self, address: u32) -> u64 {
-        self.code_versions[address as usize / self.host_page].get()
+        self.code_versions[address as usize >> self.page_shift].get()
     }
+    #[inline]
+    pub(crate) fn code_page_version(&self, page: usize) -> u64 {
+        self.code_versions[page].get()
+    }
+    #[inline]
     fn note_write(&self, address: u32, len: usize) {
         if len == 0 {
             return;
         }
-        let first = address as usize / self.host_page;
-        let last = (address as usize + len - 1) / self.host_page;
+        let first = address as usize >> self.page_shift;
+        let last = (address as usize + len - 1) >> self.page_shift;
         for page in first..=last {
             let version = &self.code_versions[page];
             if version.get() != 0 {
@@ -135,9 +149,8 @@ impl GuestMem {
         if len == 0 {
             return Ok(());
         }
-        let hp = self.host_page as u64;
-        let first = (addr as u64 / hp) as usize;
-        let last = ((addr as u64 + len as u64 - 1) / hp) as usize;
+        let first = (addr as u64 >> self.page_shift) as usize;
+        let last = ((addr as u64 + len as u64 - 1) >> self.page_shift) as usize;
         for page in first..=last {
             if !self.page_ok(page) {
                 let r = unsafe {
@@ -160,6 +173,7 @@ impl GuestMem {
         Ok(())
     }
 
+    #[inline]
     pub(crate) fn ptr(&self, addr: u32, len: u32, write: bool) -> Result<*mut u8, MemFault> {
         let end = addr as u64 + len as u64;
         if end > SPACE_SIZE {
@@ -168,10 +182,14 @@ impl GuestMem {
         if len == 0 {
             return Ok(self.base.wrapping_add(addr as usize));
         }
-        let hp = self.host_page as u64;
-        let first = (addr as u64 / hp) as usize;
-        let last = ((end - 1) / hp) as usize;
-        for p in first..=last {
+        let first = (addr as u64 >> self.page_shift) as usize;
+        let last = ((end - 1) >> self.page_shift) as usize;
+        if !self.page_ok(first) {
+            return Err(MemFault { addr, len, write });
+        }
+        // The common scalar access checks one page without setting up a
+        // range loop. Cross-page accesses still check every covered page.
+        for p in first + 1..=last {
             if !self.page_ok(p) {
                 return Err(MemFault { addr, len, write });
             }
@@ -184,38 +202,46 @@ impl GuestMem {
         Ok(unsafe { self.base.add(addr as usize) })
     }
 
+    #[inline]
     pub fn read_u8(&self, addr: u32) -> Result<u8, MemFault> {
         let p = self.ptr(addr, 1, false)?;
         Ok(unsafe { p.read() })
     }
+    #[inline]
     pub fn read_u16(&self, addr: u32) -> Result<u16, MemFault> {
         let p = self.ptr(addr, 2, false)?;
         Ok(u16::from_le(unsafe { p.cast::<u16>().read_unaligned() }))
     }
+    #[inline]
     pub fn read_u32(&self, addr: u32) -> Result<u32, MemFault> {
         let p = self.ptr(addr, 4, false)?;
         Ok(u32::from_le(unsafe { p.cast::<u32>().read_unaligned() }))
     }
+    #[inline]
     pub fn read_u64(&self, addr: u32) -> Result<u64, MemFault> {
         let p = self.ptr(addr, 8, false)?;
         Ok(u64::from_le(unsafe { p.cast::<u64>().read_unaligned() }))
     }
 
+    #[inline]
     pub fn write_u8(&self, addr: u32, v: u8) -> Result<(), MemFault> {
         let p = self.ptr(addr, 1, true)?;
         unsafe { p.write(v) };
         Ok(())
     }
+    #[inline]
     pub fn write_u16(&self, addr: u32, v: u16) -> Result<(), MemFault> {
         let p = self.ptr(addr, 2, true)?;
         unsafe { p.cast::<u16>().write_unaligned(v.to_le()) };
         Ok(())
     }
+    #[inline]
     pub fn write_u32(&self, addr: u32, v: u32) -> Result<(), MemFault> {
         let p = self.ptr(addr, 4, true)?;
         unsafe { p.cast::<u32>().write_unaligned(v.to_le()) };
         Ok(())
     }
+    #[inline]
     pub fn write_u64(&self, addr: u32, v: u64) -> Result<(), MemFault> {
         let p = self.ptr(addr, 8, true)?;
         unsafe { p.cast::<u64>().write_unaligned(v.to_le()) };
