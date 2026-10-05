@@ -389,6 +389,141 @@ fn typed_segment_stops_at_the_exact_cooperative_timeslice() {
     }
     assert_eq!(states[0], states[1]);
 }
+
+#[test]
+fn callback_chains_keep_each_budget_and_nonlocal_stack_boundary() {
+    for transfer in [false, true] {
+        let mut code = vec![0xb9, 3, 0, 0, 0, 0x83, 0xc0, 1, 0x49, 0x75, 0xfa];
+        if transfer {
+            // Crossing the saved callback ceiling must stop before the next
+            // instruction, even if that instruction would lower ESP again.
+            code.push(0xbc);
+            code.extend((STACK + 0xff00u32).to_le_bytes());
+            code.extend([0x83, 0xec, 16, 0xb8, 99, 0, 0, 0, 0xcc]);
+        } else {
+            code.extend([0xe8, 3, 0, 0, 0, 0xc2, 4, 0]);
+            code.extend([0x50, 0x83, 0xc0, 1, 0x58, 0xc3]); // nested frame
+        }
+        for budget in 0..=22 {
+            let mut states = Vec::new();
+            for use_ir in [false, true] {
+                let (mut cpu, mut mem) = machine(&code, use_ir);
+                cpu.regs[0] = u32::MAX;
+                let mut api = ApiTable::new();
+                let mut state = ApiState::new(CODE, "C:\\callback.exe".into(), 0, 0);
+                let path = std::env::temp_dir().join(format!(
+                    "wire-ir-callback-{}-{use_ir}.log",
+                    std::process::id()
+                ));
+                let mut log = ApiLogger::new(&path).unwrap();
+                let mut sched = Sched::new();
+                let tid = sched.alloc_tid();
+                let h = state.alloc_handle(HandleObj::Thread { tid });
+                sched.add_main(tid, h, 0);
+                let outcome = cpu.call_guest(
+                    &mut mem,
+                    &mut api,
+                    &mut state,
+                    &mut log,
+                    &mut sched,
+                    CODE,
+                    &[7],
+                    budget,
+                );
+                let outcome = match outcome {
+                    Ok(wire::cpu::GuestCallOutcome::Returned(n)) => format!("returned {n}"),
+                    Ok(wire::cpu::GuestCallOutcome::Transferred) => "transferred".into(),
+                    Ok(wire::cpu::GuestCallOutcome::Exited(n)) => format!("exited {n}"),
+                    Err(e) => e,
+                };
+                states.push((outcome, cpu.regs, cpu.eflags, cpu.eip, cpu.instr_count));
+                drop(log);
+                std::fs::remove_file(path).unwrap();
+            }
+            assert_eq!(states[0], states[1], "transfer {transfer}, budget {budget}");
+        }
+    }
+}
+
+#[test]
+fn compact_stack_and_calls_keep_fault_state_and_esp_aliases() {
+    let codes: &[&[u8]] = &[
+        &[0x54, 0x5b, 0x50, 0x5c, 0xcc], // PUSH ESP, POP EBX, PUSH EAX, POP ESP
+        &[0x83, 0xc0, 1, 0x50, 0xcc],    // faulting PUSH must decrement ESP
+        &[0x83, 0xc0, 1, 0x58, 0xcc],    // faulting POP must preserve ESP
+        &[0x83, 0xc0, 1, 0xe8, 0, 0, 0, 0, 0xcc],
+        &[0x83, 0xc0, 1, 0xff, 0xd4, 0xcc], // CALL ESP reads target before PUSH
+        &[0x83, 0xc0, 1, 0xc2, 8, 0],       // RET stack-read fault
+        &[0x83, 0xc0, 1, 0xc9, 0xcc],       // LEAVE sets ESP before read fault
+    ];
+    for (case, code) in codes.iter().enumerate() {
+        for budget in 0..=8 {
+            let mut results = Vec::new();
+            for use_ir in [false, true] {
+                let (mut cpu, mut mem) = machine(code, use_ir);
+                cpu.regs[0] = 0x7fff_ffff;
+                cpu.regs[5] = 0x700000;
+                if case != 0 {
+                    cpu.set_esp(0x700004);
+                }
+                let outcome = run(&mut cpu, &mut mem, budget);
+                results.push((
+                    outcome.to_string_for_test(),
+                    cpu.regs,
+                    cpu.eflags,
+                    cpu.eip,
+                    cpu.instr_count,
+                ));
+            }
+            assert_eq!(results[0], results[1], "case {case}, budget {budget}");
+        }
+    }
+}
+
+#[test]
+fn presentation_limit_waits_for_callback_return_and_restores_flags() {
+    let code = [0x83, 0xc0, 1, 0xc3];
+    let (mut cpu, mut mem) = machine(&code, true);
+    let mut api = ApiTable::new();
+    let mut state = ApiState::new(CODE, "C:\\present.exe".into(), 0, 0);
+    state.stop_after_presents = Some(8);
+    state.d3d9.frames = 9;
+    let path = std::env::temp_dir().join(format!("wire-ir-present-{}.log", std::process::id()));
+    let mut log = ApiLogger::new(&path).unwrap();
+    let mut sched = Sched::new();
+    let tid = sched.alloc_tid();
+    let h = state.alloc_handle(HandleObj::Thread { tid });
+    sched.add_main(tid, h, 0);
+    cpu.regs[0] = u32::MAX;
+    assert!(matches!(
+        cpu.call_guest(
+            &mut mem,
+            &mut api,
+            &mut state,
+            &mut log,
+            &mut sched,
+            CODE,
+            &[],
+            100
+        ),
+        Ok(wire::cpu::GuestCallOutcome::Returned(0))
+    ));
+    assert_eq!(cpu.instr_count, 2);
+    assert_eq!(cpu.eflags & (CF | ZF), CF | ZF);
+    assert!(matches!(
+        cpu.run(&mut mem, &mut api, &mut state, &mut log, &mut sched, 100),
+        RunOutcome::PresentationLimit(9)
+    ));
+    assert_eq!(cpu.instr_count, 2);
+    cpu.halted = true;
+    cpu.exit_code = Some(42);
+    assert!(matches!(
+        cpu.run(&mut mem, &mut api, &mut state, &mut log, &mut sched, 100),
+        RunOutcome::Exited(42)
+    ));
+    drop(log);
+    std::fs::remove_file(path).unwrap();
+}
 impl Outcome for RunOutcome {
     fn to_string_for_test(&self) -> String {
         match self {
@@ -397,6 +532,7 @@ impl Outcome for RunOutcome {
             Self::Crashed(s) => s.clone(),
             Self::CallbackReturned => "callback".into(),
             Self::CallbackUnwound => "callback unwound".into(),
+            Self::PresentationLimit(n) => format!("present {n}"),
         }
     }
 }

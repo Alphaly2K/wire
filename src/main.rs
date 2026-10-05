@@ -15,7 +15,7 @@ fn main() -> ExitCode {
         eprintln!("  wire imports <program.exe>");
         eprintln!("  wire prepare <program.exe> [--out program.wir]");
         eprintln!(
-            "  wire run <program.exe> [--ir program.wir] [--op-stats] [--max-instr N] [--log-dir DIR] [--cwd DIR] [--trace-cpu]"
+            "  wire run <program.exe> [--ir program.wir] [--op-stats] [--max-instr N] [--log-dir DIR] [--cwd DIR] [--trace-cpu] [--present|--headless] [--capture-frames DIR] [--stop-after-presents N]"
         );
         return ExitCode::from(2);
     }
@@ -182,6 +182,7 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
     let mut profile_opcodes = false;
     let mut present = cfg!(target_os = "macos");
     let mut capture_frames = None;
+    let mut stop_after_presents = None;
     let mut i = 0;
     while i < opts.len() {
         match opts[i].as_str() {
@@ -203,6 +204,18 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
             "--no-op-stats" => profile_opcodes = false,
             "--headless" => present = false,
             "--present" => present = true,
+            "--stop-after-presents" => {
+                i += 1;
+                let Some(n) = opts
+                    .get(i)
+                    .and_then(|n| n.parse::<u64>().ok())
+                    .filter(|&n| n > 0)
+                else {
+                    eprintln!("--stop-after-presents needs a positive count");
+                    return ExitCode::from(2);
+                };
+                stop_after_presents = Some(n);
+            }
             "--capture-frames" => {
                 i += 1;
                 let Some(dir) = opts.get(i) else {
@@ -287,6 +300,7 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
         loaded.cmdline_w,
     );
     state.fs = Some(fs);
+    state.stop_after_presents = stop_after_presents;
     state.presenter = match wire::platform::Presenter::new(present, capture_frames) {
         Ok(p) => p,
         Err(e) => {
@@ -353,6 +367,7 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
         max_instr
     );
     let t_start = std::time::Instant::now();
+    state.d3d9.run_start = Some(t_start);
     let outcome = cpu.run(
         &mut mem,
         &mut api,
@@ -367,6 +382,9 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
     match &outcome {
         RunOutcome::Exited(code) => println!("outcome: exited cleanly, guest code {code}"),
         RunOutcome::InstructionLimit => println!("outcome: instruction limit hit ({max_instr})"),
+        RunOutcome::PresentationLimit(n) => {
+            println!("outcome: presentation benchmark limit reached ({n})")
+        }
         RunOutcome::Crashed(e) => println!("outcome: CRASHED: {e}"),
         RunOutcome::CallbackReturned | RunOutcome::CallbackUnwound => {
             println!("outcome: internal error (callback frame escaped top level)")
@@ -386,6 +404,10 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
     if let Some(e) = &state.presenter.error {
         eprintln!("presenter: {e}");
     }
+    println!(
+        "first D3D9 draw: {:?}s; first present: {:?}s",
+        state.d3d9.first_draw_seconds, state.d3d9.first_present_seconds
+    );
     if ir_path.is_some() {
         println!(
             "IR instructions: {}; x86 fallback: {}; CALL_NATIVE: {}",
@@ -465,6 +487,7 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
 
     match outcome {
         RunOutcome::Exited(0) => ExitCode::SUCCESS,
+        RunOutcome::PresentationLimit(_) => ExitCode::SUCCESS,
         RunOutcome::Exited(c) => ExitCode::from((c & 0xff) as u8),
         _ => ExitCode::FAILURE,
     }

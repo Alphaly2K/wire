@@ -29,6 +29,8 @@ def compare(args):
             command = [str(getattr(args, version).resolve()), "run", str(args.exe.resolve()),
                        "--ir", str(args.ir.resolve()), "--max-instr", str(args.max_instr),
                        "--log-dir", str(folder.resolve())]
+            if args.stop_after_presents:
+                command += ["--stop-after-presents", str(args.stop_after_presents), "--present"]
             with (folder / "report.txt").open("w") as output:
                 start = time.perf_counter()
                 process = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT)
@@ -47,15 +49,30 @@ def compare(args):
                        guest_mips=float(timing[3]), instructions=int(timing[1]),
                        api_calls=int(apis[1]), state=state[0], outcome=outcome[1],
                        exit_code=process.returncode)
+            first = re.search(r"first D3D9 draw: Some\(([\d.]+)\)s; first present: Some\(([\d.]+)\)s", report)
+            frames = re.search(r"D3D9 draws: (\d+); presents: (\d+); displayed: (\d+)", report)
+            if args.stop_after_presents:
+                if not first or not frames or not outcome[1].startswith("presentation benchmark limit reached"):
+                    raise SystemExit(f"presentation benchmark did not complete in {folder}/report.txt")
+                run.update(first_draw_s=float(first[1]), first_present_s=float(first[2]),
+                           draws=int(frames[1]), presents=int(frames[2]), displayed=int(frames[3]))
+                if (run['presents'] < args.stop_after_presents or not run['draws']
+                        or not run['displayed'] or run['exit_code']):
+                    raise SystemExit(f"render/presentation benchmark failed in {folder}/report.txt")
             runs.append(run)
             print(f"pair {pair} {version}: {run['guest_mips']:.2f} MIPS, "
-                  f"process CPU {run['process_cpu_s']:.4f}s", flush=True)
+                  f"process CPU {run['process_cpu_s']:.4f}s"
+                  + (f", first present {run['first_present_s']:.4f}s" if 'first_present_s' in run else ""), flush=True)
+    metrics = ['guest_mips', 'guest_wall_s', 'process_cpu_s', 'process_wall_s']
+    if args.stop_after_presents:
+        metrics += ['first_draw_s', 'first_present_s']
     medians = {version: {key: statistics.median(r[key] for r in runs if r['version'] == version)
-                         for key in ['guest_mips', 'process_cpu_s', 'process_wall_s']}
+                         for key in metrics}
                for version in ['before', 'after']}
     summary = dict(commands=dict(before=str(args.before.resolve()), after=str(args.after.resolve()),
                                  exe=str(args.exe.resolve()), ir=str(args.ir.resolve()),
-                                 max_instr=args.max_instr), medians=medians, runs=runs)
+                                 max_instr=args.max_instr, stop_after_presents=args.stop_after_presents),
+                   medians=medians, runs=runs)
     (args.out / "compare.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(medians, indent=2))
 
@@ -71,14 +88,18 @@ def capture(args):
                    "--max-instr", str(args.max_instr), "--log-dir", str(folder.resolve())]
         if args.ir:
             command += ["--ir", str(args.ir.resolve())]
+        if args.stop_after_presents:
+            command += ["--stop-after-presents", str(args.stop_after_presents), "--present"]
         with (folder / "report.txt").open("w") as report:
             process = subprocess.Popen(command, stdout=report, stderr=subprocess.STDOUT)
             result = subprocess.run(
-                ["/usr/bin/sample", str(process.pid), "5", "1", "-mayDie", "-fullPaths",
+                ["/usr/bin/sample", str(process.pid), str(args.sample_seconds),
+                 str(args.sample_interval_ms), "-mayDie", "-fullPaths",
                  "-file", str((folder / "sample.txt").resolve())],
-                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                timeout=args.sample_seconds + 30)
             (folder / "sampler.txt").write_text(result.stdout)
-            status = process.wait(timeout=30)
+            status = process.wait(timeout=120)
         print(f"run-{run}: sampler={result.returncode}, guest={status}", flush=True)
         if result.returncode:
             raise SystemExit(result.stdout)
@@ -136,16 +157,22 @@ def summarize(args):
                 continue  # exclude loader, IR parse/bind, reports, teardown
             stack = stack[entry:]
             text = ";".join(stack)
+            # A host API can invoke another guest run_loop. Classify against
+            # that innermost loop so callback dispatch is not charged to its
+            # enclosing USER32 API merely because it is an ancestor.
+            inner = max(i for i, s in enumerate(stack)
+                        if "wire::cpu" in s and s.endswith("::run_loop"))
+            execution = ";".join(stack[inner:])
             categories["runtime"] += weight
             # Rust demangling prints Cpu's inherent methods as <Cpu>::fpu_op,
             # dropping the source module. Include that ancestor's self time.
-            if "wire::cpu::fpu" in text or "::fpu_op" in text:
+            if "wire::cpu::fpu" in execution or "::fpu_op" in execution:
                 group = "x87 software execution"
-            elif "::step_x86" in text:
+            elif "::step_x86" in execution:
                 group = "other raw fallback"
-            elif "::steps_cached" in text:
+            elif "::steps_cached" in execution:
                 group = "IR execution and cache"
-            elif "wire::api" in text:
+            elif "wire::api" in execution:
                 group = "API outside guest execution"
             else:
                 group = "outer dispatch and other"
@@ -219,6 +246,9 @@ def main():
     collect.add_argument("--out", type=pathlib.Path, required=True)
     collect.add_argument("--runs", type=int, default=4)
     collect.add_argument("--max-instr", type=int, default=50_000_000)
+    collect.add_argument("--sample-seconds", type=int, default=5)
+    collect.add_argument("--sample-interval-ms", type=int, default=1)
+    collect.add_argument("--stop-after-presents", type=int, default=0)
     report = commands.add_parser("summarize")
     report.add_argument("samples", type=pathlib.Path, nargs="+")
     report.add_argument("--out", type=pathlib.Path, required=True)
@@ -230,8 +260,14 @@ def main():
     bench.add_argument("--out", type=pathlib.Path, required=True)
     bench.add_argument("--pairs", type=int, default=5)
     bench.add_argument("--max-instr", type=int, default=50_000_000)
+    bench.add_argument("--stop-after-presents", type=int, default=0,
+                       help="measure startup through N successful Presents instead of an instruction budget")
     args = parser.parse_args()
+    if args.command != "summarize" and (args.max_instr < 1 or args.stop_after_presents < 0):
+        parser.error("instruction budget must be positive and Present threshold must be nonnegative")
     if args.command == "capture":
+        if args.runs < 1 or args.sample_seconds < 1 or args.sample_interval_ms < 1:
+            parser.error("runs, sample duration and interval must be positive")
         capture(args)
     elif args.command == "summarize":
         summarize(args)

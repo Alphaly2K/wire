@@ -1,6 +1,7 @@
 // Public AppKit/CoreGraphics CPU frame presenter. No executable guest code.
 #import <AppKit/AppKit.h>
 #include <stdint.h>
+#include <pthread.h>
 
 typedef struct { uint32_t hwnd, message, wparam, lparam; } WireEvent;
 static WireEvent events[512];
@@ -67,6 +68,9 @@ static void queue(uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp) {
 static NSMutableDictionary<NSNumber *,NSWindow *> *windows;
 int wire_ui_init(void) {
     if(!NSThread.isMainThread) return 0;
+    // Game startup and interpretation are user-initiated foreground work.
+    // Let the public scheduler account for that latency requirement.
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED,0);
     @autoreleasepool {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
@@ -124,7 +128,9 @@ int wire_ui_poll(WireEvent *out) {
             NSEvent *e=[NSApp nextEventMatchingMask:NSEventMaskAny untilDate:NSDate.distantPast inMode:NSDefaultRunLoopMode dequeue:YES];
             if(!e) break;[NSApp sendEvent:e];
         }
-        CFRunLoopRunInMode(kCFRunLoopDefaultMode,0.001,true);
+        // Drain ready run-loop sources without adding a 1 ms sleep to every
+        // interpreter poll. Guest waits supply their own deadlines.
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode,0,true);
         [NSApp updateWindows];
         if(event_head==event_tail) return 0;
         *out=events[event_head];event_head=(event_head+1)%512;return 1;

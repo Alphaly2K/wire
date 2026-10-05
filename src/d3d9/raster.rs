@@ -416,6 +416,9 @@ impl D3D9 {
         }
         resource::write(mem, &b, &dest)?;
         self.draws += 1;
+        if self.first_draw_seconds.is_none() {
+            self.first_draw_seconds = self.run_start.map(|t| t.elapsed().as_secs_f64());
+        }
         Ok(0)
     }
 }

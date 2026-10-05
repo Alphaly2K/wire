@@ -187,6 +187,17 @@ CLI的opcode统计现默认关闭，`--op-stats`显式开启；旧`--no-op-stats
 GuestMem预先验证宿主页尺寸为2的幂，代码代数用shift定位宿主页；checked权限用固定4KiB guest页，
 标量访问通常只检查一页，跨页继续检查剩余所有页，写入继续递增代码代数。没有unchecked访存路径。
 内存算术、其他窄寄存器和 CALL_NATIVE 使用64B预解码慢路径；SSE/x87/其他未覆盖指令用原解释器。
+2026-10-06 的启动性能优化还在 bind 时把已验证 v3 记录中的 PUSH/POP_I32、
+立即数 PUSH、直接/寄存器 CALL_I32、寄存器 JMP_I32、RET_I32 与 LEAVE_I32
+降低为8B typed 热操作。额外8个 opcode 只存在于进程内的热表；磁盘编码与验证规则不变，
+旧 `.wir` 不需重建，16B hot entry 和总 cache 向量尺寸不增加。
+栈访问沿用 checked GuestMem 及原操作顺序，包括 PUSH/LEAVE 的 fault 时 ESP 状态、
+PUSH ESP / POP ESP / CALL ESP 的源值读取顺序。CALL 仍完整恢复 FLAGS；
+CALL_NATIVE 的 IAT guard 和计数仍走原路径，没有绕开 guest hook。
+无观测的 guest callback 也可连续执行 typed 操作，但每条之后检查所属线程的 callback 栈顶边界；
+API/stub、cold/fallback、代码页 generation、精确预算和协作分时检查保留。
+常见调用与返回可继续同一紧凑解释链，动态目标仍按真实 guest PC 查表并验证代码页。
+详细长启动 profile、调度影响和复测见 [启动性能记录](performance-startup-2026-10-06.md)。
 
 **解释器的512B vreg bank、完整 Semantic IR、所有类型的8B lowering、紧凑持久文件与通用 block chaining 还未实现。**
 当前热子集借用现有 EAX…EDI 存储，不能将其包装成已经完成的64-vreg后端。

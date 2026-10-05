@@ -69,6 +69,7 @@ impl From<MemFault> for CpuError {
 }
 
 pub enum RunOutcome {
+    PresentationLimit(u64),
     Exited(u32),
     InstructionLimit,
     Crashed(String),
@@ -2823,6 +2824,14 @@ impl Cpu {
                 self.flush_flags();
                 return RunOutcome::Exited(self.exit_code.unwrap_or(0));
             }
+            if callback_exit.is_none()
+                && state
+                    .stop_after_presents
+                    .is_some_and(|n| state.d3d9.frames >= n)
+            {
+                self.flush_flags();
+                return RunOutcome::PresentationLimit(state.d3d9.frames);
+            }
             if let Some((exit, owner_teb, stack_ceiling)) = callback_exit {
                 if self.fs_base == owner_teb {
                     if self.eip == exit && self.esp() <= stack_ceiling {
@@ -2850,16 +2859,18 @@ impl Cpu {
             // The inner loop retains per-guest fault/code-generation checks.
             // End exactly at budget or cooperative scheduling boundaries.
             let slice_remaining = 0x10_0000 - (self.instr_count & 0xF_FFFF);
-            let limit = if self.ir_cache.is_some()
-                && !self.trace_enabled
-                && !self.profile_opcodes
-                && callback_exit.is_none()
-            {
+            let limit = if self.ir_cache.is_some() && !self.trace_enabled && !self.profile_opcodes {
                 (max_instr - self.instr_count).min(slice_remaining)
             } else {
                 1
             };
-            let (retired, result) = self.steps_cached(mem, limit);
+            // The executing thread cannot change inside the compact chain.
+            // Check the owner's callback stack after every guest operation;
+            // other threads still stop at the exact cooperative timeslice.
+            let stack_ceiling = callback_exit
+                .filter(|&(_, owner_teb, _)| self.fs_base == owner_teb)
+                .map(|(_, _, ceiling)| ceiling);
+            let (retired, result) = self.steps_cached(mem, limit, stack_ceiling);
             self.instr_count += retired;
             match result {
                 Ok(()) => {
@@ -2924,6 +2935,9 @@ impl Cpu {
             RunOutcome::Exited(c) => Ok(GuestCallOutcome::Exited(c)),
             RunOutcome::InstructionLimit => Err("instruction limit inside callback".into()),
             RunOutcome::Crashed(e) => Err(e),
+            RunOutcome::PresentationLimit(_) => {
+                Err("presentation benchmark boundary escaped a guest callback".into())
+            }
         }
     }
 }

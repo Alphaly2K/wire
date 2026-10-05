@@ -14,6 +14,7 @@ use crate::thread::{
 };
 use std::collections::{HashMap, VecDeque};
 pub type Args = [u32; 16];
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::sync::OnceLock;
@@ -159,6 +160,7 @@ pub struct ApiState {
     pub graphics: crate::graphics::Graphics,
     pub d3d9: crate::d3d9::D3D9,
     pub presenter: crate::platform::Presenter,
+    pub stop_after_presents: Option<u64>,
     pub(crate) bstrs: HashMap<u32, u32>,
     pub(crate) com_threads: HashMap<u32, (u32, u32)>,
 }
@@ -196,6 +198,7 @@ impl ApiState {
             graphics: crate::graphics::Graphics::default(),
             d3d9: crate::d3d9::D3D9::default(),
             presenter: crate::platform::Presenter::default(),
+            stop_after_presents: None,
             bstrs: HashMap::new(),
             com_threads: HashMap::new(),
         };
@@ -284,6 +287,7 @@ impl ApiState {
 
 pub struct ApiLogger {
     trace: BufWriter<File>,
+    call_keys: Vec<String>,
     pub freq: HashMap<String, u64>,
     pub unimpl_freq: HashMap<String, u64>,
     pub recent: VecDeque<String>,
@@ -293,7 +297,8 @@ pub struct ApiLogger {
 impl ApiLogger {
     pub fn new(path: &std::path::Path) -> std::io::Result<ApiLogger> {
         Ok(ApiLogger {
-            trace: BufWriter::new(File::create(path)?),
+            trace: BufWriter::with_capacity(64 * 1024, File::create(path)?),
+            call_keys: Vec::new(),
             freq: HashMap::new(),
             unimpl_freq: HashMap::new(),
             recent: VecDeque::new(),
@@ -316,6 +321,7 @@ impl ApiLogger {
     #[allow(clippy::too_many_arguments)]
     fn log_call(
         &mut self,
+        idx: usize,
         dll: &str,
         name: &str,
         args: &[u32],
@@ -324,27 +330,50 @@ impl ApiLogger {
         note: &str,
     ) {
         self.call_count += 1;
-        let key = format!("{dll}!{name}");
-        *self.freq.entry(key.clone()).or_insert(0) += 1;
-        if !implemented {
-            *self.unimpl_freq.entry(key.clone()).or_insert(0) += 1;
+        if self.call_keys.len() <= idx {
+            self.call_keys.resize_with(idx + 1, String::new);
         }
-        let args_s: Vec<String> = args.iter().map(|a| format!("{a:#x}")).collect();
-        let tag = if implemented { "" } else { " [UNIMPLEMENTED]" };
-        let note_s = if note.is_empty() {
-            String::new()
+        let key = &mut self.call_keys[idx];
+        if key.split_once('!') != Some((dll, name)) {
+            key.clear();
+            write!(key, "{dll}!{name}").unwrap();
+        }
+        if let Some(count) = self.freq.get_mut(key.as_str()) {
+            *count += 1;
         } else {
-            format!(" ; {note}")
+            self.freq.insert(key.clone(), 1);
+        }
+        if !implemented {
+            if let Some(count) = self.unimpl_freq.get_mut(key.as_str()) {
+                *count += 1;
+            } else {
+                self.unimpl_freq.insert(key.clone(), 1);
+            }
+        }
+        // Reuse the evicted diagnostic line and format directly into it.
+        // Keep the complete trace and the same 64-call crash context.
+        let mut line = if self.recent.len() == 64 {
+            self.recent.pop_front().unwrap()
+        } else {
+            String::with_capacity(160)
         };
-        self.emit(format!(
-            "#{:<8} {}({}) = {:#x}{}{}",
-            self.call_count,
-            key,
-            args_s.join(", "),
-            ret,
-            tag,
-            note_s
-        ));
+        line.clear();
+        write!(&mut line, "#{:<8} {}(", self.call_count, key).unwrap();
+        for (i, a) in args.iter().enumerate() {
+            if i != 0 {
+                line.push_str(", ");
+            }
+            write!(&mut line, "{a:#x}").unwrap();
+        }
+        write!(&mut line, ") = {ret:#x}").unwrap();
+        if !implemented {
+            line.push_str(" [UNIMPLEMENTED]");
+        }
+        if !note.is_empty() {
+            line.push_str(" ; ");
+            line.push_str(note);
+        }
+        self.emit(line);
     }
 
     pub fn finish(&mut self) {
@@ -1553,7 +1582,15 @@ pub fn dispatch(
     let ret: u32;
     match (dll, name) {
         ("wire", "ExitEmulation") => {
-            log.log_call(dll, name, &args[..1], 0, true, "initial thread returned");
+            log.log_call(
+                idx,
+                dll,
+                name,
+                &args[..1],
+                0,
+                true,
+                "initial thread returned",
+            );
             cpu.halted = true;
             cpu.exit_code = Some(0);
             return Ok(());
@@ -1561,7 +1598,15 @@ pub fn dispatch(
         ("wire", "ExitThread") => {
             // A worker thread function returned; its EAX is the exit code.
             let code = cpu.regs[0];
-            log.log_call(dll, name, &args[..1], 0, true, "thread function returned");
+            log.log_call(
+                idx,
+                dll,
+                name,
+                &args[..1],
+                0,
+                true,
+                "thread function returned",
+            );
             state
                 .modules
                 .release_tls_thread(&mut state.heap, state.process_heap, cpu.fs_base);
@@ -1569,13 +1614,13 @@ pub fn dispatch(
             return Ok(());
         }
         ("kernel32.dll", "ExitProcess") => {
-            log.log_call(dll, name, &args[..1], 0, true, "process exit");
+            log.log_call(idx, dll, name, &args[..1], 0, true, "process exit");
             cpu.halted = true;
             cpu.exit_code = Some(args[0]);
             return Ok(());
         }
         ("kernel32.dll", "ExitThread") => {
-            log.log_call(dll, name, &args[..1], 0, true, "thread exit");
+            log.log_call(idx, dll, name, &args[..1], 0, true, "thread exit");
             state
                 .modules
                 .release_tls_thread(&mut state.heap, state.process_heap, cpu.fs_base);
@@ -2246,7 +2291,15 @@ pub fn dispatch(
             state.unhandled_filter = args[0];
         }
         ("kernel32.dll", "RaiseException") => {
-            log.log_call(dll, name, &args[..4], 0, true, "first-chance SEH dispatch");
+            log.log_call(
+                idx,
+                dll,
+                name,
+                &args[..4],
+                0,
+                true,
+                "first-chance SEH dispatch",
+            );
             return crate::seh::raise(cpu, mem, api, state, log, sched, &args, max_instr);
         }
         ("kernel32.dll", "UnhandledExceptionFilter") => {
@@ -2269,7 +2322,7 @@ pub fn dispatch(
             }
         }
         ("kernel32.dll", "RtlUnwind") | ("ntdll.dll", "RtlUnwind") => {
-            log.log_call(dll, name, &args[..4], args[3], true, "SEH unwind");
+            log.log_call(idx, dll, name, &args[..4], args[3], true, "SEH unwind");
             return crate::seh::unwind(cpu, mem, api, state, log, sched, &args, max_instr);
         }
         // --- critical sections: real owner/recursion bookkeeping in the guest
@@ -2632,7 +2685,15 @@ pub fn dispatch(
 
     let stack_args = stack_args_bytes(dll, name).unwrap_or(0);
     let nargs = (stack_args / 4).min(6) as usize;
-    log.log_call(dll, name, &args[..nargs.max(1)], ret, implemented, &note);
+    log.log_call(
+        idx,
+        dll,
+        name,
+        &args[..nargs.max(1)],
+        ret,
+        implemented,
+        &note,
+    );
 
     cpu.regs[0] = ret; // eax
     let retaddr = mem

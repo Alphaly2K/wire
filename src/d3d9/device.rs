@@ -460,6 +460,9 @@ impl D3D9 {
             .upload(hwnd, w, height, &pixels)
             .map_err(|_| NOMEM)?;
         self.frames += 1;
+        if self.first_present_seconds.is_none() {
+            self.first_present_seconds = self.run_start.map(|t| t.elapsed().as_secs_f64());
+        }
         self.last_presented = hwnd;
         Ok(0)
     }

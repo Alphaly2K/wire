@@ -94,6 +94,9 @@ pub struct D3D9 {
     pub frames: u64,
     pub draws: u64,
     pub last_presented: u32,
+    pub run_start: Option<std::time::Instant>,
+    pub first_draw_seconds: Option<f64>,
+    pub first_present_seconds: Option<f64>,
 }
 fn put(mem: &GuestMem, p: u32, words: &[u32]) -> Result<(), u32> {
     mem.write_bytes(

@@ -103,16 +103,18 @@ impl Cpu {
         };
     }
     pub(super) fn step_cached(&mut self, mem: &mut GuestMem) -> Result<(), CpuError> {
-        self.steps_cached(mem, 1).1
+        self.steps_cached(mem, 1, None).1
     }
     /// Chain typed operations across scalar branches, retaining a guest
     /// boundary after every operation. Budgets and cooperative timeslices
-    /// bound the chain; callbacks/observers use a one-instruction limit.
+    /// bound the chain; observers use a one-instruction limit. A callback's
+    /// stack ceiling is checked after each operation, before the next fetch.
     /// Cold/fallback operations and API targets return to the outer dispatcher.
     pub(super) fn steps_cached(
         &mut self,
         mem: &mut GuestMem,
         limit: u64,
+        stack_ceiling: Option<u32>,
     ) -> (u64, Result<(), CpuError>) {
         let mut retired = 0;
         loop {
@@ -167,7 +169,11 @@ impl Cpu {
                 // API stubs and callback sentinels stay in the outer run loop.
                 // A branch itself has no host action. The next get() still
                 // validates changed code and rejects unrecognized entries.
-                if retired >= limit || op == 0 || self.eip >= crate::api::STUB_BASE {
+                if retired >= limit
+                    || op == 0
+                    || self.eip >= crate::api::STUB_BASE
+                    || stack_ceiling.is_some_and(|ceiling| self.esp() >= ceiling)
+                {
                     return (retired, Ok(()));
                 }
             } else {
@@ -230,6 +236,28 @@ impl Cpu {
                 }
             }
             JMP_I32 => self.eip = i.aux,
+            PUSH_I32 => self.push32(mem, self.regs[i.a()])?,
+            PUSH_CONST_I32 => self.push32(mem, i.aux)?,
+            POP_I32 => self.regs[i.dst()] = self.pop32(mem)?,
+            CALL_CONST_I32 | CALL_I32 => {
+                let target = if op == CALL_CONST_I32 {
+                    i.aux
+                } else {
+                    self.regs[i.a()]
+                };
+                self.flush_flags();
+                self.push32(mem, hot.next_ip)?;
+                self.eip = target;
+            }
+            JMP_REG_I32 => self.eip = self.regs[i.a()],
+            RET_I32 => {
+                self.eip = self.pop32(mem)?;
+                self.set_esp(self.esp().wrapping_add(i.aux));
+            }
+            LEAVE_I32 => {
+                self.set_esp(self.regs[super::EBP]);
+                self.regs[super::EBP] = self.pop32(mem)?;
+            }
             JCC_BASE..=47 => {
                 if self.cc(op - JCC_BASE) {
                     self.eip = i.aux;
@@ -338,11 +366,12 @@ impl Cpu {
         let a = r.operand(0);
         let b = r.operand(1);
         let width = r.width();
-        match r.op() {
+        let op = r.op();
+        match op {
             Op::Nop => {}
             Op::Mov | Op::Movzx | Op::Movsx => {
                 let mut value = self.ir_read(b, mem)?;
-                if r.op() == Op::Movsx {
+                if op == Op::Movsx {
                     value = sign_extend(value, b.width()) as u32;
                 }
                 self.ir_write(a, value, mem)?;
@@ -407,7 +436,7 @@ impl Cpu {
                 self.flush_flags();
                 self.push32(mem, r.next_ip())?;
                 self.eip = target;
-                if r.op() == Op::CallNative {
+                if op == Op::CallNative {
                     self.ir_native_calls += 1;
                 }
             }

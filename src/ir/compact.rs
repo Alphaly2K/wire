@@ -45,6 +45,16 @@ pub(crate) const LOAD_U8_I32: u8 = 56;
 pub(crate) const LOAD_U16_I32: u8 = 57;
 pub(crate) const LOAD_S8_I32: u8 = 58;
 pub(crate) const LOAD_S16_I32: u8 = 59;
+// Runtime-only lowering of validated v3 records. These opcodes are never
+// written into the persisted compact fields, so old AOT files stay valid.
+pub(crate) const PUSH_I32: u8 = 60;
+pub(crate) const PUSH_CONST_I32: u8 = 61;
+pub(crate) const POP_I32: u8 = 62;
+pub(crate) const CALL_CONST_I32: u8 = 63;
+pub(crate) const CALL_I32: u8 = 64;
+pub(crate) const JMP_REG_I32: u8 = 65;
+pub(crate) const RET_I32: u8 = 66;
+pub(crate) const LEAVE_I32: u8 = 67;
 
 const FLAG_BITS: [u32; 6] = [CF, PF, AF, ZF, SF, OF];
 impl Inst {
@@ -184,6 +194,22 @@ impl Inst {
             _ => return None,
         };
         Some(Self::new(op, dst, src_a, src_b, r.eager_flags(), aux))
+    }
+    pub fn lower_runtime(r: &Record) -> Option<Self> {
+        let a = r.operand(0);
+        let reg32 = a.kind() == 1 && a.width() == 32;
+        let (op, register, aux) = match r.op() {
+            Op::Push if r.width() == 32 && reg32 => (PUSH_I32, a.base(), 0),
+            Op::Push if r.width() == 32 && a.kind() == 2 => (PUSH_CONST_I32, 0, a.value),
+            Op::Pop if r.width() == 32 && reg32 => (POP_I32, a.base(), 0),
+            Op::Call if a.kind() == 2 => (CALL_CONST_I32, 0, a.value),
+            Op::Call if reg32 => (CALL_I32, a.base(), 0),
+            Op::Jmp if reg32 => (JMP_REG_I32, a.base(), 0),
+            Op::Ret => (RET_I32, 0, a.value),
+            Op::Leave => (LEAVE_I32, 0, 0),
+            _ => return None,
+        };
+        Some(Self::new(op, register, register, 0, 0, aux))
     }
 }
 

@@ -663,14 +663,14 @@ impl Cache {
                 .records
                 .iter()
                 .map(|r| compact::Hot {
-                    inst: compact::Inst {
+                    inst: compact::Inst::lower_runtime(r).unwrap_or(compact::Inst {
                         bits: if r.op() == Op::CallNative {
                             0
                         } else {
                             r.words[9]
                         },
                         aux: r.words[10],
-                    },
+                    }),
                     next_ip: r.next_ip(),
                     next_slot: 0,
                 })
