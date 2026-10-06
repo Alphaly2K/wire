@@ -46,6 +46,19 @@ impl D3D9 {
         texture: bool,
         state: &mut ApiState,
     ) -> Result<(), u32> {
+        self.bind_slot(h, resource, texture, 0, state)
+    }
+    pub(super) fn bind_slot(
+        &mut self,
+        h: u32,
+        resource: u32,
+        texture: bool,
+        slot: u32,
+        state: &mut ApiState,
+    ) -> Result<(), u32> {
+        if slot > 1 {
+            return Err(UNAVAILABLE);
+        }
         if resource != 0 {
             let o = self.objects.get(&resource).ok_or(INVALID)?;
             let owner = match o.payload {
@@ -66,7 +79,14 @@ impl D3D9 {
         }
         let d = self.device_mut(h)?;
         let old = if texture {
-            std::mem::replace(&mut d.texture, resource)
+            std::mem::replace(
+                if slot == 0 {
+                    &mut d.texture
+                } else {
+                    &mut d.texture1
+                },
+                resource,
+            )
         } else {
             std::mem::replace(&mut d.target, resource)
         };
@@ -101,6 +121,9 @@ impl D3D9 {
     ) -> Result<u32, u32> {
         let h = a[0];
         match m {
+            "BeginStateBlock" => self.begin_stateblock(h),
+            "EndStateBlock" => self.end_stateblock(a, mem, api, state),
+            "CreateStateBlock" => self.create_stateblock(a, mem, api, state),
             "TestCooperativeLevel" => Ok(0),
             "Reset" => self.reset(a, mem, api, state),
             "GetAvailableTextureMem" => Ok((256 * 1024 * 1024 - self.allocated) as u32),
@@ -376,12 +399,10 @@ impl D3D9 {
             }
             "SetViewport" => {
                 let v = words::<6>(mem, a[1])?;
-                let b = self.buffer(self.device(h)?.target)?;
-                let b = b.borrow();
-                if v[2] == 0
-                    || v[3] == 0
-                    || v[0].checked_add(v[2]).is_none_or(|n| n > b.width)
-                    || v[1].checked_add(v[3]).is_none_or(|n| n > b.height)
+                // Wine accepts empty viewports too; raster coverage clips to
+                // the stored rectangle and target, so zero size writes no pixels.
+                if v[0].checked_add(v[2]).is_none_or(|n| n > 16384)
+                    || v[1].checked_add(v[3]).is_none_or(|n| n > 16384)
                     || !f32::from_bits(v[4]).is_finite()
                     || !f32::from_bits(v[5]).is_finite()
                 {
@@ -407,17 +428,18 @@ impl D3D9 {
                 Ok(0)
             }
             "SetTexture" => {
-                if a[1] != 0 {
+                if a[1] > 1 {
                     return Err(UNAVAILABLE);
                 }
-                self.bind(h, a[2], true, state)?;
+                self.bind_slot(h, a[2], true, a[1], state)?;
                 Ok(0)
             }
             "GetTexture" => {
-                if a[1] != 0 {
+                if a[1] > 1 {
                     return Err(UNAVAILABLE);
                 }
-                let t = self.device(h)?.texture;
+                let d = self.device(h)?;
+                let t = if a[1] == 0 { d.texture } else { d.texture1 };
                 if t == 0 {
                     put(mem, a[2], &[0])?;
                     Ok(0)
@@ -483,15 +505,84 @@ impl D3D9 {
                 put(mem, a[1], &[self.device(h)?.fvf])?;
                 Ok(0)
             }
-            "SetVertexShader" | "SetPixelShader" => {
-                if a[1] == 0 {
+            "CreatePixelShader" => self.create_pixel_shader(a, mem, api, state),
+            "CreateVertexShader" => self.create_vertex_shader(a, mem, api, state),
+            "SetPixelShader" => self.set_pixel_shader(h, a[1], state),
+            "GetPixelShader" => {
+                let s = self.device(h)?.pixel_shader;
+                if s == 0 {
+                    put(mem, a[1], &[0])?;
                     Ok(0)
                 } else {
-                    Err(UNAVAILABLE)
+                    self.output_ref(s, mem, a[1])
                 }
             }
-            "GetVertexShader" | "GetPixelShader" => {
-                put(mem, a[1], &[0])?;
+            "SetPixelShaderConstantF" | "GetPixelShaderConstantF" => {
+                let start = a[1] as usize;
+                let count = a[3] as usize;
+                if start >= 32 || count > 32 - start {
+                    return Err(INVALID);
+                }
+                if m.starts_with("Set") {
+                    let mut values = Vec::with_capacity(count);
+                    for i in 0..count {
+                        values.push(
+                            words::<4>(mem, a[2].checked_add((i * 16) as u32).ok_or(INVALID)?)?
+                                .map(f32::from_bits),
+                        );
+                    }
+                    self.device_mut(h)?.pixel_constants[start..start + count]
+                        .copy_from_slice(&values);
+                } else {
+                    put(
+                        mem,
+                        a[2],
+                        &self.device(h)?.pixel_constants[start..start + count]
+                            .iter()
+                            .flatten()
+                            .map(|v| v.to_bits())
+                            .collect::<Vec<_>>(),
+                    )?;
+                }
+                Ok(0)
+            }
+            "SetVertexShader" => self.set_vertex_shader(h, a[1], state),
+            "GetVertexShader" => {
+                let s = self.device(h)?.vertex_shader;
+                if s == 0 {
+                    put(mem, a[1], &[0])?;
+                    Ok(0)
+                } else {
+                    self.output_ref(s, mem, a[1])
+                }
+            }
+            "SetVertexShaderConstantF" | "GetVertexShaderConstantF" => {
+                let start = a[1] as usize;
+                let count = a[3] as usize;
+                if start >= 256 || count > 256 - start {
+                    return Err(INVALID);
+                }
+                if m.starts_with("Set") {
+                    let mut values = Vec::with_capacity(count);
+                    for i in 0..count {
+                        values.push(
+                            words::<4>(mem, a[2].checked_add((i * 16) as u32).ok_or(INVALID)?)?
+                                .map(f32::from_bits),
+                        );
+                    }
+                    self.device_mut(h)?.vertex_constants[start..start + count]
+                        .copy_from_slice(&values);
+                } else {
+                    put(
+                        mem,
+                        a[2],
+                        &self.device(h)?.vertex_constants[start..start + count]
+                            .iter()
+                            .flatten()
+                            .map(|v| v.to_bits())
+                            .collect::<Vec<_>>(),
+                    )?;
+                }
                 Ok(0)
             }
             "SetRenderState" => {
@@ -506,17 +597,21 @@ impl D3D9 {
                 Ok(0)
             }
             "SetSamplerState" => {
-                if a[1] != 0 || !raster::sampler_state(a[2], a[3]) {
+                if a[1] > 1 || !raster::sampler_state(a[2], a[3]) {
                     return Err(UNAVAILABLE);
                 }
-                self.device_mut(h)?.sampler.insert(a[2], a[3]);
+                self.device_mut(h)?.sampler.insert(a[1] * 16 + a[2], a[3]);
                 Ok(0)
             }
             "GetSamplerState" => {
-                if a[1] != 0 {
+                if a[1] > 1 {
                     return Err(UNAVAILABLE);
                 }
-                put(mem, a[3], &[raster::sampler(self.device(h)?, a[2])?])?;
+                put(
+                    mem,
+                    a[3],
+                    &[raster::sampler_slot(self.device(h)?, a[1], a[2])?],
+                )?;
                 Ok(0)
             }
             "SetTextureStageState" => {

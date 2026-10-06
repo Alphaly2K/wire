@@ -7,6 +7,7 @@ pub(super) const SYSTEM_FONT: u32 = 0x42000080 + 13 * 4;
 pub(super) struct Font {
     pub logfont: [u8; 92],
     stock: bool,
+    metrics: Option<[u8; 60]>,
 }
 pub(super) fn stock_fonts() -> BTreeMap<u32, Font> {
     [10u32, 11, 12, 13, 14, 16, 17]
@@ -29,6 +30,7 @@ pub(super) fn stock_fonts() -> BTreeMap<u32, Font> {
                 Font {
                     logfont: lf,
                     stock: true,
+                    metrics: None,
                 },
             )
         })
@@ -84,11 +86,22 @@ pub(super) fn dispatch(
                 Font {
                     logfont: lf,
                     stock: false,
+                    metrics: None,
                 },
             );
             Ok(h)
         }
         "GetStockObject" if matches!(a[0], 10..=14 | 16 | 17) => Ok(0x42000080 + a[0] * 4),
+        "GetTextMetricsW" => {
+            let h = gfx.dc(a[0])?.font;
+            let font = gfx.fonts.get_mut(&h).ok_or(6u32)?;
+            if font.metrics.is_none() {
+                font.metrics = Some(metrics(&font.logfont)?);
+            }
+            mem.write_bytes(a[1], font.metrics.as_ref().unwrap())
+                .map_err(|_| 87u32)?;
+            Ok(1)
+        }
         "SelectObject" if gfx.fonts.contains_key(&a[1]) => {
             let dc = gfx.dcs.get_mut(&a[0]).ok_or(6u32)?;
             let old = dc.font;
@@ -140,4 +153,64 @@ pub(super) fn dispatch(
         _ => Err(u32::MAX),
     })())
     .filter(|r| !matches!(r, Err(u32::MAX)))
+}
+
+fn metrics(lf: &[u8; 92]) -> Result<[u8; 60], u32> {
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            fn wire_font_metrics(
+                face: *const u16,
+                length: u32,
+                height: i32,
+                width: i32,
+                weight: i32,
+                italic: i32,
+                values: *mut i32,
+                characters: *mut u16,
+                pitch: *mut u8,
+            ) -> i32;
+        }
+        let face: Vec<_> = lf[28..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| u16::from_le_bytes(*b))
+            .take_while(|&c| c != 0)
+            .collect();
+        let mut values = [0; 11];
+        let mut characters = [0; 4];
+        let mut pitch = 0;
+        let int = |i| i32::from_le_bytes(lf[i..i + 4].try_into().unwrap());
+        if unsafe {
+            wire_font_metrics(
+                face.as_ptr(),
+                face.len() as u32,
+                int(0),
+                int(4),
+                int(16),
+                lf[20] as i32,
+                values.as_mut_ptr(),
+                characters.as_mut_ptr(),
+                &mut pitch,
+            )
+        } == 0
+        {
+            return Err(120);
+        }
+        let mut out = [0; 60];
+        for (i, n) in values.iter().enumerate() {
+            out[i * 4..i * 4 + 4].copy_from_slice(&n.to_le_bytes());
+        }
+        for (i, n) in characters.iter().enumerate() {
+            out[44 + i * 2..46 + i * 2].copy_from_slice(&n.to_le_bytes());
+        }
+        out[52..57].copy_from_slice(&[lf[20], lf[21], lf[22], pitch, lf[23]]);
+        Ok(out)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = lf;
+        Err(120)
+    }
 }

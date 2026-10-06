@@ -4,8 +4,10 @@ use super::*;
 pub(super) struct Layout {
     pub position: u32,
     pub transformed: bool,
+    pub position_w: bool,
     pub color: Option<u32>,
     pub uv: u32,
+    pub uv1: Option<u32>,
     pub size: u32,
 }
 impl D3D9 {
@@ -16,7 +18,10 @@ impl D3D9 {
                 _ => Err(INVALID),
             };
         }
-        if !matches!(d.fvf, 0x102 | 0x142 | 0x104 | 0x144) {
+        if !matches!(
+            d.fvf,
+            0x102 | 0x142 | 0x104 | 0x144 | 0x202 | 0x242 | 0x204 | 0x244
+        ) {
             return Err(UNAVAILABLE);
         }
         let transformed = d.fvf & 0xe == 4;
@@ -26,9 +31,11 @@ impl D3D9 {
         Ok(Layout {
             position: 0,
             transformed,
+            position_w: transformed,
             color: color.then_some(position_size),
             uv,
-            size: uv + 8,
+            uv1: (d.fvf & 0xf00 == 0x200).then_some(uv + 8),
+            size: uv + if d.fvf & 0xf00 == 0x200 { 16 } else { 8 },
         })
     }
     pub(super) fn create_declaration(
@@ -40,8 +47,9 @@ impl D3D9 {
     ) -> Result<u32, u32> {
         put(mem, a[2], &[0])?;
         let mut elements = Vec::new();
-        let (mut position, mut color, mut uv) = (None, None, None);
+        let (mut position, mut color, mut uv, mut uv1) = (None, None, None, None);
         let mut size = 0;
+        let mut position_w = false;
         for i in 0..=64 {
             let p = a[1].checked_add(i * 8).ok_or(INVALID)?;
             let mut bytes = [0; 8];
@@ -53,8 +61,10 @@ impl D3D9 {
                 let layout = Layout {
                     position,
                     transformed,
+                    position_w,
                     color,
                     uv: uv.ok_or(INVALID)?,
+                    uv1,
                     size,
                 };
                 let h = self.object(
@@ -74,25 +84,35 @@ impl D3D9 {
                 put(mem, a[2], &[h])?;
                 return Ok(0);
             }
-            if i == 64 || stream != 0 || bytes[5] != 0 || bytes[7] != 0 {
+            if i == 64 || stream != 0 || bytes[5] != 0 || bytes[7] > 1 {
                 return Err(UNAVAILABLE);
             }
             let offset = u16::from_le_bytes(bytes[2..4].try_into().unwrap()) as u32;
             let width = match (bytes[4], bytes[6]) {
-                (2, 0) if position.is_none() => {
+                (2, 0) if bytes[7] == 0 && position.is_none() => {
                     position = Some((offset, false));
                     12
                 }
-                (3, 9) if position.is_none() => {
+                (3, 9) if bytes[7] == 0 && position.is_none() => {
                     position = Some((offset, true));
+                    position_w = true;
                     16
                 }
-                (4, 10) if color.is_none() => {
+                (3, 0) if bytes[7] == 0 && position.is_none() => {
+                    position = Some((offset, false));
+                    position_w = true;
+                    16
+                }
+                (4, 10) if bytes[7] == 0 && color.is_none() => {
                     color = Some(offset);
                     4
                 }
-                (1, 5) if uv.is_none() => {
+                (1, 5) if bytes[7] == 0 && uv.is_none() => {
                     uv = Some(offset);
+                    8
+                }
+                (1, 5) if bytes[7] == 1 && uv1.is_none() => {
+                    uv1 = Some(offset);
                     8
                 }
                 _ => return Err(UNAVAILABLE),

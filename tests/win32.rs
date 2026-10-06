@@ -1064,6 +1064,69 @@ fn default_window_position_messages_use_actual_client_changes_and_destroy_clears
 }
 
 #[test]
+fn crt_byte_comparison_and_c_locale_case_preserve_unsigned_bytes_eof_and_cdecl() {
+    let mut v = Vm::new();
+    v.mem.write_bytes(DATA, &[0, 0x80, 0xff, 3]).unwrap();
+    v.mem.write_bytes(DATA + 16, &[0, 0x7f, 0xff, 9]).unwrap();
+    assert_eq!(v.call("msvcrt.dll", "memcmp", &[0, 0, 0]), 0);
+    assert_eq!(v.call("msvcrt.dll", "memcmp", &[DATA, DATA + 16, 1]), 0);
+    assert_eq!(v.call("msvcrt.dll", "memcmp", &[DATA, DATA + 16, 4]), 1);
+    assert_eq!(
+        v.call("msvcrt.dll", "memcmp", &[DATA + 16, DATA, 4]) as i32,
+        -1
+    );
+    assert!(v.try_call("msvcrt.dll", "memcmp", &[DATA, 0, 1]).is_err());
+    for (input, upper, lower) in [
+        (b'a' as u32, b'A' as u32, b'a' as u32),
+        (b'Z' as u32, b'Z' as u32, b'z' as u32),
+        (0xff, 0xff, 0xff),
+        (u32::MAX, u32::MAX, u32::MAX),
+        (0, 0, 0),
+    ] {
+        assert_eq!(v.call("msvcrt.dll", "toupper", &[input]), upper);
+        assert_eq!(v.call("msvcrt.dll", "tolower", &[input]), lower);
+        assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 252);
+    }
+}
+
+#[test]
+fn crt_windows_version_exports_are_shared_data_for_dll_imports_and_getprocaddress() {
+    let mut v = Vm::new();
+    std::fs::write(
+        v.dir.join("version-data.dll"),
+        test_dll("msvcrt.dll!_winmajor", true, 0),
+    )
+    .unwrap();
+    // DllMain must read the imported variable, not call it as a function.
+    let path = v.dir.join("version-data.dll");
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[0x200..0x20c].copy_from_slice(&[0xa1, 0, 0x14, 0, 0x10, 0x8b, 0, 0xc2, 12, 0, 0, 0]);
+    bytes[0x908..0x910].copy_from_slice(&[0x01, 0x30, 0x81, 0x30, 0x10, 0x32, 0, 0]);
+    std::fs::write(&path, bytes).unwrap();
+    v.mem.write_bytes(DATA, b"version-data.dll\0").unwrap();
+    let h = v.k("LoadLibraryA", &[DATA]);
+    assert_ne!(h, 0);
+    let imported = v.mem.read_u32(h + 0x1400).unwrap();
+    v.mem.write_bytes(DATA, b"msvcrt.dll\0").unwrap();
+    let crt = v.k("LoadLibraryA", &[DATA]);
+    for (name, value) in [
+        ("_winmajor", 6),
+        ("_winminor", 1),
+        ("_winver", 0x601),
+        ("_osver", 7601),
+    ] {
+        let address = dll_export(&mut v, crt, name);
+        assert_ne!(address, 0);
+        assert_eq!(v.mem.read_u32(address).unwrap(), value);
+        if name == "_winmajor" {
+            assert_eq!(address, imported);
+            v.mem.write_u32(address, 7).unwrap();
+            assert_eq!(v.mem.read_u32(imported).unwrap(), 7);
+        }
+    }
+}
+
+#[test]
 fn common_strings_arithmetic_com_apartments_and_guid_use_checked_state() {
     let mut v = Vm::new();
     v.wide(DATA, "AbC\0tail");
@@ -1886,8 +1949,8 @@ fn main_static_tls_is_initialized_before_entry_and_reserves_its_loader_index() {
     assert_eq!(v.mem.read_u32(block).unwrap(), 38);
     v.k("FreeLibrary", &[dll]);
     assert_eq!(v.mem.read_u32(vector).unwrap(), block);
-    // Nonempty main callback lists are rejected before registration, never ignored.
-    bytes[0xb30..0xb34].copy_from_slice(&0x401000u32.to_le_bytes());
+    // Invalid main callback targets are rejected before registration, never ignored.
+    bytes[0xb30..0xb34].copy_from_slice(&0x404000u32.to_le_bytes());
     std::fs::write(&path, &bytes).unwrap();
     let mut mem = GuestMem::new().unwrap();
     let mut api = ApiTable::new();
@@ -1895,7 +1958,7 @@ fn main_static_tls_is_initialized_before_entry_and_reserves_its_loader_index() {
     assert!(wire::modules::Modules::default()
         .register_main(&mem, 0x400000, path, "C:\\main-tls.exe".into())
         .unwrap_err()
-        .contains("callbacks"));
+        .contains("TLS"));
 }
 
 #[test]
@@ -2089,7 +2152,7 @@ fn dll_static_tls_is_ready_for_dllmain_and_isolated_for_existing_and_new_threads
 }
 
 #[test]
-fn dll_tls_failure_rolls_back_and_unsupported_callbacks_are_rejected() {
+fn dll_tls_failure_rolls_back_and_invalid_callback_targets_are_rejected() {
     let mut v = Vm::new();
     std::fs::write(v.dir.join("tls.dll"), test_tls_dll(false)).unwrap();
     v.mem.write_bytes(DATA, b"tls.dll\0").unwrap();
@@ -2099,7 +2162,7 @@ fn dll_tls_failure_rolls_back_and_unsupported_callbacks_are_rejected() {
     let vector = v.mem.read_u32(TEB_ADDR + 0x2c).unwrap();
     assert_eq!(v.mem.read_u32(vector).unwrap(), 0);
     let mut callback = test_tls_dll(true);
-    callback[0xb30..0xb34].copy_from_slice(&0x10001000u32.to_le_bytes());
+    callback[0xb30..0xb34].copy_from_slice(&0x10004000u32.to_le_bytes());
     std::fs::write(v.dir.join("tls.dll"), callback).unwrap();
     assert_eq!(v.k("LoadLibraryA", &[DATA]), 0);
     assert_eq!(v.k("GetLastError", &[]), 193);
@@ -2110,6 +2173,156 @@ fn dll_tls_failure_rolls_back_and_unsupported_callbacks_are_rejected() {
     assert_eq!(v.k("LoadLibraryA", &[DATA]), 0);
     assert_eq!(v.k("GetLastError", &[]), 193);
     assert!(!v.mem.is_committed(0x50000000));
+}
+
+#[test]
+fn pe32_dep_policy_interprets_legacy_data_but_preserves_nx_noaccess_guard_and_ir_invalidation() {
+    use wire::mem::{MEM_COMMIT, MEM_RESERVE, PAGE_GUARD, PAGE_NOACCESS, PAGE_READWRITE};
+    let v = Vm::new();
+    for nx in [false, true] {
+        let mut exe = test_dll("kernel32.dll!GetCurrentProcessId", true, 0);
+        exe[0x96..0x98].copy_from_slice(&0x102u16.to_le_bytes());
+        exe[0xb4..0xb8].copy_from_slice(&0x400000u32.to_le_bytes());
+        exe[0xde..0xe0].copy_from_slice(&(if nx { 0x100u16 } else { 0 }).to_le_bytes());
+        let path = v.dir.join("dep.exe");
+        std::fs::write(&path, exe).unwrap();
+        let mut mem = GuestMem::new().unwrap();
+        let mut api = ApiTable::new();
+        wire::loader::load_image(&mut mem, &mut api, &path, "dep.exe").unwrap();
+        let p = mem
+            .virtual_alloc(0x31000000, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
+            .unwrap();
+        let code = [0xb8, 42, 0, 0, 0];
+        mem.write_bytes(p, &code).unwrap();
+        let mut cpu = Cpu::new(p, 0, 0);
+        cpu.install_ir(wire::ir::Image::from_code(p, &code).unwrap(), &mem)
+            .unwrap();
+        if nx {
+            assert!(cpu.step(&mut mem).is_err());
+        } else {
+            cpu.step(&mut mem).unwrap();
+            assert_eq!(cpu.regs[0], 42);
+            assert_eq!(cpu.ir_steps, 1);
+            cpu.eip = p;
+            mem.set_dep_enabled(true);
+            assert!(cpu.step(&mut mem).is_err());
+            mem.set_dep_enabled(false);
+        }
+        mem.virtual_protect(p, 4096, PAGE_NOACCESS).unwrap();
+        cpu.eip = p;
+        assert!(cpu.step(&mut mem).is_err());
+        mem.virtual_protect(p, 4096, PAGE_READWRITE | PAGE_GUARD)
+            .unwrap();
+        cpu.eip = p;
+        assert!(cpu.step(&mut mem).is_err());
+        assert_eq!(mem.virtual_query(p).unwrap().protect, PAGE_READWRITE);
+        cpu.eip = p;
+        assert_eq!(cpu.step(&mut mem).is_ok(), !nx);
+    }
+}
+
+#[test]
+fn dll_last_page_file_padding_is_mapped_but_cannot_extend_into_another_page() {
+    let mut v = Vm::new();
+    let mut bytes = test_dll("kernel32.dll!GetCurrentProcessId", true, 9);
+    // Declared virtual extent ends within the last page; aligned file data
+    // continues through that page, as in the real MinGW codec extension.
+    bytes[0xd0..0xd4].copy_from_slice(&0x2f10u32.to_le_bytes());
+    bytes[0x180..0x184].copy_from_slice(&0x1f10u32.to_le_bytes());
+    bytes[0x21ff] = 0x5a;
+    std::fs::write(v.dir.join("tail.dll"), &bytes).unwrap();
+    v.mem.write_bytes(DATA, b"tail.dll\0").unwrap();
+    let h = v.k("LoadLibraryA", &[DATA]);
+    assert_ne!(h, 0);
+    assert_eq!(v.mem.read_u8(h + 0x2fff).unwrap(), 0x5a);
+    assert_eq!(
+        v.mem.virtual_query(h + 0x2fff).unwrap().protect,
+        wire::mem::PAGE_EXECUTE_READWRITE
+    );
+    assert!(v.mem.read_u8(h + 0x3000).is_err());
+    assert_eq!(v.k("FreeLibrary", &[h]), 1);
+    bytes.resize(0x2400, 0);
+    bytes[0x188..0x18c].copy_from_slice(&0x2200u32.to_le_bytes());
+    std::fs::write(v.dir.join("tail.dll"), &bytes).unwrap();
+    assert_eq!(v.k("LoadLibraryA", &[DATA]), 0);
+    assert_eq!(v.k("GetLastError", &[]), 193);
+    assert!(!v.mem.is_committed(h));
+}
+
+#[test]
+fn tls_callbacks_run_before_dllmain_on_the_owner_and_before_storage_is_released() {
+    let mut v = Vm::new();
+    v.mem.write_u32(TEB_ADDR + 0x18, TEB_ADDR).unwrap();
+    let mut bytes = test_tls_dll(true);
+    // callback records reason, owner TEB and the still-live TLS value.
+    let mut code = vec![0x8b, 0x44, 0x24, 8, 0xff, 0x04, 0x85];
+    code.extend((DATA + 0x740).to_le_bytes());
+    code.extend([0x64, 0x8b, 0x0d, 0x18, 0, 0, 0, 0x89, 0x0c, 0x85]);
+    code.extend((DATA + 0x760).to_le_bytes());
+    code.extend([
+        0x8b, 0x4c, 0x24, 4, 0x8b, 0x89, 0x20, 0x19, 0, 0, 0x64, 0x8b, 0x15, 0x2c, 0, 0, 0, 0x8b,
+        0x0c, 0x8a, 0x8b, 0x11, 0x89, 0x14, 0x85,
+    ]);
+    code.extend((DATA + 0x780).to_le_bytes());
+    code.extend([0xc2, 12, 0]);
+    bytes[0x2c0..0x2c0 + code.len()].copy_from_slice(&code);
+    bytes[0xb30..0xb34].copy_from_slice(&0x100010c0u32.to_le_bytes());
+    // The callback table target itself also needs HIGHLOW relocation.
+    bytes[0x904..0x908].copy_from_slice(&24u32.to_le_bytes());
+    bytes[0x914..0x918].copy_from_slice(&[0x30, 0x39, 0, 0]);
+    bytes[0x124..0x128].copy_from_slice(&24u32.to_le_bytes());
+    std::fs::write(v.dir.join("tls.dll"), &bytes).unwrap();
+    v.mem.write_bytes(DATA, b"tls.dll\0").unwrap();
+    let h = v.k("LoadLibraryA", &[DATA]);
+    assert_ne!(h, 0);
+    assert_eq!(v.mem.read_u32(DATA + 0x744).unwrap(), 1);
+    assert_eq!(v.mem.read_u32(DATA + 0x764).unwrap(), TEB_ADDR);
+    assert_eq!(v.mem.read_u32(DATA + 0x784).unwrap(), 37);
+    assert_eq!(v.mem.read_u32(DATA + 0x720).unwrap(), 37);
+    assert_eq!(v.k("DisableThreadLibraryCalls", &[h]), 0);
+    assert_eq!(v.k("GetLastError", &[]), 126);
+    // Suspended thread receives no callback until it actually runs.
+    let exit = v.api.register("kernel32.dll", Some("ExitThread"), None);
+    v.mem.write_bytes(CODE, &[0x6a, 7, 0xb8]).unwrap();
+    v.mem.write_u32(CODE + 3, exit).unwrap();
+    v.mem.write_bytes(CODE + 7, &[0xff, 0xd0]).unwrap();
+    let worker = v.k("CreateThread", &[0, 0, CODE, 0, 4, 0]);
+    let teb = v.sched.threads[v.sched.thread_index_by_handle(worker).unwrap()].teb;
+    assert_eq!(v.mem.read_u32(DATA + 0x748).unwrap(), 0);
+    v.k("ResumeThread", &[worker]);
+    v.k("Sleep", &[0]);
+    // Owner resumes after the worker exits; stop before it can dispatch a
+    // synthetic API frame from Vm::call's return address.
+    v.sched.threads[0].ctx.eip = RET;
+    v.mem.write_bytes(RET, &[0xeb, 0xfe]).unwrap();
+    let outcome = v.cpu.run(
+        &mut v.mem,
+        &mut v.api,
+        &mut v.state,
+        &mut v.log,
+        &mut v.sched,
+        10000,
+    );
+    assert!(matches!(outcome, wire::cpu::RunOutcome::InstructionLimit));
+    assert_eq!(v.mem.read_u32(DATA + 0x748).unwrap(), 1);
+    assert_eq!(v.mem.read_u32(DATA + 0x74c).unwrap(), 1);
+    assert_eq!(v.mem.read_u32(DATA + 0x768).unwrap(), teb);
+    assert_eq!(v.mem.read_u32(DATA + 0x76c).unwrap(), teb);
+    assert_eq!(v.mem.read_u32(DATA + 0x78c).unwrap(), 37);
+    let vector = v.mem.read_u32(teb + 0x2c).unwrap();
+    assert_eq!(
+        v.k("HeapSize", &[v.state.process_heap, 0, vector]),
+        u32::MAX
+    );
+    assert_eq!(v.k("FreeLibrary", &[h]), 1);
+    assert_eq!(v.mem.read_u32(DATA + 0x740).unwrap(), 1);
+    assert_eq!(v.mem.read_u32(DATA + 0x780).unwrap(), 37);
+    // A malformed callback list never reaches guest execution.
+    bytes[0xb30..0xb34].copy_from_slice(&0x10001900u32.to_le_bytes());
+    bytes[0x19c..0x1a0].copy_from_slice(&0xc0000040u32.to_le_bytes());
+    std::fs::write(v.dir.join("tls.dll"), &bytes).unwrap();
+    assert_eq!(v.k("LoadLibraryA", &[DATA]), 0);
+    assert_eq!(v.k("GetLastError", &[]), 193);
 }
 
 #[test]
@@ -4870,7 +5083,7 @@ fn d3d9_indexed_declarations_transforms_and_reset_preserve_real_resources() {
     assert_eq!(v.mem.read_u32(pixels).unwrap(), 0xff336699);
     d3d_com(&mut v, back, 2, &[]);
     assert_eq!(d3d_com(&mut v, device, 16, &[DATA + 0x800]), 0);
-    assert_eq!(v.mem.read_u32(DATA + 0x800).unwrap(), 0);
+    assert_eq!(v.mem.read_u32(DATA + 0x800).unwrap(), 8);
     assert_eq!(
         v.k("HeapSize", &[v.state.process_heap, 0, pixels]),
         u32::MAX
@@ -5482,4 +5695,513 @@ fn validated_paint_drops_only_synthetic_messages_and_default_close_destroys_wind
         1
     );
     assert_eq!(v.call("user32.dll", "IsWindow", &[hwnd]), 0);
+}
+
+#[test]
+fn d3d9_pixel_shader_executes_constants_masks_and_preserves_bound_lifetime() {
+    let mut v = Vm::new();
+    let (factory, device, _) = d3d_device(&mut v);
+    // def c0, (0.25,0.5,0.75,1); mov oC0,c0
+    let tokens = [
+        0xffff0200,
+        0x05000051,
+        0xa00f0000,
+        0.25f32.to_bits(),
+        0.5f32.to_bits(),
+        0.75f32.to_bits(),
+        1f32.to_bits(),
+        0x02000001,
+        0x800f0800,
+        0xa0e40000,
+        0xffff,
+    ];
+    let p = DATA + 0x200;
+    v.mem
+        .write_bytes(
+            p,
+            &tokens
+                .iter()
+                .flat_map(|n| n.to_le_bytes())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    assert_eq!(d3d_com(&mut v, device, 106, &[p, DATA + 0x900]), 0);
+    let shader = v.mem.read_u32(DATA + 0x900).unwrap();
+    assert_eq!(d3d_com(&mut v, shader, 4, &[0, DATA + 0x910]), 0);
+    assert_eq!(
+        v.mem.read_u32(DATA + 0x910).unwrap(),
+        tokens.len() as u32 * 4
+    );
+    v.mem.write_u32(DATA + 0x910, 4).unwrap();
+    assert_eq!(
+        d3d_com(&mut v, shader, 4, &[DATA + 0x300, DATA + 0x910]),
+        0x88760867
+    );
+    assert_eq!(d3d_com(&mut v, shader, 4, &[DATA + 0x300, DATA + 0x910]), 0);
+    let mut copy = vec![0; tokens.len() * 4];
+    v.mem.read_bytes(DATA + 0x300, &mut copy).unwrap();
+    assert_eq!(
+        copy,
+        tokens
+            .iter()
+            .flat_map(|n| n.to_le_bytes())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(d3d_com(&mut v, device, 107, &[shader]), 0);
+    assert_eq!(d3d_com(&mut v, shader, 2, &[]), 0);
+    assert_eq!(d3d_com(&mut v, device, 108, &[DATA + 0x900]), 0);
+    assert_eq!(v.mem.read_u32(DATA + 0x900).unwrap(), shader);
+    assert_eq!(d3d_com(&mut v, shader, 2, &[]), 0);
+    // Constants set atomically, local def shadows device c0.
+    let c = [0f32, 0., 0., 0.];
+    v.mem
+        .write_bytes(
+            DATA + 0x400,
+            &c.iter().flat_map(|n| n.to_le_bytes()).collect::<Vec<_>>(),
+        )
+        .unwrap();
+    assert_eq!(d3d_com(&mut v, device, 109, &[0, DATA + 0x400, 1]), 0);
+    assert_eq!(
+        d3d_com(&mut v, device, 109, &[31, DATA + 0x400, 2]),
+        0x8876086c
+    );
+    assert_eq!(d3d_com(&mut v, device, 110, &[0, DATA + 0x410, 1]), 0);
+    assert_eq!(v.mem.read_u32(DATA + 0x410).unwrap(), 0);
+    for (i, values) in [
+        [0f32, 0., 0.5, 1., 0., 0.],
+        [4., 0., 0.5, 1., 1., 0.],
+        [0., 4., 0.5, 1., 0., 1.],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        v.mem
+            .write_bytes(
+                DATA + i as u32 * 24,
+                &values
+                    .iter()
+                    .flat_map(|n| n.to_le_bytes())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+    }
+    assert_eq!(d3d_com(&mut v, device, 89, &[0x104]), 0);
+    d3d_com(&mut v, device, 57, &[22, 1]);
+    d3d_com(&mut v, device, 57, &[168, 5]); // only R and B
+    d3d_com(
+        &mut v,
+        device,
+        43,
+        &[0, 0, 1, 0xff123456, 1f32.to_bits(), 0],
+    );
+    d3d_com(&mut v, device, 41, &[]);
+    assert_eq!(d3d_com(&mut v, device, 83, &[4, 1, DATA, 24]), 0);
+    d3d_com(&mut v, device, 42, &[]);
+    d3d_com(&mut v, device, 18, &[0, 0, 0, DATA + 0x900]);
+    let back = v.mem.read_u32(DATA + 0x900).unwrap();
+    d3d_com(&mut v, back, 13, &[DATA + 0x910, 0, 0x10]);
+    let bits = v.mem.read_u32(DATA + 0x914).unwrap();
+    assert_eq!(v.mem.read_u32(bits).unwrap(), 0xff4034bf);
+    d3d_com(&mut v, back, 14, &[]);
+    assert_eq!(d3d_com(&mut v, device, 107, &[0]), 0);
+    // Malformed stream cannot publish an object.
+    v.mem.write_u32(p + 4, 0x04000001).unwrap();
+    assert_ne!(d3d_com(&mut v, device, 106, &[p, DATA + 0x900]), 0);
+    assert_eq!(v.mem.read_u32(DATA + 0x900).unwrap(), 0);
+    for o in [back, device, factory] {
+        d3d_com(&mut v, o, 2, &[]);
+    }
+}
+
+#[test]
+fn d3d9_recorded_stateblocks_isolate_live_state_capture_only_members_and_hold_resources() {
+    let mut v = Vm::new();
+    let (factory, device, _) = d3d_device(&mut v);
+    assert_eq!(d3d_com(&mut v, device, 61, &[DATA + 0x900]), 0x8876086c);
+    assert_eq!(d3d_com(&mut v, device, 60, &[]), 0);
+    assert_eq!(d3d_com(&mut v, device, 60, &[]), 0x8876086c);
+    assert_eq!(d3d_com(&mut v, device, 59, &[1, DATA + 0x900]), 0x8876086c);
+    assert_eq!(d3d_com(&mut v, device, 57, &[22, 1]), 0);
+    assert_eq!(d3d_com(&mut v, device, 57, &[168, 3]), 0);
+    assert_eq!(d3d_com(&mut v, device, 57, &[168, 16]), 0x8876086a);
+    assert_eq!(d3d_com(&mut v, device, 58, &[22, DATA]), 0);
+    assert_eq!(v.mem.read_u32(DATA).unwrap(), 3); // getter sees live state
+    assert_eq!(
+        d3d_com(&mut v, device, 23, &[1, 1, 1, 0, 21, 1, DATA + 0x900, 0]),
+        0
+    );
+    let texture = v.mem.read_u32(DATA + 0x900).unwrap();
+    assert_eq!(d3d_com(&mut v, device, 65, &[1, texture]), 0);
+    assert_eq!(d3d_com(&mut v, texture, 2, &[]), 0); // recording owns the resource
+    assert_eq!(d3d_com(&mut v, device, 64, &[1, DATA + 0x900]), 0);
+    assert_eq!(v.mem.read_u32(DATA + 0x900).unwrap(), 0);
+    assert_eq!(d3d_com(&mut v, device, 61, &[0]), 0x8876086c); // keep recording on bad output
+    assert_eq!(d3d_com(&mut v, device, 61, &[DATA + 0x900]), 0);
+    let block = v.mem.read_u32(DATA + 0x900).unwrap();
+    d3d_com(&mut v, device, 57, &[27, 1]); // unrecorded blend-enable
+    assert_eq!(d3d_com(&mut v, block, 5, &[]), 0);
+    d3d_com(&mut v, device, 58, &[22, DATA]);
+    assert_eq!(v.mem.read_u32(DATA).unwrap(), 1);
+    d3d_com(&mut v, device, 58, &[168, DATA]);
+    assert_eq!(v.mem.read_u32(DATA).unwrap(), 3);
+    d3d_com(&mut v, device, 58, &[27, DATA]);
+    assert_eq!(v.mem.read_u32(DATA).unwrap(), 1);
+    d3d_com(&mut v, device, 64, &[1, DATA]);
+    assert_eq!(v.mem.read_u32(DATA).unwrap(), texture);
+    d3d_com(&mut v, texture, 2, &[]);
+    d3d_com(&mut v, device, 57, &[22, 2]);
+    assert_eq!(d3d_com(&mut v, block, 4, &[]), 0);
+    d3d_com(&mut v, device, 57, &[22, 3]);
+    assert_eq!(d3d_com(&mut v, block, 5, &[]), 0);
+    d3d_com(&mut v, device, 58, &[22, DATA]);
+    assert_eq!(v.mem.read_u32(DATA).unwrap(), 2);
+    assert_eq!(d3d_com(&mut v, block, 3, &[DATA]), 0);
+    assert_eq!(v.mem.read_u32(DATA).unwrap(), device);
+    d3d_com(&mut v, device, 2, &[]);
+    assert_eq!(d3d_com(&mut v, block, 2, &[]), 0);
+    assert_eq!(d3d_com(&mut v, device, 64, &[1, DATA]), 0);
+    assert_eq!(v.mem.read_u32(DATA).unwrap(), texture); // live binding survives block release
+    d3d_com(&mut v, texture, 2, &[]);
+    d3d_com(&mut v, device, 65, &[1, 0]);
+    assert_eq!(
+        v.call("d3d9.dll", "IDirect3DTexture9.AddRef", &[texture]),
+        0x8876086c
+    );
+    for o in [device, factory] {
+        d3d_com(&mut v, o, 2, &[]);
+    }
+}
+
+#[test]
+fn d3d9_all_stateblocks_restore_defaults_constants_and_exclude_render_targets() {
+    let mut v = Vm::new();
+    let (factory, device, _) = d3d_device(&mut v);
+    assert_eq!(d3d_com(&mut v, device, 59, &[1, DATA + 0x900]), 0);
+    let block = v.mem.read_u32(DATA + 0x900).unwrap();
+    assert_eq!(
+        d3d_com(&mut v, device, 28, &[8, 4, 21, 0, 0, 0, DATA + 0x900, 0]),
+        0
+    );
+    let target = v.mem.read_u32(DATA + 0x900).unwrap();
+    d3d_com(&mut v, device, 37, &[0, target]);
+    d3d_com(&mut v, device, 57, &[22, 1]);
+    d3d_com(&mut v, device, 69, &[1, 3, 3]); // address W is stored for 2D textures
+    v.mem.write_bytes(DATA, &[0x55; 16]).unwrap();
+    d3d_com(&mut v, device, 109, &[5, DATA, 1]);
+    assert_eq!(d3d_com(&mut v, block, 5, &[]), 0);
+    d3d_com(&mut v, device, 38, &[0, DATA]);
+    assert_eq!(v.mem.read_u32(DATA).unwrap(), target);
+    d3d_com(&mut v, target, 2, &[]);
+    d3d_com(&mut v, device, 48, &[DATA]);
+    assert_eq!(v.mem.read_u32(DATA + 8).unwrap(), 4); // saved viewport, not target extent
+    d3d_com(&mut v, device, 58, &[22, DATA]);
+    assert_eq!(v.mem.read_u32(DATA).unwrap(), 3);
+    d3d_com(&mut v, device, 68, &[1, 3, DATA]);
+    assert_eq!(v.mem.read_u32(DATA).unwrap(), 1);
+    d3d_com(&mut v, device, 110, &[5, DATA, 1]);
+    assert_eq!(v.mem.read_u32(DATA).unwrap(), 0);
+    assert_eq!(d3d_com(&mut v, device, 59, &[0, DATA]), 0x8876086c);
+    for o in [block, target, device, factory] {
+        d3d_com(&mut v, o, 2, &[]);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn gdi_font_metrics_measure_the_selected_font_and_check_output() {
+    let mut v = Vm::new();
+    let dc = v.call("gdi32.dll", "CreateCompatibleDC", &[0]);
+    assert_eq!(v.call("gdi32.dll", "SetMapMode", &[dc, 1]), 1);
+    assert_eq!(v.call("gdi32.dll", "GetMapMode", &[dc]), 1);
+    assert_eq!(v.call("gdi32.dll", "SetMapMode", &[dc, 2]), 0);
+    let mut heights = Vec::new();
+    for size in [12i32, 36] {
+        let mut lf = [0; 92];
+        lf[..4].copy_from_slice(&(-size).to_le_bytes());
+        lf[16..20].copy_from_slice(&400u32.to_le_bytes());
+        for (i, c) in "Helvetica".encode_utf16().enumerate() {
+            lf[28 + i * 2..30 + i * 2].copy_from_slice(&c.to_le_bytes());
+        }
+        v.mem.write_bytes(DATA, &lf).unwrap();
+        let font = v.call("gdi32.dll", "CreateFontIndirectW", &[DATA]);
+        assert_ne!(font, 0);
+        let old = v.call("gdi32.dll", "SelectObject", &[dc, font]);
+        assert_ne!(old, 0);
+        v.mem.write_bytes(DATA + 0x100, &[0x55; 64]).unwrap();
+        assert_eq!(
+            v.call("gdi32.dll", "GetTextMetricsW", &[dc, DATA + 0x100]),
+            1
+        );
+        let height = v.mem.read_u32(DATA + 0x100).unwrap();
+        let ascent = v.mem.read_u32(DATA + 0x104).unwrap();
+        let descent = v.mem.read_u32(DATA + 0x108).unwrap();
+        assert_eq!(height, ascent + descent);
+        assert!(height > 0 && ascent > 0);
+        assert!(v.mem.read_u32(DATA + 0x114).unwrap() > 0);
+        assert_eq!(v.mem.read_u32(DATA + 0x13c).unwrap(), 0x55555555);
+        heights.push(height);
+        assert_eq!(v.call("gdi32.dll", "GetTextMetricsW", &[dc, 0]), 0);
+        assert_eq!(v.call("gdi32.dll", "SelectObject", &[dc, old]), font);
+        assert_eq!(v.call("gdi32.dll", "DeleteObject", &[font]), 1);
+    }
+    assert!(heights[1] > heights[0] * 2);
+    assert_eq!(v.call("gdi32.dll", "GetTextMetricsW", &[0, DATA]), 0);
+    v.call("gdi32.dll", "DeleteDC", &[dc]);
+}
+
+#[test]
+fn d3d9_vs2_dp4_constants_clip_position_and_forward_color_to_ps2() {
+    let mut v = Vm::new();
+    let (factory, device, _) = d3d_device(&mut v);
+    let tokens = [
+        0xfffe0200u32,
+        0x0200001f,
+        0x80000000,
+        0x900f0000,
+        0x0200001f,
+        0x80000005,
+        0x900f0001,
+        0x0200001f,
+        0x8000000a,
+        0x900f0002,
+        0x03000009,
+        0xc0010000,
+        0x90e40000,
+        0xa0e40000,
+        0x03000009,
+        0xc0020000,
+        0x90e40000,
+        0xa0e40001,
+        0x03000009,
+        0xc0040000,
+        0x90e40000,
+        0xa0e40002,
+        0x03000009,
+        0xc0080000,
+        0x90e40000,
+        0xa0e40003,
+        0x02000001,
+        0xe0030000,
+        0x90e40001,
+        0x02000001,
+        0xd00f0000,
+        0x90e40002,
+        0xffff,
+    ];
+    let vp = [0u32, 0, 8, 8, 0, 1f32.to_bits()];
+    v.mem
+        .write_bytes(
+            DATA + 0x800,
+            &vp.iter().flat_map(|n| n.to_le_bytes()).collect::<Vec<_>>(),
+        )
+        .unwrap();
+    assert_eq!(d3d_com(&mut v, device, 47, &[DATA + 0x800]), 0);
+    v.mem.write_u32(DATA + 0x808, 0).unwrap();
+    v.mem.write_u32(DATA + 0x80c, 0).unwrap();
+    assert_eq!(d3d_com(&mut v, device, 47, &[DATA + 0x800]), 0);
+    assert_eq!(d3d_com(&mut v, device, 48, &[DATA + 0x800]), 0);
+    assert_eq!(v.mem.read_u32(DATA + 0x808).unwrap(), 0);
+    v.mem.write_u32(DATA + 0x808, 4).unwrap();
+    v.mem.write_u32(DATA + 0x80c, 4).unwrap();
+    assert_eq!(d3d_com(&mut v, device, 47, &[DATA + 0x800]), 0);
+    let p = DATA + 0x200;
+    v.mem
+        .write_bytes(
+            p,
+            &tokens
+                .iter()
+                .flat_map(|n| n.to_le_bytes())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    assert_eq!(d3d_com(&mut v, device, 91, &[p, DATA + 0x900]), 0);
+    let vs = v.mem.read_u32(DATA + 0x900).unwrap();
+    let decl = [
+        0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 16, 0, 1, 0, 5, 0, 0, 0, 24, 0, 4, 0, 10, 0, 255, 0, 0, 0,
+        17, 0, 0, 0,
+    ];
+    v.mem.write_bytes(DATA + 0x600, &decl).unwrap();
+    assert_eq!(
+        d3d_com(&mut v, device, 86, &[DATA + 0x600, DATA + 0x900]),
+        0
+    );
+    let declaration = v.mem.read_u32(DATA + 0x900).unwrap();
+    assert_eq!(d3d_com(&mut v, device, 87, &[declaration]), 0);
+    assert_eq!(d3d_com(&mut v, device, 92, &[vs]), 0);
+    let matrix = [
+        0.5f32, 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.,
+    ];
+    v.mem
+        .write_bytes(
+            DATA + 0x400,
+            &matrix
+                .iter()
+                .flat_map(|n| n.to_le_bytes())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    assert_eq!(d3d_com(&mut v, device, 94, &[0, DATA + 0x400, 4]), 0);
+    assert_eq!(
+        d3d_com(&mut v, device, 94, &[255, DATA + 0x400, 2]),
+        0x8876086c
+    );
+    let ps = [
+        0xffff0200u32,
+        0x0200001f,
+        0x80000000,
+        0x900f0000,
+        0x02000001,
+        0x800f0800,
+        0x90e40000,
+        0xffff,
+    ];
+    v.mem
+        .write_bytes(
+            DATA + 0x700,
+            &ps.iter().flat_map(|n| n.to_le_bytes()).collect::<Vec<_>>(),
+        )
+        .unwrap();
+    assert_eq!(
+        d3d_com(&mut v, device, 106, &[DATA + 0x700, DATA + 0x900]),
+        0
+    );
+    let shader = v.mem.read_u32(DATA + 0x900).unwrap();
+    d3d_com(&mut v, device, 107, &[shader]);
+    for (i, point) in [
+        [-1f32, 1., 0.5, 1., 0., 0.],
+        [1., 1., 0.5, 1., 1., 0.],
+        [-1., -1., 0.5, 1., 0., 1.],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        v.mem
+            .write_bytes(
+                DATA + i as u32 * 28,
+                &point
+                    .iter()
+                    .flat_map(|n| n.to_le_bytes())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        v.mem
+            .write_u32(DATA + i as u32 * 28 + 24, 0xff4080bf)
+            .unwrap();
+    }
+    d3d_com(&mut v, device, 43, &[0, 0, 1, 0, 1f32.to_bits(), 0]);
+    d3d_com(&mut v, device, 41, &[]);
+    assert_eq!(d3d_com(&mut v, device, 83, &[4, 1, DATA, 28]), 0);
+    d3d_com(&mut v, device, 42, &[]);
+    d3d_com(&mut v, device, 18, &[0, 0, 0, DATA + 0x900]);
+    let back = v.mem.read_u32(DATA + 0x900).unwrap();
+    d3d_com(&mut v, back, 13, &[DATA + 0x910, 0, 0x10]);
+    let bits = v.mem.read_u32(DATA + 0x914).unwrap();
+    assert_eq!(v.mem.read_u32(bits + 5 * 4).unwrap(), 0xff4080bf);
+    assert_eq!(v.mem.read_u32(bits + 4 * 4).unwrap(), 0);
+    d3d_com(&mut v, back, 14, &[]);
+    // Switching to pretransformed input bypasses the still-bound VS. Its
+    // matrix would collapse these screen coordinates if it were executed.
+    assert_eq!(d3d_com(&mut v, device, 89, &[0x144]), 0);
+    d3d_com(&mut v, device, 57, &[22, 1]);
+    for (i, xy) in [[0f32, 0.], [4., 0.], [0., 4.]].into_iter().enumerate() {
+        let p = DATA + i as u32 * 28;
+        for (j, n) in [xy[0], xy[1], 0.5, 1.].into_iter().enumerate() {
+            v.mem.write_u32(p + j as u32 * 4, n.to_bits()).unwrap();
+        }
+        v.mem.write_u32(p + 16, 0xffc04080).unwrap();
+        v.mem.write_u32(p + 20, 0).unwrap();
+        v.mem.write_u32(p + 24, 0).unwrap();
+    }
+    assert_eq!(d3d_com(&mut v, device, 69, &[0, 7, 1]), 0);
+    assert_eq!(d3d_com(&mut v, device, 69, &[0, 7, 2]), 0);
+    assert_eq!(d3d_com(&mut v, device, 68, &[0, 7, DATA + 0x920]), 0);
+    assert_eq!(v.mem.read_u32(DATA + 0x920).unwrap(), 2);
+    d3d_com(&mut v, device, 43, &[0, 0, 1, 0, 1f32.to_bits(), 0]);
+    d3d_com(&mut v, device, 41, &[]);
+    assert_eq!(d3d_com(&mut v, device, 83, &[4, 1, DATA, 28]), 0);
+    d3d_com(&mut v, device, 42, &[]);
+    d3d_com(&mut v, back, 13, &[DATA + 0x910, 0, 0x10]);
+    assert_eq!(v.mem.read_u32(bits + 5 * 4).unwrap(), 0xffc04080);
+    d3d_com(&mut v, back, 14, &[]);
+    assert_eq!(d3d_com(&mut v, device, 93, &[DATA + 0x920]), 0);
+    assert_eq!(v.mem.read_u32(DATA + 0x920).unwrap(), vs);
+    d3d_com(&mut v, vs, 2, &[]);
+    d3d_com(&mut v, device, 107, &[0]);
+    // Null stage-zero texture disables the default MODULATE stage, retaining
+    // diffuse RGBA instead of failing or sampling a fabricated texture.
+    assert_eq!(d3d_com(&mut v, device, 69, &[0, 12, 0]), 0);
+    assert_eq!(d3d_com(&mut v, device, 69, &[0, 13, 0]), 0);
+    assert_eq!(d3d_com(&mut v, device, 69, &[0, 12, 1]), 0x8876086a);
+    d3d_com(&mut v, device, 43, &[0, 0, 1, 0, 1f32.to_bits(), 0]);
+    d3d_com(&mut v, device, 41, &[]);
+    assert_eq!(d3d_com(&mut v, device, 83, &[4, 1, DATA, 28]), 0);
+    d3d_com(&mut v, device, 42, &[]);
+    d3d_com(&mut v, back, 13, &[DATA + 0x910, 0, 0x10]);
+    assert_eq!(v.mem.read_u32(bits + 5 * 4).unwrap(), 0xffc04080);
+    d3d_com(&mut v, back, 14, &[]);
+    d3d_com(&mut v, device, 92, &[0]);
+    d3d_com(&mut v, device, 87, &[0]);
+    for o in [back, shader, vs, declaration, device, factory] {
+        d3d_com(&mut v, o, 2, &[]);
+    }
+}
+
+#[test]
+fn gdi_bitfields_dib_reports_masks_and_keeps_checked_pixels() {
+    let mut v = Vm::new();
+    let dc = v.call("gdi32.dll", "CreateCompatibleDC", &[0]);
+    let info = [
+        40u32,
+        3,
+        (-2i32) as u32,
+        0x200001,
+        3,
+        24,
+        0,
+        0,
+        0,
+        0,
+        0xff0000,
+        0xff00,
+        0xff,
+    ];
+    v.mem
+        .write_bytes(
+            DATA,
+            &info
+                .iter()
+                .flat_map(|n| n.to_le_bytes())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    let bitmap = v.call(
+        "gdi32.dll",
+        "CreateDIBSection",
+        &[dc, DATA, 0, DATA + 0x100, 0, 0],
+    );
+    assert_ne!(bitmap, 0);
+    let bits = v.mem.read_u32(DATA + 0x100).unwrap();
+    v.mem.write_u32(bits, 0x11223344).unwrap();
+    let old = v.call("gdi32.dll", "SelectObject", &[dc, bitmap]);
+    assert_ne!(old, 0);
+    assert_eq!(v.call("gdi32.dll", "GetPixel", &[dc, 0, 0]), 0x443322);
+    assert_eq!(
+        v.call("gdi32.dll", "GetObjectW", &[bitmap, 84, DATA + 0x200]),
+        84
+    );
+    assert_eq!(v.mem.read_u32(DATA + 0x228).unwrap(), 3);
+    assert_eq!(v.mem.read_u32(DATA + 0x240).unwrap(), 0xff0000);
+    assert_eq!(v.mem.read_u32(DATA + 0x248).unwrap(), 0xff);
+    v.mem.write_u32(DATA + 40, 0xff).unwrap();
+    assert_eq!(
+        v.call(
+            "gdi32.dll",
+            "CreateDIBSection",
+            &[dc, DATA, 0, DATA + 0x100, 0, 0]
+        ),
+        0
+    );
+    v.call("gdi32.dll", "SelectObject", &[dc, old]);
+    v.call("gdi32.dll", "DeleteObject", &[bitmap]);
+    v.call("gdi32.dll", "DeleteDC", &[dc]);
 }

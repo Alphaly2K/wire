@@ -320,6 +320,7 @@ impl GuestMem {
             return Err(INVALID_ADDRESS);
         }
         let count = ((a.end - base as u64) / GUEST_PAGE as u64) as usize;
+        let image_end = (pe.size_of_image as u64).div_ceil(GUEST_PAGE as u64) * GUEST_PAGE as u64;
         let mut flags = vec![0u8; count];
         for p in flags
             .iter_mut()
@@ -333,7 +334,14 @@ impl GuestMem {
                 continue;
             }
             let end = section.virtual_address as u64 + span as u64;
-            if end > pe.size_of_image as u64 {
+            let virtual_span = if section.virtual_size == 0 {
+                section.raw_size
+            } else {
+                section.virtual_size
+            };
+            if end > image_end
+                || section.virtual_address as u64 + virtual_span as u64 > pe.size_of_image as u64
+            {
                 return Err(INVALID_ADDRESS);
             }
             let bits = u8::from(section.characteristics & 0x40000000 != 0)

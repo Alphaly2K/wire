@@ -15,6 +15,7 @@ const TLS_SLOTS: usize = 64;
 struct StaticTls {
     index: usize,
     template: Vec<u8>,
+    callbacks: Vec<u32>,
     blocks: HashMap<u32, u32>, // TEB -> per-thread copy
 }
 
@@ -50,12 +51,15 @@ struct Module {
     pinned: bool,
     phase: Phase,
     tls: Option<StaticTls>,
+    thread_calls_disabled: bool,
 }
 #[derive(Default)]
 pub struct Modules {
     images: HashMap<u32, Module>,
     paths: HashMap<PathBuf, u32>,
     tls_vectors: HashMap<u32, u32>, // TEB -> ThreadLocalStoragePointer
+    init_order: Vec<u32>,
+    process_detaching: bool,
 }
 
 enum Failure {
@@ -152,15 +156,30 @@ fn prepare(bytes: &[u8]) -> LoadResult<(PeFile, Vec<u8>, Exports)> {
     if pe.dir(13).rva != 0 {
         return Err(bad("delay imports are not supported yet"));
     }
-    let mut image = vec![0; pe.size_of_image as usize];
+    // Some MinGW images end at the last virtual byte rather than at a page
+    // boundary. File-alignment padding may still occupy that last mapped page.
+    let mapped_size = pe
+        .size_of_image
+        .checked_add(4095)
+        .map(|n| n & !4095)
+        .ok_or_else(|| bad("DLL image size overflow"))?;
+    let mut image = vec![0; mapped_size as usize];
     image[..pe.size_of_headers as usize].copy_from_slice(&bytes[..pe.size_of_headers as usize]);
     let mut ranges = vec![(0, pe.size_of_headers)];
     for section in &pe.sections {
         let span = section.virtual_size.max(section.raw_size);
+        let virtual_span = if section.virtual_size == 0 {
+            section.raw_size
+        } else {
+            section.virtual_size
+        };
+        if section.virtual_address as u64 + virtual_span as u64 > pe.size_of_image as u64 {
+            return Err(bad("virtual section out of image"));
+        }
         let end = section
             .virtual_address
             .checked_add(span)
-            .filter(|&e| e <= pe.size_of_image)
+            .filter(|&e| e <= mapped_size)
             .ok_or_else(|| bad("section out of image"))?;
         if span != 0
             && ranges
@@ -243,9 +262,14 @@ fn relocate(pe: &PeFile, image: &mut [u8], base: u32) -> LoadResult<()> {
     }
     Ok(())
 }
-// TLS directory fields are VAs, read only after HIGHLOW relocation. A nonempty
-// callback list is rejected until thread callback notifications are available.
-fn static_tls(pe: &PeFile, image: &[u8], base: u32) -> LoadResult<Option<(u32, Vec<u8>)>> {
+struct TlsSpec {
+    index_va: u32,
+    template: Vec<u8>,
+    callbacks: Vec<u32>,
+}
+// TLS fields are relocated VAs. Callback tables and targets remain bounded
+// guest data/code, and callbacks execute through the ordinary checked CPU.
+fn static_tls(pe: &PeFile, image: &[u8], base: u32) -> LoadResult<Option<TlsSpec>> {
     let dir = pe.dir(9);
     if dir.rva == 0 {
         return Ok(None);
@@ -270,8 +294,30 @@ fn static_tls(pe: &PeFile, image: &[u8], base: u32) -> LoadResult<Option<(u32, V
             .ok_or_else(|| bad("TLS VA out of image"))
     };
     offset(index, 4)?;
-    if callbacks != 0 && read32(image, offset(callbacks, 4)?)? != 0 {
-        return Err(bad("TLS callbacks are not supported yet"));
+    let mut functions = Vec::new();
+    if callbacks != 0 {
+        let mut table = callbacks;
+        loop {
+            let target = read32(image, offset(table, 4)?)?;
+            if target == 0 {
+                break;
+            }
+            if functions.len() >= 256 {
+                return Err(bad("TLS callback table too large"));
+            }
+            let rva = offset(target, 1)? as u32;
+            if !pe
+                .sections
+                .iter()
+                .any(|s| s.is_executable() && s.contains_rva(rva))
+            {
+                return Err(bad("TLS callback target is not image code"));
+            }
+            functions.push(target);
+            table = table
+                .checked_add(4)
+                .ok_or_else(|| bad("TLS callback table overflow"))?;
+        }
     }
     let length = end
         .checked_sub(start)
@@ -287,7 +333,11 @@ fn static_tls(pe: &PeFile, image: &[u8], base: u32) -> LoadResult<Option<(u32, V
         .ok_or_else(|| bad("TLS template too large"))?;
     let mut template = vec![0; size as usize];
     template[..length as usize].copy_from_slice(&image[source..source + length as usize]);
-    Ok(Some((index, template)))
+    Ok(Some(TlsSpec {
+        index_va: index,
+        template,
+        callbacks: functions,
+    }))
 }
 fn basename(name: &str) -> String {
     name.rsplit(['\\', '/'])
@@ -355,7 +405,7 @@ impl Modules {
                 .image_snapshot(base, pe.size_of_image)
                 .map_err(|e| bad(format!("main image snapshot: error {e}")))?;
             let table = exports(&pe, &image)?;
-            let tls = if let Some((index_va, template)) = static_tls(&pe, &image, base)? {
+            let tls = if let Some(spec) = static_tls(&pe, &image, base)? {
                 let index = (0..TLS_SLOTS)
                     .find(|&index| {
                         !self
@@ -364,10 +414,11 @@ impl Modules {
                             .any(|m| m.tls.as_ref().is_some_and(|t| t.index == index))
                     })
                     .ok_or_else(|| Failure::Expected(8, "static TLS slots exhausted".into()))?;
-                mem.write_u32(index_va, index as u32).map_err(memory)?;
+                mem.write_u32(spec.index_va, index as u32).map_err(memory)?;
                 Some(StaticTls {
                     index,
-                    template,
+                    template: spec.template,
+                    callbacks: spec.callbacks,
                     blocks: HashMap::new(),
                 })
             } else {
@@ -387,8 +438,10 @@ impl Modules {
                     pinned: true,
                     phase: Phase::Ready,
                     tls,
+                    thread_calls_disabled: false,
                 },
             );
+            self.init_order.push(base);
             Ok(())
         })();
         result.map_err(|e| match e {
@@ -634,7 +687,7 @@ fn link(
     let imports = pe.imports(&bytes).map_err(bad)?;
     let (base, size) = state.modules.allocate(&pe, mem)?;
     relocate(&pe, &mut image, base)?;
-    let tls = if let Some((index_va, template)) = static_tls(&pe, &image, base)? {
+    let tls = if let Some(spec) = static_tls(&pe, &image, base)? {
         let index = (0..TLS_SLOTS)
             .find(|&index| {
                 !state
@@ -644,11 +697,12 @@ fn link(
                     .any(|m| m.tls.as_ref().is_some_and(|t| t.index == index))
             })
             .ok_or_else(|| Failure::Expected(8, "static TLS slots exhausted".into()))?;
-        image[(index_va - base) as usize..(index_va - base) as usize + 4]
+        image[(spec.index_va - base) as usize..(spec.index_va - base) as usize + 4]
             .copy_from_slice(&(index as u32).to_le_bytes());
         Some(StaticTls {
             index,
-            template,
+            template: spec.template,
+            callbacks: spec.callbacks,
             blocks: HashMap::new(),
         })
     } else {
@@ -677,6 +731,7 @@ fn link(
             pinned: false,
             phase: Phase::Linking,
             tls,
+            thread_calls_disabled: false,
         },
     );
     txn.created.push(base);
@@ -820,6 +875,186 @@ fn resolve(
     }
 }
 #[allow(clippy::too_many_arguments)]
+fn invoke_tls(
+    handle: u32,
+    reason: u32,
+    cpu: &mut Cpu,
+    mem: &mut GuestMem,
+    api: &mut ApiTable,
+    state: &mut ApiState,
+    log: &mut ApiLogger,
+    sched: &mut Sched,
+    max_instr: u64,
+) -> LoadResult<()> {
+    let callbacks = state
+        .modules
+        .images
+        .get(&handle)
+        .and_then(|m| m.tls.as_ref())
+        .map(|t| t.callbacks.clone())
+        .unwrap_or_default();
+    for function in callbacks {
+        if !state.modules.images.contains_key(&handle) {
+            break;
+        }
+        log.note(&format!(
+            "TLS callback module={handle:#x} entry={function:#x} reason={reason}"
+        ));
+        match cpu
+            .call_guest(
+                mem,
+                api,
+                state,
+                log,
+                sched,
+                function,
+                &[handle, reason, 0],
+                max_instr,
+            )
+            .map_err(Failure::Fatal)?
+        {
+            GuestCallOutcome::Returned(_) => {} // TLS callbacks return void.
+            outcome => return Err(Failure::Control(outcome)),
+        }
+    }
+    Ok(())
+}
+#[allow(clippy::too_many_arguments)]
+fn notification(
+    handle: u32,
+    reason: u32,
+    reserved: u32,
+    cpu: &mut Cpu,
+    mem: &mut GuestMem,
+    api: &mut ApiTable,
+    state: &mut ApiState,
+    log: &mut ApiLogger,
+    sched: &mut Sched,
+    max_instr: u64,
+) -> LoadResult<()> {
+    invoke_tls(handle, reason, cpu, mem, api, state, log, sched, max_instr)?;
+    let entry = state.modules.images.get(&handle).map_or(0, |m| m.entry);
+    if entry != 0 {
+        match cpu
+            .call_guest(
+                mem,
+                api,
+                state,
+                log,
+                sched,
+                entry,
+                &[handle, reason, reserved],
+                max_instr,
+            )
+            .map_err(Failure::Fatal)?
+        {
+            GuestCallOutcome::Returned(_) => {}
+            outcome => return Err(Failure::Control(outcome)),
+        }
+    }
+    Ok(())
+}
+fn notification_result(result: LoadResult<()>) -> Result<GuestCallOutcome, String> {
+    match result {
+        Ok(()) => Ok(GuestCallOutcome::Returned(1)),
+        Err(Failure::Control(outcome)) => Ok(outcome),
+        Err(Failure::Fatal(message) | Failure::Expected(_, message)) => Err(message),
+    }
+}
+/// Execute notifications in the owning thread, after TLS storage exists and
+/// before its entry, or before releasing that storage on orderly thread exit.
+#[allow(clippy::too_many_arguments)]
+pub fn notify_thread(
+    main: bool,
+    attach: bool,
+    cpu: &mut Cpu,
+    mem: &mut GuestMem,
+    api: &mut ApiTable,
+    state: &mut ApiState,
+    log: &mut ApiLogger,
+    sched: &mut Sched,
+    max_instr: u64,
+) -> Result<GuestCallOutcome, String> {
+    if state.modules.process_detaching {
+        return Ok(GuestCallOutcome::Returned(1));
+    }
+    let reason = if attach {
+        if main {
+            1
+        } else {
+            2
+        }
+    } else {
+        3
+    };
+    let result = (|| -> LoadResult<()> {
+        if !main || !attach {
+            let mut order = state.modules.init_order.clone();
+            if !attach {
+                order.reverse();
+            }
+            for handle in order {
+                if handle == state.exe_base {
+                    continue;
+                }
+                let eligible = state
+                    .modules
+                    .images
+                    .get(&handle)
+                    .is_some_and(|m| m.phase == Phase::Ready && !m.thread_calls_disabled);
+                if eligible {
+                    notification(
+                        handle, reason, 0, cpu, mem, api, state, log, sched, max_instr,
+                    )?;
+                }
+            }
+        }
+        invoke_tls(
+            state.exe_base,
+            reason,
+            cpu,
+            mem,
+            api,
+            state,
+            log,
+            sched,
+            max_instr,
+        )
+    })();
+    notification_result(result)
+}
+#[allow(clippy::too_many_arguments)]
+pub fn notify_process_exit(
+    cpu: &mut Cpu,
+    mem: &mut GuestMem,
+    api: &mut ApiTable,
+    state: &mut ApiState,
+    log: &mut ApiLogger,
+    sched: &mut Sched,
+    max_instr: u64,
+) -> Result<GuestCallOutcome, String> {
+    if state.modules.process_detaching {
+        return Ok(GuestCallOutcome::Returned(1));
+    }
+    state.modules.process_detaching = true;
+    let order = state.modules.init_order.clone();
+    let result = (|| -> LoadResult<()> {
+        for handle in order.into_iter().rev() {
+            if state
+                .modules
+                .images
+                .get(&handle)
+                .is_some_and(|m| m.phase == Phase::Ready)
+            {
+                notification(handle, 0, 1, cpu, mem, api, state, log, sched, max_instr)?;
+            }
+        }
+        Ok(())
+    })();
+    notification_result(result)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn initialize(
     handle: u32,
     cpu: &mut Cpu,
@@ -862,6 +1097,7 @@ fn initialize(
     for dependency in dependencies {
         initialize(dependency, cpu, mem, api, state, log, sched, max_instr, txn)?;
     }
+    invoke_tls(handle, 1, cpu, mem, api, state, log, sched, max_instr)?;
     if entry != 0 {
         log.note(&format!(
             "DllMain attach module={handle:#x} entry={entry:#x}"
@@ -891,6 +1127,7 @@ fn initialize(
     }
     state.modules.images.get_mut(&handle).unwrap().phase = Phase::Ready;
     txn.initialized.push(handle);
+    state.modules.init_order.push(handle);
     Ok(())
 }
 fn rollback(
@@ -918,6 +1155,7 @@ fn rollback(
                 state.process_heap,
             )?;
             state.modules.paths.remove(&module.path);
+            state.modules.init_order.retain(|&h| h != handle);
             mem.decommit_image(handle, module.size)
                 .map_err(|e| e.to_string())?;
             cpu.remove_module_ir(handle, module.size);
@@ -959,6 +1197,7 @@ fn unload(
     }
     module.phase = Phase::Unloading;
     let entry = module.entry;
+    invoke_tls(handle, 0, cpu, mem, api, state, log, sched, max_instr)?;
     if entry != 0 {
         log.note(&format!(
             "DllMain detach module={handle:#x} entry={entry:#x}"
@@ -985,6 +1224,7 @@ fn unload(
         .release_module_tls(&mut module, mem, &mut state.heap, state.process_heap)
         .map_err(Failure::Fatal)?;
     state.modules.paths.remove(&module.path);
+    state.modules.init_order.retain(|&h| h != handle);
     mem.decommit_image(handle, module.size).map_err(memory)?;
     cpu.remove_module_ir(handle, module.size);
     for dependency in module.dependencies {
@@ -1037,6 +1277,24 @@ pub fn dispatch(
                 )?;
                 note = format!("loaded {path:?} at {handle:#x}");
                 Ok(handle)
+            }
+            "DisableThreadLibraryCalls" => {
+                if state.handle_to_dll.contains_key(&a[0]) {
+                    return Ok(1);
+                }
+                let module = state
+                    .modules
+                    .images
+                    .get_mut(&a[0])
+                    .ok_or_else(|| Failure::Expected(126, "module is not loaded".into()))?;
+                if module.tls.is_some() {
+                    return Err(Failure::Expected(
+                        126,
+                        "static TLS requires thread notifications".into(),
+                    ));
+                }
+                module.thread_calls_disabled = true;
+                Ok(1)
             }
             "FreeLibrary" => {
                 unload(a[0], cpu, mem, api, state, log, sched, max_instr)?;
@@ -1177,6 +1435,17 @@ pub fn dispatch(
             // Undo successful dependency callbacks in reverse init order.
             for &handle in txn.initialized.iter().rev() {
                 let entry = state.modules.images[&handle].entry;
+                if let Err(failure) =
+                    invoke_tls(handle, 0, cpu, mem, api, state, log, sched, max_instr)
+                {
+                    abandon(state, &txn);
+                    return match failure {
+                        Failure::Control(outcome) => {
+                            Ok((outcome, "TLS rollback transferred control".into()))
+                        }
+                        Failure::Fatal(message) | Failure::Expected(_, message) => Err(message),
+                    };
+                }
                 if entry != 0 {
                     match cpu.call_guest(
                         mem,

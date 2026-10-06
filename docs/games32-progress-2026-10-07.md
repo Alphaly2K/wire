@@ -9,7 +9,7 @@
 | 样本 | 实测状态 | 尚未通过的验收 |
 | --- | --- | --- |
 | 恋×シンアイ彼女 / koikake.exe | 已显示真实警告页、标题菜单；1,080 帧与 Return 输入重放通过 | 进入正文、持续可玩；标题 BGM 已经用户听验确认 |
-| Rewrite.exe | 约 219.75M guest 指令后错误退出；0 Draw / 0 Present | Pixel Shader 2.0 执行与后续实际启动 |
+| Rewrite.exe | pass-34 已显示完整版权页和真实标题菜单；22B 指令 / 3,101 Metal Draw / 522 Present，无 GPU 错误 | 输入进入正文、场景切换、持续可玩与性能优化 |
 | totsulover.exe | 指定 EXE 是 SdWrap / ソフト電池 包装器；约 1.61M 指令后报告外部运行时缺失 | 合法安装其要求的 COM server，再继续实际游戏路径 |
 
 本轮增加 CPU MMX、SHUFPS/SHUFPD、CRT 数学与 qsort、静态 TLS 初始化、
@@ -136,13 +136,40 @@ BGM 连续观察 193.008 秒、193 次回填，中位 0.906508 秒、P95 0.96458
 `probe-audio-metal-clear/last-present.png`、`probe-audio-metal-clear-stream.json`（均位于隔离 koikake 目录）。
 `tools/dsound_streaming.py` 可从日志复算回填/期限/半段指标。
 
-## Rewrite：真正的 Pixel Shader 执行是下一阻塞
+## Rewrite：资源扩展、effect 与真实标题菜单
 
-`wire-out/games32/rewrite/pass-14-report.txt` 和 `pass-14/api.log` 记录 219,749,639 指令后退出 0，
-仍为错误路径。深度/模板格式查询已通过，MessageBox 明确写出“ピクセルシェーダ 2.0”要求。
-目前 shader caps 为 0，没有 shader bytecode 执行器。下一步需要 bounded token 解析、
-寄存器/常量/采样语义、shader COM 生命周期和 raster 集成，再宣告相应能力。
-不能只改 caps、返回空 shader 或把未执行的 draw 当作成功。
+有界 PS2/VS2、双纹理/双 UV、shader COM 生命周期、CoreText 字体度量、32位 BI_BITFIELDS，
+以及 Wine Reset 返回实际参数的语义已实现。真实 inventory 的 202 次 PS / 192 次 VS 创建全部成功；
+仍是明确限定的 SM2 子集，不支持的 token/addressing/flow/output 会创建失败。
+
+定位图片解码崩溃后，补齐 MinGW DLL 尾页映射、TLS callback 和线程/进程通知、CRT 版本数据导出，
+成功装载 SiglusDebugger2.dll / ucidec.dll；旧 PE32 DEP policy 允许 checked 解释 guest 数据页上的 trampoline，
+宿主始终无可执行页或 x86 JIT。memcmp 和默认 C locale toupper/tolower 已实际执行。
+配套 DLL 的安装期 IR 仍按 source hash、重定位/代码字节与页 generation 守卫。
+
+`pass-30` 达到 7,581,290,535 指令、2 Draw / 3 Present，两个 Draw 全部为 Metal、GPU error=None。
+已检查 960×540 截图，只有黑色，未将它当作画面验收。
+后续 pass-31/32/33 分别定位 effect BeginStateBlock、预变换输入 VS 处理和默认 sampler / 空纹理边界。
+现已实现有界录制/ALL/Capture/Apply 状态块及真实资源引用，修复 XYZRHW 跳过已绑定 VS、
+单层 mip filter / 默认 ELEMENTINDEX/DMAPOFFSET、固定管线空纹理保留 diffuse 的语义。
+
+最新 `pass-34` 计划900帧，但先达到 **22,000,000,000 指令预算**：
+3,101 Draw / 522 Present / 521 displayed，所有 Draw 由 Metal 执行，GPU error=None，未崩溃或错误退出。
+实际查看第53帧与最终960×540截图：前者为完整日文版权提示页，后者为真实 Rewrite 标题菜单，
+人物、森林背景、Logo 和 Start/Load/Config/Exit 均存在。没有把计划900帧写成已完成900帧。
+尚未通过输入进入正文或持续可玩验收；初始化较长，标题帧率仍低。
+证据：`wire-out/games32/rewrite/pass-34-report.txt`、`pass-34/api.log`、
+`pass-34/frames/frame-000053.png`、`pass-34/last-present.png`。
+
+标题阶段25秒调用栈采样得到3,916个 runtime 叶权重：IR/cache 41.09%、x87 30.13%、
+其他 raw fallback 21.27%、outer/other 4.98%、API outside guest execution 2.53%。
+`steps_cached` 自身27.94%、`access_ptr` 自身12.79%，这两个 self 指标包含于前述分类，不能再相加。
+这只是单次短采样，不是严格 AB 性能对照；后续优化应先复测 CPU/IR/FP80 热点。
+原始 `pass-34/profile.txt`、`profile-command.txt`、`profile-summary/summary.json` 与 flame.svg 保留在隔离目录。
+
+原 Rewrite.exe 的证据保留；根据随附说明单独测试 SiglusEngineCHS.exe，它也命中了同一扩展装载失败，
+没有拿另一 EXE 代替原样本验收。具体范围、解压差分、定位和证据见
+[Rewrite shader / loader 检查点](rewrite-shader-loader-2026-10-07.md)。
 
 ## totsulover：指定启动器的外部依赖
 
@@ -153,13 +180,16 @@ BGM 连续观察 193.008 秒、193 次回填，中位 0.906508 秒、P95 0.96458
 
 ## 回归、来源与边界
 
-最新完整回归通过 **178 项**（`cargo test --release -- --include-ignored`）：
-7 unit（含真实 Metal 设备回归）、37 CPU 差分、9 FPU、26 IR、1 Wasm、98 Win32。
+上个 Koikake 检查点完整回归通过 **178 项**。本轮 shader/x64 初始检查点191项通过；
+TLS/DEP/CRT 检查点全套196项通过，新增状态块后全套 **198 项**通过：
+10 unit（含两项真实 Metal）、37 differential、9 FPU、26 IR、1 Wasm、109 Win32 和6 AMD64。
 真实 Metal 设备测试默认 ignored，必须在有设备的平台环境显式运行。
 三项键盘行为回归覆盖：async 与 queued state、PM_NOREMOVE、keyup/低位清除、CapsLock repeat，
 TranslateMessage 的文本延迟、Unicode/ANSI 编码、posted keydown 不修改物理状态和 checked 输出。
-Clippy release all-targets `-D warnings` 通过。最新完整回归日志 `/private/tmp/wire-metal-all-final-tests.txt`；
-Clippy 日志 `/private/tmp/wire-metal-final-clippy.txt`，format 与 diff whitespace 检查通过。
+Clippy release all-targets `-D warnings` 通过。最新完整回归日志 `/private/tmp/wire-games-final-tests.txt`；
+Clippy 日志 `/private/tmp/wire-games-final-clippy.txt`，format 与自有改动 diff whitespace 检查通过。
+两个未修改 Wine 头文件保留上游原有空白；SHA-256 与记录一致，未为了空白检查改写来源快照。
+`scripts/package-macos.sh` 已重建本地 `wire-out/Wire.app`，bundle binary 与 release binary 的 SHA-256 相同。
 
 此前已渲染游戏“王様恋愛【体験版】”回归达到 3 Present、4 Draw、约 1.758B 指令；
 已查看第二张 frame，警告页文字与人物图像实际存在。
@@ -170,3 +200,12 @@ Hangover 固定 `56e385b7ff490edd281b288f420677093563560b`，Wine 子模块固�
 选择 LGPL 2.1 并保留版权、快照与校验值。来源范围见 `third_party/hangover/README.md`。
 没有复制或链接 QEMU GPL 实现；Unicorn 仅用于开发测试 oracle。
 保留 checked guest memory、FP80、预算/线程边界与极度保守 FLAGS；Wasm 仍只是可用时的加速路线。
+
+## AMD64 基础与缺失的样本
+
+已新增独立的高地址 PE32+ 装载、DIR64/64位 IAT、稀疏 checked memory 和整数 CPU，
+`wire probe64` 实际解释 high-base 入口并在未支持指令/未解决导入边界失败。
+六项独立回归包含256组 Unicorn 逐指令整数差分和 CLI 入口执行。
+原 AliceToPapaADV_1-0-0.exe 路径当前不存在，已请求用户提供新路径。
+普通 `wire run` 尚未支持 AMD64；没有 Win64 API runtime、Unity/Mono、D3D11 或64位 IR，
+不能将基础 probe 当作该游戏已经运行。范围见 [AMD64 检查点](x86-64-sample-2026-10-06.md)。

@@ -10,6 +10,7 @@ pub(super) struct Bitmap {
     pub width: u32,
     pub height: u32,
     pub bpp: u32,
+    pub compression: u32,
     pub storage: Storage,
     pub internal: bool,
 }
@@ -23,6 +24,7 @@ impl Bitmap {
             width,
             height,
             bpp,
+            compression: 0,
             storage: Storage::Owned(pixels),
             internal,
         })

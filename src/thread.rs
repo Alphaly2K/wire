@@ -80,6 +80,9 @@ pub struct GuestThread {
     /// Deadline of the wait the thread is currently in; survives Retest
     /// re-blocks so a re-blocked wait keeps its original timeout budget.
     pub wait_deadline: Option<Instant>,
+    /// Loader notifications run on this thread before its entry point.
+    pub loader_initialized: bool,
+    pub is_main: bool,
 }
 
 pub struct Sched {
@@ -120,6 +123,8 @@ impl Sched {
             state: ThreadState::Runnable,
             wake: None,
             wait_deadline: None,
+            loader_initialized: false,
+            is_main: true,
         });
     }
 
@@ -221,6 +226,8 @@ impl Sched {
             },
             wake: None,
             wait_deadline: None,
+            loader_initialized: false,
+            is_main: false,
         });
         Ok(())
     }

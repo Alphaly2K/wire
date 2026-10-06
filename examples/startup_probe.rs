@@ -18,6 +18,17 @@ fn outcome_text(outcome: &RunOutcome) -> String {
         _ => "callback boundary".into(),
     }
 }
+fn crash_context(cpu: &Cpu, mem: &GuestMem) {
+    for (pc, bytes) in &cpu.trace_ring {
+        println!("trace {pc:#010x}: {bytes:02x?}");
+    }
+    for address in std::iter::once(cpu.esp()).chain(cpu.regs) {
+        let mut bytes = [0; 128];
+        if mem.read_bytes(address, &mut bytes).is_ok() {
+            println!("memory {address:#010x}: {bytes:02x?}");
+        }
+    }
+}
 fn main() -> Result<(), String> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.len() < 3 {
@@ -59,6 +70,7 @@ fn main() -> Result<(), String> {
     )?;
     state.d3d9.enable_gpu = !args.iter().any(|s| s == "software");
     state.d3d9.prepare_gpu();
+    state.d3d9.shader_dump_dir = Some(log_dir.join("shaders"));
     state.stop_after_presents = Some(
         args.get(6)
             .map(|s| s.parse::<u64>().map_err(|e| e.to_string()))
@@ -87,6 +99,12 @@ fn main() -> Result<(), String> {
         .map(|s| s.parse::<u64>().map_err(|e| e.to_string()))
         .transpose()?
         .unwrap_or(1000000000);
+    // Opt-in bounded diagnostics: preserve the normal fast path until the
+    // requested retirement boundary, then retain only the last 256 PCs.
+    let trace_after = std::env::var("WIRE_PROBE_TRACE_AFTER")
+        .ok()
+        .map(|s| s.parse::<u64>().map_err(|e| e.to_string()))
+        .transpose()?;
     let outcome = cpu.run(&mut mem, &mut api, &mut state, &mut log, &mut sched, 500000);
     println!("initial: {}", outcome_text(&outcome));
     for (&hwnd, w) in &state.user32.windows {
@@ -115,6 +133,7 @@ fn main() -> Result<(), String> {
         }
         let mut input = false;
         let outcome = loop {
+            cpu.trace_enabled = trace_after.is_some_and(|n| cpu.instr_count >= n);
             if !input && args.get(5).is_some_and(|s| s == "input") && sched.threads.len() > 1 {
                 if let Some(hwnd) = state.user32.windows.iter().find_map(|(&h, w)| {
                     (w.tid == tid && w.parent == 0 && h != 0x4000fffc).then_some(h)
@@ -124,11 +143,14 @@ fn main() -> Result<(), String> {
                     input = true;
                 }
             }
-            let next = if args.get(5).is_some_and(|s| s == "input") && !input {
+            let mut next = if args.get(5).is_some_and(|s| s == "input") && !input {
                 (cpu.instr_count + 100000).min(limit)
             } else {
                 limit
             };
+            if let Some(n) = trace_after.filter(|&n| n > cpu.instr_count) {
+                next = next.min(n);
+            }
             let outcome = cpu.run(&mut mem, &mut api, &mut state, &mut log, &mut sched, next);
             if !matches!(outcome, RunOutcome::InstructionLimit) || cpu.instr_count >= limit {
                 break outcome;
@@ -144,6 +166,9 @@ fn main() -> Result<(), String> {
             state.d3d9.frames,
             state.presenter.displayed
         );
+        if matches!(outcome, RunOutcome::Crashed(_)) {
+            crash_context(&cpu, &mem);
+        }
         if args.get(8).is_some_and(|s| s == "enter")
             && matches!(outcome, RunOutcome::PresentationLimit(_))
         {
@@ -183,7 +208,12 @@ fn main() -> Result<(), String> {
         state.d3d9.gpu_draws(),
         state.d3d9.gpu_error()
     );
-    if state.d3d9.frames > 0 {
+    if state.d3d9.frames > 0
+        && state
+            .user32
+            .windows
+            .contains_key(&state.d3d9.last_presented)
+    {
         let (w, h, pixels) = state
             .graphics
             .window_snapshot(&mem, state.d3d9.last_presented)

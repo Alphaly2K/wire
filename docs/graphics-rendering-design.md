@@ -12,6 +12,15 @@
 用户要求此检查点之后暂停功能扩展，先优化启动到真实画面的耗时。
 下文起点描述为历史状态，不代表当前进度。
 
+## 2026-10-07：有界 PS2 / VS2
+
+Rewrite 命中的 shader 已接入实际执行：PS2 使用最多 96 条的定长 records，支持两个 2D sampler 和两套 UV；
+VS2 的 DCL/MOV/DP4 在 CPU 逐顶点执行，再执行 clip/viewport/perspective，像素使用静态 Metal interpreter。
+Create/Set/Get、常量、COM 引用与 Reset 均有真实生命周期。不支持的 shader opcode/addressing/输出明确失败。
+Metal 仅处理 checked 宿主资源快照；没有按 guest 动态生成 MSL 或 x86 机器码。
+SM2 的范围、payload 和 GPU 对照精度边界见 [Rewrite shader/loader 记录](rewrite-shader-loader-2026-10-07.md)。
+CoreText 度量和32位 BI_BITFIELDS DIB 已接通，glyph rendering、完整字体 API 和其他像素格式仍待实现。
+
 ## 从当前实测入口开始
 
 游戏已经装载 layerExDraw 并调用 GdiplusStartup；绘图功能尚未调用成功。

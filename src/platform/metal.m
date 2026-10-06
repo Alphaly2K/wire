@@ -7,7 +7,7 @@
 @property id<MTLDevice> device;
 @property id<MTLCommandQueue> queue;
 @property id<MTLComputePipelineState> pipeline;
-@property id<MTLBuffer> triangles,params,source,dest,depth;
+@property id<MTLBuffer> triangles,params,source,dest,depth,program;
 @end
 @implementation WireRaster
 @end
@@ -39,18 +39,21 @@ static id<MTLBuffer> buffer(WireRaster *r,id<MTLBuffer> old,const void *data,siz
 }
 int wire_metal_draw(void *ctx,const float *triangles,unsigned count,const uint32_t *params,
     const uint32_t *source,unsigned source_count,uint32_t *dest,unsigned dest_count,
-    uint32_t *depth,unsigned depth_count,char *error,unsigned cap) {
+    uint32_t *depth,unsigned depth_count,const uint32_t *program,unsigned program_count,char *error,unsigned cap) {
     @autoreleasepool {
         WireRaster *r=(__bridge WireRaster *)ctx;
         if(params[7]!=count || (uint64_t)params[0]*params[1]!=dest_count
-            || (uint64_t)params[2]*params[3]!=source_count
+            || (uint64_t)params[2]*params[3]>source_count
             || (params[199] && (uint64_t)params[6]*params[1]>depth_count)) return 0;
+        if(!program_count || program[0]>96 || (program[0] && program_count!=137+program[0]*8)) return 0;
+        if(program[0] && (uint64_t)program[1]*program[2]+program[7]>source_count) return 0;
+        r.program=buffer(r,r.program,program,(size_t)program_count*4);
         r.triangles=buffer(r,r.triangles,triangles,(size_t)count*144);
         r.params=buffer(r,r.params,params,800);
         r.source=buffer(r,r.source,source,(size_t)source_count*4);
         r.dest=buffer(r,r.dest,dest,(size_t)dest_count*4);
         r.depth=buffer(r,r.depth,depth,(size_t)depth_count*4);
-        if(!r.triangles || !r.params || !r.source || !r.dest || !r.depth) {
+        if(!r.triangles || !r.params || !r.source || !r.dest || !r.depth || !r.program) {
             error_text(error,cap,@"Metal buffer allocation failed");return 0;
         }
         id<MTLCommandBuffer> command=[r.queue commandBuffer];
@@ -62,6 +65,7 @@ int wire_metal_draw(void *ctx,const float *triangles,unsigned count,const uint32
         [encoder setBuffer:r.source offset:0 atIndex:2];
         [encoder setBuffer:r.dest offset:0 atIndex:3];
         [encoder setBuffer:r.depth offset:0 atIndex:4];
+        [encoder setBuffer:r.program offset:0 atIndex:5];
         [encoder dispatchThreadgroups:MTLSizeMake((params[0]+15)/16,(params[1]+15)/16,1)
             threadsPerThreadgroup:MTLSizeMake(16,16,1)];
         [encoder endEncoding];[command commit];[command waitUntilCompleted];

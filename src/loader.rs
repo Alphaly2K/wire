@@ -33,6 +33,10 @@ pub fn load_image(
 ) -> Result<LoadedImage, String> {
     let buf = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let pe = PeFile::parse(&buf)?;
+    // Default Windows PE32 opt-in DEP profile: legacy images without
+    // NX_COMPAT can interpret code stored in readable guest data pages.
+    // This never changes the host's memory protections or generates code.
+    mem.set_dep_enabled(pe.dll_characteristics & 0x100 != 0);
     let base = pe.image_base;
     if base < 0x1_0000 || base as u64 + pe.size_of_image as u64 > SPACE_SIZE {
         return Err(format!(

@@ -7,7 +7,7 @@
 //! execution resumes at the return address. Unimplemented APIs are not silent:
 //! they are counted and reported, which is the primary M0 deliverable.
 
-use crate::cpu::{Cpu, EDX};
+use crate::cpu::{Cpu, GuestCallOutcome, EDX};
 use crate::mem::GuestMem;
 use crate::thread::{
     target_mentions, Sched, ThreadState, WaitTarget, Wake, WAIT_OBJECT_0, WAIT_TIMEOUT,
@@ -130,6 +130,10 @@ impl ApiTable {
             "_wcmdln" => cmdline_w,
             "_fmode" | "_commode" | "_adjust_fdiv" | "_timezone" | "_daylight" => 0,
             "__argc" => 1,
+            "_winmajor" => 6,
+            "_winminor" => 1,
+            "_winver" => 0x601,
+            "_osver" => 7601,
             _ => return Ok(None),
         };
         let key = (dll, name.to_string());
@@ -569,6 +573,7 @@ fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("LoadLibraryExA", 12),
                 ("LoadLibraryExW", 12),
                 ("FreeLibrary", 4),
+                ("DisableThreadLibraryCalls", 4),
                 ("GetStartupInfoA", 4),
                 ("GetStartupInfoW", 4),
                 ("GetCommandLineA", 0),
@@ -1683,6 +1688,8 @@ pub fn dispatch(
             "floor" => 2,
             "ldexp" => 3,
             "pow" | "qsort" => 4,
+            "memcmp" | "memcpy" | "memmove" | "memset" => 3,
+            "toupper" | "tolower" => 1,
             _ => 12,
         }
     } else {
@@ -1790,6 +1797,11 @@ pub fn dispatch(
                 true,
                 "initial thread returned",
             );
+            match crate::modules::notify_process_exit(cpu, mem, api, state, log, sched, max_instr)?
+            {
+                GuestCallOutcome::Returned(_) => {}
+                _ => return Ok(()),
+            }
             cpu.halted = true;
             cpu.exit_code = Some(0);
             return Ok(());
@@ -1806,6 +1818,12 @@ pub fn dispatch(
                 true,
                 "thread function returned",
             );
+            match crate::modules::notify_thread(
+                false, false, cpu, mem, api, state, log, sched, max_instr,
+            )? {
+                GuestCallOutcome::Returned(_) => {}
+                _ => return Ok(()),
+            }
             state
                 .modules
                 .release_tls_thread(&mut state.heap, state.process_heap, cpu.fs_base);
@@ -1815,12 +1833,23 @@ pub fn dispatch(
         }
         ("kernel32.dll", "ExitProcess") => {
             log.log_call(idx, dll, name, &args[..1], 0, true, "process exit");
+            match crate::modules::notify_process_exit(cpu, mem, api, state, log, sched, max_instr)?
+            {
+                GuestCallOutcome::Returned(_) => {}
+                _ => return Ok(()),
+            }
             cpu.halted = true;
             cpu.exit_code = Some(args[0]);
             return Ok(());
         }
         ("kernel32.dll", "ExitThread") => {
             log.log_call(idx, dll, name, &args[..1], 0, true, "thread exit");
+            match crate::modules::notify_thread(
+                false, false, cpu, mem, api, state, log, sched, max_instr,
+            )? {
+                GuestCallOutcome::Returned(_) => {}
+                _ => return Ok(()),
+            }
             state
                 .modules
                 .release_tls_thread(&mut state.heap, state.process_heap, cpu.fs_base);
@@ -2455,9 +2484,19 @@ pub fn dispatch(
         }
         (
             "kernel32.dll",
-            "GetModuleHandleA" | "GetModuleHandleW" | "GetModuleHandleExA" | "GetModuleHandleExW"
-            | "GetModuleFileNameA" | "GetModuleFileNameW" | "LoadLibraryA" | "LoadLibraryW"
-            | "LoadLibraryExA" | "LoadLibraryExW" | "GetProcAddress" | "FreeLibrary",
+            "GetModuleHandleA"
+            | "GetModuleHandleW"
+            | "GetModuleHandleExA"
+            | "GetModuleHandleExW"
+            | "GetModuleFileNameA"
+            | "GetModuleFileNameW"
+            | "LoadLibraryA"
+            | "LoadLibraryW"
+            | "LoadLibraryExA"
+            | "LoadLibraryExW"
+            | "GetProcAddress"
+            | "FreeLibrary"
+            | "DisableThreadLibraryCalls",
         ) => {
             let (outcome, message) =
                 crate::modules::dispatch(name, &args, cpu, mem, api, state, log, sched, max_instr)?;
@@ -3242,6 +3281,42 @@ fn crt_dispatch(
             let tmp = vec![args[1] as u8; n];
             mem.write_bytes(args[0], &tmp).map_err(|e| e.to_string())?;
             args[0]
+        }
+        "memcmp" => {
+            if args[2] == 0 {
+                0
+            } else {
+                if args[2] > 1 << 26 {
+                    return Err("memcmp range too large".into());
+                }
+                let left = mem
+                    .ptr(args[0], args[2], false)
+                    .map_err(|e| e.to_string())?;
+                let right = mem
+                    .ptr(args[1], args[2], false)
+                    .map_err(|e| e.to_string())?;
+                // Both complete ranges are checked, and no guest callback or
+                // mutation can invalidate the backing during comparison.
+                let (left, right) = unsafe {
+                    (
+                        std::slice::from_raw_parts(left, args[2] as usize),
+                        std::slice::from_raw_parts(right, args[2] as usize),
+                    )
+                };
+                left.iter()
+                    .zip(right)
+                    .find_map(|(&a, &b)| (a != b).then_some((a as i32 - b as i32) as u32))
+                    .unwrap_or(0)
+            }
+        }
+        "toupper" | "tolower" => {
+            // The current CRT supports the default C locale. Values outside
+            // ASCII (including EOF) retain their exact integer value.
+            match (name, args[0]) {
+                ("toupper", 0x61..=0x7a) => args[0] - 32,
+                ("tolower", 0x41..=0x5a) => args[0] + 32,
+                _ => args[0],
+            }
         }
         "strcmp" | "strncmp" => {
             let limit = if name == "strncmp" { args[2] } else { u32::MAX };

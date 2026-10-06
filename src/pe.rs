@@ -50,6 +50,7 @@ pub struct PeFile {
     pub size_of_image: u32,
     pub size_of_headers: u32,
     pub subsystem: u16,
+    pub dll_characteristics: u16,
     pub stack_reserve: u32,
     pub stack_commit: u32,
     pub heap_reserve: u32,
@@ -114,6 +115,7 @@ impl PeFile {
         let size_of_image = rd32(buf, opt + 56)?;
         let size_of_headers = rd32(buf, opt + 60)?;
         let subsystem = rd16(buf, opt + 68)?;
+        let dll_characteristics = rd16(buf, opt + 70)?;
         let stack_reserve = rd32(buf, opt + 72)?;
         let stack_commit = rd32(buf, opt + 76)?;
         let heap_reserve = rd32(buf, opt + 80)?;
@@ -157,6 +159,7 @@ impl PeFile {
             size_of_image,
             size_of_headers,
             subsystem,
+            dll_characteristics,
             stack_reserve,
             stack_commit,
             heap_reserve,

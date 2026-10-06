@@ -34,3 +34,4 @@ mod vmem_api;
 mod win32_abi;
 mod wmi;
 mod wsprintf;
+pub mod x64;

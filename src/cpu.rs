@@ -2956,6 +2956,20 @@ impl Cpu {
                 self.flush_flags();
                 return RunOutcome::Exited(self.exit_code.unwrap_or(0));
             }
+            if !sched.threads[sched.current].loader_initialized {
+                // Mark before callbacks, which may re-enter the interpreter.
+                let main = sched.threads[sched.current].is_main;
+                sched.threads[sched.current].loader_initialized = true;
+                let saved = self.save_ctx();
+                match crate::modules::notify_thread(
+                    main, true, self, mem, api, state, log, sched, max_instr,
+                ) {
+                    Ok(GuestCallOutcome::Returned(_)) => self.load_ctx(&saved),
+                    Ok(GuestCallOutcome::Exited(code)) => return RunOutcome::Exited(code),
+                    Ok(GuestCallOutcome::Transferred) => continue,
+                    Err(error) => return RunOutcome::Crashed(error),
+                }
+            }
             if callback_exit.is_none()
                 && state
                     .stop_after_presents

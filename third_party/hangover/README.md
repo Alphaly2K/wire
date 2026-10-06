@@ -45,7 +45,7 @@ units/CP932 character boundaries. No native path/file backend is linked.
 
 - `geometry.c`: `07df351f137ce4f11215a449997ed3f324981b8034bb5728fe3e42dd3844892b`
 - `d3d9.h`: `fb49b3c44acec5e100a5c0ff1622f7d0207842d87fc513b49047a818e8c351b2`
-- `d3d9-methods.tsv`: `5bdfd9da0cb56c3487d798686d109556dd255bbee1729544902e834f048e1225`
+- `d3d9-methods.tsv`: `0467452cc8f2e299d6acfc2433212ac374a67951204b83cbdf3ddcf9187fc94f`
 
 D3D9 header copyright 2002–2003 Jason Edmeades and Raphael Junqueira.
 The derived table includes the COM `this` DWORD in every x86 stdcall size.
@@ -102,3 +102,29 @@ Additional SHA-256 checksums:
 - `winmm.spec`: `8139149e997e90aad0a0bdab62eb7b38da46c029f840d395e253128c996def4f`
 - `dsound.h`: `afead216b15386912f1ac4e2d147064a542ed3ab5c112c09a4edf5617e3d9bcf`
 - `dsound-methods.tsv`: `4a886e7e885836381a14167beb7ce1edba55f961de00274f5f1dd7f415094b8f`
+
+## Bounded shader and loader review (2026-10-07)
+
+Unmodified public headers from the same pinned Wine commit:
+
+- `include/d3d9types.h` -> `d3d9types.h`: `ca6537e10480d694582ea1db785cb0805425df8268932d435b03fe9cc0e5820f`.
+- `include/d3d9caps.h` -> `d3d9caps.h`: `c2d0e534dccaa47eb211dc491a668ab1823dea087cc5bbdc05e1d11ad46efa8f`.
+
+Both expressly permit LGPL-2.1-or-later. Copyright 2002–2003 Jason Edmeades
+and Raphael Junqueira; d3d9types.h also Copyright 2005 Oliver Stieber.
+The derived d3d9-methods.tsv adds PixelShader9, VertexShader9 and StateBlock9 COM ABI.
+The bounded PS2/VS2 interpreters and static Metal program are independently
+implemented. No Wine shader compiler, renderer or driver is copied or linked.
+
+Semantic review only, without importing implementation:
+`dlls/d3d9/device.c` (Copyright 2002–2005 Jason Edmeades and Raphael Junqueira,
+2005 Oliver Stieber) for successful Reset's returned presentation parameters
+and SetViewport storage, plus Begin/End/CreateStateBlock recording boundaries;
+`dlls/ntdll/loader.c` (Copyright 1995/2003 Alexandre
+Julliard, 2002 Dmitry Timoshkov for CodeWeavers) for TLS callback / DllMain
+notification ordering and DisableThreadLibraryCalls; `server/mapping.c`
+(Copyright 1999 Alexandre Julliard) for page-rounded images and final section
+file padding. Each file explicitly permits LGPL-2.1-or-later; wire selects
+LGPL 2.1. These reviews do not import a native Wine loader, server or backend.
+No GPL QEMU implementation is incorporated. Unicorn remains a development-only
+oracle and is absent from the runtime dependency graph.

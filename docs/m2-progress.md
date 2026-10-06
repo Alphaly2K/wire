@@ -2,7 +2,9 @@
 当前按用户最新要求继续 Rewrite、totsulover，并恢复 AliceToPapa x86-64 基础支持。
 恋×シンアイ彼女已有真实标题菜单；Metal 固定管线和 bulk Clear 后完成 193 秒 / 6,000 Present 重放，
 用户听验确认 BGM 当前没有问题，后续仍需正文、场景切换和持续可玩验收。
-Rewrite 被实际 Pixel Shader 2.0 缺失挡住，totsulover 缺少其要求的外部“ソフト電池”运行时。
+Rewrite 已实现有界 PS2/VS2、字体度量、资源 DLL 与 effect 状态块，
+22B指令 / 3,101 Metal Draw / 522 Present 后已检查真实完整标题菜单，正文与性能仍待推进；
+totsulover 缺少其要求的外部“ソフト電池”运行时。详情见 [Rewrite 检查点](rewrite-shader-loader-2026-10-07.md)。
 解释器继续作为主路径，保留 checked memory、保守 FLAGS 与 FP80 语义。
 以下性能数据是此前阶段的历史记录，不是本轮跨游戏对照。
 已扩大到约23亿 guest 指令的真实启动 profile，优化 callback IR 连续调度、
@@ -18,8 +20,9 @@ Rewrite 被实际 Pixel Shader 2.0 缺失挡住，totsulover 缺少其要求的�
 保留所有guest入口、预算、callback ESP和完整FLAGS恢复recipe。
 三对完整启动吞吐82.36→85.42 MIPS（约+3.7%），首Present17.984→17.425秒，收益仍较小。
 这只是批量执行，还没有完成专用融合opcode或常量/复制传播；见[静态序列性能记录](performance-scalar-runs-2026-10-06.md)。
-新提供的AliceToPapa样本为64位Unity/Mono应用，目前loader/CPU/API/IR均只支持PE32，
-实际引擎及Mono DLL也为AMD64；检查和独立扩展范围见[x86-64样本](x86-64-sample-2026-10-06.md)。
+AliceToPapa 为64位Unity/Mono应用，现已建立独立 PE32+/64位内存/整数解释器与 probe64 诊断；
+尚无 Win64 API runtime、Unity/Mono、D3D11 或64位 IR，原样本路径当前缺失。
+基础回归和扩展范围见[x86-64样本](x86-64-sample-2026-10-06.md)。
 以下保留此前功能推进阶段的历史记录；当前已经具备真实图像与 AppKit 上传。
 
 # M2 进行中：最新进度与交接（2026-10-06）

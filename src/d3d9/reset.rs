@@ -12,7 +12,7 @@ impl D3D9 {
         mem.ptr(a[1], 56, true).map_err(|_| INVALID)?;
         let mut params = words::<14>(mem, a[1])?;
         let d = self.device(h)?;
-        if d.scene {
+        if d.scene || self.recording.contains_key(&h) {
             return Err(INVALID);
         }
         if params[4] != 0 || params[9] > 1 || params[3] > 1 || (params[9] == 1 && params[10] != 75)
@@ -104,10 +104,15 @@ impl D3D9 {
         d.target = back;
         d.depth = depth;
         d.texture = 0;
+        d.texture1 = 0;
         d.stream = [0; 3];
         d.indices = 0;
         d.fvf = 0;
         d.declaration = 0;
+        d.vertex_shader = 0;
+        d.vertex_constants = [[0.; 4]; 256];
+        d.pixel_shader = 0;
+        d.pixel_constants = [[0.; 4]; 32];
         d.render.clear();
         d.sampler.clear();
         d.stage.clear();
@@ -119,13 +124,8 @@ impl D3D9 {
             self.release(depth, state)?;
         }
         self.unpin(h, state);
-        // Windows Reset leaves these three caller fields zeroed.
-        params[0] = 0;
-        params[1] = 0;
-        params[3] = 0;
-        if params[8] != 0 {
-            params[2] = 0;
-        }
+        // Match pinned Wine d3d9's successful Reset: report the resolved
+        // swapchain dimensions/count/format, including windowed fallback.
         put(mem, a[1], &params)?;
         Ok(0)
     }

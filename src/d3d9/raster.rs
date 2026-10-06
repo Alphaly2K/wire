@@ -44,14 +44,17 @@ pub(super) fn render_state(n: u32, v: u32) -> bool {
     }
 }
 pub(super) fn sampler(d: &Device, n: u32) -> Result<u32, u32> {
-    if let Some(&v) = d.sampler.get(&n) {
+    sampler_slot(d, 0, n)
+}
+pub(super) fn sampler_slot(d: &Device, slot: u32, n: u32) -> Result<u32, u32> {
+    if let Some(&v) = d.sampler.get(&(slot * 16 + n)) {
         return Ok(v);
     }
     Ok(match n {
         1..=3 => 1,
         4 => 0,
         5 | 6 => 1,
-        7 | 8 | 9 | 11 => 0,
+        7 | 8 | 9 | 11..=13 => 0,
         10 => 1,
         _ => return Err(UNAVAILABLE),
     })
@@ -59,10 +62,11 @@ pub(super) fn sampler(d: &Device, n: u32) -> Result<u32, u32> {
 pub(super) fn sampler_state(n: u32, v: u32) -> bool {
     match n {
         1 | 2 => matches!(v, 1 | 3),
-        3 => v == 1,
+        3 => matches!(v, 1 | 3), // W addressing has no effect on supported 2D samplers.
         4 => true,
         5 | 6 => matches!(v, 1 | 2),
-        7 | 8 | 9 | 11 => v == 0,
+        7 => v <= 2, // Only one mip level exists, so NONE/POINT/LINEAR select that level.
+        8 | 9 | 11..=13 => v == 0,
         10 => v == 1,
         _ => false,
     }
@@ -108,7 +112,12 @@ pub(super) fn stage_state(index: u32, n: u32, v: u32) -> bool {
     }
 }
 pub(super) fn validate(d: &Device) -> Result<(), u32> {
-    if d.declaration == 0 && !matches!(d.fvf, 0x102 | 0x142 | 0x104 | 0x144) {
+    if d.declaration == 0
+        && !matches!(
+            d.fvf,
+            0x102 | 0x142 | 0x104 | 0x144 | 0x202 | 0x242 | 0x204 | 0x244
+        )
+    {
         return Err(UNAVAILABLE);
     }
     Ok(())
@@ -120,6 +129,7 @@ struct Vertex {
     z: f64,
     u: f64,
     v: f64,
+    uv1: [f64; 2],
     color: [f64; 4],
     rhw: f64,
 }
@@ -152,6 +162,7 @@ fn clipped(mut polygon: Vec<Vertex>, viewport: [u32; 6]) -> Vec<[Vertex; 3]> {
                     rhw: mix(prev.rhw, cur.rhw),
                     u: mix(prev.u, cur.u),
                     v: mix(prev.v, cur.v),
+                    uv1: std::array::from_fn(|i| mix(prev.uv1[i], cur.uv1[i])),
                     color: std::array::from_fn(|i| mix(prev.color[i], cur.color[i])),
                 });
             }
@@ -347,6 +358,73 @@ fn sample(src: &[u32], b: &Pixels, u: f64, v: f64, s: &Sampling) -> Result<u32, 
             << (c * 8))
     }))
 }
+fn pack_shader_color(v: [f32; 4]) -> u32 {
+    let c = v.map(|v| {
+        if v.is_nan() {
+            0
+        } else {
+            (v.clamp(0., 1.) * 255. + 0.5).floor() as u32
+        }
+    });
+    (c[3] << 24) | (c[0] << 16) | (c[1] << 8) | c[2]
+}
+fn sample_float(src: &[u32], b: &Pixels, u: f64, v: f64, s: &Sampling) -> [f32; 4] {
+    let address = |v: f64, mode: u32| {
+        if mode == 1 {
+            v.rem_euclid(1.)
+        } else {
+            v.clamp(0., 1.)
+        }
+    };
+    if !u.is_finite() || !v.is_finite() {
+        return [0.; 4];
+    }
+    let x = address(u, s.address[0]) * b.width as f64;
+    let y = address(v, s.address[1]) * b.height as f64;
+    let get = |x: i64, y: i64| {
+        let coord = |i: i64, size: u32, mode: u32| {
+            if mode == 1 {
+                i.rem_euclid(size as i64) as u32
+            } else {
+                i.clamp(0, size as i64 - 1) as u32
+            }
+        };
+        let n = src[(coord(y, b.height, s.address[1]) * b.width + coord(x, b.width, s.address[0]))
+            as usize];
+        [
+            ((n >> 16) & 255) as f32 / 255.,
+            ((n >> 8) & 255) as f32 / 255.,
+            (n & 255) as f32 / 255.,
+            if b.format == 22 {
+                1.
+            } else {
+                (n >> 24) as f32 / 255.
+            },
+        ]
+    };
+    if s.filter == [1, 1] {
+        return get(x.floor() as i64, y.floor() as i64);
+    }
+    let x = x - 0.5;
+    let y = y - 0.5;
+    let ix = x.floor() as i64;
+    let iy = y.floor() as i64;
+    let fx = (x - x.floor()) as f32;
+    let fy = (y - y.floor()) as f32;
+    let p = [
+        get(ix, iy),
+        get(ix + 1, iy),
+        get(ix, iy + 1),
+        get(ix + 1, iy + 1),
+    ];
+    let w = [
+        (1. - fx) * (1. - fy),
+        fx * (1. - fy),
+        (1. - fx) * fy,
+        fx * fy,
+    ];
+    std::array::from_fn(|i| (0..4).map(|j| p[j][i] * w[j]).sum())
+}
 #[inline(always)]
 fn blend(src: u32, dst: u32, sf: u32, df: u32) -> u32 {
     let factor = |f| match f {
@@ -380,6 +458,8 @@ struct Raster<'a> {
     color_mask: u32,
     clip: [i32; 4],
     depth_width: u32,
+    shader: Option<(&'a shader::Program, &'a [[f32; 4]; 32])>,
+    extra: Option<(&'a Pixels, &'a [u32], &'a Sampling)>,
 }
 impl Raster<'_> {
     fn gpu(
@@ -402,8 +482,8 @@ impl Raster<'_> {
                     v.rhw as f32,
                     v.u as f32,
                     v.v as f32,
-                    0.,
-                    0.,
+                    v.uv1[0] as f32,
+                    v.uv1[1] as f32,
                     v.color[0] as f32,
                     v.color[1] as f32,
                     v.color[2] as f32,
@@ -432,7 +512,27 @@ impl Raster<'_> {
         params[191..198].copy_from_slice(self.stage);
         params[198] = self.color_mask;
         params[199] = depth.is_some() as u32;
-        gpu.draw(&vertices, &params, self.source, dest, depth)
+        let mut source = std::borrow::Cow::Borrowed(self.source);
+        let extra = if let Some((t, s, sampling)) = self.extra {
+            let offset = source.len() as u32;
+            source.to_mut().extend(s);
+            [
+                t.width,
+                t.height,
+                t.format,
+                sampling.address[0],
+                sampling.address[1],
+                sampling.filter[0],
+                offset,
+                0,
+            ]
+        } else {
+            [0; 8]
+        };
+        let program = self
+            .shader
+            .map_or_else(|| vec![0], |(p, c)| p.gpu_words(c, extra));
+        gpu.draw(&vertices, &params, &source, dest, depth, &program)
     }
     fn render(
         &self,
@@ -545,7 +645,10 @@ impl Raster<'_> {
                     (b * (v[1].x - v[0].x) - a * (v[2].x - v[0].x)) / area,
                 ]
             });
-            let needs_weights = !affine || constant_color.is_none() || depth_pixels.is_some();
+            let needs_weights = !affine
+                || constant_color.is_none()
+                || depth_pixels.is_some()
+                || self.shader.is_some();
             let minx = v
                 .iter()
                 .map(|v| v.x.ceil() as i32)
@@ -629,6 +732,36 @@ impl Raster<'_> {
                                 << (c * 8))
                         })
                     });
+                    let shader_color = if let Some((program, constants)) = self.shader {
+                        let dc = std::array::from_fn(|i| {
+                            (0..3)
+                                .map(|j| v[j].color[[2, 1, 0, 3][i]] * pw[j])
+                                .sum::<f64>() as f32
+                                / 255.
+                        });
+                        // Vertex storage is BGRA; shader registers are RGBA.
+                        let uv1 = std::array::from_fn::<_, 2, _>(|i| {
+                            (0..3).map(|j| v[j].uv1[i] * pw[j]).sum::<f64>() as f32
+                        });
+                        match program.execute(
+                            constants,
+                            dc,
+                            [[u as f32, vv as f32, 0., 1.], [uv1[0], uv1[1], 0., 1.]],
+                            |slot, at| {
+                                let (t, src, s) = if slot == 0 {
+                                    (tb, source, sampling)
+                                } else {
+                                    self.extra.unwrap()
+                                };
+                                sample_float(src, t, at[0] as f64, at[1] as f64, s)
+                            },
+                        ) {
+                            Some(value) => Some(pack_shader_color(value)),
+                            None => continue,
+                        }
+                    } else {
+                        None
+                    };
                     let tex = sample(source, tb, u, vv, sampling)?;
                     let rgb = combine(
                         texture_stage[1],
@@ -650,7 +783,7 @@ impl Raster<'_> {
                             diffuse,
                         ) & 0xff000000
                     };
-                    let mut color = (rgb & 0xffffff) | alpha;
+                    let mut color = shader_color.unwrap_or((rgb & 0xffffff) | alpha);
                     let index = ((y as u32 - first_y as u32) * b.width + x as u32) as usize;
                     if r[15] != 0 && !compare(r[25], color >> 24, r[24]) {
                         continue;
@@ -738,6 +871,28 @@ impl D3D9 {
             *value = stage(d, 0, n as u32)?;
         }
         let sampling = Sampling::new(d)?;
+        if sampling.filter[0] != sampling.filter[1] {
+            return Err(UNAVAILABLE);
+        }
+        let program = if d.pixel_shader == 0 {
+            None
+        } else {
+            match &self.objects.get(&d.pixel_shader).ok_or(INVALID)?.payload {
+                Payload::PixelShader { program, .. } => Some(program),
+                _ => return Err(INVALID),
+            }
+        };
+        // POSITIONT / XYZRHW vertices bypass vertex processing, including
+        // a bound shader; the binding itself remains observable and owned.
+        let vertex_program = if d.vertex_shader == 0 || layout.transformed {
+            None
+        } else {
+            match &self.objects.get(&d.vertex_shader).ok_or(INVALID)?.payload {
+                Payload::VertexShader { program, .. } => Some(program),
+                _ => return Err(INVALID),
+            }
+        };
+        let constants = program.map(|p| p.constants(&d.pixel_constants));
         let color_mask = ((r[168] & 1) * 0xff0000)
             | (((r[168] >> 1) & 1) * 0xff00)
             | (((r[168] >> 2) & 1) * 0xff)
@@ -756,15 +911,17 @@ impl D3D9 {
             let base = a[3] + i * a[4];
             let xyz = words::<3>(mem, base + layout.position)?.map(|v| f32::from_bits(v) as f64);
             let mut xyzw = [xyz[0], xyz[1], xyz[2], 1.];
-            if layout.transformed {
+            if layout.position_w {
                 xyzw[3] = f32::from_bits(
                     mem.read_u32(base + layout.position + 12)
                         .map_err(|_| INVALID)?,
                 ) as f64;
+            }
+            if layout.transformed {
                 if !(0.0..=1.0).contains(&xyzw[2]) || xyzw[3] <= 0. {
                     return Err(UNAVAILABLE);
                 }
-            } else {
+            } else if vertex_program.is_none() {
                 for n in [256, 2, 3] {
                     if let Some(matrix) = d.transforms.get(&n) {
                         xyzw = std::array::from_fn(|j| {
@@ -782,12 +939,21 @@ impl D3D9 {
             if !u.is_finite() || !v.is_finite() || xyzw[0].abs() > 1e6 || xyzw[1].abs() > 1e6 {
                 return Err(INVALID);
             }
-            vertices.push(Vertex {
+            let mut vertex = Vertex {
                 x: xyzw[0],
                 y: xyzw[1],
                 z: xyzw[2],
                 u: u as f64,
                 v: v as f64,
+                uv1: if let Some(off) = layout.uv1 {
+                    let n = words::<2>(mem, base + off)?.map(|n| f32::from_bits(n) as f64);
+                    if n.iter().any(|n| !n.is_finite()) {
+                        return Err(INVALID);
+                    }
+                    n
+                } else {
+                    [0.; 2]
+                },
                 color: {
                     let color = if let Some(off) = layout.color {
                         mem.read_u32(base + off).map_err(|_| INVALID)?
@@ -797,20 +963,93 @@ impl D3D9 {
                     std::array::from_fn(|i| ((color >> (i * 8)) & 255) as f64)
                 },
                 rhw: xyzw[3],
-            });
+            };
+            if let Some(program) = vertex_program {
+                let out = program.execute(
+                    &d.vertex_constants,
+                    xyzw.map(|n| n as f32),
+                    [
+                        vertex.color[2] as f32 / 255.,
+                        vertex.color[1] as f32 / 255.,
+                        vertex.color[0] as f32 / 255.,
+                        vertex.color[3] as f32 / 255.,
+                    ],
+                    [[u, v], vertex.uv1.map(|n| n as f32)],
+                )?;
+                vertex.x = out.position[0] as f64;
+                vertex.y = out.position[1] as f64;
+                vertex.z = out.position[2] as f64;
+                vertex.rhw = out.position[3] as f64;
+                vertex.u = out.uv[0][0] as f64;
+                vertex.v = out.uv[0][1] as f64;
+                vertex.uv1 = out.uv[1].map(|n| n as f64);
+                vertex.color =
+                    std::array::from_fn(|i| out.color[[2, 1, 0, 3][i]].clamp(0., 1.) as f64 * 255.);
+            }
+            vertices.push(vertex);
         }
-        if d.texture == 0 {
+        if d.texture == 0 && program.is_some_and(|p| p.texture_mask & 1 != 0) {
             return Err(UNAVAILABLE);
         }
-        let texture = self.buffer(d.texture)?;
+        if d.texture == 0 && program.is_none() {
+            // Fixed-function stages requiring a missing texture are disabled;
+            // stage zero's incoming CURRENT value is vertex diffuse.
+            let uses_texture = match texture_stage[1] {
+                2 => texture_stage[2] == 2,
+                3 => texture_stage[3] == 2,
+                4 => texture_stage[2] == 2 || texture_stage[3] == 2,
+                _ => false,
+            };
+            if uses_texture {
+                texture_stage = [0, 2, 0, 0, 2, 0, 0];
+            }
+        }
+        let texture = if d.texture == 0 {
+            Rc::new(RefCell::new(Pixels {
+                width: 1,
+                height: 1,
+                format: 21,
+                pool: 0,
+                usage: 0,
+                bits: 0,
+                locked: false,
+            }))
+        } else {
+            self.buffer(d.texture)?
+        };
         let tb = texture.borrow();
+        if program.is_some_and(|p| p.uv1) && layout.uv1.is_none() {
+            return Err(UNAVAILABLE);
+        }
+        let extra = if program.is_some_and(|p| p.texture_mask & 2 != 0) {
+            Some(self.buffer(d.texture1)?)
+        } else {
+            None
+        };
+        let extra = extra.as_ref().map(|t| t.borrow());
+        let extra_source = extra.as_ref().map(|t| resource::read(mem, t)).transpose()?;
+        let extra_sampling = Sampling {
+            address: [sampler_slot(d, 1, 1)?, sampler_slot(d, 1, 2)?],
+            filter: [sampler_slot(d, 1, 5)?, sampler_slot(d, 1, 6)?],
+        };
+        if extra.is_some() && extra_sampling.filter[0] != extra_sampling.filter[1] {
+            return Err(UNAVAILABLE);
+        }
         let target = self.buffer(d.target)?;
         let b = target.borrow();
-        if tb.locked || b.locked || Rc::ptr_eq(&texture, &target) {
+        if tb.locked
+            || b.locked
+            || Rc::ptr_eq(&texture, &target)
+            || extra.as_ref().is_some_and(|t| t.locked || t.bits == b.bits)
+        {
             return Err(INVALID);
         }
         mem.ptr(b.bits, b.len(), true).map_err(|_| INVALID)?;
-        let source = resource::read(mem, &tb)?;
+        let source = if d.texture == 0 {
+            vec![0]
+        } else {
+            resource::read(mem, &tb)?
+        };
         let mut dest = resource::read(mem, &b)?;
         let depth_buffer = if r[7] != 0 || r[52] != 0 {
             let ds = self.buffer(d.depth)?;
@@ -885,6 +1124,11 @@ impl D3D9 {
             color_mask,
             clip,
             depth_width,
+            shader: program.zip(constants.as_ref()),
+            extra: extra
+                .as_deref()
+                .zip(extra_source.as_deref())
+                .map(|(t, s)| (t, s, &extra_sampling)),
         };
         // Large draws use disjoint host-owned row bands. Guest execution and
         // checked read/write remain on this thread, with one atomic commit.
@@ -931,15 +1175,21 @@ mod tests {
     use super::*;
     #[test]
     fn parallel_row_bands_match_serial_color_depth_stencil_and_triangle_order() {
-        raster_comparison(false);
+        raster_comparison(false, false);
     }
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "requires a real Metal device; run with --ignored"]
     fn metal_pixels_match_software_coverage_masks_stencil_and_rounding_bounds() {
-        raster_comparison(true);
+        raster_comparison(true, false);
     }
-    fn raster_comparison(metal: bool) {
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires a real Metal device; run with --ignored"]
+    fn metal_ps2_pixels_match_software_sampling_constants_and_masks() {
+        raster_comparison(true, true);
+    }
+    fn raster_comparison(metal: bool, programmable: bool) {
         let mut gpu = super::super::gpu::GpuRaster::default();
         let target = Pixels {
             width: 47,
@@ -958,6 +1208,28 @@ mod tests {
         let source: Vec<u32> = (0..64u32)
             .map(|i| 0x80000000 | i.wrapping_mul(0x182347) & 0xffffff)
             .collect();
+        let tokens = [
+            0xffff0200, 0x03000042, 0x800f0000, 0xb0e40000, 0xa0e40800, 0x03000042, 0x800f0002,
+            0xb0e40001, 0xa0e40801, 0x04000012, 0x800f0000, 0xa0e40002, 0x80e40000, 0x80e40002,
+            0x04000004, 0x801f0001, 0x80e40000, 0xa0e40000, 0xa0e40001, 0x03000005, 0x800f0800,
+            0x80c60001, 0x90e40000, 0xffff,
+        ];
+        let program =
+            shader::Program::parse(|i| tokens.get(i).copied().ok_or("truncated".into())).unwrap();
+        let mut constants = [[0.; 4]; 32];
+        constants[0] = [0.8, 1.2, 0.5, 0.9];
+        constants[1] = [0.05, -0.1, 0.2, 0.1];
+        constants[2] = [0.25; 4];
+        let texture1 = Pixels {
+            width: 3,
+            height: 5,
+            ..texture
+        };
+        let source1: Vec<_> = (0..15u32).map(|i| 0xb0472000 | (i * 0x117)).collect();
+        let sampling1 = Sampling {
+            address: [3, 1],
+            filter: [2, 2],
+        };
         for case in 0..8 {
             let mut seed = 0x83023b47u32;
             let mut triangles = Vec::new();
@@ -973,6 +1245,7 @@ mod tests {
                         z: next(),
                         u: next() * 2. - 0.5,
                         v: next() * 2. - 0.5,
+                        uv1: [0.2, 0.3],
                         color: if case & 1 == 0 {
                             [255.; 4]
                         } else {
@@ -1019,6 +1292,8 @@ mod tests {
                 color_mask: 0xffff00ff,
                 clip: [3, 2, 44, 35],
                 depth_width: 53, // a wider depth attachment must use its own pitch
+                shader: programmable.then_some((&program, &constants)),
+                extra: programmable.then_some((&texture1, &source1, &sampling1)),
             };
             for with_depth in [false, true] {
                 let initial = vec![0x49382617; 47 * 37];
@@ -1065,7 +1340,8 @@ mod tests {
                     for (&actual, &expected) in values.iter().zip(&serial_depth) {
                         assert_eq!(actual & 255, expected & 255, "stencil case {case}");
                         assert!(
-                            (actual >> 8).abs_diff(expected >> 8) <= 4,
+                            (actual >> 8).abs_diff(expected >> 8)
+                                <= if programmable { 8 } else { 4 },
                             "depth case {case}: {actual:08x} vs {expected:08x}"
                         );
                     }
@@ -1116,6 +1392,7 @@ mod tests {
                 z: 0.,
                 u: 0.,
                 v: 0.,
+                uv1: [0.; 2],
                 color: [255.; 4],
                 rhw: 1.,
             });

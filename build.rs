@@ -2,6 +2,7 @@ use std::{env, path::PathBuf, process::Command};
 fn main() {
     println!("cargo:rerun-if-changed=src/platform/macos.m");
     println!("cargo:rerun-if-changed=src/platform/audio.c");
+    println!("cargo:rerun-if-changed=src/platform/font.c");
     println!("cargo:rerun-if-changed=src/platform/metal.m");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
         return;
@@ -54,12 +55,29 @@ fn main() {
             .success(),
         "Metal bridge compile failed"
     );
+    assert!(
+        Command::new("clang")
+            .args([
+                "-mmacosx-version-min=11.0",
+                "-Wall",
+                "-Wextra",
+                "-c",
+                "src/platform/font.c",
+                "-o"
+            ])
+            .arg(out.join("font.o"))
+            .status()
+            .unwrap()
+            .success(),
+        "CoreText bridge compile failed"
+    );
     assert!(Command::new("ar")
         .arg("crs")
         .arg(out.join("libwire_ui.a"))
         .arg(out.join("macos.o"))
         .arg(out.join("audio.o"))
         .arg(out.join("metal.o"))
+        .arg(out.join("font.o"))
         .status()
         .unwrap()
         .success());
@@ -69,4 +87,5 @@ fn main() {
     println!("cargo:rustc-link-lib=framework=CoreGraphics");
     println!("cargo:rustc-link-lib=framework=AudioToolbox");
     println!("cargo:rustc-link-lib=framework=Metal");
+    println!("cargo:rustc-link-lib=framework=CoreText");
 }

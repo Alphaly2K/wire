@@ -235,15 +235,15 @@ fn bitmap_object(mem: &GuestMem, bitmap: &Bitmap, a: &crate::api::Args) -> Resul
             bitmap.width,
             height as u32,
             0x00200001,
-            0,
+            bitmap.compression,
             bitmap.size(),
             0,
             0,
             0,
             0,
-            0,
-            0,
-            0,
+            if bitmap.compression == 3 { 0xff0000 } else { 0 },
+            if bitmap.compression == 3 { 0xff00 } else { 0 },
+            if bitmap.compression == 3 { 0xff } else { 0 },
             0,
             0,
         ] {
@@ -348,6 +348,9 @@ pub(crate) fn dispatch(
                 | "CreateFontW"
                 | "CreateFontIndirectA"
                 | "CreateFontIndirectW"
+                | "GetTextMetricsW"
+                | "SetMapMode"
+                | "GetMapMode"
         );
     if !user && !gdi {
         return None;
@@ -361,6 +364,13 @@ pub(crate) fn dispatch(
             return result;
         }
         match name {
+            "SetMapMode" | "GetMapMode" => {
+                gfx.dc(a[0])?;
+                if name == "SetMapMode" && a[1] != 1 {
+                    return Err(120);
+                }
+                Ok(1) // only MM_TEXT is currently supported
+            }
             "GetDC" => {
                 let (width, height) = if a[0] == 0 {
                     (1024, 768)
@@ -421,8 +431,24 @@ pub(crate) fn dispatch(
                 let f: [u32; 10] = std::array::from_fn(|i| {
                     u32::from_le_bytes(info[i * 4..i * 4 + 4].try_into().unwrap())
                 });
-                if f[0] != 40 || f[3] != 0x00200001 || f[4] != 0 || f[8] != 0 {
+                if f[0] != 40 || f[3] != 0x00200001 || !matches!(f[4], 0 | 3) || f[8] != 0 {
                     return Err(120);
+                }
+                if f[4] == 3 {
+                    let mut masks = [0; 12];
+                    mem.read_bytes(a[1].checked_add(40).ok_or(87u32)?, &mut masks)
+                        .map_err(|_| 87u32)?;
+                    if masks
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .copied()
+                        .map(u32::from_le_bytes)
+                        .collect::<Vec<_>>()
+                        != [0xff0000, 0xff00, 0xff]
+                    {
+                        return Err(120);
+                    }
                 }
                 let width = f[1] as i32;
                 let height = f[2] as i32;
@@ -444,6 +470,7 @@ pub(crate) fn dispatch(
                         width: width as u32,
                         height: height_abs,
                         bpp: 32,
+                        compression: f[4],
                         storage: Storage::Dib {
                             base,
                             top_down: height < 0,
@@ -580,6 +607,24 @@ pub(crate) fn dispatch(
             _ => unreachable!(),
         }
     })();
+    let info = if name == "CreateDIBSection" {
+        let mut bytes = [0; 40];
+        if mem.read_bytes(a[1], &mut bytes).is_ok() {
+            format!(
+                "; BITMAPINFO={:x?}",
+                bytes
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| u32::from_le_bytes(*b))
+                    .collect::<Vec<_>>()
+            )
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
     Some(match result {
         Ok(v) => (v, "checked GDI object / CPU pixels".into(), true),
         Err(e) => {
@@ -597,7 +642,7 @@ pub(crate) fn dispatch(
             } else {
                 0
             };
-            (v, format!("GDI error {e}"), e != 120)
+            (v, format!("GDI error {e}{info}"), e != 120)
         }
     })
 }

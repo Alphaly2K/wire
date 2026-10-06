@@ -11,7 +11,10 @@ mod gpu;
 mod raster;
 mod reset;
 mod resource;
+mod shader;
+mod stateblock;
 mod vertex;
+mod vertex_shader;
 const INVALID: u32 = 0x8876086c;
 const UNAVAILABLE: u32 = 0x8876086a;
 const NOMEM: u32 = 0x8007000e;
@@ -45,6 +48,7 @@ impl Pixels {
     }
 }
 type Buffer = Rc<RefCell<Pixels>>;
+#[derive(Clone)]
 struct Device {
     factory: u32,
     hwnd: u32,
@@ -56,8 +60,13 @@ struct Device {
     stream: [u32; 3], // buffer, byte offset, stride (stream zero)
     indices: u32,
     texture: u32,
+    texture1: u32,
     fvf: u32,
     declaration: u32,
+    vertex_shader: u32,
+    vertex_constants: [[f32; 4]; 256],
+    pixel_shader: u32,
+    pixel_constants: [[f32; 4]; 32],
     transforms: BTreeMap<u32, [f32; 16]>,
     scene: bool,
     render: BTreeMap<u32, u32>,
@@ -68,6 +77,19 @@ struct Device {
     swap: u32,
 }
 enum Payload {
+    StateBlock {
+        device: u32,
+        snapshot: Box<Device>,
+        keys: std::collections::BTreeSet<stateblock::Key>,
+    },
+    VertexShader {
+        device: u32,
+        program: vertex_shader::VertexProgram,
+    },
+    PixelShader {
+        device: u32,
+        program: shader::Program,
+    },
     Factory,
     Device(Box<Device>),
     Texture {
@@ -111,8 +133,11 @@ struct Object {
 #[derive(Default)]
 pub struct D3D9 {
     pub enable_gpu: bool,
+    shader_error: Option<String>,
+    pub shader_dump_dir: Option<std::path::PathBuf>,
     gpu: gpu::GpuRaster,
     objects: BTreeMap<u32, Object>,
+    recording: BTreeMap<u32, stateblock::Recording>,
     vtables: BTreeMap<&'static str, u32>,
     allocated: u64,
     pub frames: u64,
@@ -187,7 +212,13 @@ impl D3D9 {
                 continue;
             }
             let o = self.objects.remove(&h).unwrap();
-            for p in o.parents.into_iter().chain(o.children) {
+            let recording = self.recording.remove(&h);
+            for p in o
+                .parents
+                .into_iter()
+                .chain(o.children)
+                .chain(recording.into_iter().flat_map(|r| r.children))
+            {
                 if let Some(o) = self.objects.get_mut(&p) {
                     o.pins = o.pins.checked_sub(1).expect("D3D owned reference");
                     work.push(p);
@@ -391,6 +422,14 @@ fn caps(mem: &GuestMem, p: u32) -> Result<(), u32> {
         (46, 4),
         (47, 1),
         (48, 28),
+        (49, 0xfffe0200),
+        (50, 256),
+        (51, 0xffff0200),
+        (52, 1f32.to_bits()),
+        (66, 1), // PS20 arbitrary swizzle
+        (68, 12),
+        (70, 96),
+        (73, 96),
         (58, 1),
         (60, 1),
         (61, 0x3000300),
@@ -423,6 +462,9 @@ pub(crate) fn dispatch(
         "D3D9 {name}; frames={} draws={}",
         backend.frames, backend.draws
     );
+    if name.ends_with(".CreatePixelShader") || name.ends_with(".CreateVertexShader") {
+        note.push_str(&format!("; shader_error={:?}", backend.shader_error));
+    }
     if name.ends_with(".Present") {
         note.push_str(&format!(
             "; Metal={} GPU_error={:?}",
@@ -441,6 +483,34 @@ pub(crate) fn dispatch(
     if name == "IDirect3DDevice9.DrawPrimitiveUP" && result.is_err() {
         if let Ok(v) = words::<6>(mem, a[3]) {
             note.push_str(&format!("; first XYZRHW/UV {:?}", v.map(f32::from_bits)));
+        }
+    }
+    if name.starts_with("IDirect3DDevice9.Draw") && result.is_err() {
+        if let Ok(d) = backend.device(a[0]) {
+            note.push_str(&format!(
+                "; draw_args={a:x?} fvf={:#x} declaration={:#x} VS={:#x} PS={:#x} textures={:x?} viewport={:?} render={:?} sampler={:?} stage={:?}",
+                d.fvf, d.declaration, d.vertex_shader, d.pixel_shader,
+                [d.texture, d.texture1], d.viewport, d.render, d.sampler, d.stage
+            ));
+            if let Some(Object {
+                payload: Payload::Vertices { bits, .. },
+                ..
+            }) = backend.objects.get(&d.stream[0])
+            {
+                let values: Vec<_> = (0..4)
+                    .filter_map(|i| {
+                        bits.checked_add(d.stream[1])?
+                            .checked_add(i * d.stream[2])
+                            .and_then(|p| words::<7>(mem, p).ok())
+                    })
+                    .collect();
+                note.push_str(&format!("; first stream vertices={values:x?}"));
+            }
+        }
+    }
+    if name == "IDirect3DDevice9.SetViewport" {
+        if let Ok(v) = words::<6>(mem, a[1]) {
+            note.push_str(&format!("; viewport={v:?}"));
         }
     }
     if name == "IDirect3DDevice9.Reset" && result.is_ok() {
@@ -520,9 +590,12 @@ impl D3D9 {
                     "IDirect3DSurface9" => [0x0cfbaf3a, 0x429a9ff6, 0x79a2b399, 0x9bb8f86a],
                     "IDirect3DVertexBuffer9" => [0xb64bb1b5, 0x4df6fd70, 0xd01991bf, 0xe35524a1],
                     "IDirect3DIndexBuffer9" => [0x7c9dd65e, 0x4529d3f7, 0x5878eeac, 0x35deac30],
+                    "IDirect3DVertexShader9" => [0xefc5557e, 0x46136265, 0x8543948a, 0x36eb8978],
+                    "IDirect3DPixelShader9" => [0x6d3bdbdc, 0x44155b02, 0x5ece52b8, 0x89b2cc8b],
                     "IDirect3DVertexDeclaration9" => {
                         [0xdd13c59c, 0x409836fa, 0xedc7fba8, 0x4685dc39]
                     }
+                    "IDirect3DStateBlock9" => [0xb07c4fe5, 0x4ba8310d, 0x0f4f3ca2, 0x8b216f20],
                     _ => [0x794950f2, 0x458aadfc, 0xa1105e90, 0x3b500b0b],
                 };
                 if iid != expected && iid != [0, 0, 0xc0, 0x46000000] {
@@ -534,11 +607,13 @@ impl D3D9 {
         }
         match kind {
             "IDirect3D9" => self.factory(method, a, mem, api, state),
-            "IDirect3DDevice9" => self.device_call(method, a, mem, api, state),
+            "IDirect3DDevice9" => self.recorded_device_call(method, a, mem, api, state),
             "IDirect3DTexture9" | "IDirect3DSurface9" => self.resource(method, a, mem),
             "IDirect3DSwapChain9" => self.swap(method, a, mem, state),
             "IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9" => self.vertex_call(method, a, mem),
             "IDirect3DVertexDeclaration9" => self.declaration_call(method, a, mem),
+            "IDirect3DPixelShader9" | "IDirect3DVertexShader9" => self.shader_call(method, a, mem),
+            "IDirect3DStateBlock9" => self.stateblock_call(method, a, mem, state),
             _ => Err(UNAVAILABLE),
         }
     }
@@ -684,8 +759,13 @@ impl D3D9 {
                         stream: [0; 3],
                         indices: 0,
                         texture: 0,
+                        texture1: 0,
                         fvf: 0,
                         declaration: 0,
+                        vertex_shader: 0,
+                        vertex_constants: [[0.; 4]; 256],
+                        pixel_shader: 0,
+                        pixel_constants: [[0.; 4]; 32],
                         transforms: BTreeMap::new(),
                         scene: false,
                         render: BTreeMap::new(),

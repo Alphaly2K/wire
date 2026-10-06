@@ -58,10 +58,65 @@ uint sample_pixel(device const uint *src,constant Params &p,float2 uv) {
         +c01*((1-f.x)*f.y)+c11*(f.x*f.y);
     return packed(uint4(floor(clamp(value,0.0f,255.0f)+0.5f)));
 }
+// Validated PS2 records are data interpreted by this fixed host program.
+float4 rgba(uint pixel) { return float4((pixel>>16)&255,(pixel>>8)&255,pixel&255,pixel>>24)/255.0f; }
+uint shader_texel(device const uint *src,uint tw,uint th,uint format,uint2 address,int x,int y) {
+    uint pixel=src[texel_coordinate(y,th,address.y)*tw+texel_coordinate(x,tw,address.x)];
+    return format==22?pixel|0xff000000:pixel;
+}
+float4 sample_shader(device const uint *src,constant Params &p,device const uint *program,uint slot,float2 uv) {
+    uint tw=slot?program[1]:p.tw,th=slot?program[2]:p.th,format=slot?program[3]:p.texture_format;
+    uint2 address=slot?uint2(program[4],program[5]):uint2(p.address[0],p.address[1]);
+    uint filter=slot?program[6]:p.filter[0];src+=slot?program[7]:0;
+    if(!all(isfinite(uv))) return float4(0);
+    for(uint i=0;i<2;i++) uv[i]=address[i]==1?uv[i]-floor(uv[i]):clamp(uv[i],0.0f,1.0f);
+    float2 at=uv*float2(tw,th);
+    if(filter==1) return rgba(shader_texel(src,tw,th,format,address,int(floor(at.x)),int(floor(at.y))));
+    at-=0.5f;int2 base=int2(floor(at));float2 f=at-floor(at);
+    return rgba(shader_texel(src,tw,th,format,address,base.x,base.y))*((1-f.x)*(1-f.y))
+        +rgba(shader_texel(src,tw,th,format,address,base.x+1,base.y))*(f.x*(1-f.y))
+        +rgba(shader_texel(src,tw,th,format,address,base.x,base.y+1))*((1-f.x)*f.y)
+        +rgba(shader_texel(src,tw,th,format,address,base.x+1,base.y+1))*(f.x*f.y);
+}
+uint reg_kind(uint t) { return ((t>>28)&7)|((t>>8)&24); }
+float4 ps_source(uint t,thread float4 *regs,device const uint *program,float4 diffuse,float4 uv,float4 uv1) {
+    uint n=t&2047,k=reg_kind(t);
+    float4 v=k==0?regs[n]:k==1?diffuse:k==2?as_type<float4>(uint4(program[9+n*4],program[10+n*4],program[11+n*4],program[12+n*4])):n==0?uv:uv1;
+    v=float4(v[(t>>16)&3],v[(t>>18)&3],v[(t>>20)&3],v[(t>>22)&3]);
+    uint m=(t>>24)&15;return m==1?-v:m==11?abs(v):m==12?-abs(v):v;
+}
+bool run_pixel_shader(device const uint *program,device const uint *src,constant Params &p,float4 diffuse,float4 uv,float4 uv1,thread uint &color) {
+    float4 regs[12];for(uint i=0;i<12;i++) regs[i]=float4(0);
+    float4 out=float4(0);
+    for(uint i=0;i<program[0];i++) {
+        device const uint *op=program+137+i*8;uint code=op[0]&65535,d=op[1];
+        if(code==65) {if(any(regs[d&2047].xyz<0)) return false;continue;}
+        float4 a=ps_source(op[2],regs,program,diffuse,uv,uv1),b=ps_source(op[3],regs,program,diffuse,uv,uv1),c=ps_source(op[4],regs,program,diffuse,uv,uv1),v;
+        switch(code) {
+            case 1:v=a;break;case 2:v=a+b;break;case 3:v=a-b;break;
+            case 4:v=a*b+c;break;case 5:v=a*b;break;case 6:v=float4(1/a.x);break;
+            case 7:v=float4(1/sqrt(abs(a.x)));break;case 8:v=float4(dot(a.xyz,b.xyz));break;
+            case 9:v=float4(dot(a,b));break;case 10:v=min(a,b);break;case 11:v=max(a,b);break;
+            case 12:v=select(float4(0),float4(1),a<b);break;case 13:v=select(float4(0),float4(1),a>=b);break;
+            case 14:v=float4(exp2(a.x));break;case 15:v=float4(log2(abs(a.x)));break;
+            case 18:v=a*b+(1-a)*c;break;case 19:v=a-floor(a);break;
+            case 32:v=float4(pow(abs(a.x),b.x));break;case 35:v=abs(a);break;
+            case 36:v=float4(normalize(a.xyz),a.w);break;case 37:v=float4(cos(a.x),sin(a.x),0,0);break;
+            case 66:v=sample_shader(src,p,program,op[3]&2047,(op[0]&65536)?a.xy/a.w:a.xy);break;
+            case 88:v=select(c,b,a>=0);break;case 90:v=float4(a.x*b.x+a.y*b.y+c.x);break;
+            default:return false;
+        }
+        if(d&1048576) v=clamp(v,0.0f,1.0f);
+        for(uint j=0;j<4;j++) if(d&(1<<(16+j))) {if(reg_kind(d)==8) out[j]=v[j];else regs[d&2047][j]=v[j];}
+    }
+    for(uint i=0;i<4;i++) if(isnan(out[i])) out[i]=0;
+    uint4 value=uint4(floor(clamp(out,0.0f,1.0f)*255.0f+0.5f));
+    color=(value.w<<24)|(value.x<<16)|(value.y<<8)|value.z;return true;
+}
 kernel void raster(device const Triangle *triangles [[buffer(0)]],
     constant Params &p [[buffer(1)]],device const uint *src [[buffer(2)]],
     device uint *dest [[buffer(3)]],device uint *depth [[buffer(4)]],
-    uint2 at [[thread_position_in_grid]]) {
+    device const uint *program [[buffer(5)]],uint2 at [[thread_position_in_grid]]) {
     if(at.x>=p.width || at.y>=p.height || int(at.x)<p.clip[0] || int(at.y)<p.clip[1]
         || int(at.x)>=p.clip[2] || int(at.y)>=p.clip[3]) return;
     uint index=at.y*p.width+at.x,di=at.y*p.depth_width+at.x;
@@ -96,6 +151,7 @@ kernel void raster(device const Triangle *triangles [[buffer(0)]],
         uint rgb=combine(p.stage[1],p.stage[2],p.stage[3],tex,diffuse);
         uint alpha=p.stage[4]==1?diffuse:combine(p.stage[4],p.stage[5],p.stage[6],tex,diffuse);
         uint color=(rgb&0xffffff)|(alpha&0xff000000);
+        if(program[0] && !run_pixel_shader(program,src,p,dc.zyxw/255.0f,float4(uv,0,1),float4(a.uv.zw*pw.x+b.uv.zw*pw.y+c.uv.zw*pw.z,0,1),color)) continue;
         if(p.r[15] && !compare(p.r[25],color>>24,p.r[24])) continue;
         if(p.has_depth) {
             uint z=uint(floor(clamp(a.p.z*w.x+b.p.z*w.y+c.p.z*w.z,0.0f,1.0f)*16777215.0f+0.5f));

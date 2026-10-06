@@ -13,6 +13,7 @@ fn main() -> ExitCode {
         eprintln!("wire — Watari-Is-a-Runtime-Environment (M2 spike)");
         eprintln!("usage:");
         eprintln!("  wire imports <program.exe>");
+        eprintln!("  wire probe64 <program.exe> [--max-instr N] (experimental AMD64 loader/CPU diagnostic)");
         eprintln!("  wire prepare <program.exe> [--out program.wir]");
         eprintln!(
             "  wire run <program.exe> [--ir program.wir] [--op-stats] [--max-instr N] [--log-dir DIR] [--cwd DIR] [--trace-cpu] [--present|--headless] [--software-render] [--capture-frames DIR] [--stop-after-presents N]"
@@ -21,6 +22,7 @@ fn main() -> ExitCode {
     }
     match args[1].as_str() {
         "imports" => cmd_imports(&args[2]),
+        "probe64" => cmd_probe64(&args[2], &args[3..]),
         "prepare" => cmd_prepare(&args[2], &args[3..]),
         "run" => cmd_run(&args[2], &args[3..]),
         c => {
@@ -92,6 +94,32 @@ fn cmd_imports(path: &str) -> ExitCode {
     let pe = match PeFile::parse(&buf) {
         Ok(p) => p,
         Err(e) => {
+            if let Ok(pe) = wire::x64::pe::Pe64::parse(&buf) {
+                println!(
+                    "file: {path}\ntarget: AMD64 / PE32+\nimage base: {:#x}\nentry rva: {:#x}",
+                    pe.image_base, pe.entry_rva
+                );
+                return match pe.imports(&buf) {
+                    Ok(imports) => {
+                        for d in imports {
+                            println!("{}:", d.dll);
+                            for f in d.functions {
+                                println!(
+                                    "  {} IAT={:#x}",
+                                    f.name
+                                        .unwrap_or_else(|| format!("#{}", f.ordinal.unwrap_or(0))),
+                                    f.iat_rva
+                                );
+                            }
+                        }
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("imports: {e}");
+                        ExitCode::FAILURE
+                    }
+                };
+            }
             eprintln!("parse {path}: {e}");
             return ExitCode::FAILURE;
         }
@@ -538,5 +566,87 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
         RunOutcome::PresentationLimit(_) => ExitCode::SUCCESS,
         RunOutcome::Exited(c) => ExitCode::from((c & 0xff) as u8),
         _ => ExitCode::FAILURE,
+    }
+}
+
+fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
+    let result = (|| -> Result<(), String> {
+        let limit = match opts {
+            [] => 1000000,
+            [flag, n] if flag == "--max-instr" => n.parse::<u64>().map_err(|e| e.to_string())?,
+            _ => return Err("usage: wire probe64 <exe> [--max-instr N]".into()),
+        };
+        let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+        let pe = wire::x64::pe::Pe64::parse(&bytes)?;
+        let mut gateways = std::collections::BTreeMap::new();
+        let mut mem = pe.load(&bytes, pe.image_base, |dll, f| {
+            let target = 0x7ffe00000000 + gateways.len() as u64 * 16;
+            gateways.insert(
+                target,
+                format!(
+                    "{dll}!{}",
+                    f.name
+                        .as_deref()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("#{}", f.ordinal.unwrap_or(0)))
+                ),
+            );
+            Ok(target)
+        })?;
+        const STACK: u64 = 0x7ff000000000;
+        const RETURN: u64 = 0x7ffe10000000;
+        let reserve = pe.stack_reserve.max(4096).div_ceil(4096) * 4096;
+        if reserve > 64 * 1024 * 1024 {
+            return Err("probe64 stack exceeds 64 MiB".into());
+        }
+        mem.map(
+            STACK,
+            reserve,
+            wire::x64::memory::READ | wire::x64::memory::WRITE,
+        )?;
+        let rsp = STACK + reserve - 40;
+        mem.write_int(rsp, 8, RETURN)?;
+        let mut cpu = wire::x64::cpu::Cpu64::new(pe.image_base + pe.entry_rva as u64, rsp);
+        println!(
+            "experimental AMD64 probe: base={:#x} RIP={:#x} RSP={rsp:#x}; no Win64 API runtime yet",
+            pe.image_base, cpu.rip
+        );
+        while cpu.retired < limit {
+            if cpu.rip == RETURN {
+                println!(
+                    "entry returned RAX={:#x}; retired={}",
+                    cpu.regs[0], cpu.retired
+                );
+                return Ok(());
+            }
+            if let Some(name) = gateways.get(&cpu.rip) {
+                println!(
+                    "import boundary: {name}; retired={}; integer args={:x?}",
+                    cpu.retired,
+                    cpu.arguments(&mem, 4)?
+                );
+                return Err(
+                    "AMD64 import is unresolved; this diagnostic does not run the game".into(),
+                );
+            }
+            if let Err(e) = cpu.step(&mut mem) {
+                println!(
+                    "retired={}; RIP={:#x}; regs={:x?}",
+                    cpu.retired, cpu.rip, cpu.regs
+                );
+                return Err(e);
+            }
+        }
+        Err(format!(
+            "AMD64 probe instruction limit ({limit}) at {:#x}",
+            cpu.rip
+        ))
+    })();
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("probe64: {e}");
+            ExitCode::FAILURE
+        }
     }
 }

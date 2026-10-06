@@ -19,6 +19,8 @@ extern "C" {
         dest_count: u32,
         depth: *mut u32,
         depth_count: u32,
+        program: *const u32,
+        program_count: u32,
         error: *mut u8,
         cap: u32,
     ) -> i32;
@@ -66,6 +68,7 @@ impl GpuRaster {
         source: &[u32],
         dest: &mut [u32],
         depth: Option<&mut [u32]>,
+        program: &[u32],
     ) -> bool {
         self.prepare();
         #[cfg(target_os = "macos")]
@@ -85,6 +88,8 @@ impl GpuRaster {
                         dest.len() as u32,
                         depth.as_mut_ptr(),
                         depth.len() as u32,
+                        program.as_ptr(),
+                        program.len() as u32,
                         error.as_mut_ptr(),
                         error.len() as u32,
                     )
@@ -97,7 +102,7 @@ impl GpuRaster {
             self.record_error(&error);
         }
         #[cfg(not(target_os = "macos"))]
-        let _ = (triangles, params, source, dest, depth);
+        let _ = (triangles, params, source, dest, depth, program);
         false
     }
 }

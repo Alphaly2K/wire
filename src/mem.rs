@@ -52,6 +52,7 @@ pub struct GuestMem {
     host_page: usize, // 16 KiB on Apple Silicon, 4 KiB on most x86 hosts
     page_shift: u32,
     code_versions: Vec<Cell<u64>>,
+    dep_enabled: bool,
 }
 
 unsafe impl Send for GuestMem {}
@@ -98,6 +99,7 @@ impl GuestMem {
             host_page,
             page_shift: host_page.trailing_zeros(),
             code_versions: vec![Cell::new(0); SPACE_SIZE as usize / host_page],
+            dep_enabled: true,
         })
     }
 
@@ -112,6 +114,20 @@ impl GuestMem {
 
     pub fn is_committed(&self, addr: u32) -> bool {
         self.page_ok(addr as usize >> 12)
+    }
+    /// PE32 legacy DEP policy affects logical guest fetch permission only.
+    /// Host backing always remains RW data, including guest trampolines.
+    pub fn set_dep_enabled(&mut self, enabled: bool) {
+        if self.dep_enabled != enabled {
+            self.dep_enabled = enabled;
+            // A cached fetch permission must be revalidated after policy
+            // changes, just as it is after VirtualProtect.
+            for version in &self.code_versions {
+                if version.get() != 0 {
+                    version.set(version.get().saturating_add(1));
+                }
+            }
+        }
     }
 
     pub(crate) fn host_page_size(&self) -> u32 {
@@ -293,7 +309,12 @@ impl GuestMem {
                 }
                 return Err(Self::fault(addr, len, access, true));
             }
-            if protect & access.mask() == 0 {
+            let allowed = if matches!(access, Access::Execute) && !self.dep_enabled {
+                Access::Execute.mask() | Access::Read.mask()
+            } else {
+                access.mask()
+            };
+            if protect & allowed == 0 {
                 return Err(Self::fault(addr, len, access, false));
             }
         }
