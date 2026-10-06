@@ -20,6 +20,9 @@ pub struct User32 {
     pub windows: BTreeMap<u32, Window>,
     pub timers: BTreeMap<(u32, u32, u32), Timer>, // tid, HWND, id
     queues: BTreeMap<u32, VecDeque<Message>>,
+    queue_changed: BTreeMap<u32, u32>,
+    sent: BTreeMap<u32, SentMessage>,
+    next_sent: u32,
     next_atom: u32,
     next_window: u32,
     next_timer: u32,
@@ -28,6 +31,11 @@ pub struct User32 {
     pub(crate) foreground: u32,
     pub(crate) capture: u32,
     pub(crate) cursor_pos: [i32; 2],
+    cursor_counts: BTreeMap<u32, i32>,
+    cursor: u32,
+    keyboard: crate::keyboard::Keyboard,
+    formats: BTreeMap<String, u32>,
+    next_format: u32,
 }
 
 pub struct Timer {
@@ -44,6 +52,7 @@ struct Message {
     lparam: u32,
     time: u32,
     synthetic_paint: bool,
+    hardware_input: bool,
 }
 
 pub struct Window {
@@ -62,6 +71,7 @@ pub struct Window {
     pub(crate) text: Vec<u16>,
     pub(crate) update: Option<[i32; 4]>,
     pub(crate) erase: bool,
+    props: BTreeMap<String, u32>,
     destroying: bool,
 }
 impl Window {
@@ -95,6 +105,9 @@ impl Default for User32 {
             windows: BTreeMap::new(),
             timers: BTreeMap::new(),
             queues: BTreeMap::new(),
+            queue_changed: BTreeMap::new(),
+            sent: BTreeMap::new(),
+            next_sent: 1,
             next_atom: 0xc000,
             next_window: 0x4001_0000,
             next_timer: 1,
@@ -103,11 +116,77 @@ impl Default for User32 {
             foreground: 0,
             capture: 0,
             cursor_pos: [0; 2],
+            cursor_counts: BTreeMap::new(),
+            cursor: 0,
+            keyboard: Default::default(),
+            formats: BTreeMap::new(),
+            next_format: 0xc000,
+        }
+    }
+}
+struct SentMessage {
+    sender: u32,
+    receiver: u32,
+    args: [u32; 4],
+    processing: bool,
+    result: Option<u32>,
+}
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn service_sent(
+    cpu: &mut Cpu,
+    mem: &mut GuestMem,
+    api: &mut ApiTable,
+    state: &mut ApiState,
+    log: &mut ApiLogger,
+    sched: &mut Sched,
+    max_instr: u64,
+) -> Result<Option<GuestCallOutcome>, String> {
+    let tid = sched.current_tid();
+    loop {
+        let Some((&id, msg)) = state
+            .user32
+            .sent
+            .iter()
+            .find(|(_, m)| m.receiver == tid && !m.processing && m.result.is_none())
+        else {
+            return Ok(None);
+        };
+        let args = msg.args;
+        state.user32.sent.get_mut(&id).unwrap().processing = true;
+        let result = if let Some(w) = state.user32.windows.get(&args[0]) {
+            let proc = w.wndproc;
+            invoke(cpu, mem, api, state, log, sched, proc, &args, max_instr)?
+        } else {
+            GuestCallOutcome::Returned(0)
+        };
+        let GuestCallOutcome::Returned(value) = result else {
+            return Ok(Some(result));
+        };
+        if sched.threads.iter().any(|t| {
+            t.tid == state.user32.sent[&id].sender && matches!(t.state, ThreadState::Exited(_))
+        }) {
+            state.user32.sent.remove(&id);
+            continue;
+        }
+        let msg = state
+            .user32
+            .sent
+            .get_mut(&id)
+            .ok_or("sent message removed during callback")?;
+        msg.result = Some(value);
+        let sender = msg.sender;
+        if let Some(i) = sched.threads.iter().position(|t| {
+            t.tid == sender
+                && matches!(t.state,
+            ThreadState::Waiting {target:WaitTarget::SentMessage(n),..} if n==id)
+        }) {
+            sched.wake_thread(i, Wake::Retest);
         }
     }
 }
 
-pub(crate) fn host_message(
+/// Queue a host input event at a guest scheduling boundary.
+pub fn host_message(
     state: &mut ApiState,
     sched: &mut Sched,
     hwnd: u32,
@@ -120,6 +199,13 @@ pub(crate) fn host_message(
     };
     let tid = w.tid;
     let time = clock_ms(state);
+    if !state
+        .user32
+        .keyboard
+        .host([hwnd, message, wparam, lparam, time])
+    {
+        return;
+    }
     put_message(
         state,
         sched,
@@ -131,6 +217,7 @@ pub(crate) fn host_message(
             lparam,
             time,
             synthetic_paint: false,
+            hardware_input: true,
         },
     );
 }
@@ -181,6 +268,57 @@ pub fn find_class(
     }))
 }
 
+/// Minimal system controls with real window/text ownership. Specialized
+/// control messages and rich formatting remain separate backend work.
+pub(crate) fn register_system_class(
+    mem: &mut GuestMem,
+    api: &mut ApiTable,
+    state: &mut ApiState,
+    module: u32,
+    name: &str,
+    wide: bool,
+) -> Result<(), String> {
+    if state
+        .user32
+        .classes
+        .values()
+        .any(|c| c.name.eq_ignore_ascii_case(name))
+    {
+        return Ok(());
+    }
+    if state.user32.next_atom > 0xffff {
+        return Err("system class atom table exhausted".into());
+    }
+    let name_ptrs = persistent_strings(mem, state, name)?;
+    let mut fields = [0; 11];
+    fields[0] = 0x4000; // CS_GLOBALCLASS
+    fields[1] = api.register(
+        "user32.dll",
+        Some(if wide {
+            "DefWindowProcW"
+        } else {
+            "DefWindowProcA"
+        }),
+        None,
+    );
+    fields[3] = 16;
+    fields[4] = module;
+    fields[9] = name_ptrs[usize::from(wide)];
+    let atom = state.user32.next_atom as u16;
+    state.user32.next_atom += 1;
+    state.user32.classes.insert(
+        atom,
+        WindowClass {
+            name: name.into(),
+            fields,
+            wide,
+            name_ptrs,
+            menu_ptrs: [0; 2],
+        },
+    );
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch(
     dll: &str,
@@ -196,6 +334,389 @@ pub fn dispatch(
 ) -> Option<Result<(GuestCallOutcome, String), String>> {
     if dll != "user32.dll" {
         return None;
+    }
+    if matches!(
+        name,
+        "GetKeyState" | "GetAsyncKeyState" | "GetKeyboardState"
+    ) {
+        return Some((|| {
+            let result = match name {
+                "GetAsyncKeyState" => state.user32.keyboard.asynchronous(a[0]),
+                "GetKeyState" => {
+                    let value = state
+                        .user32
+                        .keyboard
+                        .state(sched.current_tid())
+                        .get(a[0] as usize)
+                        .copied()
+                        .unwrap_or(0) as u16;
+                    (((value & 0x80) << 8) | (value & 1)) as i16 as i32 as u32
+                }
+                _ => {
+                    mem.write_bytes(a[0], &state.user32.keyboard.state(sched.current_tid()))
+                        .map_err(|e| e.to_string())?;
+                    1
+                }
+            };
+            Ok((
+                GuestCallOutcome::Returned(result),
+                "host asynchronous / retrieved queue key state".into(),
+            ))
+        })());
+    }
+    if matches!(
+        name,
+        "ShowCursor" | "GetCursor" | "SetCursor" | "LoadCursorA" | "LoadCursorW"
+    ) {
+        let result = match name {
+            "ShowCursor" => {
+                let count = state
+                    .user32
+                    .cursor_counts
+                    .entry(sched.current_tid())
+                    .or_default();
+                *count = count.saturating_add(if a[0] != 0 { 1 } else { -1 });
+                *count as u32
+            }
+            "GetCursor" => state.user32.cursor,
+            "SetCursor" => {
+                if a[0] != 0 && a[0] != 0x42007f00 {
+                    state.last_error = 6;
+                    0
+                } else {
+                    std::mem::replace(&mut state.user32.cursor, a[0])
+                }
+            }
+            _ => {
+                if a[0] == 0 && a[1] == 32512 {
+                    0x42007f00
+                } else {
+                    state.last_error = 1812;
+                    0
+                }
+            }
+        };
+        return Some(Ok((
+            GuestCallOutcome::Returned(result),
+            "logical system arrow and per-thread cursor display count".into(),
+        )));
+    }
+    if name == "EnumDisplayMonitors" {
+        return Some((|| {
+            if a[0] != 0 || a[2] == 0 {
+                state.last_error = if a[0] != 0 { 50 } else { 87 };
+                return Ok((
+                    GuestCallOutcome::Returned(0),
+                    "unsupported DC or invalid monitor callback".into(),
+                ));
+            }
+            let mut rect = [0i32, 0, 1024, 768];
+            if a[1] != 0 {
+                let mut bytes = [0; 16];
+                mem.read_bytes(a[1], &mut bytes)
+                    .map_err(|e| e.to_string())?;
+                let clip: [i32; 4] = std::array::from_fn(|i| {
+                    i32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap())
+                });
+                rect = [
+                    rect[0].max(clip[0]),
+                    rect[1].max(clip[1]),
+                    rect[2].min(clip[2]),
+                    rect[3].min(clip[3]),
+                ];
+            }
+            if rect[0] >= rect[2] || rect[1] >= rect[3] {
+                return Ok((
+                    GuestCallOutcome::Returned(1),
+                    "no monitor intersects the clipping rectangle".into(),
+                ));
+            }
+            let p = state
+                .heap
+                .alloc(mem, state.process_heap, 16, false)
+                .map_err(|e| e.to_string())?;
+            mem.write_bytes(
+                p,
+                &rect
+                    .into_iter()
+                    .flat_map(i32::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(|e| e.to_string())?;
+            let result = invoke(
+                cpu,
+                mem,
+                api,
+                state,
+                log,
+                sched,
+                a[2],
+                &[0x40000001, 0, p, a[3]],
+                max_instr,
+            );
+            state.heap.free(state.process_heap, p);
+            result.map(|value| (value, "enumerated the logical 1024x768 monitor".into()))
+        })());
+    }
+    if let Some((n, note)) = crate::display::dispatch(name, a, mem, state) {
+        return Some(Ok((GuestCallOutcome::Returned(n), note)));
+    }
+    if matches!(
+        name,
+        "SetPropA" | "SetPropW" | "GetPropA" | "GetPropW" | "RemovePropA" | "RemovePropW"
+    ) {
+        return Some((|| {
+            let key = if a[1] <= 0xffff {
+                format!("atom:{}", a[1])
+            } else {
+                format!(
+                    "name:{}",
+                    crate::file_api::read_name(mem, a[1], name.ends_with('W'))
+                        .map_err(|e| format!("window property: {e}"))?
+                        .to_lowercase()
+                )
+            };
+            let Some(w) = state.user32.windows.get_mut(&a[0]) else {
+                state.last_error = 1400;
+                return Ok((
+                    GuestCallOutcome::Returned(0),
+                    "invalid property HWND".into(),
+                ));
+            };
+            if a[1] == 0 {
+                state.last_error = 87;
+                return Ok((GuestCallOutcome::Returned(0), "invalid property key".into()));
+            }
+            let result = if name.starts_with("Set") {
+                w.props.insert(key, a[2]);
+                1
+            } else if name.starts_with("Remove") {
+                w.props.remove(&key).unwrap_or(0)
+            } else {
+                w.props.get(&key).copied().unwrap_or(0)
+            };
+            Ok((
+                GuestCallOutcome::Returned(result),
+                "window-owned property".into(),
+            ))
+        })());
+    }
+    if matches!(
+        name,
+        "GetClassLongA" | "GetClassLongW" | "SetClassLongA" | "SetClassLongW" | "GetClassWord"
+    ) {
+        return Some((|| {
+            let Some(w) = state.user32.windows.get(&a[0]) else {
+                state.last_error = 1400;
+                return Ok((GuestCallOutcome::Returned(0), "invalid class HWND".into()));
+            };
+            if a[1] as i32 == -32 && name.starts_with("Get") {
+                return Ok((
+                    GuestCallOutcome::Returned(w.class as u32),
+                    "class atom".into(),
+                ));
+            }
+            let index = match a[1] as i32 {
+                -26 => 0,
+                -24 => 1,
+                -20 => 2,
+                -18 => 3,
+                -16 => 4,
+                -14 => 5,
+                -12 => 6,
+                -10 => 7,
+                -8 => 8,
+                -34 => 10,
+                _ => {
+                    state.last_error = 1413;
+                    return Ok((
+                        GuestCallOutcome::Returned(0),
+                        "unsupported class index".into(),
+                    ));
+                }
+            };
+            let class = state.user32.classes.get_mut(&w.class).unwrap();
+            let old = class.fields[index];
+            if name.starts_with("Set") {
+                if matches!(index, 2 | 3) && a[2] > 4096 {
+                    state.last_error = 87;
+                    return Ok((
+                        GuestCallOutcome::Returned(0),
+                        "class extra storage too large".into(),
+                    ));
+                }
+                if index == 8 {
+                    state.last_error = 120;
+                    return Ok((
+                        GuestCallOutcome::Returned(0),
+                        "class menu-name change unavailable".into(),
+                    ));
+                }
+                class.fields[index] = a[2];
+            }
+            Ok((GuestCallOutcome::Returned(old), "class field state".into()))
+        })());
+    }
+    if matches!(
+        name,
+        "CreateWindowExA"
+            | "CreateWindowExW"
+            | "GetClassInfoA"
+            | "GetClassInfoW"
+            | "GetClassInfoExA"
+            | "GetClassInfoExW"
+    ) {
+        let class_pointer = a[1];
+        if class_pointer > 0xffff {
+            if let Ok(class) = crate::file_api::read_name(mem, class_pointer, name.ends_with('W')) {
+                if let Some(builtin) = [
+                    "Button",
+                    "Edit",
+                    "Static",
+                    "ListBox",
+                    "ComboBox",
+                    "ScrollBar",
+                ]
+                .into_iter()
+                .find(|n| n.eq_ignore_ascii_case(&class))
+                {
+                    let module = state.module_handle_for("user32.dll");
+                    if let Err(e) = register_system_class(mem, api, state, module, builtin, true) {
+                        return Some(Err(e));
+                    }
+                }
+            }
+        }
+    }
+    if matches!(
+        name,
+        "RegisterClipboardFormatA"
+            | "RegisterClipboardFormatW"
+            | "RegisterWindowMessageA"
+            | "RegisterWindowMessageW"
+    ) {
+        return Some((|| {
+            let text = crate::file_api::read_name(mem, a[0], name.ends_with('W'))
+                .map_err(|e| format!("registered format: {e}"))?;
+            if text.is_empty() || text.encode_utf16().count() > 255 {
+                state.last_error = 87;
+                return Ok((
+                    GuestCallOutcome::Returned(0),
+                    "invalid registered name".into(),
+                ));
+            }
+            let key = text.to_lowercase();
+            let atom = if let Some(&n) = state.user32.formats.get(&key) {
+                n
+            } else {
+                if state.user32.next_format > 0xffff {
+                    state.last_error = 8;
+                    return Ok((
+                        GuestCallOutcome::Returned(0),
+                        "format table exhausted".into(),
+                    ));
+                }
+                let n = state.user32.next_format;
+                state.user32.next_format += 1;
+                state.user32.formats.insert(key, n);
+                n
+            };
+            Ok((
+                GuestCallOutcome::Returned(atom),
+                "registered process format/message".into(),
+            ))
+        })());
+    }
+    if matches!(name, "FindWindowA" | "FindWindowW") {
+        return Some((|| {
+            let wide = name.ends_with('W');
+            let class = if a[0] > 0xffff {
+                Some(
+                    crate::file_api::read_name(mem, a[0], wide)
+                        .map_err(|e| format!("FindWindow class: {e}"))?
+                        .to_lowercase(),
+                )
+            } else {
+                None
+            };
+            let title = if a[1] != 0 {
+                Some(
+                    crate::file_api::read_name(mem, a[1], wide)
+                        .map_err(|e| format!("FindWindow title: {e}"))?
+                        .to_lowercase(),
+                )
+            } else {
+                None
+            };
+            let found = state
+                .user32
+                .windows
+                .iter()
+                .find_map(|(&h, w)| {
+                    if w.style & 0x40000000 != 0 || w.parent == 0xfffffffd {
+                        return None;
+                    }
+                    let c = state.user32.classes.get(&w.class)?;
+                    let matches_class = if a[0] == 0 {
+                        true
+                    } else if let Some(key) = &class {
+                        c.name.to_lowercase() == *key
+                    } else {
+                        w.class as u32 == a[0]
+                    };
+                    (matches_class
+                        && title
+                            .as_ref()
+                            .is_none_or(|t| String::from_utf16_lossy(&w.text).to_lowercase() == *t))
+                    .then_some(h)
+                })
+                .unwrap_or(0);
+            Ok((
+                GuestCallOutcome::Returned(found),
+                "process top-level window lookup".into(),
+            ))
+        })());
+    }
+    if name == "GetDesktopWindow" {
+        return Some((|| {
+            const DESKTOP: u32 = 0x4000fffc;
+            if !state.user32.windows.contains_key(&DESKTOP) {
+                let module = state.module_handle_for("user32.dll");
+                register_system_class(mem, api, state, module, "Desktop", true)?;
+                let (&atom, class) = state
+                    .user32
+                    .classes
+                    .iter()
+                    .find(|(_, c)| c.name == "Desktop")
+                    .unwrap();
+                state.user32.windows.insert(
+                    DESKTOP,
+                    Window {
+                        class: atom,
+                        wndproc: class.fields[1],
+                        instance: module,
+                        parent: 0,
+                        menu: 0,
+                        style: 0x10000000,
+                        ex_style: 0,
+                        rect: [0, 0, 1024, 768],
+                        user_data: 0,
+                        extra: Vec::new(),
+                        wide: true,
+                        tid: 0,
+                        text: Vec::new(),
+                        destroying: false,
+                        update: None,
+                        erase: false,
+                        props: BTreeMap::new(),
+                    },
+                );
+            }
+            Ok((
+                GuestCallOutcome::Returned(DESKTOP),
+                "virtual desktop".into(),
+            ))
+        })());
     }
     if let Some(result) = crate::user32_geometry::adjust(name, a, mem, state) {
         return Some(result.map(|n| {
@@ -245,6 +766,8 @@ pub fn dispatch(
             | "DestroyWindow"
             | "DefWindowProcA"
             | "DefWindowProcW"
+            | "DefDlgProcA"
+            | "DefDlgProcW"
             | "SendMessageA"
             | "SendMessageW"
             | "GetWindowLongA"
@@ -417,7 +940,7 @@ fn window_dispatch(
     max_instr: u64,
 ) -> Result<(GuestCallOutcome, String), String> {
     let value = |value, note: String| Ok((GuestCallOutcome::Returned(value), note));
-    if name.starts_with("DefWindowProc") {
+    if name.starts_with("DefWindowProc") || name.starts_with("DefDlgProc") {
         if a[1] == 0x10 {
             return window_dispatch(
                 "DestroyWindow",
@@ -546,6 +1069,7 @@ fn window_dispatch(
             destroying: false,
             update: None,
             erase: false,
+            props: BTreeMap::new(),
         };
         let create = state.scratch_alloc(mem, 48, 4);
         let mut fields = [
@@ -613,7 +1137,7 @@ fn window_dispatch(
                                 break;
                             }
                         }
-                        remove_window(state, hwnd);
+                        remove_window(state, sched, hwnd);
                         if !matches!(result, GuestCallOutcome::Returned(_)) {
                             return Ok((result, "creation cleanup transferred".into()));
                         }
@@ -621,11 +1145,11 @@ fn window_dispatch(
                     return value(0, "WndProc rejected creation".into());
                 }
                 Ok(transfer) => {
-                    remove_window(state, hwnd);
+                    remove_window(state, sched, hwnd);
                     return Ok((transfer, "creation transferred".into()));
                 }
                 Err(error) => {
-                    remove_window(state, hwnd);
+                    remove_window(state, sched, hwnd);
                     return Err(error);
                 }
             }
@@ -661,6 +1185,23 @@ fn window_dispatch(
     } else {
         [0; 2]
     };
+    if matches!(name, "SendMessageA" | "SendMessageW") {
+        let sender = sched.current_tid();
+        if let Some((&id, msg)) = state
+            .user32
+            .sent
+            .iter()
+            .find(|(_, m)| m.sender == sender && m.result.is_some() && m.args == a[..4])
+        {
+            let result = msg.result.unwrap();
+            state.user32.sent.remove(&id);
+            sched.take_wake();
+            return value(
+                result,
+                "cross-thread WndProc completed or owner was removed".into(),
+            );
+        }
+    }
     let Some(window) = state.user32.windows.get_mut(&a[0]) else {
         state.last_error = 1400;
         return value(0, "invalid HWND".into());
@@ -730,7 +1271,66 @@ fn window_dispatch(
         }
         "SendMessageA" | "SendMessageW" => {
             if window.tid != sched.current_tid() {
-                return Err("cross-thread synchronous WndProc is unsupported".into());
+                let owner = window.tid;
+                let sender = sched.current_tid();
+                if let Some((&id, request)) =
+                    state.user32.sent.iter().find(|(_, m)| m.sender == sender)
+                {
+                    if let Some(result) = request.result {
+                        state.user32.sent.remove(&id);
+                        sched.take_wake();
+                        return value(result, "cross-thread WndProc completed on its owner".into());
+                    }
+                    sched.block_current(cpu, WaitTarget::SentMessage(id), None)?;
+                    return Ok((
+                        GuestCallOutcome::Transferred,
+                        "waiting for WndProc owner".into(),
+                    ));
+                }
+                if state.user32.sent.len() >= 256 {
+                    state.last_error = 8;
+                    return value(0, "sent message limit".into());
+                }
+                let Some(receiver) = sched
+                    .threads
+                    .iter()
+                    .position(|t| t.tid == owner && !matches!(t.state, ThreadState::Exited(_)))
+                else {
+                    state.last_error = 1400;
+                    return value(0, "WndProc owner exited".into());
+                };
+                let id = state.user32.next_sent;
+                state.user32.next_sent = state
+                    .user32
+                    .next_sent
+                    .checked_add(1)
+                    .ok_or("sent message ID exhausted")?;
+                state.user32.sent.insert(
+                    id,
+                    SentMessage {
+                        sender,
+                        receiver: owner,
+                        args: a[..4].try_into().unwrap(),
+                        processing: false,
+                        result: None,
+                    },
+                );
+                if matches!(
+                    sched.threads[receiver].state,
+                    ThreadState::Waiting {
+                        target: WaitTarget::Messages(_) | WaitTarget::SentMessage(_),
+                        ..
+                    }
+                ) || matches!(sched.threads[receiver].state,ThreadState::Waiting {
+                        target:WaitTarget::MessageObjects(_,_,mask),..} if mask&0x40!=0)
+                {
+                    sched.wake_thread(receiver, Wake::Retest);
+                }
+                sched.block_current(cpu, WaitTarget::SentMessage(id), None)?;
+                return Ok((
+                    GuestCallOutcome::Transferred,
+                    "queued synchronous WndProc for owner thread".into(),
+                ));
             }
             let proc = window.wndproc;
             let result = invoke(cpu, mem, api, state, log, sched, proc, &a[..4], max_instr)?;
@@ -794,14 +1394,26 @@ fn window_dispatch(
                     return Ok((result, "destroy transferred".into()));
                 }
             }
-            remove_window(state, a[0]);
+            remove_window(state, sched, a[0]);
             value(1, "window destroyed".into())
         }
         _ => unreachable!(),
     }
 }
 
-fn remove_window(state: &mut ApiState, hwnd: u32) {
+fn remove_window(state: &mut ApiState, sched: &mut Sched, hwnd: u32) {
+    state.user32.keyboard.remove_window(hwnd);
+    let pending: Vec<_> = state
+        .user32
+        .sent
+        .iter()
+        .filter(|(_, m)| m.args[0] == hwnd && !m.processing && m.result.is_none())
+        .map(|(&id, m)| (id, m.sender))
+        .collect();
+    for (id, sender) in pending {
+        state.user32.sent.get_mut(&id).unwrap().result = Some(0);
+        wake_sender(sched, id, sender);
+    }
     state.graphics.remove_window(hwnd);
     for owner in [
         &mut state.user32.focus,
@@ -827,6 +1439,43 @@ fn remove_window(state: &mut ApiState, hwnd: u32) {
     }
 }
 
+fn wake_sender(sched: &mut Sched, id: u32, sender: u32) {
+    if let Some(i)=sched.threads.iter().position(|t|t.tid==sender && matches!(t.state,ThreadState::Waiting {target:WaitTarget::SentMessage(n),..} if n==id)) {
+        sched.wake_thread(i,Wake::Retest);
+    }
+}
+pub(crate) fn thread_exit(state: &mut ApiState, sched: &mut Sched, tid: u32) {
+    let windows: Vec<_> = state
+        .user32
+        .windows
+        .iter()
+        .filter_map(|(&h, w)| (w.tid == tid).then_some(h))
+        .collect();
+    for h in windows {
+        remove_window(state, sched, h);
+    }
+    let pending: Vec<_> = state
+        .user32
+        .sent
+        .iter()
+        .filter(|(_, m)| m.receiver == tid && m.result.is_none())
+        .map(|(&id, m)| (id, m.sender))
+        .collect();
+    for (id, sender) in pending {
+        state.user32.sent.get_mut(&id).unwrap().result = Some(0);
+        wake_sender(sched, id, sender);
+    }
+    state
+        .user32
+        .sent
+        .retain(|_, m| m.sender != tid || m.processing);
+    state.user32.queues.remove(&tid);
+    state.user32.queue_changed.remove(&tid);
+    state.user32.cursor_counts.remove(&tid);
+    state.user32.keyboard.exit(tid);
+    state.user32.timers.retain(|&(owner, _, _), _| owner != tid);
+}
+
 fn clock_ms(state: &ApiState) -> u32 {
     state.start.elapsed().as_millis() as u32
 }
@@ -849,7 +1498,9 @@ fn refresh_timers(state: &mut ApiState, tid: u32) {
                     lparam: timer.proc,
                     time,
                     synthetic_paint: false,
+                    hardware_input: false,
                 });
+                *state.user32.queue_changed.entry(tid).or_default() |= 0x10;
             }
         }
     }
@@ -870,16 +1521,67 @@ fn put_message(state: &mut ApiState, sched: &mut Sched, tid: u32, message: Messa
         return false;
     }
     queue.push_back(message);
+    let bits = message_bits(message.message);
+    *state.user32.queue_changed.entry(tid).or_default() |= bits;
     if matches!(
         sched.threads[i].state,
         ThreadState::Waiting {
             target: WaitTarget::Messages(_),
             ..
         }
-    ) {
+    ) || matches!(&sched.threads[i].state, ThreadState::Waiting {
+        target: WaitTarget::MessageObjects(_,_,mask),.. } if *mask & bits != 0)
+    {
         sched.wake_thread(i, Wake::Retest);
     }
     true
+}
+fn message_bits(message: u32) -> u32 {
+    match message {
+        0x100..=0x109 => 1,
+        0x200 => 2,
+        0x201..=0x20e => 4,
+        0x113 => 0x10,
+        0xf => 0x20,
+        0xff => 0x400,
+        _ => 0x108,
+    }
+}
+pub(crate) fn message_wait_ready(state: &mut ApiState, tid: u32, mask: u32, old: bool) -> bool {
+    refresh_timers(state, tid);
+    let time = clock_ms(state);
+    let q = state.user32.queues.entry(tid).or_default();
+    q.retain(|m| {
+        !m.synthetic_paint
+            || state
+                .user32
+                .windows
+                .get(&m.hwnd)
+                .is_some_and(|w| w.update.is_some() && w.style & 0x10000000 != 0)
+    });
+    for (&hwnd, w) in &state.user32.windows {
+        if w.tid == tid
+            && w.style & 0x10000000 != 0
+            && w.update.is_some()
+            && !q.iter().any(|m| m.hwnd == hwnd && m.message == 0xf)
+        {
+            q.push_back(Message {
+                hwnd,
+                message: 0xf,
+                wparam: 0,
+                lparam: 0,
+                time,
+                synthetic_paint: true,
+                hardware_input: false,
+            });
+            *state.user32.queue_changed.entry(tid).or_default() |= 0x20;
+        }
+    }
+    if old {
+        q.iter().any(|m| message_bits(m.message) & mask != 0)
+    } else {
+        state.user32.queue_changed.get(&tid).copied().unwrap_or(0) & mask != 0
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -963,6 +1665,7 @@ fn message_dispatch(
                     lparam: 0,
                     time: clock_ms(state),
                     synthetic_paint: false,
+                    hardware_input: false,
                 }
             } else {
                 Message {
@@ -972,6 +1675,7 @@ fn message_dispatch(
                     lparam: a[3],
                     time: clock_ms(state),
                     synthetic_paint: false,
+                    hardware_input: false,
                 }
             };
             let ok = put_message(state, sched, owner, message);
@@ -1005,7 +1709,9 @@ fn message_dispatch(
                         lparam: 0,
                         time,
                         synthetic_paint: true,
+                        hardware_input: false,
                     });
+                    *state.user32.queue_changed.entry(tid).or_default() |= 0x20;
                 }
             }
             let wait_only = name == "WaitMessage";
@@ -1036,6 +1742,7 @@ fn message_dispatch(
                     return value(1, String::new());
                 }
                 let msg = queue[index];
+                *state.user32.queue_changed.entry(tid).or_default() &= !message_bits(msg.message);
                 let words = [
                     msg.hwnd,
                     msg.message,
@@ -1049,6 +1756,12 @@ fn message_dispatch(
                 mem.write_bytes(a[0], &bytes).map_err(|e| e.to_string())?;
                 if name.starts_with("Get") || a[4] & 1 != 0 {
                     queue.remove(index);
+                    if msg.hardware_input {
+                        state
+                            .user32
+                            .keyboard
+                            .consumed(tid, msg.message, msg.wparam, msg.lparam);
+                    }
                 }
                 let result = if name.starts_with("Get") && msg.message == 0x12 {
                     0
@@ -1126,11 +1839,49 @@ fn message_dispatch(
             Ok((result, "guest WndProc forwarding".into()))
         }
         "TranslateMessage" => {
-            let msg = mem.read_u32(a[0] + 4).map_err(|e| e.to_string())?;
+            let mut words = [0; 5];
+            for (i, n) in words.iter_mut().enumerate() {
+                *n = mem
+                    .read_u32(a[0] + i as u32 * 4)
+                    .map_err(|e| e.to_string())?;
+            }
+            let msg = words[1];
             if matches!(msg, 0x100 | 0x101 | 0x104 | 0x105) {
-                return Err(
-                    "keyboard TranslateMessage requires the pending input/keymap backend".into(),
-                );
+                if matches!(msg, 0x100 | 0x104) {
+                    let text = state.user32.keyboard.translate(words);
+                    let wide = state
+                        .user32
+                        .windows
+                        .get(&words[0])
+                        .is_some_and(|w| state.user32.classes[&w.class].wide);
+                    let chars: Vec<u32> = if wide {
+                        text.into_iter().map(u32::from).collect()
+                    } else {
+                        crate::codepage::encode(&String::from_utf16_lossy(&text), 932)
+                            .map_err(|e| format!("keyboard encoding: {e}"))?
+                            .0
+                            .into_iter()
+                            .map(u32::from)
+                            .collect()
+                    };
+                    for c in chars {
+                        put_message(
+                            state,
+                            sched,
+                            tid,
+                            Message {
+                                hwnd: words[0],
+                                message: if msg == 0x104 { 0x106 } else { 0x102 },
+                                wparam: c,
+                                lparam: words[3],
+                                time: clock_ms(state),
+                                synthetic_paint: false,
+                                hardware_input: false,
+                            },
+                        );
+                    }
+                }
+                return value(1, "translated host text for a keyboard message".into());
             }
             value(0, String::new())
         }

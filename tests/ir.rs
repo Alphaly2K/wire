@@ -41,6 +41,85 @@ fn run_api(cpu: &mut Cpu, mem: &mut GuestMem, budget: u64, api: &mut ApiTable) -
     outcome
 }
 
+#[test]
+fn separate_module_ir_rebases_relative_branches_and_checks_changes_at_every_budget() {
+    const MODULE: u32 = 0x50000000;
+    const PREFERRED: u32 = 0x10000000;
+    let mut code = vec![0xb8, 3, 0, 0, 0, 0xb9, 2, 0, 0, 0, 0xba, 5, 0, 0, 0, 0xe8];
+    code.extend_from_slice(&MODULE.wrapping_sub(CODE + 20).to_le_bytes());
+    code.extend([0x49, 0x75, 0xf8, 0xcc]);
+    let module = [0x83, 0xc0, 7, 0xeb, 2, 0x90, 0x90, 0x83, 0xea, 1, 0xc3];
+    for budget in 1..35 {
+        for changed in [false, true] {
+            let setup = |ir| {
+                let (mut cpu, mut mem) = machine(&code, ir);
+                mem.commit(MODULE, 0x1000).unwrap();
+                mem.virtual_protect(MODULE, 0x1000, wire::mem::PAGE_EXECUTE_READWRITE)
+                    .unwrap();
+                mem.write_bytes(MODULE, &module).unwrap();
+                if ir {
+                    let image = Image::from_code(PREFERRED, &module)
+                        .unwrap()
+                        .at_base(MODULE)
+                        .unwrap();
+                    cpu.add_module_ir(image, &mem).unwrap();
+                }
+                (cpu, mem)
+            };
+            let (mut raw, mut raw_mem) = setup(false);
+            let (mut ir, mut ir_mem) = setup(true);
+            let a = run(&mut raw, &mut raw_mem, budget);
+            let b = run(&mut ir, &mut ir_mem, budget);
+            assert_eq!(std::mem::discriminant(&a), std::mem::discriminant(&b));
+            if let (RunOutcome::Crashed(a), RunOutcome::Crashed(b)) = (&a, &b) {
+                assert_eq!(a, b);
+            }
+            assert_eq!(raw.regs, ir.regs);
+            assert_eq!(raw.eip, ir.eip);
+            assert_eq!(raw.effective_eflags(), ir.effective_eflags());
+            if changed {
+                raw_mem.write_u8(MODULE + 2, 9).unwrap();
+                ir_mem.write_u8(MODULE + 2, 9).unwrap();
+                let a = run(&mut raw, &mut raw_mem, 50);
+                let b = run(&mut ir, &mut ir_mem, 50);
+                assert_eq!(std::mem::discriminant(&a), std::mem::discriminant(&b));
+                if let (RunOutcome::Crashed(a), RunOutcome::Crashed(b)) = (&a, &b) {
+                    assert_eq!(a, b);
+                }
+                assert_eq!(raw.regs, ir.regs);
+                assert_eq!(raw.eip, ir.eip);
+                assert_eq!(raw.effective_eflags(), ir.effective_eflags());
+            }
+        }
+    }
+    assert!(Image::from_code(PREFERRED, &module)
+        .unwrap()
+        .at_base(u32::MAX - 3)
+        .is_err());
+    let (mut cpu, mut mem) = machine(&code, true);
+    mem.commit(MODULE, 0x1000).unwrap();
+    mem.virtual_protect(MODULE, 0x1000, wire::mem::PAGE_EXECUTE_READWRITE)
+        .unwrap();
+    mem.write_bytes(MODULE, &module).unwrap();
+    cpu.add_module_ir(
+        Image::from_code(PREFERRED, &module)
+            .unwrap()
+            .at_base(MODULE)
+            .unwrap(),
+        &mem,
+    )
+    .unwrap();
+    let outcome = run(&mut cpu, &mut mem, 50);
+    assert!(
+        matches!(outcome, RunOutcome::Crashed(ref e) if e.contains("breakpoint")),
+        "{} at {:#x}",
+        outcome.to_string_for_test(),
+        cpu.eip
+    );
+    assert_eq!((cpu.regs[0], cpu.regs[1], cpu.regs[2]), (17, 0, 3));
+    assert!(cpu.ir_steps >= 15, "both caches execute actual IR");
+}
+
 /// Minimal PE32 with one executable section and one kernel32 import. All
 /// bytes are authored here; the tests do not require a cross-compiler/game.
 fn import_pe(code: &[u8]) -> Vec<u8> {

@@ -91,7 +91,10 @@ impl Presenter {
             .windows
             .iter()
             .filter(|(_, w)| {
-                w.parent == 0 && w.style & 0x40000000 == 0 && w.client_size().iter().all(|&n| n > 1)
+                w.tid != 0
+                    && w.parent == 0
+                    && w.style & 0x40000000 == 0
+                    && w.client_size().iter().all(|&n| n > 1)
             })
             .map(|(&h, _)| h)
             .collect();
@@ -145,11 +148,11 @@ impl Presenter {
                 self.error = Some("AppKit frame upload failed".into());
             }
         }
-        if let Some(p) = &self.capture {
+        if let Some(p) = self.capture.as_ref().filter(|_| self.captures < 16) {
             let hash = rgba.iter().fold(0xcbf29ce484222325u64, |n, &b| {
                 (n ^ b as u64).wrapping_mul(0x100000001b3)
             });
-            if self.captures < 16 && (self.captures == 0 || hash != self.last_hash) {
+            if self.captures == 0 || hash != self.last_hash {
                 let mut ppm = format!("P6\n{w} {h}\n255\n").into_bytes();
                 for c in rgba.as_chunks::<4>().0 {
                     ppm.extend_from_slice(&c[..3]);
@@ -174,6 +177,7 @@ impl Drop for Presenter {
     }
 }
 pub(crate) fn poll(mem: &GuestMem, state: &mut ApiState, sched: &mut Sched) {
+    crate::dsound::poll(mem, state, sched);
     if !state.presenter.enabled && state.presenter.capture.is_none() {
         return;
     }

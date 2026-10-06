@@ -15,7 +15,7 @@ fn main() -> ExitCode {
         eprintln!("  wire imports <program.exe>");
         eprintln!("  wire prepare <program.exe> [--out program.wir]");
         eprintln!(
-            "  wire run <program.exe> [--ir program.wir] [--op-stats] [--max-instr N] [--log-dir DIR] [--cwd DIR] [--trace-cpu] [--present|--headless] [--capture-frames DIR] [--stop-after-presents N]"
+            "  wire run <program.exe> [--ir program.wir] [--op-stats] [--max-instr N] [--log-dir DIR] [--cwd DIR] [--trace-cpu] [--present|--headless] [--software-render] [--capture-frames DIR] [--stop-after-presents N]"
         );
         return ExitCode::from(2);
     }
@@ -181,6 +181,7 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
     let mut ir_path = None;
     let mut profile_opcodes = false;
     let mut present = cfg!(target_os = "macos");
+    let mut software_render = false;
     let mut capture_frames = None;
     let mut stop_after_presents = None;
     let mut i = 0;
@@ -204,6 +205,7 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
             "--no-op-stats" => profile_opcodes = false,
             "--headless" => present = false,
             "--present" => present = true,
+            "--software-render" => software_render = true,
             "--stop-after-presents" => {
                 i += 1;
                 let Some(n) = opts
@@ -308,6 +310,8 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    state.d3d9.enable_gpu = !software_render;
+    state.d3d9.prepare_gpu();
     if let Err(e) = state.modules.register_main(
         &mem,
         loaded.image_base,
@@ -319,9 +323,17 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
         eprintln!("register main module: {e}");
         return ExitCode::FAILURE;
     }
-    for entry in &api.entries {
-        if wire::modules::native_module(&entry.dll) {
-            state.module_handle_for(&entry.dll);
+    if let Err(e) =
+        state
+            .modules
+            .setup_tls_thread(&mut mem, &mut state.heap, state.process_heap, loaded.teb)
+    {
+        eprintln!("initialize main static TLS: {e}");
+        return ExitCode::FAILURE;
+    }
+    for dll in api.imported_dlls() {
+        if wire::modules::native_module(dll) {
+            state.module_handle_for(dll);
         }
     }
 
@@ -397,6 +409,18 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
         cpu.instr_count as f64 / wall.as_secs_f64().max(1e-9) / 1e6
     );
     println!("api calls: {}", logger.call_count);
+    println!(
+        "Metal draws: {}; GPU error: {:?}",
+        state.d3d9.gpu_draws(),
+        state.d3d9.gpu_error()
+    );
+    println!(
+        "PCM: mixed_frames={}; dropped_samples={}; underrun_samples={}; locked_playback_frames={}",
+        state.dsound.mixed_frames,
+        state.dsound.dropped_samples,
+        state.dsound.output_stats[1],
+        state.dsound.locked_playback_frames
+    );
     println!(
         "D3D9 draws: {}; presents: {}; displayed: {}",
         state.d3d9.draws, state.d3d9.frames, state.presenter.displayed

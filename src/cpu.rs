@@ -16,6 +16,7 @@ use std::time::Instant;
 
 mod fpu;
 mod ir_exec;
+mod mmx;
 pub use fpu::Fpu;
 use ir_exec::PendingFlags;
 
@@ -43,6 +44,7 @@ pub enum CpuError {
     Breakpoint { eip: u32 },
     DivideError { eip: u32 },
     FloatingPoint { eip: u32, status: u16 },
+    SimdFloatingPoint { eip: u32, mxcsr: u32 },
 }
 
 impl fmt::Display for CpuError {
@@ -57,6 +59,10 @@ impl fmt::Display for CpuError {
             CpuError::FloatingPoint { eip, status } => write!(
                 f,
                 "unmasked x87 exception at {eip:#010x}: status={status:#06x}"
+            ),
+            CpuError::SimdFloatingPoint { eip, mxcsr } => write!(
+                f,
+                "unmasked SSE exception at {eip:#010x}: MXCSR={mxcsr:#010x}"
             ),
         }
     }
@@ -167,6 +173,7 @@ pub struct Cpu {
     pub ir_fallbacks: u64,
     pub ir_native_calls: u64,
     ir_cache: Option<crate::ir::Cache>,
+    ir_modules: Vec<crate::ir::Cache>,
     ir_hint: (u32, u32),
     pending_flags: Option<PendingFlags>,
     decode_address16: bool, // transient raw-decoder state, never a thread register
@@ -200,6 +207,7 @@ impl Cpu {
             ir_fallbacks: 0,
             ir_native_calls: 0,
             ir_cache: None,
+            ir_modules: Vec::new(),
             ir_hint: (0, 0),
             pending_flags: None,
             decode_address16: false,
@@ -1607,6 +1615,9 @@ impl Cpu {
             *self.op_stats.entry(0x100 | op as u32).or_insert(0) += 1;
             *self.raw_op_stats.entry(0x100 | op as u32).or_insert(0) += 1;
         }
+        if !op66 && rep.is_none() && mmx::is_opcode(op) {
+            return self.mmx(mem, seg, op, eip0);
+        }
         match op {
             0x0D | 0x18..=0x1F => {
                 // prefetch / multi-byte nop: consume modrm, do nothing
@@ -2042,6 +2053,90 @@ impl Cpu {
                 self.set_flag(SF, false);
                 self.set_flag(AF, false);
             }
+            0xC2 => {
+                // Legacy CMPPS/CMPPD/CMPSS/CMPSD: exact bit comparisons,
+                // including signed zero, NaN predicates, DAZ and MXCSR faults.
+                if op66 && rep.is_some() {
+                    return Err(self.unsupported(mem, eip0, "invalid CMP prefix"));
+                }
+                let rm = self.modrm(mem)?;
+                let double = op66 || rep == Some(0xf2);
+                let scalar = rep.is_some();
+                let width = if double { 8 } else { 4 };
+                let source = self.xmm_rm_sized(mem, &rm, seg, if scalar { width } else { 16 })?;
+                let predicate = self.fetch8(mem)? & 7;
+                let mut out = self.xmm[rm.reg];
+                let mut exceptions = 0u32;
+                let mantissa = if double { 52 } else { 23 };
+                let exponent = if double { 0x7ffu64 } else { 0xff };
+                let sign = 1u64 << (mantissa + if double { 11 } else { 8 });
+                let fraction = (1u64 << mantissa) - 1;
+                let classify = |raw: u64| {
+                    let denormal = (raw >> mantissa) & exponent == 0 && raw & fraction != 0;
+                    let raw = if denormal && self.mxcsr & 0x40 != 0 {
+                        raw & sign
+                    } else {
+                        raw
+                    };
+                    let nan = (raw >> mantissa) & exponent == exponent && raw & fraction != 0;
+                    let signaling = nan && raw & (1u64 << (mantissa - 1)) == 0;
+                    (
+                        raw,
+                        nan,
+                        signaling,
+                        if denormal && self.mxcsr & 0x40 == 0 {
+                            2
+                        } else {
+                            0
+                        },
+                    )
+                };
+                for i in 0..if scalar { 1 } else { 16 / width } {
+                    let read = |bytes: &[u8]| {
+                        if double {
+                            u64::from_le_bytes(bytes.try_into().unwrap())
+                        } else {
+                            u32::from_le_bytes(bytes.try_into().unwrap()) as u64
+                        }
+                    };
+                    let at = i * width;
+                    let (a, an, asn, ad) = classify(read(&out[at..at + width]));
+                    let (b, bn, bsn, bd) = classify(read(&source[at..at + width]));
+                    exceptions |= ad | bd;
+                    let unordered = an || bn;
+                    if asn || bsn || (unordered && matches!(predicate, 1 | 2 | 5 | 6)) {
+                        exceptions |= 1;
+                    }
+                    let equal = a == b || (a & !sign == 0 && b & !sign == 0);
+                    let less = !equal
+                        && if (a ^ b) & sign != 0 {
+                            a & sign != 0
+                        } else if a & sign != 0 {
+                            a > b
+                        } else {
+                            a < b
+                        };
+                    let result = match predicate {
+                        0 => !unordered && equal,
+                        1 => !unordered && less,
+                        2 => !unordered && (less || equal),
+                        3 => unordered,
+                        4 => unordered || !equal,
+                        5 => unordered || !less,
+                        6 => unordered || !(less || equal),
+                        _ => !unordered,
+                    };
+                    out[at..at + width].fill(if result { 0xff } else { 0 });
+                }
+                self.mxcsr |= exceptions;
+                if exceptions & !(self.mxcsr >> 7) & 0x3f != 0 {
+                    return Err(CpuError::SimdFloatingPoint {
+                        eip: eip0,
+                        mxcsr: self.mxcsr,
+                    });
+                }
+                self.xmm[rm.reg] = out;
+            }
             0x50 => {
                 // movmskps (np) / movmskpd (66)
                 let rm = self.modrm(mem)?;
@@ -2372,6 +2467,28 @@ impl Cpu {
                 } else {
                     return Err(self.unsupported(mem, eip0, "movq mm (MMX)"));
                 }
+            }
+            0xC6 if rep.is_none() => {
+                // SHUFPS / SHUFPD selects low lanes from the original
+                // destination and high lanes from the source, including aliases.
+                let rm = self.modrm(mem)?;
+                let a = self.xmm[rm.reg];
+                let b = self.xmm_rm(mem, &rm, seg)?;
+                let imm = self.fetch8(mem)?;
+                let mut out = [0; 16];
+                if op66 {
+                    let lo = (imm & 1) as usize * 8;
+                    let hi = ((imm >> 1) & 1) as usize * 8;
+                    out[..8].copy_from_slice(&a[lo..lo + 8]);
+                    out[8..].copy_from_slice(&b[hi..hi + 8]);
+                } else {
+                    for i in 0..4 {
+                        let source = if i < 2 { a } else { b };
+                        let at = ((imm >> (2 * i)) & 3) as usize * 4;
+                        out[i * 4..i * 4 + 4].copy_from_slice(&source[at..at + 4]);
+                    }
+                }
+                self.xmm[rm.reg] = out;
             }
             0xC4 if op66 => {
                 // pinsrw xmm, r32/m16, imm8

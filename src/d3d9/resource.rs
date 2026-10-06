@@ -12,16 +12,30 @@ pub(super) fn rect(mem: &GuestMem, p: u32, b: &Pixels) -> Result<[u32; 4], u32> 
     Ok(r)
 }
 pub(super) fn read(mem: &GuestMem, b: &Pixels) -> Result<Vec<u32>, u32> {
-    let mut data = vec![0; b.len() as usize];
-    mem.read_bytes(b.bits, &mut data).map_err(|_| INVALID)?;
-    Ok(data
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|s| u32::from_le_bytes(*s))
-        .collect())
+    let mut pixels = vec![0u32; b.len() as usize / 4];
+    // Only reborrow initialized host-owned storage as bytes. Guest memory
+    // still passes the full checked read; no guest pointer is dereferenced.
+    let bytes = unsafe {
+        std::slice::from_raw_parts_mut(pixels.as_mut_ptr().cast::<u8>(), b.len() as usize)
+    };
+    mem.read_bytes(b.bits, bytes).map_err(|_| INVALID)?;
+    #[cfg(target_endian = "big")]
+    for pixel in &mut pixels {
+        *pixel = u32::from_le(*pixel);
+    }
+    Ok(pixels)
 }
 pub(super) fn write(mem: &GuestMem, b: &Pixels, pixels: &[u32]) -> Result<(), u32> {
+    if pixels.len() != b.len() as usize / 4 {
+        return Err(INVALID);
+    }
+    #[cfg(target_endian = "little")]
+    {
+        let bytes =
+            unsafe { std::slice::from_raw_parts(pixels.as_ptr().cast::<u8>(), b.len() as usize) };
+        mem.write_bytes(b.bits, bytes).map_err(|_| INVALID)
+    }
+    #[cfg(target_endian = "big")]
     mem.write_bytes(
         b.bits,
         &pixels
@@ -103,6 +117,9 @@ impl D3D9 {
                     return Err(UNAVAILABLE);
                 }
                 let mut b = data.borrow_mut();
+                if b.format == 75 {
+                    return Err(UNAVAILABLE);
+                }
                 if b.locked {
                     return Err(INVALID);
                 }
@@ -164,6 +181,9 @@ impl D3D9 {
     pub(super) fn fill(&self, mem: &GuestMem, h: u32, rp: u32, color: u32) -> Result<(), u32> {
         let data = self.buffer(h)?;
         let b = data.borrow();
+        if b.format == 75 {
+            return Err(UNAVAILABLE);
+        }
         if b.locked {
             return Err(INVALID);
         }
@@ -194,6 +214,9 @@ impl D3D9 {
         let db = self.buffer(dst)?;
         let s = sb.borrow();
         let d = db.borrow();
+        if s.format == 75 || d.format == 75 {
+            return Err(UNAVAILABLE);
+        }
         if s.locked || d.locked {
             return Err(INVALID);
         }

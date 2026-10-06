@@ -68,7 +68,13 @@ pub fn load_image(
     let mut import_count = 0usize;
     for d in &imports {
         for f in &d.functions {
-            let stub = api.register(&d.dll, f.name.as_deref(), f.ordinal);
+            let data = match f.name.as_deref() {
+                Some(name) => {
+                    api.data_export(mem, &d.dll, name, CMDLINE_ADDR, CMDLINE_ADDR + 0x800)?
+                }
+                None => None,
+            };
+            let stub = data.unwrap_or_else(|| api.register(&d.dll, f.name.as_deref(), f.ordinal));
             mem.write_u32(base.wrapping_add(f.iat_rva), stub)
                 .map_err(|e| format!("patch IAT: {e}"))?;
             import_count += 1;

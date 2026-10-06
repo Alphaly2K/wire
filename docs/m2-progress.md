@@ -1,5 +1,10 @@
-最新检查点：[真实游戏图像/CPU D3D9/macOS 呈现](graphics-progress-2026-10-06.md)。
-当前按用户要求暂停功能拓展，优先缩短启动到首张游戏画面的耗时。
+最新检查点：[三个 PE32 样本兼容进度](games32-progress-2026-10-07.md)。
+当前按用户最新要求继续 Rewrite、totsulover，并恢复 AliceToPapa x86-64 基础支持。
+恋×シンアイ彼女已有真实标题菜单；Metal 固定管线和 bulk Clear 后完成 193 秒 / 6,000 Present 重放，
+用户听验确认 BGM 当前没有问题，后续仍需正文、场景切换和持续可玩验收。
+Rewrite 被实际 Pixel Shader 2.0 缺失挡住，totsulover 缺少其要求的外部“ソフト電池”运行时。
+解释器继续作为主路径，保留 checked memory、保守 FLAGS 与 FP80 语义。
+以下性能数据是此前阶段的历史记录，不是本轮跨游戏对照。
 已扩大到约23亿 guest 指令的真实启动 profile，优化 callback IR 连续调度、
 紧凑栈调用、完整日志的分配和 macOS UI 轮询/前台 QoS；该轮128项回归通过。
 三对完整启动AB/BA首 Present中位数25.031→18.996秒（约−24%），

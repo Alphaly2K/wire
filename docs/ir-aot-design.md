@@ -196,6 +196,23 @@ INC/DEC仍保留先前CF，ADC/SBB读取有效CF，Jcc只求其所需位。
 这是延迟计算，不是扩大静态dead-FLAGS集合；原来的极度保守静态分析规则未改变。
 没有做常量传播、copy propagation、guest指令删除或专用CMP+Jcc融合opcode。
 
+## Guest DLL 的安装期 IR（2026-10-07）
+
+启用主 EXE IR 时，loader 同时查找实际 guest DLL 旁的 `name.dll.wir`。
+使用同一 `wire prepare` 命令在安装期生成；运行时只验证源 PE 的 SHA-256、调整 PC-relative 分支、
+绑定原有 typed IR，不进行 x86 再解码、生成机器码或 JIT。没有 sidecar、源 hash 不符、绑定失败均继续 raw。
+未启用主 IR 的运行仍使用原解释器，便于语义对照。
+
+每个 PE 独立使用紧凑执行缓存，不为 `0x00400000` 与 `0x50000000` 之间的地址空洞分配索引。
+跨 module CALL/RET/branch 自动选择缓存；全局 guest 预算、callback ESP、线程切换与 FLAGS recipe 保持一致。
+缓存最多 64 个；DLL 正常卸载、初始化失败回滚会移除相应缓存。
+
+当前重定位策略刻意保守：只调整记录 PC、已提升的相对控制流目标和显式 IAT identity。
+绝对地址 operand 不猜测重定位；凡 loaded instruction bytes 与原始 bytes 不同，该指令拒绝绑定并 raw 执行。
+代码页 generation/permission 和自修改失效仍按每条 guest 指令检查。
+没有因扩展 DLL IR 而扩大 FLAGS 死亡证明范围，也没有把 x87/MMX/SSE 改成近似 F64。
+独立回归覆盖跨缓存控制流、每个预算位置、自修改、重定位的绝对访存 fallback、DLL unload/reload 与 stale sidecar。
+
 ## 当前实现与目标格式的距离
 
 当前 `.wir` **版本3**仍使用56B头和64B固定预解码记录，以 EXE SHA-256 绑定源文件，字段显式 LE。

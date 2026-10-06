@@ -54,7 +54,10 @@ pub fn enumerate(
         .iter()
         .rev()
         .filter(|(_, w)| {
-            w.style & 0x40000000 == 0 && w.parent != 0xfffffffd && (tid == 0 || tid == w.tid)
+            w.tid != 0
+                && w.style & 0x40000000 == 0
+                && w.parent != 0xfffffffd
+                && (tid == 0 || tid == w.tid)
         })
         .map(|(&h, _)| h)
         .collect();

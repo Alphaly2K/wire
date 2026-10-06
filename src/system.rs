@@ -21,6 +21,7 @@ pub fn dispatch(
                 | "GlobalMemoryStatus"
                 | "GlobalMemoryStatusEx"
                 | "GetSystemTime"
+                | "GetLocalTime"
         ))
         && !(dll == "winmm.dll"
             && matches!(name, "timeGetDevCaps" | "timeBeginPeriod" | "timeEndPeriod"))
@@ -84,13 +85,20 @@ pub fn dispatch(
                     Ok(0)
                 }
             }
-            "GetSystemTime" => {
+            "GetSystemTime" | "GetLocalTime" => {
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map_err(|_| 87u32)?;
                 let seconds = now.as_secs() as libc::time_t;
                 let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-                if unsafe { libc::gmtime_r(&seconds, &mut tm) }.is_null() {
+                let result = unsafe {
+                    if name == "GetLocalTime" {
+                        libc::localtime_r(&seconds, &mut tm)
+                    } else {
+                        libc::gmtime_r(&seconds, &mut tm)
+                    }
+                };
+                if result.is_null() {
                     return Err(87);
                 }
                 let fields = [

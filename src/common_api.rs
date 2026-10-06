@@ -12,6 +12,24 @@ use crate::api::{ApiState, Args, HandleObj};
 use crate::mem::GuestMem;
 use crate::thread::Sched;
 use std::cmp::Ordering;
+fn guid_text(mem: &GuestMem, p: u32) -> Result<String, u32> {
+    let mut b = [0; 16];
+    mem.read_bytes(p, &mut b).map_err(|_| 0x80004003u32)?;
+    Ok(format!(
+        "{{{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
+        u32::from_le_bytes(b[..4].try_into().unwrap()),
+        u16::from_le_bytes(b[4..6].try_into().unwrap()),
+        u16::from_le_bytes(b[6..8].try_into().unwrap()),
+        b[8],
+        b[9],
+        b[10],
+        b[11],
+        b[12],
+        b[13],
+        b[14],
+        b[15]
+    ))
+}
 fn units(mem: &GuestMem, p: u32, len: u32) -> Result<Vec<u16>, u32> {
     if p == 0 {
         return Err(87);
@@ -31,7 +49,11 @@ fn units(mem: &GuestMem, p: u32, len: u32) -> Result<Vec<u16>, u32> {
         .map(|b| u16::from_le_bytes(*b))
         .collect())
 }
-fn allocate_bstr(mem: &mut GuestMem, state: &mut ApiState, text: &[u16]) -> Result<u32, u32> {
+pub(crate) fn allocate_bstr(
+    mem: &mut GuestMem,
+    state: &mut ApiState,
+    text: &[u16],
+) -> Result<u32, u32> {
     let length = u32::try_from(text.len())
         .map_err(|_| 8u32)?
         .checked_mul(2)
@@ -45,6 +67,9 @@ fn allocate_bstr(mem: &mut GuestMem, state: &mut ApiState, text: &[u16]) -> Resu
             true,
         )
         .map_err(|_| 8u32)?;
+    if base == 0 {
+        return Err(8);
+    }
     mem.write_u32(base, length).map_err(|_| 87u32)?;
     mem.write_bytes(
         base + 4,
@@ -73,6 +98,15 @@ pub(crate) fn dispatch(
                 | "lstrcmpA"
                 | "lstrcmpiW"
                 | "lstrcmpiA"
+                | "lstrlenA"
+                | "lstrlenW"
+                | "lstrlen"
+                | "lstrcpyA"
+                | "lstrcpyW"
+                | "lstrcatA"
+                | "lstrcatW"
+                | "lstrcpynA"
+                | "lstrcpynW"
                 | "IsBadReadPtr"
                 | "IsBadWritePtr"
                 | "IsBadCodePtr"
@@ -91,12 +125,24 @@ pub(crate) fn dispatch(
         && !(dll == "ole32.dll"
             && matches!(
                 name,
-                "CoCreateGuid" | "CoInitialize" | "CoInitializeEx" | "CoUninitialize"
+                "CoCreateGuid"
+                    | "CoInitialize"
+                    | "CoInitializeEx"
+                    | "CoUninitialize"
+                    | "StringFromCLSID"
+                    | "StringFromIID"
+                    | "StringFromGUID2"
+                    | "CLSIDFromString"
+                    | "IIDFromString"
             ))
         && !(dll == "oleaut32.dll"
             && matches!(
                 name,
                 "SysAllocString"
+                    | "VariantInit"
+                    | "VariantClear"
+                    | "VariantCopy"
+                    | "VariantChangeType"
                     | "SysAllocStringLen"
                     | "SysFreeString"
                     | "SysStringLen"
@@ -110,6 +156,56 @@ pub(crate) fn dispatch(
     let tid = sched.current_tid();
     let result = (|| -> Result<u32, u32> {
         match name {
+            "lstrlen" | "lstrlenA" | "lstrlenW" | "lstrcpyA" | "lstrcpyW" | "lstrcatA"
+            | "lstrcatW" | "lstrcpynA" | "lstrcpynW" => {
+                let wide = name.ends_with('W');
+                let unit = if wide { 2 } else { 1 };
+                let read = |p: u32, n: u32, truncated: bool| -> Result<Vec<u8>, u32> {
+                    let mut bytes = Vec::new();
+                    for i in 0..n.min(1 << 20) {
+                        let address = p.checked_add(i * unit).ok_or(87u32)?;
+                        let c = if wide {
+                            mem.read_u16(address).map_err(|_| 87u32)?
+                        } else {
+                            mem.read_u8(address).map_err(|_| 87u32)? as u16
+                        };
+                        if c == 0 {
+                            return Ok(bytes);
+                        }
+                        if wide {
+                            bytes.extend(c.to_le_bytes());
+                        } else {
+                            bytes.push(c as u8);
+                        }
+                    }
+                    if truncated && n <= 1 << 20 {
+                        Ok(bytes)
+                    } else {
+                        Err(87)
+                    }
+                };
+                if name.starts_with("lstrlen") {
+                    if a[0] == 0 {
+                        return Ok(0);
+                    }
+                    return Ok(read(a[0], 1 << 20, false)?.len() as u32 / unit);
+                }
+                let limited = name.starts_with("lstrcpyn");
+                if limited && (a[2] as i32) <= 0 {
+                    return Ok(a[0]);
+                }
+                let capacity = if limited { a[2] - 1 } else { 1 << 20 };
+                let mut bytes = read(a[1], capacity, limited)?;
+                bytes.extend(vec![0; unit as usize]);
+                let offset = if name.starts_with("lstrcat") {
+                    read(a[0], 1 << 20, false)?.len() as u32
+                } else {
+                    0
+                };
+                mem.write_bytes(a[0].checked_add(offset).ok_or(87u32)?, &bytes)
+                    .map_err(|_| 87u32)?;
+                Ok(a[0])
+            }
             "OpenProcess" => {
                 if a[2] != 4242 {
                     return Err(if a[2] == 0 { 87 } else { 5 });
@@ -238,6 +334,69 @@ pub(crate) fn dispatch(
                 };
                 Ok(i32::try_from(result).map_or(u32::MAX, |n| n as u32))
             }
+            "StringFromCLSID" | "StringFromIID" | "StringFromGUID2" => {
+                if name == "StringFromGUID2" && (a[2] as i32) < 39 {
+                    return Ok(0);
+                }
+                let text = guid_text(mem, a[0])?;
+                let mut bytes: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+                bytes.extend([0, 0]);
+                if name == "StringFromGUID2" {
+                    return Ok(if mem.write_bytes(a[1], &bytes).is_ok() {
+                        39
+                    } else {
+                        0
+                    });
+                }
+                mem.write_u32(a[1], 0).map_err(|_| 0x80004003u32)?;
+                let p = state
+                    .heap
+                    .alloc(mem, state.process_heap, 78, false)
+                    .map_err(|_| 0x8007000eu32)?;
+                if p == 0 {
+                    return Err(0x8007000e);
+                }
+                if mem.write_bytes(p, &bytes).is_err() || mem.write_u32(a[1], p).is_err() {
+                    state.heap.free(state.process_heap, p);
+                    return Err(0x80004003);
+                }
+                Ok(0)
+            }
+            "CLSIDFromString" | "IIDFromString" => {
+                mem.ptr(a[1], 16, true).map_err(|_| 0x80004003u32)?;
+                let mut guid = [0; 16];
+                if a[0] != 0 {
+                    let text = mem.read_wstr(a[0], 39).map_err(|_| 0x800401f3u32)?;
+                    let b = text.as_bytes();
+                    if b.len() != 38
+                        || b[0] != b'{'
+                        || b[37] != b'}'
+                        || [9, 14, 19, 24].iter().any(|&i| b[i] != b'-')
+                    {
+                        return Err(0x800401f3);
+                    }
+                    let digit = |c: u8| -> Result<u8, u32> {
+                        match c {
+                            b'0'..=b'9' => Ok(c - b'0'),
+                            b'a'..=b'f' => Ok(c - b'a' + 10),
+                            b'A'..=b'F' => Ok(c - b'A' + 10),
+                            _ => Err(0x800401f3),
+                        }
+                    };
+                    let mut raw = Vec::new();
+                    for (start, end) in [(1, 9), (10, 14), (15, 19), (20, 24), (25, 37)] {
+                        for pair in b[start..end].as_chunks::<2>().0 {
+                            raw.push(digit(pair[0])? * 16 + digit(pair[1])?);
+                        }
+                    }
+                    guid.copy_from_slice(&raw);
+                    guid[..4].reverse();
+                    guid[4..6].reverse();
+                    guid[6..8].reverse();
+                }
+                mem.write_bytes(a[1], &guid).map_err(|_| 0x80004003u32)?;
+                Ok(0)
+            }
             "CoCreateGuid" => {
                 mem.ptr(a[0], 16, true).map_err(|_| 0x80004003u32)?;
                 let mut guid = [0; 16];
@@ -272,6 +431,85 @@ pub(crate) fn dispatch(
                         state.com_threads.remove(&tid);
                     }
                 }
+                Ok(0)
+            }
+            "VariantCopy" | "VariantChangeType" => {
+                mem.ptr(a[0], 16, true).map_err(|_| 0x80070057u32)?;
+                let mut bytes = [0; 16];
+                mem.read_bytes(a[1], &mut bytes)
+                    .map_err(|_| 0x80070057u32)?;
+                let vt = u16::from_le_bytes(bytes[..2].try_into().unwrap());
+                let target = if name == "VariantCopy" {
+                    vt
+                } else {
+                    a[3] as u16
+                };
+                // Deep-copy BSTR ownership, including aliases. Other managed types
+                // require a backend and return a failure rather than shallow-copying.
+                let mut allocation = None;
+                if vt == 8 && target == 8 {
+                    let old = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+                    let p = if old == 0 {
+                        0
+                    } else {
+                        let len = mem
+                            .read_u32(old.checked_sub(4).ok_or(0x80070057u32)?)
+                            .map_err(|_| 0x80070057u32)?
+                            / 2;
+                        allocate_bstr(mem, state, &units(mem, old, len)?)?
+                    };
+                    allocation = Some(p);
+                    bytes[8..12].copy_from_slice(&p.to_le_bytes());
+                } else if vt == 0 && target == 8 {
+                    let p = allocate_bstr(mem, state, &[])?;
+                    allocation = Some(p);
+                    bytes = [0; 16];
+                    bytes[0] = 8;
+                    bytes[8..12].copy_from_slice(&p.to_le_bytes());
+                } else if vt != target || !matches!(vt,0..=7|10..=14|16..=23) {
+                    return Err(0x80020005);
+                }
+                let old_vt = mem.read_u16(a[0]).map_err(|_| 0x80070057u32)?;
+                let clear = (|| -> Result<(), u32> {
+                    if old_vt == 8 {
+                        let old = mem.read_u32(a[0] + 8).map_err(|_| 0x80070057u32)?;
+                        if old != 0 {
+                            let base = state.bstrs.remove(&old).ok_or(0x80070057u32)?;
+                            state.heap.free(state.process_heap, base);
+                        }
+                    } else if !matches!(old_vt,0..=7|10..=14|16..=23) && old_vt & 0x4000 == 0 {
+                        return Err(0x80020008);
+                    }
+                    Ok(())
+                })();
+                if let Err(e) = clear {
+                    if let Some(p) = allocation {
+                        if let Some(base) = state.bstrs.remove(&p) {
+                            state.heap.free(state.process_heap, base);
+                        }
+                    }
+                    return Err(e);
+                }
+                mem.write_bytes(a[0], &bytes).map_err(|_| 0x80070057u32)?;
+                Ok(0)
+            }
+            "VariantInit" => {
+                mem.write_bytes(a[0], &[0; 16]).map_err(|_| 0x80070057u32)?;
+                Ok(0)
+            }
+            "VariantClear" => {
+                mem.ptr(a[0], 16, true).map_err(|_| 0x80070057u32)?;
+                let vt = mem.read_u16(a[0]).map_err(|_| 0x80070057u32)?;
+                if vt == 8 {
+                    let p = mem.read_u32(a[0] + 8).map_err(|_| 0x80070057u32)?;
+                    if p != 0 {
+                        let base = state.bstrs.remove(&p).ok_or(0x80070057u32)?;
+                        state.heap.free(state.process_heap, base);
+                    }
+                } else if !matches!(vt,0..=7|10..=14|16..=23) && vt & 0x4000 == 0 {
+                    return Err(0x80020008);
+                }
+                mem.write_u16(a[0], 0).map_err(|_| 0x80070057u32)?;
                 Ok(0)
             }
             "SysAllocString" | "SysAllocStringLen" => {
@@ -372,7 +610,7 @@ pub(crate) fn dispatch(
         Err(error) => {
             state.last_error = error;
             (
-                if dll == "ole32.dll" {
+                if dll == "ole32.dll" || name.starts_with("Variant") {
                     error
                 } else if name == "SetThreadIdealProcessor" {
                     u32::MAX

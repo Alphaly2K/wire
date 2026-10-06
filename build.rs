@@ -1,6 +1,8 @@
 use std::{env, path::PathBuf, process::Command};
 fn main() {
     println!("cargo:rerun-if-changed=src/platform/macos.m");
+    println!("cargo:rerun-if-changed=src/platform/audio.c");
+    println!("cargo:rerun-if-changed=src/platform/metal.m");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
         return;
     }
@@ -19,10 +21,45 @@ fn main() {
         .status()
         .expect("system clang");
     assert!(status.success(), "AppKit bridge compile failed");
+    assert!(
+        Command::new("clang")
+            .args([
+                "-mmacosx-version-min=11.0",
+                "-Wall",
+                "-Wextra",
+                "-c",
+                "src/platform/audio.c",
+                "-o"
+            ])
+            .arg(out.join("audio.o"))
+            .status()
+            .unwrap()
+            .success(),
+        "AudioQueue bridge compile failed"
+    );
+    assert!(
+        Command::new("clang")
+            .args([
+                "-fobjc-arc",
+                "-mmacosx-version-min=11.0",
+                "-Wall",
+                "-Wextra",
+                "-c",
+                "src/platform/metal.m",
+                "-o"
+            ])
+            .arg(out.join("metal.o"))
+            .status()
+            .unwrap()
+            .success(),
+        "Metal bridge compile failed"
+    );
     assert!(Command::new("ar")
         .arg("crs")
         .arg(out.join("libwire_ui.a"))
         .arg(out.join("macos.o"))
+        .arg(out.join("audio.o"))
+        .arg(out.join("metal.o"))
         .status()
         .unwrap()
         .success());
@@ -30,4 +67,6 @@ fn main() {
     println!("cargo:rustc-link-lib=static=wire_ui");
     println!("cargo:rustc-link-lib=framework=AppKit");
     println!("cargo:rustc-link-lib=framework=CoreGraphics");
+    println!("cargo:rustc-link-lib=framework=AudioToolbox");
+    println!("cargo:rustc-link-lib=framework=Metal");
 }

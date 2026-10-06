@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 const ARENA_START: u32 = 0x5000_0000;
-const ARENA_END: u32 = 0x6000_0000;
+const ARENA_END: u32 = 0x6800_0000;
 const GRANULARITY: u32 = 0x10000;
 const TLS_SLOTS: usize = 64;
 
@@ -142,7 +142,7 @@ fn prepare(bytes: &[u8]) -> LoadResult<(PeFile, Vec<u8>, Exports)> {
     let pe = PeFile::parse(bytes).map_err(bad)?;
     if pe.characteristics & 0x2000 == 0
         || pe.size_of_image == 0
-        || pe.size_of_image > 64 * 1024 * 1024
+        || pe.size_of_image > ARENA_END - ARENA_START
         || pe.entry_rva >= pe.size_of_image
         || pe.size_of_headers > pe.size_of_image
         || pe.size_of_headers as usize > bytes.len()
@@ -195,8 +195,17 @@ fn relocate(pe: &PeFile, image: &mut [u8], base: u32) -> LoadResult<()> {
         return Ok(());
     }
     let dir = pe.dir(DIR_BASERELOC);
-    if dir.rva == 0 || dir.size == 0 || pe.characteristics & 1 != 0 {
+    if pe.characteristics & 1 != 0 {
         return Err(bad("DLL cannot be relocated"));
+    }
+    // An absent relocation directory means there are no absolute fixups.
+    // Resource-only / position-independent DLLs need no patches. RELOCS_STRIPPED
+    // above still rejects fixed images, matching Hangover Wine's loader.
+    if dir.size == 0 {
+        return Ok(());
+    }
+    if dir.rva == 0 {
+        return Err(bad("invalid relocation directory"));
     }
     let mut at = dir.rva as usize;
     let end = at + dir.size as usize;
@@ -321,6 +330,10 @@ pub fn native_module(name: &str) -> bool {
             | "dinput.dll"
             | "oleaut32.dll"
             | "wininet.dll"
+            | "riched32.dll"
+            | "riched20.dll"
+            | "msftedit.dll"
+            | "imagehlp.dll"
     )
 }
 impl Modules {
@@ -342,6 +355,24 @@ impl Modules {
                 .image_snapshot(base, pe.size_of_image)
                 .map_err(|e| bad(format!("main image snapshot: error {e}")))?;
             let table = exports(&pe, &image)?;
+            let tls = if let Some((index_va, template)) = static_tls(&pe, &image, base)? {
+                let index = (0..TLS_SLOTS)
+                    .find(|&index| {
+                        !self
+                            .images
+                            .values()
+                            .any(|m| m.tls.as_ref().is_some_and(|t| t.index == index))
+                    })
+                    .ok_or_else(|| Failure::Expected(8, "static TLS slots exhausted".into()))?;
+                mem.write_u32(index_va, index as u32).map_err(memory)?;
+                Some(StaticTls {
+                    index,
+                    template,
+                    blocks: HashMap::new(),
+                })
+            } else {
+                None
+            };
             self.paths.insert(path.clone(), base);
             self.images.insert(
                 base,
@@ -355,7 +386,7 @@ impl Modules {
                     refs: 1,
                     pinned: true,
                     phase: Phase::Ready,
-                    tls: None,
+                    tls,
                 },
             );
             Ok(())
@@ -550,7 +581,25 @@ fn link(
     let name = library_name(name);
     let short = basename(&name);
     if native_module(&short) {
-        return Ok(state.module_handle_for(&short));
+        let handle = state.module_handle_for(&short);
+        let classes: &[(&str, bool)] = match short.as_str() {
+            "riched32.dll" => &[("RichEdit", false)],
+            "riched20.dll" => &[("RichEdit20A", false), ("RichEdit20W", true)],
+            "msftedit.dll" => &[("RICHEDIT50W", true)],
+            _ => &[],
+        };
+        for &(name, wide) in classes {
+            crate::user32::register_system_class(mem, api, state, handle, name, wide)
+                .map_err(Failure::Fatal)?;
+        }
+        return Ok(handle);
+    }
+    // Consult the loaded module list before searching the filesystem.
+    if !name.contains(['\\', '/', ':']) {
+        if let Some(handle) = state.modules.handle(&name, state.fs.as_ref()) {
+            acquire(state, txn, handle)?;
+            return Ok(handle);
+        }
     }
     let fs = state
         .fs
@@ -695,6 +744,14 @@ fn resolve(
         return Err(Failure::Expected(127, "export forwarder cycle".into()));
     }
     if let Some(dll) = state.handle_to_dll.get(&handle) {
+        if let Symbol::Name(name) = &symbol {
+            if let Some(addr) = api
+                .data_export(mem, dll, name, state.cmdline_a, state.cmdline_w)
+                .map_err(Failure::Fatal)?
+            {
+                return Ok(addr);
+            }
+        }
         return match &symbol {
             Symbol::Name(name)
                 if crate::api::native_export(dll, name) || api.lookup(dll, name).is_some() =>
@@ -786,6 +843,22 @@ fn initialize(
     module.phase = Phase::Initializing;
     let dependencies = module.dependencies.clone();
     let entry = module.entry;
+    let path = module.path.clone();
+    // Optional install-time sidecar. Its source hash and each instruction's
+    // loaded bytes must match; stale/unsupported IR never prevents loading.
+    let sidecar = path.with_file_name(format!(
+        "{}.wir",
+        path.file_name().unwrap().to_string_lossy()
+    ));
+    if cpu.uses_ir() && sidecar.is_file() {
+        let result = (|| -> Result<usize, String> {
+            let bytes = std::fs::read(&sidecar).map_err(|e| e.to_string())?;
+            let source = std::fs::read(&path).map_err(|e| e.to_string())?;
+            let image = crate::ir::Image::parse(&bytes, &source)?.at_base(handle)?;
+            cpu.add_module_ir(image, mem)
+        })();
+        log.note(&format!("module IR {}: {result:?}", path.display()));
+    }
     for dependency in dependencies {
         initialize(dependency, cpu, mem, api, state, log, sched, max_instr, txn)?;
     }
@@ -820,7 +893,12 @@ fn initialize(
     txn.initialized.push(handle);
     Ok(())
 }
-fn rollback(state: &mut ApiState, mem: &mut GuestMem, txn: &Transaction) -> Result<(), String> {
+fn rollback(
+    state: &mut ApiState,
+    mem: &mut GuestMem,
+    cpu: &mut Cpu,
+    txn: &Transaction,
+) -> Result<(), String> {
     for &(owner, dependency) in txn.edges.iter().rev() {
         if let Some(module) = state.modules.images.get_mut(&owner) {
             module.dependencies.retain(|&h| h != dependency);
@@ -842,6 +920,7 @@ fn rollback(state: &mut ApiState, mem: &mut GuestMem, txn: &Transaction) -> Resu
             state.modules.paths.remove(&module.path);
             mem.decommit_image(handle, module.size)
                 .map_err(|e| e.to_string())?;
+            cpu.remove_module_ir(handle, module.size);
         }
     }
     Ok(())
@@ -907,6 +986,7 @@ fn unload(
         .map_err(Failure::Fatal)?;
     state.modules.paths.remove(&module.path);
     mem.decommit_image(handle, module.size).map_err(memory)?;
+    cpu.remove_module_ir(handle, module.size);
     for dependency in module.dependencies {
         unload(dependency, cpu, mem, api, state, log, sched, max_instr)?;
     }
@@ -937,7 +1017,13 @@ pub fn dispatch(
                     ));
                 }
                 let path = crate::api::read_str(mem, a[0], name.ends_with('W'));
-                let handle = link(&path, None, mem, api, state, &mut txn, 0)?;
+                let handle =
+                    link(&path, None, mem, api, state, &mut txn, 0).map_err(|e| match e {
+                        Failure::Expected(code, reason) => {
+                            Failure::Expected(code, format!("{path:?}: {reason}"))
+                        }
+                        other => other,
+                    })?;
                 for thread in &sched.threads {
                     if !matches!(thread.state, crate::thread::ThreadState::Exited(_)) {
                         state
@@ -1113,12 +1199,12 @@ pub fn dispatch(
                     }
                 }
             }
-            rollback(state, mem, &txn)?;
+            rollback(state, mem, cpu, &txn)?;
             state.last_error = code;
             Ok((GuestCallOutcome::Returned(0), message))
         }
         Err(Failure::Fatal(message)) => {
-            rollback(state, mem, &txn)?;
+            rollback(state, mem, cpu, &txn)?;
             Err(message)
         }
         // Guest exception/exit already chose a new architectural context.

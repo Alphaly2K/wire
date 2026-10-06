@@ -85,8 +85,59 @@ impl Cpu {
         let cache = crate::ir::Cache::bind(image, mem)?;
         let accepted = cache.accepted;
         self.ir_cache = Some(cache);
+        self.ir_modules.clear();
         self.ir_hint = (0, 0);
         Ok(accepted)
+    }
+    /// Add an independently guarded module cache without spanning the gaps
+    /// between PE images. No code is decoded or generated during binding.
+    pub fn add_module_ir(&mut self, image: Image, mem: &GuestMem) -> Result<usize, String> {
+        self.flush_flags();
+        let cache = crate::ir::Cache::bind(image, mem)?;
+        let accepted = cache.accepted;
+        if accepted == 0 {
+            return Ok(0);
+        }
+        let base = cache.base();
+        self.ir_modules.retain(|c| c.base() != base);
+        if self.ir_cache.as_ref().is_none_or(|c| c.base() == base) {
+            self.ir_cache = Some(cache);
+            self.ir_hint = (0, 0);
+        } else {
+            if self.ir_modules.len() >= 63 {
+                return Err("module IR cache limit reached".into());
+            }
+            self.ir_modules.push(cache);
+        }
+        Ok(accepted)
+    }
+    pub(crate) fn uses_ir(&self) -> bool {
+        self.ir_cache.is_some()
+    }
+    pub(crate) fn remove_module_ir(&mut self, base: u32, size: u32) {
+        let matches = |c: &crate::ir::Cache| {
+            c.base() >= base && (c.base() as u64) < base as u64 + size as u64
+        };
+        self.ir_modules.retain(|c| !matches(c));
+        if self.ir_cache.as_ref().is_some_and(matches) {
+            self.flush_flags();
+            self.ir_cache = self.ir_modules.pop();
+            self.ir_hint = (0, 0);
+        }
+    }
+    fn select_module_ir(&mut self) -> bool {
+        if self.ir_cache.as_ref().is_some_and(|c| c.covers(self.eip)) {
+            return false;
+        }
+        if let Some(i) = self.ir_modules.iter().position(|c| c.covers(self.eip)) {
+            let next = self.ir_modules.swap_remove(i);
+            if let Some(previous) = self.ir_cache.replace(next) {
+                self.ir_modules.push(previous);
+            }
+            self.ir_hint = (0, 0);
+            return true;
+        }
+        false
     }
     pub fn effective_eflags(&self) -> u32 {
         self.flags_for(FLAGS)
@@ -138,6 +189,7 @@ impl Cpu {
         limit: u64,
         stack_ceiling: Option<u32>,
     ) -> (u64, Result<(), CpuError>) {
+        self.select_module_ir();
         let mut retired = 0;
         // No API/callback runs within a chain. Keep lookup state local and
         // publish the hint/count at its exit, including a faulting attempt.
@@ -237,6 +289,10 @@ impl Cpu {
                     return (retired, Ok(()));
                 }
             } else {
+                if !self.ir_modules.is_empty() && self.select_module_ir() {
+                    hint = (0, 0);
+                    continue;
+                }
                 self.ir_steps += retired;
                 if self.ir_cache.is_some() {
                     self.ir_fallbacks += 1;

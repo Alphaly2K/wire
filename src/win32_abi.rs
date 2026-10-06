@@ -10,6 +10,7 @@ pub(crate) fn ordinal_name(dll: &str, ordinal: u16) -> Option<&'static str> {
         "comctl32.dll" => include_str!("../third_party/wine-10.0/abi/comctl32.spec"),
         "shell32.dll" => include_str!("../third_party/wine-10.0/abi/shell32.spec"),
         "shlwapi.dll" => include_str!("../third_party/wine-10.0/abi/shlwapi.spec"),
+        "dsound.dll" => include_str!("../third_party/hangover/dsound.spec"),
         _ => return None,
     };
     for line in spec.lines() {
@@ -33,6 +34,18 @@ pub(crate) fn stack_bytes(dll: &str, name: &str) -> Option<u32> {
     static TABLE: OnceLock<HashMap<(&'static str, &'static str), u32>> = OnceLock::new();
     let table = TABLE.get_or_init(|| {
         let files = [
+            (
+                "winmm.dll",
+                include_str!("../third_party/hangover/winmm.spec"),
+            ),
+            (
+                "advapi32.dll",
+                include_str!("../third_party/hangover/advapi32.spec"),
+            ),
+            (
+                "dsound.dll",
+                include_str!("../third_party/hangover/dsound.spec"),
+            ),
             (
                 "kernel32.dll",
                 include_str!("../third_party/wine-10.0/abi/kernel32.spec"),

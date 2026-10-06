@@ -1474,8 +1474,81 @@ fn sse_moves() {
 }
 
 #[test]
+fn mmx_integer_moves_unpack_saturation_and_shifts() {
+    let mut cases = Vec::new();
+    for op in [
+        0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, 0x6e, 0x6f, 0x74,
+        0x75, 0x76, 0x7e, 0x7f, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd,
+        0xde, 0xdf, 0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe8, 0xe9, 0xea, 0xeb, 0xec, 0xed, 0xee,
+        0xef, 0xf1, 0xf2, 0xf3, 0xf5, 0xf6, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe,
+    ] {
+        for rm in [0xc1, 0xc0, 0x03] {
+            cases.push(vec![0x0f, op, rm]);
+        }
+    }
+    cases.push(vec![0x0f, 0xe7, 0x03]);
+    cases.push(vec![0x0f, 0xd7, 0xc1]);
+    for imm in [0, 1, 3, 15, 16, 31, 32, 63, 64, 255] {
+        for rm in [0xc1, 0x03] {
+            cases.push(vec![0x0f, 0x70, rm, imm]);
+            cases.push(vec![0x0f, 0xc4, rm, imm]);
+        }
+        cases.push(vec![0x0f, 0xc5, 0xc1, imm]);
+        for op in 0x71..=0x73 {
+            for group in [2, 4, 6] {
+                if op != 0x73 || group != 4 {
+                    cases.push(vec![0x0f, op, 0xc1 | (group << 3), imm]);
+                }
+            }
+        }
+    }
+    // Store every physical register to memory so both oracles expose MMX
+    // results. Include EMMS followed by a real x87 push/pop.
+    let mut rng = Rng(0x4d4d5807654321);
+    for operation in cases {
+        for _ in 0..6 {
+            let init = Init::random(&mut rng);
+            let mut code = Vec::new();
+            for i in 0..8u8 {
+                code.extend([0x0f, 0x6f, 0x05 | (i << 3)]);
+                code.extend((DATA + i as u32 * 8).to_le_bytes());
+            }
+            code.extend(&operation);
+            for i in 0..8u8 {
+                code.extend([0x0f, 0x7f, 0x05 | (i << 3)]);
+                code.extend((DATA + 0x5000 + i as u32 * 8).to_le_bytes());
+            }
+            code.extend([0x0f, 0x77, 0xd9, 0xe8, 0xdd, 0x1d]);
+            code.extend((DATA + 0x5040).to_le_bytes());
+            let u = run_unicorn(&code, &init, 100);
+            for ir in [false, true] {
+                let w = run_wire_engine(&code, &init, 100, ir);
+                compare(
+                    &format!("MMX {operation:02x?}, IR={ir}"),
+                    &code,
+                    &init,
+                    &w,
+                    &u,
+                    FLAG_MASK,
+                )
+                .unwrap();
+            }
+        }
+    }
+}
+
+#[test]
 fn sse_integer_and_unpack() {
     let mut cases = Vec::new();
+    for prefix in [0, 0x66] {
+        for rm in [0xc0, 0xc1, 0x03] {
+            for imm in [0, 1, 2, 3, 0x1b, 0xe4, 0xff] {
+                let mut code = sse_op(prefix, 0xc6, rm);
+                code.push(imm);
+                cases.push(code);
+            }
+        }
+    }
     for op in [
         0x60, 0x61, 0x62, 0x68, 0x69, 0x6a, 0x6c, 0x6d, 0x74, 0x75, 0x76, 0xdb, 0xdf, 0xeb, 0xef,
         0xd4, 0xfb, 0xfc, 0xf8, 0xfd, 0xf9, 0xfe, 0xfa,
@@ -1549,6 +1622,13 @@ fn sse_arithmetic_compare_convert() {
             4
         };
         let mut cases = Vec::new();
+        for predicate in 0..8 {
+            for rm in [0xc1, 0xc0, 0x03] {
+                let mut cmp = sse_op(prefix, 0xc2, rm);
+                cmp.push(predicate);
+                cases.push(cmp);
+            }
+        }
         for op in [0x51, 0x58, 0x59, 0x5c, 0x5d, 0x5e, 0x5f, 0x5a] {
             for rm in [0xc1, 0x03] {
                 cases.push(sse_op(prefix, op, rm));
@@ -1600,10 +1680,15 @@ fn sse_scalar_memory_width() {
         (0xf3, 0x5a, 4),
         (0xf2, 0x5a, 8),
         (0xf2, 0x12, 8),
+        (0xf3, 0xc2, 4),
+        (0xf2, 0xc2, 8),
     ] {
         let mut init = Init::random(&mut rng);
         init.regs[3] = STACK + STACK_SIZE as u32 - width;
-        let code = sse_op(prefix, op, 0x03);
+        let mut code = sse_op(prefix, op, 0x03);
+        if op == 0xc2 {
+            code.push(6);
+        }
         let w = run_wire(&code, &init, 10);
         let u = run_unicorn(&code, &init, 10);
         compare("SSE scalar width", &code, &init, &w, &u, FLAG_MASK)

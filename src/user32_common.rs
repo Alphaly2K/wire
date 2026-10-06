@@ -264,6 +264,7 @@ pub(crate) fn dispatch(
             | "MonitorFromPoint"
             | "MonitorFromRect"
             | "GetMonitorInfoW"
+            | "GetMonitorInfoA"
             | "DialogBoxIndirectParamW"
             | "CreateDialogIndirectParamW"
             | "MapDialogRect"
@@ -670,23 +671,30 @@ pub(crate) fn dispatch(
             "MonitorFromWindow" | "MonitorFromPoint" | "MonitorFromRect" => {
                 value(0x40000001, "single logical monitor")
             }
-            "GetMonitorInfoW" => {
+            "GetMonitorInfoA" | "GetMonitorInfoW" => {
                 let size = mem.read_u32(a[1]).map_err(|e| e.to_string())?;
-                if a[0] != 0x40000001 || !matches!(size, 40 | 104) {
+                let wide = name.ends_with('W');
+                if a[0] != 0x40000001 || (size != 40 && size != if wide { 104 } else { 72 }) {
                     return failure(state, 87);
                 }
                 let mut bytes = [size, 0, 0, 1024, 768, 0, 0, 1024, 768, 1]
                     .into_iter()
                     .flat_map(u32::to_le_bytes)
                     .collect::<Vec<_>>();
-                if size == 104 {
-                    bytes.extend(
-                        "\\\\.\\DISPLAY1"
-                            .encode_utf16()
-                            .chain(std::iter::repeat(0))
-                            .take(32)
-                            .flat_map(u16::to_le_bytes),
-                    );
+                if size != 40 {
+                    if wide {
+                        bytes.extend(
+                            "\\\\.\\DISPLAY1"
+                                .encode_utf16()
+                                .chain(std::iter::repeat(0))
+                                .take(32)
+                                .flat_map(u16::to_le_bytes),
+                        );
+                    } else {
+                        let mut text = [0; 32];
+                        text[..12].copy_from_slice(b"\\\\.\\DISPLAY1");
+                        bytes.extend(text);
+                    }
                 }
                 mem.write_bytes(a[1], &bytes).map_err(|e| e.to_string())?;
                 value(1, "logical monitor bounds")

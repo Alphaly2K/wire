@@ -4,7 +4,7 @@ Requested upstream: https://github.com/AndreRH/hangover
 Hangover commit: `56e385b7ff490edd281b288f420677093563560b`
 Its Wine submodule: https://github.com/AndreRH/wine
 Wine commit: `3ea3a14941b6a122b892c84141ce9662c008081e`
-Reviewed/adapted: 2026-10-06. Both project licenses are LGPL 2.1. Every C
+Reviewed/adapted: 2026-10-06–2026-10-07. Both project licenses are LGPL 2.1. Every C
 file used below expressly permits LGPL 2.1 or later; wire selects LGPL 2.1.
 
 | Wine file | Local snapshot / adaptation |
@@ -12,6 +12,7 @@ file used below expressly permits LGPL 2.1 or later; wire selects LGPL 2.1.
 | dlls/oleaut32/oleaut.c | oleaut-bstr.c; BSTR operations in src/common_api.rs |
 | dlls/win32u/defwnd.c | windowpos.c / geometry.c; default window messages and nonclient geometry |
 | include/d3d9.h | unmodified d3d9.h; derived d3d9-methods.tsv, COM slot/arity ABI only |
+| dlls/kernelbase/path.c | unmodified path.c; PathRemoveFileSpec, PathAddExtension, PathUnquoteSpaces A/W adapted in src/file_api.rs |
 
 Copyright 1999, 2000 Marcus Meissner (oleaut.c).
 Copyright 1993, 1996 Alexandre Julliard, 1995 Alex Korobka,
@@ -35,10 +36,16 @@ SHA-256 checksums follow.
 - `COPYING.LIB`: `e237fa56668030e928551ddd60f05df5fe957f75eab874bbd017e085ed722e7c`
 - `oleaut-bstr.c`: `373527f447da12eb208bb3e4656cb02edc920a96b316ddf9352ec0fc4da9f197`
 - `windowpos.c`: `596c87b7489753600e1220d4a135cf403aa084a6d5dd078aa105017193173c9d`
+- `path.c`: `5ab6715af29660476cabc10ead698e53b91bc9e6d757b73299c17fe6c4784c05`
+
+Path source copyright 2018 Nikolay Sivov, 2018 Zhiyi Zhang,
+2021–2023 Zebediah Figura. This file explicitly permits LGPL-2.1-or-later;
+wire selects LGPL 2.1. Native pointer scanning is replaced by checked guest
+units/CP932 character boundaries. No native path/file backend is linked.
 
 - `geometry.c`: `07df351f137ce4f11215a449997ed3f324981b8034bb5728fe3e42dd3844892b`
 - `d3d9.h`: `fb49b3c44acec5e100a5c0ff1622f7d0207842d87fc513b49047a818e8c351b2`
-- `d3d9-methods.tsv`: `bca412d281e8b1ce1002653bc39e9e01a5781efccdb2b080d32f46871ff51d03`
+- `d3d9-methods.tsv`: `5bdfd9da0cb56c3487d798686d109556dd255bbee1729544902e834f048e1225`
 
 D3D9 header copyright 2002–2003 Jason Edmeades and Raphael Junqueira.
 The derived table includes the COM `this` DWORD in every x86 stdcall size.
@@ -46,3 +53,52 @@ The bounded CPU rasterizer in src/d3d9/ is independently implemented;
 no Wine D3D/wined3d renderer, shader compiler, driver or executable code
 is copied or linked. Reviewed LGPL-2.1-or-later include/d3d9types.h and
 include/d3d9caps.h define the public data layouts and constants.
+
+## PE32 compatibility additions (2026-10-07)
+
+All snapshots below are unmodified files from the same fixed Wine commit,
+`3ea3a14941b6a122b892c84141ce9662c008081e`. Source URLs are
+`https://raw.githubusercontent.com/AndreRH/wine/3ea3a14941b6a122b892c84141ce9662c008081e/`
+followed by the upstream path in this table.
+
+| Upstream path | Local file | Used scope |
+| --- | --- | --- |
+| dlls/msvcrt/mbcs.c | mbcs.c | CP932 `_mbsinc` and byte-limited `_mbsnbcpy` rules |
+| dlls/user32/wsprintf.c | wsprintf.c | Windows format/type/width/precision rules; checked i386 varargs |
+| include/wbemcli.idl | wbemcli.idl | WMI COM layout and signatures; independent local OS provider |
+| dlls/dsound/dsound.spec | dsound.spec | Named and ordinal i386 export ABI |
+| dlls/advapi32/advapi32.spec | advapi32.spec | Export ABI; registry failures remain explicit |
+| dlls/winmm/winmm.spec | winmm.spec | Export ABI, including MCI stack cleanup |
+| include/dsound.h | dsound.h | DirectSound COM/data layouts; derived dsound-methods.tsv |
+
+`mbcs.c`: Copyright 1999 Alexandre Julliard, 2000 Jon Griffths.
+`wsprintf.c`: Copyright 1996 Alexandre Julliard.
+`wbemcli.idl`: Copyright 2009 Hans Leidekker for CodeWeavers.
+`dsound.h`: Copyright the Wine project.
+These files expressly permit LGPL-2.1-or-later; wire selects LGPL 2.1.
+The export specs retain upstream metadata and belong to the same LGPL Wine
+source tree. The copies retain their original notices. No GPL QEMU code is
+copied or linked. The independent CPU PCM mixer and public AudioQueue bridge
+are not ports of Wine's audio driver.
+
+`d3d9-methods.tsv` now also derives vertex/index-buffer and vertex-declaration
+slots and arities from our unchanged `d3d9.h`. No upstream graphics renderer is included.
+
+Semantic review only, without importing implementation:
+`dlls/ntdll/loader.c` (Copyright 1995/2003 Alexandre Julliard,
+2002 Dmitry Timoshkov; LGPL-2.1-or-later) for absent relocation directories;
+`dlls/d3d9/d3d9_main.c` for the SDK version argument;
+`dlls/win32u/message.c` (Copyright 2001 Alexandre Julliard,
+2008 Maarten Lankhorst; LGPL-2.1-or-later)
+for MsgWait queue masks and wait-all. These reviews do not provide a native
+Wine server, loader, message dispatcher or renderer.
+
+Additional SHA-256 checksums:
+- `mbcs.c`: `53920d2cd072217734db62e378f0ec03ae5c7ec073a223bd5e8b352f439f3703`
+- `wsprintf.c`: `e00663b26d1f8290afc1e6ad01a2c6e7d7d58170159701b0f8fea0916ed4d421`
+- `wbemcli.idl`: `f3a230221e86ac8729c3079bed8982549ac2ef9e09239e883b304023f456fd6c`
+- `dsound.spec`: `c349055e8cce1d8f285a249e521582b8dea551324ea2c66d542493dec40d24bb`
+- `advapi32.spec`: `976ae51433e044ac9d7c4b59fec5ada727c868d0303decef8d0a6315ae1b05da`
+- `winmm.spec`: `8139149e997e90aad0a0bdab62eb7b38da46c029f840d395e253128c996def4f`
+- `dsound.h`: `afead216b15386912f1ac4e2d147064a542ed3ab5c112c09a4edf5617e3d9bcf`
+- `dsound-methods.tsv`: `4a886e7e885836381a14167beb7ce1edba55f961de00274f5f1dd7f415094b8f`

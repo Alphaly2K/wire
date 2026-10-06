@@ -12,6 +12,788 @@ const CODE: u32 = 0x10000;
 const RET: u32 = CODE + 0x800;
 
 #[test]
+fn crt_math_returns_x87_values_and_integer_helpers_consume_st0() {
+    use rustc_apfloat::{
+        ieee::{Double, X87DoubleExtended as Ext},
+        Float, FloatConvert, Round, StatusAnd,
+    };
+    let mut v = Vm::new();
+    let extended = |value: f64| {
+        let r: StatusAnd<Ext> = Double::from_bits(value.to_bits() as u128)
+            .convert_r(Round::NearestTiesToEven, &mut false);
+        r.value.to_bits()
+    };
+    let result = |v: &Vm| {
+        let r: StatusAnd<Double> =
+            Ext::from_bits(v.cpu.fpu.st_bits(0)).convert_r(Round::NearestTiesToEven, &mut false);
+        r.value.to_bits() as u64
+    };
+    let words = |x: f64| [x.to_bits() as u32, (x.to_bits() >> 32) as u32];
+    for input in [-3.125, 3.125, -0., 0., f64::INFINITY] {
+        v.cpu.fpu = Default::default();
+        v.cpu.fpu.set_st_bits(0, extended(42.));
+        v.call("msvcrt.dll", "floor", &words(input));
+        assert_eq!(v.cpu.fpu.top(), 7);
+        assert_eq!(result(&v), input.floor().to_bits());
+        assert_eq!(v.cpu.fpu.st_bits(1), extended(42.));
+        assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 252);
+    }
+    let errno = v.call("msvcrt.dll", "_errno", &[]);
+    for (x, y, expected, error) in [
+        (2., -3., 0.125, 0),
+        (-2., 3., -8., 0),
+        (-2., 4., 16., 0),
+        (4., 0.5, 2., 0),
+        (-0., 3., -0., 0),
+        (-0., -3., f64::NEG_INFINITY, 34),
+        (f64::NAN, 0., 1., 0),
+        (1., f64::NAN, 1., 0),
+    ] {
+        for intrinsic in [false, true] {
+            v.cpu.fpu = Default::default();
+            v.mem.write_u32(errno, 0).unwrap();
+            let mut args = words(x).to_vec();
+            args.extend(words(y));
+            if intrinsic {
+                v.cpu.fpu.set_st_bits(0, extended(y));
+                v.cpu.fpu.set_st_bits(1, extended(x));
+                v.call("msvcrt.dll", "_CIpow", &[]);
+                assert_eq!(v.cpu.fpu.top(), 1);
+            } else {
+                v.call("msvcrt.dll", "pow", &args);
+                assert_eq!(v.cpu.fpu.top(), 7);
+            }
+            assert_eq!(
+                result(&v),
+                expected.to_bits(),
+                "{x}^{y} intrinsic={intrinsic}"
+            );
+            assert_eq!(v.mem.read_u32(errno).unwrap(), error);
+        }
+    }
+    // Numerical oracle across the finite range; CRT returns a binary64 result.
+    for (x, y) in [
+        (0.1, 0.7),
+        (123.25, -2.75),
+        (1.0001, 1234.),
+        (1e-200, 1.25),
+        (1e200, 0.75),
+    ] {
+        v.cpu.fpu = Default::default();
+        let mut args = words(x).to_vec();
+        args.extend(words(y));
+        v.call("msvcrt.dll", "pow", &args);
+        assert!(result(&v).abs_diff(x.powf(y).to_bits()) <= 1, "{x}^{y}");
+    }
+    v.cpu.fpu = Default::default();
+    let mut args = words(-2.).to_vec();
+    args.extend(words(0.5));
+    v.call("msvcrt.dll", "pow", &args);
+    assert!(f64::from_bits(result(&v)).is_nan());
+    assert_eq!(v.mem.read_u32(errno).unwrap(), 33);
+    for rc in 0..4 {
+        for (input, exp, expected) in [
+            (1., -1074, 1),
+            (1., i32::MIN, if rc == 2 { 1 } else { 0 }),
+            (
+                -1.,
+                i32::MIN,
+                0x8000000000000000 | if rc == 1 { 1 } else { 0 },
+            ),
+            (
+                1.,
+                i32::MAX,
+                if rc == 1 || rc == 3 {
+                    0x7fefffffffffffff
+                } else {
+                    0x7ff0000000000000
+                },
+            ),
+        ] {
+            v.cpu.fpu = Default::default();
+            v.cpu.fpu.cw |= rc << 10;
+            let mut args = words(input).to_vec();
+            args.push(exp as u32);
+            v.call("msvcrt.dll", "ldexp", &args);
+            assert_eq!(result(&v), expected, "ldexp RC={rc} exp={exp}");
+        }
+    }
+    for name in ["_ftol", "_ftol2", "_ftol2_sse"] {
+        for input in [3.9, -3.9, 4294967296.5, -4294967296.5, 0., f64::NAN] {
+            v.cpu.fpu = Default::default();
+            v.cpu.fpu.cw |= 2 << 10; // conversion truncates regardless of RC
+            v.cpu.fpu.set_st_bits(0, extended(input));
+            v.call("msvcrt.dll", name, &[]);
+            let actual = v.cpu.regs[0] as u64 | ((v.cpu.regs[2] as u64) << 32);
+            assert_eq!(
+                actual,
+                if input.is_nan() {
+                    1 << 63
+                } else {
+                    input.trunc() as i64 as u64
+                }
+            );
+            assert_eq!(v.cpu.fpu.top(), 1);
+            assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 252);
+        }
+    }
+}
+
+#[test]
+fn crt_qsort_calls_guest_comparator_preserves_records_and_callback_boundaries() {
+    let mut v = Vm::new();
+    let mut comparator = vec![0xff, 0x05];
+    comparator.extend((DATA + 0x200).to_le_bytes());
+    comparator.extend([
+        0x8b, 0x44, 0x24, 4, 0x8b, 0x54, 0x24, 8, 0x8b, 0, 0x3b, 2, 0x0f, 0x9f, 0xc0, 0x0f, 0x9c,
+        0xc2, 0x0f, 0xb6, 0xc0, 0x0f, 0xb6, 0xd2, 0x29, 0xd0, 0xc3,
+    ]);
+    v.mem.write_bytes(CODE, &comparator).unwrap();
+    let values = [i32::MAX, -4, 0, 4, -4, i32::MIN, 9];
+    for (i, key) in values.into_iter().enumerate() {
+        v.mem.write_u32(DATA + i as u32 * 8, key as u32).unwrap();
+        v.mem.write_u32(DATA + i as u32 * 8 + 4, i as u32).unwrap();
+    }
+    v.call("msvcrt.dll", "qsort", &[DATA, 7, 8, CODE]);
+    let mut keys = Vec::new();
+    for i in 0..7 {
+        let key = v.mem.read_u32(DATA + i * 8).unwrap() as i32;
+        let original = v.mem.read_u32(DATA + i * 8 + 4).unwrap() as usize;
+        assert_eq!(key, values[original]);
+        keys.push(key);
+    }
+    assert_eq!(keys, [i32::MIN, -4, -4, 0, 4, 9, i32::MAX]);
+    assert!(v.mem.read_u32(DATA + 0x200).unwrap() > 0);
+    assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 252);
+    assert!(v
+        .try_call("msvcrt.dll", "qsort", &[DATA, u32::MAX, 8, CODE])
+        .is_err());
+    assert!(v
+        .try_call("msvcrt.dll", "qsort", &[0x30000000, 2, 4, CODE])
+        .is_err());
+    assert!(v.try_call("msvcrt.dll", "qsort", &[DATA, 2, 4, 0]).is_err());
+    v.call("msvcrt.dll", "qsort", &[0, 0, 4, 0]);
+    v.mem.write_bytes(CODE, &[0xeb, 0xfe]).unwrap();
+    let budget = v.cpu.instr_count;
+    let stub = v.api.register("msvcrt.dll", Some("qsort"), None);
+    v.cpu.eip = stub;
+    v.cpu.set_esp(STACK_BASE + STACK_SIZE - 256);
+    for (i, n) in [RET, DATA, 2, 4, CODE].into_iter().enumerate() {
+        v.mem.write_u32(v.cpu.esp() + i as u32 * 4, n).unwrap();
+    }
+    let index = v.api.stub_index(stub).unwrap();
+    let error = api::dispatch(
+        index,
+        &mut v.cpu,
+        &mut v.mem,
+        &mut v.api,
+        &mut v.state,
+        &mut v.log,
+        &mut v.sched,
+        budget + 8,
+    )
+    .unwrap_err();
+    assert!(error.contains("instruction limit inside callback"));
+    assert_eq!(v.cpu.instr_count, budget + 8);
+    let exit = v.api.register("kernel32.dll", Some("ExitProcess"), None);
+    let mut code = vec![0x6a, 7, 0xb8];
+    code.extend(exit.to_le_bytes());
+    code.extend([0xff, 0xd0]);
+    v.mem.write_bytes(CODE, &code).unwrap();
+    v.call("msvcrt.dll", "qsort", &[DATA, 2, 4, CODE]);
+    assert!(v.cpu.halted);
+    assert_eq!(v.cpu.exit_code, Some(7));
+}
+
+#[test]
+fn cursor_show_count_is_signed_and_set_cursor_returns_previous_handle() {
+    let mut v = Vm::new();
+    assert_eq!(v.call("user32.dll", "ShowCursor", &[1]), 1);
+    assert_eq!(v.call("user32.dll", "ShowCursor", &[0]), 0);
+    assert_eq!(v.call("user32.dll", "ShowCursor", &[0]), u32::MAX);
+    assert_eq!(v.call("user32.dll", "ShowCursor", &[1]), 0);
+    let arrow = v.call("user32.dll", "LoadCursorA", &[0, 32512]);
+    assert_ne!(arrow, 0);
+    assert_eq!(v.call("user32.dll", "SetCursor", &[arrow]), 0);
+    assert_eq!(v.call("user32.dll", "GetCursor", &[]), arrow);
+    assert_eq!(v.call("user32.dll", "SetCursor", &[0]), arrow);
+    assert_eq!(v.call("user32.dll", "GetCursor", &[]), 0);
+    assert_eq!(v.call("user32.dll", "SetCursor", &[0xdeadbeef]), 0);
+    assert_eq!(v.state.last_error, 6);
+}
+
+#[test]
+fn monitor_callbacks_and_ansi_info_return_real_bounds_and_honor_clipping() {
+    let mut v = Vm::new();
+    let mut code = vec![0xff, 0x05];
+    code.extend((DATA + 0x300).to_le_bytes());
+    code.extend([0x8b, 0x44, 0x24, 12, 0x8b, 0x40, 8, 0xa3]);
+    code.extend((DATA + 0x304).to_le_bytes());
+    code.extend([0xb8, 0, 0, 0, 0, 0xc2, 16, 0]);
+    v.mem.write_bytes(CODE, &code).unwrap();
+    assert_eq!(
+        v.call("user32.dll", "EnumDisplayMonitors", &[0, 0, CODE, 0]),
+        0
+    );
+    assert_eq!(v.mem.read_u32(DATA + 0x300).unwrap(), 1);
+    assert_eq!(v.mem.read_u32(DATA + 0x304).unwrap(), 1024);
+    for (i, n) in [2000u32, 0, 2100, 100].into_iter().enumerate() {
+        v.mem.write_u32(DATA + i as u32 * 4, n).unwrap();
+    }
+    assert_eq!(
+        v.call("user32.dll", "EnumDisplayMonitors", &[0, DATA, CODE, 0]),
+        1
+    );
+    assert_eq!(v.mem.read_u32(DATA + 0x300).unwrap(), 1);
+    for (name, size) in [
+        ("GetMonitorInfoA", 40),
+        ("GetMonitorInfoA", 72),
+        ("GetMonitorInfoW", 104),
+    ] {
+        v.mem.write_u32(DATA, size).unwrap();
+        assert_eq!(v.call("user32.dll", name, &[0x40000001, DATA]), 1);
+        assert_eq!(v.mem.read_u32(DATA + 12).unwrap(), 1024);
+        assert_eq!(v.mem.read_u32(DATA + 16).unwrap(), 768);
+        if size == 72 {
+            assert_eq!(v.mem.read_cstr(DATA + 40, 32).unwrap(), "\\\\.\\DISPLAY1");
+        }
+        if size == 104 {
+            assert_eq!(v.mem.read_wstr(DATA + 40, 32).unwrap(), "\\\\.\\DISPLAY1");
+        }
+    }
+}
+
+#[test]
+fn wine_path_extensions_and_unquoting_preserve_existing_names() {
+    let mut v = Vm::new();
+    v.mem.write_bytes(DATA, b"dir.with.dot\\name\0").unwrap();
+    v.mem.write_bytes(DATA + 0x100, b".pgd\0").unwrap();
+    assert_eq!(
+        v.call("shlwapi.dll", "PathAddExtensionA", &[DATA, DATA + 0x100]),
+        1
+    );
+    assert_eq!(
+        v.mem.read_cstr(DATA, 260).unwrap(),
+        "dir.with.dot\\name.pgd"
+    );
+    assert_eq!(
+        v.call("shlwapi.dll", "PathAddExtensionA", &[DATA, DATA + 0x100]),
+        0
+    );
+    v.wide(DATA, "\"ソフト path\"");
+    v.call("shlwapi.dll", "PathUnquoteSpacesW", &[DATA]);
+    assert_eq!(v.mem.read_wstr(DATA, 260).unwrap(), "ソフト path");
+    v.mem.write_bytes(DATA, b"\"incomplete\0").unwrap();
+    v.call("shlwapi.dll", "PathUnquoteSpacesA", &[DATA]);
+    assert_eq!(v.mem.read_cstr(DATA, 260).unwrap(), "\"incomplete");
+}
+
+#[test]
+fn kernel_and_crt_strings_preserve_bytes_lengths_and_numeric_errors() {
+    let mut v = Vm::new();
+    v.mem.write_bytes(DATA, &[0x83, 0x5c, 0xff, 0]).unwrap();
+    assert_eq!(v.k("lstrlenA", &[DATA]), 3);
+    assert_eq!(v.call("msvcrt.dll", "strlen", &[DATA]), 3);
+    assert_eq!(v.k("lstrcpyA", &[DATA + 0x100, DATA]), DATA + 0x100);
+    let mut raw = [0; 4];
+    v.mem.read_bytes(DATA + 0x100, &mut raw).unwrap();
+    assert_eq!(raw, [0x83, 0x5c, 0xff, 0]);
+    assert_eq!(v.k("lstrcpynA", &[DATA + 0x100, 0, 1]), DATA + 0x100);
+    assert_eq!(v.mem.read_u8(DATA + 0x100).unwrap(), 0);
+    assert_eq!(v.k("lstrcpynW", &[DATA + 0x100, 0, 0]), DATA + 0x100);
+    assert_eq!(v.call("msvcrt.dll", "strncmp", &[0, 0, 0]), 0);
+    assert_eq!(v.call("msvcrt.dll", "_mbsinc", &[DATA]), DATA + 2);
+    v.mem.write_bytes(DATA, &[0x83, 0]).unwrap();
+    assert_eq!(v.call("msvcrt.dll", "_mbsinc", &[DATA]), DATA + 1);
+    v.mem
+        .write_bytes(DATA, &[b'a', 0x83, 0x5c, b'b', 0])
+        .unwrap();
+    assert_eq!(
+        v.call("msvcrt.dll", "_mbsnbcpy", &[DATA + 0x100, DATA, 2]),
+        DATA + 0x100
+    );
+    assert_eq!(v.mem.read_u16(DATA + 0x100).unwrap(), b'a' as u16);
+    v.call("msvcrt.dll", "_mbsnbcpy", &[DATA + 0x100, DATA, 6]);
+    let mut raw = [1; 6];
+    v.mem.read_bytes(DATA + 0x100, &mut raw).unwrap();
+    assert_eq!(raw, [b'a', 0x83, 0x5c, b'b', 0, 0]);
+    let errno = v.call("msvcrt.dll", "_errno", &[]);
+    for (input, base, value, end, error) in [
+        ("  -0x10rest", 0, 0xfffffff0, 7, 0),
+        ("0779", 0, 63, 3, 0),
+        ("0xZ", 0, 0, 1, 0),
+        (" +z", 10, 0, 0, 0),
+        ("4294967296x", 10, u32::MAX, 10, 34),
+        ("12", 1, 0, 0, 22),
+    ] {
+        v.mem.write_u32(errno, 0).unwrap();
+        v.mem
+            .write_bytes(DATA, format!("{input}\0").as_bytes())
+            .unwrap();
+        assert_eq!(
+            v.call("msvcrt.dll", "strtoul", &[DATA, DATA + 0x200, base]),
+            value,
+            "{input}"
+        );
+        assert_eq!(v.mem.read_u32(DATA + 0x200).unwrap(), DATA + end);
+        assert_eq!(v.mem.read_u32(errno).unwrap(), error);
+    }
+}
+
+#[test]
+fn guid_strings_use_com_allocations_endianness_and_checked_capacity() {
+    let mut v = Vm::new();
+    let bytes = [
+        0xca, 0x58, 0x35, 0x97, 0x88, 0xb3, 0xd3, 0x11, 0xae, 0xf6, 0, 0x40, 0x26, 0x40, 2, 0xc6,
+    ];
+    v.mem.write_bytes(DATA, &bytes).unwrap();
+    assert_eq!(
+        v.call("ole32.dll", "StringFromCLSID", &[DATA, DATA + 0x100]),
+        0
+    );
+    let p = v.mem.read_u32(DATA + 0x100).unwrap();
+    assert_ne!(p, 0);
+    let text = "{973558CA-B388-11D3-AEF6-0040264002C6}";
+    assert_eq!(v.mem.read_wstr(p, 39).unwrap(), text);
+    assert_eq!(
+        v.call("ole32.dll", "CLSIDFromString", &[p, DATA + 0x200]),
+        0
+    );
+    let mut round = [0; 16];
+    v.mem.read_bytes(DATA + 0x200, &mut round).unwrap();
+    assert_eq!(round, bytes);
+    v.mem.write_u32(DATA + 0x300, 0xdeadbeef).unwrap();
+    assert_eq!(
+        v.call("ole32.dll", "StringFromGUID2", &[DATA, DATA + 0x300, 38]),
+        0
+    );
+    assert_eq!(v.mem.read_u32(DATA + 0x300).unwrap(), 0xdeadbeef);
+    assert_eq!(
+        v.call("ole32.dll", "StringFromGUID2", &[DATA, DATA + 0x300, 39]),
+        39
+    );
+    v.call("ole32.dll", "CoTaskMemFree", &[p]);
+    assert_eq!(v.k("HeapSize", &[v.state.process_heap, 0, p]), u32::MAX);
+    v.wide(DATA + 0x300, "{973558CA-B388-11D3-AEF6-0040264002CZ}");
+    assert_eq!(
+        v.call(
+            "ole32.dll",
+            "CLSIDFromString",
+            &[DATA + 0x300, DATA + 0x200]
+        ),
+        0x800401f3
+    );
+}
+
+#[test]
+fn variants_deep_copy_bstr_aliases_and_reject_unsupported_managed_types() {
+    let mut v = Vm::new();
+    v.wide(DATA, "ソフト");
+    let p = v.call("oleaut32.dll", "SysAllocString", &[DATA]);
+    for at in [DATA + 0x100, DATA + 0x120] {
+        v.call("oleaut32.dll", "VariantInit", &[at]);
+    }
+    v.mem.write_u16(DATA + 0x100, 8).unwrap();
+    v.mem.write_u32(DATA + 0x108, p).unwrap();
+    assert_eq!(
+        v.call("oleaut32.dll", "VariantCopy", &[DATA + 0x120, DATA + 0x100]),
+        0
+    );
+    let copy = v.mem.read_u32(DATA + 0x128).unwrap();
+    assert_ne!(copy, p);
+    assert_eq!(v.mem.read_wstr(copy, 10).unwrap(), "ソフト");
+    assert_eq!(
+        v.call(
+            "oleaut32.dll",
+            "VariantChangeType",
+            &[DATA + 0x120, DATA + 0x120, 0, 8]
+        ),
+        0
+    );
+    assert_eq!(
+        v.k("HeapSize", &[v.state.process_heap, 0, copy - 4]),
+        u32::MAX
+    );
+    v.call("oleaut32.dll", "VariantClear", &[DATA + 0x100]);
+    let still = v.mem.read_u32(DATA + 0x128).unwrap();
+    assert_eq!(v.mem.read_wstr(still, 10).unwrap(), "ソフト");
+    assert_eq!(v.call("oleaut32.dll", "VariantClear", &[DATA + 0x120]), 0);
+    assert_eq!(v.mem.read_u16(DATA + 0x120).unwrap(), 0);
+    v.mem.write_u16(DATA + 0x100, 9).unwrap(); // IDispatch requires a COM backend
+    assert_eq!(
+        v.call("oleaut32.dll", "VariantCopy", &[DATA + 0x120, DATA + 0x100]),
+        0x80020005
+    );
+    assert_eq!(
+        v.call("oleaut32.dll", "VariantClear", &[DATA + 0x100]),
+        0x80020008
+    );
+}
+
+#[test]
+fn version_resources_query_fixed_translation_and_ansi_unicode_nested_strings() {
+    fn block(key: &str, text: bool, value: Vec<u8>, children: Vec<Vec<u8>>) -> Vec<u8> {
+        let mut b = vec![0; 6];
+        b[2..4].copy_from_slice(&((value.len() / if text { 2 } else { 1 }) as u16).to_le_bytes());
+        b[4..6].copy_from_slice(&u16::from(text).to_le_bytes());
+        b.extend(key.encode_utf16().chain([0]).flat_map(u16::to_le_bytes));
+        b.resize((b.len() + 3) & !3, 0);
+        b.extend(value);
+        for child in children {
+            b.resize((b.len() + 3) & !3, 0);
+            b.extend(child);
+        }
+        let len = b.len() as u16;
+        b[..2].copy_from_slice(&len.to_le_bytes());
+        b
+    }
+    let mut v = Vm::new();
+    let leaf = block(
+        "CompanyName",
+        true,
+        "ソフト"
+            .encode_utf16()
+            .chain([0])
+            .flat_map(u16::to_le_bytes)
+            .collect(),
+        vec![],
+    );
+    let strings = block(
+        "StringFileInfo",
+        true,
+        vec![],
+        vec![block("041103a4", true, vec![], vec![leaf])],
+    );
+    let vars = block(
+        "VarFileInfo",
+        true,
+        vec![],
+        vec![block(
+            "Translation",
+            false,
+            [0x411u16.to_le_bytes(), 932u16.to_le_bytes()].concat(),
+            vec![],
+        )],
+    );
+    let mut fixed = vec![0; 52];
+    fixed[..4].copy_from_slice(&0xfeef04bdu32.to_le_bytes());
+    let blob = block("VS_VERSION_INFO", false, fixed, vec![strings, vars]);
+    let mut exe = test_dll("kernel32.dll!GetCurrentProcessId", true, 0);
+    exe[0x108..0x10c].copy_from_slice(&0x1900u32.to_le_bytes());
+    exe[0x10c..0x110].copy_from_slice(&0x100u32.to_le_bytes());
+    let root = 0xb00;
+    for off in [0, 24, 48] {
+        exe[root + off + 14..root + off + 16].copy_from_slice(&1u16.to_le_bytes());
+    }
+    for (off, n) in [
+        (16, 16u32),
+        (20, 0x80000018),
+        (40, 1),
+        (44, 0x80000030),
+        (64, 0x411),
+        (68, 72),
+        (72, 0x1a00),
+        (76, blob.len() as u32),
+    ] {
+        exe[root + off..root + off + 4].copy_from_slice(&n.to_le_bytes());
+    }
+    exe[0xc00..0xc00 + blob.len()].copy_from_slice(&blob);
+    std::fs::write(v.dir.join("version.dll"), &exe).unwrap();
+    v.mem.write_bytes(DATA, b"C:\\version.dll\0").unwrap();
+    let size = v.call(
+        "version.dll",
+        "GetFileVersionInfoSizeA",
+        &[DATA, DATA + 0x100],
+    );
+    assert!(size >= blob.len() as u32);
+    assert_eq!(v.mem.read_u32(DATA + 0x100).unwrap(), 0);
+    assert_eq!(
+        v.call(
+            "version.dll",
+            "GetFileVersionInfoA",
+            &[DATA, 0, size, DATA + 0x1000]
+        ),
+        1
+    );
+    for (path, len) in [("\\", 52), ("\\VarFileInfo\\Translation", 4)] {
+        v.wide(DATA + 0x200, path);
+        assert_eq!(
+            v.call(
+                "version.dll",
+                "VerQueryValueW",
+                &[DATA + 0x1000, DATA + 0x200, DATA + 0x100, DATA + 0x104]
+            ),
+            1
+        );
+        assert_eq!(v.mem.read_u32(DATA + 0x104).unwrap(), len);
+    }
+    let path = "\\StringFileInfo\\041103a4\\CompanyName";
+    v.wide(DATA + 0x200, path);
+    assert_eq!(
+        v.call(
+            "version.dll",
+            "VerQueryValueW",
+            &[DATA + 0x1000, DATA + 0x200, DATA + 0x100, DATA + 0x104]
+        ),
+        1
+    );
+    let wide = v.mem.read_u32(DATA + 0x100).unwrap();
+    assert_eq!(v.mem.read_wstr(wide, 10).unwrap(), "ソフト");
+    assert_eq!(v.mem.read_u32(DATA + 0x104).unwrap(), 4);
+    v.mem
+        .write_bytes(DATA + 0x200, format!("{path}\0").as_bytes())
+        .unwrap();
+    assert_eq!(
+        v.call(
+            "version.dll",
+            "VerQueryValueA",
+            &[DATA + 0x1000, DATA + 0x200, DATA + 0x100, DATA + 0x104]
+        ),
+        1
+    );
+    let ansi = v.mem.read_u32(DATA + 0x100).unwrap();
+    assert_eq!(
+        wire::file_api::read_name(&v.mem, ansi, false).unwrap(),
+        "ソフト"
+    );
+    assert_eq!(v.mem.read_u32(DATA + 0x104).unwrap(), 7);
+    assert_eq!(v.mem.read_wstr(wide, 10).unwrap(), "ソフト");
+    v.mem.write_u16(DATA + 0x1000, 5).unwrap();
+    assert_eq!(
+        v.call(
+            "version.dll",
+            "VerQueryValueA",
+            &[DATA + 0x1000, DATA + 0x200, DATA + 0x100, DATA + 0x104]
+        ),
+        0
+    );
+    assert_eq!(v.mem.read_u32(DATA + 0x104).unwrap(), 0);
+}
+
+#[test]
+fn large_dll_and_resource_only_dll_preserve_heap_and_reuse_loaded_basenames() {
+    let mut v = Vm::new();
+    let heap = v.state.process_heap;
+    let allocation = v.k("HeapAlloc", &[heap, 0, 16]);
+    v.mem.write_u32(allocation, 0x1234).unwrap();
+    let mut large = test_dll("kernel32.dll!GetCurrentProcessId", true, 42);
+    large[0xd0..0xd4].copy_from_slice(&0x4138000u32.to_le_bytes());
+    std::fs::create_dir(v.dir.join("dll")).unwrap();
+    let path = v.dir.join("dll/large.dll");
+    std::fs::write(&path, &large).unwrap();
+    v.mem.write_bytes(DATA, b"C:\\dll\\large.dll\0").unwrap();
+    let h = v.k("LoadLibraryA", &[DATA]);
+    assert_ne!(h, 0);
+    assert_eq!(v.mem.read_u32(allocation).unwrap(), 0x1234);
+    assert_eq!(
+        v.mem.virtual_query(h + 0x4137000).unwrap().allocation_base,
+        h
+    );
+    std::fs::remove_file(&path).unwrap();
+    v.mem.write_bytes(DATA, b"LARGE.DLL\0").unwrap();
+    assert_eq!(v.k("LoadLibraryA", &[DATA]), h);
+    assert_eq!(v.k("FreeLibrary", &[h]), 1);
+    assert!(v.mem.is_committed(h));
+    assert_eq!(v.k("FreeLibrary", &[h]), 1);
+    assert!(!v.mem.is_committed(h));
+    let mut resource = test_dll("kernel32.dll!GetCurrentProcessId", true, 0);
+    resource[0xa8..0xac].fill(0);
+    resource[0xf8..0x108].fill(0);
+    resource[0x120..0x128].fill(0);
+    resource[0x19c..0x1a0].copy_from_slice(&0x40000040u32.to_le_bytes());
+    std::fs::write(v.dir.join("resource.dll"), resource).unwrap();
+    v.mem.write_bytes(DATA, b"resource.dll\0").unwrap();
+    let h = v.k("LoadLibraryA", &[DATA]);
+    assert_ne!(h, 0);
+    assert!(v.mem.read_u32(h + 0x1200).is_ok());
+    assert_eq!(
+        v.mem.virtual_query(h + 0x1000).unwrap().protect,
+        wire::mem::PAGE_READONLY
+    );
+    assert_eq!(v.k("FreeLibrary", &[h]), 1);
+}
+
+#[test]
+fn windows_varargs_formatting_reads_exact_arguments_and_preserves_cdecl_stack() {
+    let mut v = Vm::new();
+    v.mem.write_bytes(DATA, b"%08x|%d|%I64u|%s|%%\0").unwrap();
+    v.mem.write_bytes(DATA + 0x100, b"abc\0").unwrap();
+    let result = v.call(
+        "user32.dll",
+        "wsprintfA",
+        &[
+            DATA + 0x300,
+            DATA,
+            0x12,
+            (-42i32) as u32,
+            1,
+            1,
+            DATA + 0x100,
+        ],
+    );
+    let expected = "00000012|-42|4294967297|abc|%";
+    assert_eq!(result, expected.len() as u32);
+    assert_eq!(v.mem.read_cstr(DATA + 0x300, 128).unwrap(), expected);
+    assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 4);
+    v.wide(DATA, "%s|%S|%p");
+    v.wide(DATA + 0x100, "ソ");
+    v.mem.write_bytes(DATA + 0x200, b"raw\0").unwrap();
+    v.call(
+        "user32.dll",
+        "wsprintfW",
+        &[DATA + 0x400, DATA, DATA + 0x100, DATA + 0x200, 0x123],
+    );
+    assert_eq!(
+        v.mem.read_wstr(DATA + 0x400, 128).unwrap(),
+        "ソ|raw|00000123"
+    );
+    v.mem.write_bytes(DATA, b"%u/%u\0").unwrap();
+    v.mem.write_u32(DATA + 0x100, 7).unwrap();
+    v.mem.write_u32(DATA + 0x104, 9).unwrap();
+    assert_eq!(
+        v.call(
+            "user32.dll",
+            "wvsprintfA",
+            &[DATA + 0x300, DATA, DATA + 0x100]
+        ),
+        3
+    );
+    assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 16);
+    assert_eq!(v.mem.read_cstr(DATA + 0x300, 128).unwrap(), "7/9");
+    assert!(v
+        .try_call("user32.dll", "wsprintfA", &[0, DATA, 1, 2])
+        .is_err());
+}
+
+#[test]
+fn missing_registry_installations_fail_and_dsound_ordinals_resolve() {
+    let mut v = Vm::new();
+    v.mem
+        .write_bytes(DATA, b"Software\\not-installed\0")
+        .unwrap();
+    v.mem.write_u32(DATA + 0x100, 0xdeadbeef).unwrap();
+    assert_eq!(
+        v.call(
+            "advapi32.dll",
+            "RegOpenKeyA",
+            &[0x80000002, DATA, DATA + 0x100]
+        ),
+        2
+    );
+    assert_eq!(v.mem.read_u32(DATA + 0x100).unwrap(), 0);
+    assert_eq!(
+        v.call(
+            "advapi32.dll",
+            "RegQueryValueExA",
+            &[0, DATA, 0, 0, 0, DATA + 0x100]
+        ),
+        6
+    );
+    v.mem.write_bytes(DATA, b"dsound.dll\0").unwrap();
+    let module = v.k("LoadLibraryA", &[DATA]);
+    let ordinal = v.k("GetProcAddress", &[module, 1]);
+    assert_ne!(ordinal, 0);
+    assert_eq!(ordinal, dll_export(&mut v, module, "DirectSoundCreate"));
+    assert_eq!(
+        v.call("dsound.dll", "DirectSoundCreate", &[0, DATA + 0x100, 0]),
+        0
+    );
+    let sound = v.mem.read_u32(DATA + 0x100).unwrap();
+    assert_ne!(sound, 0);
+    assert_eq!(d3d_com(&mut v, sound, 2, &[]), 0);
+}
+
+#[test]
+fn path_remove_file_spec_preserves_roots_dbcs_and_checked_buffers() {
+    let mut v = Vm::new();
+    for (input, expected, changed) in [
+        ("C:\\koikake.exe", "C:\\", 1),
+        ("C:\\dll\\Pal.dll", "C:\\dll", 1),
+        ("C:\\", "C:\\", 0),
+        ("C:", "C:", 0),
+        ("file.exe", "", 1),
+        ("\\\\server\\share\\file.exe", "\\\\server\\share", 1),
+        ("C:\\dir\\\\file.exe", "C:\\dir", 1),
+        ("C:\\ソフト\\ソ", "C:\\ソフト", 1),
+        ("C:\\dir/file.exe", "C:\\", 1),
+        ("", "", 0),
+    ] {
+        for wide in [false, true] {
+            if wide {
+                v.wide(DATA, input);
+            } else {
+                let mut bytes = wire::codepage::encode(input, 932).unwrap().0;
+                bytes.push(0);
+                v.mem.write_bytes(DATA, &bytes).unwrap();
+            }
+            assert_eq!(
+                v.call(
+                    "shlwapi.dll",
+                    if wide {
+                        "PathRemoveFileSpecW"
+                    } else {
+                        "PathRemoveFileSpecA"
+                    },
+                    &[DATA]
+                ),
+                changed,
+                "{input:?} wide {wide}"
+            );
+            assert_eq!(
+                wire::file_api::read_name(&v.mem, DATA, wide).unwrap(),
+                expected
+            );
+        }
+    }
+    v.wide(DATA, "\\\\?\\C:\\file.exe");
+    assert_eq!(v.call("shlwapi.dll", "PathRemoveFileSpecW", &[DATA]), 1);
+    assert_eq!(v.mem.read_wstr(DATA, 128).unwrap(), "\\\\?\\C:\\");
+    assert_eq!(v.call("shlwapi.dll", "PathRemoveFileSpecA", &[0]), 0);
+    assert_eq!(v.call("shlwapi.dll", "PathRemoveFileSpecW", &[0x700000]), 0);
+}
+
+#[test]
+fn crt_data_imports_and_accessors_share_writable_guest_storage() {
+    let mut v = Vm::new();
+    v.state.cmdline_a = DATA + 0x200;
+    v.state.cmdline_w = DATA + 0x400;
+    v.mem.write_bytes(v.state.cmdline_a, b"test.exe\0").unwrap();
+    v.wide(v.state.cmdline_w, "test.exe");
+    v.mem.write_bytes(DATA, b"msvcrt.dll\0").unwrap();
+    let module = v.k("LoadLibraryA", &[DATA]);
+    for (global, accessor, initial) in [
+        ("_acmdln", "__p__acmdln", v.state.cmdline_a),
+        ("_wcmdln", "__p__wcmdln", v.state.cmdline_w),
+        ("_fmode", "__p__fmode", 0),
+        ("_commode", "__p__commode", 0),
+        ("__argc", "__p___argc", 1),
+    ] {
+        let p = dll_export(&mut v, module, global);
+        assert_ne!(p, 0);
+        assert!(v.api.stub_index(p).is_none());
+        assert_eq!(v.mem.read_u32(p).unwrap(), initial);
+        assert_eq!(v.call("msvcrt.dll", accessor, &[]), p);
+        v.mem.write_u32(p, 0x12345678).unwrap();
+        assert_eq!(v.call("msvcrt.dll", accessor, &[]), p);
+        assert_eq!(v.mem.read_u32(p).unwrap(), 0x12345678);
+        assert_eq!(dll_export(&mut v, module, global), p);
+    }
+    let mut exe = test_dll("MSVCRT.dll!_acmdln", true, 19);
+    exe[0x96..0x98].copy_from_slice(&0x102u16.to_le_bytes());
+    exe[0xb4..0xb8].copy_from_slice(&0x400000u32.to_le_bytes());
+    let path = v.dir.join("data-import.exe");
+    std::fs::write(&path, &exe).unwrap();
+    let mut mem = GuestMem::new().unwrap();
+    let mut table = ApiTable::new();
+    let loaded = wire::loader::load_image(&mut mem, &mut table, &path, "data-import.exe").unwrap();
+    let p = mem.read_u32(0x401400).unwrap();
+    assert!(table.stub_index(p).is_none());
+    assert_eq!(mem.read_u32(p).unwrap(), loaded.cmdline_a);
+    mem.write_u32(p, loaded.cmdline_w).unwrap();
+    assert_eq!(table.lookup("msvcrt.dll", "_acmdln"), Some(p));
+}
+
+#[test]
 fn frame_adjustment_client_geometry_and_paint_clipping_share_the_same_pixels() {
     let mut v = Vm::new();
     let def = v.api.register("user32.dll", Some("DefWindowProcW"), None);
@@ -1028,6 +1810,216 @@ fn test_tls_dll(attach_ok: bool) -> Vec<u8> {
 }
 
 #[test]
+fn main_static_tls_is_initialized_before_entry_and_reserves_its_loader_index() {
+    let mut v = Vm::new();
+    let mut bytes = test_tls_dll(true);
+    bytes[0x96..0x98].copy_from_slice(&0x102u16.to_le_bytes());
+    bytes[0xb4..0xb8].copy_from_slice(&0x400000u32.to_le_bytes());
+    for rva in [0x1008usize, 0x1088, 0x1800, 0x1804, 0x1808, 0x180c] {
+        let at = 0x200 + rva - 0x1000;
+        let va = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        bytes[at..at + 4].copy_from_slice(&(va - 0x10000000 + 0x400000).to_le_bytes());
+    }
+    let path = v.dir.join("main-tls.exe");
+    std::fs::write(&path, &bytes).unwrap();
+    let mut main_mem = GuestMem::new().unwrap();
+    let mut main_api = ApiTable::new();
+    let loaded =
+        wire::loader::load_image(&mut main_mem, &mut main_api, &path, "main-tls.exe").unwrap();
+    main_mem.commit(CODE, 0x10000).unwrap();
+    main_mem.commit(DATA, 0x10000).unwrap();
+    v.mem = main_mem;
+    v.api = main_api;
+    v.state
+        .modules
+        .register_main(
+            &v.mem,
+            loaded.image_base,
+            path.clone(),
+            "C:\\main-tls.exe".into(),
+        )
+        .unwrap();
+    v.state
+        .modules
+        .setup_tls_thread(
+            &mut v.mem,
+            &mut v.state.heap,
+            v.state.process_heap,
+            loaded.teb,
+        )
+        .unwrap();
+    let index = v.mem.read_u32(0x401920).unwrap();
+    assert_eq!(index, 0);
+    let vector = v.mem.read_u32(loaded.teb + 0x2c).unwrap();
+    assert_ne!(vector, 0);
+    let block = v.mem.read_u32(vector).unwrap();
+    assert_eq!(v.mem.read_u32(block).unwrap(), 37);
+    for i in 4..16 {
+        assert_eq!(v.mem.read_u8(block + i).unwrap(), 0);
+    }
+    let f = dll_export(&mut v, loaded.image_base, "GetValue");
+    assert!(matches!(
+        v.cpu
+            .call_guest(
+                &mut v.mem,
+                &mut v.api,
+                &mut v.state,
+                &mut v.log,
+                &mut v.sched,
+                f,
+                &[],
+                1000
+            )
+            .unwrap(),
+        wire::cpu::GuestCallOutcome::Returned(37)
+    ));
+    let thread = v.k("CreateThread", &[0, 0, CODE, 0, 4, 0]);
+    let teb = v.sched.threads[v.sched.thread_index_by_handle(thread).unwrap()].teb;
+    let other = v.mem.read_u32(v.mem.read_u32(teb + 0x2c).unwrap()).unwrap();
+    assert_ne!(other, block);
+    assert_eq!(v.mem.read_u32(other).unwrap(), 37);
+    std::fs::write(v.dir.join("tls.dll"), test_tls_dll(true)).unwrap();
+    v.mem.write_bytes(DATA, b"tls.dll\0").unwrap();
+    let dll = v.k("LoadLibraryA", &[DATA]);
+    assert_ne!(dll, 0);
+    assert_eq!(v.mem.read_u32(dll + 0x1920).unwrap(), 1);
+    assert_eq!(v.mem.read_u32(block).unwrap(), 38);
+    v.k("FreeLibrary", &[dll]);
+    assert_eq!(v.mem.read_u32(vector).unwrap(), block);
+    // Nonempty main callback lists are rejected before registration, never ignored.
+    bytes[0xb30..0xb34].copy_from_slice(&0x401000u32.to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+    let mut mem = GuestMem::new().unwrap();
+    let mut api = ApiTable::new();
+    wire::loader::load_image(&mut mem, &mut api, &path, "main-tls.exe").unwrap();
+    assert!(wire::modules::Modules::default()
+        .register_main(&mem, 0x400000, path, "C:\\main-tls.exe".into())
+        .unwrap_err()
+        .contains("callbacks"));
+}
+
+#[test]
+fn wmi_local_objects_balance_references_and_fail_queries_without_null_dereferences() {
+    let mut v = Vm::new();
+    let clsid = [0x4590f811u32, 0x11d01d3a, 0xaa001f89, 0x242e4b00];
+    let iid = [0xdc12a687u32, 0x11cf737f, 0xaa004d88, 0x242e4b00];
+    for (p, g) in [(DATA, clsid), (DATA + 0x20, iid)] {
+        v.mem
+            .write_bytes(
+                p,
+                &g.into_iter().flat_map(u32::to_le_bytes).collect::<Vec<_>>(),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        v.call(
+            "ole32.dll",
+            "CoCreateInstance",
+            &[DATA, 0, 1, DATA + 0x20, DATA + 0x100]
+        ),
+        0
+    );
+    let locator = v.mem.read_u32(DATA + 0x100).unwrap();
+    assert_ne!(locator, 0);
+    v.mem.write_bytes(DATA + 0x40, &[0; 16]).unwrap();
+    assert_eq!(
+        v.call(
+            "wire.wmi",
+            "IWbemLocator.QueryInterface",
+            &[locator, DATA + 0x40, DATA + 0x104]
+        ),
+        0x80004002
+    );
+    assert_eq!(v.mem.read_u32(DATA + 0x104).unwrap(), 0);
+    assert_eq!(
+        v.call(
+            "wire.wmi",
+            "IWbemLocator.QueryInterface",
+            &[locator, DATA + 0x20, DATA + 0x104]
+        ),
+        0
+    );
+    assert_eq!(v.call("wire.wmi", "IWbemLocator.Release", &[locator]), 1);
+    v.wide(DATA + 0x200, "\\\\.\\ROOT\\CIMV2");
+    assert_eq!(
+        v.call(
+            "wire.wmi",
+            "IWbemLocator.ConnectServer",
+            &[locator, DATA + 0x200, 0, 0, 0, 0, 0, 0, DATA + 0x108]
+        ),
+        0
+    );
+    let service = v.mem.read_u32(DATA + 0x108).unwrap();
+    assert_ne!(service, 0);
+    v.wide(DATA + 0x300, "WQL");
+    v.wide(DATA + 0x400, "SELECT * FROM Win32_VideoController");
+    v.mem.write_u32(DATA + 0x10c, 0xdeadbeef).unwrap();
+    assert_eq!(
+        v.call(
+            "wire.wmi",
+            "IWbemServices.ExecQuery",
+            &[service, DATA + 0x300, DATA + 0x400, 0x30, 0, DATA + 0x10c]
+        ),
+        0x80041011
+    );
+    assert_eq!(v.mem.read_u32(DATA + 0x10c).unwrap(), 0);
+    assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 28);
+    v.wide(DATA + 0x400, "SELECT * FROM Win32_OperatingSystem");
+    assert_eq!(
+        v.call(
+            "wire.wmi",
+            "IWbemServices.ExecQuery",
+            &[service, DATA + 0x300, DATA + 0x400, 0x30, 0, DATA + 0x10c]
+        ),
+        0
+    );
+    let enumerator = v.mem.read_u32(DATA + 0x10c).unwrap();
+    assert_eq!(
+        v.call(
+            "wire.wmi",
+            "IEnumWbemClassObject.Next",
+            &[enumerator, u32::MAX, 1, DATA + 0x110, DATA + 0x114]
+        ),
+        0
+    );
+    assert_eq!(v.mem.read_u32(DATA + 0x114).unwrap(), 1);
+    let row = v.mem.read_u32(DATA + 0x110).unwrap();
+    v.wide(DATA + 0x500, "Version");
+    assert_eq!(
+        v.call(
+            "wire.wmi",
+            "IWbemClassObject.Get",
+            &[row, DATA + 0x500, 0, DATA + 0x600, DATA + 0x620, 0]
+        ),
+        0
+    );
+    assert_eq!(v.mem.read_u16(DATA + 0x600).unwrap(), 8);
+    let bstr = v.mem.read_u32(DATA + 0x608).unwrap();
+    assert_eq!(v.mem.read_wstr(bstr, 32).unwrap(), "6.1.7601");
+    assert_eq!(v.call("oleaut32.dll", "VariantClear", &[DATA + 0x600]), 0);
+    assert_eq!(
+        v.call(
+            "wire.wmi",
+            "IEnumWbemClassObject.Next",
+            &[enumerator, u32::MAX, 1, DATA + 0x110, DATA + 0x114]
+        ),
+        1
+    );
+    assert_eq!(v.mem.read_u32(DATA + 0x114).unwrap(), 0);
+    assert_eq!(v.call("wire.wmi", "IWbemClassObject.Release", &[row]), 0);
+    assert_eq!(
+        v.call("wire.wmi", "IEnumWbemClassObject.Release", &[enumerator]),
+        0
+    );
+    assert_eq!(v.call("wire.wmi", "IWbemServices.Release", &[service]), 0);
+    assert_eq!(v.call("wire.wmi", "IWbemLocator.Release", &[locator]), 0);
+    assert_eq!(
+        v.k("HeapSize", &[v.state.process_heap, 0, locator]),
+        u32::MAX
+    );
+}
+
+#[test]
 fn dll_static_tls_is_ready_for_dllmain_and_isolated_for_existing_and_new_threads() {
     let mut v = Vm::new();
     let existing = v.k("CreateThread", &[0, 0, CODE, 0, 4, 0]);
@@ -1187,6 +2179,78 @@ fn dll_mapping_relocation_exports_initialization_and_reference_counts() {
     assert_eq!(v.k("LoadLibraryA", &[DATA]), handle);
     assert_eq!(v.mem.read_u32(DATA + 0x700).unwrap(), 2);
     assert_eq!(v.mem.read_u32(handle + 0x1200).unwrap(), 0x12345678);
+}
+
+#[test]
+fn dll_sidecar_ir_handles_relocation_unload_reload_and_stale_source_hashes() {
+    let mut v = Vm::new();
+    v.cpu.profile_opcodes = false;
+    v.cpu
+        .install_ir(wire::ir::Image::from_code(CODE, &[]).unwrap(), &v.mem)
+        .unwrap();
+    let bytes = test_dll("kernel32.dll!GetCurrentProcessId", true, 0x12345678);
+    std::fs::write(v.dir.join("aot.dll"), &bytes).unwrap();
+    let image = wire::ir::Image::from_pe(&bytes).unwrap();
+    std::fs::write(v.dir.join("aot.dll.wir"), image.encode()).unwrap();
+    v.wide(DATA, "aot.dll");
+    for i in 0..2 {
+        let before = v.cpu.ir_steps;
+        let module = v.k("LoadLibraryW", &[DATA]);
+        assert_eq!(module, 0x50000000);
+        assert_eq!(v.mem.read_u32(DATA + 0x700).unwrap(), i + 1);
+        assert_eq!(v.mem.read_u32(DATA + 0x70c).unwrap(), 4242);
+        assert!(
+            v.cpu.ir_steps > before,
+            "DllMain actually executes module IR"
+        );
+        let function = dll_export(&mut v, module, "GetValue");
+        assert!(matches!(
+            v.cpu
+                .call_guest(
+                    &mut v.mem,
+                    &mut v.api,
+                    &mut v.state,
+                    &mut v.log,
+                    &mut v.sched,
+                    function,
+                    &[],
+                    1_000_000
+                )
+                .unwrap(),
+            wire::cpu::GuestCallOutcome::Returned(0x12345678)
+        ));
+        // The relocated absolute MOV cannot use the original operand.
+        assert!(v.cpu.ir_fallbacks > 0);
+        assert_eq!(v.k("FreeLibrary", &[module]), 1);
+        assert!(!v.mem.is_committed(module));
+    }
+    // A matching path is insufficient: a changed source must run as x86.
+    std::fs::write(
+        v.dir.join("aot.dll"),
+        test_dll("kernel32.dll!GetCurrentProcessId", true, 0xcafebabe),
+    )
+    .unwrap();
+    let before = v.cpu.ir_steps;
+    let module = v.k("LoadLibraryW", &[DATA]);
+    assert_ne!(module, 0);
+    let function = dll_export(&mut v, module, "GetValue");
+    assert!(matches!(
+        v.cpu
+            .call_guest(
+                &mut v.mem,
+                &mut v.api,
+                &mut v.state,
+                &mut v.log,
+                &mut v.sched,
+                function,
+                &[],
+                1_000_000
+            )
+            .unwrap(),
+        wire::cpu::GuestCallOutcome::Returned(0xcafebabe)
+    ));
+    assert_eq!(v.cpu.ir_steps, before);
+    assert_eq!(v.k("FreeLibrary", &[module]), 1);
 }
 
 #[test]
@@ -1372,6 +2436,7 @@ fn dll_missing_imports_and_malformed_images_fail_without_fake_modules() {
     ];
     let mut no_reloc = valid.clone();
     no_reloc[0x120..0x128].fill(0);
+    no_reloc[0x96..0x98].copy_from_slice(&0x2103u16.to_le_bytes()); // fixed image, relocations stripped
     cases.push((no_reloc, 193));
     let mut wrong_reloc = valid.clone();
     wrong_reloc[0x908..0x90a].copy_from_slice(&0x7001u16.to_le_bytes());
@@ -1584,6 +2649,39 @@ fn x86_slist_init_and_flush_preserve_sequence_and_return_chain() {
     assert_eq!(v.mem.read_u64(DATA).unwrap(), 0); // sequence wrapped, depth/pointer cleared
     assert_eq!(v.k("InterlockedFlushSList", &[DATA]), 0);
     assert_eq!(v.mem.read_u64(DATA).unwrap(), 1u64 << 48);
+}
+
+#[test]
+fn zero_delay_yields_finish_the_callers_frame_before_switching_threads() {
+    for (name, args, cleanup, result) in [
+        ("Sleep", vec![0], 8, 0),
+        ("SleepEx", vec![0, 0], 12, 0),
+        ("SwitchToThread", vec![], 4, 1),
+    ] {
+        let mut v = Vm::new();
+        v.k("CreateThread", &[0, 0, CODE + 16, 0x98765432, 0, 0]);
+        v.k("SetLastError", &[123]);
+        let worker = v.sched.threads[1].ctx;
+        let worker_teb = v.sched.threads[1].teb;
+        v.mem.write_u32(worker_teb + 0x34, 456).unwrap();
+        v.k(name, &args);
+        assert_eq!(v.sched.current, 1, "{name}");
+        assert_eq!(v.cpu.eip, worker.eip);
+        assert_eq!(v.cpu.regs, worker.regs);
+        assert_eq!(v.cpu.fs_base, worker_teb);
+        assert_eq!(v.mem.read_u32(worker_teb + 0x34).unwrap(), 456);
+        assert!(v.sched.round_robin(&mut v.cpu));
+        assert_eq!(v.cpu.eip, RET, "{name} return PC");
+        assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + cleanup);
+        assert_eq!(v.cpu.regs[0], result);
+        assert_eq!(v.cpu.fs_base, TEB_ADDR);
+        assert_eq!(v.mem.read_u32(TEB_ADDR + 0x34).unwrap(), 123);
+        // A single runnable thread still returns normally without switching.
+        v.sched.threads[1].state = wire::thread::ThreadState::Suspended;
+        assert_eq!(v.k(name, &args), 0);
+        assert_eq!(v.sched.current, 0);
+        assert_eq!(v.cpu.eip, RET);
+    }
 }
 
 #[test]
@@ -1891,6 +2989,319 @@ fn test_window(v: &mut Vm, wndproc: u32) -> u32 {
         "CreateWindowExW",
         &[0, atom, 0, 0, 3, 4, 640, 480, 0, 0, 0x400000, 0x1234],
     )
+}
+
+#[test]
+fn keyboard_host_state_and_retrieved_state_follow_different_boundaries() {
+    let mut v = Vm::new();
+    v.mem
+        .write_bytes(CODE, &[0xb8, 1, 0, 0, 0, 0xc2, 16, 0])
+        .unwrap();
+    let hwnd = test_window(&mut v, CODE);
+    wire::user32::host_message(&mut v.state, &mut v.sched, hwnd, 0x100, 0x41, 1);
+    assert_eq!(
+        v.call("user32.dll", "GetAsyncKeyState", &[0x41]),
+        0xffff8001
+    );
+    assert_eq!(
+        v.call("user32.dll", "GetAsyncKeyState", &[0x41]),
+        0xffff8000
+    );
+    assert_eq!(v.call("user32.dll", "GetKeyState", &[0x41]), 0);
+    assert_eq!(
+        v.call(
+            "user32.dll",
+            "PeekMessageW",
+            &[DATA + 0x900, hwnd, 0x100, 0x100, 0]
+        ),
+        1
+    );
+    assert_eq!(v.call("user32.dll", "GetKeyState", &[0x41]), 0);
+    assert_eq!(
+        v.call(
+            "user32.dll",
+            "PeekMessageW",
+            &[DATA + 0x900, hwnd, 0x100, 0x100, 1]
+        ),
+        1
+    );
+    assert_eq!(v.call("user32.dll", "GetKeyState", &[0x41]), 0xffff8000);
+    assert_eq!(v.call("user32.dll", "GetKeyboardState", &[DATA + 0xa00]), 1);
+    assert_eq!(v.mem.read_u8(DATA + 0xa41).unwrap(), 0x80);
+    wire::user32::host_message(&mut v.state, &mut v.sched, hwnd, 0x101, 0x41, 0xc0000001);
+    assert_eq!(v.call("user32.dll", "GetAsyncKeyState", &[0x41]), 0);
+    assert_eq!(v.call("user32.dll", "GetKeyState", &[0x41]), 0xffff8000);
+    assert_eq!(
+        v.call(
+            "user32.dll",
+            "GetMessageW",
+            &[DATA + 0x900, hwnd, 0x101, 0x101]
+        ),
+        1
+    );
+    assert_eq!(v.call("user32.dll", "GetKeyState", &[0x41]), 0);
+    assert_eq!(v.call("user32.dll", "GetAsyncKeyState", &[256]), 0);
+    assert!(v
+        .try_call("user32.dll", "GetKeyboardState", &[0xfffffff0])
+        .is_err());
+    // CapsLock toggles once per physical press, not again on auto-repeat.
+    for lp in [1, 1 | (1 << 30)] {
+        wire::user32::host_message(&mut v.state, &mut v.sched, hwnd, 0x100, 0x14, lp);
+        v.call(
+            "user32.dll",
+            "GetMessageW",
+            &[DATA + 0x900, hwnd, 0x100, 0x100],
+        );
+        assert_eq!(v.call("user32.dll", "GetKeyState", &[0x14]), 0xffff8001);
+    }
+    wire::user32::host_message(&mut v.state, &mut v.sched, hwnd, 0x101, 0x14, 0xc0000001);
+    v.call(
+        "user32.dll",
+        "GetMessageW",
+        &[DATA + 0x900, hwnd, 0x101, 0x101],
+    );
+    assert_eq!(v.call("user32.dll", "GetKeyState", &[0x14]), 1);
+}
+
+#[test]
+fn keyboard_translation_defers_host_text_and_preserves_unicode_and_ansi() {
+    for wide in [true, false] {
+        let mut v = Vm::new();
+        v.mem
+            .write_bytes(CODE, &[0xb8, 1, 0, 0, 0, 0xc2, 16, 0])
+            .unwrap();
+        let hwnd = if wide {
+            test_window(&mut v, CODE)
+        } else {
+            v.mem.write_bytes(DATA + 128, b"AnsiKeyboard\0").unwrap();
+            for (i, n) in [48, 0, CODE, 0, 0, 0x400000, 0, 0, 0, 0, DATA + 128, 0]
+                .into_iter()
+                .enumerate()
+            {
+                v.mem.write_u32(DATA + i as u32 * 4, n).unwrap();
+            }
+            let atom = v.call("user32.dll", "RegisterClassExA", &[DATA]);
+            v.call(
+                "user32.dll",
+                "CreateWindowExA",
+                &[0, atom, 0, 0, 0, 0, 640, 480, 0, 0, 0x400000, 0],
+            )
+        };
+        assert_ne!(hwnd, 0);
+        // The host layout resolves text; the guest virtual key does not imply a US character.
+        for (msg, key, lp, text) in [(0x100, 0x51, 1, "あ"), (0x104, 0x42, 0x20000001, "B")] {
+            wire::user32::host_message(&mut v.state, &mut v.sched, hwnd, msg, key, lp);
+            for c in text.encode_utf16() {
+                wire::user32::host_message(&mut v.state, &mut v.sched, hwnd, 0x102, c as u32, lp);
+            }
+            let character = if msg == 0x104 { 0x106 } else { 0x102 };
+            assert_eq!(
+                v.call(
+                    "user32.dll",
+                    "PeekMessageW",
+                    &[DATA + 0x900, hwnd, character, character, 1]
+                ),
+                0
+            );
+            v.call("user32.dll", "GetMessageW", &[DATA + 0x900, hwnd, msg, msg]);
+            assert_eq!(v.call("user32.dll", "TranslateMessage", &[DATA + 0x900]), 1);
+            let expected: Vec<u32> = if wide {
+                text.encode_utf16().map(u32::from).collect()
+            } else {
+                wire::codepage::encode(text, 932)
+                    .unwrap()
+                    .0
+                    .into_iter()
+                    .map(u32::from)
+                    .collect()
+            };
+            for c in expected {
+                assert_eq!(
+                    v.call(
+                        "user32.dll",
+                        "PeekMessageW",
+                        &[DATA + 0x900, hwnd, character, character, 1]
+                    ),
+                    1
+                );
+                assert_eq!(v.mem.read_u32(DATA + 0x908).unwrap(), c);
+                assert_eq!(v.mem.read_u32(DATA + 0x90c).unwrap(), lp);
+            }
+            assert_eq!(
+                v.call(
+                    "user32.dll",
+                    "PeekMessageW",
+                    &[DATA + 0x900, hwnd, character, character, 1]
+                ),
+                0
+            );
+        }
+    }
+}
+
+#[test]
+fn keyboard_posted_messages_do_not_fake_physical_key_state() {
+    let mut v = Vm::new();
+    v.mem
+        .write_bytes(CODE, &[0xb8, 1, 0, 0, 0, 0xc2, 16, 0])
+        .unwrap();
+    let hwnd = test_window(&mut v, CODE);
+    v.call("user32.dll", "PostMessageW", &[hwnd, 0x100, 13, 1]);
+    v.call(
+        "user32.dll",
+        "GetMessageW",
+        &[DATA + 0x900, hwnd, 0x100, 0x100],
+    );
+    assert_eq!(v.call("user32.dll", "GetKeyState", &[13]), 0);
+    assert_eq!(v.call("user32.dll", "GetAsyncKeyState", &[13]), 0);
+    assert_eq!(v.call("user32.dll", "TranslateMessage", &[DATA + 0x900]), 1);
+    assert_eq!(
+        v.call(
+            "user32.dll",
+            "PeekMessageW",
+            &[DATA + 0x900, hwnd, 0x102, 0x102, 1]
+        ),
+        1
+    );
+    assert_eq!(v.mem.read_u32(DATA + 0x908).unwrap(), 13);
+    assert_eq!(v.call("user32.dll", "TranslateMessage", &[DATA + 0x900]), 0);
+}
+#[test]
+fn window_properties_default_classes_and_registered_names_have_lifetimes() {
+    let mut v = Vm::new();
+    v.mem.write_bytes(DATA + 0x400, b"Static\0").unwrap();
+    let hwnd = v.call(
+        "user32.dll",
+        "CreateWindowExA",
+        &[0, DATA + 0x400, 0, 0, 0, 0, 30, 20, 0, 0, 0x400000, 0],
+    );
+    assert_ne!(hwnd, 0);
+    v.mem.write_bytes(DATA + 0x500, b"EngineContext\0").unwrap();
+    assert_eq!(
+        v.call("user32.dll", "SetPropA", &[hwnd, DATA + 0x500, 0x12345678]),
+        1
+    );
+    v.wide(DATA + 0x600, "EngineContext");
+    assert_eq!(
+        v.call("user32.dll", "GetPropW", &[hwnd, DATA + 0x600]),
+        0x12345678
+    );
+    assert_eq!(
+        v.call("user32.dll", "RemovePropW", &[hwnd, DATA + 0x600]),
+        0x12345678
+    );
+    assert_eq!(v.call("user32.dll", "GetPropA", &[hwnd, DATA + 0x500]), 0);
+    assert_eq!(v.call("user32.dll", "SetPropW", &[hwnd, 123, 456]), 1);
+    assert_eq!(v.call("user32.dll", "GetPropA", &[hwnd, 123]), 456);
+    let id = v.call("user32.dll", "RegisterWindowMessageA", &[DATA + 0x500]);
+    assert!(id >= 0xc000);
+    assert_eq!(
+        v.call("user32.dll", "RegisterWindowMessageW", &[DATA + 0x600]),
+        id
+    );
+    let desktop = v.call("user32.dll", "GetDesktopWindow", &[]);
+    assert_eq!(v.call("user32.dll", "DestroyWindow", &[desktop]), 0);
+    assert_eq!(v.call("user32.dll", "IsWindow", &[desktop]), 1);
+    assert_eq!(v.call("user32.dll", "DestroyWindow", &[hwnd]), 1);
+    assert_eq!(v.call("user32.dll", "GetPropA", &[hwnd, 123]), 0);
+}
+#[test]
+fn display_enumeration_has_consistent_modes_and_checked_output_layouts() {
+    let mut v = Vm::new();
+    for wide in [false, true] {
+        let suffix = if wide { "W" } else { "A" };
+        let size = if wide { 840 } else { 424 };
+        v.mem.write_u32(DATA, size).unwrap();
+        assert_eq!(
+            v.call(
+                "user32.dll",
+                &format!("EnumDisplayDevices{suffix}"),
+                &[0, 0, DATA, 0]
+            ),
+            1
+        );
+        assert_eq!(
+            wire::file_api::read_name(&v.mem, DATA + 4, wide).unwrap(),
+            "\\\\.\\DISPLAY1"
+        );
+        assert_eq!(
+            v.call(
+                "user32.dll",
+                &format!("EnumDisplayDevices{suffix}"),
+                &[0, 1, DATA, 0]
+            ),
+            0
+        );
+        let dm = DATA + 0x1000;
+        v.mem
+            .write_u16(
+                dm + if wide { 68 } else { 36 },
+                if wide { 220 } else { 156 },
+            )
+            .unwrap();
+        assert_eq!(
+            v.call(
+                "user32.dll",
+                &format!("EnumDisplaySettings{suffix}"),
+                &[0, u32::MAX, dm]
+            ),
+            1
+        );
+        let bits = dm + if wide { 168 } else { 104 };
+        assert_eq!(v.mem.read_u32(bits).unwrap(), 32);
+        assert_eq!(v.mem.read_u32(bits + 4).unwrap(), 1024);
+        assert_eq!(v.mem.read_u32(bits + 8).unwrap(), 768);
+        assert_eq!(
+            v.call(
+                "user32.dll",
+                &format!("EnumDisplaySettings{suffix}"),
+                &[0, 1, dm]
+            ),
+            0
+        );
+        v.mem.write_u16(dm + if wide { 68 } else { 36 }, 8).unwrap();
+        assert_eq!(
+            v.call(
+                "user32.dll",
+                &format!("EnumDisplaySettings{suffix}"),
+                &[0, 0, dm]
+            ),
+            0
+        );
+        assert_eq!(v.state.last_error, 87);
+    }
+}
+#[test]
+fn path_directory_creation_readonly_and_delete_stay_inside_guest_root() {
+    let mut v = Vm::new();
+    v.mem
+        .write_bytes(DATA, b"C:\\nested\\child\\save.dat\0")
+        .unwrap();
+    assert_eq!(
+        v.call("imagehlp.dll", "MakeSureDirectoryPathExists", &[DATA]),
+        1
+    );
+    assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 8);
+    assert!(v.dir.join("nested/child").is_dir());
+    assert!(!v.dir.join("nested/child/save.dat").exists());
+    std::fs::write(v.dir.join("nested/child/save.dat"), b"save").unwrap();
+    assert_eq!(v.k("SetFileAttributesA", &[DATA, 1]), 1);
+    assert_eq!(v.k("DeleteFileA", &[DATA]), 0);
+    assert_eq!(v.state.last_error, 5);
+    assert_eq!(v.k("SetFileAttributesA", &[DATA, 0x80]), 1);
+    assert_eq!(v.k("DeleteFileA", &[DATA]), 1);
+    assert_eq!(v.k("DeleteFileA", &[DATA]), 0);
+    v.mem.write_bytes(DATA + 0x400, b".bak\0").unwrap();
+    assert_eq!(
+        v.call("shlwapi.dll", "PathRenameExtensionA", &[DATA, DATA + 0x400]),
+        1
+    );
+    assert!(v.mem.read_cstr(DATA, 260).unwrap().ends_with("save.bak"));
+    assert_eq!(
+        v.call("winmm.dll", "mciSendCommandW", &[0, 0x803, 0, 0]),
+        274
+    );
+    assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 20);
 }
 
 #[test]
@@ -2284,6 +3695,126 @@ fn blocked_thread_resumes_after_worker_signals_and_exits() {
     assert!(matches!(outcome, wire::cpu::RunOutcome::Exited(0)));
     assert_eq!(v.mem.read_u32(DATA + 16).unwrap(), 0);
     assert_eq!(v.mem.read_u32(DATA + 20).unwrap(), 42);
+}
+#[test]
+fn cross_thread_sends_wake_when_window_is_destroyed_or_owner_exits() {
+    fn call(code: &mut Vec<u8>, stub: u32, args: &[u32]) {
+        for n in args.iter().rev() {
+            code.push(0x68);
+            code.extend(n.to_le_bytes());
+        }
+        code.push(0xb8);
+        code.extend(stub.to_le_bytes());
+        code.extend([0xff, 0xd0]);
+    }
+    for owner_exits in [false, true] {
+        let mut v = Vm::new();
+        v.mem
+            .write_bytes(CODE + 0x600, &[0xb8, 1, 0, 0, 0, 0xc2, 16, 0])
+            .unwrap();
+        let hwnd = test_window(&mut v, CODE + 0x600);
+        let send = v.api.register("user32.dll", Some("SendMessageW"), None);
+        let exit = v.api.register("kernel32.dll", Some("ExitProcess"), None);
+        let sleep = v.api.register("kernel32.dll", Some("Sleep"), None);
+        let finish = v.api.register(
+            if owner_exits {
+                "kernel32.dll"
+            } else {
+                "user32.dll"
+            },
+            Some(if owner_exits {
+                "ExitThread"
+            } else {
+                "DestroyWindow"
+            }),
+            None,
+        );
+        v.mem.write_u32(DATA + 0x7000, 0xdeadbeef).unwrap();
+        let mut worker = Vec::new();
+        call(&mut worker, send, &[hwnd, 0x405, 0, 0]);
+        worker.push(0xa3);
+        worker.extend((DATA + 0x7000).to_le_bytes());
+        call(&mut worker, exit, &[0]);
+        v.mem.write_bytes(CODE + 0x400, &worker).unwrap();
+        v.k("CreateThread", &[0, 0, CODE + 0x400, 0, 0, 0]);
+        let mut main = Vec::new();
+        call(&mut main, sleep, &[1]);
+        call(&mut main, finish, &[if owner_exits { 42 } else { hwnd }]);
+        call(&mut main, sleep, &[100]);
+        v.mem.write_bytes(CODE, &main).unwrap();
+        v.cpu.eip = CODE;
+        let result = v.cpu.run(
+            &mut v.mem,
+            &mut v.api,
+            &mut v.state,
+            &mut v.log,
+            &mut v.sched,
+            10000,
+        );
+        if let wire::cpu::RunOutcome::Crashed(error) = result {
+            panic!("{error}");
+        }
+        assert!(matches!(result, wire::cpu::RunOutcome::Exited(0)));
+        assert_eq!(v.mem.read_u32(DATA + 0x7000).unwrap(), 0);
+        assert!(!v.state.user32.windows.contains_key(&hwnd));
+    }
+}
+
+#[test]
+fn cross_thread_send_message_runs_on_owner_teb_and_preserves_sender_result() {
+    fn call(code: &mut Vec<u8>, stub: u32, args: &[u32]) {
+        for &n in args.iter().rev() {
+            code.push(0x68);
+            code.extend(n.to_le_bytes());
+        }
+        code.push(0xb8);
+        code.extend(stub.to_le_bytes());
+        code.extend([0xff, 0xd0]);
+    }
+    let mut v = Vm::new();
+    let mut wndproc = vec![0x64, 0xa1, 0x24, 0, 0, 0, 0xa3];
+    wndproc.extend((DATA + 0x7000).to_le_bytes());
+    wndproc.extend([0xb8, 0x34, 0x12, 0, 0, 0xc2, 16, 0]);
+    v.mem.write_bytes(CODE + 0x600, &wndproc).unwrap();
+    let hwnd = test_window(&mut v, CODE + 0x600);
+    v.mem.write_u32(DATA + 0x7000, 0).unwrap();
+    let send = v.api.register("user32.dll", Some("SendMessageW"), None);
+    let post = v
+        .api
+        .register("user32.dll", Some("PostThreadMessageW"), None);
+    let main_tid = v.sched.current_tid();
+    v.mem.write_u32(TEB_ADDR + 0x24, main_tid).unwrap();
+    let mut worker = Vec::new();
+    call(&mut worker, send, &[hwnd, 0x405, 0, 0]);
+    worker.push(0xa3);
+    worker.extend((DATA + 0x7004).to_le_bytes());
+    call(&mut worker, post, &[main_tid, 0x406, 0, 0]);
+    worker.extend([0xc2, 4, 0]);
+    v.mem.write_bytes(CODE + 0x400, &worker).unwrap();
+    v.k("CreateThread", &[0, 0, CODE + 0x400, 0, 0, 0]);
+    let get = v.api.register("user32.dll", Some("GetMessageW"), None);
+    let exit = v.api.register("kernel32.dll", Some("ExitProcess"), None);
+    let mut main = Vec::new();
+    call(&mut main, get, &[DATA + 0x7100, 0, 0, 0]);
+    call(&mut main, exit, &[0]);
+    v.mem.write_bytes(CODE, &main).unwrap();
+    v.cpu.eip = CODE;
+    let result = v.cpu.run(
+        &mut v.mem,
+        &mut v.api,
+        &mut v.state,
+        &mut v.log,
+        &mut v.sched,
+        10000,
+    );
+    match result {
+        wire::cpu::RunOutcome::Exited(0) => {}
+        wire::cpu::RunOutcome::Crashed(e) => panic!("{e}"),
+        _ => panic!("did not exit"),
+    }
+    assert_eq!(v.mem.read_u32(DATA + 0x7000).unwrap(), main_tid);
+    assert_eq!(v.mem.read_u32(DATA + 0x7004).unwrap(), 0x1234);
+    assert_eq!(v.mem.read_u32(DATA + 0x7104).unwrap(), 0x406);
 }
 
 #[test]
@@ -3153,6 +4684,326 @@ fn d3d_device(v: &mut Vm) -> (u32, u32, u32) {
     (factory, device, hwnd)
 }
 #[test]
+fn d3d9_target_binding_resets_extent_and_rhw_drives_perspective_sampling() {
+    let mut v = Vm::new();
+    let (factory, device, _) = d3d_device(&mut v);
+    d3d_com(&mut v, device, 18, &[0, 0, 0, DATA + 0x900]);
+    let back = v.mem.read_u32(DATA + 0x900).unwrap();
+    assert_eq!(
+        d3d_com(&mut v, device, 28, &[8, 4, 21, 0, 0, 0, DATA + 0x900, 0]),
+        0
+    );
+    let target = v.mem.read_u32(DATA + 0x900).unwrap();
+    assert_eq!(d3d_com(&mut v, device, 37, &[0, target]), 0);
+    d3d_com(&mut v, device, 48, &[DATA]);
+    assert_eq!(v.mem.read_u32(DATA + 8).unwrap(), 8);
+    assert_eq!(d3d_com(&mut v, device, 37, &[0, back]), 0);
+    d3d_com(&mut v, device, 48, &[DATA]);
+    assert_eq!(v.mem.read_u32(DATA + 8).unwrap(), 4);
+    assert_eq!(
+        d3d_com(&mut v, device, 23, &[8, 1, 1, 0, 21, 1, DATA + 0x900, 0]),
+        0
+    );
+    let texture = v.mem.read_u32(DATA + 0x900).unwrap();
+    d3d_com(&mut v, texture, 19, &[0, DATA + 0x910, 0, 0]);
+    let bits = v.mem.read_u32(DATA + 0x914).unwrap();
+    for i in 0..8 {
+        v.mem.write_u32(bits + i * 4, 0xff000000 + i * 10).unwrap();
+    }
+    d3d_com(&mut v, texture, 20, &[0]);
+    d3d_com(&mut v, device, 65, &[0, texture]);
+    for (i, values) in [
+        [0f32, 0., 0.5, 1., 0., 0.],
+        [4., 0., 0.5, 0.5, 1., 0.],
+        [0., 4., 0.5, 1., 0., 0.],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for (j, n) in values.into_iter().enumerate() {
+            v.mem
+                .write_u32(DATA + i as u32 * 24 + j as u32 * 4, n.to_bits())
+                .unwrap();
+        }
+    }
+    d3d_com(&mut v, device, 89, &[0x104]);
+    d3d_com(&mut v, device, 57, &[22, 1]);
+    d3d_com(&mut v, device, 41, &[]);
+    assert_eq!(d3d_com(&mut v, device, 83, &[4, 1, DATA, 24]), 0);
+    d3d_com(&mut v, back, 13, &[DATA + 0x910, 0, 0x10]);
+    let pixels = v.mem.read_u32(DATA + 0x914).unwrap();
+    // Barycentrics=(1/2,1/4,1/4), u=(1/4*1/2)/(1/2+1/8+1/4)=1/7.
+    assert_eq!(v.mem.read_u32(pixels + 5 * 4).unwrap(), 0xff00000a);
+    d3d_com(&mut v, back, 14, &[]);
+    d3d_com(&mut v, device, 42, &[]);
+    for object in [back, target, texture, device, factory] {
+        d3d_com(&mut v, object, 2, &[]);
+    }
+}
+
+#[test]
+fn d3d9_indexed_declarations_transforms_and_reset_preserve_real_resources() {
+    let mut v = Vm::new();
+    let (factory, device, _) = d3d_device(&mut v);
+    assert_eq!(
+        d3d_com(&mut v, device, 23, &[1, 1, 1, 0, 21, 1, DATA + 0x900, 0]),
+        0
+    );
+    let texture = v.mem.read_u32(DATA + 0x900).unwrap();
+    assert_eq!(d3d_com(&mut v, texture, 19, &[0, DATA + 0x910, 0, 0]), 0);
+    let texbits = v.mem.read_u32(DATA + 0x914).unwrap();
+    v.mem.write_u32(texbits, 0xff336699).unwrap();
+    d3d_com(&mut v, texture, 20, &[0]);
+    d3d_com(&mut v, device, 65, &[0, texture]);
+    d3d_com(&mut v, device, 26, &[140, 0, 0x144, 1, DATA + 0x900, 0]);
+    let vb = v.mem.read_u32(DATA + 0x900).unwrap();
+    d3d_com(&mut v, vb, 11, &[0, 0, DATA + 0x910, 0]);
+    let vertices = v.mem.read_u32(DATA + 0x910).unwrap();
+    for (i, [x, y]) in [[-0.5f32, -0.5], [3.5, -0.5], [-0.5, 3.5], [3.5, 3.5]]
+        .into_iter()
+        .enumerate()
+    {
+        let base = vertices + (i as u32 + 1) * 28;
+        for (j, n) in [x, y, 0.25, 1.].into_iter().enumerate() {
+            v.mem.write_u32(base + j as u32 * 4, n.to_bits()).unwrap();
+        }
+        v.mem.write_u32(base + 16, 0xffffffff).unwrap();
+        v.mem.write_u32(base + 20, 0).unwrap();
+        v.mem.write_u32(base + 24, 0).unwrap();
+    }
+    d3d_com(&mut v, vb, 12, &[]);
+    d3d_com(&mut v, device, 27, &[14, 0, 101, 1, DATA + 0x900, 0]);
+    let ib = v.mem.read_u32(DATA + 0x900).unwrap();
+    d3d_com(&mut v, ib, 11, &[0, 0, DATA + 0x910, 0]);
+    let indices = v.mem.read_u32(DATA + 0x910).unwrap();
+    for (i, n) in [999u16, 2, 3, 4, 4, 3, 5].into_iter().enumerate() {
+        v.mem.write_u16(indices + i as u32 * 2, n).unwrap();
+    }
+    d3d_com(&mut v, ib, 12, &[]);
+    d3d_com(&mut v, device, 100, &[0, vb, 0, 28]);
+    d3d_com(&mut v, device, 104, &[ib]);
+    // POSITIONT/COLOR/TEXCOORD declaration owns an exact copy of the elements.
+    let elements = [
+        0, 0, 0, 0, 3, 0, 9, 0, 0, 0, 16, 0, 4, 0, 10, 0, 0, 0, 20, 0, 1, 0, 5, 0, 255, 0, 0, 0,
+        17, 0, 0, 0,
+    ];
+    v.mem.write_bytes(DATA, &elements).unwrap();
+    assert_eq!(d3d_com(&mut v, device, 86, &[DATA, DATA + 0x900]), 0);
+    let declaration = v.mem.read_u32(DATA + 0x900).unwrap();
+    v.mem.write_bytes(DATA, &[0; 32]).unwrap();
+    assert_eq!(d3d_com(&mut v, declaration, 4, &[0, DATA + 0x910]), 0);
+    assert_eq!(v.mem.read_u32(DATA + 0x910).unwrap(), 4);
+    v.mem.write_u32(DATA + 0x910, 3).unwrap();
+    assert_eq!(
+        d3d_com(&mut v, declaration, 4, &[DATA, DATA + 0x910]),
+        0x88760867
+    );
+    assert_eq!(d3d_com(&mut v, declaration, 4, &[DATA, DATA + 0x910]), 0);
+    let mut copy = [0; 32];
+    v.mem.read_bytes(DATA, &mut copy).unwrap();
+    assert_eq!(copy, elements);
+    d3d_com(&mut v, device, 87, &[declaration]);
+    d3d_com(&mut v, device, 57, &[22, 1]);
+    d3d_com(&mut v, device, 41, &[]);
+    assert_eq!(
+        d3d_com(&mut v, device, 82, &[4, (-1i32) as u32, 2, 4, 1, 2]),
+        0
+    );
+    assert_eq!(d3d_com(&mut v, device, 18, &[0, 0, 0, DATA + 0x900]), 0);
+    let back = v.mem.read_u32(DATA + 0x900).unwrap();
+    d3d_com(&mut v, back, 13, &[DATA + 0x910, 0, 0x10]);
+    let pixels = v.mem.read_u32(DATA + 0x914).unwrap();
+    d3d_com(&mut v, back, 14, &[]);
+    for i in 0..16 {
+        assert_eq!(v.mem.read_u32(pixels + i * 4).unwrap(), 0xff336699);
+    }
+    v.mem.write_u16(indices + 2, 1).unwrap();
+    assert_eq!(
+        d3d_com(&mut v, device, 82, &[4, (-1i32) as u32, 2, 4, 1, 2]),
+        0x8876086c
+    );
+    assert_eq!(v.mem.read_u32(pixels).unwrap(), 0xff336699);
+    // Real XYZ vertices transform and clip against all homogeneous planes.
+    d3d_com(&mut v, device, 89, &[0x142]);
+    d3d_com(&mut v, device, 100, &[0, vb, 28, 24]);
+    for (i, [x, y]) in [[-2.5f32, 2.5], [2.5, 2.5], [-2.5, -2.5], [2.5, -2.5]]
+        .into_iter()
+        .enumerate()
+    {
+        let base = vertices + 28 + i as u32 * 24;
+        for (j, n) in [x, y, 0.25].into_iter().enumerate() {
+            v.mem.write_u32(base + j as u32 * 4, n.to_bits()).unwrap();
+        }
+        v.mem.write_u32(base + 12, 0xffffffff).unwrap();
+        v.mem.write_u32(base + 16, 0).unwrap();
+        v.mem.write_u32(base + 20, 0).unwrap();
+    }
+    let matrix = std::array::from_fn::<_, 16, _>(|i| {
+        if i == 0 || i == 5 {
+            0.5f32
+        } else if i % 5 == 0 {
+            1.
+        } else {
+            0.
+        }
+    });
+    for (i, n) in matrix.into_iter().enumerate() {
+        v.mem
+            .write_u32(DATA + 0x100 + i as u32 * 4, n.to_bits())
+            .unwrap();
+    }
+    assert_eq!(d3d_com(&mut v, device, 44, &[256, DATA + 0x100]), 0);
+    assert_eq!(d3d_com(&mut v, device, 45, &[256, DATA + 0x200]), 0);
+    assert_eq!(v.mem.read_u32(DATA + 0x200).unwrap(), 0.5f32.to_bits());
+    d3d_com(&mut v, device, 43, &[0, 0, 1, 0xff000000, 0, 0]);
+    assert_eq!(d3d_com(&mut v, device, 81, &[5, 0, 2]), 0);
+    for i in 0..16 {
+        assert_eq!(v.mem.read_u32(pixels + i * 4).unwrap(), 0xff336699);
+    }
+    d3d_com(&mut v, device, 42, &[]);
+    // A live implicit back-buffer reference prevents Reset without changing it.
+    let params = [8u32, 4, 21, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0];
+    for (i, n) in params.into_iter().enumerate() {
+        v.mem.write_u32(DATA + 0x800 + i as u32 * 4, n).unwrap();
+    }
+    assert_eq!(d3d_com(&mut v, device, 16, &[DATA + 0x800]), 0x8876086c);
+    assert_eq!(v.mem.read_u32(pixels).unwrap(), 0xff336699);
+    d3d_com(&mut v, back, 2, &[]);
+    assert_eq!(d3d_com(&mut v, device, 16, &[DATA + 0x800]), 0);
+    assert_eq!(v.mem.read_u32(DATA + 0x800).unwrap(), 0);
+    assert_eq!(
+        v.k("HeapSize", &[v.state.process_heap, 0, pixels]),
+        u32::MAX
+    );
+    // Managed buffer/texture/declaration storage survives and bindings reset.
+    assert_ne!(
+        v.k("HeapSize", &[v.state.process_heap, 0, vertices]),
+        u32::MAX
+    );
+    assert_eq!(v.mem.read_u32(texbits).unwrap(), 0xff336699);
+    assert_eq!(d3d_com(&mut v, device, 88, &[DATA + 0x910]), 0);
+    assert_eq!(v.mem.read_u32(DATA + 0x910).unwrap(), 0);
+    assert_eq!(d3d_com(&mut v, device, 18, &[0, 0, 0, DATA + 0x900]), 0);
+    let back = v.mem.read_u32(DATA + 0x900).unwrap();
+    d3d_com(&mut v, back, 12, &[DATA + 0x100]);
+    assert_eq!(v.mem.read_u32(DATA + 0x118).unwrap(), 8);
+    for object in [back, declaration, ib, vb, texture, device, factory] {
+        d3d_com(&mut v, object, 2, &[]);
+    }
+}
+
+#[test]
+fn d3d9_depth_stencil_alpha_and_vertex_streams_affect_real_pixels() {
+    let mut v = Vm::new();
+    let (factory, device, _) = d3d_device(&mut v);
+    assert_eq!(d3d_com(&mut v, factory, 10, &[0, 1, 22, 2, 1, 75]), 0);
+    assert_eq!(
+        d3d_com(&mut v, device, 29, &[4, 4, 75, 0, 0, 0, DATA + 0x900, 0]),
+        0
+    );
+    let depth = v.mem.read_u32(DATA + 0x900).unwrap();
+    assert_eq!(d3d_com(&mut v, device, 39, &[depth]), 0);
+    assert_eq!(
+        d3d_com(&mut v, depth, 13, &[DATA + 0x910, 0, 0]),
+        0x8876086a
+    );
+    assert_eq!(d3d_com(&mut v, device, 40, &[DATA + 0x910]), 0);
+    assert_eq!(v.mem.read_u32(DATA + 0x910).unwrap(), depth);
+    assert_eq!(d3d_com(&mut v, depth, 2, &[]), 1);
+    assert_eq!(
+        d3d_com(
+            &mut v,
+            device,
+            43,
+            &[0, 0, 7, 0xff112233, 1f32.to_bits(), 3]
+        ),
+        0
+    );
+    assert_eq!(
+        d3d_com(&mut v, device, 23, &[1, 1, 1, 0, 21, 1, DATA + 0x900, 0]),
+        0
+    );
+    let texture = v.mem.read_u32(DATA + 0x900).unwrap();
+    assert_eq!(d3d_com(&mut v, texture, 19, &[0, DATA + 0x910, 0, 0]), 0);
+    let texbits = v.mem.read_u32(DATA + 0x914).unwrap();
+    v.mem.write_u32(texbits, 0xffff0000).unwrap();
+    assert_eq!(d3d_com(&mut v, texture, 20, &[0]), 0);
+    assert_eq!(d3d_com(&mut v, device, 65, &[0, texture]), 0);
+    assert_eq!(
+        d3d_com(&mut v, device, 26, &[96, 0, 0x104, 1, DATA + 0x900, 0]),
+        0
+    );
+    let buffer = v.mem.read_u32(DATA + 0x900).unwrap();
+    assert_eq!(d3d_com(&mut v, buffer, 11, &[0, 0, DATA + 0x910, 0]), 0);
+    let vertices = v.mem.read_u32(DATA + 0x910).unwrap();
+    assert_eq!(
+        d3d_com(&mut v, buffer, 11, &[0, 4, DATA + 0x910, 0]),
+        0x8876086c
+    );
+    let points = [[-0.5f32, -0.5], [3.5, -0.5], [-0.5, 3.5], [3.5, 3.5]];
+    for (i, [x, y]) in points.into_iter().enumerate() {
+        for (j, n) in [x, y, 0.25, 1., 0., 0.].into_iter().enumerate() {
+            v.mem
+                .write_u32(vertices + i as u32 * 24 + j as u32 * 4, n.to_bits())
+                .unwrap();
+        }
+    }
+    assert_eq!(d3d_com(&mut v, buffer, 12, &[]), 0);
+    assert_eq!(
+        d3d_com(&mut v, buffer, 11, &[95, 2, DATA + 0x910, 0]),
+        0x8876086c
+    );
+    assert_eq!(d3d_com(&mut v, device, 100, &[0, buffer, 0, 24]), 0);
+    assert_eq!(d3d_com(&mut v, device, 89, &[0x104]), 0);
+    for (state, value) in [(22, 1), (7, 1), (52, 1), (56, 3), (57, 3), (55, 4)] {
+        assert_eq!(d3d_com(&mut v, device, 57, &[state, value]), 0);
+    }
+    assert_eq!(d3d_com(&mut v, device, 41, &[]), 0);
+    assert_eq!(d3d_com(&mut v, device, 81, &[5, 0, 2]), 0);
+    assert_eq!(d3d_com(&mut v, device, 18, &[0, 0, 0, DATA + 0x920]), 0);
+    let back = v.mem.read_u32(DATA + 0x920).unwrap();
+    assert_eq!(d3d_com(&mut v, back, 13, &[DATA + 0x930, 0, 0x10]), 0);
+    let pixels = v.mem.read_u32(DATA + 0x934).unwrap();
+    assert_eq!(v.mem.read_u32(pixels).unwrap(), 0xffff0000);
+    assert_eq!(d3d_com(&mut v, back, 14, &[]), 0);
+    // Stencil was incremented to four: the second red draw must be rejected.
+    assert_eq!(d3d_com(&mut v, device, 43, &[0, 0, 1, 0xff00ff00, 0, 0]), 0);
+    assert_eq!(d3d_com(&mut v, device, 81, &[5, 0, 2]), 0);
+    assert_eq!(v.mem.read_u32(pixels).unwrap(), 0xff00ff00);
+    // Stencil disabled; farther z fails, even though the triangle covers pixel zero.
+    assert_eq!(d3d_com(&mut v, device, 57, &[52, 0]), 0);
+    for i in 0..4 {
+        v.mem
+            .write_u32(vertices + i * 24 + 8, 0.75f32.to_bits())
+            .unwrap();
+    }
+    assert_eq!(d3d_com(&mut v, device, 81, &[5, 0, 2]), 0);
+    assert_eq!(v.mem.read_u32(pixels).unwrap(), 0xff00ff00);
+    assert_eq!(d3d_com(&mut v, device, 57, &[7, 0]), 0);
+    // Alpha test discards zero-alpha samples before updating any depth/stencil.
+    v.mem.write_u32(texbits, 0x00ffffff).unwrap();
+    for (state, value) in [(15, 1), (25, 5), (24, 0)] {
+        assert_eq!(d3d_com(&mut v, device, 57, &[state, value]), 0);
+    }
+    assert_eq!(d3d_com(&mut v, device, 81, &[5, 0, 2]), 0);
+    assert_eq!(v.mem.read_u32(pixels).unwrap(), 0xff00ff00);
+    assert_eq!(d3d_com(&mut v, device, 42, &[]), 0);
+    assert_eq!(d3d_com(&mut v, buffer, 2, &[]), 0);
+    assert_ne!(
+        v.k("HeapSize", &[v.state.process_heap, 0, vertices]),
+        u32::MAX
+    );
+    assert_eq!(d3d_com(&mut v, back, 2, &[]), 0);
+    assert_eq!(d3d_com(&mut v, depth, 2, &[]), 0);
+    assert_eq!(d3d_com(&mut v, texture, 2, &[]), 0);
+    assert_eq!(d3d_com(&mut v, device, 2, &[]), 0);
+    assert_eq!(
+        v.k("HeapSize", &[v.state.process_heap, 0, vertices]),
+        u32::MAX
+    );
+    assert_eq!(d3d_com(&mut v, factory, 2, &[]), 0);
+}
+#[test]
 fn d3d9_com_texture_quad_present_has_real_pixels_and_releases_bound_resources() {
     let mut v = Vm::new();
     let (factory, device, hwnd) = d3d_device(&mut v);
@@ -3355,8 +5206,8 @@ fn unsupported_audio_returns_real_failure_and_never_a_success_with_null_object()
     let mut v = Vm::new();
     v.mem.write_u32(DATA, 0xdeadbeef).unwrap();
     assert_eq!(
-        v.call("dsound.dll", "DirectSoundCreate", &[0, DATA, 0]),
-        0x88780078
+        v.call("dsound.dll", "DirectSoundCreate", &[0, DATA, 1]),
+        0x80040110
     );
     assert_eq!(v.mem.read_u32(DATA).unwrap(), 0);
     assert_eq!(v.call("winmm.dll", "waveOutGetNumDevs", &[]), 0);
@@ -3370,6 +5221,226 @@ fn unsupported_audio_returns_real_failure_and_never_a_success_with_null_object()
         6
     );
     assert_eq!(v.mem.read_u32(DATA).unwrap(), 0);
+}
+#[test]
+fn directsound_notify_identity_keeps_buffer_alive_and_stop_wakes_event() {
+    let mut v = Vm::new();
+    assert_eq!(
+        v.call("dsound.dll", "DirectSoundCreate", &[0, DATA + 0x900, 0]),
+        0
+    );
+    let sound = v.mem.read_u32(DATA + 0x900).unwrap();
+    for (i, n) in [20u32, 0x100, 64, 0, DATA + 0x100].into_iter().enumerate() {
+        v.mem.write_u32(DATA + i as u32 * 4, n).unwrap();
+    }
+    v.mem
+        .write_bytes(
+            DATA + 0x100,
+            &[
+                1, 0, 1, 0, 0x44, 0xac, 0, 0, 0x88, 0x58, 1, 0, 2, 0, 16, 0, 0, 0,
+            ],
+        )
+        .unwrap();
+    assert_eq!(d3d_com(&mut v, sound, 3, &[DATA, DATA + 0x910, 0]), 0);
+    let buffer = v.mem.read_u32(DATA + 0x910).unwrap();
+    let notify_iid = [
+        0x83, 7, 0x21, 0xb0, 0xcd, 0x89, 0xd0, 0x11, 0xaf, 8, 0, 0xa0, 0xc9, 0x25, 0xcd, 0x16,
+    ];
+    v.mem.write_bytes(DATA + 0x300, &notify_iid).unwrap();
+    assert_eq!(d3d_com(&mut v, buffer, 0, &[DATA + 0x300, DATA + 0x910]), 0);
+    let notify = v.mem.read_u32(DATA + 0x910).unwrap();
+    assert_eq!(d3d_com(&mut v, buffer, 0, &[DATA + 0x300, DATA + 0x910]), 0);
+    assert_eq!(v.mem.read_u32(DATA + 0x910).unwrap(), notify);
+    assert_eq!(d3d_com(&mut v, notify, 2, &[]), 1);
+    v.mem
+        .write_bytes(
+            DATA + 0x300,
+            &[
+                0x85, 0xfa, 0x9a, 0x27, 0x81, 0x49, 0xce, 0x11, 0xa5, 0x21, 0, 0x20, 0xaf, 0xb,
+                0xe5, 0x60,
+            ],
+        )
+        .unwrap();
+    assert_eq!(d3d_com(&mut v, notify, 0, &[DATA + 0x300, DATA + 0x910]), 0);
+    assert_eq!(v.mem.read_u32(DATA + 0x910).unwrap(), buffer);
+    d3d_com(&mut v, buffer, 2, &[]);
+    let event = v.k("CreateEventW", &[0, 0, 0, 0]);
+    v.mem.write_u32(DATA + 0x200, u32::MAX).unwrap();
+    v.mem.write_u32(DATA + 0x204, event).unwrap();
+    assert_eq!(d3d_com(&mut v, notify, 3, &[1, DATA + 0x200]), 0);
+    assert_eq!(d3d_com(&mut v, buffer, 12, &[0, 0, 1]), 0);
+    assert_eq!(d3d_com(&mut v, buffer, 18, &[]), 0);
+    assert_eq!(v.k("WaitForSingleObject", &[event, 0]), 0);
+    assert_eq!(d3d_com(&mut v, buffer, 2, &[]), 1);
+    assert_ne!(
+        v.k("HeapSize", &[v.state.process_heap, 0, buffer]),
+        u32::MAX
+    );
+    assert_eq!(d3d_com(&mut v, notify, 2, &[]), 0);
+    assert_eq!(
+        v.k("HeapSize", &[v.state.process_heap, 0, buffer]),
+        u32::MAX
+    );
+    d3d_com(&mut v, sound, 2, &[]);
+}
+
+#[test]
+fn directsound_pcm_buffers_check_wrapped_locks_controls_and_release_storage() {
+    let mut v = Vm::new();
+    assert_eq!(
+        v.call("dsound.dll", "DirectSoundCreate", &[0, DATA + 0x900, 0]),
+        0
+    );
+    let sound = v.mem.read_u32(DATA + 0x900).unwrap();
+    v.mem.write_u32(DATA, 20).unwrap();
+    v.mem.write_u32(DATA + 4, 0xe0).unwrap();
+    v.mem.write_u32(DATA + 8, 8).unwrap();
+    v.mem.write_u32(DATA + 16, DATA + 0x100).unwrap();
+    v.mem
+        .write_bytes(
+            DATA + 0x100,
+            &[
+                1, 0, 1, 0, 0x44, 0xac, 0, 0, 0x88, 0x58, 1, 0, 2, 0, 16, 0, 0, 0,
+            ],
+        )
+        .unwrap();
+    assert_eq!(d3d_com(&mut v, sound, 3, &[DATA, DATA + 0x910, 0]), 0);
+    let buffer = v.mem.read_u32(DATA + 0x910).unwrap();
+    assert_ne!(buffer, 0);
+    assert_eq!(
+        d3d_com(
+            &mut v,
+            buffer,
+            11,
+            &[
+                6,
+                4,
+                DATA + 0x920,
+                DATA + 0x924,
+                DATA + 0x928,
+                DATA + 0x92c,
+                0
+            ]
+        ),
+        0
+    );
+    let first = v.mem.read_u32(DATA + 0x920).unwrap();
+    let second = v.mem.read_u32(DATA + 0x928).unwrap();
+    assert_eq!(first, second + 6);
+    assert_eq!(v.mem.read_u32(DATA + 0x924).unwrap(), 2);
+    assert_eq!(v.mem.read_u32(DATA + 0x92c).unwrap(), 2);
+    assert_eq!(
+        d3d_com(&mut v, buffer, 19, &[first, 3, second, 2]),
+        0x80070057
+    );
+    v.mem.write_u16(first, 0x7fff).unwrap();
+    v.mem.write_u16(second, 0x8000).unwrap();
+    assert_eq!(d3d_com(&mut v, buffer, 19, &[first, 2, second, 2]), 0);
+    assert_eq!(
+        d3d_com(
+            &mut v,
+            buffer,
+            11,
+            &[7, 9, DATA + 0x920, DATA + 0x924, 0, 0, 0]
+        ),
+        0x80070057
+    );
+    assert_eq!(d3d_com(&mut v, buffer, 15, &[1]), 0x80070057);
+    assert_eq!(d3d_com(&mut v, buffer, 15, &[(-600i32) as u32]), 0);
+    assert_eq!(d3d_com(&mut v, buffer, 6, &[DATA + 0x930]), 0);
+    assert_eq!(v.mem.read_u32(DATA + 0x930).unwrap() as i32, -600);
+    assert_eq!(d3d_com(&mut v, buffer, 12, &[0, 0, 1]), 0);
+    assert_eq!(d3d_com(&mut v, buffer, 9, &[DATA + 0x930]), 0);
+    assert_eq!(v.mem.read_u32(DATA + 0x930).unwrap(), 5);
+    assert_eq!(d3d_com(&mut v, buffer, 18, &[]), 0);
+    assert_eq!(d3d_com(&mut v, buffer, 2, &[]), 0);
+    assert_eq!(
+        v.k("HeapSize", &[v.state.process_heap, 0, second]),
+        u32::MAX
+    );
+    v.mem.write_u32(DATA + 4, 16).unwrap();
+    assert_eq!(
+        d3d_com(&mut v, sound, 3, &[DATA, DATA + 0x910, 0]),
+        0x80004001
+    );
+    assert_eq!(v.mem.read_u32(DATA + 0x910).unwrap(), 0);
+    assert_eq!(d3d_com(&mut v, sound, 2, &[]), 0);
+}
+#[test]
+fn message_object_waits_preserve_queue_masks_old_input_and_atomic_acquisition() {
+    let mut v = Vm::new();
+    let tid = v.sched.current_tid();
+    let event = v.k("CreateEventW", &[0, 0, 0, 0]);
+    v.mem.write_u32(DATA, event).unwrap();
+    assert_eq!(
+        v.call(
+            "user32.dll",
+            "MsgWaitForMultipleObjects",
+            &[1, DATA, 0, 0, 8]
+        ),
+        0x102
+    );
+    assert_eq!(
+        v.call("user32.dll", "PostThreadMessageW", &[tid, 0x400, 0, 0]),
+        1
+    );
+    assert_eq!(
+        v.call(
+            "user32.dll",
+            "MsgWaitForMultipleObjects",
+            &[1, DATA, 0, 0, 8]
+        ),
+        1
+    );
+    assert_eq!(
+        v.call("user32.dll", "PeekMessageW", &[DATA + 0x100, 0, 0, 0, 0]),
+        1
+    );
+    assert_eq!(
+        v.call(
+            "user32.dll",
+            "MsgWaitForMultipleObjects",
+            &[1, DATA, 0, 0, 8]
+        ),
+        0x102
+    );
+    assert_eq!(
+        v.call(
+            "user32.dll",
+            "MsgWaitForMultipleObjectsEx",
+            &[1, DATA, 0, 8, 4]
+        ),
+        1
+    );
+    assert_eq!(v.k("SetEvent", &[event]), 1);
+    assert_eq!(
+        v.call(
+            "user32.dll",
+            "MsgWaitForMultipleObjectsEx",
+            &[1, DATA, 0, 8, 5]
+        ),
+        0
+    );
+    assert_eq!(v.k("WaitForSingleObject", &[event, 0]), 0x102);
+    assert_eq!(
+        v.call(
+            "user32.dll",
+            "MsgWaitForMultipleObjects",
+            &[64, DATA, 0, 0, 8]
+        ),
+        u32::MAX
+    );
+    assert_eq!(v.state.last_error, 87);
+    v.mem.write_u32(DATA, 0xdeadbeef).unwrap();
+    assert_eq!(
+        v.call(
+            "user32.dll",
+            "MsgWaitForMultipleObjects",
+            &[1, DATA, 0, 0, 8]
+        ),
+        u32::MAX
+    );
+    assert_eq!(v.state.last_error, 6);
 }
 #[test]
 fn validated_paint_drops_only_synthetic_messages_and_default_close_destroys_window() {

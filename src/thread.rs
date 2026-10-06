@@ -42,13 +42,16 @@ pub enum WaitTarget {
     Multi(Vec<u32>, bool), // handles, wait_all
     CriticalSection(u32),  // guest CRITICAL_SECTION address
     Sleep,
-    Messages(u32), // thread's user32 queue/timer wait
+    Messages(u32),                      // thread's user32 queue/timer wait
+    MessageObjects(Vec<u32>, u32, u32), // handles, thread ID, queue mask
+    SentMessage(u32),
 }
 
 pub fn target_mentions(t: &WaitTarget, h: u32) -> bool {
     match t {
         WaitTarget::Object(x) => *x == h,
         WaitTarget::Multi(v, _) => v.contains(&h),
+        WaitTarget::MessageObjects(v, _, _) => v.contains(&h),
         _ => false,
     }
 }
@@ -316,8 +319,19 @@ impl Sched {
             } = t.state
             {
                 if d <= now {
+                    let retest = matches!(
+                        t.state,
+                        ThreadState::Waiting {
+                            target: WaitTarget::MessageObjects(..),
+                            ..
+                        }
+                    );
                     t.state = ThreadState::Runnable;
-                    t.wake = Some(Wake::Completed(WAIT_TIMEOUT));
+                    t.wake = Some(if retest {
+                        Wake::Retest
+                    } else {
+                        Wake::Completed(WAIT_TIMEOUT)
+                    });
                 }
             }
         }

@@ -9,6 +9,184 @@ struct Vm {
     cpu: Cpu,
     mem: GuestMem,
 }
+#[test]
+fn mmx_aliases_physical_x87_registers_and_faults_preserve_state() {
+    let mut v = Vm::new();
+    v.cpu.fpu.sw = 5 << 11;
+    v.cpu.fpu.regs[0] = ONE | 0x1234;
+    v.cpu.fpu.regs[1] = ONE | 0x55;
+    let flags = v.cpu.eflags;
+    v.run(&[0x0f, 0xef, 0xc1]).unwrap();
+    assert_eq!(v.cpu.fpu.regs[0], (0xffffu128 << 64) | 0x1261);
+    assert_eq!(v.cpu.fpu.tags, 0);
+    assert_eq!(v.cpu.fpu.top(), 0);
+    assert_eq!(v.cpu.eflags, flags);
+    let payloads = v.cpu.fpu.regs;
+    v.run(&[0x0f, 0x77]).unwrap();
+    assert_eq!(v.cpu.fpu.tags, 0xffff);
+    assert_eq!(v.cpu.fpu.regs, payloads);
+    v.cpu.fpu.sw = 3 << 11;
+    let before = v.cpu.fpu;
+    v.cpu.regs[3] = 0x30000;
+    assert!(v.run(&[0x0f, 0xef, 0x03]).is_err());
+    assert_eq!(v.cpu.fpu.regs, before.regs);
+    assert_eq!(v.cpu.fpu.tags, before.tags);
+    assert_eq!(v.cpu.fpu.sw, before.sw);
+    // PUNPCKLBW reads four bytes at a page end, MOVQ still reads eight.
+    v.cpu.regs[3] = DATA + 0xfffc;
+    v.mem.write_u32(DATA + 0xfffc, 0x04030201).unwrap();
+    v.run(&[0x0f, 0x60, 0x03]).unwrap();
+    assert!(v.run(&[0x0f, 0x6f, 0x03]).is_err());
+}
+
+#[test]
+fn x87_trigonometry_preserves_extended_precision_stack_and_range() {
+    // Independent 150-digit Decimal Taylor/reduction references, rounded to
+    // extended precision. The large argument exercises split-pi reduction.
+    for (x, sin, cos) in [
+        (ONE, 0x3ffe_d76a_a478_4867_7021, 0x3ffe_8a51_407d_a834_5c92),
+        (
+            0x403d_8000_0000_0000_0001,
+            0xbffe_f537_162c_eea4_dddd,
+            0xbffd_930b_5e4d_26d6_9ce0,
+        ),
+    ] {
+        for pc in [0x7f, 0x27f, 0x37f] {
+            let mut v = Vm::new();
+            v.cpu.fpu.cw = pc;
+            v.load(x);
+            v.run(&[0xd9, 0xfb]).unwrap();
+            assert_eq!(v.cpu.fpu.top(), 6);
+            assert_eq!(v.cpu.fpu.st_bits(0), cos);
+            assert_eq!(v.cpu.fpu.st_bits(1), sin);
+            assert_eq!(v.cpu.fpu.sw & 0x420, 0x20);
+        }
+    }
+    for x in [0, 1 << 79] {
+        let mut v = Vm::new();
+        v.load(x);
+        v.run(&[0xd9, 0xfb]).unwrap();
+        assert_eq!(v.cpu.fpu.st_bits(0), ONE);
+        assert_eq!(v.cpu.fpu.st_bits(1), x);
+        assert_eq!(v.cpu.fpu.sw & 0x3f, 0);
+    }
+    for op in [0xfb, 0xfe, 0xff] {
+        let mut v = Vm::new();
+        let x = 0x403e_8000_0000_0000_0000; // 2^63, out of range
+        v.load(x);
+        v.run(&[0xd9, op]).unwrap();
+        assert_eq!(v.cpu.fpu.top(), 7);
+        assert_eq!(v.cpu.fpu.st_bits(0), x);
+        assert_eq!(v.cpu.fpu.sw & 0x43f, 0x400);
+    }
+}
+#[test]
+fn x87_trigonometry_tiny_directed_rounding_and_invalid_operands() {
+    use rustc_apfloat::{ieee::X87DoubleExtended, Float};
+    let tiny = ((16383u128 - 100) << 64) | (1 << 63);
+    for sign in [0, 1 << 79] {
+        for rc in 0..4 {
+            let x = tiny | sign;
+            let toward = rc == 3 || (rc == 1 && sign == 0) || (rc == 2 && sign != 0);
+            let expected = if toward {
+                let f = X87DoubleExtended::from_bits(x);
+                if sign == 0 {
+                    f.next_down().value
+                } else {
+                    f.next_up().value
+                }
+                .to_bits()
+            } else {
+                x
+            };
+            let mut v = Vm::new();
+            v.cpu.fpu.cw = 0x37f | (rc << 10);
+            v.load(x);
+            v.run(&[0xd9, 0xfb]).unwrap();
+            assert_eq!(v.cpu.fpu.st_bits(1), expected);
+            assert_eq!(
+                v.cpu.fpu.st_bits(0),
+                if rc == 1 || rc == 3 {
+                    0x3ffe_ffff_ffff_ffff_ffff
+                } else {
+                    ONE
+                }
+            );
+        }
+    }
+    for (x, result, invalid) in [
+        (0x7fff_8000_0000_0000_0000, INDEFINITE, 1),
+        (0x7fff_c000_0000_0000_0011, 0x7fff_c000_0000_0000_0011, 0),
+    ] {
+        let mut v = Vm::new();
+        v.load(x);
+        v.run(&[0xd9, 0xfb]).unwrap();
+        assert_eq!(v.cpu.fpu.st_bits(0), result);
+        assert_eq!(v.cpu.fpu.st_bits(1), result);
+        assert_eq!(v.cpu.fpu.sw & 1, invalid);
+    }
+    let mut v = Vm::new();
+    for _ in 0..8 {
+        v.load(ONE);
+    }
+    v.run(&[0xd9, 0xfb]).unwrap();
+    assert_eq!(v.cpu.fpu.sw & 0x241, 0x241);
+    assert_eq!(v.cpu.fpu.st_bits(0), INDEFINITE);
+    assert_eq!(v.cpu.fpu.st_bits(1), INDEFINITE);
+    let mut v = Vm::new();
+    v.load(0x7fff_8000_0000_0000_0000);
+    v.cpu.fpu.cw &= !1;
+    v.run(&[0xd9, 0xfb]).unwrap();
+    assert_eq!(v.cpu.fpu.top(), 7);
+    assert_eq!(v.cpu.fpu.st_bits(0), 0x7fff_8000_0000_0000_0000);
+    assert!(matches!(
+        v.run(&[0x9b]),
+        Err(CpuError::FloatingPoint { .. })
+    ));
+}
+#[test]
+fn sse_compare_predicates_nan_daz_exceptions_and_scalar_upper_lanes() {
+    for predicate in 0..8u8 {
+        let mut v = Vm::new();
+        v.cpu.xmm[0][..8].copy_from_slice(&0x7ff8_0000_0000_0001u64.to_le_bytes());
+        v.cpu.xmm[0][8..].fill(0x5a);
+        v.cpu.xmm[1][..8].copy_from_slice(&1f64.to_le_bytes());
+        let flags = v.cpu.eflags;
+        v.run(&[0xf2, 0x0f, 0xc2, 0xc1, predicate]).unwrap();
+        assert_eq!(
+            v.cpu.xmm[0][..8],
+            if matches!(predicate, 3..=6) {
+                [255; 8]
+            } else {
+                [0; 8]
+            }
+        );
+        assert_eq!(v.cpu.xmm[0][8..], [0x5a; 8]);
+        assert_eq!(v.cpu.eflags, flags);
+        assert_eq!(v.cpu.mxcsr & 1, matches!(predicate, 1 | 2 | 5 | 6) as u32);
+    }
+    let mut v = Vm::new();
+    v.cpu.xmm[0][..8].copy_from_slice(&1u64.to_le_bytes());
+    v.cpu.mxcsr |= 0x40; // DAZ: the smallest subnormal compares equal to zero
+    v.run(&[0xf2, 0x0f, 0xc2, 0xc1, 0]).unwrap();
+    assert_eq!(v.cpu.xmm[0][..8], [255; 8]);
+    assert_eq!(v.cpu.mxcsr & 3, 0);
+    let mut v = Vm::new();
+    v.cpu.xmm[0][..8].copy_from_slice(&1u64.to_le_bytes());
+    v.run(&[0xf2, 0x0f, 0xc2, 0xc1, 0]).unwrap();
+    assert_eq!(v.cpu.xmm[0][..8], [0; 8]);
+    assert_eq!(v.cpu.mxcsr & 3, 2);
+    let mut v = Vm::new();
+    v.cpu.xmm[0][..8].copy_from_slice(&0x7ff0_0000_0000_0001u64.to_le_bytes());
+    let before = v.cpu.xmm[0];
+    v.cpu.mxcsr &= !0x80;
+    assert!(matches!(
+        v.run(&[0xf2, 0x0f, 0xc2, 0xc1, 0]),
+        Err(CpuError::SimdFloatingPoint { .. })
+    ));
+    assert_eq!(v.cpu.xmm[0], before);
+    assert_eq!(v.cpu.mxcsr & 1, 1);
+}
 impl Vm {
     fn new() -> Self {
         let mut mem = GuestMem::new().unwrap();

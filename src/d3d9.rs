@@ -1,14 +1,17 @@
-//! Bounded CPU D3D9 backend for pretransformed two-dimensional textured draws.
-//! ABI data is generated from Hangover's pinned Wine header. No Wine renderer,
-//! shaders, machine-code generator or platform driver is linked here.
+//! Bounded fixed-function D3D9 backend with optional public Metal acceleration.
+//! ABI data comes from Hangover's pinned Wine header. Guest code stays in the
+//! CPU interpreter; Metal executes only wire's static host graphics shader.
 use crate::{
     api::{ApiState, ApiTable, Args},
     mem::GuestMem,
 };
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 mod device;
+mod gpu;
 mod raster;
+mod reset;
 mod resource;
+mod vertex;
 const INVALID: u32 = 0x8876086c;
 const UNAVAILABLE: u32 = 0x8876086a;
 const NOMEM: u32 = 0x8007000e;
@@ -49,8 +52,13 @@ struct Device {
     params: [u32; 14],
     back: u32,
     target: u32,
+    depth: u32,
+    stream: [u32; 3], // buffer, byte offset, stride (stream zero)
+    indices: u32,
     texture: u32,
     fvf: u32,
+    declaration: u32,
+    transforms: BTreeMap<u32, [f32; 16]>,
     scene: bool,
     render: BTreeMap<u32, u32>,
     sampler: BTreeMap<u32, u32>,
@@ -75,6 +83,20 @@ enum Payload {
     Swap {
         device: u32,
     },
+    Vertices {
+        device: u32,
+        bits: u32,
+        len: u32,
+        usage: u32,
+        pool: u32,
+        fvf: u32,
+        locked: bool,
+    },
+    Declaration {
+        device: u32,
+        elements: Vec<u8>,
+        layout: vertex::Layout,
+    },
 }
 struct Object {
     kind: &'static str,
@@ -88,6 +110,8 @@ struct Object {
 }
 #[derive(Default)]
 pub struct D3D9 {
+    pub enable_gpu: bool,
+    gpu: gpu::GpuRaster,
     objects: BTreeMap<u32, Object>,
     vtables: BTreeMap<&'static str, u32>,
     allocated: u64,
@@ -116,6 +140,17 @@ fn words<const N: usize>(mem: &GuestMem, p: u32) -> Result<[u32; N], u32> {
     }))
 }
 impl D3D9 {
+    pub fn prepare_gpu(&mut self) {
+        if self.enable_gpu {
+            self.gpu.prepare();
+        }
+    }
+    pub fn gpu_draws(&self) -> u64 {
+        self.gpu.draws
+    }
+    pub fn gpu_error(&self) -> Option<&str> {
+        self.gpu.error.as_deref()
+    }
     fn pin(&mut self, h: u32) -> Result<(), u32> {
         let o = self.objects.get_mut(&h).ok_or(INVALID)?;
         o.pins = o.pins.checked_add(1).ok_or(NOMEM)?;
@@ -158,8 +193,15 @@ impl D3D9 {
                     work.push(p);
                 }
             }
-            if let Payload::Surface { data, .. } | Payload::Texture { data, .. } = o.payload {
-                self.free_buffer(data, state);
+            match o.payload {
+                Payload::Surface { data, .. } | Payload::Texture { data, .. } => {
+                    self.free_buffer(data, state)
+                }
+                Payload::Vertices { bits, len, .. } => {
+                    self.allocated -= len as u64;
+                    state.heap.free(state.process_heap, bits);
+                }
+                _ => {}
             }
             state.heap.free(state.process_heap, h);
         }
@@ -261,7 +303,7 @@ impl D3D9 {
         mem: &mut GuestMem,
         state: &mut ApiState,
     ) -> Result<Buffer, u32> {
-        if !matches!(format, 21 | 22) {
+        if !(matches!(format, 21 | 22) && usage & 2 == 0 || format == 75 && usage == 2) {
             return Err(UNAVAILABLE);
         }
         if w == 0 || h == 0 || w > 16384 || h > 16384 {
@@ -378,12 +420,50 @@ pub(crate) fn dispatch(
     let mut backend = std::mem::take(&mut state.d3d9);
     let result = backend.call(name, a, mem, api, state);
     let mut note = format!(
-        "CPU D3D9 {name}; frames={} draws={}",
+        "D3D9 {name}; frames={} draws={}",
         backend.frames, backend.draws
     );
+    if name.ends_with(".Present") {
+        note.push_str(&format!(
+            "; Metal={} GPU_error={:?}",
+            backend.gpu_draws(),
+            backend.gpu_error()
+        ));
+    }
+    if name == "IDirect3D9.CheckDeviceFormat" {
+        note.push_str(&format!("; format={}", a[6]));
+    }
+    if name == "IDirect3D9.CreateDevice" {
+        if let Ok(p) = words::<14>(mem, a[5]) {
+            note.push_str(&format!("; params={p:?}"));
+        }
+    }
     if name == "IDirect3DDevice9.DrawPrimitiveUP" && result.is_err() {
         if let Ok(v) = words::<6>(mem, a[3]) {
             note.push_str(&format!("; first XYZRHW/UV {:?}", v.map(f32::from_bits)));
+        }
+    }
+    if name == "IDirect3DDevice9.Reset" && result.is_ok() {
+        if let Ok(d) = backend.device(a[0]) {
+            note.push_str(&format!("; reset params={:?}", d.params));
+        }
+    }
+    if name == "IDirect3DDevice9.DrawPrimitiveUP" && backend.draws <= 10 {
+        if let Ok(d) = backend.device(a[0]) {
+            note.push_str(&format!(
+                "; fvf={:#x} viewport={:?} transforms={:?}",
+                d.fvf, d.viewport, d.transforms
+            ));
+            if let Ok(layout) = backend.layout(d) {
+                let n = if a[1] == 4 { a[2] * 3 } else { a[2] + 2 };
+                let values: Vec<_> = (0..n.min(4))
+                    .filter_map(|i| words::<7>(mem, a[3] + i * a[4]).ok())
+                    .collect();
+                note.push_str(&format!(
+                    "; layout={} first vertices={values:x?}",
+                    layout.size
+                ));
+            }
         }
     }
     state.d3d9 = backend;
@@ -406,7 +486,8 @@ impl D3D9 {
         state: &mut ApiState,
     ) -> Result<u32, u32> {
         if name == "Direct3DCreate9" {
-            if a[0] != 32 {
+            // D3D9 SDK 31 predates the current SDK 32; both use this interface.
+            if !matches!(a[0] & 0x7fff_ffff, 31 | 32) {
                 return Err(INVALID);
             }
             return self.object(
@@ -437,6 +518,11 @@ impl D3D9 {
                     "IDirect3DDevice9" => [0xd0223b96, 0x43fdbf7a, 0x3ba4bd92, 0xebb9820d],
                     "IDirect3DTexture9" => [0x85c31227, 0x4f003de5, 0x1af13a9b, 0xb5188c3c],
                     "IDirect3DSurface9" => [0x0cfbaf3a, 0x429a9ff6, 0x79a2b399, 0x9bb8f86a],
+                    "IDirect3DVertexBuffer9" => [0xb64bb1b5, 0x4df6fd70, 0xd01991bf, 0xe35524a1],
+                    "IDirect3DIndexBuffer9" => [0x7c9dd65e, 0x4529d3f7, 0x5878eeac, 0x35deac30],
+                    "IDirect3DVertexDeclaration9" => {
+                        [0xdd13c59c, 0x409836fa, 0xedc7fba8, 0x4685dc39]
+                    }
                     _ => [0x794950f2, 0x458aadfc, 0xa1105e90, 0x3b500b0b],
                 };
                 if iid != expected && iid != [0, 0, 0xc0, 0x46000000] {
@@ -451,6 +537,8 @@ impl D3D9 {
             "IDirect3DDevice9" => self.device_call(method, a, mem, api, state),
             "IDirect3DTexture9" | "IDirect3DSurface9" => self.resource(method, a, mem),
             "IDirect3DSwapChain9" => self.swap(method, a, mem, state),
+            "IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9" => self.vertex_call(method, a, mem),
+            "IDirect3DVertexDeclaration9" => self.declaration_call(method, a, mem),
             _ => Err(UNAVAILABLE),
         }
     }
@@ -510,9 +598,20 @@ impl D3D9 {
                 if a[1] == 0
                     && matches!(a[2], 1 | 2)
                     && matches!(a[3], 21 | 22)
-                    && a[4] & !0x201 == 0
-                    && matches!(a[5], 1 | 3)
-                    && matches!(a[6], 21 | 22)
+                    && ((a[4] & !0x201 == 0 && matches!(a[5], 1 | 3) && matches!(a[6], 21 | 22))
+                        || (a[4] == 2 && a[5] == 1 && a[6] == 75))
+                {
+                    Ok(0)
+                } else {
+                    Err(UNAVAILABLE)
+                }
+            }
+            "CheckDepthStencilMatch" => {
+                if a[1] == 0
+                    && matches!(a[2], 1 | 2)
+                    && matches!(a[3], 21 | 22)
+                    && matches!(a[4], 21 | 22)
+                    && a[5] == 75
                 {
                     Ok(0)
                 } else {
@@ -550,7 +649,11 @@ impl D3D9 {
                 }
                 mem.ptr(a[5], 56, true).map_err(|_| INVALID)?;
                 let mut params = words::<14>(mem, a[5])?;
-                if params[4] != 0 || params[9] != 0 || params[3] > 1 {
+                if params[4] != 0
+                    || params[9] > 1
+                    || params[3] > 1
+                    || (params[9] == 1 && params[10] != 75)
+                {
                     return Err(UNAVAILABLE);
                 }
                 let hwnd = if params[7] == 0 { a[3] } else { params[7] };
@@ -577,8 +680,13 @@ impl D3D9 {
                         params,
                         back: 0,
                         target: 0,
+                        depth: 0,
+                        stream: [0; 3],
+                        indices: 0,
                         texture: 0,
                         fvf: 0,
+                        declaration: 0,
+                        transforms: BTreeMap::new(),
                         scene: false,
                         render: BTreeMap::new(),
                         sampler: BTreeMap::new(),
@@ -620,6 +728,19 @@ impl D3D9 {
                 let d = self.device_mut(device)?;
                 d.back = surface;
                 d.target = surface;
+                if params[9] == 1 {
+                    let result = self
+                        .create_depth(device, params[0], params[1], mem, api, state)
+                        .and_then(|depth| {
+                            let result = self.bind_depth(device, depth, state);
+                            self.release(depth, state)?;
+                            result
+                        });
+                    if let Err(e) = result {
+                        self.release(device, state)?;
+                        return Err(e);
+                    }
+                }
                 put(mem, a[5], &params)?;
                 put(mem, a[6], &[device])?;
                 Ok(0)

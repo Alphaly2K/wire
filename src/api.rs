@@ -34,6 +34,8 @@ pub struct ApiEntry {
 pub struct ApiTable {
     pub entries: Vec<ApiEntry>,
     by_key: HashMap<(String, String), u32>,
+    data_exports: HashMap<(String, String), u32>,
+    next_data: u32,
 }
 
 impl Default for ApiTable {
@@ -47,6 +49,8 @@ impl ApiTable {
         let mut t = ApiTable {
             entries: Vec::new(),
             by_key: HashMap::new(),
+            data_exports: HashMap::new(),
+            next_data: 0,
         };
         // index 0: return address pushed for the initial thread entry.
         t.register("wire", Some("ExitEmulation"), None);
@@ -62,6 +66,9 @@ impl ApiTable {
             .map(|n| n.to_string())
             .unwrap_or_else(|| format!("#{}", ordinal.unwrap_or(0)));
         let key = (dll.clone(), name.clone());
+        if let Some(&addr) = self.data_exports.get(&key) {
+            return addr;
+        }
         if let Some(&addr) = self.by_key.get(&key) {
             if ordinal.is_some() {
                 let index = ((addr - STUB_BASE) / STUB_STRIDE) as usize;
@@ -86,9 +93,63 @@ impl ApiTable {
     }
 
     pub fn lookup(&self, dll: &str, name: &str) -> Option<u32> {
-        self.by_key
-            .get(&(dll.to_ascii_lowercase(), name.to_string()))
+        let key = (dll.to_ascii_lowercase(), name.to_string());
+        self.data_exports
+            .get(&key)
+            .or_else(|| self.by_key.get(&key))
             .copied()
+    }
+    pub fn imported_dlls(&self) -> impl Iterator<Item = &str> {
+        self.entries
+            .iter()
+            .map(|e| e.dll.as_str())
+            .chain(self.data_exports.keys().map(|(dll, _)| dll.as_str()))
+    }
+
+    /// CRT exports such as _acmdln are guest variables, never callable stubs.
+    /// Imports, GetProcAddress and __p__ accessors share each module's stable
+    /// writable storage. Reserve a checked runtime arena separate from scratch.
+    pub(crate) fn data_export(
+        &mut self,
+        mem: &mut GuestMem,
+        dll: &str,
+        name: &str,
+        cmdline_a: u32,
+        cmdline_w: u32,
+    ) -> Result<Option<u32>, String> {
+        let dll = dll.to_ascii_lowercase();
+        if !(dll == "msvcrt.dll"
+            || dll == "ucrtbase.dll"
+            || dll.starts_with("api-ms-win-crt-")
+            || (dll.starts_with("msvcr") && dll.ends_with(".dll")))
+        {
+            return Ok(None);
+        }
+        let initial = match name {
+            "_acmdln" => cmdline_a,
+            "_wcmdln" => cmdline_w,
+            "_fmode" | "_commode" | "_adjust_fdiv" | "_timezone" | "_daylight" => 0,
+            "__argc" => 1,
+            _ => return Ok(None),
+        };
+        let key = (dll, name.to_string());
+        if let Some(&addr) = self.data_exports.get(&key) {
+            return Ok(Some(addr));
+        }
+        const DATA_BASE: u32 = 0x00ec_0000;
+        if self.next_data == 0 {
+            mem.map_runtime(DATA_BASE, 0x10000)
+                .map_err(|e| format!("CRT data arena: Win32 error {e}"))?;
+            self.next_data = DATA_BASE;
+        }
+        if self.next_data >= DATA_BASE + 0x10000 {
+            return Err("CRT data arena exhausted".into());
+        }
+        let addr = self.next_data;
+        mem.write_u32(addr, initial).map_err(|e| e.to_string())?;
+        self.next_data += 4;
+        self.data_exports.insert(key, addr);
+        Ok(Some(addr))
     }
 }
 
@@ -143,6 +204,8 @@ pub struct ApiState {
     pub scratch_top: u32,
     pub argv_ptr: u32,
     pub envp_ptr: u32,
+    pub crt_app_type: u32,
+    crt_errno: HashMap<u32, u32>,
     pub process_heap: u32,
     pub heap: crate::heap::GuestHeap,
     pub fs: Option<crate::fs::GuestFs>,
@@ -159,6 +222,8 @@ pub struct ApiState {
     pub gdiplus: crate::gdiplus::GdiPlus,
     pub graphics: crate::graphics::Graphics,
     pub d3d9: crate::d3d9::D3D9,
+    pub dsound: crate::dsound::DSound,
+    pub(crate) wmi: crate::wmi::Wmi,
     pub presenter: crate::platform::Presenter,
     pub stop_after_presents: Option<u64>,
     pub(crate) bstrs: HashMap<u32, u32>,
@@ -181,6 +246,8 @@ impl ApiState {
             scratch_top: SCRATCH_BASE,
             argv_ptr: 0,
             envp_ptr: 0,
+            crt_app_type: 1,
+            crt_errno: HashMap::new(),
             process_heap: 0x7005_0000,
             heap: crate::heap::GuestHeap::new(0x7005_0000),
             fs: None,
@@ -197,6 +264,8 @@ impl ApiState {
             gdiplus: crate::gdiplus::GdiPlus::default(),
             graphics: crate::graphics::Graphics::default(),
             d3d9: crate::d3d9::D3D9::default(),
+            dsound: crate::dsound::DSound::default(),
+            wmi: crate::wmi::Wmi::default(),
             presenter: crate::platform::Presenter::default(),
             stop_after_presents: None,
             bstrs: HashMap::new(),
@@ -270,6 +339,18 @@ impl ApiState {
         };
         self.scratch_top = end;
         a
+    }
+    fn errno_address(&mut self, mem: &mut GuestMem, tid: u32) -> Result<u32, String> {
+        if let Some(&p) = self.crt_errno.get(&tid) {
+            return Ok(p);
+        }
+        let p = self.scratch_alloc(mem, 4, 4);
+        if p == 0 {
+            return Err("CRT errno allocation failed".into());
+        }
+        mem.write_u32(p, 0).map_err(|e| e.to_string())?;
+        self.crt_errno.insert(tid, p);
+        Ok(p)
     }
 
     /// Lazy argc/argv/envp: argc=1, argv=[cmdline, NULL], envp=[NULL].
@@ -414,8 +495,7 @@ pub(crate) fn read_str(mem: &GuestMem, addr: u32, wide: bool) -> String {
         mem.read_wstr(addr, 260)
             .unwrap_or_else(|_| "<fault>".into())
     } else {
-        mem.read_cstr(addr, 260)
-            .unwrap_or_else(|_| "<fault>".into())
+        crate::file_api::read_name(mem, addr, false).unwrap_or_else(|_| "<fault>".into())
     }
 }
 
@@ -453,6 +533,12 @@ pub(crate) fn native_export(dll: &str, name: &str) -> bool {
 /// stdcall stack cleanup in bytes. Unknown functions retain the existing
 /// cdecl/zero-cleanup diagnostic path.
 fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
+    if dll == "dsound.dll" && name.contains('.') {
+        return crate::dsound::stack_bytes(name);
+    }
+    if dll == "wire.wmi" {
+        return crate::wmi::stack_bytes(name);
+    }
     if dll == "d3d9.dll" {
         return crate::d3d9::stack_bytes(name);
     }
@@ -467,6 +553,7 @@ fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 m.insert((dll, *n), *b);
             }
         };
+        add("imagehlp.dll", &[("MakeSureDirectoryPathExists", 4)]);
         add(
             "kernel32.dll",
             &[
@@ -1537,6 +1624,13 @@ fn wake_obj_waiters(sched: &mut Sched, h: u32, max: usize) -> usize {
     }
     n
 }
+pub(crate) fn signal_audio_event(state: &mut ApiState, sched: &mut Sched, h: u32) {
+    if let Some(HandleObj::Event { manual, signaled }) = state.handles.get_mut(&h) {
+        *signaled = true;
+        let n = if *manual { usize::MAX } else { 1 };
+        wake_obj_waiters(sched, h, n);
+    }
+}
 
 /// Execute one API call on behalf of the guest. EIP currently points at the
 /// stub address; the guest stack has [ret][args...].
@@ -1555,6 +1649,23 @@ pub fn dispatch(
     crate::platform::poll(mem, state, sched);
     let dll = entry.dll.as_str();
     let name = entry.name.as_str();
+    if dll == "user32.dll"
+        && matches!(
+            name,
+            "PeekMessageA"
+                | "PeekMessageW"
+                | "GetMessageA"
+                | "GetMessageW"
+                | "WaitMessage"
+                | "MsgWaitForMultipleObjects"
+                | "MsgWaitForMultipleObjectsEx"
+                | "SendMessageA"
+                | "SendMessageW"
+        )
+        && crate::user32::service_sent(cpu, mem, api, state, log, sched, max_instr)?.is_some()
+    {
+        return Ok(());
+    }
     let esp = cpu.esp();
     if cpu.fs_base != 0 {
         state.last_error = mem
@@ -1564,8 +1675,16 @@ pub fn dispatch(
     let mut args = [0u32; 16];
     let stack_bytes = stack_args_bytes(dll, name);
     let cdecl = dll.contains("crt") || dll.starts_with("msvcr");
-    let count = if cdecl {
-        12
+    let count = if dll == "user32.dll" && matches!(name, "wsprintfA" | "wsprintfW") {
+        2 // cdecl varargs are read on demand by the formatter
+    } else if cdecl {
+        match name {
+            "_errno" | "_CIpow" | "_ftol" | "_ftol2" | "_ftol2_sse" => 0,
+            "floor" => 2,
+            "ldexp" => 3,
+            "pow" | "qsort" => 4,
+            _ => 12,
+        }
     } else {
         stack_bytes.map_or(12, |n| (n / 4).min(16) as usize)
     };
@@ -1579,8 +1698,88 @@ pub fn dispatch(
     }
     let mut implemented = true;
     let mut note = String::new();
+    let mut yield_after_return = false;
     let ret: u32;
     match (dll, name) {
+        (
+            "winmm.dll",
+            "mciSendCommandA" | "mciSendCommandW" | "mciSendStringA" | "mciSendStringW",
+        ) => {
+            ret = 274;
+            implemented = false;
+            note = "MCI device backend unavailable".into();
+        }
+        ("kernel32.dll", "TerminateProcess") => {
+            if args[0] == u32::MAX
+                || matches!(state.handles.get(&args[0]), Some(HandleObj::Process { .. }))
+            {
+                cpu.halted = true;
+                cpu.exit_code = Some(args[1]);
+                ret = 1;
+                note = "terminated current guest process".into();
+            } else {
+                state.last_error = 6;
+                ret = 0;
+            }
+        }
+        ("wire.wmi", _) | ("ole32.dll", "CoCreateInstance") => {
+            (ret, note, implemented) =
+                crate::wmi::dispatch(dll, name, &args, mem, api, state).unwrap();
+        }
+        ("user32.dll", "wsprintfA" | "wsprintfW" | "wvsprintfA" | "wvsprintfW") => {
+            let varargs = if name.starts_with("wvs") {
+                args[2]
+            } else {
+                esp.checked_add(12).ok_or("wsprintf stack overflow")?
+            };
+            ret = crate::wsprintf::format(mem, args[0], args[1], varargs, name.ends_with('W'))?;
+            note = "checked guest Windows varargs formatting".into();
+        }
+        ("advapi32.dll", "RegOpenKeyA" | "RegOpenKeyW" | "RegOpenKeyExA" | "RegOpenKeyExW") => {
+            let output = if name.contains("Ex") {
+                args[4]
+            } else {
+                args[2]
+            };
+            mem.write_u32(output, 0).map_err(|e| e.to_string())?;
+            ret = if matches!(args[0], 0x80000000..=0x80000006) {
+                let key = crate::file_api::read_name(mem, args[1], name.ends_with('W'))
+                    .map_err(|e| format!("registry key: error {e}"))?;
+                note = format!("isolated registry: key {key:?} not present");
+                2 // no host registry or fabricated third-party installation
+            } else {
+                6
+            };
+        }
+        (
+            "advapi32.dll",
+            "RegQueryValueExA" | "RegQueryValueExW" | "RegQueryValueA" | "RegQueryValueW",
+        ) => {
+            ret = if matches!(args[0], 0x80000000..=0x80000006) {
+                2
+            } else {
+                6
+            };
+            note = "isolated registry: no value / invalid key".into();
+        }
+        ("advapi32.dll", "RegCloseKey") => {
+            ret = if matches!(args[0], 0x80000000..=0x80000006) {
+                0
+            } else {
+                6
+            };
+        }
+        (
+            "version.dll",
+            "GetFileVersionInfoA"
+            | "GetFileVersionInfoW"
+            | "GetFileVersionInfoSizeA"
+            | "GetFileVersionInfoSizeW"
+            | "VerQueryValueA"
+            | "VerQueryValueW",
+        ) => {
+            (ret, note) = crate::version::dispatch(name, &args, mem, state).unwrap();
+        }
         ("wire", "ExitEmulation") => {
             log.log_call(
                 idx,
@@ -1610,6 +1809,7 @@ pub fn dispatch(
             state
                 .modules
                 .release_tls_thread(&mut state.heap, state.process_heap, cpu.fs_base);
+            crate::user32::thread_exit(state, sched, sched.current_tid());
             sched.exit_current(cpu, code)?;
             return Ok(());
         }
@@ -1624,6 +1824,7 @@ pub fn dispatch(
             state
                 .modules
                 .release_tls_thread(&mut state.heap, state.process_heap, cpu.fs_base);
+            crate::user32::thread_exit(state, sched, sched.current_tid());
             sched.exit_current(cpu, args[0])?;
             return Ok(());
         }
@@ -1693,13 +1894,15 @@ pub fn dispatch(
             }
         }
         ("kernel32.dll", "SwitchToThread") => {
-            ret = sched.round_robin(cpu) as u32;
+            sched.poll_timeouts();
+            ret = sched.any_other_runnable() as u32;
+            yield_after_return = ret != 0;
         }
         ("kernel32.dll", "Sleep") => {
             if sched.take_wake().is_some() {
                 ret = 0; // void; woke after the full delay
             } else if args[0] == 0 {
-                sched.round_robin(cpu); // yield
+                yield_after_return = true;
                 ret = 0;
             } else {
                 let d = sched.arm_deadline(args[0]);
@@ -1716,7 +1919,7 @@ pub fn dispatch(
             if sched.take_wake().is_some() {
                 ret = 0;
             } else if args[0] == 0 {
-                sched.round_robin(cpu);
+                yield_after_return = true;
                 ret = 0;
             } else {
                 let d = sched.arm_deadline(args[0]);
@@ -1967,6 +2170,82 @@ pub fn dispatch(
                         }
                     }
                 }
+            }
+        }
+        ("user32.dll", "MsgWaitForMultipleObjects" | "MsgWaitForMultipleObjectsEx") => {
+            let (n, ptr, timeout, mask, flags) = if name.ends_with("Ex") {
+                (args[0], args[1], args[2], args[3], args[4])
+            } else {
+                (
+                    args[0],
+                    args[1],
+                    args[3],
+                    args[4],
+                    if args[2] != 0 { 1 } else { 0 },
+                )
+            };
+            sched.take_wake();
+            if n > 63 || flags & !7 != 0 || flags & 2 != 0 || mask & !0x5ff != 0 {
+                sched.clear_deadline();
+                state.last_error = 87;
+                ret = u32::MAX;
+            } else {
+                let hs = (0..n)
+                    .map(|i| mem.read_u32(ptr + i * 4).map_err(|e| e.to_string()))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let tid = sched.current_tid();
+                let input = crate::user32::message_wait_ready(state, tid, mask, flags & 4 != 0);
+                let invalid = hs.iter().any(|h| !state.handles.contains_key(h));
+                let got = if invalid {
+                    None
+                } else if flags & 1 != 0 {
+                    if input && hs.iter().all(|&h| obj_ready(state, sched, h)) {
+                        for &h in &hs {
+                            obj_acquire(state, sched, h);
+                        }
+                        Some(0)
+                    } else {
+                        None
+                    }
+                } else {
+                    hs.iter()
+                        .enumerate()
+                        .find_map(|(i, &h)| obj_acquire(state, sched, h).then_some(i as u32))
+                        .or(input.then_some(n))
+                };
+                if invalid {
+                    sched.clear_deadline();
+                    state.last_error = 6;
+                    ret = u32::MAX;
+                } else if let Some(r) = got {
+                    sched.clear_deadline();
+                    ret = r;
+                } else {
+                    let deadline = sched.arm_deadline(timeout);
+                    if timeout == 0 || deadline.is_some_and(|d| d <= Instant::now()) {
+                        sched.clear_deadline();
+                        ret = WAIT_TIMEOUT;
+                    } else {
+                        let timer = state
+                            .user32
+                            .timers
+                            .iter()
+                            .filter(|((owner, _, _), _)| *owner == tid && mask & 0x10 != 0)
+                            .map(|(_, t)| t.deadline)
+                            .min();
+                        let wake = match (deadline, timer) {
+                            (Some(a), Some(b)) => Some(a.min(b)),
+                            (a, b) => a.or(b),
+                        };
+                        sched.block_current(
+                            cpu,
+                            WaitTarget::MessageObjects(hs, tid, mask),
+                            wake,
+                        )?;
+                        return Ok(());
+                    }
+                }
+                note = "checked object/message wait".into();
             }
         }
         ("kernel32.dll", "CloseHandle") => {
@@ -2579,6 +2858,32 @@ pub fn dispatch(
             note = "CLR-style exit".into();
             ret = 0;
         }
+        ("comctl32.dll", "InitCommonControls" | "InitCommonControlsEx") => {
+            if name == "InitCommonControlsEx"
+                && mem.read_u32(args[0]).map_err(|e| e.to_string())? != 8
+            {
+                ret = 0;
+                state.last_error = 87;
+            } else {
+                let module = state.module_handle_for("comctl32.dll");
+                for class in [
+                    "Button",
+                    "Edit",
+                    "Static",
+                    "ListBox",
+                    "ComboBox",
+                    "ScrollBar",
+                    "SysListView32",
+                    "SysTreeView32",
+                    "SysTabControl32",
+                    "msctls_progress32",
+                ] {
+                    crate::user32::register_system_class(mem, api, state, module, class, true)?;
+                }
+                ret = 1;
+                note = "registered controls with basic window/text state".into();
+            }
+        }
         ("gdiplus.dll", _) => {
             (ret, note, implemented) = crate::gdiplus::dispatch(name, &args, mem, state);
         }
@@ -2586,11 +2891,8 @@ pub fn dispatch(
             (ret, note, implemented) =
                 crate::d3d9::dispatch(dll, name, &args, mem, api, state).unwrap();
         }
-        ("dsound.dll", "DirectSoundCreate" | "DirectSoundCreate8") => {
-            mem.write_u32(args[1], 0).map_err(|e| e.to_string())?;
-            ret = 0x88780078; // DSERR_NODRIVER; no audio device backend yet
-            implemented = false;
-            note = "DirectSound device backend unavailable".into();
+        ("dsound.dll", _) => {
+            (ret, note, implemented) = crate::dsound::dispatch(name, &args, mem, api, state, sched);
         }
         ("winmm.dll", "waveOutGetNumDevs") => {
             ret = 0;
@@ -2705,6 +3007,11 @@ pub fn dispatch(
         mem.write_u32(cpu.fs_base + 0x34, state.last_error)
             .map_err(|e| e.to_string())?;
     }
+    // Finish the caller's stdcall frame before saving its context. Switching
+    // earlier would apply its EAX/ESP/return PC and LastError to another thread.
+    if yield_after_return {
+        sched.round_robin(cpu);
+    }
     Ok(())
 }
 
@@ -2731,28 +3038,111 @@ fn crt_dispatch(
         return Ok(None);
     }
     let r = match name {
+        "time" | "_time32" => {
+            let n = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|e| e.to_string())?
+                .as_secs();
+            let value = if n > i32::MAX as u64 {
+                u32::MAX
+            } else {
+                n as u32
+            };
+            if args[0] != 0 {
+                mem.write_u32(args[0], value).map_err(|e| e.to_string())?;
+            }
+            value
+        }
+        "_mbsinc" => {
+            let first = mem.read_u8(args[0]).map_err(|e| e.to_string())?;
+            let lead = matches!(first, 0x81..=0x9f | 0xe0..=0xfc);
+            let pair = lead
+                && mem
+                    .read_u8(args[0].checked_add(1).ok_or("_mbsinc address overflow")?)
+                    .map_err(|e| e.to_string())?
+                    != 0;
+            args[0]
+                .checked_add(if pair { 2 } else { 1 })
+                .ok_or("_mbsinc address overflow")?
+        }
+        "_mbsnbcpy" => {
+            // Hangover Wine mbcs.c, LGPL-2.1-or-later, Alexandre Julliard
+            // (1999), Jon Griffths (2000). Checked CP932 guest adaptation.
+            if args[2] == 0 {
+                return Ok(Some(crate::cpu::GuestCallOutcome::Returned(args[0])));
+            }
+            if args[2] > 1 << 26 {
+                return Err("_mbsnbcpy size too large".into());
+            }
+            let mut bytes = vec![0; args[2] as usize];
+            let mut lead = false;
+            let mut copied = 0;
+            for i in 0..args[2] {
+                let b = mem
+                    .read_u8(args[1].checked_add(i).ok_or("_mbsnbcpy address overflow")?)
+                    .map_err(|e| e.to_string())?;
+                if b == 0 {
+                    break;
+                }
+                lead = !lead && matches!(b, 0x81..=0x9f | 0xe0..=0xfc);
+                bytes[i as usize] = b;
+                copied += 1;
+            }
+            if lead {
+                bytes[copied - 1] = 0;
+            }
+            mem.write_bytes(args[0], &bytes)
+                .map_err(|e| e.to_string())?;
+            args[0]
+        }
+        "_errno" => state.errno_address(mem, sched.current_tid())?,
+        "_ftol" | "_ftol2" | "_ftol2_sse" => {
+            let result = cpu.fpu.crt_ftol();
+            cpu.regs[crate::cpu::EDX] = (result >> 32) as u32;
+            result as u32
+        }
+        "floor" => {
+            cpu.fpu.crt_floor(args[0] as u64 | ((args[1] as u64) << 32));
+            0
+        }
+        "ldexp" => {
+            if cpu
+                .fpu
+                .crt_ldexp(args[0] as u64 | ((args[1] as u64) << 32), args[2] as i32)
+            {
+                let errno = state.errno_address(mem, sched.current_tid())?;
+                mem.write_u32(errno, 34).map_err(|e| e.to_string())?;
+            }
+            0
+        }
+        "_CIpow" | "pow" => {
+            let values = (name == "pow").then_some((
+                args[0] as u64 | ((args[1] as u64) << 32),
+                args[2] as u64 | ((args[3] as u64) << 32),
+            ));
+            if let Some(error) = cpu.fpu.crt_pow(values) {
+                let errno = state.errno_address(mem, sched.current_tid())?;
+                mem.write_u32(errno, error).map_err(|e| e.to_string())?;
+            }
+            0
+        }
+        "qsort" => {
+            return crate::crt_sort::qsort(
+                args[0], args[1], args[2], args[3], cpu, mem, api, state, log, sched, max_instr,
+            )
+            .map(Some)
+        }
         "__acrt_iob_func" => state
             .scratch_alloc(mem, 0x100, 16)
             .wrapping_add(args[0].wrapping_mul(0x40)),
-        "__p__fmode" | "__p__commode" | "__p___argc" | "__p__timezone" | "__p__daylight" => {
-            let p = state.scratch_alloc(mem, 16, 16);
-            if name == "__p___argc" {
-                mem.write_u32(p, 1).map_err(|e| e.to_string())?;
-            }
-            p
+        "__set_app_type" => {
+            state.crt_app_type = args[0];
+            0
         }
-        "__p__acmdln" => {
-            let p = state.scratch_alloc(mem, 4, 4);
-            mem.write_u32(p, state.cmdline_a)
-                .map_err(|e| e.to_string())?;
-            p
-        }
-        "__p__wcmdln" => {
-            let p = state.scratch_alloc(mem, 4, 4);
-            mem.write_u32(p, state.cmdline_w)
-                .map_err(|e| e.to_string())?;
-            p
-        }
+        "__p__fmode" | "__p__commode" | "__p___argc" | "__p__timezone" | "__p__daylight"
+        | "__p__acmdln" | "__p__wcmdln" => api
+            .data_export(mem, dll, &name[4..], state.cmdline_a, state.cmdline_w)?
+            .ok_or("unknown CRT data accessor")?,
         "__p___argv" | "__p___wargv" => {
             let p = state.scratch_alloc(mem, 4, 4);
             let (_, argv, _) = state.build_argv(mem);
@@ -2853,10 +3243,141 @@ fn crt_dispatch(
             mem.write_bytes(args[0], &tmp).map_err(|e| e.to_string())?;
             args[0]
         }
-        "strlen" => mem
-            .read_cstr(args[0], 1 << 20)
-            .map(|s| s.len() as u32)
-            .unwrap_or(0),
+        "strcmp" | "strncmp" => {
+            let limit = if name == "strncmp" { args[2] } else { u32::MAX };
+            let mut result = 0;
+            for i in 0..limit {
+                let left = mem
+                    .read_u8(args[0].checked_add(i).ok_or("strcmp address overflow")?)
+                    .map_err(|e| e.to_string())?;
+                let right = mem
+                    .read_u8(args[1].checked_add(i).ok_or("strcmp address overflow")?)
+                    .map_err(|e| e.to_string())?;
+                if left != right {
+                    result = (left as i32 - right as i32) as u32;
+                    break;
+                }
+                if left == 0 {
+                    break;
+                }
+            }
+            result
+        }
+        "_strdup" | "strdup" => {
+            let mut bytes = Vec::new();
+            for i in 0..1 << 20 {
+                let b = mem
+                    .read_u8(args[0].checked_add(i).ok_or("strdup address overflow")?)
+                    .map_err(|e| e.to_string())?;
+                bytes.push(b);
+                if b == 0 {
+                    break;
+                }
+            }
+            if bytes.last() != Some(&0) {
+                return Err("unterminated strdup source".into());
+            }
+            let p = state
+                .heap
+                .alloc(mem, state.process_heap, bytes.len() as u32, false)?;
+            if p != 0 {
+                mem.write_bytes(p, &bytes).map_err(|e| e.to_string())?;
+            }
+            p
+        }
+        "strtoul" => {
+            let mut bytes = Vec::new();
+            let mut terminated = false;
+            for i in 0..1 << 20 {
+                let b = mem
+                    .read_u8(args[0].checked_add(i).ok_or("strtoul address overflow")?)
+                    .map_err(|e| e.to_string())?;
+                if b == 0 {
+                    terminated = true;
+                    break;
+                }
+                bytes.push(b);
+            }
+            if !terminated {
+                return Err("unterminated strtoul source".into());
+            }
+            let digit = |b: u8| match b {
+                b'0'..=b'9' => Some((b - b'0') as u32),
+                b'a'..=b'z' => Some((b - b'a' + 10) as u32),
+                b'A'..=b'Z' => Some((b - b'A' + 10) as u32),
+                _ => None,
+            };
+            let mut pos = 0;
+            while bytes.get(pos).is_some_and(u8::is_ascii_whitespace) {
+                pos += 1;
+            }
+            let negative = bytes.get(pos) == Some(&b'-');
+            if bytes.get(pos).is_some_and(|b| matches!(b, b'+' | b'-')) {
+                pos += 1;
+            }
+            let mut base = args[2];
+            let prefix = bytes.get(pos) == Some(&b'0')
+                && bytes.get(pos + 1).is_some_and(|b| matches!(b, b'x' | b'X'))
+                && bytes
+                    .get(pos + 2)
+                    .and_then(|&b| digit(b))
+                    .is_some_and(|n| n < 16);
+            if (base == 0 || base == 16) && prefix {
+                base = 16;
+                pos += 2;
+            }
+            if base == 0 {
+                base = if bytes.get(pos) == Some(&b'0') { 8 } else { 10 };
+            }
+            let start = pos;
+            let mut n = 0u32;
+            let mut overflow = false;
+            if (2..=36).contains(&base) {
+                while let Some(d) = bytes.get(pos).and_then(|&b| digit(b)).filter(|&d| d < base) {
+                    if let Some(value) = n.checked_mul(base).and_then(|v| v.checked_add(d)) {
+                        n = value;
+                    } else {
+                        overflow = true;
+                    }
+                    pos += 1;
+                }
+            }
+            if args[1] != 0 {
+                mem.write_u32(
+                    args[1],
+                    args[0]
+                        .checked_add(if pos == start { 0 } else { pos as u32 })
+                        .ok_or("strtoul end pointer overflow")?,
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            if overflow || !(2..=36).contains(&base) {
+                let p = state.errno_address(mem, sched.current_tid())?;
+                mem.write_u32(p, if overflow { 34 } else { 22 })
+                    .map_err(|e| e.to_string())?;
+            }
+            if overflow {
+                u32::MAX
+            } else if negative {
+                n.wrapping_neg()
+            } else {
+                n
+            }
+        }
+        "strlen" => {
+            let mut len = None;
+            for i in 0..1 << 20 {
+                if mem
+                    .read_u8(args[0].checked_add(i).ok_or("strlen address overflow")?)
+                    .map_err(|e| e.to_string())?
+                    == 0
+                {
+                    len = Some(i);
+                    break;
+                }
+            }
+            len.ok_or("unterminated strlen source")?
+        }
         "exit" | "_exit" | "_cexit" | "quick_exit" => {
             cpu.halted = true;
             cpu.exit_code = Some(args[0]);

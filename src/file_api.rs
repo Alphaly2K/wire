@@ -1,3 +1,10 @@
+/* PathRemoveFileSpec, PathAddExtension and PathUnquoteSpaces A/W adapted from
+ * Hangover's Wine kernelbase/path.c,
+ * commit 3ea3a14941b6a122b892c84141ce9662c008081e (LGPL-2.1-or-later).
+ * Copyright 2018 Nikolay Sivov; 2018 Zhiyi Zhang;
+ * Copyright 2021-2023 Zebediah Figura. Wire selects LGPL 2.1.
+ * See third_party/hangover/path.c and COPYING.LIB for original notices.
+ */
 //! Synchronous Win32 file operations and directory queries.
 use crate::api::{ApiState, HandleObj};
 use crate::fs::win_error;
@@ -109,6 +116,10 @@ pub fn dispatch(
                 | "GetFileAttributesW"
                 | "CreateDirectoryA"
                 | "CreateDirectoryW"
+                | "DeleteFileA"
+                | "DeleteFileW"
+                | "SetFileAttributesA"
+                | "SetFileAttributesW"
                 | "FindFirstFileA"
                 | "FindFirstFileW"
                 | "FindFirstFileExA"
@@ -120,8 +131,20 @@ pub fn dispatch(
         || dll == "shlwapi.dll"
             && matches!(
                 name,
-                "PathFileExistsA" | "PathFileExistsW" | "PathIsDirectoryA" | "PathIsDirectoryW"
-            );
+                "PathFileExistsA"
+                    | "PathFileExistsW"
+                    | "PathIsDirectoryA"
+                    | "PathIsDirectoryW"
+                    | "PathRemoveFileSpecA"
+                    | "PathRemoveFileSpecW"
+                    | "PathRenameExtensionA"
+                    | "PathRenameExtensionW"
+                    | "PathAddExtensionA"
+                    | "PathAddExtensionW"
+                    | "PathUnquoteSpacesA"
+                    | "PathUnquoteSpacesW"
+            )
+        || (dll == "imagehlp.dll" && name == "MakeSureDirectoryPathExists");
     if !supported {
         return None;
     }
@@ -145,6 +168,110 @@ pub fn dispatch(
     };
     let result = (|| -> Result<(u32, String), u32> {
         match name {
+            "PathRemoveFileSpecA" | "PathRemoveFileSpecW" => {
+                if a[0] == 0 {
+                    return Ok((0, String::new()));
+                }
+                let mut chars = Vec::new();
+                let mut offset = 0;
+                loop {
+                    if offset >= 32768 {
+                        return Err(87);
+                    }
+                    let p = a[0].checked_add(offset).ok_or(87u32)?;
+                    let c = if wide {
+                        mem.read_u16(p).map_err(|_| 87u32)?
+                    } else {
+                        mem.read_u8(p).map_err(|_| 87u32)? as u16
+                    };
+                    if c == 0 {
+                        break;
+                    }
+                    chars.push((offset, c));
+                    offset += if wide { 2 } else { 1 };
+                    // CP932 trail byte 0x5c is part of a character, not '\\'.
+                    if !wide && matches!(c, 0x81..=0x9f | 0xe0..=0xfc) {
+                        let trail = mem
+                            .read_u8(a[0].checked_add(offset).ok_or(87u32)?)
+                            .map_err(|_| 87u32)?;
+                        if trail == 0 {
+                            break;
+                        }
+                        offset += 1;
+                    }
+                }
+                // Hangover's pinned Wine kernelbase/path.c root and separator
+                // rules, with indices into checked guest characters replacing
+                // native pointers. Keep ANSI/Wide extended-prefix differences.
+                let at = |i: usize| chars.get(i).map_or(0, |(_, c)| *c);
+                let drive = |i| matches!(at(i), 65..=90 | 97..=122) && at(i + 1) == 58;
+                let prefix = |text: &str, insensitive: bool| {
+                    text.bytes().enumerate().all(|(i, c)| {
+                        let ch = at(i);
+                        ch == c as u16
+                            || (insensitive && ch <= 127 && (ch as u8).eq_ignore_ascii_case(&c))
+                    })
+                };
+                let volume = wide
+                    && prefix("\\\\?\\Volume", true)
+                    && (0..38).all(|i| match i {
+                        0 => at(10 + i) == 123,
+                        9 | 14 | 19 | 24 => at(10 + i) == 45,
+                        37 => at(10 + i) == 125,
+                        _ => matches!(at(10 + i), 48..=57 | 65..=70 | 97..=102),
+                    });
+                let mut root = if volume {
+                    Some(48)
+                } else if wide && prefix("\\\\?\\", false) && drive(4) {
+                    Some(6)
+                } else if drive(0) {
+                    Some(2)
+                } else {
+                    None
+                };
+                if let Some(r) = root.as_mut() {
+                    if at(*r) == 92 {
+                        *r += 1;
+                    }
+                } else {
+                    let mut r = usize::from(at(0) == 92);
+                    if at(r + 1) != 63 {
+                        if at(r) == 92 {
+                            r += 1;
+                        }
+                        if r > 1 && drive(r) {
+                            r += 2;
+                        }
+                        if at(r) == 92 && at(r + 1) != 0 && at(r + 1) != 92 {
+                            r += 1;
+                        }
+                    }
+                    root = Some(r);
+                }
+                let root = root.unwrap();
+                let mut end_index = chars
+                    .iter()
+                    .enumerate()
+                    .skip(root)
+                    .filter(|(_, (_, c))| *c == 92)
+                    .map(|(i, _)| i)
+                    .next_back()
+                    .unwrap_or(root);
+                if end_index != root && at(end_index - 1) == 92 {
+                    end_index -= 1;
+                }
+                if at(end_index) == 0 {
+                    return Ok((0, String::new()));
+                }
+                let end = chars[end_index].0;
+                let p = a[0].checked_add(end).ok_or(87u32)?;
+                if wide {
+                    mem.write_u16(p, 0).map_err(|_| 87u32)?;
+                } else {
+                    mem.write_u8(p, 0).map_err(|_| 87u32)?;
+                }
+                Ok((1, "removed last path component".into()))
+            }
             "CreateFileA" | "CreateFileW" => {
                 if a[6] != 0 || a[5] & 0x4000_0000 != 0 {
                     return Err(50);
@@ -323,6 +450,87 @@ pub fn dispatch(
                     },
                     text,
                 ))
+            }
+            "MakeSureDirectoryPathExists" => {
+                let text = read_name(mem, a[0], false)?;
+                let path = state.fs.as_ref().ok_or(3u32)?.resolve(&text)?;
+                let directory = if text.ends_with(['\\', '/']) {
+                    path.as_path()
+                } else {
+                    path.parent().ok_or(3u32)?
+                };
+                std::fs::create_dir_all(directory).map_err(|e| win_error(&e))?;
+                Ok((1, text))
+            }
+            "PathUnquoteSpacesA" | "PathUnquoteSpacesW" => {
+                if a[0] == 0 {
+                    return Ok((0, String::new()));
+                }
+                let text = read_name(mem, a[0], wide)?;
+                if text.len() >= 2 && text.starts_with('"') && text.ends_with('"') {
+                    write_string(mem, a[0], 32768, &text[1..text.len() - 1], wide)?;
+                }
+                Ok((0, text))
+            }
+            "PathRenameExtensionA"
+            | "PathRenameExtensionW"
+            | "PathAddExtensionA"
+            | "PathAddExtensionW" => {
+                if a[0] == 0 || a[1] == 0 {
+                    return Ok((0, String::new()));
+                }
+                let mut text = read_name(mem, a[0], wide)?;
+                let ext = read_name(mem, a[1], wide)?;
+                let start = text.rfind(['\\', '/', ' ']).map_or(0, |n| n + 1);
+                if let Some(dot) = text[start..].rfind('.') {
+                    if name.starts_with("PathAdd") {
+                        return Ok((0, text));
+                    }
+                    text.truncate(start + dot);
+                }
+                text.push_str(&ext);
+                let count = if wide {
+                    text.encode_utf16().count()
+                } else {
+                    crate::codepage::encode(&text, 932)?.0.len()
+                };
+                if count >= 260 {
+                    return Err(206);
+                }
+                write_string(mem, a[0], 260, &text, wide)?;
+                Ok((1, text))
+            }
+            "DeleteFileA" | "DeleteFileW" => {
+                let text = read_name(mem, a[0], wide)?;
+                let path = state.fs.as_ref().ok_or(3u32)?.resolve(&text)?;
+                let info = path.metadata().map_err(|e| win_error(&e))?;
+                if info.is_dir() || info.permissions().readonly() {
+                    return Err(5);
+                }
+                std::fs::remove_file(path).map_err(|e| win_error(&e))?;
+                Ok((1, text))
+            }
+            "SetFileAttributesA" | "SetFileAttributesW" => {
+                let text = read_name(mem, a[0], wide)?;
+                let path = state.fs.as_ref().ok_or(3u32)?.resolve(&text)?;
+                if a[1] & !0x81 != 0 {
+                    return Err(87);
+                }
+                let mut permissions = path.metadata().map_err(|e| win_error(&e))?.permissions();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = permissions.mode();
+                    permissions.set_mode(if a[1] & 1 != 0 {
+                        mode & !0o222
+                    } else {
+                        mode | 0o200
+                    });
+                }
+                #[cfg(not(unix))]
+                permissions.set_readonly(a[1] & 1 != 0);
+                std::fs::set_permissions(path, permissions).map_err(|e| win_error(&e))?;
+                Ok((1, text))
             }
             "CreateDirectoryA" | "CreateDirectoryW" => {
                 let text = read_name(mem, a[0], wide)?;

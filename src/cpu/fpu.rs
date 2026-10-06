@@ -22,6 +22,12 @@ static LN2: LazyLock<Quad> = LazyLock::new(|| {
     .unwrap()
     .value
 });
+// Split pi/2 retains >200 bits during fused argument reduction, including
+// extended inputs near the x87 2^63 limit. No binary64 conversion is used.
+const HALF_PI_HI: u128 = 0x3fff_921f_b544_42d1_8469_898c_c517_01b8;
+static HALF_PI_LO: LazyLock<Quad> = LazyLock::new(|| {
+    Quad::from_str_r("4.33590506506189051239852201302167598438116167312826517088796786054022068557566411533235e-35",Round::NearestTiesToEven).unwrap().value
+});
 static LOAD_CONSTANTS: LazyLock<[[Ext; 7]; 4]> = LazyLock::new(|| {
     [
         Round::NearestTiesToEven,
@@ -483,6 +489,271 @@ impl Fpu {
         self.exception(0x20);
         self.put(0, v);
     }
+    fn trig(&mut self, op: u8) {
+        let x = self.get(0);
+        self.operands(&[x]);
+        // Invalid/denormal operand exceptions precede any stack mutation.
+        if self.sw & !self.cw & 3 != 0 {
+            return;
+        }
+        let limit = Ext::from_bits(((16383u128 + 63) << 64) | (1 << 63));
+        if x.is_finite() && x.abs() >= limit {
+            self.sw |= C2;
+            return;
+        }
+        self.sw &= !C2;
+        if op == 0xfb && self.tag((self.top() + 7) & 7) != 3 {
+            self.sw |= C1;
+            self.exception(0x41);
+            if self.cw & 1 != 0 {
+                self.put(0, Ext::from_bits(INDEFINITE));
+                self.push(Ext::from_bits(INDEFINITE));
+            }
+            return;
+        }
+        let (sin, cos) = if x.is_nan() {
+            let r = x.add_r(Ext::ZERO, self.round());
+            let v = self.accept(r, x);
+            (v, v)
+        } else if x.is_infinite() {
+            self.exception(1);
+            let v = Ext::from_bits(INDEFINITE);
+            (v, v)
+        } else if x.is_zero() {
+            (x, Ext::from_u128(1).value)
+        } else if x.abs() < Ext::from_bits(((16383u128 - 33) << 64) | (1 << 63)) {
+            // sin(x) lies immediately toward zero from x; cos(x) immediately
+            // below one. Preserve the discarded tail even when binary128
+            // cannot represent x^3 or distinguish 1-x^2/2 from one.
+            let toward_zero = matches!(self.round(), Round::TowardZero)
+                || (x.is_negative() && self.round() == Round::TowardPositive)
+                || (!x.is_negative() && self.round() == Round::TowardNegative);
+            let sin = if toward_zero {
+                if x.is_negative() {
+                    x.next_up().value
+                } else {
+                    x.next_down().value
+                }
+            } else {
+                x
+            };
+            let one = Ext::from_u128(1).value;
+            let cos = if matches!(self.round(), Round::TowardZero | Round::TowardNegative) {
+                one.next_down().value
+            } else {
+                one
+            };
+            self.exception(0x20);
+            if op != 0xff && (sin.is_denormal() || sin.is_zero()) {
+                self.exception(0x10);
+            }
+            if (op == 0xfe && !toward_zero) || (op != 0xfe && cos == one) {
+                self.sw |= C1;
+            }
+            (sin, cos)
+        } else {
+            let high = Quad::from_bits(HALF_PI_HI);
+            let q = Self::to_quad(x);
+            let quadrant = (q / high)
+                .value
+                .round_to_integral(Round::NearestTiesToEven)
+                .value;
+            let n = quadrant.to_i128_r(64, Round::TowardZero, &mut false).value;
+            let r = (-quadrant)
+                .mul_add_r(high, q, Round::NearestTiesToEven)
+                .value;
+            let r = (-quadrant)
+                .mul_add_r(*HALF_PI_LO, r, Round::NearestTiesToEven)
+                .value;
+            let r2 = -(r * r).value;
+            let mut st = r;
+            let mut ct = Quad::from_u128(1).value;
+            let mut sin = st;
+            let mut cos = ct;
+            for i in 1..64 {
+                st = quad_divide_small(quad_divide_small((st * r2).value, 2 * i), 2 * i + 1);
+                ct = quad_divide_small(quad_divide_small((ct * r2).value, 2 * i - 1), 2 * i);
+                let s = (sin + st).value;
+                let c = (cos + ct).value;
+                if s == sin && c == cos {
+                    break;
+                }
+                sin = s;
+                cos = c;
+            }
+            let (s, c) = match n.rem_euclid(4) {
+                0 => (sin, cos),
+                1 => (cos, -sin),
+                2 => (-sin, -cos),
+                _ => (-cos, sin),
+            };
+            let mut narrow = |q: Quad| {
+                let r: StatusAnd<Ext> = q.convert_r(self.round(), &mut false);
+                let t: StatusAnd<Ext> = q.convert_r(Round::TowardZero, &mut false);
+                self.sw &= !C1;
+                self.accept(r, t.value)
+            };
+            let s = if op != 0xff { narrow(s) } else { Ext::ZERO };
+            let c = if op != 0xfe { narrow(c) } else { Ext::ZERO };
+            self.exception(0x20);
+            (s, c)
+        };
+        if self.sw & !self.cw & 1 != 0 {
+            return;
+        }
+        match op {
+            0xfb => {
+                self.put(0, sin);
+                let rounded_up = self.sw & C1;
+                self.push(cos);
+                self.sw |= rounded_up;
+            }
+            0xfe => self.put(0, sin),
+            0xff => self.put(0, cos),
+            _ => unreachable!(),
+        }
+    }
+    pub(crate) fn crt_ftol(&mut self) -> u64 {
+        let x = self.get(0);
+        self.operands(&[x]);
+        let r = x.to_i128_r(64, Round::TowardZero, &mut false);
+        self.status(r.status);
+        let value = if r.status.contains(Status::INVALID_OP) {
+            1u64 << 63
+        } else {
+            r.value as u64
+        };
+        self.pop();
+        value
+    }
+    pub(crate) fn crt_floor(&mut self, bits: u64) {
+        let x = Double::from_bits(bits as u128);
+        let result = x.round_to_integral(Round::TowardNegative);
+        self.status(result.status);
+        let value: StatusAnd<Ext> = result.value.convert_r(Round::NearestTiesToEven, &mut false);
+        self.push(value.value);
+    }
+    pub(crate) fn crt_ldexp(&mut self, bits: u64, exponent: i32) -> bool {
+        let x = Double::from_bits(bits as u128);
+        let q: StatusAnd<Quad> = x.convert_r(Round::NearestTiesToEven, &mut false);
+        // Clamping extreme exponents preserves every binary64 result and its
+        // directed overflow/underflow while staying inside binary128 range.
+        let r: StatusAnd<Double> = q
+            .value
+            .scalbn(exponent.clamp(-4096, 4096))
+            .convert_r(self.round(), &mut false);
+        self.status(r.status);
+        let value: StatusAnd<Ext> = r.value.convert_r(Round::NearestTiesToEven, &mut false);
+        self.push(value.value);
+        r.status.intersects(Status::OVERFLOW | Status::UNDERFLOW)
+    }
+    pub(crate) fn crt_pow(&mut self, arguments: Option<(u64, u64)>) -> Option<u32> {
+        let (x, y) = if let Some((x, y)) = arguments {
+            let cv = |bits: u64| {
+                let v: StatusAnd<Ext> =
+                    Double::from_bits(bits as u128).convert_r(Round::NearestTiesToEven, &mut false);
+                v.value
+            };
+            (cv(x), cv(y))
+        } else {
+            let y = self.get(0);
+            let x = self.get(1);
+            self.pop();
+            self.pop();
+            (x, y)
+        };
+        self.operands(&[x, y]);
+        let one = Ext::from_u128(1).value;
+        let integral = y.is_finite() && y.round_to_integral(Round::TowardZero).value == y;
+        let odd = integral
+            && y.abs() < Ext::from_bits(((16383u128 + 64) << 64) | (1 << 63))
+            && y.to_i128_r(128, Round::TowardZero, &mut false).value & 1 != 0;
+        let negative = x.is_negative() && odd;
+        let mut error = None;
+        let mut result = if y.is_zero() || x == one {
+            one
+        } else if x.is_nan() || y.is_nan() {
+            self.accept(x.add_r(y, self.round()), x)
+        } else if y.is_infinite() {
+            if x.abs() == one {
+                one
+            } else if (x.abs() > one) != y.is_negative() {
+                Ext::INFINITY
+            } else {
+                Ext::ZERO
+            }
+        } else if x.is_infinite() {
+            if y.is_negative() {
+                Ext::ZERO
+            } else {
+                Ext::INFINITY
+            }
+        } else if x.is_zero() {
+            if y.is_negative() {
+                self.exception(4);
+                error = Some(34);
+                Ext::INFINITY
+            } else {
+                Ext::ZERO
+            }
+        } else if x.is_negative() && !integral {
+            self.exception(1);
+            error = Some(33);
+            Ext::from_bits(INDEFINITE)
+        } else {
+            let q = (Self::log2(Self::to_quad(x.abs())) * Self::to_quad(y)).value;
+            let q = if q > Quad::from_i128(4096).value {
+                Quad::from_i128(4096).value
+            } else if q < Quad::from_i128(-4096).value {
+                Quad::from_i128(-4096).value
+            } else {
+                q
+            };
+            {
+                let int = q.round_to_integral(Round::TowardNegative).value;
+                let n = int.to_i128_r(32, Round::TowardZero, &mut false).value as i32;
+                let frac = (q - int).value;
+                let z = (frac * Self::ln2()).value;
+                let mut sum = Quad::from_u128(1).value;
+                let mut term = sum;
+                for i in 1..128 {
+                    term = quad_divide_small((term * z).value, i);
+                    let next = (sum + term).value;
+                    if next == sum {
+                        break;
+                    }
+                    sum = next;
+                }
+                let value = if negative {
+                    -sum.scalbn(n)
+                } else {
+                    sum.scalbn(n)
+                };
+                // CRT pow returns binary64. Its internal reduction remains
+                // binary128, and the C intrinsic inputs retain x87 precision.
+                let rounded: StatusAnd<Double> = value.convert_r(self.round(), &mut false);
+                self.status(rounded.status);
+                if !frac.is_zero() {
+                    self.exception(0x20);
+                }
+                if rounded
+                    .status
+                    .intersects(Status::OVERFLOW | Status::UNDERFLOW)
+                {
+                    error = Some(34);
+                }
+                let extended: StatusAnd<Ext> = rounded
+                    .value
+                    .convert_r(Round::NearestTiesToEven, &mut false);
+                extended.value
+            }
+        };
+        if negative && !result.is_negative() && !result.is_nan() {
+            result = -result;
+        }
+        self.push(result);
+        error
+    }
 }
 
 impl Cpu {
@@ -690,6 +961,7 @@ impl Cpu {
                     let r = self.fpu.sqrt(x);
                     self.fpu.put(0, r);
                 }
+                (0xd9, 0xfb | 0xfe | 0xff) => self.fpu.trig(b),
                 (0xd9, 0xfc) => {
                     let x = self.fpu.get(0);
                     self.fpu.operands(&[x]);

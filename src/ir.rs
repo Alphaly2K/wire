@@ -221,6 +221,30 @@ pub struct Image {
     pub records: Vec<Record>,
 }
 impl Image {
+    /// Rebase only PC-relative control flow and the explicit IAT identity.
+    /// Absolute operands affected by PE relocations keep their original raw
+    /// bytes and are rejected by bind(), so they execute through x86 fallback.
+    pub fn at_base(mut self, base: u32) -> Result<Self, String> {
+        let delta = base.wrapping_sub(self.image_base);
+        for r in &mut self.records {
+            for i in 0..2 {
+                r.words[i] = r.words[i]
+                    .checked_sub(self.image_base)
+                    .and_then(|rva| base.checked_add(rva))
+                    .ok_or("rebased IR address overflow")?;
+            }
+            if matches!(r.op(), Op::Jmp | Op::Jcc | Op::Call) && r.operand(0).kind() == 2 {
+                r.words[6] = r.words[6].wrapping_add(delta);
+            } else if r.op() == Op::CallNative {
+                r.words[6] = base
+                    .checked_add(r.words[10])
+                    .ok_or("rebased IAT overflow")?;
+            }
+        }
+        self.image_base = base;
+        pack_hot(&mut self.records);
+        Ok(self)
+    }
     pub fn from_code(base: u32, code: &[u8]) -> Result<Self, String> {
         let mut records = decode(base, code)?;
         optimize_flags(&mut records);
@@ -635,6 +659,13 @@ pub struct Cache {
     pub accepted: usize,
 }
 impl Cache {
+    pub(crate) fn base(&self) -> u32 {
+        self.base
+    }
+    pub(crate) fn covers(&self, ip: u32) -> bool {
+        ip.checked_sub(self.base)
+            .is_some_and(|n| (n as usize) < self.slots.len())
+    }
     pub fn bind(image: Image, mem: &GuestMem) -> Result<Self, String> {
         let Some(first) = image.records.first() else {
             return Ok(Self {
