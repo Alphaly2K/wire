@@ -1,6 +1,7 @@
 //! Minimal PE32 parser (no external dependencies).
 
 pub const IMAGE_FILE_MACHINE_I386: u16 = 0x14c;
+pub const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
 pub const PE32_MAGIC: u16 = 0x10b;
 
 pub const DIR_EXPORT: usize = 0;
@@ -87,6 +88,11 @@ impl PeFile {
         }
         let coff = lfanew + 4;
         let machine = rd16(buf, coff)?;
+        if machine == IMAGE_FILE_MACHINE_AMD64 {
+            return Err(
+                "x86-64 (AMD64) is not supported; wire currently runs PE32 / i386 only".into(),
+            );
+        }
         if machine != IMAGE_FILE_MACHINE_I386 {
             return Err(format!("not a 32-bit x86 PE (machine=0x{machine:04x})"));
         }

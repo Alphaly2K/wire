@@ -9,6 +9,12 @@
 三对同负载首Present19.078→18.032秒，吞吐76.70→82.14 MIPS（约+7%），133项release回归通过。
 仍有约18秒启动延迟；热点仍集中在IR/cache与raw decode，继续暂停功能扩展。
 详见 [第二轮性能与profile](performance-ir-2026-10-06.md)，FLAGS/checked memory/x87边界没有放宽。
+第三轮已开始块内优化：安装/绑定时规划2–8条同页纯寄存器序列，共用查表/页检查/收尾，
+保留所有guest入口、预算、callback ESP和完整FLAGS恢复recipe。
+三对完整启动吞吐82.36→85.42 MIPS（约+3.7%），首Present17.984→17.425秒，收益仍较小。
+这只是批量执行，还没有完成专用融合opcode或常量/复制传播；见[静态序列性能记录](performance-scalar-runs-2026-10-06.md)。
+新提供的AliceToPapa样本为64位Unity/Mono应用，目前loader/CPU/API/IR均只支持PE32，
+实际引擎及Mono DLL也为AMD64；检查和独立扩展范围见[x86-64样本](x86-64-sample-2026-10-06.md)。
 以下保留此前功能推进阶段的历史记录；当前已经具备真实图像与 AppKit 上传。
 
 # M2 进行中：最新进度与交接（2026-10-06）

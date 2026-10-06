@@ -1,5 +1,8 @@
 # 第二轮解释器优化与完整启动 profile（2026-10-06）
 
+后续以本轮最终版 `2eea900` 为基线的块内批量执行和三对复测见
+[第三轮静态序列记录](performance-scalar-runs-2026-10-06.md)。本文件保留本轮历史结果。
+
 继续暂停功能扩展，优化真实游戏启动的解释主路径。基线为上一轮已提交的 `a694147`，
 冻结文件 `/private/tmp/wire-perf-startup-final`，不复用更早的25秒基线计算本轮收益。
 没有启用Wasm/JSC、runtime JIT、unchecked guest memory或降低x87精度。

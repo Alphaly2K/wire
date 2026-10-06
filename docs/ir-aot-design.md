@@ -157,7 +157,8 @@ Native replacement（FFmpeg/zlib 等）是另一层优化，只有版本、完�
 
 每条原始 guest 指令要能找回 PC、长度、IR 范围和 fault 恢复状态。统计按 retired 原始 x86 指令，
 融合后不得按一条 IR 算一条 guest；分时片/预算/调试也遵守原始边界。内部临时操作不能暴露半更新的 GPR/FLAGS。
-当前原型是一条 guest 对一条热路径/预解码操作；故障行为对照现有 wire，尚未补齐完整 x86 fault→SEH。
+当前仍保留一条 guest 对一条热操作/预解码记录，但可静态规划安全的纯寄存器序列批量执行；
+故障行为对照现有 wire，尚未补齐完整 x86 fault→SEH。
 
 guest memory check 与 FLAGS 消除相互独立。GuestMem 已实现独立的4KiB guest commitment/protection、
 checked 读/写/执行权限、VirtualProtect 和一次性 PAGE_GUARD；Apple Silicon 的16KiB宿主页仅管理 backing。
@@ -169,6 +170,31 @@ checked 读/写/执行权限、VirtualProtect 和一次性 PAGE_GUARD；Apple Si
 修改/重定位导致源字节不一致时也回退。PE 节混有数据，线性扫描不是完整代码发现证明。
 宿主写、解除映射、保护变化和重映射已统一纳入失效规则；generation 仍按 host page 保守失效。
 当前只支持单宿主 CPU 协作调度，多宿主线程的同步证明留待后续。
+
+## 纯寄存器序列的静态规划（2026-10-06）
+
+绑定已经AOT预解码的记录后，用一次逆序扫描规划2–8条连续热操作。
+每条都必须通过源字节和执行权限验证；使用同一4KiB guest页，所有原始入口仍可独立执行。
+覆盖寄存器MOV/CONST、零/符号扩展、整数算术/比较、LEA、NOP和末尾的直接Jcc/Jmp。
+不跨访存、栈操作、CALL_NATIVE、API、raw fallback；不允许中间分支或任何ESP/SP写入。
+8位寄存器编号4表示AH，与ESP区分。当前只在绑定时组合，不新增持久opcode或runtime decode/JIT。
+
+`Hot.next_slot`低28位保存原来的后继slot，高4位保存run长度减1；实际长度上限8。
+`.wir` v3、8B热操作、16B热条目和cache向量尺寸保持不变，没有额外run side table。
+执行时先验证入口的代码页generation，再按连续热条目执行，无需逐条重复dense PC lookup、
+generation和公共收尾。序列同页、无访存/宿主动作/ESP写入，且只有一个协作host CPU，
+因此内部没有能改写代码、保护、线程或callback栈边界的动作；跨页指令保持逐条checked路径。
+这项证明不适用于未来并行host CPU、异步guest内存写入或访存融合，扩展时必须重新论证。
+
+若预算或精确协作分时余量小于run长度，就执行原始单条路径；trace/op-stats同样逐条执行。
+所有计数仍按原始guest退休指令，进入序列内部的分支继续从相应原始入口执行。
+序列后紧接的访存fault、API、callback、代码失效等边界按原逻辑处理。
+
+序列内寄存器算术可推迟全部FLAGS的实际求值，但保存完整的a/b/result/carry/width/sub恢复recipe；
+INC/DEC仍保留先前CF，ADC/SBB读取有效CF，Jcc只求其所需位。
+预算、raw fallback、API、线程context保存或fault报告均能恢复所有架构FLAGS。
+这是延迟计算，不是扩大静态dead-FLAGS集合；原来的极度保守静态分析规则未改变。
+没有做常量传播、copy propagation、guest指令删除或专用CMP+Jcc融合opcode。
 
 ## 当前实现与目标格式的距离
 

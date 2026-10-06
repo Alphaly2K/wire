@@ -413,6 +413,10 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
             "IR instructions: {}; x86 fallback: {}; CALL_NATIVE: {}",
             cpu.ir_steps, cpu.ir_fallbacks, cpu.ir_native_calls
         );
+        println!(
+            "static scalar runs: {}; guest instructions in runs: {}",
+            cpu.ir_scalar_runs, cpu.ir_scalar_steps
+        );
     }
     println!(
         "final regs: eax={:#010x} ebx={:#010x} ecx={:#010x} edx={:#010x}",

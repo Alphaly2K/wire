@@ -314,3 +314,41 @@ pub(crate) struct Hot {
     pub next_ip: u32,
     pub next_slot: u32,
 }
+impl Hot {
+    // MAX_RECORDS fits well below 28 bits. The upper nibble records a
+    // statically proven register-only run, without enlarging the hot entry.
+    pub fn next_slot(self) -> u32 {
+        self.next_slot & 0x0fff_ffff
+    }
+    pub fn scalar_len(self) -> usize {
+        (self.next_slot >> 28) as usize + 1
+    }
+    pub fn set_scalar_len(&mut self, len: usize) {
+        debug_assert!((1..=8).contains(&len));
+        self.next_slot = self.next_slot() | (((len - 1) as u32) << 28);
+    }
+}
+
+/// These operations cannot fault, access memory, enter the host or change
+/// ESP. A branch may end a run, but cannot have a following operation in it.
+pub(crate) fn scalar_member(i: Inst) -> bool {
+    let op = i.opcode();
+    match op {
+        NOP | JCC_BASE..=JMP_I32 => true,
+        CMP_I32..=TEST_IMM_I32 => true,
+        MOV_GPR8 | CONST_GPR8 => true, // index 4 is AH, not ESP
+        ALU_GPR8_BASE..=ALU_GPR8_END => true,
+        ALU_GPR16_BASE..=ALU_GPR16_END => {
+            let form = op - ALU_GPR16_BASE + ADD_I32;
+            matches!(form, CMP_I32..=TEST_IMM_I32) || i.gpr_dst() != crate::cpu::ESP
+        }
+        MOV_I32
+        | CONST_I32
+        | ADD_I32..=DEC_I32
+        | LEA_I32
+        | MOV_GPR16
+        | CONST_GPR16
+        | MOV_U8_I32..=MOV_S16_I32 => i.gpr_dst() != crate::cpu::ESP,
+        _ => false,
+    }
+}

@@ -729,7 +729,39 @@ impl Cache {
                 .unwrap_or(0);
             hot.inst.link_branch(target_slot);
         }
+        // Static block planning after byte/permission validation. Every guest
+        // entry remains independently addressable. Bound runs contain at most
+        // eight accepted, contiguous, nonfaulting scalar operations within one
+        // guest page; only the last may branch. No instruction in a run can
+        // write code, change protection, switch threads or change callback ESP.
+        for index in (0..cache.hot.len()).rev() {
+            let r = &cache.records[index];
+            let hot = cache.hot[index];
+            if !compact::scalar_member(hot.inst)
+                || matches!(hot.inst.opcode(), compact::JCC_BASE..=compact::JMP_I32)
+                || cache.slots[(r.ip() - base) as usize] != index as u32 + 1
+                || hot.next_slot() != index as u32 + 2
+            {
+                continue;
+            }
+            let next = cache.hot[index + 1];
+            if !compact::scalar_member(next.inst) {
+                continue;
+            }
+            let len = (1 + next.scalar_len()).min(8);
+            let end = cache.hot[index + len - 1].next_ip - 1;
+            if r.ip() / crate::mem::GUEST_PAGE == end / crate::mem::GUEST_PAGE {
+                cache.hot[index].set_scalar_len(len);
+            }
+        }
         Ok(cache)
+    }
+    /// Only used for the contiguous range proven by bind and validated at its
+    /// entry. The single cooperative host CPU cannot invalidate code inside a
+    /// nonfaulting register-only run. Checked indexing remains in place.
+    #[inline]
+    pub(crate) fn scalar_hot(&self, index: usize) -> compact::Hot {
+        self.hot[index]
     }
     #[inline]
     pub(crate) fn get(

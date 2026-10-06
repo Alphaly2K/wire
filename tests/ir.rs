@@ -684,6 +684,163 @@ trait Outcome {
 }
 
 #[test]
+fn scalar_runs_keep_all_flags_branches_and_every_interior_entry() {
+    for compare in [0x39, 0x85] {
+        // CMP / TEST EAX,EDX
+        for cc in 0..16 {
+            let code = [
+                0x89,
+                0xc2, // MOV EDX,EAX
+                0x83,
+                0xc0,
+                1,    // ADD EAX,1
+                0x41, // INC ECX (preserve CF)
+                0x88,
+                0xc7, // MOV BH,AL
+                0x0f,
+                0xb6,
+                0xf7, // MOVZX ESI,BH
+                0x8d,
+                0x7c,
+                0x4e,
+                3, // LEA EDI,[ESI+ECX*2+3]
+                compare,
+                0xd0,
+                0x70 + cc,
+                5,
+                0xbb,
+                7,
+                0,
+                0,
+                0, // MOV EBX,7
+                0xcc,
+            ];
+            for initial in [0, 0x7fff_ffff, u32::MAX] {
+                for entry in [0, 2, 5, 6, 8, 11, 15] {
+                    for budget in 0..=11 {
+                        let mut states = Vec::new();
+                        for use_ir in [false, true] {
+                            let (mut cpu, mut mem) = machine(&code, use_ir);
+                            cpu.eip += entry;
+                            cpu.regs[0] = initial;
+                            cpu.regs[1] = initial;
+                            cpu.regs[2] = 0x8000_0000;
+                            cpu.eflags = 2 | FLAGS;
+                            let outcome = run(&mut cpu, &mut mem, budget);
+                            states.push((
+                                outcome.to_string_for_test(),
+                                cpu.regs,
+                                cpu.eflags,
+                                cpu.eip,
+                                cpu.instr_count,
+                            ));
+                            if use_ir && entry == 0 && budget >= 8 {
+                                assert!(cpu.ir_scalar_steps >= 8);
+                                assert!(cpu.ir_scalar_runs > 0);
+                            }
+                        }
+                        assert_eq!(states[0], states[1],
+                            "compare {compare:x} cc {cc} initial {initial:x} entry {entry} budget {budget}");
+                    }
+                }
+            }
+            for (trace, stats) in [(true, false), (false, true)] {
+                let (mut cpu, mut mem) = machine(&code, true);
+                cpu.trace_enabled = trace;
+                cpu.profile_opcodes = stats;
+                run(&mut cpu, &mut mem, 8);
+                assert_eq!(cpu.ir_scalar_runs, 0);
+                assert_eq!(cpu.ir_steps, 8);
+                if trace {
+                    assert_eq!(cpu.trace_ring.len(), 8);
+                }
+                if stats {
+                    assert_eq!(cpu.compact_op_stats.iter().sum::<u64>(), 8);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn scalar_runs_stop_before_guarded_code_and_a_following_memory_fault() {
+    use wire::mem::{GUEST_PAGE, PAGE_EXECUTE_READWRITE, PAGE_GUARD};
+    for guard in [false, true] {
+        let entry = if guard { GUEST_PAGE - 4 } else { 0 };
+        let mut code = vec![0; entry as usize];
+        code.extend([0x40, 0x41, 0x42, 0x43, 0x8b, 0x06, 0xcc]);
+        let mut states = Vec::new();
+        for use_ir in [false, true] {
+            let (mut cpu, mut mem) = machine(&code, false);
+            if guard {
+                mem.virtual_protect(
+                    CODE + GUEST_PAGE,
+                    GUEST_PAGE,
+                    PAGE_EXECUTE_READWRITE | PAGE_GUARD,
+                )
+                .unwrap();
+            }
+            if use_ir {
+                cpu.install_ir(Image::from_code(CODE, &code).unwrap(), &mem)
+                    .unwrap();
+            }
+            cpu.eip += entry;
+            cpu.regs[0] = u32::MAX;
+            cpu.regs[6] = 0x700000; // uncommitted MOV source
+            let outcome = run(&mut cpu, &mut mem, 10);
+            assert!(matches!(outcome, RunOutcome::Crashed(_)));
+            assert_eq!(cpu.instr_count, 4);
+            if use_ir {
+                assert_eq!(cpu.ir_scalar_steps, 4);
+            }
+            states.push((
+                outcome.to_string_for_test(),
+                cpu.regs,
+                cpu.eflags,
+                cpu.eip,
+                cpu.instr_count,
+                mem.virtual_query(CODE + GUEST_PAGE).unwrap().protect,
+            ));
+        }
+        assert_eq!(states[0], states[1], "guard {guard}");
+    }
+}
+
+#[test]
+fn scalar_run_interior_patches_invalidate_the_entire_run() {
+    let code = [0x40, 0x41, 0x42, 0x43, 0x45, 0x46, 0x47, 0xcc];
+    for before_bind in [false, true] {
+        let mut states = Vec::new();
+        for use_ir in [false, true] {
+            let (mut cpu, mut mem) = machine(&code, false);
+            if before_bind {
+                mem.write_u8(CODE + 4, 0x4d).unwrap();
+            }
+            if use_ir {
+                cpu.install_ir(Image::from_code(CODE, &code).unwrap(), &mem)
+                    .unwrap();
+            }
+            if !before_bind {
+                mem.write_u8(CODE + 4, 0x4d).unwrap();
+            }
+            let outcome = run(&mut cpu, &mut mem, 7);
+            assert_eq!(cpu.regs[5], u32::MAX); // patched DEC EBP
+            states.push((
+                outcome.to_string_for_test(),
+                cpu.regs,
+                cpu.eflags,
+                cpu.eip,
+                cpu.instr_count,
+            ));
+            if use_ir && !before_bind {
+                assert_eq!(cpu.ir_scalar_steps, 0);
+            }
+        }
+        assert_eq!(states[0], states[1], "before bind {before_bind}");
+    }
+}
+
+#[test]
 fn typed_segments_preserve_every_budget_and_fault_retirement_boundary() {
     let code = [
         0xb9, 3, 0, 0, 0, // MOV ECX,3

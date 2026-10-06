@@ -147,7 +147,7 @@ impl Cpu {
                 .ir_cache
                 .as_ref()
                 .and_then(|c| c.get(self.eip, mem, self.profile_opcodes, hint));
-            if let Some(r) = record {
+            if let Some(mut r) = record {
                 if self.trace_enabled {
                     let mut bytes = Vec::with_capacity(8);
                     for i in 0..8 {
@@ -169,8 +169,28 @@ impl Cpu {
                         *self.op_stats.entry(0x100 | (opcode >> 16)).or_insert(0) += 1;
                     }
                 }
-                let op = r.hot.inst.opcode();
-                let result = if op != 0 {
+                let mut op = r.hot.inst.opcode();
+                let mut executed = 1;
+                let scalar_len = r.hot.scalar_len();
+                let result = if scalar_len > 1
+                    && scalar_len as u64 <= limit - retired
+                    && !self.trace_enabled
+                    && !self.profile_opcodes
+                {
+                    // Entry get() validated the page shared by the whole run.
+                    // No memory, host action, ESP write or intermediate branch
+                    // can change code or expose an interior boundary. If the
+                    // budget ends inside, use normal per-guest dispatch instead.
+                    for index in r.index..r.index + scalar_len {
+                        r.hot = self.ir_cache.as_ref().unwrap().scalar_hot(index);
+                        self.execute_scalar(r.hot, true);
+                    }
+                    executed = scalar_len as u64;
+                    self.ir_scalar_runs += 1;
+                    self.ir_scalar_steps += executed;
+                    op = r.hot.inst.opcode();
+                    Ok(())
+                } else if op != 0 {
                     if self.profile_opcodes {
                         self.compact_op_stats[op as usize] += 1;
                     }
@@ -195,7 +215,7 @@ impl Cpu {
                     return (retired, Err(error));
                 }
                 hint = if self.eip == r.hot.next_ip {
-                    (r.hot.next_ip, r.hot.next_slot)
+                    (r.hot.next_ip, r.hot.next_slot())
                 } else if matches!(op, compact::JCC_BASE..=compact::JMP_I32)
                     && self.eip == r.hot.inst.aux
                 {
@@ -203,7 +223,7 @@ impl Cpu {
                 } else {
                     (0, 0)
                 };
-                retired += 1;
+                retired += executed;
                 // API stubs and callback sentinels stay in the outer run loop.
                 // A branch itself has no host action. The next get() still
                 // validates changed code and rejects unrecognized entries.
@@ -235,18 +255,13 @@ impl Cpu {
         self.eip = hot.next_ip;
         let op = i.opcode();
         match op {
-            NOP => {}
-            MOV_I32 => self.regs[i.gpr_dst()] = self.regs[i.gpr_a()],
-            CONST_I32 => self.regs[i.gpr_dst()] = i.aux,
-            MOV_GPR8 => self.set_r8(i.gpr_dst(), self.r8(i.gpr_a())),
-            MOV_GPR16 => self.set_r(i.gpr_dst(), self.regs[i.gpr_a()], 16),
-            CONST_GPR8 => self.set_r8(i.gpr_dst(), i.aux as u8),
-            CONST_GPR16 => self.set_r(i.gpr_dst(), i.aux, 16),
-            MOV_U8_I32 => self.regs[i.gpr_dst()] = self.r8(i.gpr_a()) as u32,
-            MOV_U16_I32 => self.regs[i.gpr_dst()] = self.regs[i.gpr_a()] & 0xffff,
-            MOV_S8_I32 => self.regs[i.gpr_dst()] = self.r8(i.gpr_a()) as i8 as i32 as u32,
-            MOV_S16_I32 => self.regs[i.gpr_dst()] = self.regs[i.gpr_a()] as i16 as i32 as u32,
-            LOAD_I32..=LOAD_S16_I32 | ALU_REG_MEM_I32_BASE..=ALU_MEM_REG_I32_END => {
+            NOP..=DEC_I32 | JCC_BASE..=JMP_I32 | LEA_I32 | ALU_GPR8_BASE..=MOV_S16_I32 => {
+                self.execute_scalar(hot, false);
+            }
+            LOAD_I32
+            | STORE_I32
+            | LOAD_GPR8..=LOAD_S16_I32
+            | ALU_REG_MEM_I32_BASE..=ALU_MEM_REG_I32_END => {
                 let base = if i.has_base() {
                     self.regs[i.gpr_a()]
                 } else {
@@ -257,14 +272,10 @@ impl Cpu {
                 } else {
                     0
                 };
-                let segment = if op == LEA_I32 {
-                    0
-                } else {
-                    match i.address_segment() {
-                        1 => self.fs_base,
-                        2 => self.gs_base,
-                        _ => 0,
-                    }
+                let segment = match i.address_segment() {
+                    1 => self.fs_base,
+                    2 => self.gs_base,
+                    _ => 0,
                 };
                 let address = base
                     .wrapping_add(index)
@@ -275,7 +286,6 @@ impl Cpu {
                 match op {
                     LOAD_I32 => self.regs[i.gpr_dst()] = mem.read_u32(address)?,
                     STORE_I32 => mem.write_u32(address, self.regs[i.gpr_dst()])?,
-                    LEA_I32 => self.regs[i.gpr_dst()] = address,
                     LOAD_GPR8 => self.set_r8(i.gpr_dst(), mem.read_u8(address)?),
                     LOAD_GPR16 => self.set_r(i.gpr_dst(), mem.read_u16(address)? as u32, 16),
                     STORE_GPR8 => mem.write_u8(address, self.r8(i.gpr_dst()))?,
@@ -310,7 +320,6 @@ impl Cpu {
                     _ => unreachable!(),
                 }
             }
-            JMP_I32 => self.eip = i.aux,
             PUSH_I32 => self.push32(mem, self.regs[i.gpr_a()])?,
             PUSH_CONST_I32 => self.push32(mem, i.aux)?,
             POP_I32 => self.regs[i.gpr_dst()] = self.pop32(mem)?,
@@ -333,6 +342,44 @@ impl Cpu {
                 self.set_esp(self.regs[super::EBP]);
                 self.regs[super::EBP] = self.pop32(mem)?;
             }
+            _ => unreachable!("compact instructions are validated before binding"),
+        }
+        Ok(())
+    }
+    /// Register-only execution shared by ordinary dispatch and static runs.
+    /// All FLAGS recipes remain complete, including at a branch or split.
+    #[inline(always)]
+    fn execute_scalar(&mut self, hot: compact::Hot, lazy: bool) {
+        use compact::*;
+        let i = hot.inst;
+        let op = i.opcode();
+        self.eip = hot.next_ip;
+        match op {
+            NOP => {}
+            MOV_I32 => self.regs[i.gpr_dst()] = self.regs[i.gpr_a()],
+            CONST_I32 => self.regs[i.gpr_dst()] = i.aux,
+            MOV_GPR8 => self.set_r8(i.gpr_dst(), self.r8(i.gpr_a())),
+            MOV_GPR16 => self.set_r(i.gpr_dst(), self.regs[i.gpr_a()], 16),
+            CONST_GPR8 => self.set_r8(i.gpr_dst(), i.aux as u8),
+            CONST_GPR16 => self.set_r(i.gpr_dst(), i.aux, 16),
+            MOV_U8_I32 => self.regs[i.gpr_dst()] = self.r8(i.gpr_a()) as u32,
+            MOV_U16_I32 => self.regs[i.gpr_dst()] = self.regs[i.gpr_a()] & 0xffff,
+            MOV_S8_I32 => self.regs[i.gpr_dst()] = self.r8(i.gpr_a()) as i8 as i32 as u32,
+            MOV_S16_I32 => self.regs[i.gpr_dst()] = self.regs[i.gpr_a()] as i16 as i32 as u32,
+            LEA_I32 => {
+                let base = if i.has_base() {
+                    self.regs[i.gpr_a()]
+                } else {
+                    0
+                };
+                let index = if i.has_index() {
+                    self.regs[i.gpr_b()].wrapping_shl(i.address_scale())
+                } else {
+                    0
+                };
+                self.regs[i.gpr_dst()] = base.wrapping_add(index).wrapping_add(i.aux);
+            }
+            JMP_I32 => self.eip = i.aux,
             JCC_BASE..=47 => {
                 if self.cc(op - JCC_BASE) {
                     self.eip = i.aux;
@@ -378,7 +425,7 @@ impl Cpu {
                         deferred: 0,
                     },
                     defs,
-                    i.eager_flags(),
+                    if lazy { 0 } else { i.eager_flags() },
                 );
                 if !matches!(op, CMP_I32 | CMP_IMM_I32 | TEST_I32 | TEST_IMM_I32) {
                     self.regs[i.gpr_dst()] = result;
@@ -401,14 +448,14 @@ impl Cpu {
                 } else {
                     (op - ADD_I32) / 2
                 };
-                let result = self.compact_alu(a, b, sub, width, i.eager_flags());
+                let result =
+                    self.compact_alu(a, b, sub, width, if lazy { 0 } else { i.eager_flags() });
                 if !matches!(sub, 7 | 8) {
                     self.set_r(i.gpr_dst(), result, width);
                 }
             }
-            _ => unreachable!("compact instructions are validated before binding"),
+            _ => unreachable!("validated scalar run"),
         }
-        Ok(())
     }
     #[inline(always)]
     fn compact_alu(&mut self, a: u32, b: u32, sub: u8, width: u8, eager: u32) -> u32 {
