@@ -449,6 +449,26 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
             };
             println!("  {c:>9}  {name}");
         }
+        println!("\ntop raw fallback opcodes:");
+        let mut v: Vec<_> = cpu.raw_op_stats.iter().collect();
+        v.sort_by(|a, b| b.1.cmp(a.1));
+        for (k, c) in v.iter().take(40) {
+            if **k >= 0x100 {
+                println!("  {c:>9}  0f {:02x}", **k & 0xff);
+            } else {
+                println!("  {c:>9}  {k:02x}");
+            }
+        }
+        println!(
+            "\ncompact IR operations: {}",
+            cpu.compact_op_stats.iter().sum::<u64>()
+        );
+        println!("top cold IR operations (sub-operation, width, operands):");
+        let mut v = cpu.cold_ir_profile();
+        v.sort_by_key(|a| std::cmp::Reverse(a.1));
+        for (name, count) in v.iter().take(30) {
+            println!("  {count:>9}  {name}");
+        }
     }
     if matches!(outcome, RunOutcome::Crashed(_)) {
         println!("\nlast API calls before stop:");

@@ -81,3 +81,6 @@ release Clippy all-targets、fmt和diff检查通过。
 首 Present 中位数25.031→18.996秒（约−24%），测量段37.191→29.534秒，
 128项回归通过。该数据只针对同一真实游戏启动负载，尚未解决性能问题；
 具体实现、时间口径和剩余热点见 [启动性能记录](performance-startup-2026-10-06.md)。
+第二轮继续优化解释器：三对首Present19.078→18.032秒、吞吐约+7%，133项release回归通过。
+重抓的完整启动profile仍以IR/cache和raw decode为主，D3D9绘制不到1%，
+因此继续性能路线，图形功能扩展暂停；见 [第二轮记录](performance-ir-2026-10-06.md)。

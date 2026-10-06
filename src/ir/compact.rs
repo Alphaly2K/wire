@@ -55,6 +55,25 @@ pub(crate) const CALL_I32: u8 = 64;
 pub(crate) const JMP_REG_I32: u8 = 65;
 pub(crate) const RET_I32: u8 = 66;
 pub(crate) const LEAVE_I32: u8 = 67;
+// The same twenty arithmetic forms, with the guest subregister type carried
+// by the opcode. GPR8 retains x86's AH/CH/DH/BH numbering.
+pub(crate) const ALU_GPR8_BASE: u8 = 68;
+pub(crate) const ALU_GPR8_END: u8 = 87;
+pub(crate) const ALU_GPR16_BASE: u8 = 88;
+pub(crate) const ALU_GPR16_END: u8 = 107;
+pub(crate) const MOV_GPR8: u8 = 108;
+pub(crate) const MOV_GPR16: u8 = 109;
+pub(crate) const CONST_GPR8: u8 = 110;
+pub(crate) const CONST_GPR16: u8 = 111;
+pub(crate) const MOV_U8_I32: u8 = 112;
+pub(crate) const MOV_U16_I32: u8 = 113;
+pub(crate) const MOV_S8_I32: u8 = 114;
+pub(crate) const MOV_S16_I32: u8 = 115;
+// Nine arithmetic/compare forms in each direction. Memory forms keep full
+// FLAGS eagerly and reuse metadata for the checked address, like LOAD_I32.
+pub(crate) const ALU_REG_MEM_I32_BASE: u8 = 116;
+pub(crate) const ALU_MEM_REG_I32_BASE: u8 = 125;
+pub(crate) const ALU_MEM_REG_I32_END: u8 = 133;
 
 const FLAG_BITS: [u32; 6] = [CF, PF, AF, ZF, SF, OF];
 impl Inst {
@@ -71,14 +90,21 @@ impl Inst {
             self.bits |= slot << 8;
         }
     }
-    pub fn dst(self) -> usize {
-        ((self.bits >> 8) & 63) as usize
+    // All current register-using hot opcodes operate on the eight x86 GPRs.
+    // bind validates the complete six-bit fields against lowering first;
+    // branch links (which reuse those bits) never use these accessors. Make
+    // that proven range visible to Rust without unchecked array accesses.
+    pub fn gpr_dst(self) -> usize {
+        debug_assert_eq!((self.bits >> 8) & 63, (self.bits >> 8) & 7);
+        ((self.bits >> 8) & 7) as usize
     }
-    pub fn a(self) -> usize {
-        ((self.bits >> 14) & 63) as usize
+    pub fn gpr_a(self) -> usize {
+        debug_assert_eq!((self.bits >> 14) & 63, (self.bits >> 14) & 7);
+        ((self.bits >> 14) & 7) as usize
     }
-    pub fn b(self) -> usize {
-        ((self.bits >> 20) & 63) as usize
+    pub fn gpr_b(self) -> usize {
+        debug_assert_eq!((self.bits >> 20) & 63, (self.bits >> 20) & 7);
+        ((self.bits >> 20) & 7) as usize
     }
     pub fn eager_flags(self) -> u32 {
         let packed = self.bits >> 26;
@@ -197,8 +223,75 @@ impl Inst {
     }
     pub fn lower_runtime(r: &Record) -> Option<Self> {
         let a = r.operand(0);
+        let b = r.operand(1);
         let reg32 = a.kind() == 1 && a.width() == 32;
+        if r.op() == Op::Alu {
+            if a.kind() == 1 && a.width() == r.width() && matches!(r.width(), 8 | 16) {
+                let base = if r.width() == 8 {
+                    ALU_GPR8_BASE
+                } else {
+                    ALU_GPR16_BASE
+                };
+                let (form, src, aux) = if r.sub() >= 9 {
+                    (INC_I32 - ADD_I32 + r.sub() - 9, 0, 1)
+                } else if b.kind() == 1 && b.width() == r.width() {
+                    (r.sub() * 2, b.base(), 0)
+                } else if b.kind() == 2 {
+                    (r.sub() * 2 + 1, 0, b.value)
+                } else {
+                    return None;
+                };
+                return Some(Self::new(
+                    base + form,
+                    a.base(),
+                    a.base(),
+                    src,
+                    r.eager_flags(),
+                    aux,
+                ));
+            }
+            if r.width() == 32
+                && r.sub() <= 8
+                && r.defs() == super::FLAGS
+                && r.eager_flags() == super::FLAGS
+            {
+                if reg32 && b.kind() == 3 && b.width() == 32 {
+                    return Some(Self::memory(ALU_REG_MEM_I32_BASE + r.sub(), a.base(), b));
+                }
+                if a.kind() == 3 && a.width() == 32 && b.kind() == 1 && b.width() == 32 {
+                    return Some(Self::memory(ALU_MEM_REG_I32_BASE + r.sub(), b.base(), a));
+                }
+            }
+        }
         let (op, register, aux) = match r.op() {
+            Op::Mov
+                if a.kind() == 1
+                    && matches!(a.width(), 8 | 16)
+                    && b.kind() == 1
+                    && a.width() == b.width() =>
+            {
+                let op = if a.width() == 8 { MOV_GPR8 } else { MOV_GPR16 };
+                return Some(Self::new(op, a.base(), b.base(), 0, 0, 0));
+            }
+            Op::Mov if a.kind() == 1 && matches!(a.width(), 8 | 16) && b.kind() == 2 => (
+                if a.width() == 8 {
+                    CONST_GPR8
+                } else {
+                    CONST_GPR16
+                },
+                a.base(),
+                b.value,
+            ),
+            Op::Movzx | Op::Movsx if reg32 && b.kind() == 1 => {
+                let op = match (r.op(), b.width()) {
+                    (Op::Movzx, 8) => MOV_U8_I32,
+                    (Op::Movzx, 16) => MOV_U16_I32,
+                    (Op::Movsx, 8) => MOV_S8_I32,
+                    (Op::Movsx, 16) => MOV_S16_I32,
+                    _ => return None,
+                };
+                return Some(Self::new(op, a.base(), b.base(), 0, 0, 0));
+            }
             Op::Push if r.width() == 32 && reg32 => (PUSH_I32, a.base(), 0),
             Op::Push if r.width() == 32 && a.kind() == 2 => (PUSH_CONST_I32, 0, a.value),
             Op::Pop if r.width() == 32 && reg32 => (POP_I32, a.base(), 0),

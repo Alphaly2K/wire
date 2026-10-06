@@ -182,11 +182,11 @@ checked 读/写/执行权限、VirtualProtect 和一次性 PAGE_GUARD；Apple Si
 不会绕过这些检查。页索引使用 shift，消除热路径动态除法。
 无trace/opcode统计时，连续typed指令在一个解释段内调度，减少每条指令重复的外层halt/API分发；
 CLI的opcode统计现默认关闭，`--op-stats`显式开启；旧`--no-op-stats`保留兼容。
-分支、冷记录、fallback与stub边界返回外层。预算和1,048,576条指令的协作分时边界精确截断，
+冷记录、fallback与stub边界返回外层；紧凑分支可继续同一解释链。预算和1,048,576条指令的协作分时边界精确截断，
 中途fault只计已成功退休的前缀。单步与开启观测时仍逐条返回，FLAGS恢复规则不变。
 GuestMem预先验证宿主页尺寸为2的幂，代码代数用shift定位宿主页；checked权限用固定4KiB guest页，
 标量访问通常只检查一页，跨页继续检查剩余所有页，写入继续递增代码代数。没有unchecked访存路径。
-内存算术、其他窄寄存器和 CALL_NATIVE 使用64B预解码慢路径；SSE/x87/其他未覆盖指令用原解释器。
+尚未降低的内存/窄操作和 CALL_NATIVE 使用64B预解码慢路径；SSE/x87/其他未覆盖指令用原解释器。
 2026-10-06 的启动性能优化还在 bind 时把已验证 v3 记录中的 PUSH/POP_I32、
 立即数 PUSH、直接/寄存器 CALL_I32、寄存器 JMP_I32、RET_I32 与 LEAVE_I32
 降低为8B typed 热操作。额外8个 opcode 只存在于进程内的热表；磁盘编码与验证规则不变，
@@ -198,6 +198,32 @@ CALL_NATIVE 的 IAT guard 和计数仍走原路径，没有绕开 guest hook。
 API/stub、cold/fallback、代码页 generation、精确预算和协作分时检查保留。
 常见调用与返回可继续同一紧凑解释链，动态目标仍按真实 guest PC 查表并验证代码页。
 详细长启动 profile、调度影响和复测见 [启动性能记录](performance-startup-2026-10-06.md)。
+
+后续按完整启动的执行路径统计增加以下**仅进程内** lowering，同样不改变持久v3编码：
+
+| opcode 编号 | 操作及字段 |
+| --- | --- |
+| 68–87 / 88–107 | GPR8 / GPR16 的20种算术形式；对应 I32 的寄存器/立即数 ADD…TEST、INC/DEC；metadata仍为原静态 eager_flags |
+| 108–111 | 窄寄存器 MOV/CONST；GPR8保持高字节编号，GPR16/8写回保留其余位 |
+| 112–115 | 从GPR8/16零/符号扩展到I32；源与目标别名时先读取源值 |
+| 116–124 / 125–133 | I32寄存器←内存 / 内存←寄存器的9种算术/比较形式；dst是非内存操作数的GPR，srcA/srcB与metadata描述地址，aux为displacement |
+
+内存算术只有原记录的 defs/eager_flags 都为完整六位 FLAGS 时才降低；
+不把FLAGS掩码塞进寻址metadata，也不缩窄该操作的静态观察边界。
+仍先checked read、读取CF、完整计算FLAGS，再按原顺序checked write；CMP/TEST不写内存。
+因此只读写故障可观察的FLAGS、跨4KiB页的访问、一次性guard和自修改失效保持原语义。
+这些操作仍一条guest对应一条8B操作，可延续紧凑链；没有引入融合后跳过guest预算/回调边界的行为。
+全部热操作共使用125个opcode编号，解释分发按少数操作族共享实现，未穷举x86指令编码。
+没有增加地址/常量side table，8B指令、16B热条目及上述cache向量有效载荷尺寸不变。
+查表hint和IR尝试数在解释链退出时写回，包括fault时的失败尝试；每条guest的边界检查仍保留。
+目前这些typed opcode的所有寄存器操作数都被bind验证为GPR 0–7；执行器通过专用GPR字段访问器
+把该范围传给编译器，消除8元素宿主寄存器数组的重复bounds分支，不使用unchecked索引。
+磁盘字段仍为6位，branch link不经GPR访问器；这不是通用64-vreg访问实现，也不缩窄guest内存检查。
+
+原始fallback前缀扫描直接消费已checked执行读取的opcode，移除同地址的第二次读取；
+fetch_u8/u16/u32允许编译期内联，但不提前读取操作数，也不缓存未经检查的guest指针。
+`--op-stats`额外报告raw opcode、紧凑IR数量与冷IR的操作/宽度/操作数分类；
+这些诊断按尝试次数计数，错误指令也可能被记录，不能充当退休数或正式性能计时。
 
 **解释器的512B vreg bank、完整 Semantic IR、所有类型的8B lowering、紧凑持久文件与通用 block chaining 还未实现。**
 当前热子集借用现有 EAX…EDI 存储，不能将其包装成已经完成的64-vreg后端。

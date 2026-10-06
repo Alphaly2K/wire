@@ -305,9 +305,11 @@ impl GuestMem {
         Ok(unsafe { self.base.add(addr as usize) })
     }
 
+    #[inline]
     pub(crate) fn fetch_u8(&self, addr: u32) -> Result<u8, MemFault> {
         Ok(unsafe { self.access_ptr(addr, 1, Access::Execute, true)?.read() })
     }
+    #[inline]
     pub(crate) fn fetch_u16(&self, addr: u32) -> Result<u16, MemFault> {
         Ok(u16::from_le(unsafe {
             self.access_ptr(addr, 2, Access::Execute, true)?
@@ -315,6 +317,7 @@ impl GuestMem {
                 .read_unaligned()
         }))
     }
+    #[inline]
     pub(crate) fn fetch_u32(&self, addr: u32) -> Result<u32, MemFault> {
         Ok(u32::from_le(unsafe {
             self.access_ptr(addr, 4, Access::Execute, true)?

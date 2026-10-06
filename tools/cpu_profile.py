@@ -140,6 +140,7 @@ def summarize(args):
     folded, reports = collections.Counter(), []
     for path, nodes in parsed:
         categories, inclusive = collections.Counter(), collections.Counter()
+        self_time, function_inclusive = collections.Counter(), collections.Counter()
         for index, node in enumerate(nodes):
             weight = node["weight"] - sum(nodes[c]["weight"] for c in node["children"])
             if weight < 0:
@@ -156,6 +157,11 @@ def summarize(args):
             if entry is None:
                 continue  # exclude loader, IR parse/bind, reports, teardown
             stack = stack[entry:]
+            self_time[stack[-1]] += weight
+            # Each sampled stack contributes once to a function, even with
+            # recursive guest callbacks. These inclusive shares can overlap.
+            for symbol in set(stack):
+                function_inclusive[symbol] += weight
             text = ";".join(stack)
             # A host API can invoke another guest run_loop. Classify against
             # that innermost loop so callback dispatch is not charged to its
@@ -182,8 +188,16 @@ def summarize(args):
                 if key in text:
                     inclusive[key] += weight
             folded[tuple(["wire guest runtime"] + stack)] += weight
-        reports.append(dict(file=str(path), samples=dict(categories), inclusive=dict(inclusive)))
+        def ranked(counter):
+            return [dict(symbol=symbol, samples=count,
+                         runtime_percent=100 * count / categories['runtime'])
+                    for symbol, count in counter.most_common(40)]
+
+        reports.append(dict(file=str(path), samples=dict(categories), inclusive=dict(inclusive),
+                            self_hotspots=ranked(self_time),
+                            inclusive_hotspots=ranked(function_inclusive)))
         print(path.parent.name, dict(categories), dict(inclusive))
+        print('top runtime self time:', self_time.most_common(10))
     total = sum(r["samples"].get("runtime", 0) for r in reports)
     if not total:
         raise SystemExit("no guest run_loop samples found")

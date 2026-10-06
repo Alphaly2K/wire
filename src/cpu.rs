@@ -156,6 +156,9 @@ pub struct Cpu {
     pub exit_code: Option<u32>,
     pub instr_count: u64,
     pub op_stats: HashMap<u32, u64>,
+    pub raw_op_stats: HashMap<u32, u64>,
+    pub compact_op_stats: [u64; 256],
+    ir_cold_stats: HashMap<(crate::ir::Op, u8, u8, u32, u32), u64>,
     pub trace_enabled: bool,
     pub profile_opcodes: bool,
     pub ir_steps: u64,
@@ -184,6 +187,9 @@ impl Cpu {
             exit_code: None,
             instr_count: 0,
             op_stats: HashMap::new(),
+            raw_op_stats: HashMap::new(),
+            compact_op_stats: [0; 256],
+            ir_cold_stats: HashMap::new(),
             trace_enabled: false,
             profile_opcodes: true,
             ir_steps: 0,
@@ -1122,7 +1128,7 @@ impl Cpu {
         let mut address16 = false;
         let mut seg: u32 = 0;
         let mut rep: Option<u8> = None;
-        loop {
+        let op = loop {
             let b = mem.fetch_u8(self.eip)?;
             match b {
                 0x66 => {
@@ -1147,17 +1153,21 @@ impl Cpu {
                     rep = Some(b);
                     self.eip = self.eip.wrapping_add(1);
                 }
-                _ => break,
+                _ => break b,
             }
-        }
+        };
         let bits: u8 = if opsize16 { 16 } else { 32 };
-        let op = self.fetch8(mem)?;
+        // Prefix scanning already fetched this opcode with execute checks.
+        // No guest/host action can change the page between that fetch and
+        // dispatch; consume the byte once, without prefetching any operands.
+        self.eip = self.eip.wrapping_add(1);
         if address16 && !matches!(op, 0x88..=0x8b | 0x8d | 0xa0..=0xa3 | 0xc6 | 0xc7) {
             return Err(self.unsupported(mem, eip0, "16-bit addressing outside MOV/LEA"));
         }
         self.decode_address16 = address16;
         if self.profile_opcodes {
             *self.op_stats.entry(op as u32).or_insert(0) += 1;
+            *self.raw_op_stats.entry(op as u32).or_insert(0) += 1;
         }
 
         match op {
@@ -1591,6 +1601,7 @@ impl Cpu {
         let op = self.fetch8(mem)?;
         if self.profile_opcodes {
             *self.op_stats.entry(0x100 | op as u32).or_insert(0) += 1;
+            *self.raw_op_stats.entry(0x100 | op as u32).or_insert(0) += 1;
         }
         match op {
             0x0D | 0x18..=0x1F => {

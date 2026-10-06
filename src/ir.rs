@@ -14,7 +14,7 @@ const MAGIC: &[u8; 8] = b"WIREIR01";
 const MAX_RECORDS: usize = 2_000_000;
 pub(crate) const FLAGS: u32 = CF | PF | AF | ZF | SF | OF;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub(crate) enum Op {
     Fallback,
