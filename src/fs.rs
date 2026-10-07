@@ -1,7 +1,7 @@
 //! Guest C:\ drive confined to one canonical host directory.
 use std::path::{Path, PathBuf};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GuestFs {
     root: PathBuf,
     cwd: PathBuf,

@@ -1,8 +1,9 @@
 //! Checked PE32+ parsing/loading; RVA stays 32 bits, virtual addresses stay 64 bits.
 use super::memory::{Memory, EXECUTE, PAGE, READ, WRITE};
 use crate::pe::{DataDir, ImportDll, ImportFunc, Section};
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Pe64 {
+    pub is_dll: bool,
     pub image_base: u64,
     pub entry_rva: u32,
     pub size_of_image: u32,
@@ -11,6 +12,25 @@ pub struct Pe64 {
     pub stack_commit: u64,
     pub dirs: Vec<DataDir>,
     pub sections: Vec<Section>,
+}
+#[derive(Debug)]
+pub struct Tls64 {
+    pub template: Vec<u8>,
+    pub zero_fill: u32,
+    pub alignment: u64,
+    pub index_address: u64,
+    pub callbacks: Vec<u64>,
+}
+#[derive(Debug)]
+pub struct Delay64 {
+    pub dll: String,
+    pub module_handle_rva: u32,
+    pub functions: Vec<ImportFunc>,
+}
+#[derive(Debug, Default)]
+pub struct Exports64 {
+    pub names: std::collections::BTreeMap<String, u64>,
+    pub ordinals: std::collections::BTreeMap<u16, u64>,
 }
 fn bytes(b: &[u8], at: usize, n: usize) -> Result<&[u8], String> {
     b.get(at..at.checked_add(n).ok_or("PE32+ offset overflow")?)
@@ -120,6 +140,7 @@ impl Pe64 {
             sections.push(section);
         }
         Ok(Self {
+            is_dll: u16at(b, nt + 22)? & 0x2000 != 0,
             image_base,
             entry_rva,
             size_of_image,
@@ -152,6 +173,75 @@ impl Pe64 {
     }
     pub fn imports(&self, b: &[u8]) -> Result<Vec<ImportDll>, String> {
         self.image_imports(&self.image(b)?)
+    }
+    pub fn exports(&self, b: &[u8], base: u64) -> Result<Exports64, String> {
+        let dir = self.dir(0);
+        let mut out = Exports64::default();
+        if dir.rva == 0 {
+            return Ok(out);
+        }
+        if dir.size < 40 {
+            return Err("truncated AMD64 exports".into());
+        }
+        let image = self.image(b)?;
+        let at = dir.rva as usize;
+        let first = u32at(&image, at + 16)?;
+        let count = u32at(&image, at + 20)? as usize;
+        let names = u32at(&image, at + 24)? as usize;
+        let funcs = u32at(&image, at + 28)? as usize;
+        let strings = u32at(&image, at + 32)? as usize;
+        let ordinals = u32at(&image, at + 36)? as usize;
+        if count > 65536 || names > 65536 {
+            return Err("AMD64 exports exceed capacity".into());
+        }
+        bytes(&image, funcs, count * 4)?;
+        bytes(&image, strings, names * 4)?;
+        bytes(&image, ordinals, names * 2)?;
+        for index in 0..count {
+            let rva = u32at(&image, funcs + index * 4)?;
+            if rva == 0 {
+                continue;
+            }
+            if rva >= dir.rva && rva < dir.rva + dir.size {
+                return Err("AMD64 forwarded exports are not implemented".into());
+            }
+            if rva >= self.size_of_image {
+                return Err("AMD64 export outside image".into());
+            }
+            let ordinal = u16::try_from(first as u64 + index as u64)
+                .map_err(|_| "AMD64 export ordinal exceeds 16 bits")?;
+            out.ordinals.insert(
+                ordinal,
+                base.checked_add(rva as u64)
+                    .ok_or("AMD64 export address overflow")?,
+            );
+        }
+        for index in 0..names {
+            let rva = u32at(&image, strings + index * 4)? as usize;
+            let ord = u16at(&image, ordinals + index * 2)? as usize;
+            if ord >= count {
+                return Err("invalid AMD64 export name ordinal".into());
+            }
+            let tail = image.get(rva..).ok_or("AMD64 export name outside image")?;
+            let n = tail
+                .iter()
+                .take(4096)
+                .position(|&b| b == 0)
+                .ok_or("unterminated AMD64 export name")?;
+            let name = std::str::from_utf8(&tail[..n])
+                .map_err(|_| "invalid AMD64 export name")?
+                .to_owned();
+            let ordinal = u16::try_from(first as u64 + ord as u64)
+                .map_err(|_| "AMD64 export ordinal overflow")?;
+            let address = *out
+                .ordinals
+                .get(&ordinal)
+                .ok_or("AMD64 named export points to empty entry")?;
+            if out.names.insert(name, address).is_some() {
+                return Err("duplicate AMD64 export name".into());
+            }
+        }
+        Ok(out)
     }
     fn image_imports(&self, image: &[u8]) -> Result<Vec<ImportDll>, String> {
         let dir = self.dir(1);
@@ -235,6 +325,20 @@ impl Pe64 {
         base: u64,
         mut resolve: impl FnMut(&str, &ImportFunc) -> Result<u64, String>,
     ) -> Result<Memory, String> {
+        if self.dir(13).rva != 0 || self.dir(9).rva != 0 {
+            return Err(
+                "AMD64 delay imports/TLS are not implemented by the CPU-only loader".into(),
+            );
+        }
+        self.load_with_runtime(b, base, &mut resolve)
+    }
+    /// Mapping for a runtime that initializes static TLS and installs delay gateways before execution.
+    pub fn load_with_runtime(
+        &self,
+        b: &[u8],
+        base: u64,
+        mut resolve: impl FnMut(&str, &ImportFunc) -> Result<u64, String>,
+    ) -> Result<Memory, String> {
         if !base.is_multiple_of(65536)
             || base
                 .checked_add(self.size_of_image as u64)
@@ -281,9 +385,6 @@ impl Pe64 {
                 image[at..at + 8].copy_from_slice(&value.to_le_bytes());
             }
         }
-        if self.dir(13).rva != 0 || self.dir(9).rva != 0 {
-            return Err("AMD64 delay imports/TLS are not implemented yet".into());
-        }
         for dll in self.image_imports(&image)? {
             for f in dll.functions {
                 let target = resolve(&dll.dll, &f)?;
@@ -292,7 +393,7 @@ impl Pe64 {
             }
         }
         let mut memory = Memory::default();
-        memory.map(base, self.size_of_image as u64, READ | WRITE)?;
+        memory.map_image(base, self.size_of_image as u64, READ | WRITE)?;
         memory.write(base, &image)?;
         memory.protect(base, self.size_of_image as u64, 0)?;
         let header_size = (self.size_of_headers as u64).div_ceil(PAGE) * PAGE;
@@ -315,5 +416,164 @@ impl Pe64 {
             )?;
         }
         Ok(memory)
+    }
+    pub fn tls(&self, mem: &Memory, base: u64) -> Result<Option<Tls64>, String> {
+        let dir = self.dir(9);
+        if dir.rva == 0 {
+            return Ok(None);
+        }
+        if dir.size < 40 {
+            return Err("truncated AMD64 TLS directory".into());
+        }
+        let at = base
+            .checked_add(dir.rva as u64)
+            .ok_or("TLS directory overflow")?;
+        let start = mem.read_int(at, 8)?;
+        let end = mem.read_int(at + 8, 8)?;
+        let index_address = mem.read_int(at + 16, 8)?;
+        let callback_array = mem.read_int(at + 24, 8)?;
+        let zero_fill = mem.read_int(at + 32, 4)? as u32;
+        let alignment = (mem.read_int(at + 36, 4)? >> 20) & 15;
+        if alignment == 15 {
+            return Err("invalid AMD64 TLS alignment".into());
+        }
+        let size = end
+            .checked_sub(start)
+            .ok_or("reversed AMD64 TLS template")?;
+        if size
+            .checked_add(zero_fill as u64)
+            .is_none_or(|n| n > 16 * 1024 * 1024)
+        {
+            return Err("AMD64 TLS template exceeds capacity".into());
+        }
+        mem.check(index_address, 4, WRITE)?;
+        let mut template = vec![0; size as usize];
+        mem.read(start, &mut template)?;
+        let mut callbacks = Vec::new();
+        if callback_array != 0 {
+            for n in 0..1024 {
+                let address = mem.read_int(
+                    callback_array
+                        .checked_add(n * 8)
+                        .ok_or("TLS callback array overflow")?,
+                    8,
+                )?;
+                if address == 0 {
+                    return Ok(Some(Tls64 {
+                        template,
+                        zero_fill,
+                        alignment: if alignment == 0 {
+                            16
+                        } else {
+                            1 << (alignment - 1)
+                        },
+                        index_address,
+                        callbacks,
+                    }));
+                }
+                mem.fetch(address, &mut [0])?;
+                callbacks.push(address);
+            }
+            return Err("unterminated AMD64 TLS callbacks".into());
+        }
+        Ok(Some(Tls64 {
+            template,
+            zero_fill,
+            alignment: if alignment == 0 {
+                16
+            } else {
+                1 << (alignment - 1)
+            },
+            index_address,
+            callbacks,
+        }))
+    }
+    pub fn delay_imports(&self, b: &[u8]) -> Result<Vec<Delay64>, String> {
+        let dir = self.dir(13);
+        if dir.rva == 0 {
+            return Ok(Vec::new());
+        }
+        let image = self.image(b)?;
+        let string = |rva: u32| -> Result<String, String> {
+            let tail = image
+                .get(rva as usize..)
+                .ok_or("AMD64 delay name outside image")?;
+            let n = tail
+                .iter()
+                .take(4096)
+                .position(|&b| b == 0)
+                .ok_or("unterminated AMD64 delay name")?;
+            std::str::from_utf8(&tail[..n])
+                .map(str::to_owned)
+                .map_err(|_| "invalid AMD64 delay name".into())
+        };
+        let mut out = Vec::new();
+        for n in 0..512 {
+            let at = dir.rva as usize + n * 32;
+            if at + 32 > dir.rva as usize + dir.size as usize {
+                return Err("unterminated AMD64 delay directory".into());
+            }
+            let d = bytes(&image, at, 32)?;
+            if d.iter().all(|&b| b == 0) {
+                return Ok(out);
+            }
+            if u32at(d, 0)? != 1 {
+                return Err("AMD64 delay descriptor requires RVA attributes".into());
+            }
+            let name = u32at(d, 4)?;
+            let module_handle_rva = u32at(d, 8)?;
+            let iat = u32at(d, 12)?;
+            let names = u32at(d, 16)?;
+            if name == 0 || module_handle_rva == 0 || iat == 0 || names == 0 {
+                return Err("invalid AMD64 delay descriptor".into());
+            }
+            bytes(&image, module_handle_rva as usize, 8)?;
+            let mut functions = Vec::new();
+            let mut terminated = false;
+            for index in 0..65536u32 {
+                let offset = index * 8;
+                let value = u64at(
+                    &image,
+                    names
+                        .checked_add(offset)
+                        .ok_or("AMD64 delay thunk overflow")? as usize,
+                )?;
+                let iat_rva = iat.checked_add(offset).ok_or("AMD64 delay IAT overflow")?;
+                bytes(&image, iat_rva as usize, 8)?;
+                if value == 0 {
+                    terminated = true;
+                    break;
+                }
+                let (name, ordinal) = if value & (1 << 63) != 0 {
+                    if value & 0x7fffffffffff0000 != 0 {
+                        return Err("invalid AMD64 delay ordinal".into());
+                    }
+                    (None, Some(value as u16))
+                } else {
+                    let rva =
+                        u32::try_from(value).map_err(|_| "AMD64 delay name exceeds RVA width")?;
+                    (
+                        Some(string(
+                            rva.checked_add(2).ok_or("AMD64 delay name overflow")?,
+                        )?),
+                        None,
+                    )
+                };
+                functions.push(ImportFunc {
+                    iat_rva,
+                    name,
+                    ordinal,
+                });
+            }
+            if !terminated {
+                return Err("unterminated AMD64 delay thunks".into());
+            }
+            out.push(Delay64 {
+                dll: string(name)?,
+                module_handle_rva,
+                functions,
+            });
+        }
+        Err("AMD64 delay descriptor capacity exceeded".into())
     }
 }

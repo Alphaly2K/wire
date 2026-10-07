@@ -13,7 +13,7 @@ fn main() -> ExitCode {
         eprintln!("wire — Watari-Is-a-Runtime-Environment (M2 spike)");
         eprintln!("usage:");
         eprintln!("  wire imports <program.exe>");
-        eprintln!("  wire probe64 <program.exe> [--max-instr N] (experimental AMD64 loader/CPU diagnostic)");
+        eprintln!("  wire probe64 <program.exe> [--max-instr N] [--startup] [--dll] (experimental AMD64 diagnostic)");
         eprintln!("  wire prepare <program.exe> [--out program.wir]");
         eprintln!(
             "  wire run <program.exe> [--ir program.wir] [--op-stats] [--max-instr N] [--log-dir DIR] [--cwd DIR] [--trace-cpu] [--present|--headless] [--software-render] [--capture-frames DIR] [--stop-after-presents N]"
@@ -571,11 +571,34 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
 
 fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
     let result = (|| -> Result<(), String> {
-        let limit = match opts {
-            [] => 1000000,
-            [flag, n] if flag == "--max-instr" => n.parse::<u64>().map_err(|e| e.to_string())?,
-            _ => return Err("usage: wire probe64 <exe> [--max-instr N]".into()),
-        };
+        let mut limit = 1000000;
+        let mut startup = false;
+        let mut dll_attach = false;
+        let mut opt = opts.iter();
+        while let Some(flag) = opt.next() {
+            match flag.as_str() {
+                "--startup" => startup = true,
+                "--dll" => {
+                    dll_attach = true;
+                    startup = true;
+                }
+                "--max-instr" => {
+                    limit = opt
+                        .next()
+                        .ok_or("--max-instr needs a count")?
+                        .parse::<u64>()
+                        .map_err(|e| e.to_string())?
+                }
+                _ => {
+                    return Err(
+                        "usage: wire probe64 <exe> [--max-instr N] [--startup] [--dll]".into(),
+                    )
+                }
+            }
+        }
+        if startup {
+            return run_startup64(path, limit, dll_attach);
+        }
         let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
         let pe = wire::x64::pe::Pe64::parse(&bytes)?;
         let mut gateways = std::collections::BTreeMap::new();
@@ -595,7 +618,13 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
         })?;
         const STACK: u64 = 0x7ff000000000;
         const RETURN: u64 = 0x7ffe10000000;
-        let reserve = pe.stack_reserve.max(4096).div_ceil(4096) * 4096;
+        let reserve = pe
+            .stack_reserve
+            .max(4096)
+            .checked_add(4095)
+            .ok_or("stack reserve overflow")?
+            / 4096
+            * 4096;
         if reserve > 64 * 1024 * 1024 {
             return Err("probe64 stack exceeds 64 MiB".into());
         }
@@ -607,11 +636,8 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
         let rsp = STACK + reserve - 40;
         mem.write_int(rsp, 8, RETURN)?;
         let mut cpu = wire::x64::cpu::Cpu64::new(pe.image_base + pe.entry_rva as u64, rsp);
-        println!(
-            "experimental AMD64 probe: base={:#x} RIP={:#x} RSP={rsp:#x}; no Win64 API runtime yet",
-            pe.image_base, cpu.rip
-        );
-        while cpu.retired < limit {
+        println!("experimental AMD64 CPU probe: base={:#x} RIP={:#x} RSP={rsp:#x}; startup services disabled", pe.image_base, cpu.rip);
+        while cpu.work < limit {
             if cpu.rip == RETURN {
                 println!(
                     "entry returned RAX={:#x}; retired={}",
@@ -638,7 +664,7 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
             }
         }
         Err(format!(
-            "AMD64 probe instruction limit ({limit}) at {:#x}",
+            "AMD64 probe budget limit ({limit}, includes REP elements) at {:#x}",
             cpu.rip
         ))
     })();
@@ -648,5 +674,63 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
             eprintln!("probe64: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+fn run_startup64(path: &str, limit: u64, dll_attach: bool) -> Result<(), String> {
+    use wire::x64::process::{Outcome, Process64};
+    let mut process = Process64::load(Path::new(path), dll_attach)?;
+    println!(
+        "experimental AMD64 startup: RIP={:#x} RSP={:#x}; interpreter; DLL attach={dll_attach}",
+        process.cpu.rip, process.cpu.regs[4]
+    );
+    for (name, base) in &process.modules {
+        println!("  mapped {name} at {base:#x}");
+    }
+    let outcome = process.run(limit);
+    if outcome.is_err() {
+        println!(
+            "fault ABI registers: RCX={:#x} RDX={:#x} R8={:#x} R9={:#x}; thread GS={:#x}",
+            process.cpu.regs[1],
+            process.cpu.regs[2],
+            process.cpu.regs[8],
+            process.cpu.regs[9],
+            process.cpu.gs_base
+        );
+    }
+    for (name, pc) in &process.stages {
+        if name.contains(" TLS attach") {
+            println!("TLS process attach: {pc:#x} ({name})");
+        } else {
+            println!("entry stage: {name} at {pc:#x}");
+        }
+    }
+    for line in &process.runtime.trace {
+        println!("  {line}");
+    }
+    println!(
+        "phase={}; retired={}; budget work={}; RIP={:#x}; API calls={}",
+        process.phase(),
+        process.cpu.retired,
+        process.cpu.work,
+        process.cpu.rip,
+        process.runtime.api_calls
+    );
+    match outcome? {
+        Outcome::Returned(value) => {
+            println!(
+                "entry returned RAX={value:#x}; retired={}",
+                process.cpu.retired
+            );
+            Ok(())
+        }
+        Outcome::Exited(0) => {
+            println!("AMD64 process exited 0");
+            Ok(())
+        }
+        Outcome::Exited(code) => Err(format!("AMD64 process exited {code}")),
+        Outcome::Budget => Err(format!(
+            "AMD64 startup budget limit ({limit}, includes REP elements, native calls and idle scheduler polls)"
+        )),
     }
 }

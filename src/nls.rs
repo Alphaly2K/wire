@@ -229,7 +229,7 @@ pub fn dispatch(
 
 /// C1 flags needed by the CRT's character tables. Unicode properties follow
 /// Rust's Unicode tables; this is not a complete Windows NLS database.
-fn ctype1(unit: u16) -> u16 {
+pub(crate) fn ctype1(unit: u16) -> u16 {
     let Some(c) = char::from_u32(unit as u32) else {
         return 0;
     };
