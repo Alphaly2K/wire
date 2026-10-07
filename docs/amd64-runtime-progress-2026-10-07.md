@@ -1,18 +1,19 @@
 # AMD64 / Unity / Mono 启动推进（2026-10-07）
 
-这是接续 `f3cb8bd` 的运行时检查点。普通 `wire run` 仍拒绝 AMD64；
+这是接续 `6748118` 的运行时检查点。普通 `wire run` 仍拒绝 AMD64；
 实际启动使用 `wire probe64 --startup`。解释器是主路径，所有高地址访问仍经过 checked guest memory，
 没有把 guest 机器码交给宿主 CPU，也没有引入 QEMU GPL 实现。
 
 ## 当前真实结果
 
-AliceToPapa 隔离副本已从13条 EXE 入口指令推进到 **56,177,133 条退休指令、
-56,304,497 work、123,389 次已完成 API 调用**（`linked-pass-74.txt`）。
+AliceToPapa 隔离副本已从13条 EXE 入口指令推进到 **60,162,898 条退休指令、
+60,292,800 work、125,927 次已完成 API 调用**（`linked-pass-78.txt`）。
 已经实际执行 UnityPlayer 的 TLS / DllMain、EXE 入口，以及动态加载 Mono 的 TLS / DllMain；
 合作调度的 worker 也在执行。线程命名异常已真正执行 guest vectored handler、语言处理器
 以及同帧 RtlUnwindEx，继续到了 Winsock 和 Unity input 初始化。
-当前停止于 `kernel32.dll!LoadLibraryExW` 的 `LOAD_WITH_ALTERED_SEARCH_PATH`（flags=`0x8`）边界。
-这是尚未覆盖的装载语义；没有清除标志或把装载失败改成成功。
+已经越过 altered-search DLL 装载、curl 的 SSPI 服务发现、显示器查询和 HKCU 游戏设置键创建。
+当前停止于 `user32.dll!LoadIconA`（实际主 EXE、资源 ID 103）的图标装载边界，正在准备窗口。
+没有忽略此前 curl 初始化失败触发的 INT3，也没有把不存在的安全包或系统注册键改成成功。
 
 游戏实际写出的 `Player.log` 包含：
 
@@ -42,6 +43,10 @@ Input System module state changed to: Initialized.
 | pass-72 | 56,176,439 | 123,372 | 未登记隐式 ntdll 导致空模块句柄 |
 | pass-73 | 56,176,863 | 123,386 | `GetSystemDirectoryW` |
 | pass-74 | 56,177,133 | 123,389 | `LoadLibraryExW` flags=`0x8` |
+| pass-75 | 56,182,224 | 123,405 | secur32 缺失，curl 初始化失败后的 INT3 |
+| pass-76 | 58,335,816 | 125,058 | SSPI 初始化通过；`EnumDisplayDevicesA` |
+| pass-77 | 60,146,353 | 125,789 | 显示设备/模式通过；`RegCreateKeyW` |
+| pass-78 | 60,162,898 | 125,927 | 游戏 HKCU 键创建通过；`LoadIconA` |
 
 指令与 API 计数受真实时间/线程调度影响，上表不构成相同路径的性能 AB 对照。
 
@@ -90,7 +95,22 @@ Input System module state changed to: Initialized.
   默认支持 EXE directory / 显式 DLL directory / System32 / Windows / CWD 的 confined 搜索，
   也用于真实导入依赖，并补默认 `.dll` 后缀。
   已支持的 SYSTEM32 / DEFAULT_DIRS 标志保持限定搜索；PATH、AddDllDirectory cookies、
-  LOAD_WITH_ALTERED_SEARCH_PATH、加载回滚仍不是完整支持。
+  LOAD_WITH_ALTERED_SEARCH_PATH 使用目标 DLL 目录替换依赖搜索首项，并递归传递限定搜索；
+  不修改全局 SetDllDirectory。完整路径要求、非法组合和依赖实际代码已验证；
+  加载回滚仍不是完整支持。逻辑 provider 只接受规范 System32 完整路径或名称，任意同名路径不能冒充。
+- secur32 的 InitSecurityInterface A/W 返回真实224字节 Win64 函数表，版本1；
+  pointer slots 是64位 guest gateway，保留槽为空。表为只读 runtime-owned page，不属于 guest heap。
+  当前包注册表为空；枚举返回 count=0/info=NULL，Schannel/NTLM 等查询和获取凭证返回
+  SEC_E_SECPKG_NOT_FOUND；无有效凭证/上下文的认证、签名、加密调用返回 SEC_E_INVALID_HANDLE。
+  这只完成服务发现，不是 TLS 或网络认证。SSPI 错误不污染 Win32 LastError。
+- 单1024×768、32bit、60Hz逻辑显示器的设备/monitor 枚举、A/W DEVMODE、MonitorInfo与
+  MonitorFromPoint/Rect 查询保持一致；Win64 POINT 的两个32位坐标在同一个64位参数中。
+  EnumDisplayMonitors 真正执行 guest callback，传递64位 LPARAM，处理 clip/BOOL结果并释放临时 RECT。
+  非零 HDC、CCD display-configuration 路径仍返回不支持，没有声称存在 GPU 或交换链。
+- 隔离的进程内注册表支持 HKCU 键/值创建、打开、查询、写入、删除值、关闭与访问权限，
+  64位 HKEY 和 sign-extended predefined roots 不截断；键名大小写无关，CP932/UTF16字符串值互转。
+  short-buffer 返回 ERROR_MORE_DATA、报告字节尺寸并保留数据；fault 输出不创建半个键或句柄。
+  系统 hive 只读、缺少的安装信息真实返回找不到；尚无持久化、32位 registry view、ACL或枚举。
 - ntdll 是隐式常驻 provider。版本查询/判断使用明确的 Windows 10.0.19045 workstation profile，
   RtlGetVersion / RtlVerifyVersionInfo、GetVersion / GetVersionEx A/W、VerifyVersionInfoW 和
   VerSetConditionMask 保留 NTSTATUS/Win32 错误区别与层级比较，而不是总返回满足。
@@ -185,12 +205,12 @@ cd wire-out/games64/alice/runtime
   --max-instr 50000000 --startup
 ```
 
-下一阶段先继续 flags=`0x8` 的真实装载路径，再以初始化完成、正式窗口和实际 Present 验收；
+下一阶段继续真实资源图标、Win64 USER32窗口类/窗口及 WNDPROC，再以正式窗口和实际 Present 验收；
 不以 LoadLibrary 成功、错误退出0或空窗口当作游戏跑通。
-完整 release 回归通过256项：8 unit、37 differential、9 FPU、26 IR、1 Wasm、109 Win32、66 AMD64。
-新增7项覆盖异常链/同帧 unwind、Winsock、地址等待、DLL 搜索与版本判断。
+完整 release 回归通过262项：8 unit、37 differential、9 FPU、26 IR、1 Wasm、109 Win32、72 AMD64。
+本轮新增6项覆盖 altered/system依赖搜索、SSPI表/安全失败、显示结构/实际枚举回调、注册表状态与fault原子性。
 两项 Metal 设备测试本轮按默认 ignored；上一提交已单独通过，本轮没有渲染实现改动。
-日志为 `/private/tmp/wire-amd64-followup-tests.txt`、`wire-amd64-followup-clippy.txt`；
+日志为 `/private/tmp/wire-amd64-services-tests.txt`、`wire-amd64-services-clippy.txt`；
 Clippy release all-targets `-D warnings`、format、diff whitespace 检查通过。
 `scripts/package-macos.sh` 重建 `wire-out/Wire.app`，bundle 与 release binary 校验一致。
 旧文档的13条入口/无 Win64 runtime 是历史状态。
@@ -198,3 +218,5 @@ Clippy release all-targets `-D warnings`、format、diff whitespace 检查通过
 本轮版本比较移植自固定 Wine 10.0 的 LGPL-2.1-or-later `ntdll/version.c`，选择 LGPL 2.1，
 保留原始快照、版权、许可证及 SHA-256，范围见 `third_party/wine-10.0/README.md`。
 Winsock 仅只读核对公开 ABI/行为，没有复制其 C 实现。没有引入 QEMU GPL 代码。
+SSPI 本轮只读核对固定 Wine 10.0 的 sspi.h/secur32.spec 及 curl 8.0.1 的初始化流程，
+未复制上游实现；显示器与注册表服务为本地独立实现。

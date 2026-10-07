@@ -39,6 +39,7 @@ struct CallbackFrame {
     active: Option<CallbackCall>,
     release: Vec<u64>,
     stop_on_false: bool,
+    return_boolean: bool,
     loader_parent: Option<Option<u64>>,
     load: Option<(String, String, Vec<u64>, u64)>,
     lookup: Option<(String, u64, Vec<u64>)>,
@@ -88,6 +89,7 @@ fn provider(name: &str) -> bool {
                 | "uiautomationcore.dll"
                 | "crypt32.dll"
                 | "dwmapi.dll"
+                | "secur32.dll"
         )
 }
 impl Modules {
@@ -98,6 +100,7 @@ impl Modules {
         fs: &crate::fs::GuestFs,
         mem: &mut Memory,
         runtime: &mut Runtime64,
+        search: (u64, Option<&str>),
     ) -> Result<u64, String> {
         if self.exports.len() >= 64 {
             return Err("AMD64 module capacity exceeded".into());
@@ -149,9 +152,9 @@ impl Modules {
             }
             if !self.exports.contains_key(&dll) {
                 let path = runtime
-                    .module_path(fs, &dll, 0)
+                    .module_path_with_search(fs, &dll, search.0, search.1)
                     .map_err(|e| format!("AMD64 DLL path error {e}: {dll}"))?;
-                self.load(&path, false, fs, mem, runtime)?;
+                self.load(&path, false, fs, mem, runtime, search)?;
             }
             let exports = &self.exports[&dll];
             let address = if let Some(name) = &function.name {
@@ -250,7 +253,7 @@ impl Process64 {
         let fs = crate::fs::GuestFs::new(path.parent().ok_or("missing game directory")?)
             .map_err(|e| e.to_string())?;
         let mut loaded = Modules::default();
-        let main_base = loaded.load(&path, true, &fs, &mut memory, &mut runtime)?;
+        let main_base = loaded.load(&path, true, &fs, &mut memory, &mut runtime, (0, None))?;
         runtime.set_main_base(&mut memory, main_base)?;
         let mut calls = VecDeque::new();
         let mut modules = Vec::new();
@@ -576,6 +579,7 @@ impl Process64 {
     fn load_module(
         &mut self,
         path: &str,
+        search: (u64, Option<String>),
         dll: String,
         function: String,
         args: Vec<u64>,
@@ -593,9 +597,14 @@ impl Process64 {
         let path = fs
             .resolve(path)
             .map_err(|error| format!("AMD64 DLL path error {error}: {path}"))?;
-        let base = self
-            .loader
-            .load(&path, false, &fs, &mut self.memory, &mut self.runtime)?;
+        let base = self.loader.load(
+            &path,
+            false,
+            &fs,
+            &mut self.memory,
+            &mut self.runtime,
+            (search.0, search.1.as_deref()),
+        )?;
         let images = std::mem::take(&mut self.loader.pending);
         for image in &images {
             self.runtime.install_delays(
@@ -650,6 +659,7 @@ impl Process64 {
                 active: None,
                 release: Vec::new(),
                 stop_on_false: false,
+                return_boolean: false,
                 loader_parent: Some(owner),
                 load: Some((dll, function, args, base)),
                 lookup: None,
@@ -703,7 +713,9 @@ impl Process64 {
                             .complete_call(dll, "RtlLookupFunctionEntry", args, value);
                         Some(value)
                     } else {
-                        None
+                        frame
+                            .return_boolean
+                            .then_some((self.cpu.regs[0] as u32 != 0) as u64)
                     };
                     let frame = self.callbacks.pop().unwrap();
                     if let Some(owner) = frame.loader_parent {
@@ -802,11 +814,12 @@ impl Process64 {
                     }
                     Control::LoadModule {
                         path,
+                        search,
                         dll,
                         function,
                         args,
                     } => {
-                        self.load_module(&path, dll, function, args)?;
+                        self.load_module(&path, search, dll, function, args)?;
                     }
                     Control::FunctionLookup {
                         dll,
@@ -829,6 +842,7 @@ impl Process64 {
                             active: None,
                             release: Vec::new(),
                             stop_on_false: false,
+                            return_boolean: false,
                             loader_parent: None,
                             load: None,
                             lookup: Some((dll, base, args)),
@@ -840,6 +854,7 @@ impl Process64 {
                         calls,
                         release,
                         stop_on_false,
+                        return_boolean,
                     } => {
                         if calls.is_empty() {
                             self.runtime
@@ -864,6 +879,7 @@ impl Process64 {
                                 active: None,
                                 release,
                                 stop_on_false,
+                                return_boolean,
                                 loader_parent: None,
                                 load: None,
                                 lookup: None,

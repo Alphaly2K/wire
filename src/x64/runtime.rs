@@ -10,6 +10,7 @@ use std::{
 };
 mod address;
 mod command;
+mod display;
 mod events;
 pub(crate) mod exception;
 mod files;
@@ -17,8 +18,10 @@ mod locale;
 mod mapping;
 mod modules;
 mod pipes;
+mod registry;
 mod snapshot;
 mod sockets;
+mod sspi;
 mod threads;
 mod time;
 mod token;
@@ -90,6 +93,8 @@ pub struct Runtime64 {
     files: files::Files,
     mappings: mapping::Mappings,
     winsock_refs: u32,
+    security_tables: [u64; 2],
+    registry: registry::Registry,
     fs: Option<crate::fs::GuestFs>,
     process_attributes: BTreeMap<u64, (u32, BTreeMap<u64, Vec<u8>>)>,
 }
@@ -104,9 +109,11 @@ pub enum Control {
         calls: Vec<(u64, [u64; 4])>,
         release: Vec<u64>,
         stop_on_false: bool,
+        return_boolean: bool,
     },
     LoadModule {
         path: String,
+        search: (u64, Option<String>),
         dll: String,
         function: String,
         args: Vec<u64>,
@@ -225,6 +232,8 @@ impl Runtime64 {
             files: files::Files::default(),
             mappings: mapping::Mappings::default(),
             winsock_refs: 0,
+            security_tables: [0; 2],
+            registry: registry::Registry::default(),
             fs: None,
             process_attributes: BTreeMap::new(),
         })
@@ -310,26 +319,42 @@ impl Runtime64 {
         }
     }
     fn native_module(&mut self, name: &str, load: bool) -> Result<u64, String> {
-        if load && name.contains(['/', '\\']) {
-            let path = self.fs.as_ref().and_then(|fs| fs.resolve(name).ok());
-            let loaded = self.guest_paths.values().any(|p| {
-                path.is_some() && self.fs.as_ref().and_then(|fs| fs.resolve(p).ok()) == path
-            });
-            if !loaded {
-                return Err(format!("Win64 guest DLL requires process loader: {name}"));
-            }
-        }
-        let name = name
+        let module = name
             .replace('\\', "/")
             .rsplit('/')
             .next()
             .unwrap_or(name)
             .to_ascii_lowercase();
-        let name = if name.contains('.') {
-            name
+        let module = if module.contains('.') {
+            module
         } else {
-            format!("{name}.dll")
+            format!("{module}.dll")
         };
+        if load && name.contains(['/', '\\']) {
+            let path = self.fs.as_ref().and_then(|fs| fs.resolve(name).ok());
+            let loaded = self.guest_paths.values().any(|p| {
+                path.is_some() && self.fs.as_ref().and_then(|fs| fs.resolve(p).ok()) == path
+            });
+            // A logical provider is loaded by its canonical guest system32 name;
+            // an arbitrary path with the same basename is not that provider.
+            let system_provider = self
+                .fs
+                .as_ref()
+                .zip(path.as_ref())
+                .is_some_and(|(fs, path)| {
+                    (Self::dynamic_provider(&module)
+                        || self.modules.iter().any(|(&handle, (name, _))| {
+                            name == &module && !self.guest_exports.contains_key(&handle)
+                        }))
+                        && fs
+                            .guest_path(path)
+                            .eq_ignore_ascii_case(&format!("C:\\Windows\\System32\\{module}"))
+                });
+            if !loaded && !system_provider {
+                return Err(format!("Win64 guest DLL requires process loader: {name}"));
+            }
+        }
+        let name = module;
         if let Some((&handle, (_, refs))) = self.modules.iter_mut().find(|(_, (n, _))| n == &name) {
             if load {
                 *refs = refs.checked_add(1).ok_or("module reference overflow")?;
@@ -340,23 +365,26 @@ impl Runtime64 {
         if !load {
             return Ok(0);
         }
-        if name != "kernel32.dll"
-            && name != "kernelbase.dll"
-            && !matches!(
-                name.as_str(),
-                "api-ms-win-core-synch-l1-2-0.dll"
-                    | "api-ms-win-core-fibers-l1-1-1.dll"
-                    | "api-ms-win-core-localization-l1-2-1.dll"
-                    | "api-ms-win-core-string-l1-1-0.dll"
-                    | "api-ms-win-core-datetime-l1-1-1.dll"
-            )
-        {
+        if !Self::dynamic_provider(&name) {
             return Err(format!("Win64 guest DLL loading not implemented: {name}"));
         }
         let handle = self.next_module;
         self.next_module += 0x10000;
         self.modules.insert(handle, (name, 1));
         Ok(handle)
+    }
+    fn dynamic_provider(name: &str) -> bool {
+        matches!(
+            name,
+            "kernel32.dll"
+                | "kernelbase.dll"
+                | "secur32.dll"
+                | "api-ms-win-core-synch-l1-2-0.dll"
+                | "api-ms-win-core-fibers-l1-1-1.dll"
+                | "api-ms-win-core-localization-l1-2-1.dll"
+                | "api-ms-win-core-string-l1-1-0.dll"
+                | "api-ms-win-core-datetime-l1-1-1.dll"
+        )
     }
     pub fn install_gateways(&mut self, gateways: BTreeMap<u64, String>) {
         self.gateways = gateways;
@@ -684,15 +712,18 @@ impl Runtime64 {
                         | "InitializeSid"
                 ))
             && !(dll.eq_ignore_ascii_case("user32.dll")
-                && matches!(
-                    name,
-                    "SystemParametersInfoA" | "SystemParametersInfoW" | "GetSystemMetrics"
-                ))
+                && (display::arity(name).is_some()
+                    || matches!(
+                        name,
+                        "SystemParametersInfoA" | "SystemParametersInfoW" | "GetSystemMetrics"
+                    )))
             && !(dll.eq_ignore_ascii_case("psapi.dll") && modules::is_query(name))
             && !(dll.eq_ignore_ascii_case("advapi32.dll") && tracing::is_call(name))
+            && !(dll.eq_ignore_ascii_case("advapi32.dll") && registry::arity(name).is_some())
             && !(dll.eq_ignore_ascii_case("ntdll.dll") && unwind::is_call(name))
             && !(dll.eq_ignore_ascii_case("ntdll.dll") && version::is_call(name))
             && !(dll.eq_ignore_ascii_case("ws2_32.dll") && sockets::is_call(name))
+            && !(dll.eq_ignore_ascii_case("secur32.dll") && sspi::arity(name).is_some())
             && !(dll.eq_ignore_ascii_case("api-ms-win-core-synch-l1-2-0.dll")
                 && matches!(
                     name,
@@ -722,6 +753,9 @@ impl Runtime64 {
             return Err(format!("unimplemented Win64 import: {dll}!{name}"));
         }
         let arity = match name {
+            name if registry::arity(name).is_some() => registry::arity(name).unwrap(),
+            name if display::arity(name).is_some() => display::arity(name).unwrap(),
+            name if sspi::arity(name).is_some() => sspi::arity(name).unwrap(),
             "GetSystemDirectoryA"
             | "GetSystemDirectoryW"
             | "GetWindowsDirectoryA"
@@ -963,6 +997,9 @@ impl Runtime64 {
         };
         let mut args = cpu.arguments(mem, arity)?;
         let dwords: &[usize] = match name {
+            name if registry::arity(name).is_some() => registry::dwords(name),
+            name if display::arity(name).is_some() => display::dwords(name),
+            name if sspi::arity(name).is_some() => sspi::dwords(name),
             "GetSystemDirectoryA"
             | "GetSystemDirectoryW"
             | "GetWindowsDirectoryA"
@@ -1097,6 +1134,27 @@ impl Runtime64 {
             self.delay_hooks.remove(&cpu.rip);
         }
         let ret = match name {
+            name if registry::arity(name).is_some() => self.registry_call(mem, name, &args)?,
+            "EnumDisplayMonitors" => {
+                let enumeration = self.enumerate_monitors(mem, &args, &returned)?;
+                if enumeration.calls.is_empty() {
+                    enumeration.result
+                } else {
+                    returned.regs[0] = enumeration.result;
+                    *cpu = returned;
+                    self.unblock();
+                    self.api_calls += 1;
+                    self.record(dll, name, &args, enumeration.result);
+                    return Ok(Control::Callbacks {
+                        calls: enumeration.calls,
+                        release: enumeration.release,
+                        stop_on_false: true,
+                        return_boolean: true,
+                    });
+                }
+            }
+            name if display::arity(name).is_some() => self.display_call(mem, name, &args)?,
+            name if sspi::arity(name).is_some() => self.security_call(mem, name, &args)?,
             "GetSystemDirectoryA"
             | "GetSystemDirectoryW"
             | "GetWindowsDirectoryA"
@@ -1917,6 +1975,7 @@ impl Runtime64 {
                             calls,
                             release: vec![block],
                             stop_on_false: true,
+                            return_boolean: false,
                         });
                     }
                 }
@@ -4094,15 +4153,24 @@ impl Runtime64 {
                 }
             }
             "LoadLibraryExW" | "LoadLibraryExA" | "LoadLibraryW" | "LoadLibraryA" => {
-                if arity == 3 && (args[1] != 0 || args[2] & !0x1800 != 0) {
+                let flags = if arity == 3 { args[2] } else { 0 };
+                if arity == 3 && (args[1] != 0 || flags & !0x1808 != 0) {
                     return Err("unsupported Win64 LoadLibraryEx flags/file".into());
                 }
                 let module = Self::path_name(mem, args[0], name.ends_with('W'))?;
+                if flags & 8 != 0 && (flags & 0x1800 != 0 || !Self::absolute_module_path(&module)) {
+                    self.set_error(mem, 87)?;
+                    returned.regs[0] = 0;
+                    *cpu = returned;
+                    self.api_calls += 1;
+                    self.record(dll, name, &args, 0);
+                    return Ok(Control::Returned);
+                }
                 match self.native_module(&module, true) {
                     Ok(handle) => handle,
                     Err(error) => {
                         let path = self.fs.as_ref().ok_or(126u32).and_then(|fs| {
-                            self.module_path(fs, &module, if arity == 3 { args[2] } else { 0 })
+                            self.module_path(fs, &module, flags)
                                 .map(|path| fs.guest_path(&path))
                         });
                         if let Ok(path) = path {
@@ -4112,6 +4180,19 @@ impl Runtime64 {
                             *cpu = returned;
                             self.api_calls += 1;
                             return Ok(Control::LoadModule {
+                                search: (
+                                    flags,
+                                    if flags & 8 != 0 {
+                                        Some(
+                                            path.rsplit_once('\\')
+                                                .ok_or("DLL directory is missing")?
+                                                .0
+                                                .to_owned(),
+                                        )
+                                    } else {
+                                        None
+                                    },
+                                ),
                                 path,
                                 dll: dll.into(),
                                 function: name.into(),
@@ -4197,6 +4278,9 @@ impl Runtime64 {
                             "kernel32.dll" | "kernelbase.dll" | "ntdll.dll"
                         ) && version::is_call(&function))
                         || (provider == "ws2_32.dll" && sockets::is_call(&function))
+                        || (provider == "secur32.dll" && sspi::arity(&function).is_some())
+                        || (provider == "user32.dll" && display::arity(&function).is_some())
+                        || (provider == "advapi32.dll" && registry::arity(&function).is_some())
                         || (matches!(provider.as_str(), "kernel32.dll" | "kernelbase.dll")
                             && matches!(
                                 function.as_str(),

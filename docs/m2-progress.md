@@ -1,8 +1,8 @@
 最新检查点：[三个 PE32 样本兼容进度](games32-progress-2026-10-07.md)。
 当前按用户最新要求继续 Rewrite、totsulover，并恢复 AliceToPapa x86-64 基础支持。
 AliceToPapa 的 checked Win64/DLL/TLS/合作线程已执行真实 Unity / Mono 启动，
-软件异常链、Winsock、地址等待和 DLL 搜索已推进到56.18M指令 / input 初始化；
-当前仍停于 LoadLibraryExW flags=0x8，尚无正式窗口或 D3D11/DXGI Present。
+软件异常链、Winsock、地址等待、altered DLL 搜索、SSPI服务发现、显示器查询及HKCU键已推进到60.16M指令；
+当前停于主 EXE 图标 LoadIconA，尚无正式窗口或 D3D11/DXGI Present。
 详见 [AMD64 运行时检查点](amd64-runtime-progress-2026-10-07.md)。
 恋×シンアイ彼女已有真实标题菜单；Metal 固定管线和 bulk Clear 后完成 193 秒 / 6,000 Present 重放，
 用户听验确认 BGM 当前没有问题，后续仍需正文、场景切换和持续可玩验收。
@@ -25,7 +25,7 @@ totsulover 缺少其要求的外部“ソフト電池”运行时。详情见 [R
 三对完整启动吞吐82.36→85.42 MIPS（约+3.7%），首Present17.984→17.425秒，收益仍较小。
 这只是批量执行，还没有完成专用融合opcode或常量/复制传播；见[静态序列性能记录](performance-scalar-runs-2026-10-06.md)。
 AliceToPapa 已增加 checked Win64 runtime、真实 PE32+ DLL/TLS、合作线程与当前启动所需 SSE。
-隔离实测已进入 Unity / 动态 Mono，退休约20.68M指令，停于线程命名异常的真实分发边界。
+隔离实测已进入 Unity / 动态 Mono，退休约60.16M指令，开始主 EXE 图标/窗口准备。
 还没有正式窗口、D3D11/DXGI Present 或64位 IR；普通 run 仍明确拒绝 AMD64。
 运行时范围、Mono 原生桥接判断与接续见[AMD64 检查点](amd64-runtime-progress-2026-10-07.md)。
 以下保留此前功能推进阶段的历史记录；当前已经具备真实图像与 AppKit 上传。

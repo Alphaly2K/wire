@@ -33,6 +33,7 @@ impl Process64 {
             active: None,
             release: vec![block],
             stop_on_false: false,
+            return_boolean: false,
             loader_parent: None,
             load: None,
             lookup: None,

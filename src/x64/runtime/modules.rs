@@ -14,6 +14,12 @@ pub(super) fn is_query(name: &str) -> bool {
     )
 }
 impl Runtime64 {
+    pub(super) fn absolute_module_path(name: &str) -> bool {
+        let bytes = name.as_bytes();
+        bytes.first() == Some(&b'/')
+            || bytes.first() == Some(&b'\\')
+            || (bytes.get(1) == Some(&b':') && matches!(bytes.get(2), Some(b'/' | b'\\')))
+    }
     /// Supported confined search order, including the process SetDllDirectory.
     /// PATH and AddDllDirectory cookies are not part of this bring-up loader.
     pub(crate) fn module_path(
@@ -21,6 +27,15 @@ impl Runtime64 {
         fs: &crate::fs::GuestFs,
         name: &str,
         flags: u64,
+    ) -> Result<std::path::PathBuf, u32> {
+        self.module_path_with_search(fs, name, flags, None)
+    }
+    pub(crate) fn module_path_with_search(
+        &self,
+        fs: &crate::fs::GuestFs,
+        name: &str,
+        flags: u64,
+        altered_directory: Option<&str>,
     ) -> Result<std::path::PathBuf, u32> {
         let filename = name.replace('/', "\\");
         let basename = filename.rsplit('\\').next().unwrap_or(&filename);
@@ -35,14 +50,19 @@ impl Runtime64 {
         }
         let mut directories = Vec::new();
         if flags & 0x1000 != 0 || flags & 0x800 == 0 {
-            let end = self.exe_path.rfind(['\\', '/']).ok_or(123u32)?;
-            directories.push(self.exe_path[..end].to_owned());
+            let directory = if let Some(directory) = altered_directory {
+                directory
+            } else {
+                let end = self.exe_path.rfind(['\\', '/']).ok_or(123u32)?;
+                &self.exe_path[..end]
+            };
+            directories.push(directory.to_owned());
             if let Some(dir) = self.dll_directory.as_ref().filter(|d| !d.is_empty()) {
                 directories.push(dir.clone());
             }
         }
         directories.push("C:\\Windows\\System32".into());
-        if flags == 0 {
+        if flags == 0 || flags == 8 {
             directories.push("C:\\Windows".into());
             if self.dll_directory.is_none() {
                 directories.push(fs.cwd());

@@ -356,6 +356,640 @@ fn startup_dll_call(
     cpu.regs[0]
 }
 #[test]
+fn win64_registry_owns_high_handles_roundtrips_cp932_and_keeps_errors_outputs_and_access_real() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    const HKCU: u64 = 0xffffffff80000001;
+    let path = STACK + 0x200;
+    let value = STACK + 0x300;
+    let output = STACK + 0x500;
+    let data = STACK + 0x600;
+    macro_rules! call {
+        ($name:expr, $args:expr) => {
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "advapi32.dll",
+                $name,
+                $args,
+            )
+        };
+    }
+    startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "SetLastError",
+        &[0xabcdef],
+    );
+    mem.write(
+        path,
+        &"Software\\Wire\0"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    mem.write(output, &[0xcc; 32]).unwrap();
+    assert_eq!(
+        call!(
+            "RegCreateKeyExW",
+            &[HKCU, path, 0, 0, 0, 0xf003f, 0, output, output + 8]
+        ),
+        0
+    );
+    let handle = mem.read_int(output, 8).unwrap();
+    assert!(handle > u32::MAX as u64);
+    assert_eq!(mem.read_int(output + 8, 4).unwrap(), 1);
+    assert_eq!(
+        call!(
+            "RegCreateKeyExW",
+            &[HKCU, path, 0, 0, 0, 0x20019, 0, output + 16, output + 8]
+        ),
+        0
+    );
+    assert_eq!(mem.read_int(output + 8, 4).unwrap(), 2);
+    let readonly = mem.read_int(output + 16, 8).unwrap();
+    mem.write(value, b"Text\0").unwrap();
+    let cp932 = [0x82, 0xa0, 0, 0x41, 0, 0]; // MULTI_SZ preserves embedded NULs.
+    mem.write(data, &cp932).unwrap();
+    assert_eq!(
+        call!(
+            "RegSetValueExA",
+            &[handle, value, 0, 7, data, cp932.len() as u64]
+        ),
+        0
+    );
+    assert_eq!(
+        call!(
+            "RegSetValueExA",
+            &[readonly, value, 0, 7, data, cp932.len() as u64]
+        ),
+        5
+    );
+    mem.write(
+        value,
+        &"tExT\0"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    mem.write_int(output + 8, 4, 0).unwrap();
+    assert_eq!(
+        call!(
+            "RegQueryValueExW",
+            &[handle, value, 0, output + 12, 0, output + 8]
+        ),
+        0
+    );
+    assert_eq!(mem.read_int(output + 8, 4).unwrap(), 10);
+    assert_eq!(mem.read_int(output + 12, 4).unwrap(), 7);
+    mem.write(data, &[0xaa; 16]).unwrap();
+    mem.write_int(output + 8, 4, 2).unwrap();
+    assert_eq!(
+        call!(
+            "RegQueryValueExW",
+            &[readonly, value, 0, output + 12, data, output + 8]
+        ),
+        234
+    );
+    assert_eq!(mem.read_int(output + 8, 4).unwrap(), 10);
+    assert_eq!(mem.read_int(data, 8).unwrap(), 0xaaaaaaaaaaaaaaaa);
+    assert_eq!(
+        call!(
+            "RegQueryValueExW",
+            &[readonly, value, 0, output + 12, data, output + 8]
+        ),
+        0
+    );
+    let mut wide = [0; 10];
+    mem.read(data, &mut wide).unwrap();
+    assert_eq!(wide, [0x42, 0x30, 0, 0, 0x41, 0, 0, 0, 0, 0]);
+    mem.write(value, b"TEXT\0").unwrap();
+    mem.write_int(output + 8, 4, 16).unwrap();
+    assert_eq!(
+        call!("RegQueryValueExA", &[handle, value, 0, 0, data, output + 8]),
+        0
+    );
+    let mut ansi = [0; 6];
+    mem.read(data, &mut ansi).unwrap();
+    assert_eq!(ansi, cp932);
+    assert_eq!(call!("RegCloseKey", &[handle]), 0);
+    assert_eq!(call!("RegCloseKey", &[handle]), 6);
+    mem.write(path, b"software\\WIRE\0").unwrap();
+    assert_eq!(call!("RegOpenKeyExA", &[HKCU, path, 0, 3, output]), 0);
+    let reopened = mem.read_int(output, 8).unwrap();
+    assert_ne!(reopened, handle);
+    assert_eq!(
+        call!(
+            "RegQueryValueExA",
+            &[reopened, value, 0, 0, data, output + 8]
+        ),
+        0
+    );
+    // An unknown system installation is absent, not fabricated from a successful open.
+    assert_eq!(
+        call!(
+            "RegOpenKeyExA",
+            &[0xffffffff80000002, path, 0, 0x20019, output]
+        ),
+        2
+    );
+    assert_eq!(
+        call!("RegCreateKeyA", &[0xffffffff80000002, path, output]),
+        5
+    );
+    assert_eq!(
+        call!("RegOpenKeyExA", &[HKCU, path, 0, 0x20219, output]),
+        50
+    );
+    assert_eq!(call!("RegDeleteValueA", &[reopened, value]), 0);
+    assert_eq!(
+        call!(
+            "RegQueryValueExA",
+            &[reopened, value, 0, 0, data, output + 8]
+        ),
+        2
+    );
+    assert_eq!(call!("RegDeleteValueA", &[reopened, value]), 2);
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        0xabcdef
+    );
+    // Bad disposition output cannot create the key or write the handle output.
+    mem.write(path, b"Software\\NotCreated\0").unwrap();
+    mem.write_int(output, 8, 0xdeadbeefcafebabe).unwrap();
+    cpu.regs[4] = STACK + 0x1f88;
+    mem.write_int(cpu.regs[4], 8, BASE).unwrap();
+    let args = [HKCU, path, 0, 0, 0, 3, 0, output, STACK + 8192 - 1];
+    for (i, arg) in args.into_iter().enumerate() {
+        if i < 4 {
+            cpu.regs[[1, 2, 8, 9][i]] = arg;
+        } else {
+            mem.write_int(cpu.regs[4] + 40 + (i as u64 - 4) * 8, 8, arg)
+                .unwrap();
+        }
+    }
+    let before = cpu.clone();
+    let calls = runtime.api_calls;
+    assert!(runtime
+        .dispatch("advapi32.dll", "RegCreateKeyExA", &mut cpu, &mut mem)
+        .is_err());
+    assert_eq!(cpu.regs, before.regs);
+    assert_eq!(cpu.rip, before.rip);
+    assert_eq!(runtime.api_calls, calls);
+    assert_eq!(mem.read_int(output, 8).unwrap(), 0xdeadbeefcafebabe);
+    assert_eq!(call!("RegOpenKeyExA", &[HKCU, path, 0, 1, output]), 2);
+}
+
+#[test]
+fn win64_display_queries_agree_on_one_monitor_and_check_ansi_wide_layouts_and_packed_points() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let output = STACK + 0x400;
+    let device = STACK + 0x200;
+    for (suffix, size, flags, mode_size, size_offset, bits) in [
+        ('A', 424u32, 164u64, 156u64, 36u64, 104u64),
+        ('W', 840, 324, 220, 68, 168),
+    ] {
+        mem.write(output, &[0xcc; 848]).unwrap();
+        mem.write_int(output, 4, size as u64).unwrap();
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "user32.dll",
+                &format!("EnumDisplayDevices{suffix}"),
+                &[0, 0, output, 0]
+            ),
+            1
+        );
+        assert_eq!(mem.read_int(output + flags, 4).unwrap(), 5);
+        assert_eq!(
+            mem.read_int(output + size as u64, 8).unwrap(),
+            0xcccccccccccccccc
+        );
+        let mut before = vec![0; size as usize];
+        mem.read(output, &mut before).unwrap();
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "user32.dll",
+                &format!("EnumDisplayDevices{suffix}"),
+                &[0, 1, output, 0]
+            ),
+            0
+        );
+        let mut after = vec![0; size as usize];
+        mem.read(output, &mut after).unwrap();
+        assert_eq!(after, before);
+        let text: Vec<u8> = if suffix == 'W' {
+            "\\\\.\\DISPLAY1\0"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect()
+        } else {
+            b"\\\\.\\DISPLAY1\0".to_vec()
+        };
+        mem.write(device, &text).unwrap();
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "user32.dll",
+                &format!("EnumDisplayDevices{suffix}"),
+                &[device, 0, output, 0]
+            ),
+            1
+        );
+        assert_eq!(mem.read_int(output + flags, 4).unwrap(), 3);
+        for mode in [0, u32::MAX as u64, u32::MAX as u64 - 1] {
+            mem.write(output, &[0xdd; 224]).unwrap();
+            mem.write_int(output + size_offset, 2, mode_size).unwrap();
+            assert_eq!(
+                startup_dll_call(
+                    &mut mem,
+                    &mut cpu,
+                    &mut runtime,
+                    "user32.dll",
+                    &format!("EnumDisplaySettings{suffix}"),
+                    &[device, 0x1234000000000000 | mode, output]
+                ),
+                1
+            );
+            for (i, value) in [32, 1024, 768, 0, 60].into_iter().enumerate() {
+                assert_eq!(
+                    mem.read_int(output + bits + i as u64 * 4, 4).unwrap(),
+                    value
+                );
+            }
+            assert_eq!(mem.read_int(output + mode_size, 4).unwrap(), 0xdddddddd);
+        }
+    }
+    let point = (100u64 << 32) | 100;
+    let monitor = startup_dll_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "user32.dll",
+        "MonitorFromPoint",
+        &[point, 0],
+    );
+    assert!(monitor > u32::MAX as u64);
+    for point in [0x64ffffffff, 0xffffffff00000064, (768u64 << 32) | 1024] {
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "user32.dll",
+                "MonitorFromPoint",
+                &[point, 0]
+            ),
+            0
+        );
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "user32.dll",
+                "MonitorFromPoint",
+                &[point, 2]
+            ),
+            monitor
+        );
+    }
+    for (suffix, size) in [('A', 40), ('A', 72), ('W', 104)] {
+        mem.write_int(output, 4, size).unwrap();
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "user32.dll",
+                &format!("GetMonitorInfo{suffix}"),
+                &[monitor, output]
+            ),
+            1
+        );
+        assert_eq!(mem.read_int(output + 12, 4).unwrap(), 1024);
+        assert_eq!(mem.read_int(output + 16, 4).unwrap(), 768);
+        assert_eq!(mem.read_int(output + 36, 4).unwrap(), 1);
+    }
+    // A valid cb field followed by an unmapped tail cannot partially write a device.
+    let bad = STACK + 8192 - 8;
+    mem.write_int(bad, 8, 0xcccccccc000001a8).unwrap();
+    cpu.regs[4] = STACK + 0x1f88;
+    mem.write_int(cpu.regs[4], 8, BASE).unwrap();
+    cpu.regs[1] = 0;
+    cpu.regs[2] = 0;
+    cpu.regs[8] = bad;
+    cpu.regs[9] = 0;
+    let before = cpu.clone();
+    let calls = runtime.api_calls;
+    assert!(runtime
+        .dispatch("user32.dll", "EnumDisplayDevicesA", &mut cpu, &mut mem)
+        .is_err());
+    assert_eq!(cpu.regs, before.regs);
+    assert_eq!(cpu.rip, before.rip);
+    assert_eq!(runtime.api_calls, calls);
+    assert_eq!(mem.read_int(bad, 8).unwrap(), 0xcccccccc000001a8);
+}
+
+#[test]
+fn amd64_monitor_enumeration_calls_real_guest_code_preserves_high_lparam_and_returns_callback_bool()
+{
+    use wire::x64::process::{Outcome, Process64};
+    const CODE: u64 = 0x690000000;
+    const DATA: u64 = CODE + 4096;
+    let path = std::env::temp_dir().join(format!("wire-monitor64-{}.exe", std::process::id()));
+    std::fs::write(&path, fixture()).unwrap();
+    for keep_going in [false, true] {
+        let mut p = Process64::load(&path, false).unwrap();
+        p.memory.map(CODE, 8192, READ | WRITE | EXECUTE).unwrap();
+        let gateway = p.runtime.register("user32.dll", "EnumDisplayMonitors");
+        let parameter = 0x123456789abcdef0u64;
+        let mut code = vec![0x48, 0x83, 0xec, 0x28, 0x31, 0xc9, 0x48, 0xba];
+        code.extend(DATA.to_le_bytes());
+        code.extend([0x49, 0xb8]);
+        code.extend(CODE.to_le_bytes());
+        code.extend([0x49, 0xb9]);
+        code.extend(parameter.to_le_bytes());
+        code.extend([0x48, 0xb8]);
+        code.extend(gateway.to_le_bytes());
+        code.extend([0xff, 0xd0, 0x48, 0x83, 0xc4, 0x28, 0xc3]);
+        p.memory.write(BASE + 0x1000, &code).unwrap();
+        let mut callback = vec![0x48, 0xb8];
+        callback.extend((DATA + 32).to_le_bytes());
+        callback.extend([
+            0x48, 0x89, 0x08, 0x48, 0x89, 0x50, 8, 0x4c, 0x89, 0x40, 16, 0x4c, 0x89, 0x48, 24,
+        ]);
+        for i in 0..4u8 {
+            callback.extend([0x41, 0x8b, 0x48, 4 * i, 0x89, 0x48, 32 + 4 * i]);
+        }
+        callback.extend([0xb8, keep_going as u8, 0, 0, 0, 0xc3]);
+        p.memory.write(CODE, &callback).unwrap();
+        p.memory
+            .write(
+                DATA,
+                &[10i32, 20, 100, 200]
+                    .into_iter()
+                    .flat_map(i32::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        loop {
+            match p.run(p.cpu.work + 1).unwrap() {
+                Outcome::Budget => assert!(p.cpu.work < 100),
+                result => {
+                    assert_eq!(result, Outcome::Returned(keep_going as u64));
+                    break;
+                }
+            }
+        }
+        assert!(p.memory.read_int(DATA + 32, 8).unwrap() > u32::MAX as u64);
+        assert_eq!(p.memory.read_int(DATA + 40, 8).unwrap(), 0);
+        assert_eq!(p.memory.read_int(DATA + 56, 8).unwrap(), parameter);
+        let block = p.memory.read_int(DATA + 48, 8).unwrap();
+        assert!(p.memory.read_int(block, 1).is_err());
+        for (i, value) in [10, 20, 100, 200].into_iter().enumerate() {
+            assert_eq!(
+                p.memory.read_int(DATA + 64 + i as u64 * 4, 4).unwrap(),
+                value
+            );
+        }
+        assert_eq!(p.cpu.regs[4], STACK + 0xfff70);
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn win64_sspi_tables_are_stable_guest_pointers_and_never_advertise_unavailable_security() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    runtime.install_gateways(Default::default());
+    let text = STACK + 0x200;
+    mem.write(text, b"secur32.dll\0").unwrap();
+    let module = startup_call(&mut mem, &mut cpu, &mut runtime, "LoadLibraryA", &[text]);
+    assert_ne!(module, 0);
+    let mut tables = Vec::new();
+    for suffix in ['A', 'W'] {
+        let name = format!("InitSecurityInterface{suffix}");
+        mem.write(text, format!("{name}\0").as_bytes()).unwrap();
+        let gateway = startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetProcAddress",
+            &[module, text],
+        );
+        assert!(gateway > u32::MAX as u64);
+        assert_eq!(runtime.gateways[&gateway], format!("secur32.dll!{name}"));
+        let table = startup_dll_call(&mut mem, &mut cpu, &mut runtime, "secur32.dll", &name, &[]);
+        assert!(table > u32::MAX as u64);
+        assert_eq!(mem.read_int(table, 4).unwrap(), 1);
+        assert_eq!(mem.read_int(table + 4, 4).unwrap(), 0);
+        assert!(mem.write_int(table, 4, 99).is_err());
+        for offset in [40, 144, 152, 184] {
+            assert_eq!(mem.read_int(table + offset, 8).unwrap(), 0);
+        }
+        for (offset, function) in [
+            (8, format!("EnumerateSecurityPackages{suffix}")),
+            (24, format!("AcquireCredentialsHandle{suffix}")),
+            (48, format!("InitializeSecurityContext{suffix}")),
+            (128, "FreeContextBuffer".into()),
+            (136, format!("QuerySecurityPackageInfo{suffix}")),
+            (200, "EncryptMessage".into()),
+            (208, "DecryptMessage".into()),
+            (216, format!("SetContextAttributes{suffix}")),
+        ] {
+            let pointer = mem.read_int(table + offset, 8).unwrap();
+            assert!(pointer > u32::MAX as u64);
+            assert_eq!(
+                runtime.gateways[&pointer],
+                format!("secur32.dll!{function}")
+            );
+        }
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "secur32.dll",
+                "FreeContextBuffer",
+                &[table]
+            ),
+            0x80090301
+        );
+        let heap = startup_call(&mut mem, &mut cpu, &mut runtime, "GetProcessHeap", &[]);
+        cpu.regs[4] = STACK + 0x1f88;
+        mem.write_int(cpu.regs[4], 8, BASE).unwrap();
+        cpu.regs[1] = heap;
+        cpu.regs[2] = 0;
+        cpu.regs[8] = table;
+        assert!(runtime
+            .dispatch("kernel32.dll", "HeapFree", &mut cpu, &mut mem)
+            .is_err());
+        assert_eq!(
+            startup_dll_call(&mut mem, &mut cpu, &mut runtime, "secur32.dll", &name, &[]),
+            table
+        );
+        tables.push(table);
+    }
+    assert_ne!(tables[0], tables[1]);
+    startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "SetLastError",
+        &[0x87654321],
+    );
+    let output = STACK + 0x400;
+    mem.write(output, &[0xaa; 32]).unwrap();
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "secur32.dll",
+            "EnumerateSecurityPackagesW",
+            &[output, output + 8]
+        ),
+        0
+    );
+    assert_eq!(mem.read_int(output, 8).unwrap(), 0xaaaaaaaa00000000);
+    assert_eq!(mem.read_int(output + 8, 8).unwrap(), 0);
+    mem.write(text, b"Schannel\0").unwrap();
+    mem.write(output, &[0xbb; 32]).unwrap();
+    for (name, args) in [
+        ("QuerySecurityPackageInfoA", vec![text, output]),
+        (
+            "AcquireCredentialsHandleA",
+            vec![0, text, 2, 0, 0, 0, 0, output, output + 16],
+        ),
+        (
+            "InitializeSecurityContextA",
+            vec![
+                output,
+                0,
+                text,
+                0,
+                0,
+                0,
+                0,
+                0,
+                output,
+                output,
+                output + 16,
+                output + 24,
+            ],
+        ),
+        ("EncryptMessage", vec![output, 0, output, 0]),
+        ("DecryptMessage", vec![output, output, 0, output + 24]),
+        ("FreeContextBuffer", vec![output]),
+    ] {
+        let expected = if name.starts_with("QuerySecurityPackage") || name.starts_with("Acquire") {
+            0x80090305
+        } else {
+            0x80090301
+        };
+        assert_eq!(
+            startup_dll_call(&mut mem, &mut cpu, &mut runtime, "secur32.dll", name, &args),
+            expected
+        );
+        let mut bytes = [0; 32];
+        mem.read(output, &mut bytes).unwrap();
+        assert_eq!(bytes, [0xbb; 32]);
+    }
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        0x87654321
+    );
+    // A bad second output must not zero the first output or commit the call.
+    cpu.regs[4] = STACK + 0x1f88;
+    mem.write_int(cpu.regs[4], 8, BASE).unwrap();
+    cpu.regs[1] = output;
+    cpu.regs[2] = STACK + 0x1ffd;
+    let before = cpu.clone();
+    let calls = runtime.api_calls;
+    assert!(runtime
+        .dispatch(
+            "secur32.dll",
+            "EnumerateSecurityPackagesA",
+            &mut cpu,
+            &mut mem
+        )
+        .is_err());
+    assert_eq!(cpu.regs, before.regs);
+    assert_eq!(cpu.rip, before.rip);
+    assert_eq!(runtime.api_calls, calls);
+    assert_eq!(mem.read_int(output, 4).unwrap(), 0xbbbbbbbb);
+}
+
+#[test]
+fn amd64_guest_calls_the_sspi_function_table_across_single_instruction_budgets() {
+    use wire::x64::process::{Outcome, Process64};
+    const CODE: u64 = 0x680000000;
+    const DATA: u64 = CODE + 4096;
+    let dir = std::env::temp_dir().join(format!("wire-sspi64-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("main.exe"), fixture()).unwrap();
+    let mut p = Process64::load(&dir.join("main.exe"), false).unwrap();
+    p.memory.map(CODE, 8192, READ | WRITE | EXECUTE).unwrap();
+    p.memory
+        .write(DATA, b"C:\\Windows\\System32\\secur32.dll\0")
+        .unwrap();
+    let module = startup_call(
+        &mut p.memory,
+        &mut p.cpu,
+        &mut p.runtime,
+        "LoadLibraryExA",
+        &[DATA, 0, 8],
+    );
+    assert_ne!(module, 0);
+    assert!(!dir.join("Windows/System32/secur32.dll").exists());
+    p.memory.write(DATA, b"InitSecurityInterfaceW\0").unwrap();
+    let init = startup_call(
+        &mut p.memory,
+        &mut p.cpu,
+        &mut p.runtime,
+        "GetProcAddress",
+        &[module, DATA],
+    );
+    // Restore the actual process return sentinel, replaced by the direct-call helper.
+    p.memory
+        .write_int(p.cpu.regs[4], 8, 0x7ffe10000000)
+        .unwrap();
+    let mut code = vec![0x48, 0x83, 0xec, 0x28, 0x48, 0xb8];
+    code.extend(init.to_le_bytes());
+    code.extend([0xff, 0xd0, 0x48, 0x89, 0xc3, 0x48, 0xb9]); // RBX=table, RCX=count
+    code.extend((DATA + 0x100).to_le_bytes());
+    code.extend([0x48, 0xba]);
+    code.extend((DATA + 0x108).to_le_bytes());
+    code.extend([0xff, 0x53, 0x08, 0x48, 0x83, 0xc4, 0x28, 0xc3]);
+    p.memory.write(DATA + 0x100, &[0xcc; 16]).unwrap();
+    p.memory.write(CODE, &code).unwrap();
+    p.cpu.rip = CODE;
+    loop {
+        match p.run(p.cpu.work + 1).unwrap() {
+            Outcome::Budget => assert!(p.cpu.work < 100),
+            result => {
+                assert_eq!(result, Outcome::Returned(0));
+                break;
+            }
+        }
+    }
+    assert_eq!(p.memory.read_int(DATA + 0x100, 4).unwrap(), 0);
+    assert_eq!(p.memory.read_int(DATA + 0x104, 4).unwrap(), 0xcccccccc);
+    assert_eq!(p.memory.read_int(DATA + 0x108, 8).unwrap(), 0);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn win64_winsock_negotiates_versions_checks_full_output_and_balances_ordinal_startup_refs() {
     let (mut mem, mut cpu, mut runtime) = startup();
     let output = STACK + 0x200;
@@ -918,6 +1552,161 @@ fn amd64_dll_directory_changes_real_module_search_preserves_faults_and_confines_
         }
         other => panic!("CWD search was not restored: {other:?}"),
     }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+#[test]
+fn amd64_altered_and_system_search_load_real_dependency_code_without_changing_process_directory() {
+    use wire::x64::process::{Outcome, Process64};
+    const CODE: u64 = 0x5a0000000;
+    const DATA: u64 = CODE + 4096;
+    const PARENT: u64 = 0x1a0000000;
+    const DEP: u64 = 0x1b0000000;
+    fn dependency(value: u32) -> Vec<u8> {
+        let mut b = fixture();
+        put16(&mut b, 0x96, 0x2002);
+        put64(&mut b, 0x98 + 24, DEP);
+        b[0x200..0x206].copy_from_slice(&[0xb8, 1, 0, 0, 0, 0xc3]);
+        put32(&mut b, 0x98 + 112, 0x1100);
+        put32(&mut b, 0x98 + 116, 64);
+        for (offset, word) in [
+            (16, 1),
+            (20, 1),
+            (24, 1),
+            (28, 0x1184),
+            (32, 0x1188),
+            (36, 0x118c),
+        ] {
+            put32(&mut b, 0x300 + offset, word);
+        }
+        put32(&mut b, 0x384, 0x1200);
+        put32(&mut b, 0x388, 0x11b0);
+        b[0x3b0..0x3b6].copy_from_slice(b"Value\0");
+        b[0x400] = 0xb8;
+        put32(&mut b, 0x401, value);
+        b[0x405] = 0xc3;
+        b
+    }
+    let dir = std::env::temp_dir().join(format!("wire-altered64-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("plugins")).unwrap();
+    std::fs::create_dir_all(dir.join("Windows/System32")).unwrap();
+    std::fs::write(dir.join("main.exe"), fixture()).unwrap();
+    for (path, value) in [
+        ("dep.dll", 11),
+        ("plugins/dep.dll", 22),
+        ("Windows/System32/dep.dll", 33),
+    ] {
+        std::fs::write(dir.join(path), dependency(value)).unwrap();
+    }
+    let mut parent = fixture();
+    put16(&mut parent, 0x96, 0x2002);
+    put64(&mut parent, 0x98 + 24, PARENT);
+    put32(&mut parent, 0x98 + 120, 0x1100);
+    put32(&mut parent, 0x98 + 124, 40);
+    put32(&mut parent, 0x300, 0x1180);
+    put32(&mut parent, 0x30c, 0x11c0);
+    put32(&mut parent, 0x310, 0x1190);
+    put64(&mut parent, 0x380, 0x11d0);
+    parent[0x3c0..0x3c8].copy_from_slice(b"dep.dll\0");
+    parent[0x3d2..0x3d8].copy_from_slice(b"Value\0");
+    // Parent DllMain calls the actual dependency, retaining its result in .text data.
+    parent[0x200..0x21b].copy_from_slice(&[
+        0x48, 0x83, 0xec, 0x28, 0xff, 0x15, 0x86, 1, 0, 0, 0x48, 0x89, 0x05, 0xef, 2, 0, 0, 0xb8,
+        1, 0, 0, 0, 0x48, 0x83, 0xc4, 0x28, 0xc3,
+    ]);
+    std::fs::write(dir.join("plugins/parent.dll"), parent).unwrap();
+    for (flags, expected) in [(0, 11), (8, 22), (0x800, 33)] {
+        let mut p = Process64::load(&dir.join("main.exe"), false).unwrap();
+        p.memory.map(CODE, 8192, READ | WRITE | EXECUTE).unwrap();
+        p.memory.write(DATA, b"C:\\plugins\\parent.dll\0").unwrap();
+        let gateway = p.runtime.register("kernel32.dll", "LoadLibraryExA");
+        let mut code = vec![0x48, 0x83, 0xec, 0x28, 0x48, 0xb9];
+        code.extend(DATA.to_le_bytes());
+        code.extend([0x31, 0xd2, 0x41, 0xb8]);
+        code.extend((flags as u32).to_le_bytes());
+        code.extend([0x48, 0xb8]);
+        code.extend(gateway.to_le_bytes());
+        code.extend([0xff, 0xd0, 0x48, 0x83, 0xc4, 0x28, 0xc3]);
+        p.memory.write(CODE, &code).unwrap();
+        p.cpu.rip = CODE;
+        loop {
+            match p.run(p.cpu.work + 1).unwrap() {
+                Outcome::Budget => assert!(p.cpu.work < 500),
+                result => {
+                    assert_eq!(result, Outcome::Returned(PARENT));
+                    break;
+                }
+            }
+        }
+        assert_eq!(p.memory.read_int(PARENT + 0x1300, 8).unwrap(), expected);
+        assert_eq!(p.memory.read_int(PARENT + 0x1190, 8).unwrap(), DEP + 0x1200);
+        assert_eq!(
+            startup_call(
+                &mut p.memory,
+                &mut p.cpu,
+                &mut p.runtime,
+                "GetDllDirectoryA",
+                &[0, 0]
+            ),
+            0
+        );
+        p.memory.write(DATA, b"parent.dll\0").unwrap();
+        assert_eq!(
+            startup_call(
+                &mut p.memory,
+                &mut p.cpu,
+                &mut p.runtime,
+                "LoadLibraryExA",
+                &[DATA, 0, 8]
+            ),
+            0
+        );
+        assert_eq!(
+            startup_call(
+                &mut p.memory,
+                &mut p.cpu,
+                &mut p.runtime,
+                "GetLastError",
+                &[]
+            ),
+            87
+        );
+        p.memory.write(DATA, b"C:\\plugins\\parent.dll\0").unwrap();
+        assert_eq!(
+            startup_call(
+                &mut p.memory,
+                &mut p.cpu,
+                &mut p.runtime,
+                "LoadLibraryExA",
+                &[DATA, 0, 0x808]
+            ),
+            0
+        );
+    }
+    let mut p = Process64::load(&dir.join("main.exe"), false).unwrap();
+    p.memory.map(DATA, 4096, READ | WRITE).unwrap();
+    p.memory
+        .write(DATA, b"C:\\Windows\\System32\\ntdll.dll\0")
+        .unwrap();
+    let handle = startup_call(
+        &mut p.memory,
+        &mut p.cpu,
+        &mut p.runtime,
+        "LoadLibraryExA",
+        &[DATA, 0, 8],
+    );
+    assert_ne!(handle, 0);
+    assert!(!dir.join("Windows/System32/ntdll.dll").exists());
+    p.memory.write(DATA, b"C:\\plugins\\ntdll.dll\0").unwrap();
+    assert_eq!(
+        startup_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "LoadLibraryExA",
+            &[DATA, 0, 8]
+        ),
+        0
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
