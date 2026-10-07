@@ -2,5 +2,6 @@
 pub mod cpu;
 pub mod memory;
 pub mod pe;
+mod presenter;
 pub mod process;
 pub mod runtime;

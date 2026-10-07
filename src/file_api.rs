@@ -63,7 +63,7 @@ fn find_data(mem: &GuestMem, ptr: u32, path: &Path, wide: bool) -> Result<(), u3
     Ok(())
 }
 
-fn wildcard(pattern: &str, name: &str) -> bool {
+pub(crate) fn wildcard(pattern: &str, name: &str) -> bool {
     let pattern = if pattern == "*.*" { "*" } else { pattern };
     let p: Vec<_> = pattern.to_lowercase().chars().collect();
     let n: Vec<_> = name.to_lowercase().chars().collect();

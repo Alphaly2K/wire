@@ -9,26 +9,26 @@ use std::{
 };
 #[repr(C)]
 #[derive(Default)]
-struct Event {
-    hwnd: u32,
-    message: u32,
-    wparam: u32,
-    lparam: u32,
+pub(crate) struct Event {
+    pub hwnd: u32,
+    pub message: u32,
+    pub wparam: u32,
+    pub lparam: u32,
 }
 #[cfg(target_os = "macos")]
 extern "C" {
-    fn wire_ui_init() -> i32;
-    fn wire_ui_window(
+    pub(crate) fn wire_ui_init() -> i32;
+    pub(crate) fn wire_ui_window(
         hwnd: u32,
         title: *const std::ffi::c_char,
         width: u32,
         height: u32,
         visible: i32,
     );
-    fn wire_ui_remove(hwnd: u32);
+    pub(crate) fn wire_ui_remove(hwnd: u32);
     fn wire_ui_frame(hwnd: u32, rgba: *const u8, width: u32, height: u32) -> i32;
-    fn wire_ui_poll(event: *mut Event) -> i32;
-    fn wire_ui_shutdown();
+    pub(crate) fn wire_ui_poll(event: *mut Event) -> i32;
+    pub(crate) fn wire_ui_shutdown();
 }
 pub struct Presenter {
     enabled: bool,

@@ -1,18 +1,19 @@
-# AMD64 / Unity / Mono 启动推进（2026-10-07）
+# AMD64 / Unity / Mono 启动推进（2026-10-08 接续）
 
-这是接续 `6748118` 的运行时检查点。普通 `wire run` 仍拒绝 AMD64；
+这是接续 `37db580` 的窗口/图形初始化检查点。普通 `wire run` 仍拒绝 AMD64；
 实际启动使用 `wire probe64 --startup`。解释器是主路径，所有高地址访问仍经过 checked guest memory，
 没有把 guest 机器码交给宿主 CPU，也没有引入 QEMU GPL 实现。
 
 ## 当前真实结果
 
-AliceToPapa 隔离副本已从13条 EXE 入口指令推进到 **60,162,898 条退休指令、
-60,292,800 work、125,927 次已完成 API 调用**（`linked-pass-78.txt`）。
+AliceToPapa 隔离副本已从13条 EXE 入口指令推进到 **60,211,629 条退休指令、
+60,341,653 work、126,049 次已完成 API 调用**（`linked-pass-84.txt`，`--window`）。
 已经实际执行 UnityPlayer 的 TLS / DllMain、EXE 入口，以及动态加载 Mono 的 TLS / DllMain；
 合作调度的 worker 也在执行。线程命名异常已真正执行 guest vectored handler、语言处理器
 以及同帧 RtlUnwindEx，继续到了 Winsock 和 Unity input 初始化。
 已经越过 altered-search DLL 装载、curl 的 SSPI 服务发现、显示器查询和 HKCU 游戏设置键创建。
-当前停止于 `user32.dll!LoadIconA`（实际主 EXE、资源 ID 103）的图标装载边界，正在准备窗口。
+主 EXE 图标 ID 103、RegisterClassExW 和真实游戏 WNDPROC 的窗口创建已通过，
+接着越过 DC / 设备查询、目录枚举，当前停止于 `dxgi.dll!CreateDXGIFactory2`。
 没有忽略此前 curl 初始化失败触发的 INT3，也没有把不存在的安全包或系统注册键改成成功。
 
 游戏实际写出的 `Player.log` 包含：
@@ -24,6 +25,10 @@ Input System module state changed to: Initialized.
 ```
 
 当前证据还不足以验收托管游戏入口、正式窗口、D3D11/DXGI Present 或持续可玩。
+实际 guest 窗口为 HWND=`0x7ffd00630000`、客户区314×211、标题 `AliceToPapaADV_1-0-0`，
+但 `visible=false`；这是引擎的隐藏初始化窗口，不是已经显示的游戏界面。
+`--window` 已实际验证 AppKit 主线程初始化并到达同一 DXGI 边界，按真实 visible 标志呈现，
+不会把隐藏窗口强制显示来充当正式窗口证据。
 启动指令数是兼容进度，不是性能收益。AMD64 仍使用逐指令 decode，没有64位安装期 IR。
 既有 PE32 / Metal 路径不受这条诊断路线替换。
 
@@ -47,16 +52,24 @@ Input System module state changed to: Initialized.
 | pass-76 | 58,335,816 | 125,058 | SSPI 初始化通过；`EnumDisplayDevicesA` |
 | pass-77 | 60,146,353 | 125,789 | 显示设备/模式通过；`RegCreateKeyW` |
 | pass-78 | 60,162,898 | 125,927 | 游戏 HKCU 键创建通过；`LoadIconA` |
+| pass-79 | 60,164,054 | 125,933 | 图标/类注册通过；`CreateWindowExW` |
+| pass-80 | 60,164,114 | 125,934 | 真正进入 WNDPROC；`ImmGetContext` |
+| pass-81 | 60,164,568 | 125,943 | 隐藏窗口创建通过；`GetDC` |
+| pass-82 | 60,180,964 | 125,970 | DC查询通过；`FindFirstFileExW` |
+| pass-83 | 60,211,629 | 126,049 | 目录枚举通过；`CreateDXGIFactory2` |
+| pass-84 | 60,211,629 | 126,049 | 开启 AppKit 桥接；同一 DXGI 边界，窗口仍隐藏 |
 
 指令与 API 计数受真实时间/线程调度影响，上表不构成相同路径的性能 AB 对照。
 
 ## 距离正式窗口的剩余工作
 
 当前仍处于引擎/运行时初始化；input 初始化日志不证明托管游戏入口已完成。
-先越过实际模块装载和余下初始化，再成组适配 Win64 USER32 的 class/window/message 布局、
-64位 WNDPROC / WPARAM / LPARAM 回调及宿主窗口呈现，才能验收真正创建并显示的窗口。
-游戏画面还需要 D3D11/DXGI 的64位 COM/vtable/资源布局、设备/交换链、shader 和实际 Present。
-既有 PE32 D3D9/Metal 与 AppKit 能力可复用，但当前代码并没有接通这条64位图形路径。
+Win64 USER32类/初始窗口、64位 WNDPROC / WPARAM / LPARAM 回调与可选 AppKit 桥接已经建立；
+真实游戏停在 DXGI factory 创建，尚未请求显示当前隐藏窗口。
+接下来需要 DXGI/D3D11 的64位 COM/vtable/资源布局、adapter/设备/交换链、shader 和实际 Present。
+既有 PE32 D3D9/Metal 能力可复用，但当前没有接通这条64位图形执行/像素路径。
+Win64 MSG、消息等待、宿主输入→guest消息分发和托管入口仍待实现/验收；桥接保留输入事件，
+没有忽略后续未知 API 或声称可交互。
 目前无法可靠给出剩余小时数或完成百分比；不是只差最后一个 API。
 
 ## 已实现的运行时范围
@@ -111,6 +124,30 @@ Input System module state changed to: Initialized.
   64位 HKEY 和 sign-extended predefined roots 不截断；键名大小写无关，CP932/UTF16字符串值互转。
   short-buffer 返回 ERROR_MORE_DATA、报告字节尺寸并保留数据；fault 输出不创建半个键或句柄。
   系统 hive 只读、缺少的安装信息真实返回找不到；尚无持久化、32位 registry view、ACL或枚举。
+- PE32+图标资源树使用32位 RVA / 64位 guest地址，有界目录/名称/语言/数据校验；
+  实际读取 RT_GROUP_ICON / RT_ICON，选择32px附近的合法32bit BI_RGB DIB，并保留位图/mask payload。
+  LoadIcon A/W共享生命周期、LoadImage的非共享对象、stock cursor/icon身份及错误返回已接入。
+  PNG、其它DIB格式、指定尺寸缩放、guest cursor资源和native icon绘制仍不支持。
+- WNDCLASS / WNDCLASSEX 使用72 / 80字节 Win64布局；注册保留完整 instance/procedure。
+  初始 top-level CreateWindowEx 使用80字节 CREATESTRUCT，执行真实 guest
+  WM_GETMINMAXINFO / WM_NCCREATE / WM_NCCALCSIZE / WM_CREATE；回调可跨逐条预算继续。
+  WM_NCCREATE返回FALSE、WM_CREATE返回−1时执行适当销毁消息、撤销窗口并返回NULL；
+  临时结构在所有回调完成后释放。不是只分配 HWND 后跳过 WNDPROC。
+- 窗口矩形/客户区、宽窄字符串标题、pointer-width WindowLongPtr与有界extra bytes、
+  同线程 SendMessage / CallWindowProc、ShowWindow / DestroyWindow 回调已建立。
+  MonitorFromWindow 查询实际对象；AdjustWindowRect复用已保留LGPL来源的共用geometry。
+  子窗口/menu、跨线程发送、reentrant self-destroy、完整默认窗口行为、DPI非96和消息循环仍有边界。
+  focus/foreground当前只有进程内基本状态，没有完整activation/focus消息协议。
+- 无已安装IME的guest profile：有效窗口 ImmGetContext返回NULL，不伪造HIMC或composition；
+  DC对象按窗口/线程维护，ReleaseDC/DeleteDC 区分来源与所有权，GetDeviceCaps描述逻辑显示器。
+  尚无Win64 GDI像素绘制、selected pixel format或D3D11设备，未广告未实现的raster/shading能力。
+- FindFirstFile / Ex、FindNextFile A/W和FindClose使用真实confined目录、64位search handle、
+  320/592字节输出、FILETIME和64位文件尺寸；checked fault不消费下一个条目。
+  外逃symlink不能进入枚举，基础大小写无关wildcard复用既有PE32实现；无DOS 8.3别名、
+  NT全部wildcard规则、case-sensitive/filter-directory/其它Ex选项或完整reparse服务。
+- probe64新增可选`--window`，native UI ID通过表映射到完整64位HWND，不截断guest句柄。
+  只呈现已完成创建且由guest设为visible的窗口；主线程AppKit轮询保留native事件到有界guest事件队列。
+  目前事件尚未转成Win64 MSG，也没有64位Present像素上传。
 - ntdll 是隐式常驻 provider。版本查询/判断使用明确的 Windows 10.0.19045 workstation profile，
   RtlGetVersion / RtlVerifyVersionInfo、GetVersion / GetVersionEx A/W、VerifyVersionInfoW 和
   VerSetConditionMask 保留 NTSTATUS/Win32 错误区别与层级比较，而不是总返回满足。
@@ -202,15 +239,16 @@ EXE / Unity / Mono 的 SHA-256 仍与 [恢复样本记录](x86-64-sample-2026-10
 cargo build --release
 cd wire-out/games64/alice/runtime
 ../../../../target/release/wire probe64 AliceToPapaADV_1-0-0.exe \
-  --max-instr 50000000 --startup
+  --max-instr 200000000 --startup --window
 ```
 
-下一阶段继续真实资源图标、Win64 USER32窗口类/窗口及 WNDPROC，再以正式窗口和实际 Present 验收；
+下一阶段从真实 `CreateDXGIFactory2` 开始接Win64图形及消息分发，再以正式窗口和实际 Present 验收；
 不以 LoadLibrary 成功、错误退出0或空窗口当作游戏跑通。
-完整 release 回归通过262项：8 unit、37 differential、9 FPU、26 IR、1 Wasm、109 Win32、72 AMD64。
-本轮新增6项覆盖 altered/system依赖搜索、SSPI表/安全失败、显示结构/实际枚举回调、注册表状态与fault原子性。
+完整 release 回归通过265项：8 unit、37 differential、9 FPU、26 IR、1 Wasm、109 Win32、75 AMD64。
+本检查点新增3项覆盖真正的窗口创建/失败撤销/高指针extra、实际图标资源、目录search及fault不消费条目；
+窗口测试也验证native事件高参数保留和DC错误释放不影响有效对象。此前服务检查点262项通过。
 两项 Metal 设备测试本轮按默认 ignored；上一提交已单独通过，本轮没有渲染实现改动。
-日志为 `/private/tmp/wire-amd64-services-tests.txt`、`wire-amd64-services-clippy.txt`；
+日志为 `/private/tmp/wire-amd64-window-tests.txt`、`wire-amd64-window-clippy.txt`；
 Clippy release all-targets `-D warnings`、format、diff whitespace 检查通过。
 `scripts/package-macos.sh` 重建 `wire-out/Wire.app`，bundle 与 release binary 校验一致。
 旧文档的13条入口/无 Win64 runtime 是历史状态。
@@ -220,3 +258,5 @@ Clippy release all-targets `-D warnings`、format、diff whitespace 检查通过
 Winsock 仅只读核对公开 ABI/行为，没有复制其 C 实现。没有引入 QEMU GPL 代码。
 SSPI 本轮只读核对固定 Wine 10.0 的 sspi.h/secur32.spec 及 curl 8.0.1 的初始化流程，
 未复制上游实现；显示器与注册表服务为本地独立实现。
+本轮资源/Win64 USER32与目录查询是本地实现；共用geometry仍沿用既有Hangover Wine LGPL来源，
+出处见其文件头和 `third_party/hangover/README.md`。未引入新的Wine/QEMU renderer或原生Mono。

@@ -185,7 +185,7 @@ BGM 连续观察 193.008 秒、193 次回填，中位 0.906508 秒、P95 0.96458
 
 ## 回归、来源与边界
 
-最新 AMD64 运行时检查点完整 release 回归262项通过；两项真实 Metal 默认 ignored，上一检查点另行通过。
+最新 AMD64 运行时检查点完整 release 回归265项通过；两项真实 Metal 默认 ignored，上一检查点另行通过。
 Clippy/format/diff 检查和 Wire.app 打包通过，详细边界见 [运行时检查点](amd64-runtime-progress-2026-10-07.md)。
 下方198项与 `/private/tmp/wire-games-final-*` 是此前 PE32 阶段的检查结果。
 
@@ -215,7 +215,9 @@ Hangover 固定 `56e385b7ff490edd281b288f420677093563560b`，Wine 子模块固�
 AliceToPapa 原样本已恢复，SHA-256 与旧记录一致；运行只使用 `wire-out/games64/alice/runtime/` 副本。
 checked Win64 runtime、真实 DLL/TLS、合作线程、文件元数据/时区/只读文件视图及当前启动所需 SSE 已实现。
 已实际进入 Unity / 动态 Mono；线程命名异常已执行真实 guest 异常链及同帧 RtlUnwindEx。
-pass-78 退休60,162,898条指令、125,927次 API，input/curl服务初始化、显示器查询和游戏HKCU键创建已通过，
-停于 `LoadIconA` 的实际 EXE 图标资源装载边界。SSPI安全包为空，认证/TLS并未实现；注册表当前只保留本次进程状态。
-尚无正式窗口、D3D11/DXGI Present 或64位 IR；普通 `wire run` 仍拒绝 AMD64。
+pass-84 退休60,211,629条指令、126,049次 API，实际图标/类注册、游戏WNDPROC和隐藏窗口已完成，
+DC查询、目录枚举通过，停于 `CreateDXGIFactory2` 的真实图形边界。
+隐藏初始化窗口客户区314×211，标题AliceToPapaADV_1-0-0；开启AppKit桥接仍由guest保持不可见。
+SSPI安全包为空，认证/TLS并未实现；注册表当前只保留本次进程状态。
+尚无正式可见游戏窗口、D3D11/DXGI Present 或64位 IR；普通 `wire run` 仍拒绝 AMD64。
 完整范围、限制、Mono 原生桥接判断和复现见 [AMD64 运行时检查点](amd64-runtime-progress-2026-10-07.md)。

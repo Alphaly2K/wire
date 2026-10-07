@@ -356,6 +356,549 @@ fn startup_dll_call(
     cpu.regs[0]
 }
 #[test]
+fn amd64_window_creation_executes_messages_with_full_createstruct_and_rolls_back_callback_rejection(
+) {
+    use wire::x64::process::{Outcome, Process64};
+    const CODE: u64 = 0x6a0000000;
+    const DATA: u64 = CODE + 4096;
+    const PARAMETER: u64 = 0x123456789abcdef0;
+    let path = std::env::temp_dir().join(format!("wire-window64-{}.exe", std::process::id()));
+    std::fs::write(&path, fixture()).unwrap();
+    for (nccreate, create, expected) in [
+        (1u32, 0u32, vec![0x24u64, 0x81, 0x83, 1]),
+        (0, 0, vec![0x24, 0x81, 0x82]),
+        (1, u32::MAX, vec![0x24, 0x81, 0x83, 1, 2, 0x82]),
+    ] {
+        let mut p = Process64::load(&path, false).unwrap();
+        let entry = p.cpu.clone();
+        p.memory.map(CODE, 8192, READ | WRITE | EXECUTE).unwrap();
+        p.memory
+            .write(
+                DATA,
+                &"WireProbe\0"
+                    .encode_utf16()
+                    .flat_map(u16::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        p.memory
+            .write(
+                DATA + 64,
+                &"Actual guest window\0"
+                    .encode_utf16()
+                    .flat_map(u16::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let class = DATA + 0x100;
+        p.memory.write_int(class, 4, 80).unwrap();
+        p.memory.write_int(class + 8, 8, CODE).unwrap();
+        p.memory.write_int(class + 20, 4, 16).unwrap();
+        p.memory.write_int(class + 24, 8, BASE).unwrap();
+        p.memory.write_int(class + 64, 8, DATA).unwrap();
+        let atom = startup_dll_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "user32.dll",
+            "RegisterClassExW",
+            &[class],
+        );
+        assert_ne!(atom, 0);
+        p.cpu = entry;
+        let gateway = p.runtime.register("user32.dll", "CreateWindowExW");
+        let mut code = vec![0x48, 0x83, 0xec, 0x68];
+        let args = [
+            0,
+            DATA,
+            DATA + 64,
+            0x00cf0000,
+            10,
+            20,
+            640,
+            480,
+            0,
+            0,
+            BASE,
+            PARAMETER,
+        ];
+        for (i, arg) in args.into_iter().enumerate() {
+            if i < 4 {
+                let (rex, op) = [(0x48, 0xb9), (0x48, 0xba), (0x49, 0xb8), (0x49, 0xb9)][i];
+                code.extend([rex, op]);
+                code.extend(arg.to_le_bytes());
+            } else {
+                code.extend([0x48, 0xb8]);
+                code.extend(arg.to_le_bytes());
+                code.extend([0x48, 0x89, 0x44, 0x24, 32 + (i as u8 - 4) * 8]);
+            }
+        }
+        code.extend([0x48, 0xb8]);
+        code.extend(gateway.to_le_bytes());
+        code.extend([0xff, 0xd0, 0x48, 0x83, 0xc4, 0x68, 0xc3]);
+        p.memory.write(BASE + 0x1000, &code).unwrap();
+        let mut callback = vec![0x48, 0xb8];
+        callback.extend((DATA + 0x400).to_le_bytes());
+        callback.extend([0x48, 0xff, 0x00, 0x48, 0x8b, 0x08, 0x89, 0x54, 0xc8, 0]); // record message
+        let mut nc = vec![0x48, 0xb8];
+        nc.extend((DATA + 0x500).to_le_bytes());
+        nc.extend([
+            0x4c, 0x89, 0x08, 0x49, 0x8b, 0x09, 0x48, 0x89, 0x48, 8, 0x49, 0x8b, 0x49, 8, 0x48,
+            0x89, 0x48, 16,
+        ]);
+        nc.push(0xb8);
+        nc.extend(nccreate.to_le_bytes());
+        nc.push(0xc3);
+        callback.extend([0x81, 0xfa, 0x81, 0, 0, 0, 0x75, nc.len() as u8]);
+        callback.extend(nc);
+        callback.extend([0x83, 0xfa, 1, 0x75, 6, 0xb8]);
+        callback.extend(create.to_le_bytes());
+        callback.push(0xc3);
+        callback.extend([0xb8, 1, 0, 0, 0, 0xc3]);
+        p.memory.write(CODE, &callback).unwrap();
+        let result = loop {
+            match p.run(p.cpu.work + 1).unwrap() {
+                Outcome::Budget => assert!(p.cpu.work < 400),
+                Outcome::Returned(value) => break value,
+                result => panic!("unexpected {result:?}"),
+            }
+        };
+        let success = nccreate != 0 && create != u32::MAX;
+        assert_eq!(result != 0, success);
+        assert_eq!(
+            p.memory.read_int(DATA + 0x400, 8).unwrap(),
+            expected.len() as u64
+        );
+        for (i, msg) in expected.into_iter().enumerate() {
+            assert_eq!(
+                p.memory.read_int(DATA + 0x408 + i as u64 * 8, 4).unwrap(),
+                msg
+            );
+        }
+        let temporary = p.memory.read_int(DATA + 0x500, 8).unwrap();
+        assert!(p.memory.read_int(temporary, 1).is_err());
+        assert_eq!(p.memory.read_int(DATA + 0x508, 8).unwrap(), PARAMETER);
+        assert_eq!(p.memory.read_int(DATA + 0x510, 8).unwrap(), BASE);
+        assert_eq!(p.cpu.regs[4], STACK + 0xfff70);
+        if success {
+            assert!(result > u32::MAX as u64);
+            let info = p.runtime.window_info();
+            assert_eq!(info.len(), 1);
+            assert_eq!(info[0].handle, result);
+            assert_eq!(info[0].title, "Actual guest window");
+            assert!(!info[0].visible);
+            assert_eq!((info[0].width, info[0].height), (640, 480));
+            let event = wire::x64::runtime::WindowEvent {
+                window: result,
+                message: 0x401,
+                wparam: PARAMETER,
+                lparam: !PARAMETER,
+            };
+            p.runtime.queue_window_event(event).unwrap();
+            let queued = p.runtime.take_window_events();
+            assert_eq!(queued.len(), 1);
+            assert_eq!(
+                (queued[0].window, queued[0].wparam, queued[0].lparam),
+                (result, PARAMETER, !PARAMETER)
+            );
+            assert_eq!(
+                startup_dll_call(
+                    &mut p.memory,
+                    &mut p.cpu,
+                    &mut p.runtime,
+                    "user32.dll",
+                    "IsWindow",
+                    &[result]
+                ),
+                1
+            );
+            assert_eq!(
+                startup_dll_call(
+                    &mut p.memory,
+                    &mut p.cpu,
+                    &mut p.runtime,
+                    "user32.dll",
+                    "SetWindowLongPtrW",
+                    &[result, (-21i32) as u32 as u64, PARAMETER]
+                ),
+                0
+            );
+            assert_eq!(
+                startup_dll_call(
+                    &mut p.memory,
+                    &mut p.cpu,
+                    &mut p.runtime,
+                    "user32.dll",
+                    "GetWindowLongPtrW",
+                    &[result, (-21i32) as u32 as u64]
+                ),
+                PARAMETER
+            );
+            assert_eq!(
+                startup_dll_call(
+                    &mut p.memory,
+                    &mut p.cpu,
+                    &mut p.runtime,
+                    "user32.dll",
+                    "SetWindowLongPtrW",
+                    &[result, 0, PARAMETER]
+                ),
+                0
+            );
+            assert_eq!(
+                startup_dll_call(
+                    &mut p.memory,
+                    &mut p.cpu,
+                    &mut p.runtime,
+                    "user32.dll",
+                    "GetWindowLongPtrW",
+                    &[result, 0]
+                ),
+                PARAMETER
+            );
+            assert_eq!(
+                startup_dll_call(
+                    &mut p.memory,
+                    &mut p.cpu,
+                    &mut p.runtime,
+                    "user32.dll",
+                    "GetClientRect",
+                    &[result, DATA + 0x200]
+                ),
+                1
+            );
+            assert_eq!(p.memory.read_int(DATA + 0x208, 4).unwrap(), 640);
+            let dc = startup_dll_call(
+                &mut p.memory,
+                &mut p.cpu,
+                &mut p.runtime,
+                "user32.dll",
+                "GetDC",
+                &[result],
+            );
+            assert!(dc > u32::MAX as u64);
+            assert_eq!(
+                startup_dll_call(
+                    &mut p.memory,
+                    &mut p.cpu,
+                    &mut p.runtime,
+                    "user32.dll",
+                    "ReleaseDC",
+                    &[result + 16, dc]
+                ),
+                0
+            );
+            assert_eq!(
+                startup_dll_call(
+                    &mut p.memory,
+                    &mut p.cpu,
+                    &mut p.runtime,
+                    "gdi32.dll",
+                    "DeleteDC",
+                    &[dc]
+                ),
+                0
+            );
+            assert_eq!(
+                startup_dll_call(
+                    &mut p.memory,
+                    &mut p.cpu,
+                    &mut p.runtime,
+                    "gdi32.dll",
+                    "GetDeviceCaps",
+                    &[dc, 88]
+                ),
+                96
+            );
+            assert_eq!(
+                startup_dll_call(
+                    &mut p.memory,
+                    &mut p.cpu,
+                    &mut p.runtime,
+                    "user32.dll",
+                    "ReleaseDC",
+                    &[result, dc]
+                ),
+                1
+            );
+            assert_eq!(
+                startup_dll_call(
+                    &mut p.memory,
+                    &mut p.cpu,
+                    &mut p.runtime,
+                    "gdi32.dll",
+                    "GetDeviceCaps",
+                    &[dc, 88]
+                ),
+                0
+            );
+        } else {
+            assert_eq!(
+                startup_dll_call(
+                    &mut p.memory,
+                    &mut p.cpu,
+                    &mut p.runtime,
+                    "user32.dll",
+                    "IsWindow",
+                    &[wire::x64::runtime::TEB + 0x630000]
+                ),
+                0
+            );
+            assert_eq!(
+                startup_dll_call(
+                    &mut p.memory,
+                    &mut p.cpu,
+                    &mut p.runtime,
+                    "user32.dll",
+                    "UnregisterClassW",
+                    &[DATA, BASE]
+                ),
+                1
+            );
+        }
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn win64_directory_searches_report_real_wide_metadata_and_do_not_skip_entries_after_output_faults()
+{
+    use wire::x64::process::Process64;
+    const DATA: u64 = 0x6b0000000;
+    let dir = std::env::temp_dir().join(format!("wire-find64-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("items")).unwrap();
+    std::fs::write(dir.join("main.exe"), fixture()).unwrap();
+    std::fs::write(dir.join("items/A.txt"), b"abc").unwrap();
+    let huge = std::fs::File::create(dir.join("items/B.txt")).unwrap();
+    huge.set_len(0x100000007).unwrap();
+    std::fs::write(dir.join("items/あ.txt"), b"x").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(std::env::temp_dir(), dir.join("items/escape.txt")).unwrap();
+    let mut p = Process64::load(&dir.join("main.exe"), false).unwrap();
+    p.memory.map(DATA, 8192, READ | WRITE).unwrap();
+    p.memory
+        .write(
+            DATA,
+            &"C:\\items\\*.TXT\0"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    let output = DATA + 0x200;
+    let handle = startup_call(
+        &mut p.memory,
+        &mut p.cpu,
+        &mut p.runtime,
+        "FindFirstFileExW",
+        &[DATA, 1, output, 0, 0, 2],
+    );
+    assert!(handle > u32::MAX as u64 && handle != u64::MAX);
+    assert_eq!(p.memory.read_int(output + 32, 4).unwrap(), 3);
+    assert_eq!(p.memory.read_int(output + 44, 2).unwrap(), b'A' as u64);
+    assert_ne!(p.memory.read_int(output + 20, 8).unwrap(), 0);
+    let bad = DATA + 8192 - 100;
+    p.memory.write(bad, &[0xcc; 100]).unwrap();
+    p.cpu.regs[4] = STACK + 0x1f88;
+    p.memory.write_int(p.cpu.regs[4], 8, BASE).unwrap();
+    p.cpu.regs[1] = handle;
+    p.cpu.regs[2] = bad;
+    let before = p.cpu.clone();
+    let calls = p.runtime.api_calls;
+    assert!(p
+        .runtime
+        .dispatch("kernel32.dll", "FindNextFileW", &mut p.cpu, &mut p.memory)
+        .is_err());
+    assert_eq!(p.cpu.regs, before.regs);
+    assert_eq!(p.cpu.rip, before.rip);
+    assert_eq!(p.runtime.api_calls, calls);
+    assert_eq!(p.memory.read_int(bad, 8).unwrap(), 0xcccccccccccccccc);
+    assert_eq!(
+        startup_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "FindNextFileW",
+            &[handle, output]
+        ),
+        1
+    );
+    assert_eq!(p.memory.read_int(output + 44, 2).unwrap(), b'B' as u64);
+    assert_eq!(p.memory.read_int(output + 28, 4).unwrap(), 1);
+    assert_eq!(p.memory.read_int(output + 32, 4).unwrap(), 7);
+    assert_eq!(
+        startup_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "FindNextFileW",
+            &[handle, output]
+        ),
+        1
+    );
+    assert_eq!(p.memory.read_int(output + 44, 2).unwrap(), 0x3042);
+    assert_eq!(
+        startup_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "FindNextFileW",
+            &[handle, output]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "GetLastError",
+            &[]
+        ),
+        18
+    );
+    assert_eq!(
+        startup_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "FindClose",
+            &[handle]
+        ),
+        1
+    );
+    assert_eq!(
+        startup_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "FindClose",
+            &[handle]
+        ),
+        0
+    );
+    p.memory.write(DATA, b"C:\\items\\missing*\0").unwrap();
+    assert_eq!(
+        startup_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "FindFirstFileA",
+            &[DATA, output]
+        ),
+        u64::MAX
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn amd64_icons_load_real_pe32plus_resources_keep_shared_lifetime_and_fail_missing_ids() {
+    use wire::x64::process::Process64;
+    let path = std::env::temp_dir().join(format!("wire-icon64-{}.exe", std::process::id()));
+    let mut bytes = fixture();
+    put32(&mut bytes, 0x98 + 112 + 16, 0x1100);
+    put32(&mut bytes, 0x98 + 112 + 20, 0x200);
+    // Separate GROUP_ICON and ICON branches, each with a real language/data entry.
+    for (directory, entries) in [
+        (0, vec![(3, 0x80000030), (14, 0x80000060)]),
+        (0x30, vec![(5, 0x80000090)]),
+        (0x60, vec![(103, 0x800000c0)]),
+        (0x90, vec![(1033, 0xf0)]),
+        (0xc0, vec![(1033, 0x100)]),
+    ] {
+        let base = 0x300 + directory;
+        put16(&mut bytes, base + 14, entries.len() as u16);
+        for (i, (name, value)) in entries.into_iter().enumerate() {
+            put32(&mut bytes, base + 16 + i * 8, name);
+            put32(&mut bytes, base + 20 + i * 8, value);
+        }
+    }
+    put32(&mut bytes, 0x3f0, 0x1300);
+    put32(&mut bytes, 0x3f4, 64);
+    put32(&mut bytes, 0x400, 0x1340);
+    put32(&mut bytes, 0x404, 20);
+    put32(&mut bytes, 0x500, 40);
+    put32(&mut bytes, 0x504, 2);
+    put32(&mut bytes, 0x508, 4);
+    put16(&mut bytes, 0x50c, 1);
+    put16(&mut bytes, 0x50e, 32);
+    bytes[0x542] = 1;
+    bytes[0x544] = 1;
+    bytes[0x546] = 2;
+    bytes[0x547] = 2;
+    put16(&mut bytes, 0x54a, 1);
+    put16(&mut bytes, 0x54c, 32);
+    put32(&mut bytes, 0x54e, 64);
+    put16(&mut bytes, 0x552, 5);
+    std::fs::write(&path, bytes).unwrap();
+    let mut p = Process64::load(&path, false).unwrap();
+    let icon = startup_dll_call(
+        &mut p.memory,
+        &mut p.cpu,
+        &mut p.runtime,
+        "user32.dll",
+        "LoadIconA",
+        &[BASE, 103],
+    );
+    assert!(icon > u32::MAX as u64);
+    assert_eq!(
+        startup_dll_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "user32.dll",
+            "LoadIconW",
+            &[BASE, 103]
+        ),
+        icon
+    );
+    assert_eq!(
+        startup_dll_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "user32.dll",
+            "DestroyIcon",
+            &[icon]
+        ),
+        1
+    );
+    assert_eq!(
+        startup_dll_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "user32.dll",
+            "LoadIconA",
+            &[BASE, 103]
+        ),
+        icon
+    );
+    assert_eq!(
+        startup_dll_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "user32.dll",
+            "LoadIconA",
+            &[BASE, 104]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "GetLastError",
+            &[]
+        ),
+        1814
+    );
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn win64_registry_owns_high_handles_roundtrips_cp932_and_keeps_errors_outputs_and_access_real() {
     let (mut mem, mut cpu, mut runtime) = startup();
     const HKCU: u64 = 0xffffffff80000001;

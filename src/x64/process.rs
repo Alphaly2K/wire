@@ -40,6 +40,7 @@ struct CallbackFrame {
     release: Vec<u64>,
     stop_on_false: bool,
     return_boolean: bool,
+    window_call: Option<super::runtime::WindowCall>,
     loader_parent: Option<Option<u64>>,
     load: Option<(String, String, Vec<u64>, u64)>,
     lookup: Option<(String, u64, Vec<u64>)>,
@@ -209,6 +210,8 @@ pub struct Process64 {
     scheduling: bool,
     callbacks: Vec<CallbackFrame>,
     loader: Modules,
+    presenter: Option<super::presenter::Presenter64>,
+    next_ui_work: u64,
 }
 #[derive(Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -342,6 +345,8 @@ impl Process64 {
             scheduling: false,
             callbacks: Vec::new(),
             loader: loaded,
+            presenter: None,
+            next_ui_work: 0,
         };
         process.begin()?;
         Ok(process)
@@ -373,6 +378,18 @@ impl Process64 {
         }
         if self.current.target == RETURN {
             self.cpu.regs[0] = 1;
+        }
+        Ok(())
+    }
+    pub fn enable_window(&mut self) -> Result<(), String> {
+        if self.presenter.is_none() {
+            self.presenter = Some(super::presenter::Presenter64::new()?);
+        }
+        Ok(())
+    }
+    pub fn poll_window(&mut self, force: bool) -> Result<(), String> {
+        if let Some(presenter) = self.presenter.as_mut() {
+            presenter.poll(&mut self.runtime, force)?;
         }
         Ok(())
     }
@@ -459,6 +476,7 @@ impl Process64 {
         }
         self.scheduling = true;
         loop {
+            self.poll_window(false)?;
             // Stable round robin, including a single runnable thread.
             let ids: Vec<_> = self
                 .contexts
@@ -660,6 +678,7 @@ impl Process64 {
                 release: Vec::new(),
                 stop_on_false: false,
                 return_boolean: false,
+                window_call: None,
                 loader_parent: Some(owner),
                 load: Some((dll, function, args, base)),
                 lookup: None,
@@ -671,6 +690,10 @@ impl Process64 {
     }
     pub fn run(&mut self, budget: u64) -> Result<Outcome, String> {
         while self.cpu.work < budget {
+            if self.presenter.is_some() && self.cpu.work >= self.next_ui_work {
+                self.poll_window(false)?;
+                self.next_ui_work = self.cpu.work.saturating_add(65536);
+            }
             if let Some(code) = self.terminated {
                 return Ok(Outcome::Exited(code));
             }
@@ -697,6 +720,30 @@ impl Process64 {
                     return Err(format!("{} DLL_PROCESS_ATTACH returned FALSE; dynamic load rollback is not implemented",
                         frame.active.as_ref().and_then(|call| call.label.as_deref()).unwrap_or("AMD64 dynamic DLL")));
                 }
+                let mut window_value = None;
+                if let Some(call) = self.callbacks.last_mut().unwrap().window_call.as_mut() {
+                    match self
+                        .runtime
+                        .window_resume(&mut self.memory, call, self.cpu.regs[0])?
+                    {
+                        super::runtime::WindowStep::Next(target, args) => {
+                            self.callbacks
+                                .last_mut()
+                                .unwrap()
+                                .calls
+                                .push_front(CallbackCall {
+                                    target,
+                                    args,
+                                    require_true: false,
+                                    label: None,
+                                });
+                            self.begin_callback()?;
+                            continue;
+                        }
+                        super::runtime::WindowStep::Returned(value) => window_value = Some(value),
+                    }
+                }
+                let frame = self.callbacks.last().unwrap();
                 if !frame.calls.is_empty() && !(frame.stop_on_false && self.cpu.regs[0] as u32 == 0)
                 {
                     self.begin_callback()?;
@@ -712,6 +759,8 @@ impl Process64 {
                         self.runtime
                             .complete_call(dll, "RtlLookupFunctionEntry", args, value);
                         Some(value)
+                    } else if window_value.is_some() {
+                        window_value
                     } else {
                         frame
                             .return_boolean
@@ -843,6 +892,7 @@ impl Process64 {
                             release: Vec::new(),
                             stop_on_false: false,
                             return_boolean: false,
+                            window_call: None,
                             loader_parent: None,
                             load: None,
                             lookup: Some((dll, base, args)),
@@ -855,6 +905,7 @@ impl Process64 {
                         release,
                         stop_on_false,
                         return_boolean,
+                        window_call,
                     } => {
                         if calls.is_empty() {
                             self.runtime
@@ -880,6 +931,7 @@ impl Process64 {
                                 release,
                                 stop_on_false,
                                 return_boolean,
+                                window_call,
                                 loader_parent: None,
                                 load: None,
                                 lookup: None,

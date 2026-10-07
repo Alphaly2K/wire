@@ -184,9 +184,13 @@ impl Runtime64 {
                     }
                     _ if args[0] == 0 => false,
                     _ => {
-                        self.set_error(mem, 1400)?;
-                        return Ok(0);
-                    } // No Win64 windows yet.
+                        let Some(window) = self.user.windows.get(&args[0]) else {
+                            self.set_error(mem, 1400)?;
+                            return Ok(0);
+                        };
+                        let r = window.rect;
+                        r[0] < 1024 && r[2] > 0 && r[1] < 768 && r[3] > 0
+                    }
                 };
                 Ok(if intersects || args[1] != 0 {
                     MONITOR

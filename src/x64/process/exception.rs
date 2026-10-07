@@ -34,6 +34,7 @@ impl Process64 {
             release: vec![block],
             stop_on_false: false,
             return_boolean: false,
+            window_call: None,
             loader_parent: None,
             load: None,
             lookup: None,

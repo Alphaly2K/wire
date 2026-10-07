@@ -13,7 +13,7 @@ fn main() -> ExitCode {
         eprintln!("wire — Watari-Is-a-Runtime-Environment (M2 spike)");
         eprintln!("usage:");
         eprintln!("  wire imports <program.exe>");
-        eprintln!("  wire probe64 <program.exe> [--max-instr N] [--startup] [--dll] (experimental AMD64 diagnostic)");
+        eprintln!("  wire probe64 <program.exe> [--max-instr N] [--startup] [--dll] [--window] (experimental AMD64 diagnostic)");
         eprintln!("  wire prepare <program.exe> [--out program.wir]");
         eprintln!(
             "  wire run <program.exe> [--ir program.wir] [--op-stats] [--max-instr N] [--log-dir DIR] [--cwd DIR] [--trace-cpu] [--present|--headless] [--software-render] [--capture-frames DIR] [--stop-after-presents N]"
@@ -574,10 +574,15 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
         let mut limit = 1000000;
         let mut startup = false;
         let mut dll_attach = false;
+        let mut window = false;
         let mut opt = opts.iter();
         while let Some(flag) = opt.next() {
             match flag.as_str() {
                 "--startup" => startup = true,
+                "--window" => {
+                    window = true;
+                    startup = true;
+                }
                 "--dll" => {
                     dll_attach = true;
                     startup = true;
@@ -591,13 +596,14 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
                 }
                 _ => {
                     return Err(
-                        "usage: wire probe64 <exe> [--max-instr N] [--startup] [--dll]".into(),
+                        "usage: wire probe64 <exe> [--max-instr N] [--startup] [--dll] [--window]"
+                            .into(),
                     )
                 }
             }
         }
         if startup {
-            return run_startup64(path, limit, dll_attach);
+            return run_startup64(path, limit, dll_attach, window);
         }
         let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
         let pe = wire::x64::pe::Pe64::parse(&bytes)?;
@@ -677,9 +683,12 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
     }
 }
 
-fn run_startup64(path: &str, limit: u64, dll_attach: bool) -> Result<(), String> {
+fn run_startup64(path: &str, limit: u64, dll_attach: bool, window: bool) -> Result<(), String> {
     use wire::x64::process::{Outcome, Process64};
     let mut process = Process64::load(Path::new(path), dll_attach)?;
+    if window {
+        process.enable_window()?;
+    }
     println!(
         "experimental AMD64 startup: RIP={:#x} RSP={:#x}; interpreter; DLL attach={dll_attach}",
         process.cpu.rip, process.cpu.regs[4]
@@ -688,6 +697,7 @@ fn run_startup64(path: &str, limit: u64, dll_attach: bool) -> Result<(), String>
         println!("  mapped {name} at {base:#x}");
     }
     let outcome = process.run(limit);
+    process.poll_window(true)?;
     if outcome.is_err() {
         println!(
             "fault ABI registers: RCX={:#x} RDX={:#x} R8={:#x} R9={:#x}; thread GS={:#x}",
@@ -716,6 +726,12 @@ fn run_startup64(path: &str, limit: u64, dll_attach: bool) -> Result<(), String>
         process.cpu.rip,
         process.runtime.api_calls
     );
+    for w in process.runtime.window_info() {
+        println!(
+            "Win64 guest window: HWND={:#x} visible={} client={}x{} title={:?}",
+            w.handle, w.visible, w.width, w.height, w.title
+        );
+    }
     match outcome? {
         Outcome::Returned(value) => {
             println!(

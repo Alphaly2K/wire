@@ -14,11 +14,13 @@ mod display;
 mod events;
 pub(crate) mod exception;
 mod files;
+mod find;
 mod locale;
 mod mapping;
 mod modules;
 mod pipes;
 mod registry;
+mod resources;
 mod snapshot;
 mod sockets;
 mod sspi;
@@ -27,6 +29,12 @@ mod time;
 mod token;
 mod tracing;
 mod unwind;
+mod user;
+pub use user::WindowCall;
+pub(crate) enum WindowStep {
+    Next(u64, [u64; 4]),
+    Returned(u64),
+}
 mod version;
 
 pub const TEB: u64 = 0x7ffd00000000;
@@ -37,6 +45,21 @@ const COMMAND_W: u64 = TEB + 5 * PAGE;
 const PROCESS_HEAP: u64 = TEB + 6 * PAGE;
 const PID: u64 = 1;
 const TID: u64 = 1;
+#[derive(Debug, Clone)]
+pub struct WindowInfo {
+    pub handle: u64,
+    pub title: String,
+    pub width: u32,
+    pub height: u32,
+    pub visible: bool,
+}
+#[derive(Debug, Clone, Copy)]
+pub struct WindowEvent {
+    pub window: u64,
+    pub message: u32,
+    pub wparam: u64,
+    pub lparam: u64,
+}
 
 pub struct Runtime64 {
     start: Instant,
@@ -95,6 +118,8 @@ pub struct Runtime64 {
     winsock_refs: u32,
     security_tables: [u64; 2],
     registry: registry::Registry,
+    user: user::User,
+    searches: find::Searches,
     fs: Option<crate::fs::GuestFs>,
     process_attributes: BTreeMap<u64, (u32, BTreeMap<u64, Vec<u8>>)>,
 }
@@ -110,6 +135,7 @@ pub enum Control {
         release: Vec<u64>,
         stop_on_false: bool,
         return_boolean: bool,
+        window_call: Option<WindowCall>,
     },
     LoadModule {
         path: String,
@@ -234,6 +260,8 @@ impl Runtime64 {
             winsock_refs: 0,
             security_tables: [0; 2],
             registry: registry::Registry::default(),
+            user: user::User::default(),
+            searches: find::Searches::default(),
             fs: None,
             process_attributes: BTreeMap::new(),
         })
@@ -713,11 +741,14 @@ impl Runtime64 {
                 ))
             && !(dll.eq_ignore_ascii_case("user32.dll")
                 && (display::arity(name).is_some()
+                    || user::arity(name).is_some()
                     || matches!(
                         name,
                         "SystemParametersInfoA" | "SystemParametersInfoW" | "GetSystemMetrics"
                     )))
             && !(dll.eq_ignore_ascii_case("psapi.dll") && modules::is_query(name))
+            && !(dll.eq_ignore_ascii_case("imm32.dll") && user::ime_arity(name).is_some())
+            && !(dll.eq_ignore_ascii_case("gdi32.dll") && user::gdi_arity(name).is_some())
             && !(dll.eq_ignore_ascii_case("advapi32.dll") && tracing::is_call(name))
             && !(dll.eq_ignore_ascii_case("advapi32.dll") && registry::arity(name).is_some())
             && !(dll.eq_ignore_ascii_case("ntdll.dll") && unwind::is_call(name))
@@ -753,6 +784,8 @@ impl Runtime64 {
             return Err(format!("unimplemented Win64 import: {dll}!{name}"));
         }
         let arity = match name {
+            name if find::arity(name).is_some() => find::arity(name).unwrap(),
+            name if user::arity(name).is_some() => user::arity(name).unwrap(),
             name if registry::arity(name).is_some() => registry::arity(name).unwrap(),
             name if display::arity(name).is_some() => display::arity(name).unwrap(),
             name if sspi::arity(name).is_some() => sspi::arity(name).unwrap(),
@@ -997,6 +1030,8 @@ impl Runtime64 {
         };
         let mut args = cpu.arguments(mem, arity)?;
         let dwords: &[usize] = match name {
+            "FindFirstFileExA" | "FindFirstFileExW" => &[1, 3, 5],
+            name if user::arity(name).is_some() => user::dwords(name),
             name if registry::arity(name).is_some() => registry::dwords(name),
             name if display::arity(name).is_some() => display::dwords(name),
             name if sspi::arity(name).is_some() => sspi::dwords(name),
@@ -1134,6 +1169,30 @@ impl Runtime64 {
             self.delay_hooks.remove(&cpu.rip);
         }
         let ret = match name {
+            name if find::arity(name).is_some() => self.find_call(mem, name, &args)?,
+            name if user::is_callback(name) => {
+                match self.window_start(mem, name, &args, &returned)? {
+                    user::WindowResult::Value(value) => value,
+                    user::WindowResult::Callback {
+                        target,
+                        parameters,
+                        call,
+                        release,
+                    } => {
+                        *cpu = returned;
+                        self.unblock();
+                        self.api_calls += 1;
+                        return Ok(Control::Callbacks {
+                            calls: vec![(target, parameters)],
+                            release,
+                            stop_on_false: false,
+                            return_boolean: false,
+                            window_call: Some(call),
+                        });
+                    }
+                }
+            }
+            name if user::arity(name).is_some() => self.user_call(mem, name, &args)?,
             name if registry::arity(name).is_some() => self.registry_call(mem, name, &args)?,
             "EnumDisplayMonitors" => {
                 let enumeration = self.enumerate_monitors(mem, &args, &returned)?;
@@ -1150,6 +1209,7 @@ impl Runtime64 {
                         release: enumeration.release,
                         stop_on_false: true,
                         return_boolean: true,
+                        window_call: None,
                     });
                 }
             }
@@ -1976,6 +2036,7 @@ impl Runtime64 {
                             release: vec![block],
                             stop_on_false: true,
                             return_boolean: false,
+                            window_call: None,
                         });
                     }
                 }
@@ -4280,6 +4341,9 @@ impl Runtime64 {
                         || (provider == "ws2_32.dll" && sockets::is_call(&function))
                         || (provider == "secur32.dll" && sspi::arity(&function).is_some())
                         || (provider == "user32.dll" && display::arity(&function).is_some())
+                        || (provider == "user32.dll" && user::arity(&function).is_some())
+                        || (provider == "imm32.dll" && user::ime_arity(&function).is_some())
+                        || (provider == "gdi32.dll" && user::gdi_arity(&function).is_some())
                         || (provider == "advapi32.dll" && registry::arity(&function).is_some())
                         || (matches!(provider.as_str(), "kernel32.dll" | "kernelbase.dll")
                             && matches!(
