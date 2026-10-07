@@ -4,23 +4,21 @@
 实际启动使用 `wire probe64 --startup`。解释器是主路径，所有高地址访问仍经过 checked guest memory，
 没有把 guest 机器码交给宿主 CPU，也没有引入 QEMU GPL 实现。
 
-2026-10-08 图形接续已核查 DXVK / MoltenVK 路线，并完成两个独立探针：官方 MoltenVK
-在 Apple M4 上通过4096个GPU compute读回值校验；DXVK的MIT组件dxbc-spirv原样ARM64构建，
-转译了隔离UnityPlayer内嵌的全部8个DXBC。原版DXVK仍缺必要Vulkan扩展，游戏尚未接入此后端，
-当前guest启动边界仍为pass84的CreateDXGIFactory2。
-具体路线、许可、资源/COM边界和复跑命令见[Win64图形接入设计](d3d11-dxvk-moltenvk-design.md)。
+2026-10-08 接续已接入原生 ARM64 shader / MoltenVK 库及 Win64 DXGI factory4 / adapter1。
+全部8个内嵌DXBC转译并通过spirv-val；3组VS/PS与2个CS真实创建pipeline，
+Unity内嵌VS/PS执行64×64离屏Draw，4096个RGBA8像素读回逐通道比较0误差。
+此Draw是宿主后端验证，不是guest Present。具体许可、COM/资源边界与复跑见
+[Win64图形接入设计](d3d11-dxvk-moltenvk-design.md)。
 
 ## 当前真实结果
 
-AliceToPapa 隔离副本已从13条 EXE 入口指令推进到 **60,211,629 条退休指令、
-60,341,653 work、126,049 次已完成 API 调用**（`linked-pass-84.txt`，`--window`）。
-已经实际执行 UnityPlayer 的 TLS / DllMain、EXE 入口，以及动态加载 Mono 的 TLS / DllMain；
-合作调度的 worker 也在执行。线程命名异常已真正执行 guest vectored handler、语言处理器
-以及同帧 RtlUnwindEx，继续到了 Winsock 和 Unity input 初始化。
-已经越过 altered-search DLL 装载、curl 的 SSPI 服务发现、显示器查询和 HKCU 游戏设置键创建。
-主 EXE 图标 ID 103、RegisterClassExW 和真实游戏 WNDPROC 的窗口创建已通过，
-接着越过 DC / 设备查询、目录枚举，当前停止于 `dxgi.dll!CreateDXGIFactory2`。
-没有忽略此前 curl 初始化失败触发的 INT3，也没有把不存在的安全包或系统注册键改成成功。
+AliceToPapa隔离副本推进到 **60,249,414 条退休指令、60,379,506 work、126,117 次已完成API**
+（`linked-pass-88.txt`）。从13条EXE入口开始已实际执行UnityPlayer的TLS/DllMain、EXE入口，
+动态加载Mono的TLS/DllMain及合作worker；异常链仍执行真实guest handler与同帧RtlUnwindEx。
+此前curl/SSPI、显示器、HKCU、资源图标、类注册、WNDPROC、DC与目录枚举均已越过。
+本轮`CreateDXGIFactory2`、真实Apple M4 adapter枚举/Desc/引用、D3D12明确失败后的
+D3D11回退通过，当前停止于 **`d3d11.dll!D3D11CreateDevice`**。
+没有忽略INT3、认证失败或guest对窗口的隐藏状态。
 
 游戏实际写出的 `Player.log` 包含：
 
@@ -33,7 +31,7 @@ Input System module state changed to: Initialized.
 当前证据还不足以验收托管游戏入口、正式窗口、D3D11/DXGI Present 或持续可玩。
 实际 guest 窗口为 HWND=`0x7ffd00630000`、客户区314×211、标题 `AliceToPapaADV_1-0-0`，
 但 `visible=false`；这是引擎的隐藏初始化窗口，不是已经显示的游戏界面。
-`--window` 已实际验证 AppKit 主线程初始化并到达同一 DXGI 边界，按真实 visible 标志呈现，
+`--window` 已实际验证 AppKit 主线程初始化并到达同一 D3D11 边界（pass89），按真实 visible 标志呈现，
 不会把隐藏窗口强制显示来充当正式窗口证据。
 启动指令数是兼容进度，不是性能收益。AMD64 仍使用逐指令 decode，没有64位安装期 IR。
 既有 PE32 / Metal 路径不受这条诊断路线替换。
@@ -64,6 +62,10 @@ Input System module state changed to: Initialized.
 | pass-82 | 60,180,964 | 125,970 | DC查询通过；`FindFirstFileExW` |
 | pass-83 | 60,211,629 | 126,049 | 目录枚举通过；`CreateDXGIFactory2` |
 | pass-84 | 60,211,629 | 126,049 | 开启 AppKit 桥接；同一 DXGI 边界，窗口仍隐藏 |
+| pass-85 | 60,211,853 | 126,055 | factory/adapter通过；D3D12 ordinal101 |
+| pass-87 | 60,211,853 | 126,055 | D3D12 ordinal分派通过；delay-load provider缺失 |
+| pass-88 | 60,249,414 | 126,117 | D3D12明确不支持并回退；D3D11CreateDevice |
+| pass-89 | 60,249,414 | 126,117 | AppKit + 原生Vulkan；同一D3D11边界，窗口仍隐藏 |
 
 指令与 API 计数受真实时间/线程调度影响，上表不构成相同路径的性能 AB 对照。
 
@@ -71,8 +73,13 @@ Input System module state changed to: Initialized.
 
 当前仍处于引擎/运行时初始化；input 初始化日志不证明托管游戏入口已完成。
 Win64 USER32类/初始窗口、64位 WNDPROC / WPARAM / LPARAM 回调与可选 AppKit 桥接已经建立；
-真实游戏停在 DXGI factory 创建，尚未请求显示当前隐藏窗口。
-接下来需要 DXGI/D3D11 的64位 COM/vtable/资源布局、adapter/设备/交换链、shader 和实际 Present。
+真实游戏已通过DXGI factory与adapter，尚未请求显示当前隐藏窗口。
+接下来是D3D11 device/context、资源/状态、交换链和实际Present，以及能力差异的真实补齐。
+实际请求adapter=`0x40aab5000`、driver type=UNKNOWN、flags=`0x20`（BGRA_SUPPORT）、SDK=7，
+feature-level数组为11_1 / 11_0 / 10_1 / 10_0，没有9_x回退。
+本机MoltenVK原生geometryShader=false，而10_x及以上需要geometry；
+不能将当前VS/PS/CS探针成功当作已经满足最低10_0，也不能只填一个feature-level通过创建。
+后续需要真实geometry/SO等能力补齐或具备对应实现的后端，详见图形设计文档。
 既有 PE32 D3D9/Metal 能力可复用，但当前没有接通这条64位图形执行/像素路径。
 Win64 MSG、消息等待、宿主输入→guest消息分发和托管入口仍待实现/验收；桥接保留输入事件，
 没有忽略后续未知 API 或声称可交互。
@@ -80,6 +87,15 @@ Win64 MSG、消息等待、宿主输入→guest消息分发和托管入口仍待
 
 ## 已实现的运行时范围
 
+- 可选原生Vulkan设备对应的DXGI factory4 / adapter1，完整64位COM对象/vtable/gateway、
+  IUnknown身份与parent引用，最后Release回收owned页；protected readonly页不允许guest
+  VirtualFree/HeapFree或VirtualProtect升级。adapter信息/UUID派生process-local LUID来自实际设备，
+  DESC/DESC1明确序列化304/312字节，QI与枚举fault不改变引用或留下对象。
+  private byte data有界、短buffer语义与window association已实现；输出/通知/交换链和private
+  IUnknown回调引用仍明确未实现，不报告D3D能力。没有后端时不会发放假adapter。
+- D3D12 CreateDevice/GetDebugInterface真实返回UNSUPPORTED/NO_INTERFACE；named、ordinal101/102、
+  GetProcAddress与delay-load provider一致。NULL ppDevice探测同样失败，非NULL输出checked后置NULL。
+  此服务仅让引擎得到实际能力失败并正常回退，不等于D3D12支持。
 - PE32+ 静态及动态依赖、DIR64、64位 IAT、导出、delay import gateway；真实 TLS callback / DllMain。
   重复完整路径 LoadLibrary 增加引用；动态 TLS 模板为所有存活线程单独建立。
   新线程第一次调度才收集 DLL_THREAD_ATTACH，避免漏掉创建后、恢复前装载的 DLL。
@@ -245,18 +261,21 @@ EXE / Unity / Mono 的 SHA-256 仍与 [恢复样本记录](x86-64-sample-2026-10
 cargo build --release
 cd wire-out/games64/alice/runtime
 ../../../../target/release/wire probe64 AliceToPapaADV_1-0-0.exe \
-  --max-instr 200000000 --startup --window
+  --max-instr 200000000 --startup --window \
+  --graphics-backend /Users/alphaly/Projects/wire/wire-out/libwire_graphics.dylib \
+  --moltenvk /private/tmp/wire-moltenvk-1.4.2/MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib
 ```
 
-下一阶段从真实 `CreateDXGIFactory2` 开始接Win64图形及消息分发，再以正式窗口和实际 Present 验收；
+下一阶段从真实 `D3D11CreateDevice` 开始接设备/资源/能力补齐及消息分发，再以正式窗口和实际 Present 验收；
 不以 LoadLibrary 成功、错误退出0或空窗口当作游戏跑通。
-完整 release 回归通过265项：8 unit、37 differential、9 FPU、26 IR、1 Wasm、109 Win32、75 AMD64。
-本检查点新增3项覆盖真正的窗口创建/失败撤销/高指针extra、实际图标资源、目录search及fault不消费条目；
-窗口测试也验证native事件高参数保留和DC错误释放不影响有效对象。此前服务检查点262项通过。
-两项 Metal 设备测试本轮按默认 ignored；上一提交已单独通过，本轮没有渲染实现改动。
-日志为 `/private/tmp/wire-amd64-window-tests.txt`、`wire-amd64-window-clippy.txt`；
-Clippy release all-targets `-D warnings`、format、diff whitespace 检查通过。
-`scripts/package-macos.sh` 重建 `wire-out/Wire.app`，bundle 与 release binary 校验一致。
+当前完整release回归通过269项：12 unit、37 differential、9 FPU、26 IR、1 Wasm、109 Win32、75 AMD64。
+本轮新增4项覆盖COM身份/引用/parent、Win64 Desc布局/高指针、readonly保护、故障原子性、
+private data短buffer、D3D12 named/ordinal/动态查找与真实失败。原生GPU ignored测试另行通过1项，
+包含Rust shader/context/library生命周期、跨context拒绝及实际Draw/readback；两项既有Metal测试
+本轮保持默认ignored，未修改PE32 Metal实现。
+日志：`/private/tmp/wire-native-graphics-all-tests.txt`、`wire-native-graphics-rust-tests.txt`、
+`wire-native-graphics-clippy.txt`。Clippy release all-targets `-D warnings`、format、diff whitespace检查通过。
+默认cargo build / Wire.app没有捆绑第三方GPU二进制；backend构建与验证详见图形设计文档。
 旧文档的13条入口/无 Win64 runtime 是历史状态。
 
 本轮版本比较移植自固定 Wine 10.0 的 LGPL-2.1-or-later `ntdll/version.c`，选择 LGPL 2.1，

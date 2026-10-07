@@ -86,6 +86,7 @@ fn provider(name: &str) -> bool {
                 | "bcrypt.dll"
                 | "hid.dll"
                 | "d3d11.dll"
+                | "d3d12.dll"
                 | "dxgi.dll"
                 | "uiautomationcore.dll"
                 | "crypt32.dll"

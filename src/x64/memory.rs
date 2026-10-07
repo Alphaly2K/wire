@@ -17,6 +17,7 @@ struct Allocation {
     protection: u32,
     kind: u32,
     guest: bool,
+    protection_locked: bool,
 }
 #[derive(Default)]
 pub struct Memory {
@@ -84,6 +85,7 @@ impl Memory {
                 protection: Self::windows_protection(permissions),
                 kind: crate::mem::MEM_PRIVATE,
                 guest: false,
+                protection_locked: false,
             },
         );
         Ok(())
@@ -91,6 +93,20 @@ impl Memory {
     pub fn map_image(&mut self, addr: u64, len: u64, permissions: u8) -> Result<(), String> {
         self.map(addr, len, permissions)?;
         self.allocations.get_mut(&addr).unwrap().kind = crate::mem::MEM_IMAGE;
+        Ok(())
+    }
+    /// Immutable runtime COM tables/objects. Guest VirtualProtect must not
+    /// turn a service-owned interface page into writable or executable data.
+    pub(crate) fn seal_runtime_readonly(&mut self, addr: u64) -> Result<(), String> {
+        let allocation = self
+            .allocations
+            .get(&addr)
+            .ok_or("missing runtime allocation")?;
+        if allocation.guest {
+            return Err("cannot seal guest allocation".into());
+        }
+        self.protect(addr, allocation.end - addr, READ)?;
+        self.allocations.get_mut(&addr).unwrap().protection_locked = true;
         Ok(())
     }
     pub fn protect(&mut self, addr: u64, len: u64, permissions: u8) -> Result<(), String> {

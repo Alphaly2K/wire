@@ -11,6 +11,7 @@ use std::{
 mod address;
 mod command;
 mod display;
+mod dxgi;
 mod events;
 pub(crate) mod exception;
 mod files;
@@ -117,6 +118,7 @@ pub struct Runtime64 {
     mappings: mapping::Mappings,
     winsock_refs: u32,
     security_tables: [u64; 2],
+    graphics: dxgi::Graphics,
     registry: registry::Registry,
     user: user::User,
     searches: find::Searches,
@@ -259,6 +261,7 @@ impl Runtime64 {
             mappings: mapping::Mappings::default(),
             winsock_refs: 0,
             security_tables: [0; 2],
+            graphics: dxgi::Graphics::default(),
             registry: registry::Registry::default(),
             user: user::User::default(),
             searches: find::Searches::default(),
@@ -407,6 +410,8 @@ impl Runtime64 {
             "kernel32.dll"
                 | "kernelbase.dll"
                 | "secur32.dll"
+                | "dxgi.dll"
+                | "d3d12.dll"
                 | "api-ms-win-core-synch-l1-2-0.dll"
                 | "api-ms-win-core-fibers-l1-1-1.dll"
                 | "api-ms-win-core-localization-l1-2-1.dll"
@@ -551,7 +556,7 @@ impl Runtime64 {
         self.modules.insert(handle, (name.to_ascii_lowercase(), 1));
     }
     pub fn register(&mut self, dll: &str, name: &str) -> u64 {
-        let name = sockets::symbol(dll, name);
+        let name = dxgi::symbol(dll, sockets::symbol(dll, name));
         let export = format!("{dll}!{name}");
         if let Some((&address, _)) = self.gateways.iter().find(|(_, value)| **value == export) {
             return address;
@@ -718,7 +723,7 @@ impl Runtime64 {
         cpu: &mut Cpu64,
         mem: &mut Memory,
     ) -> Result<Control, String> {
-        let name = sockets::symbol(dll, name);
+        let name = dxgi::symbol(dll, sockets::symbol(dll, name));
         if !dll.eq_ignore_ascii_case("kernel32.dll")
             && !dll.eq_ignore_ascii_case("kernelbase.dll")
             && !(dll.eq_ignore_ascii_case("shell32.dll")
@@ -755,6 +760,9 @@ impl Runtime64 {
             && !(dll.eq_ignore_ascii_case("ntdll.dll") && version::is_call(name))
             && !(dll.eq_ignore_ascii_case("ws2_32.dll") && sockets::is_call(name))
             && !(dll.eq_ignore_ascii_case("secur32.dll") && sspi::arity(name).is_some())
+            && !(dll.eq_ignore_ascii_case("dxgi.dll") && dxgi::export(name))
+            && !(dll.eq_ignore_ascii_case("d3d12.dll") && dxgi::d3d12_export(name))
+            && !(dll == dxgi::DLL && dxgi::arity(name).is_some())
             && !(dll.eq_ignore_ascii_case("api-ms-win-core-synch-l1-2-0.dll")
                 && matches!(
                     name,
@@ -784,6 +792,7 @@ impl Runtime64 {
             return Err(format!("unimplemented Win64 import: {dll}!{name}"));
         }
         let arity = match name {
+            name if dxgi::arity(name).is_some() => dxgi::arity(name).unwrap(),
             name if find::arity(name).is_some() => find::arity(name).unwrap(),
             name if user::arity(name).is_some() => user::arity(name).unwrap(),
             name if registry::arity(name).is_some() => registry::arity(name).unwrap(),
@@ -1030,6 +1039,7 @@ impl Runtime64 {
         };
         let mut args = cpu.arguments(mem, arity)?;
         let dwords: &[usize] = match name {
+            name if dxgi::arity(name).is_some() => dxgi::dwords(name),
             "FindFirstFileExA" | "FindFirstFileExW" => &[1, 3, 5],
             name if user::arity(name).is_some() => user::dwords(name),
             name if registry::arity(name).is_some() => registry::dwords(name),
@@ -1169,6 +1179,7 @@ impl Runtime64 {
             self.delay_hooks.remove(&cpu.rip);
         }
         let ret = match name {
+            name if dxgi::arity(name).is_some() => self.dxgi_call(mem, name, &args)?,
             name if find::arity(name).is_some() => self.find_call(mem, name, &args)?,
             name if user::is_callback(name) => {
                 match self.window_start(mem, name, &args, &returned)? {
@@ -4318,6 +4329,8 @@ impl Runtime64 {
                     let function = if args[1] <= 65535 {
                         if module.eq_ignore_ascii_case("ws2_32.dll") {
                             sockets::ordinal(&symbol).unwrap_or(&symbol).to_owned()
+                        } else if module.eq_ignore_ascii_case("d3d12.dll") {
+                            dxgi::symbol(module, &symbol).to_owned()
                         } else {
                             return Err("Win64 native ordinal lookup is not implemented".into());
                         }
@@ -4340,6 +4353,8 @@ impl Runtime64 {
                         ) && version::is_call(&function))
                         || (provider == "ws2_32.dll" && sockets::is_call(&function))
                         || (provider == "secur32.dll" && sspi::arity(&function).is_some())
+                        || (provider == "dxgi.dll" && dxgi::export(&function))
+                        || (provider == "d3d12.dll" && dxgi::d3d12_export(&function))
                         || (provider == "user32.dll" && display::arity(&function).is_some())
                         || (provider == "user32.dll" && user::arity(&function).is_some())
                         || (provider == "imm32.dll" && user::ime_arity(&function).is_some())

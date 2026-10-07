@@ -13,7 +13,7 @@ fn main() -> ExitCode {
         eprintln!("wire — Watari-Is-a-Runtime-Environment (M2 spike)");
         eprintln!("usage:");
         eprintln!("  wire imports <program.exe>");
-        eprintln!("  wire probe64 <program.exe> [--max-instr N] [--startup] [--dll] [--window] (experimental AMD64 diagnostic)");
+        eprintln!("  wire probe64 <program.exe> [--max-instr N] [--startup] [--dll] [--window] [--graphics-backend PATH --moltenvk PATH] (experimental AMD64 diagnostic)");
         eprintln!("  wire prepare <program.exe> [--out program.wir]");
         eprintln!(
             "  wire run <program.exe> [--ir program.wir] [--op-stats] [--max-instr N] [--log-dir DIR] [--cwd DIR] [--trace-cpu] [--present|--headless] [--software-render] [--capture-frames DIR] [--stop-after-presents N]"
@@ -575,9 +575,19 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
         let mut startup = false;
         let mut dll_attach = false;
         let mut window = false;
+        let mut graphics_backend = None;
+        let mut moltenvk = None;
         let mut opt = opts.iter();
         while let Some(flag) = opt.next() {
             match flag.as_str() {
+                "--graphics-backend" => {
+                    graphics_backend = Some(opt.next().ok_or("--graphics-backend needs a path")?);
+                    startup = true;
+                }
+                "--moltenvk" => {
+                    moltenvk = Some(opt.next().ok_or("--moltenvk needs a path")?);
+                    startup = true;
+                }
                 "--startup" => startup = true,
                 "--window" => {
                     window = true;
@@ -596,14 +606,22 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
                 }
                 _ => {
                     return Err(
-                        "usage: wire probe64 <exe> [--max-instr N] [--startup] [--dll] [--window]"
+                        "usage: wire probe64 <exe> [--max-instr N] [--startup] [--dll] [--window] [--graphics-backend PATH --moltenvk PATH]"
                             .into(),
                     )
                 }
             }
         }
+        let graphics = match (graphics_backend, moltenvk) {
+            (Some(backend), Some(moltenvk)) => Some(wire::gpu::NativeGraphics::load(
+                Path::new(backend),
+                Path::new(moltenvk),
+            )?),
+            (None, None) => None,
+            _ => return Err("--graphics-backend and --moltenvk must be provided together".into()),
+        };
         if startup {
-            return run_startup64(path, limit, dll_attach, window);
+            return run_startup64(path, limit, dll_attach, window, graphics);
         }
         let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
         let pe = wire::x64::pe::Pe64::parse(&bytes)?;
@@ -683,9 +701,23 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
     }
 }
 
-fn run_startup64(path: &str, limit: u64, dll_attach: bool, window: bool) -> Result<(), String> {
+fn run_startup64(
+    path: &str,
+    limit: u64,
+    dll_attach: bool,
+    window: bool,
+    graphics: Option<wire::gpu::NativeGraphics>,
+) -> Result<(), String> {
     use wire::x64::process::{Outcome, Process64};
     let mut process = Process64::load(Path::new(path), dll_attach)?;
+    if let Some(graphics) = graphics {
+        let info = graphics.adapter();
+        println!(
+            "native Vulkan adapter: {} vendor={:#x} device={:#x}; DXGI discovery only",
+            info.name, info.vendor, info.device
+        );
+        process.runtime.attach_graphics(graphics)?;
+    }
     if window {
         process.enable_window()?;
     }

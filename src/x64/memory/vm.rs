@@ -132,6 +132,7 @@ impl Memory {
                 protection: 1,
                 kind: MEM_PRIVATE,
                 guest: false,
+                protection_locked: false,
             },
         );
         Ok(())
@@ -242,6 +243,7 @@ impl Memory {
                     protection,
                     kind: MEM_PRIVATE,
                     guest: true,
+                    protection_locked: false,
                 },
             );
             Ok(start)
@@ -306,6 +308,9 @@ impl Memory {
     ) -> Result<u32, u32> {
         Self::protection_permissions(protection)?;
         let (start, end) = Self::rounded(address, size, PAGE)?;
+        if self.containing(start, end)?.1.protection_locked && protection != 2 {
+            return Err(5);
+        }
         if self.containing(start, end)?.1.kind == crate::mem::MEM_MAPPED
             && !matches!(protection & 0xff, 1 | 2)
         {

@@ -9,6 +9,7 @@ mod dsound;
 pub mod file_api;
 pub mod fs;
 pub mod gdiplus;
+pub mod gpu;
 pub mod graphics;
 pub mod heap;
 pub mod ir;

@@ -4,10 +4,12 @@
 
 可以复用开源 D3D11 / shader 转译代码来减少自写渲染器的工作。
 **当前不能通过复制 DXVK DLL + MoltenVK 就完成 wire 的游戏渲染。**
-wire 既不是 Wine，也没有 Vulkan guest→host ABI；DXGI/D3D11 目前只有导入 gateway。
-Alice 隔离副本仍停在 `CreateDXGIFactory2`，隐藏初始化窗口尚未显示。
+wire 既不是 Wine，也没有通用 Vulkan guest→host ABI。当前已接入原生 ARM64 图形库、
+Win64 DXGI factory4 / adapter1 的64位 COM 边界。Alice 已越过设备枚举与 D3D12 能力探测，
+进入 `D3D11CreateDevice`（pass88）；隐藏初始化窗口尚未显示，尚无 guest D3D11 设备或 Present。
 
-本次已经完成两个独立探针，没有改动游戏目录，也没有将探针结果伪装成游戏渲染：
+首次检查点的两个独立探针如下；后续原生库、离屏Draw和guest重放证据见下一节。
+原始游戏目录保持只读。
 
 | 实测项目 | 结果 | 证明范围 |
 | --- | --- | --- |
@@ -19,6 +21,74 @@ Alice 隔离副本仍停在 `CreateDXGIFactory2`，隐藏初始化窗口尚未�
 证据在 `wire-out/moltenvk-probe-2026-10-08/{report.json,driver.log}`、
 `wire-out/dxbc-probe-2026-10-08/report.json`，上游检查日志在
 `/private/tmp/wire-dxbc-tests.txt`。这不是帧率或 MIPS 对照，也不是首帧验收。
+
+## 原生库与 guest 接入检查点
+
+| 实测项目 | 结果 | 证明范围 |
+| --- | --- | --- |
+| 原生C ABI、同一UnityPlayer的8个DXBC | 8/8转译；全部通过独立spirv-val的Vulkan1.3验证 | 当前内嵌shader可转译；未扫描打包游戏资源 |
+| 同一原生库、实际MoltenVK pipeline | 3组VS/PS + 2个CS成功；6组接口不匹配的组合明确拒绝 | 每个shader至少参与一个实际成功的pipeline；CS尚未dispatch |
+| Unity位置/UV VS + t0/s0 PS，64×64离屏Draw | 4096个RGBA8像素逐通道读回比较，0误差 | 真实DXBC→GPU上传/采样/Draw/同步/读回；不是guest Present |
+| Alice启动、真实Vulkan adapter | factory4、EnumAdapters、GetDesc与引用调用通过；D3D12明确不支持并回退D3D11 | guest连接了真实adapter信息；未创建D3D11 device/context |
+
+证据：`wire-out/native-graphics-probe-2026-10-08/{report.json,offscreen-rgba64.png}`、
+`wire-out/games64/alice/linked-pass-88.txt`。这不是性能对照或可见游戏首帧。
+
+`src/platform/native_graphics.cpp/.h` 是独立实现的宿主C ABI v1。
+`src/gpu.rs`使用私有宿主函数指针，Shader持有context/library的Rc所有权；
+调用串行化，Rust与C ABI都拒绝跨context shader。最后释放才销毁device并dlclose。
+失败open保留adapter输出，失败Draw保留读回输出；DXBC检查header、总尺寸、
+chunk数量/范围/重叠和shader DWORD长度。这不是完整恶意shader的fuzz验收。
+
+固定资源映射如下；register space非0、其它stage、超额register明确拒绝。
+min16目前保守升为允许的32位实现。
+
+| stage | descriptor set | CBV | SRV | sampler | UAV | push data起始字节 |
+| --- | ---: | --- | --- | --- | --- | ---: |
+| VS | 0 | 0–13 | 14–141 | 142–157 | 158–165 | 64 |
+| PS | 1 | 0–13 | 14–141 | 142–157 | 158–165 | 128 |
+| CS | 2 | 0–13 | 14–141 | 142–157 | 158–165 | 192 |
+
+shared push data从0开始；出现push block时保留256B。反射实际SPIR-V descriptor类型、
+定长数组，以及VS输出/PS输入的location、component、scalar/vector形状。
+浮点控制按真实physical-device属性配置；Vulkan memory model与bufferDeviceAddress明确查询/启用。
+当前graphics pipeline模板为RGBA8、triangle list、F32 position/UV布局，不是完整D3D11状态集合。
+
+两个CS最初在MoltenVK生成的LDS零初始化循环里引用未声明的`gl_WorkGroupSize`。
+shim将仅由普通U32 OpConstant构成的LocalSizeId解析成LocalSize，同时添加等价的
+BuiltIn WorkgroupSize常量；拒绝specialization/dynamic维度，不删除LDS初始化或barrier。
+修改位于wire shim，dxbc-spirv源码保持原样；全部生成SPIR-V已通过独立验证。
+
+`wire_gpu_blit_rgba64`是受限离屏Draw诊断：F32x4 position/F32x2 UV、无VS资源/push block、
+单2D t0与s0的PS接口。实际创建image/buffer/view/descriptor/renderpass并上传owned host数据，
+提交Draw后等待fence，以显式barrier和coherent staging读回。RAII按依赖顺序销毁；
+超时失败也先等已提交工作结束，避免释放GPU仍引用的资源。没有保留guest指针或连接窗口交换链。
+
+Win64 `src/x64/runtime/dxgi.rs`的对象/vtable是runtime-owned只读页，slots仅存guest gateway。
+VirtualFree/HeapFree不能释放它们，VirtualProtect不能升成可写/可执行。
+宿主表维护IUnknown身份和引用；adapter持有factory，最后Release回收对象页并释放parent。
+两个共享vtable页常驻，对象数有界1024。QI/枚举先preflight，fault不留对象或增加引用；
+private byte data有界64KiB/64键，短buffer报告大小并保留内容；非NULL private IUnknown回调引用明确未实现。
+
+factory支持IUnknown/IDXGIObject与factory0–4身份，adapter支持base/adapter1。
+仅枚举实际打开的一个Vulkan设备，DESC/DESC1按304/312字节Win64 UTF16/UINT/SIZE_T/LUID布局序列化。
+process-local LUID由device UUID派生，不是宿主指针或Windows内核LUID。
+Make/GetWindowAssociation检查实际HWND与flags；尚无额外原生Alt-Enter/PrintScreen默认动作。
+创建flags只接受0，debug请求返回SDK_COMPONENT_MISSING。
+没有WARP/shared资源、DXGI output/通知/交换链、D3D feature-level或热插拔服务，未实现方法保留明确边界。
+IsCurrent针对固定attached-device inventory，不能据此声称实现了宿主GPU热插拔跟踪。
+
+D3D12 ordinal101/102与named CreateDevice/GetDebugInterface走同一gateway；静态、GetProcAddress
+和delay-load provider一致。CreateDevice真实返回UNSUPPORTED，包括NULL ppDevice能力查询；
+debug返回NO_INTERFACE，非NULL输出先检查并置NULL，不创建假device或版本号。
+
+Alice的下一调用参数已经从真实guest stack读取：driver type=UNKNOWN、flags=`0x20`
+（BGRA_SUPPORT）、SDK=7，feature-level依次为11_1 / 11_0 / 10_1 / 10_0。
+没有9_x回退；本机MoltenVK的geometryShader=false，10_x及以上要求geometry能力。
+因此当前8个VS/PS/CS成功也不能证明满足最低10_0。下一阶段除COM/device/context和资源外，
+还需实际geometry/SO等能力补齐或具有对应实现的后端；不能仅填一个10_0/11_0使创建返回成功。
+原版DXVK的必要扩展仍缺失，macOS fork降低feature请求不等于完成该语义补齐。
+参数证据在`wire-out/games64/alice/d3d11-state-pass88.txt`。
 
 ## 版本与 Vulkan 功能差异
 
@@ -123,8 +193,8 @@ geometry / SO / logicOp 等缺失不能通过调低校验就变成支持；
 | 顺序 | 实现 | 必须留下的证据 |
 | --- | --- | --- |
 | 已完成 | 官方 MoltenVK 独立GPU执行；原生DXBC转译 | checked读回、真实设备功能、8个实际内嵌shader的转译结果 |
-| 下一步 | 原生shader库的C边界、能力查询与资源映射 | 恶意长度/失效输入失败；真实VS/PS/CS在适配布局下创建pipeline |
-| 之后 | Win64 COM / DXGI factory、adapter、D3D11 device/context 与资源 | 真实后端对象/引用、结构布局/失败原子性；Alice越过当前DXGI边界 |
+| 已完成 | 原生shader库的C边界、资源映射与离屏Draw | malformed container/短输出/跨context拒绝；8shader验证、5pipeline、4096像素读回 |
+| 部分完成 | Win64 COM / factory、adapter；D3D12能力回退 | 真实adapter/引用/布局/失败原子性；Alice到D3D11CreateDevice；下一步device/context与资源 |
 | 之后 | 交换链与离屏Draw，再接Present / visible窗口 | 实际guest命令输出可对照像素，再取得可见游戏首帧 |
 | 同步完成 | Win64 MSG、输入、等待、resize / close | 真实宿主事件进入guest WNDPROC；不能仅展示独立探针窗口 |
 | 首帧后 | 持续运行与CPU/GPU耗时profile | 真实游戏持续负载、首帧时间与帧时间；不以探针替代性能收益 |
@@ -147,7 +217,10 @@ MIT / zlib组件可在保留各自notice的前提下用于当前LGPL-2.1-only工
 MoltenVK保持独立动态组件及其Apache-2.0版权/许可/NOTICE和依赖notice；
 wire的LGPL源码、修改和用户重建/替换权利仍须保留。
 不能以“动态链接”三个字代替组合/分发条件核查，也不能把Apache-2.0源码复制后统一标LGPL-2.1-only。
-本轮工具只加载明确提供的外部SDK，未打包任何第三方二进制，未变更Wire.app的分发构成。
+原生库与工具只加载明确提供的外部SDK，没有打包第三方二进制。
+默认cargo build与Wire.app不携带这些依赖；可选probe64显式加载自有ARM64 shim，
+该shim静态链接MIT dxbc-spirv，独立动态加载Apache MoltenVK。此布局须保留LGPL重建/替换权利；
+分发shim/MoltenVK时还需提供实际包的全部NOTICE与依赖notice。
 正式打包时须把具体链接布局、完整依赖notice和可重建材料一起纳入分发检查。
 工具涉及的许可文本在 `licenses/third-party/`、来源登记在 `THIRD_PARTY_NOTICES`。
 
@@ -182,3 +255,43 @@ probe_moltenvk仅在明确提供的dylib中解析公共Vulkan入口，处理port
 后逐字校验，失败返回非零。它没有guest接口，也没有临时生成CPU机器码。
 probe_dxbc检查容器/所有chunk范围与重叠、按完整payload SHA去重，保存上游日志，
 检查输出SPIR-V header/record边界；不校验其全部shader语义，也不替代GPU pipeline验证。
+
+### 当前原生库 / guest 重放
+
+```sh
+python3 tools/build_native_graphics.py \
+  --vulkan-include /private/tmp/wire-moltenvk-1.4.2/MoltenVK/MoltenVK/include \
+  --dxbc-source /private/tmp/dxbc-spirv-main \
+  --dxbc-library /private/tmp/wire-dxbc-spirv-build/libdxbc_spv.a \
+  --out wire-out/libwire_graphics.dylib
+python3 tools/probe_native_graphics.py \
+  --backend wire-out/libwire_graphics.dylib \
+  --moltenvk /private/tmp/wire-moltenvk-1.4.2/MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib \
+  --input wire-out/games64/alice/runtime/UnityPlayer.dll \
+  --out wire-out/native-graphics-probe-2026-10-08 \
+  --validator /private/tmp/wire-spirv-tools-build/tools/spirv-val
+
+cargo build --release
+cd wire-out/games64/alice/runtime
+../../../../target/release/wire probe64 AliceToPapaADV_1-0-0.exe \
+  --max-instr 200000000 --startup --window \
+  --graphics-backend /Users/alphaly/Projects/wire/wire-out/libwire_graphics.dylib \
+  --moltenvk /private/tmp/wire-moltenvk-1.4.2/MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib
+```
+
+两个graphics路径参数必须成对提供，隐含startup；没有后端时DXGI明确拒绝。
+构建脚本记录命令与shim/source/static-lib/output SHA-256，不自动下载、安装或证明传入的上游revision。
+本次独立spirv-val为SPIRV-Tools v2025.2，配其DEPS固定Headers
+`aa6cef192b8e693916eb713e7a9ccadf06062ceb`，仅用于验证，不链接runtime。
+原生Rust的ignored生命周期/所有权/Draw测试使用以下环境变量（输入均是隔离探针提取的DXBC）：
+
+| 环境变量 | 值 / 样本SHA前缀 |
+| --- | --- |
+| WIRE_NATIVE_GRAPHICS | 编好的libwire_graphics.dylib绝对路径 |
+| WIRE_MOLTENVK | 官方public libMoltenVK.dylib绝对路径 |
+| WIRE_DXBC_VERTEX / WIRE_DXBC_PIXEL | 061ea774 / e8ef222f 对应.dxbc绝对路径 |
+| WIRE_DXBC_COMPUTE | ff9a4e9b 对应.dxbc绝对路径 |
+| WIRE_DXBC_BLIT_VERTEX / WIRE_DXBC_BLIT_PIXEL | 30e1f7ac / aaaff3e4 对应.dxbc绝对路径 |
+
+然后运行 `cargo test --release --lib gpu::tests -- --ignored --nocapture`。
+默认全回归不会隐式加载/tmp中的第三方依赖；原始游戏、DXBC和SPIR-V均不提交入库。
