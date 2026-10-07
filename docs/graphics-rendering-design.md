@@ -9,6 +9,9 @@
 2026-10-07 已接入 macOS Metal 固定管线 GPU 栅格化，完成后读回到统一 CPU 像素面；
 软件路径保留为无设备/失败回退和像素对照。GPU resident 资源与直接 drawable 呈现仍留待后续。
 接入、像素误差界限及 BGM 回填验收见 [三个 PE32 样本进度](games32-progress-2026-10-07.md)。
+2026-10-08 新增[Win64 DXVK / MoltenVK 接入设计与实测](d3d11-dxvk-moltenvk-design.md)：
+官方 MoltenVK 已完成真实 GPU compute / 读回，原生 ARM64 dxbc-spirv 成功转译 UnityPlayer
+内嵌8个shader；原版DXVK在Apple GPU上仍缺必要扩展，COM / D3D11 / Present 尚未接入。
 用户要求此检查点之后暂停功能扩展，先优化启动到真实画面的耗时。
 下文起点描述为历史状态，不代表当前进度。
 

@@ -4,6 +4,12 @@
 实际启动使用 `wire probe64 --startup`。解释器是主路径，所有高地址访问仍经过 checked guest memory，
 没有把 guest 机器码交给宿主 CPU，也没有引入 QEMU GPL 实现。
 
+2026-10-08 图形接续已核查 DXVK / MoltenVK 路线，并完成两个独立探针：官方 MoltenVK
+在 Apple M4 上通过4096个GPU compute读回值校验；DXVK的MIT组件dxbc-spirv原样ARM64构建，
+转译了隔离UnityPlayer内嵌的全部8个DXBC。原版DXVK仍缺必要Vulkan扩展，游戏尚未接入此后端，
+当前guest启动边界仍为pass84的CreateDXGIFactory2。
+具体路线、许可、资源/COM边界和复跑命令见[Win64图形接入设计](d3d11-dxvk-moltenvk-design.md)。
+
 ## 当前真实结果
 
 AliceToPapa 隔离副本已从13条 EXE 入口指令推进到 **60,211,629 条退休指令、

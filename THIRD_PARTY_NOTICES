@@ -48,6 +48,28 @@ license notice obligations.
 
 ## Test dependencies (not linked into wire)
 
+- The optional native graphics probes in tools/ use separately supplied SDKs;
+  no SDK, runtime dylib, shader compiler binary, or game shader is bundled into
+  wire or Wire.app by this change. Audited 2026-10-08:
+  - MoltenVK v1.4.2 public-API macOS release (Apache-2.0), separately dynamically
+    loaded by tools/moltenvk_probe.c. https://github.com/KhronosGroup/MoltenVK
+    Official archive SHA-256:
+    f95765a6229cb7b915990a2890ce12ebe36a730b021545d3d52ae69ce4c4024e
+  - Vulkan Headers 1.4.357 (Apache-2.0 OR MIT; MIT selected), supplied by that SDK.
+    Copyright 2015-2026 The Khronos Group Inc. No header source is vendored.
+    https://github.com/KhronosGroup/Vulkan-Headers
+  - dxbc-spirv c7f069701227dcb800a01bd93e42f8001b7543e7 (MIT), compiled unchanged
+    as a standalone ARM64 tool in a temporary directory, invoked by
+    tools/probe_dxbc.py. Copyright (c) 2025 Philip Rebohle.
+    https://github.com/doitsujin/dxbc-spirv
+  - Its SPIR-V Headers c8ad050fcb29e42a2f57d9f59e97488f465c436d unified headers
+    (MIT; actual compiled files), Copyright 2014-2024 The Khronos Group Inc.
+    https://github.com/KhronosGroup/SPIRV-Headers
+  License texts are preserved in licenses/third-party/ for probe redistribution.
+  For the macOS DXVK/native source review and future runtime integration limits,
+  see docs/d3d11-dxvk-moltenvk-design.md. No DXVK implementation is currently
+  linked into the production runtime.
+
 - System JavaScriptCore.framework (platform-provided) — public C API used by
   the experimental macOS Wasm probe/runner only. No WebKit source is vendored
   or copied, and the framework is not currently linked into the wire binary.
