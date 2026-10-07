@@ -12,6 +12,12 @@ pub(crate) struct Spawn {
 }
 #[derive(Clone)]
 pub(super) enum Block {
+    Address {
+        address: u64,
+        ticket: u64,
+        notified: bool,
+        deadline: Option<Instant>,
+    },
     Wait {
         handles: Vec<u64>,
         all: bool,
@@ -44,6 +50,7 @@ pub(super) struct Threads {
     pub next: u64,
     pub stack_size: u64,
     pub enabled: bool,
+    pub next_address_wait: u64,
 }
 impl Threads {
     pub fn new(stack_size: u64) -> Self {
@@ -71,6 +78,7 @@ impl Threads {
             next: 2,
             stack_size,
             enabled: false,
+            next_address_wait: 0,
         }
     }
     pub fn id(&self, handle: u64) -> Result<u64, u32> {
@@ -218,6 +226,9 @@ impl Runtime64 {
         Ok(match &block {
             None => true,
             Some(Block::Sleep(deadline)) => Instant::now() >= *deadline,
+            Some(Block::Address {
+                notified, deadline, ..
+            }) => *notified || deadline.is_some_and(|d| Instant::now() >= d),
             Some(Block::Wait {
                 handles,
                 all,
@@ -243,7 +254,10 @@ impl Runtime64 {
             .values()
             .filter(|t| t.suspended == 0 && t.exit.is_none())
             .filter_map(|t| match &t.block {
-                Some(Block::Sleep(d))
+                Some(Block::Address {
+                    deadline: Some(d), ..
+                })
+                | Some(Block::Sleep(d))
                 | Some(Block::Wait {
                     deadline: Some(d), ..
                 }) => Some(*d),

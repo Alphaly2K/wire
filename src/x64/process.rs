@@ -9,6 +9,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     path::Path,
 };
+mod exception;
 const STACK: u64 = 0x7ff000000000;
 const RETURN: u64 = 0x7ffe10000000;
 const CALLBACK_RETURN: u64 = RETURN + 16;
@@ -41,6 +42,7 @@ struct CallbackFrame {
     loader_parent: Option<Option<u64>>,
     load: Option<(String, String, Vec<u64>, u64)>,
     lookup: Option<(String, u64, Vec<u64>)>,
+    exception: Option<super::runtime::exception::Exception>,
 }
 #[derive(Clone)]
 struct CallbackCall {
@@ -146,8 +148,8 @@ impl Modules {
                 ));
             }
             if !self.exports.contains_key(&dll) {
-                let path = fs
-                    .resolve(&dll)
+                let path = runtime
+                    .module_path(fs, &dll, 0)
                     .map_err(|e| format!("AMD64 DLL path error {e}: {dll}"))?;
                 self.load(&path, false, fs, mem, runtime)?;
             }
@@ -651,6 +653,7 @@ impl Process64 {
                 loader_parent: Some(owner),
                 load: Some((dll, function, args, base)),
                 lookup: None,
+                exception: None,
             });
             self.begin_callback()?;
         }
@@ -669,6 +672,14 @@ impl Process64 {
                 continue;
             }
             if self.cpu.rip == CALLBACK_RETURN {
+                if self
+                    .callbacks
+                    .last()
+                    .is_some_and(|frame| frame.exception.is_some())
+                {
+                    self.resume_exception()?;
+                    continue;
+                }
                 let frame = self.callbacks.last().ok_or("unexpected callback return")?;
                 if frame.active.as_ref().is_some_and(|call| call.require_true)
                     && self.cpu.regs[0] as u32 == 0
@@ -821,6 +832,7 @@ impl Process64 {
                             loader_parent: None,
                             load: None,
                             lookup: Some((dll, base, args)),
+                            exception: None,
                         });
                         self.begin_callback()?;
                     }
@@ -855,10 +867,15 @@ impl Process64 {
                                 loader_parent: None,
                                 load: None,
                                 lookup: None,
+                                exception: None,
                             });
                             self.begin_callback()?;
                         }
                     }
+                    Control::Raise { dll, args, caller } => {
+                        self.raise_exception(dll, args, *caller)?
+                    }
+                    Control::Unwind { dll, args } => self.unwind_exception(dll, args)?,
                     Control::Exited(code) => return Ok(Outcome::Exited(code)),
                 }
             } else {

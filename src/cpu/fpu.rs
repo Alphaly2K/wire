@@ -139,7 +139,7 @@ impl Semantics for P53 {
     const EXP_BITS: usize = 15;
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Fpu {
     pub cw: u16,
     pub sw: u16,

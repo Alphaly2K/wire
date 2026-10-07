@@ -68,3 +68,15 @@ All sources use the same pinned Wine 10.0 commit above.
 - `user32/menu.c`: `da08c13f8f817a526bf07a71f00779ccf8ef388aa311e0aa5c9cae01855cd0a2`
 - `user32/window-text.c`: `161c3e9b0b4bb04f967810e9cd7f3101ac41c03ae1de50f6a2294f273c000cb8`
 - `win32u/menu.c`: `1896b37ae70667e1ffafa73c13a4d1330093ae3da7f847f27cd9bc2d971b2a92`
+
+## AMD64 version profile (2026-10-07)
+
+`ntdll/version.c` is an unchanged Wine 10.0 snapshot, SHA-256
+`d56533c640b093ba6e0ccd535783596c7b5e95adff17d5694ba1bc2a0f1b2b72`.
+The comparison/update helpers, RtlVerifyVersionInfo and VerSetConditionMask are
+adapted in `src/x64/runtime/version.rs`, retaining the original copyright notice
+and selecting LGPL 2.1. Guest pointers use checked memory; version queries use
+wire's explicit Windows 10.0.19045 workstation profile. Wine's registry,
+manifest-version behavior and process-version-selection code are not ported.
+The C snapshot is not built or linked. Copyright 1997 Marcus Meissner;
+1998 Patrik Stridvall; 1998, 2003 Andreas Mohr; 1997, 2003 Alexandre Julliard.

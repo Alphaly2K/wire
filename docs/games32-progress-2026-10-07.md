@@ -185,7 +185,7 @@ BGM 连续观察 193.008 秒、193 次回填，中位 0.906508 秒、P95 0.96458
 
 ## 回归、来源与边界
 
-最新 AMD64 运行时检查点完整 release 回归249项，加两项真实 Metal 设备测试共251项通过；
+最新 AMD64 运行时检查点完整 release 回归256项通过；两项真实 Metal 默认 ignored，上一检查点另行通过。
 Clippy/format/diff 检查和 Wire.app 打包通过，详细边界见 [运行时检查点](amd64-runtime-progress-2026-10-07.md)。
 下方198项与 `/private/tmp/wire-games-final-*` 是此前 PE32 阶段的检查结果。
 
@@ -214,7 +214,8 @@ Hangover 固定 `56e385b7ff490edd281b288f420677093563560b`，Wine 子模块固�
 
 AliceToPapa 原样本已恢复，SHA-256 与旧记录一致；运行只使用 `wire-out/games64/alice/runtime/` 副本。
 checked Win64 runtime、真实 DLL/TLS、合作线程、文件元数据/时区/只读文件视图及当前启动所需 SSE 已实现。
-已实际进入 Unity / 动态 Mono；pass-67 退休20,680,194条指令、65,725次 API，
-停于第三个线程 `RaiseException 0x406d1388` 的真实异常分发边界。
+已实际进入 Unity / 动态 Mono；线程命名异常已执行真实 guest 异常链及同帧 RtlUnwindEx。
+pass-74 退休56,177,133条指令、123,389次 API，input 初始化完成，
+停于 `LoadLibraryExW` flags=`0x8` 的实际装载语义边界。
 尚无正式窗口、D3D11/DXGI Present 或64位 IR；普通 `wire run` 仍拒绝 AMD64。
 完整范围、限制、Mono 原生桥接判断和复现见 [AMD64 运行时检查点](amd64-runtime-progress-2026-10-07.md)。

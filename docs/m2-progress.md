@@ -1,5 +1,9 @@
 最新检查点：[三个 PE32 样本兼容进度](games32-progress-2026-10-07.md)。
 当前按用户最新要求继续 Rewrite、totsulover，并恢复 AliceToPapa x86-64 基础支持。
+AliceToPapa 的 checked Win64/DLL/TLS/合作线程已执行真实 Unity / Mono 启动，
+软件异常链、Winsock、地址等待和 DLL 搜索已推进到56.18M指令 / input 初始化；
+当前仍停于 LoadLibraryExW flags=0x8，尚无正式窗口或 D3D11/DXGI Present。
+详见 [AMD64 运行时检查点](amd64-runtime-progress-2026-10-07.md)。
 恋×シンアイ彼女已有真实标题菜单；Metal 固定管线和 bulk Clear 后完成 193 秒 / 6,000 Present 重放，
 用户听验确认 BGM 当前没有问题，后续仍需正文、场景切换和持续可玩验收。
 Rewrite 已实现有界 PS2/VS2、字体度量、资源 DLL 与 effect 状态块，

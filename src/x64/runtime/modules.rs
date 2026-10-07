@@ -14,6 +14,101 @@ pub(super) fn is_query(name: &str) -> bool {
     )
 }
 impl Runtime64 {
+    /// Supported confined search order, including the process SetDllDirectory.
+    /// PATH and AddDllDirectory cookies are not part of this bring-up loader.
+    pub(crate) fn module_path(
+        &self,
+        fs: &crate::fs::GuestFs,
+        name: &str,
+        flags: u64,
+    ) -> Result<std::path::PathBuf, u32> {
+        let filename = name.replace('/', "\\");
+        let basename = filename.rsplit('\\').next().unwrap_or(&filename);
+        let filename = if basename.contains('.') {
+            filename
+        } else {
+            format!("{filename}.dll")
+        };
+        if filename.contains(['\\', ':']) {
+            let path = fs.resolve(&filename)?;
+            return path.is_file().then_some(path).ok_or(126);
+        }
+        let mut directories = Vec::new();
+        if flags & 0x1000 != 0 || flags & 0x800 == 0 {
+            let end = self.exe_path.rfind(['\\', '/']).ok_or(123u32)?;
+            directories.push(self.exe_path[..end].to_owned());
+            if let Some(dir) = self.dll_directory.as_ref().filter(|d| !d.is_empty()) {
+                directories.push(dir.clone());
+            }
+        }
+        directories.push("C:\\Windows\\System32".into());
+        if flags == 0 {
+            directories.push("C:\\Windows".into());
+            if self.dll_directory.is_none() {
+                directories.push(fs.cwd());
+            }
+        }
+        for dir in directories {
+            let path = fs.resolve(&format!("{dir}\\{filename}"))?;
+            if path.is_file() {
+                return Ok(path);
+            }
+        }
+        Err(126)
+    }
+    pub(super) fn dll_directory_call(
+        &mut self,
+        mem: &mut Memory,
+        name: &str,
+        args: &[u64],
+    ) -> Result<u64, String> {
+        let wide = name.ends_with('W');
+        if name.starts_with("Set") {
+            let directory = if args[0] == 0 {
+                None
+            } else {
+                let text = Self::path_name(mem, args[0], wide)?;
+                if text.is_empty() {
+                    Some(text)
+                } else {
+                    let fs = self
+                        .fs
+                        .as_ref()
+                        .ok_or("Win64 DLL directory requires filesystem")?;
+                    match fs.resolve(&text) {
+                        Ok(path) => Some(fs.guest_path(&path)),
+                        Err(error) => {
+                            self.set_error(mem, error)?;
+                            return Ok(0);
+                        }
+                    }
+                }
+            };
+            self.dll_directory = directory;
+            return Ok(1);
+        }
+        let text = self.dll_directory.as_deref().unwrap_or("");
+        let bytes: Vec<u8> = if wide {
+            text.encode_utf16()
+                .chain(Some(0))
+                .flat_map(u16::to_le_bytes)
+                .collect()
+        } else {
+            crate::codepage::encode(&format!("{text}\0"), 932)
+                .map_err(|e| format!("DLL directory codepage error {e}"))?
+                .0
+        };
+        let length = bytes.len() / if wide { 2 } else { 1 } - 1;
+        if args[0] == 0 {
+            return Ok(if length == 0 { 0 } else { length as u64 + 1 });
+        }
+        if args[0] <= length as u64 {
+            self.set_error(mem, 122)?;
+            return Ok(length as u64 + 1);
+        }
+        mem.write(args[1], &bytes)?;
+        Ok(length as u64)
+    }
     pub(super) fn module_handle_ex(
         &mut self,
         mem: &mut Memory,

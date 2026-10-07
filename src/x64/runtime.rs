@@ -8,19 +8,23 @@ use std::{
     collections::{BTreeMap, VecDeque},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
+mod address;
 mod command;
 mod events;
+pub(crate) mod exception;
 mod files;
 mod locale;
 mod mapping;
 mod modules;
 mod pipes;
 mod snapshot;
+mod sockets;
 mod threads;
 mod time;
 mod token;
 mod tracing;
 mod unwind;
+mod version;
 
 pub const TEB: u64 = 0x7ffd00000000;
 pub const PEB: u64 = TEB + 2 * PAGE;
@@ -44,6 +48,7 @@ pub struct Runtime64 {
     guest_exports: BTreeMap<u64, super::pe::Exports64>,
     guest_paths: BTreeMap<u64, String>,
     guest_images: BTreeMap<u64, (u32, u64)>,
+    dll_directory: Option<String>,
     std_handles: [u64; 3],
     std_open: [bool; 3],
     std_flags: [u32; 3],
@@ -84,6 +89,7 @@ pub struct Runtime64 {
     pipes: pipes::Pipes,
     files: files::Files,
     mappings: mapping::Mappings,
+    winsock_refs: u32,
     fs: Option<crate::fs::GuestFs>,
     process_attributes: BTreeMap<u64, (u32, BTreeMap<u64, Vec<u8>>)>,
 }
@@ -113,6 +119,15 @@ pub enum Control {
         args: Vec<u64>,
     },
     Exited(u32),
+    Raise {
+        dll: String,
+        args: Vec<u64>,
+        caller: Box<Cpu64>,
+    },
+    Unwind {
+        dll: String,
+        args: Vec<u64>,
+    },
 }
 impl Runtime64 {
     pub fn new(
@@ -169,6 +184,7 @@ impl Runtime64 {
             guest_exports: BTreeMap::new(),
             guest_paths: BTreeMap::new(),
             guest_images: BTreeMap::new(),
+            dll_directory: None,
             std_handles: [0x100, 0x101, 0x102],
             std_open: [true; 3],
             std_flags: [0; 3],
@@ -208,6 +224,7 @@ impl Runtime64 {
             pipes: pipes::Pipes::default(),
             files: files::Files::default(),
             mappings: mapping::Mappings::default(),
+            winsock_refs: 0,
             fs: None,
             process_attributes: BTreeMap::new(),
         })
@@ -346,6 +363,14 @@ impl Runtime64 {
         // Kernel32 is an implicit, persistent process module.
         self.native_module("kernel32.dll", true)
             .expect("kernel32 provider");
+        self.register_provider("ntdll.dll");
+        let ntdll = self
+            .modules
+            .iter()
+            .find(|(_, (name, _))| name == "ntdll.dll")
+            .unwrap()
+            .0;
+        self.pinned_modules.insert(*ntdll);
     }
     pub fn initialize_tls(
         &mut self,
@@ -470,6 +495,7 @@ impl Runtime64 {
         self.modules.insert(handle, (name.to_ascii_lowercase(), 1));
     }
     pub fn register(&mut self, dll: &str, name: &str) -> u64 {
+        let name = sockets::symbol(dll, name);
         let export = format!("{dll}!{name}");
         if let Some((&address, _)) = self.gateways.iter().find(|(_, value)| **value == export) {
             return address;
@@ -636,6 +662,7 @@ impl Runtime64 {
         cpu: &mut Cpu64,
         mem: &mut Memory,
     ) -> Result<Control, String> {
+        let name = sockets::symbol(dll, name);
         if !dll.eq_ignore_ascii_case("kernel32.dll")
             && !dll.eq_ignore_ascii_case("kernelbase.dll")
             && !(dll.eq_ignore_ascii_case("shell32.dll")
@@ -664,6 +691,13 @@ impl Runtime64 {
             && !(dll.eq_ignore_ascii_case("psapi.dll") && modules::is_query(name))
             && !(dll.eq_ignore_ascii_case("advapi32.dll") && tracing::is_call(name))
             && !(dll.eq_ignore_ascii_case("ntdll.dll") && unwind::is_call(name))
+            && !(dll.eq_ignore_ascii_case("ntdll.dll") && version::is_call(name))
+            && !(dll.eq_ignore_ascii_case("ws2_32.dll") && sockets::is_call(name))
+            && !(dll.eq_ignore_ascii_case("api-ms-win-core-synch-l1-2-0.dll")
+                && matches!(
+                    name,
+                    "WaitOnAddress" | "WakeByAddressSingle" | "WakeByAddressAll"
+                ))
             && !(dll.eq_ignore_ascii_case("bcrypt.dll")
                 && matches!(
                     name,
@@ -688,11 +722,28 @@ impl Runtime64 {
             return Err(format!("unimplemented Win64 import: {dll}!{name}"));
         }
         let arity = match name {
+            "GetSystemDirectoryA"
+            | "GetSystemDirectoryW"
+            | "GetWindowsDirectoryA"
+            | "GetWindowsDirectoryW"
+            | "GetSystemWindowsDirectoryA"
+            | "GetSystemWindowsDirectoryW" => 2,
+            "GetVersion" => 0,
+            "RtlGetVersion" | "GetVersionExA" | "GetVersionExW" => 1,
+            "RtlVerifyVersionInfo" | "VerifyVersionInfoW" | "VerSetConditionMask" => 3,
+            "SetDllDirectoryW" | "SetDllDirectoryA" => 1,
+            "GetDllDirectoryW" | "GetDllDirectoryA" => 2,
+            "WaitOnAddress" => 4,
+            "WakeByAddressSingle" | "WakeByAddressAll" => 1,
+            "WSAStartup" => 2,
+            "WSASetLastError" => 1,
+            "WSACleanup" | "WSAGetLastError" => 0,
             "InitializeCriticalSection" | "TryEnterCriticalSection" => 1,
             "SetCriticalSectionSpinCount" => 2,
             "AddVectoredExceptionHandler" => 2,
             "RemoveVectoredExceptionHandler" => 1,
             "RaiseException" => 4,
+            "RtlUnwindEx" => 6,
             "RtlAddFunctionTable" | "RtlLookupFunctionEntry" => 3,
             "RtlDeleteFunctionTable" => 1,
             "RtlInstallFunctionTableCallback" => 6,
@@ -912,6 +963,16 @@ impl Runtime64 {
         };
         let mut args = cpu.arguments(mem, arity)?;
         let dwords: &[usize] = match name {
+            "GetSystemDirectoryA"
+            | "GetSystemDirectoryW"
+            | "GetWindowsDirectoryA"
+            | "GetWindowsDirectoryW"
+            | "GetSystemWindowsDirectoryA"
+            | "GetSystemWindowsDirectoryW" => &[1],
+            "RtlVerifyVersionInfo" | "VerifyVersionInfoW" | "VerSetConditionMask" => &[1],
+            "GetDllDirectoryW" | "GetDllDirectoryA" => &[0],
+            "WaitOnAddress" => &[3],
+            "WSASetLastError" => &[0],
             "SetCriticalSectionSpinCount" => &[1],
             "AddVectoredExceptionHandler" => &[0],
             "RaiseException" => &[0, 1, 2],
@@ -1036,6 +1097,54 @@ impl Runtime64 {
             self.delay_hooks.remove(&cpu.rip);
         }
         let ret = match name {
+            "GetSystemDirectoryA"
+            | "GetSystemDirectoryW"
+            | "GetWindowsDirectoryA"
+            | "GetWindowsDirectoryW"
+            | "GetSystemWindowsDirectoryA"
+            | "GetSystemWindowsDirectoryW" => {
+                let path = if name.starts_with("GetSystemDirectory") {
+                    "C:\\Windows\\System32\0"
+                } else {
+                    "C:\\Windows\0"
+                };
+                let wide = name.ends_with('W');
+                let bytes = if wide {
+                    path.encode_utf16()
+                        .flat_map(u16::to_le_bytes)
+                        .collect::<Vec<_>>()
+                } else {
+                    path.as_bytes().to_vec()
+                };
+                let required = bytes.len() / if wide { 2 } else { 1 };
+                if args[1] < required as u64 {
+                    required as u64
+                } else {
+                    mem.write(args[0], &bytes)?;
+                    required as u64 - 1
+                }
+            }
+            "GetVersion"
+            | "RtlGetVersion"
+            | "GetVersionExA"
+            | "GetVersionExW"
+            | "RtlVerifyVersionInfo"
+            | "VerifyVersionInfoW"
+            | "VerSetConditionMask" => self.version_call(mem, name, &args)?,
+            "SetDllDirectoryW" | "SetDllDirectoryA" | "GetDllDirectoryW" | "GetDllDirectoryA" => {
+                self.dll_directory_call(mem, name, &args)?
+            }
+            "WaitOnAddress" => match self.wait_address(mem, &args)? {
+                Some(value) => value,
+                None => return Ok(Control::Blocked),
+            },
+            "WakeByAddressSingle" | "WakeByAddressAll" => {
+                self.wake_address(args[0], name == "WakeByAddressAll");
+                0
+            }
+            "WSAStartup" | "WSACleanup" | "WSAGetLastError" | "WSASetLastError" => {
+                self.winsock_call(mem, name, &args)?
+            }
             "AddVectoredExceptionHandler" => {
                 if args[1] == 0 {
                     self.set_error(mem, 87)?;
@@ -1075,7 +1184,25 @@ impl Runtime64 {
                 if args[2] != 0 {
                     mem.check(args[3], args[2] as usize * 8, READ)?;
                 }
-                return Err(format!("Win64 exception dispatch/unwind not implemented: code={:#x} flags={:#x} registered_vectored_handlers={}", args[0], args[1], self.exception_handlers.len()));
+                if args[1] & !1 != 0 || !self.threads.enabled {
+                    return Err("unsupported Win64 software exception flags/scheduler".into());
+                }
+                if self.exception_handlers.is_empty()
+                    && self.initial_exception_handler(mem, &returned)?.is_none()
+                {
+                    return Err(format!("Win64 exception search beyond immediate frame is not implemented: code={:#x} flags={:#x}", args[0], args[1]));
+                }
+                return Ok(Control::Raise {
+                    dll: dll.into(),
+                    args,
+                    caller: Box::new(returned),
+                });
+            }
+            "RtlUnwindEx" => {
+                return Ok(Control::Unwind {
+                    dll: dll.into(),
+                    args,
+                })
             }
             name if unwind::is_call(name) => match self.function_table_call(mem, name, &args)? {
                 unwind::Result64::Value(value) => value,
@@ -3974,25 +4101,24 @@ impl Runtime64 {
                 match self.native_module(&module, true) {
                     Ok(handle) => handle,
                     Err(error) => {
-                        let present = self
-                            .fs
-                            .as_ref()
-                            .and_then(|fs| fs.resolve(&module).ok())
-                            .is_some_and(|p| p.is_file());
-                        if present {
+                        let path = self.fs.as_ref().ok_or(126u32).and_then(|fs| {
+                            self.module_path(fs, &module, if arity == 3 { args[2] } else { 0 })
+                                .map(|path| fs.guest_path(&path))
+                        });
+                        if let Ok(path) = path {
                             if !self.threads.enabled {
                                 return Err(error);
                             }
                             *cpu = returned;
                             self.api_calls += 1;
                             return Ok(Control::LoadModule {
-                                path: module,
+                                path,
                                 dll: dll.into(),
                                 function: name.into(),
                                 args,
                             });
                         }
-                        self.set_error(mem, 126)?;
+                        self.set_error(mem, path.unwrap_err())?;
                         0
                     }
                 }
@@ -4047,10 +4173,15 @@ impl Runtime64 {
                     let Some((module, _)) = self.modules.get(&args[0]) else {
                         return Err("invalid Win64 module handle".into());
                     };
-                    if args[1] <= 65535 {
-                        return Err("Win64 native ordinal lookup is not implemented".into());
-                    }
-                    let function = Self::ascii(mem, args[1])?;
+                    let function = if args[1] <= 65535 {
+                        if module.eq_ignore_ascii_case("ws2_32.dll") {
+                            sockets::ordinal(&symbol).unwrap_or(&symbol).to_owned()
+                        } else {
+                            return Err("Win64 native ordinal lookup is not implemented".into());
+                        }
+                    } else {
+                        Self::ascii(mem, args[1])?
+                    };
                     let provider = if module.starts_with("api-ms-win-core-") {
                         "kernel32.dll"
                     } else {
@@ -4061,10 +4192,18 @@ impl Runtime64 {
                         provider.as_str(),
                         "ntdll.dll" | "kernel32.dll" | "kernelbase.dll"
                     ) && unwind::is_call(&function))
+                        || (matches!(
+                            provider.as_str(),
+                            "kernel32.dll" | "kernelbase.dll" | "ntdll.dll"
+                        ) && version::is_call(&function))
+                        || (provider == "ws2_32.dll" && sockets::is_call(&function))
                         || (matches!(provider.as_str(), "kernel32.dll" | "kernelbase.dll")
                             && matches!(
                                 function.as_str(),
                                 "GetTempPath2W"
+                                    | "WaitOnAddress"
+                                    | "WakeByAddressSingle"
+                                    | "WakeByAddressAll"
                                     | "AreFileApisANSI"
                                     | "LCMapStringEx"
                                     | "FlsAlloc"

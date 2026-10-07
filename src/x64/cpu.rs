@@ -13,7 +13,7 @@ const ZF: u64 = 64;
 const SF: u64 = 128;
 const OF: u64 = 2048;
 const ARITH: u64 = CF | PF | AF | ZF | SF | OF;
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cpu64 {
     pub regs: [u64; 16], // RAX,RCX,RDX,RBX,RSP,RBP,RSI,RDI,R8..R15
     pub xmm: [[u8; 16]; 16],

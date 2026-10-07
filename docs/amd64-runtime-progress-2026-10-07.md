@@ -1,23 +1,25 @@
 # AMD64 / Unity / Mono 启动推进（2026-10-07）
 
-这是接续 `72de02b` 的运行时检查点。普通 `wire run` 仍拒绝 AMD64；
+这是接续 `f3cb8bd` 的运行时检查点。普通 `wire run` 仍拒绝 AMD64；
 实际启动使用 `wire probe64 --startup`。解释器是主路径，所有高地址访问仍经过 checked guest memory，
 没有把 guest 机器码交给宿主 CPU，也没有引入 QEMU GPL 实现。
 
 ## 当前真实结果
 
-AliceToPapa 隔离副本已从13条 EXE 入口指令推进到 **20,680,194 条退休指令、
-20,749,873 work、65,725 次已完成 API 调用**（`linked-pass-67.txt`）。
+AliceToPapa 隔离副本已从13条 EXE 入口指令推进到 **56,177,133 条退休指令、
+56,304,497 work、123,389 次已完成 API 调用**（`linked-pass-74.txt`）。
 已经实际执行 UnityPlayer 的 TLS / DllMain、EXE 入口，以及动态加载 Mono 的 TLS / DllMain；
-合作调度的 worker 也在执行。当前停止于第三个线程的
-`kernel32.dll!RaiseException`：code=`0x406d1388`、flags=0，已注册一个 vectored handler。
-这是 MSVC 线程命名异常，需要实际执行异常处理链，不能直接当作普通函数返回。
+合作调度的 worker 也在执行。线程命名异常已真正执行 guest vectored handler、语言处理器
+以及同帧 RtlUnwindEx，继续到了 Winsock 和 Unity input 初始化。
+当前停止于 `kernel32.dll!LoadLibraryExW` 的 `LOAD_WITH_ALTERED_SEARCH_PATH`（flags=`0x8`）边界。
+这是尚未覆盖的装载语义；没有清除标志或把装载失败改成成功。
 
 游戏实际写出的 `Player.log` 包含：
 
 ```text
 Mono path[0] = 'C:/AliceToPapaADV_1-0-0_Data/Managed'
 Mono config path = 'C:/MonoBleedingEdge/etc'
+Input System module state changed to: Initialized.
 ```
 
 当前证据还不足以验收托管游戏入口、正式窗口、D3D11/DXGI Present 或持续可玩。
@@ -33,8 +35,24 @@ Mono config path = 'C:/MonoBleedingEdge/etc'
 | pass-65 | 4,277,163 | 9,548 | `CreateFileMappingW` |
 | pass-66 | 16,277,942 | 53,280 | `SetThreadStackGuarantee` |
 | pass-67 | 20,680,194 | 65,725 | 线程命名 `RaiseException 0x406d1388` |
+| pass-68 | 20,785,687 | 66,075 | 异常链通过；Winsock ordinal 115 / `WSAStartup` |
+| pass-69 | 49,882,370 | 113,675 | 50M work 预算，未发现新故障 |
+| pass-70 | 54,879,073 | 121,998 | worker `WaitOnAddress` |
+| pass-71 | 56,164,509 | 123,356 | `SetDllDirectoryW` |
+| pass-72 | 56,176,439 | 123,372 | 未登记隐式 ntdll 导致空模块句柄 |
+| pass-73 | 56,176,863 | 123,386 | `GetSystemDirectoryW` |
+| pass-74 | 56,177,133 | 123,389 | `LoadLibraryExW` flags=`0x8` |
 
 指令与 API 计数受真实时间/线程调度影响，上表不构成相同路径的性能 AB 对照。
+
+## 距离正式窗口的剩余工作
+
+当前仍处于引擎/运行时初始化；input 初始化日志不证明托管游戏入口已完成。
+先越过实际模块装载和余下初始化，再成组适配 Win64 USER32 的 class/window/message 布局、
+64位 WNDPROC / WPARAM / LPARAM 回调及宿主窗口呈现，才能验收真正创建并显示的窗口。
+游戏画面还需要 D3D11/DXGI 的64位 COM/vtable/资源布局、设备/交换链、shader 和实际 Present。
+既有 PE32 D3D9/Metal 与 AppKit 能力可复用，但当前代码并没有接通这条64位图形路径。
+目前无法可靠给出剩余小时数或完成百分比；不是只差最后一个 API。
 
 ## 已实现的运行时范围
 
@@ -62,6 +80,40 @@ Mono config path = 'C:/MonoBleedingEdge/etc'
 - `.pdata` 静态函数表、RtlAdd/DeleteFunctionTable、RtlInstallFunctionTableCallback 和
   RtlLookupFunctionEntry。动态查找真正调用 guest callback，检查返回条目和输出 image base。
   已修复 Mono 初始化因 RtlInstallFunctionTableCallback 失败产生的断言，未忽略原来的 RaiseException。
+- WSAStartup/WSACleanup 的进程引用、版本协商和完整 Win64 WSADATA 布局（408字节）；
+  WSAGet/SetLastError 使用当前线程 TEB 的 LastError。
+  ordinal 111/112/115/116 和按名称 GetProcAddress 指向同一服务；socket 网络操作仍明确未实现。
+- WaitOnAddress / WakeByAddressSingle / WakeByAddressAll 接入合作调度：checked 1/2/4/8字节比较，
+  无匹配时立即返回、真实超时、按登记顺序唤醒、无 waiter 时不积累 wake credit。
+  唤醒不要求值已变化，等待可跨逐条预算恢复，LastError 在线程间隔离；没有忙循环伪造成功。
+- Set/GetDllDirectory A/W 维护实际进程搜索状态；NULL 恢复默认、空字符串排除 CWD。
+  默认支持 EXE directory / 显式 DLL directory / System32 / Windows / CWD 的 confined 搜索，
+  也用于真实导入依赖，并补默认 `.dll` 后缀。
+  已支持的 SYSTEM32 / DEFAULT_DIRS 标志保持限定搜索；PATH、AddDllDirectory cookies、
+  LOAD_WITH_ALTERED_SEARCH_PATH、加载回滚仍不是完整支持。
+- ntdll 是隐式常驻 provider。版本查询/判断使用明确的 Windows 10.0.19045 workstation profile，
+  RtlGetVersion / RtlVerifyVersionInfo、GetVersion / GetVersionEx A/W、VerifyVersionInfoW 和
+  VerSetConditionMask 保留 NTSTATUS/Win32 错误区别与层级比较，而不是总返回满足。
+  GetSystemDirectory / GetWindowsDirectory / GetSystemWindowsDirectory A/W 返回 confined guest 路径；
+  不声称逻辑 system32 provider 在宿主磁盘存在对应 Windows DLL。
+
+## 已实现的软件异常链及边界
+
+RaiseException 构造实际 AMD64 EXCEPTION_RECORD（152字节）、EXCEPTION_POINTERS、
+16字节对齐 CONTEXT（1232字节），异常参数保持64位。
+按登记顺序执行真实 guest vectored handler；继续执行时读取修改后的 checked CONTEXT，
+恢复 GPR/RIP/FLAGS/MXCSR/XMM0–15 和既有 FP80 x87 状态，回调自身 clobber 不覆盖保存上下文。
+noncontinuable 不允许继续，完成后释放 owned exception buffers。
+
+当前帧的语言处理器、HandlerData 和 establisher frame 从实际 `.pdata/.xdata` 读取，
+DISPATCHER_CONTEXT 使用80字节 AMD64 布局；ScopeIndex 由真实 guest handler 读写。
+同一 establisher frame、同一函数内的 RtlUnwindEx 转移使用实际 TargetIP 和完整64位 ReturnValue；
+EH-only 与有 termination handler 的元数据分别处理，后者实际调用 guest unwind handler。
+真实 Mono 线程命名异常因此进入其 C_specific handler / RtlUnwindEx，未硬编码异常码或 catch PC。
+
+这不是完整 SEH/unwind：跨帧/chain/versioned metadata、collided unwind、动态 table callback 异常查找、
+CPU fault→SEH 与 stack-overflow guarantee 仍明确失败。
+CONTEXT 仅支持 CONTROL/INTEGER/FLOAT；高于32位的既有 x87 ip/dp 恢复仍拒绝，不能截断。
 
 ## CPU 与浮点边界
 
@@ -133,11 +185,16 @@ cd wire-out/games64/alice/runtime
   --max-instr 50000000 --startup
 ```
 
-下一阶段先实现真实 AMD64 异常分发/上下文与 unwind，继续 `0x406d1388` 的 guest 处理路径。
-随后用程序集执行、正式窗口和实际 Present 验收；不以 LoadLibrary 成功、错误退出0或空窗口当作跑通。
-完整 release 回归通过249项：8 unit、37 differential、9 FPU、26 IR、1 Wasm、109 Win32、59 AMD64。
-两项默认 ignored 的真实 Metal 设备测试另行通过，合计251项。
-日志为 `/private/tmp/wire-amd64-tests.txt`、`wire-amd64-metal.txt`；
+下一阶段先继续 flags=`0x8` 的真实装载路径，再以初始化完成、正式窗口和实际 Present 验收；
+不以 LoadLibrary 成功、错误退出0或空窗口当作游戏跑通。
+完整 release 回归通过256项：8 unit、37 differential、9 FPU、26 IR、1 Wasm、109 Win32、66 AMD64。
+新增7项覆盖异常链/同帧 unwind、Winsock、地址等待、DLL 搜索与版本判断。
+两项 Metal 设备测试本轮按默认 ignored；上一提交已单独通过，本轮没有渲染实现改动。
+日志为 `/private/tmp/wire-amd64-followup-tests.txt`、`wire-amd64-followup-clippy.txt`；
 Clippy release all-targets `-D warnings`、format、diff whitespace 检查通过。
 `scripts/package-macos.sh` 重建 `wire-out/Wire.app`，bundle 与 release binary 校验一致。
 旧文档的13条入口/无 Win64 runtime 是历史状态。
+
+本轮版本比较移植自固定 Wine 10.0 的 LGPL-2.1-or-later `ntdll/version.c`，选择 LGPL 2.1，
+保留原始快照、版权、许可证及 SHA-256，范围见 `third_party/wine-10.0/README.md`。
+Winsock 仅只读核对公开 ABI/行为，没有复制其 C 实现。没有引入 QEMU GPL 代码。

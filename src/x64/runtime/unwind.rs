@@ -30,6 +30,7 @@ pub(super) fn is_call(name: &str) -> bool {
             | "RtlDeleteFunctionTable"
             | "RtlInstallFunctionTableCallback"
             | "RtlLookupFunctionEntry"
+            | "RtlUnwindEx"
     )
 }
 fn entries(mem: &Memory, table: u64, count: u32, base: u64) -> Result<bool, String> {

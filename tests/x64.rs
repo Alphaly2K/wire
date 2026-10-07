@@ -356,6 +356,755 @@ fn startup_dll_call(
     cpu.regs[0]
 }
 #[test]
+fn win64_winsock_negotiates_versions_checks_full_output_and_balances_ordinal_startup_refs() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let output = STACK + 0x200;
+    let mut call = |name: &str, args: &[u64]| {
+        startup_dll_call(&mut mem, &mut cpu, &mut runtime, "Ws2_32.dll", name, args)
+    };
+    call("#112", &[0x1234567887654321]);
+    assert_eq!(call("WSAGetLastError", &[]), 0x87654321);
+    assert_eq!(call("#115", &[0x0202, 0]), 10014);
+    assert_eq!(call("WSAStartup", &[0, 0]), 10092);
+    assert_eq!(call("#111", &[]), 0x87654321);
+    assert_eq!(call("#116", &[]), u32::MAX as u64);
+    assert_eq!(call("#111", &[]), 10093);
+
+    // Every successful startup owns a process reference, independent of version.
+    for (request, negotiated) in [
+        (0x0101u16, 0x0101u16),
+        (0x0001, 0x0001),
+        (0x0301, 0x0101),
+        (0x0202, 0x0202),
+        (0x0102, 0x0102),
+        (0x0302, 0x0202),
+        (0x0003, 0x0202),
+    ] {
+        mem.write(output, &[0xa5; 416]).unwrap();
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "ws2_32.dll",
+                "#115",
+                &[0x1234000000000000 | request as u64, output]
+            ),
+            0
+        );
+        assert_eq!(mem.read_int(output, 2).unwrap(), negotiated as u64);
+        assert_eq!(mem.read_int(output + 2, 2).unwrap(), 0x0202);
+        assert_eq!(
+            mem.read_int(output + 4, 2).unwrap(),
+            if request as u8 == 1 { 32767 } else { 0 }
+        );
+        assert_eq!(
+            mem.read_int(output + 6, 2).unwrap(),
+            if request as u8 == 1 { 65467 } else { 0 }
+        );
+        assert_eq!(mem.read_int(output + 8, 8).unwrap(), 0xa5a5a5a5a5a5a5a5);
+        let mut status = [0; 8];
+        mem.read(output + 273, &mut status).unwrap();
+        assert_eq!(&status, b"Running\0");
+        let mut tail = [0; 14];
+        mem.read(output + 402, &mut tail).unwrap();
+        assert_eq!(tail, [0xa5; 14]);
+    }
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "ws2_32.dll",
+            "WSAGetLastError",
+            &[]
+        ),
+        10093
+    );
+
+    // A checked fault cannot overwrite an initial field or increment references.
+    let bad = STACK + 4096 - 200;
+    mem.write(bad, &[0xcc; 200]).unwrap();
+    mem.protect(STACK + 4096, 4096, READ).unwrap();
+    cpu.regs[4] = STACK + 0x188;
+    mem.write_int(cpu.regs[4], 8, BASE).unwrap();
+    cpu.regs[1] = 0x0202;
+    cpu.regs[2] = bad;
+    let before = cpu.clone();
+    let calls = runtime.api_calls;
+    assert!(runtime
+        .dispatch("ws2_32.dll", "#115", &mut cpu, &mut mem)
+        .is_err());
+    assert_eq!(cpu, before);
+    assert_eq!(runtime.api_calls, calls);
+    let mut preserved = [0; 200];
+    mem.read(bad, &mut preserved).unwrap();
+    assert_eq!(preserved, [0xcc; 200]);
+    mem.protect(STACK + 4096, 4096, READ | WRITE).unwrap();
+    // Invalid version writes negotiation fields, but owns no reference.
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "ws2_32.dll",
+            "WSAStartup",
+            &[0x0200, output]
+        ),
+        10092
+    );
+    assert_eq!(mem.read_int(output, 2).unwrap(), 0x0202);
+    for _ in 0..7 {
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "ws2_32.dll",
+                "WSACleanup",
+                &[]
+            ),
+            0
+        );
+    }
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "ws2_32.dll",
+            "WSACleanup",
+            &[]
+        ),
+        u32::MAX as u64
+    );
+
+    runtime.register_provider("ws2_32.dll");
+    mem.write(output, b"ws2_32.dll\0").unwrap();
+    let module = startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "GetModuleHandleA",
+        &[output],
+    );
+    mem.write(output, b"WSAStartup\0").unwrap();
+    let named = startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "GetProcAddress",
+        &[module, output],
+    );
+    let ordinal = startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "GetProcAddress",
+        &[module, 115],
+    );
+    assert_eq!(named, ordinal);
+    assert_eq!(ordinal, runtime.register("ws2_32.dll", "#115"));
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetProcAddress",
+            &[module, 65535]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        127
+    );
+}
+#[test]
+fn win64_address_waits_check_size_values_timeouts_and_faults_before_blocking() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let address = STACK + 0x300;
+    let compare = address + 16;
+    runtime.enable_scheduler();
+    mem.write_int(address, 8, 0xff00000000000000).unwrap();
+    for size in [1, 2, 4, 8] {
+        let result = startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "api-ms-win-core-synch-l1-2-0.dll",
+            "WaitOnAddress",
+            &[address, compare, size, 0],
+        );
+        assert_eq!(result, if size == 8 { 1 } else { 0 });
+        if size != 8 {
+            assert_eq!(
+                startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+                1460
+            );
+        }
+    }
+    for size in [0, 3, 16, 0x100000008] {
+        assert_eq!(
+            startup_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "WaitOnAddress",
+                &[0, 0, size, 0]
+            ),
+            0
+        );
+        assert_eq!(
+            startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+            87
+        );
+    }
+    cpu.regs[4] = STACK + 0x1f88;
+    mem.write_int(cpu.regs[4], 8, BASE).unwrap();
+    cpu.regs[1] = address;
+    cpu.regs[2] = 0x123400000000;
+    cpu.regs[8] = 8;
+    cpu.regs[9] = 0;
+    let before = cpu.clone();
+    let calls = runtime.api_calls;
+    assert!(runtime
+        .dispatch("kernel32.dll", "WaitOnAddress", &mut cpu, &mut mem)
+        .is_err());
+    assert_eq!(cpu, before);
+    assert_eq!(runtime.api_calls, calls);
+    // No readers are required for a wake with no matching waiter.
+    startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "WakeByAddressAll",
+        &[0x123400000000],
+    );
+}
+#[test]
+fn amd64_address_wait_queues_wake_first_arrival_and_all_across_single_step_budgets() {
+    use wire::x64::process::{Outcome, Process64};
+    const CODE: u64 = 0x580000000;
+    const SECOND: u64 = CODE + 4096;
+    const FIRST: u64 = CODE + 8192;
+    const DATA: u64 = CODE + 12288;
+    fn mov(code: &mut Vec<u8>, register: u8, value: u64) {
+        code.extend([0x48 | (register >> 3), 0xb8 | (register & 7)]);
+        code.extend(value.to_le_bytes());
+    }
+    fn store(code: &mut Vec<u8>, pointer: u64) {
+        mov(code, 7, pointer);
+        code.extend([0x48, 0x89, 0x07]);
+    }
+    fn call(p: &mut Process64, code: &mut Vec<u8>, name: &str, args: &[u64]) {
+        for (n, &value) in args.iter().enumerate() {
+            mov(code, if n < 4 { [1, 2, 8, 9][n] } else { 0 }, value);
+            if n >= 4 {
+                code.extend([0x48, 0x89, 0x44, 0x24, 32 + (n as u8 - 4) * 8]);
+            }
+        }
+        let dll = if name == "WaitOnAddress" || name.starts_with("WakeByAddress") {
+            "api-ms-win-core-synch-l1-2-0.dll"
+        } else if name.starts_with("WSA") {
+            "ws2_32.dll"
+        } else {
+            "kernel32.dll"
+        };
+        mov(code, 0, p.runtime.register(dll, name));
+        code.extend([0xff, 0xd0]);
+    }
+    let path = std::env::temp_dir().join(format!("wire-address64-{}.exe", std::process::id()));
+    std::fs::write(&path, fixture()).unwrap();
+    let mut p = Process64::load(&path, false).unwrap();
+    p.memory
+        .map(CODE, 4 * 4096, READ | WRITE | EXECUTE)
+        .unwrap();
+    // Thread 3 waits before thread 2, so a single wake must use arrival order.
+    let mut main = vec![0x48, 0x83, 0xec, 0x38];
+    call(&mut p, &mut main, "WakeByAddressSingle", &[DATA]); // No wake credit.
+    call(&mut p, &mut main, "CreateThread", &[0, 0, SECOND, 0, 4, 0]);
+    store(&mut main, DATA + 64);
+    call(&mut p, &mut main, "CreateThread", &[0, 0, FIRST, 0, 4, 0]);
+    store(&mut main, DATA + 72);
+    mov(&mut main, 0, DATA + 72);
+    main.extend([0x48, 0x8b, 0x08]);
+    call(&mut p, &mut main, "ResumeThread", &[]);
+    call(&mut p, &mut main, "SwitchToThread", &[]);
+    mov(&mut main, 0, DATA + 64);
+    main.extend([0x48, 0x8b, 0x08]);
+    call(&mut p, &mut main, "ResumeThread", &[]);
+    call(&mut p, &mut main, "SwitchToThread", &[]);
+    call(&mut p, &mut main, "WakeByAddressSingle", &[DATA + 128]); // Wrong address.
+    call(&mut p, &mut main, "WakeByAddressSingle", &[DATA]);
+    call(&mut p, &mut main, "SwitchToThread", &[]);
+    mov(&mut main, 0, DATA + 16);
+    main.extend([0x48, 0x8b, 0x00]);
+    store(&mut main, DATA + 80);
+    mov(&mut main, 0, DATA + 24);
+    main.extend([0x48, 0x8b, 0x00]);
+    store(&mut main, DATA + 88);
+    call(&mut p, &mut main, "WakeByAddressAll", &[DATA]);
+    mov(&mut main, 0, DATA + 64);
+    main.extend([0x48, 0x8b, 0x08]);
+    mov(&mut main, 2, u32::MAX as u64);
+    call(&mut p, &mut main, "WaitForSingleObject", &[]);
+    // A finite address wait must expire even if the earlier wake had no waiter.
+    call(
+        &mut p,
+        &mut main,
+        "WaitOnAddress",
+        &[DATA + 128, DATA + 8, 8, 1],
+    );
+    store(&mut main, DATA + 96);
+    call(&mut p, &mut main, "GetLastError", &[]);
+    store(&mut main, DATA + 104);
+    main.extend([0xb8, 1, 0, 0, 0, 0x48, 0x83, 0xc4, 0x38, 0xc3]);
+    p.memory.write(CODE, &main).unwrap();
+    for (entry, result, last_error, error) in [
+        (FIRST, DATA + 16, DATA + 32, 123u64),
+        (SECOND, DATA + 24, DATA + 40, 456),
+    ] {
+        let mut worker = vec![0x48, 0x83, 0xec, 0x28];
+        call(&mut p, &mut worker, "WSASetLastError", &[error]);
+        call(
+            &mut p,
+            &mut worker,
+            "WaitOnAddress",
+            &[DATA, DATA + 8, 8, u32::MAX as u64],
+        );
+        store(&mut worker, result);
+        call(&mut p, &mut worker, "WSAGetLastError", &[]);
+        store(&mut worker, last_error);
+        worker.extend([0x48, 0x83, 0xc4, 0x28, 0xc3]);
+        p.memory.write(entry, &worker).unwrap();
+    }
+    p.cpu.rip = CODE;
+    loop {
+        match p.run(p.cpu.work + 1).unwrap() {
+            Outcome::Budget => assert!(p.cpu.work < 10000),
+            result => {
+                assert_eq!(result, Outcome::Returned(1));
+                break;
+            }
+        }
+    }
+    for (offset, expected) in [
+        (16, 1),
+        (24, 1),
+        (32, 123),
+        (40, 456),
+        (80, 1),
+        (88, 0),
+        (96, 0),
+        (104, 1460),
+    ] {
+        assert_eq!(
+            p.memory.read_int(DATA + offset, 8).unwrap(),
+            expected,
+            "offset={offset}"
+        );
+    }
+    assert_eq!(p.memory.read_int(DATA, 8).unwrap(), 0); // Wake can return without value change.
+    std::fs::remove_file(path).unwrap();
+}
+#[test]
+fn amd64_dll_directory_changes_real_module_search_preserves_faults_and_confines_paths() {
+    use wire::x64::process::{Outcome, Process64};
+    const CODE: u64 = 0x590000000;
+    const DATA: u64 = CODE + 4096;
+    const CHILD: u64 = 0x1a0000000;
+    fn mov(code: &mut Vec<u8>, r: u8, value: u64) {
+        code.extend([0x48 | (r >> 3), 0xb8 | (r & 7)]);
+        code.extend(value.to_le_bytes());
+    }
+    let dir = std::env::temp_dir().join(format!("wire-dll-dir64-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("plugins")).unwrap();
+    std::fs::create_dir_all(dir.join("cwd")).unwrap();
+    std::fs::write(dir.join("main.exe"), fixture()).unwrap();
+    let mut child = fixture();
+    put16(&mut child, 0x96, 0x2002);
+    put64(&mut child, 0x98 + 24, CHILD);
+    child[0x200..0x206].copy_from_slice(&[0xb8, 1, 0, 0, 0, 0xc3]);
+    std::fs::write(dir.join("plugins/choice.dll"), &child).unwrap();
+    std::fs::write(dir.join("cwd/cwdonly.dll"), &child).unwrap();
+    let mut p = Process64::load(&dir.join("main.exe"), false).unwrap();
+    let original = p.cpu.clone();
+    p.memory.map(CODE, 8192, READ | WRITE | EXECUTE).unwrap();
+    p.memory.write(DATA, b"C:\\cwd\0").unwrap();
+    assert_eq!(
+        startup_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "SetCurrentDirectoryA",
+            &[DATA]
+        ),
+        1
+    );
+    p.memory.write(DATA, b"C:\\plugins\0").unwrap();
+    assert_eq!(
+        startup_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "SetDllDirectoryA",
+            &[DATA]
+        ),
+        1
+    );
+    assert_eq!(
+        startup_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "GetDllDirectoryW",
+            &[0, 0]
+        ),
+        11
+    );
+    p.memory.write(DATA + 128, &[0xcc; 32]).unwrap();
+    assert_eq!(
+        startup_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "GetDllDirectoryW",
+            &[10, DATA + 128]
+        ),
+        11
+    );
+    assert_eq!(
+        p.memory.read_int(DATA + 128, 8).unwrap(),
+        0xcccccccccccccccc
+    );
+    assert_eq!(
+        startup_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "GetDllDirectoryW",
+            &[11, DATA + 128]
+        ),
+        10
+    );
+    let mut wide = [0; 22];
+    p.memory.read(DATA + 128, &mut wide).unwrap();
+    let expected: Vec<u8> = "C:\\plugins\0"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    assert_eq!(&wide[..], &expected);
+    p.memory.write(DATA, b"..\\..\\outside\0").unwrap();
+    assert_eq!(
+        startup_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "SetDllDirectoryA",
+            &[DATA]
+        ),
+        0
+    );
+    p.cpu.regs[4] = STACK + 0x1f88;
+    p.memory.write_int(p.cpu.regs[4], 8, BASE).unwrap();
+    p.cpu.regs[1] = CODE + 8192;
+    let before = p.cpu.clone();
+    let calls = p.runtime.api_calls;
+    assert!(p
+        .runtime
+        .dispatch(
+            "kernel32.dll",
+            "SetDllDirectoryW",
+            &mut p.cpu,
+            &mut p.memory
+        )
+        .is_err());
+    assert_eq!(p.cpu, before);
+    assert_eq!(p.runtime.api_calls, calls);
+    assert_eq!(
+        startup_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "GetDllDirectoryA",
+            &[32, DATA + 128]
+        ),
+        10
+    );
+
+    p.memory.write(DATA, b"choice\0").unwrap(); // Actual load adds the .dll extension.
+    let load = p.runtime.register("kernel32.dll", "LoadLibraryA");
+    let mut code = vec![0x48, 0x83, 0xec, 0x28];
+    mov(&mut code, 1, DATA);
+    mov(&mut code, 0, load);
+    code.extend([0xff, 0xd0, 0x48, 0x83, 0xc4, 0x28, 0xc3]);
+    p.memory.write(CODE, &code).unwrap();
+    p.cpu = original;
+    p.cpu.rip = CODE;
+    assert_eq!(p.run(1000).unwrap(), Outcome::Returned(CHILD));
+    assert!(p
+        .modules
+        .iter()
+        .any(|(name, base)| name == "choice.dll" && *base == CHILD));
+    assert_eq!(
+        startup_dll_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "psapi.dll",
+            "GetModuleFileNameExA",
+            &[u64::MAX, CHILD, DATA + 128, 64]
+        ),
+        21
+    );
+    let mut loaded_path = [0; 22];
+    p.memory.read(DATA + 128, &mut loaded_path).unwrap();
+    assert_eq!(&loaded_path, b"C:\\plugins\\choice.dll\0");
+    // NULL restores CWD search; an empty string removes CWD search.
+    p.memory.write(DATA, &[0]).unwrap();
+    assert_eq!(
+        startup_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "SetDllDirectoryA",
+            &[DATA]
+        ),
+        1
+    );
+    assert_eq!(
+        startup_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "GetDllDirectoryA",
+            &[0, 0]
+        ),
+        0
+    );
+    p.memory.write(DATA + 256, b"cwdonly.dll\0").unwrap();
+    assert_eq!(
+        startup_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "LoadLibraryA",
+            &[DATA + 256]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "SetDllDirectoryW",
+            &[0]
+        ),
+        1
+    );
+    p.memory.write(DATA, b"cwdonly.dll\0").unwrap();
+    p.cpu.regs[4] = STACK + 0x1f88;
+    p.memory.write_int(p.cpu.regs[4], 8, BASE).unwrap();
+    p.cpu.regs[1] = DATA;
+    match p
+        .runtime
+        .dispatch("kernel32.dll", "LoadLibraryA", &mut p.cpu, &mut p.memory)
+        .unwrap()
+    {
+        wire::x64::runtime::Control::LoadModule { path, .. } => {
+            assert_eq!(path, "C:\\cwd\\cwdonly.dll")
+        }
+        other => panic!("CWD search was not restored: {other:?}"),
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+#[test]
+fn win64_version_profile_queries_verify_hierarchically_and_keep_ntstatus_and_output_faults() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    runtime.install_gateways(Default::default());
+    let output = STACK + 0x200;
+    for (dll, name, size) in [
+        ("ntdll.dll", "RtlGetVersion", 284),
+        ("kernel32.dll", "GetVersionExW", 276),
+        ("kernel32.dll", "GetVersionExA", 156),
+    ] {
+        mem.write(output, &[0xcc; 284]).unwrap();
+        mem.write_int(output, 4, size).unwrap();
+        assert_eq!(
+            startup_dll_call(&mut mem, &mut cpu, &mut runtime, dll, name, &[output]),
+            (dll == "kernel32.dll") as u64
+        );
+        assert_eq!(mem.read_int(output + 4, 4).unwrap(), 10);
+        assert_eq!(mem.read_int(output + 8, 4).unwrap(), 0);
+        assert_eq!(mem.read_int(output + 12, 4).unwrap(), 19045);
+        if size != 276 {
+            assert_eq!(mem.read_int(output + size - 4, 2).unwrap(), 0x100);
+            assert_eq!(mem.read_int(output + size - 2, 1).unwrap(), 1);
+        }
+    }
+    mem.write_int(output, 4, 284).unwrap();
+    startup_dll_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "ntdll.dll",
+        "RtlGetVersion",
+        &[output],
+    );
+    let major = startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "VerSetConditionMask",
+        &[0x8000000000000000, 2, 3],
+    );
+    let both = startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "VerSetConditionMask",
+        &[major, 1, 3],
+    );
+    assert_eq!(both, 0x800000000000001b);
+    for (major, minor, expected) in [
+        (9, 99, 0),
+        (10, 0, 0),
+        (10, 1, 0xc0000059),
+        (11, 0, 0xc0000059),
+    ] {
+        mem.write_int(output + 4, 4, major).unwrap();
+        mem.write_int(output + 8, 4, minor).unwrap();
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "ntdll.dll",
+                "RtlVerifyVersionInfo",
+                &[output, 3, both]
+            ),
+            expected
+        );
+    }
+    startup_call(&mut mem, &mut cpu, &mut runtime, "SetLastError", &[777]);
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "ntdll.dll",
+            "RtlVerifyVersionInfo",
+            &[output, 3, both]
+        ),
+        0xc0000059
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        777
+    );
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "VerifyVersionInfoW",
+            &[output, 3, both]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        1150
+    );
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "ntdll.dll",
+            "RtlVerifyVersionInfo",
+            &[output, 0, both]
+        ),
+        0xc000000d
+    );
+    mem.write_int(output + 280, 2, 0x100).unwrap();
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "ntdll.dll",
+            "RtlVerifyVersionInfo",
+            &[output, 0x40, 6 << 18]
+        ),
+        0
+    );
+    mem.write_int(output + 280, 2, 1).unwrap();
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "ntdll.dll",
+            "RtlVerifyVersionInfo",
+            &[output, 0x40, 7 << 18]
+        ),
+        0xc0000059
+    );
+
+    mem.write(output, b"ntdll\0").unwrap();
+    let ntdll = startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "GetModuleHandleA",
+        &[output],
+    );
+    assert_ne!(ntdll, 0);
+    mem.write(output + 32, b"RtlVerifyVersionInfo\0").unwrap();
+    assert_ne!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetProcAddress",
+            &[ntdll, output + 32]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "FreeLibrary", &[ntdll]),
+        1
+    );
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetModuleHandleA",
+            &[output]
+        ),
+        ntdll
+    );
+    let bad = STACK + 4096 - 100;
+    mem.write(bad, &[0xcc; 100]).unwrap();
+    mem.write_int(bad, 4, 276).unwrap();
+    mem.protect(STACK + 4096, 4096, READ).unwrap();
+    cpu.regs[4] = STACK + 0x188;
+    mem.write_int(cpu.regs[4], 8, BASE).unwrap();
+    cpu.regs[1] = bad;
+    let before = cpu.clone();
+    let calls = runtime.api_calls;
+    assert!(runtime
+        .dispatch("ntdll.dll", "RtlGetVersion", &mut cpu, &mut mem)
+        .is_err());
+    assert_eq!(cpu, before);
+    assert_eq!(runtime.api_calls, calls);
+    assert_eq!(mem.read_int(bad + 4, 8).unwrap(), 0xcccccccccccccccc);
+}
+#[test]
 fn win64_token_sid_layout_access_and_local_reallocation_preserve_failure_state() {
     let (mut mem, mut cpu, mut runtime) = startup();
     let out = STACK + 0x100;
@@ -594,7 +1343,7 @@ fn win64_loaded_module_queries_messages_and_disabled_etw_keep_real_lifetimes() {
         1
     );
     assert_eq!(p.memory.read_int(out, 8).unwrap(), BASE);
-    assert_eq!(p.memory.read_int(needed, 4).unwrap(), 16); // EXE and implicit kernel32.
+    assert_eq!(p.memory.read_int(needed, 4).unwrap(), 24); // EXE, implicit kernel32 and ntdll.
     assert_eq!(
         startup_call(
             &mut p.memory,
@@ -856,6 +1605,250 @@ fn win64_loaded_module_queries_messages_and_disabled_etw_keep_real_lifetimes() {
     ); // ETW returns its error directly.
     std::fs::remove_dir_all(dir).unwrap();
 }
+#[test]
+fn amd64_vectored_software_exceptions_execute_guest_handlers_and_restore_full_context_across_budgets(
+) {
+    use wire::x64::process::{Outcome, Process64};
+    const CODE: u64 = 0x540000000;
+    const DATA: u64 = CODE + 4096;
+    const VALUE: u64 = 0x123456789abcdef0;
+    fn mov(code: &mut Vec<u8>, register: u8, value: u64) {
+        code.extend([0x48 | (register >> 3), 0xb8 | (register & 7)]);
+        code.extend(value.to_le_bytes());
+    }
+    let path = std::env::temp_dir().join(format!("wire-veh64-{}.exe", std::process::id()));
+    std::fs::write(&path, fixture()).unwrap();
+    for noncontinuable in [false, true] {
+        let mut p = Process64::load(&path, false).unwrap();
+        p.memory.map(CODE, 8192, READ | WRITE | EXECUTE).unwrap();
+        let mut original = p.cpu.clone();
+        original.rip = CODE;
+        original.xmm[0] = [0xa5; 16];
+        original.fpu.cw = 0x0b7f;
+        original.fpu.sw = 3 << 11;
+        original.fpu.set_st_bits(0, 0x3fff8000000000000000);
+        original.rflags = 0x602;
+        let expected_fpu = original.fpu;
+        let raise = p.runtime.register("kernel32.dll", "RaiseException");
+        // Register in append order. Both callbacks actually run guest instructions.
+        for target in [CODE + 0x200, CODE + 0x300] {
+            assert_ne!(
+                startup_call(
+                    &mut p.memory,
+                    &mut p.cpu,
+                    &mut p.runtime,
+                    "AddVectoredExceptionHandler",
+                    &[0, target]
+                ),
+                0
+            );
+        }
+        let mut main = vec![0x48, 0x83, 0xec, 0x28];
+        for (r, v) in [
+            (1, 0xe0400042),
+            (2, noncontinuable as u64),
+            (8, 2),
+            (9, DATA + 256),
+            (0, raise),
+        ] {
+            mov(&mut main, r, v);
+        }
+        main.extend([0xff, 0xd0]);
+        mov(&mut main, 7, DATA);
+        main.extend([0x48, 0x89, 0x07, 0x48, 0x83, 0xc4, 0x28, 0xc3]);
+        p.memory.write(CODE, &main).unwrap();
+        p.memory
+            .write_int(DATA + 256, 8, 0x1122334455667788)
+            .unwrap();
+        p.memory
+            .write_int(DATA + 264, 8, 0x8877665544332211)
+            .unwrap();
+        p.memory.write_int(DATA + 128, 2, 0x077f).unwrap();
+        // First callback reads the real EXCEPTION_RECORD and stores the argument,
+        // then returns CONTINUE_SEARCH rather than ending dispatch.
+        let mut first = vec![0x48, 0x8b, 0x01, 0x48, 0x8b, 0x50, 0x20];
+        mov(&mut first, 7, DATA + 16);
+        first.extend([0x48, 0x89, 0x17, 0x48, 0x8b, 0x41, 8]);
+        mov(&mut first, 7, DATA + 24);
+        first.extend([0x48, 0x89, 0x07, 0x31, 0xc0, 0xc3]);
+        p.memory.write(CODE + 0x200, &first).unwrap();
+        // Second callback edits the context's RAX and deliberately clobbers its
+        // own XMM0/control word. Resuming must use the saved exception context.
+        let mut second = vec![0x48, 0x8b, 0x41, 8];
+        mov(&mut second, 2, VALUE);
+        second.extend([0x48, 0x89, 0x50, 120, 0x0f, 0x57, 0xc0]);
+        mov(&mut second, 7, DATA + 128);
+        second.extend([0xd9, 0x2f, 0xb8, 0xff, 0xff, 0xff, 0xff, 0xc3]);
+        p.memory.write(CODE + 0x300, &second).unwrap();
+        p.cpu = original;
+        loop {
+            let budget = p.cpu.work + 1;
+            match p.run(budget) {
+                Ok(Outcome::Budget) => assert!(p.cpu.work < 200),
+                Ok(result) => {
+                    assert!(!noncontinuable);
+                    assert_eq!(result, Outcome::Returned(VALUE));
+                    assert_eq!(p.cpu.xmm[0], [0xa5; 16]);
+                    assert_eq!(p.cpu.fpu, expected_fpu);
+                    assert_eq!(p.cpu.rflags, 0x602);
+                    assert_eq!(p.memory.read_int(DATA, 8).unwrap(), VALUE);
+                    break;
+                }
+                Err(error) => {
+                    assert!(noncontinuable, "{error}");
+                    assert!(error.contains("noncontinuable"));
+                    assert_eq!(p.memory.read_int(DATA, 8).unwrap(), 0);
+                    break;
+                }
+            }
+        }
+        assert_eq!(p.memory.read_int(DATA + 16, 8).unwrap(), 0x1122334455667788);
+        assert_eq!(
+            p.stages
+                .iter()
+                .filter(|(s, _)| s == "vectored exception handler")
+                .count(),
+            2
+        );
+        let context = p.memory.read_int(DATA + 24, 8).unwrap();
+        assert!(context > u32::MAX as u64);
+        if !noncontinuable {
+            assert!(p.memory.read_int(context, 1).is_err());
+        }
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn amd64_same_frame_exception_unwind_executes_guest_language_and_termination_handlers() {
+    use wire::x64::process::{Outcome, Process64};
+    const CODE: u64 = 0x560000000;
+    const DATA: u64 = CODE + 4096;
+    const VALUE: u64 = 0xfedcba9876543210;
+    fn mov(code: &mut Vec<u8>, r: u8, value: u64) {
+        code.extend([0x48 | (r >> 3), 0xb8 | (r & 7)]);
+        code.extend(value.to_le_bytes());
+    }
+    let path = std::env::temp_dir().join(format!("wire-seh64-{}.exe", std::process::id()));
+    std::fs::write(&path, fixture()).unwrap();
+    for termination in [false, true] {
+        let mut p = Process64::load(&path, false).unwrap();
+        let mut original = p.cpu.clone();
+        original.rip = CODE;
+        p.memory.map(CODE, 8192, READ | WRITE | EXECUTE).unwrap();
+        let raise = p.runtime.register("kernel32.dll", "RaiseException");
+        let unwind = p.runtime.register("kernel32.dll", "RtlUnwindEx");
+        let mut main = vec![0x48, 0x83, 0xec, 0x28];
+        for (r, v) in [(1, 0xe0410042), (2, 0), (8, 0), (9, 0), (0, raise)] {
+            mov(&mut main, r, v);
+        }
+        main.extend([0xff, 0xd0]);
+        // A returning RaiseException would write this marker. Target unwind must
+        // instead transfer to the catch block with the requested 64-bit RAX.
+        mov(&mut main, 7, DATA + 8);
+        main.extend([0xc7, 0x07, 0xad, 0xde, 0, 0, 0x48, 0x83, 0xc4, 0x28, 0xc3]);
+        let catch = main.len() as u64;
+        mov(&mut main, 7, DATA);
+        main.extend([0x48, 0x89, 0x07, 0x48, 0x83, 0xc4, 0x28, 0xc3]);
+        p.memory.write(CODE, &main).unwrap();
+        // Guest handler dispatches using HandlerData, not a host-selected catch PC.
+        let mut handler = vec![0x48, 0x83, 0xec, 0x38, 0xf7, 0x41, 4, 2, 0, 0, 0, 0x75, 0];
+        let branch = handler.len() - 1;
+        handler.extend([
+            0x49, 0x89, 0xcc, 0x49, 0x89, 0xd5, 0x4d, 0x89, 0xc6, 0x4d, 0x89, 0xcf,
+        ]);
+        mov(&mut handler, 7, DATA + 16);
+        handler.extend([0x4c, 0x89, 0x2f]);
+        mov(&mut handler, 7, DATA + 32);
+        handler.extend([
+            0x4c, 0x89, 0x37, 0x49, 0x8b, 0x47, 0x38, 0x8b, 0x50, 0x10, 0x49, 0x03, 0x57, 8,
+        ]);
+        handler.extend([0x4c, 0x89, 0xe9, 0x4d, 0x89, 0xe0]);
+        mov(&mut handler, 9, VALUE);
+        handler.extend([
+            0x4c, 0x89, 0x74, 0x24, 0x20, 0x48, 0xc7, 0x44, 0x24, 0x28, 0, 0, 0, 0,
+        ]);
+        mov(&mut handler, 0, unwind);
+        handler.extend([0xff, 0xd0, 0xcc]); // Unwind never returns to this call site.
+        let cleanup = handler.len();
+        handler[branch] = u8::try_from(cleanup - branch - 1).unwrap();
+        handler.extend([0x8b, 0x41, 4]);
+        mov(&mut handler, 7, DATA + 24);
+        handler.extend([0x89, 0x07, 0xb8, 1, 0, 0, 0, 0x48, 0x83, 0xc4, 0x38, 0xc3]);
+        p.memory.write(CODE + 0x200, &handler).unwrap();
+        let table = DATA + 512;
+        p.memory.write_int(table, 4, 0).unwrap();
+        p.memory.write_int(table + 4, 4, main.len() as u64).unwrap();
+        p.memory.write_int(table + 8, 4, 4096 + 544).unwrap();
+        let mut metadata = [0; 32];
+        metadata[..8].copy_from_slice(&[
+            if termination { 0x19 } else { 9 },
+            4,
+            1,
+            0,
+            4,
+            0x42,
+            0,
+            0,
+        ]);
+        put32(&mut metadata, 8, 0x200);
+        put32(&mut metadata, 12, 1);
+        put32(&mut metadata, 16, 4);
+        put32(&mut metadata, 20, catch as u32);
+        put32(&mut metadata, 24, 1);
+        put32(&mut metadata, 28, catch as u32);
+        p.memory.write(DATA + 544, &metadata).unwrap();
+        assert_eq!(
+            startup_call(
+                &mut p.memory,
+                &mut p.cpu,
+                &mut p.runtime,
+                "RtlAddFunctionTable",
+                &[table, 1, CODE]
+            ),
+            1
+        );
+        p.cpu = original.clone();
+        loop {
+            match p.run(p.cpu.work + 1).unwrap() {
+                Outcome::Budget => assert!(p.cpu.work < 500),
+                result => {
+                    assert_eq!(result, Outcome::Returned(VALUE));
+                    break;
+                }
+            }
+        }
+        assert_eq!(p.memory.read_int(DATA, 8).unwrap(), VALUE);
+        assert_eq!(p.memory.read_int(DATA + 8, 8).unwrap(), 0);
+        assert_eq!(
+            p.memory.read_int(DATA + 16, 8).unwrap(),
+            original.regs[4] - 40
+        );
+        assert_eq!(
+            p.memory.read_int(DATA + 24, 4).unwrap(),
+            if termination { 0x22 } else { 0 }
+        );
+        assert_eq!(p.cpu.regs[4], original.regs[4] + 8);
+        let context = p.memory.read_int(DATA + 32, 8).unwrap();
+        assert!(p.memory.read_int(context, 1).is_err());
+        assert_eq!(
+            p.stages
+                .iter()
+                .filter(|(s, _)| s == "language exception handler")
+                .count(),
+            1
+        );
+        assert_eq!(
+            p.stages
+                .iter()
+                .filter(|(s, _)| s == "target unwind handler")
+                .count(),
+            termination as usize
+        );
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
 #[test]
 fn amd64_function_tables_lookup_real_metadata_and_execute_guest_lookup_callback_across_budgets() {
     use wire::x64::process::{Outcome, Process64};
