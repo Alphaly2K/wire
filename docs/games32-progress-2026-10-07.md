@@ -178,6 +178,11 @@ BGM 连续观察 193.008 秒、193 次回填，中位 0.906508 秒、P95 0.96458
 隔离游戏目录没有该 COM server，注册表返回 ERROR_FILE_NOT_FOUND，随后 MessageBox 要求安装“ソフト電池”。
 这属于外部运行时依赖；没有换成另一个 cn.exe、制造安装状态或绕过保护。
 
+2026-10-07 用户恢复 AliceToPapa 后再次检查：Downloads 中未找到以“ソフト電池”或已知相关名称
+命名的运行时/安装包；totsulover 原目录相对隔离副本没有新增文件或文件大小变化，
+19个 EXE/DLL/安装相关文件的 SHA-256 全部一致。此次没有发现可继续真实装载的新增依赖，
+没有重新运行相同输入，pass-6 结论仍保留；该检查不代表搜索了整台机器或完成了安装状态检测。
+
 ## 回归、来源与边界
 
 上个 Koikake 检查点完整回归通过 **178 项**。本轮 shader/x64 初始检查点191项通过；
@@ -201,11 +206,15 @@ Hangover 固定 `56e385b7ff490edd281b288f420677093563560b`，Wine 子模块固�
 没有复制或链接 QEMU GPL 实现；Unicorn 仅用于开发测试 oracle。
 保留 checked guest memory、FP80、预算/线程边界与极度保守 FLAGS；Wasm 仍只是可用时的加速路线。
 
-## AMD64 基础与缺失的样本
+## AMD64 基础与恢复样本的实测
 
 已新增独立的高地址 PE32+ 装载、DIR64/64位 IAT、稀疏 checked memory 和整数 CPU，
 `wire probe64` 实际解释 high-base 入口并在未支持指令/未解决导入边界失败。
 六项独立回归包含256组 Unicorn 逐指令整数差分和 CLI 入口执行。
-原 AliceToPapaADV_1-0-0.exe 路径当前不存在，已请求用户提供新路径。
+AliceToPapa 原路径已恢复，SHA-256 与旧记录一致，并已完整复制到 `wire-out/games64/alice/runtime/` 实测。
+主 EXE 实际退休13条指令后停在 `KERNEL32.dll!GetSystemTimeAsFileTime` 的未实现 Win64 gateway；
+UnityPlayer / Mono 装载探针分别因 TLS/delay imports、TLS 退出1，均未执行 DLL 入口。
+EXE / UnityPlayer / Mono 的静态导入解析全部成功，不等于导入运行时已实现。
 普通 `wire run` 尚未支持 AMD64；没有 Win64 API runtime、Unity/Mono、D3D11 或64位 IR，
-不能将基础 probe 当作该游戏已经运行。范围见 [AMD64 检查点](x86-64-sample-2026-10-06.md)。
+本次未进入引擎、未建窗口或 Present。首个阻塞、完整命令/退出码和后续范围见
+[AMD64 检查点](x86-64-sample-2026-10-06.md)。

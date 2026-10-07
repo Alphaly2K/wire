@@ -21,7 +21,9 @@ totsulover 缺少其要求的外部“ソフト電池”运行时。详情见 [R
 三对完整启动吞吐82.36→85.42 MIPS（约+3.7%），首Present17.984→17.425秒，收益仍较小。
 这只是批量执行，还没有完成专用融合opcode或常量/复制传播；见[静态序列性能记录](performance-scalar-runs-2026-10-06.md)。
 AliceToPapa 为64位Unity/Mono应用，现已建立独立 PE32+/64位内存/整数解释器与 probe64 诊断；
-尚无 Win64 API runtime、Unity/Mono、D3D11 或64位 IR，原样本路径当前缺失。
+原样本已恢复并隔离实测：入口退休13条指令后停在 `GetSystemTimeAsFileTime` 的未实现 Win64 gateway。
+UnityPlayer / Mono 装载探针分别因 TLS/delay imports、TLS 被拒绝，尚未进入引擎或建立窗口。
+尚无 Win64 API runtime、Unity/Mono、D3D11 或64位 IR，普通 run 仍明确拒绝 AMD64。
 基础回归和扩展范围见[x86-64样本](x86-64-sample-2026-10-06.md)。
 以下保留此前功能推进阶段的历史记录；当前已经具备真实图像与 AppKit 上传。
 
