@@ -1,6 +1,6 @@
 # 独立 Unity Mono 原型
 
-此目录不接入 Cargo 或游戏后端。源码候选和归档 SHA-256 固定在
+此目录包含独立构建工具和测试 driver，不接入游戏后端。源码候选和归档 SHA-256 固定在
 `source-lock.json`；尚未证明精确对应 AliceToPapa 的 Unity 6000.3.11f1 DLL。
 构建和测试只写入忽略目录 `wire-out/native-mono-m1`，Unity SDK 只读。
 
@@ -36,3 +36,19 @@ dyld 加载构建好的静态支持库与运行时生成代码是不同的操作
 `audit_build.py` 从最终静态归档和编译依赖记录实际选入对象，检查未混入
 libatomic_ops 的 GPL stack/malloc 设施；该清单不是最终发行许可审计。
 上游 notices 位于 `licenses/`，固定的完整源码归档及逐文件版权仍须保留。
+
+M2 driver 位于 `m2/`，使用独立 Cargo package/target directory；受控共享 Memory
+由 `native-mono-memory` feature 提供，默认 wire 构建没有该访存分支。
+
+```sh
+python3 tools/mono/probe_m2.py --runtime-output wire-out/native-mono-m1
+python3 tools/mono/probe_m2.py --runtime-output wire-out/native-mono-checked-runtime --checked-memory
+cargo test --release --features native-mono-memory --test mono_shared
+```
+
+`probe.py --support-builder <已有开发AOT工具>` 可复用只读builder；
+`--classlib-input <已有Managed目录>` 在ignored输出中复制并验证真实类库。
+`probe_m2.py --sample-mono <原始x64 Mono DLL>` 增加只读leaf ABI/系统契约诊断。
+所有实际游戏后端准入标志仍为false；primitive scope明确拒绝未适配的调用/引用
+路径，不能当作通用IL sandbox。完整证据和下一阶段阻塞见
+`docs/native-mono-m2-shared-2026-10-09.md`。

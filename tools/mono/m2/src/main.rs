@@ -3,11 +3,12 @@
 use std::{
     cell::Cell,
     ffi::{c_char, c_void, CString},
-    ptr,
+    ptr::{self, NonNull},
+    sync::Arc,
 };
 use wire::x64::{
     cpu::Cpu64,
-    memory::{Memory, READ, WRITE},
+    memory::{shared::HostRegion, Memory, READ, WRITE},
     pe::Pe64,
 };
 
@@ -16,6 +17,7 @@ const STACK: u64 = 0x7ff000000000;
 const GATEWAY: u64 = 0x6fff00000000;
 const RETURN: u64 = 0x6fff00000010;
 const CALLBACK: u64 = BASE + 0x1100;
+const SHARED_CALLBACK: u64 = BASE + 0x1200;
 const ROOT_SLOT: u64 = STACK + 0x800;
 type Object = *mut c_void;
 type Handle = *mut c_void;
@@ -28,6 +30,7 @@ struct Mono {
     method: Method,
     domain: Object,
     class: Object,
+    image: Object,
     get_target: unsafe extern "C" fn(Handle) -> Object,
     new_handle: unsafe extern "C" fn(Object, i32) -> Handle,
     weak_handle: unsafe extern "C" fn(Object, i32) -> Handle,
@@ -45,8 +48,12 @@ macro_rules! symbol {
         unsafe { std::mem::transmute::<Object, $ty>(raw) }
     }};
 }
+mod checked;
+mod concurrency;
+mod layout;
+
 impl Mono {
-    fn load(library: &str, classlib: &str, assembly: &str) -> Self {
+    fn load(library: &str, classlib: &str, assembly: &str, checked: bool) -> Self {
         let path = CString::new(library).unwrap();
         let library = unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
         assert!(!library.is_null(), "could not load candidate Mono");
@@ -81,6 +88,14 @@ impl Mono {
             "mono_add_internal_call",
             unsafe extern "C" fn(*const c_char, Object)
         );
+        if checked {
+            let prepare = symbol!(
+                library,
+                "wire_mono_prepare_memory_adapter",
+                unsafe extern "C" fn(u32) -> i32
+            );
+            assert_eq!(unsafe { prepare(1) }, 0);
+        }
         let dirs = CString::new(classlib).unwrap();
         let filename = CString::new(assembly).unwrap();
         let domain = unsafe {
@@ -90,20 +105,34 @@ impl Mono {
             init(c"wire-guest-mono-probe".as_ptr(), c"v4.0.30319".as_ptr())
         };
         assert!(!domain.is_null());
-        let class = unsafe {
+        let (class, image) = unsafe {
             add_icall(
                 c"GuestBridge::GuestCallback".as_ptr(),
                 guest_callback as *const () as Object,
             );
+            add_icall(
+                c"GuestBridge::GuestSharedCallback".as_ptr(),
+                guest_shared_callback as *const () as Object,
+            );
+            add_icall(
+                c"GuestBridge::GuestThreadReady".as_ptr(),
+                concurrency::guest_thread_ready as *const () as Object,
+            );
+            add_icall(
+                c"GuestBridge::GuestConcurrentCallback".as_ptr(),
+                concurrency::guest_concurrent_callback as *const () as Object,
+            );
             let assembly = open(domain, filename.as_ptr());
             assert!(!assembly.is_null());
-            class(image(assembly), c"".as_ptr(), c"GuestBridge".as_ptr())
+            let image = image(assembly);
+            (class(image, c"".as_ptr(), c"GuestBridge".as_ptr()), image)
         };
         assert!(!class.is_null());
         Self {
             library,
             domain,
             class,
+            image,
             invoke: symbol!(library, "mono_runtime_invoke", Invoke),
             method: symbol!(library, "mono_class_get_method_from_name", Method),
             get_target: symbol!(
@@ -159,6 +188,8 @@ struct Guest {
     memory: Memory,
     callbacks: u64,
     paused_regs: [u64; 16],
+    checked_calls: [u64; 4],
+    memory_faults: Vec<String>,
 }
 thread_local! { static OWNER: Cell<*mut Guest> = const { Cell::new(ptr::null_mut()) }; }
 unsafe extern "C" fn guest_callback(value: i32) -> i32 {
@@ -191,8 +222,176 @@ unsafe extern "C" fn guest_callback(value: i32) -> i32 {
     }
 }
 
+unsafe extern "C" fn guest_shared_callback(data: Object, value: i32) -> i32 {
+    let result = std::panic::catch_unwind(|| {
+        OWNER.with(|owner| {
+            let state = owner.get();
+            assert!(!state.is_null(), "shared callback without execution owner");
+            let guest = unsafe { &mut *state };
+            let rsp = STACK + 0x2ff8;
+            guest.memory.write_int(rsp, 8, RETURN).unwrap();
+            let mut cpu = Cpu64::new(SHARED_CALLBACK, rsp);
+            cpu.regs[1] = data as u64;
+            cpu.regs[2] = value as u32 as u64;
+            for _ in 0..16 {
+                if cpu.rip == RETURN {
+                    guest.callbacks += 1;
+                    return cpu.regs[0] as i32;
+                }
+                cpu.step(&mut guest.memory).unwrap();
+            }
+            panic!("shared guest callback did not return");
+        })
+    });
+    match result {
+        Ok(n) => n,
+        Err(_) => std::process::abort(),
+    }
+}
+
+// Fixture owner releases a pinned handle only while attached to this VM. All
+// owners are dropped before cleanup; a production owner must also retain the VM.
+struct PinnedOwner {
+    domain: usize,
+    handle: usize,
+    attach: unsafe extern "C" fn(Object) -> Object,
+    detach: unsafe extern "C" fn(Object),
+    current_domain: unsafe extern "C" fn() -> Object,
+    free: unsafe extern "C" fn(Handle),
+}
+impl Drop for PinnedOwner {
+    fn drop(&mut self) {
+        unsafe {
+            let was_attached = !(self.current_domain)().is_null();
+            let thread = if was_attached {
+                ptr::null_mut()
+            } else {
+                (self.attach)(self.domain as Object)
+            };
+            (self.free)(self.handle as Handle);
+            if !was_attached {
+                (self.detach)(thread);
+            }
+        }
+    }
+}
+
+fn shared_array_probe(mono: &Mono, state: *mut Guest) {
+    let attach = symbol!(
+        mono.library,
+        "mono_thread_attach",
+        unsafe extern "C" fn(Object) -> Object
+    );
+    let detach = symbol!(
+        mono.library,
+        "mono_thread_detach",
+        unsafe extern "C" fn(Object)
+    );
+    let array_addr = symbol!(
+        mono.library,
+        "mono_array_addr_with_size",
+        unsafe extern "C" fn(Object, i32, usize) -> Object
+    );
+    let unbox = symbol!(
+        mono.library,
+        "mono_object_unbox",
+        unsafe extern "C" fn(Object) -> Object
+    );
+    let array = mono.invoke(mono.find("NewArray", 0), ptr::null_mut());
+    let handle = unsafe { (mono.new_handle)(array, 1) };
+    let owner = Arc::new(PinnedOwner {
+        domain: mono.domain as usize,
+        handle: handle as usize,
+        attach,
+        detach,
+        current_domain: symbol!(
+            mono.library,
+            "mono_domain_get",
+            unsafe extern "C" fn() -> Object
+        ),
+        free: mono.free_handle,
+    });
+    let pointer = NonNull::new(unsafe { array_addr(array, 4, 0) }.cast::<u8>()).unwrap();
+    let address = pointer.as_ptr() as u64;
+    // Only the int[] element bytes are registered: no object/GC header, vtable,
+    // or neighbouring allocation. GC does not write this pinned scalar payload.
+    // This fixture has no concurrent managed writer; invoke holds the same lease.
+    let region = unsafe { HostRegion::foreign(pointer, 16, owner.clone()) }.unwrap();
+    unsafe { &mut (*state).memory }
+        .map_shared_data(address, region.clone(), READ | WRITE, READ | WRITE)
+        .unwrap();
+    unsafe { &mut (*state).memory }
+        .write_int(address, 4, 31)
+        .unwrap();
+    OWNER.with(|token| {
+        assert!(token.get().is_null());
+        token.set(state);
+    });
+    let result = region
+        .with_native(|_| {
+            let mut args = [array];
+            let boxed = mono.invoke(mono.find("SharedRoundTrip", 1), args.as_mut_ptr());
+            unsafe { *(unbox(boxed) as *const i32) }
+        })
+        .unwrap();
+    OWNER.with(|token| token.set(ptr::null_mut()));
+    assert_eq!(result, 79); // guest 31+5=36; IL second slot 36+7=43.
+    assert_eq!(
+        unsafe { &mut (*state).memory }
+            .read_int(address, 4)
+            .unwrap(),
+        36
+    );
+    assert_eq!(
+        unsafe { &mut (*state).memory }
+            .read_int(address + 4, 4)
+            .unwrap(),
+        43
+    );
+    unsafe {
+        (mono.collect)(0);
+    }
+    assert_eq!(
+        unsafe { &mut (*state).memory }
+            .read_int(address + 8, 4)
+            .unwrap(),
+        43
+    );
+    assert!(unsafe { &mut (*state).memory }
+        .read_int(address - 1, 1)
+        .is_err());
+    assert!(unsafe { &mut (*state).memory }
+        .read_int(address + 16, 1)
+        .is_err());
+    unsafe { &mut (*state).memory }
+        .protect_shared_data(address, READ, false)
+        .unwrap();
+    assert!(unsafe { &mut (*state).memory }
+        .write_int(address, 4, 0)
+        .is_err());
+    region.revoke().unwrap();
+    assert!(unsafe { &mut (*state).memory }
+        .read_int(address, 4)
+        .is_err());
+    drop(
+        unsafe { &mut (*state).memory }
+            .unmap_shared_data(address)
+            .unwrap(),
+    );
+    drop(region);
+    let current_domain = owner.current_domain;
+    std::thread::spawn(move || {
+        assert!(unsafe { current_domain() }.is_null());
+        drop(owner); // Drop attaches, frees the pin, then detaches itself.
+        assert!(unsafe { current_domain() }.is_null());
+    })
+    .join()
+    .unwrap();
+    println!("PASS shared pinned Mono array: same bytes, guest callback reentry, GC, readonly, bounds, revoke");
+}
+
 fn pe_fixture() -> Vec<u8> {
-    let mut bytes = vec![0; 0x400];
+    let mut bytes = vec![0; 0x600];
     fn u16at(bytes: &mut [u8], at: usize, value: u16) {
         bytes[at..at + 2].copy_from_slice(&value.to_le_bytes());
     }
@@ -223,9 +422,9 @@ fn pe_fixture() -> Vec<u8> {
     u32at(&mut bytes, opt + 108, 16);
     let section = opt + 0xf0;
     bytes[section..section + 5].copy_from_slice(b".text");
-    u32at(&mut bytes, section + 8, 512);
+    u32at(&mut bytes, section + 8, 1024);
     u32at(&mut bytes, section + 12, 4096);
-    u32at(&mut bytes, section + 16, 512);
+    u32at(&mut bytes, section + 16, 1024);
     u32at(&mut bytes, section + 20, 512);
     u32at(&mut bytes, section + 36, 0x60000020);
     // Win64 shadow space, typed Int32 argument, data gateway, return.
@@ -235,17 +434,18 @@ fn pe_fixture() -> Vec<u8> {
     bytes[512..512 + entry.len()].copy_from_slice(&entry);
     // Original x64 callback: mov eax,ecx; add eax,11; ret.
     bytes[0x300..0x306].copy_from_slice(&[0x89, 0xc8, 0x83, 0xc0, 11, 0xc3]);
+    // Typed IntPtr + Int32 guest callback modifies the registered scalar array.
+    bytes[0x400..0x407].copy_from_slice(&[0x8b, 0x01, 0x03, 0xc2, 0x89, 0x01, 0xc3]);
     bytes
 }
 
 fn main() {
     let args: Vec<_> = std::env::args().collect();
-    assert_eq!(
-        args.len(),
-        5,
-        "usage: probe runtime.dylib classlib-root GuestBridge.exe fixture.exe"
+    assert!(
+        (5..=7).contains(&args.len()),
+        "usage: probe runtime.dylib classlib-root GuestBridge.dll fixture.exe [CheckedBlocks.dll] [sample-mono.dll]"
     );
-    let mono = Mono::load(&args[1], &args[2], &args[3]);
+    let mono = Mono::load(&args[1], &args[2], &args[3], args.len() >= 6);
     let bytes = pe_fixture();
     std::fs::write(&args[4], &bytes).unwrap();
     let pe = Pe64::parse(&bytes).unwrap();
@@ -256,6 +456,8 @@ fn main() {
         memory,
         callbacks: 0,
         paused_regs: [0; 16],
+        checked_calls: [0; 4],
+        memory_faults: Vec::new(),
     });
     guest.memory.map(STACK, 0x3000, READ | WRITE).unwrap();
     let rsp = STACK + 0xff8;
@@ -291,6 +493,36 @@ fn main() {
     assert_eq!(cpu.regs[0], 19);
     assert_eq!(guest.callbacks, 1);
     println!("PASS original PE -> native IL -> interpreted x64 callback: checksum=19");
+
+    shared_array_probe(&mono, &mut *guest);
+    concurrency::run(&mono);
+    if let Some(blocks) = args.get(5) {
+        checked::run(&mono, &mut *guest, blocks);
+    }
+    if let Some(sample) = args.get(6) {
+        layout::run(&mono, sample);
+        let platform = mono.invoke(mono.find("PlatformContract", 0), ptr::null_mut());
+        let platform = unsafe { *(unbox(platform) as *const i32) };
+        let host_file = mono.invoke(mono.find("HostFilesystemContract", 0), ptr::null_mut());
+        let host_file = unsafe { *(unbox(host_file) as *const i32) };
+        let diagnostics = mono.invoke(mono.find("ServiceContractDiagnostics", 0), ptr::null_mut());
+        let to_utf8 = symbol!(
+            mono.library,
+            "mono_string_to_utf8",
+            unsafe extern "C" fn(Object) -> *mut c_char
+        );
+        let free = symbol!(mono.library, "mono_free", unsafe extern "C" fn(Object));
+        let text = unsafe { to_utf8(diagnostics) };
+        assert!(!text.is_null());
+        println!(
+            "PROFILE_SERVICE_DIAGNOSTICS {}",
+            unsafe { std::ffi::CStr::from_ptr(text) }.to_str().unwrap()
+        );
+        unsafe {
+            free(text.cast());
+        }
+        println!("PROFILE_CONTRACT platform={platform} expected_windows=2 host_filesystem_visible={host_file} windows_vfs_bound=0 native_game_backend_enabled=0");
+    }
 
     // Root snapshots are scoped data regions, never a root for the whole heap.
     // This verifies guest register/stack reference ownership before shared backing.

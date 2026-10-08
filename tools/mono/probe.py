@@ -40,7 +40,7 @@ def execute(args, env, output, label, expected=0, timeout=120):
     return record
 
 
-def compile_fixtures(root, sdk):
+def compile_fixtures(root, sdk, support_builder=None, classlib_input=None):
     output = root / "probe"
     output.mkdir(exist_ok=True)
     env = os.environ.copy()
@@ -49,11 +49,14 @@ def compile_fixtures(root, sdk):
         env.pop(name, None)
     classlib = output / "classlib/mono/4.5"
     classlib.mkdir(parents=True, exist_ok=True)
+    classlib_input = classlib_input or sdk / "lib/mono/4.5"
     for name in ("mscorlib.dll", "System.dll", "System.Core.dll"):
-        shutil.copy2(sdk / "lib/mono/4.5" / name, classlib / name)
+        shutil.copy2(classlib_input / name, classlib / name)
     records = []
     records.append(execute([sdk / "bin/mono", sdk / "lib/mono/4.5/mcs.exe", "-unsafe",
-                            "-optimize+", "-out:" + str(output / "NativeProbe.exe"),
+                            "-optimize+", "-nostdlib",
+                            *["-r:" + str(classlib / name) for name in ("mscorlib.dll", "System.dll", "System.Core.dll")],
+                            "-out:" + str(output / "NativeProbe.exe"),
                             FIXTURES / "NativeProbe.cs"], env, output, "compile-il"))
     source_lock = json.loads((HERE / "source-lock.json").read_text())
     source = root / "sources" / source_lock["sources"][0]["directory"]
@@ -71,11 +74,12 @@ def compile_fixtures(root, sdk):
     # Only support wrappers/trampolines are emitted with interp. Managed method
     # bodies remain IL; the game is not AOT-compiled or executed by this tool.
     aot_env = dict(env, MONO_PATH=str(classlib))
+    support_builder = support_builder or root / "build-aot-tool/mono/mini/mono-boehm"
     for assembly in (classlib / "mscorlib.dll", output / "NativeProbe.exe"):
-        records.append(execute([root / "build-aot-tool/mono/mini/mono-boehm",
+        records.append(execute([support_builder,
                                 "--aot=interp", assembly], aot_env, output,
                                "aot-support-" + assembly.stem, timeout=300))
-    manifest = {"sdk": str(sdk), "runtime_is_sdk": False,
+    manifest = {"sdk": str(sdk), "classlib_input": str(classlib_input), "runtime_is_sdk": False,
                 "class_libraries": {p.name: sha256(p) for p in classlib.glob("*.dll")},
                 "fixture_sources": {p.name: sha256(p) for p in FIXTURES.iterdir() if p.is_file()},
                 "build": records}
@@ -110,12 +114,14 @@ def main():
     parser.add_argument("--output", type=Path, default=REPO / "wire-out/native-mono-m1")
     parser.add_argument("--sdk", type=Path, default=DEFAULT_SDK)
     parser.add_argument("--cases", nargs="+", choices=("core", "interop", "threads", "gc", "layout"), default=["core", "interop", "threads", "gc", "layout"])
+    parser.add_argument("--support-builder", type=Path, help="existing read-only development AOT tool input")
+    parser.add_argument("--classlib-input", type=Path, help="existing read-only managed class libraries (copied to ignored output)")
     args = parser.parse_args()
     root = args.output.resolve()
     if not root.is_relative_to(REPO / "wire-out"):
         parser.error("Output must be below this repository's ignored wire-out directory")
     if args.stage in ("compile", "all"):
-        compile_fixtures(root, args.sdk.resolve())
+        compile_fixtures(root, args.sdk.resolve(), args.support_builder.resolve() if args.support_builder else None, args.classlib_input.resolve() if args.classlib_input else None)
     if args.stage in ("run", "all"):
         run_probes(root, args.cases)
 

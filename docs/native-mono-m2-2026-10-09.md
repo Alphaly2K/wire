@@ -1,5 +1,8 @@
 # 原生 Mono 跨架构原型（2026-10-09）
 
+本文记录 `59ca3d7` 的历史原型。后续共享、unsafe、线程与真实类库证据见
+[native-mono-m2-shared-2026-10-09.md](native-mono-m2-shared-2026-10-09.md)。
+
 ## 已通过的部分
 
 `python3 tools/mono/probe_m2.py` 构建独立 Rust probe，直接使用当前 wire 的
