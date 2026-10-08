@@ -18,6 +18,8 @@ pub mod loader;
 pub mod mem;
 mod menu;
 pub mod modules;
+#[cfg(feature = "native-mono-backend")]
+pub mod mono;
 pub mod nls;
 pub mod pe;
 pub mod platform;
