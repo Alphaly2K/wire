@@ -5,6 +5,10 @@ edition = "2021"
 license = "LGPL-2.1-only"
 description = "Watari-Is-a-Runtime-Environment: non-JIT x86 interpretation + Win32 compatibility layer (feasibility spike)"
 
+[features]
+# Optional isolated Mono prototype; the default interpreter has no shared branch.
+native-mono-memory = []
+
 [dependencies]
 iced-x86 = { version = "1.21.0", default-features = false, features = ["std", "decoder", "instr_info"] }
 libc = "0.2"

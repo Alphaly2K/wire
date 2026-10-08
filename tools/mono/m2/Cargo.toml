@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-wire = { path = "../../.." }
+wire = { path = "../../..", features = ["native-mono-memory"] }
 libc = "0.2"
 
 [profile.release]

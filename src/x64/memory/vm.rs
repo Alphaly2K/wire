@@ -63,8 +63,19 @@ impl Memory {
     }
     pub fn memory_status(&self) -> [u8; 64] {
         let total = 512 * 1024 * 1024u64;
+        #[cfg(feature = "native-mono-memory")]
+        let used = self.committed_bytes();
+        #[cfg(not(feature = "native-mono-memory"))]
         let used = self.pages.len() as u64 * PAGE;
         let virtual_total = APP_END - GRANULARITY;
+        #[cfg(feature = "native-mono-memory")]
+        let reserved: u64 = self
+            .allocations
+            .iter()
+            .map(|(&base, a)| a.end - base)
+            .sum::<u64>()
+            + self.shared_bytes();
+        #[cfg(not(feature = "native-mono-memory"))]
         let reserved: u64 = self.allocations.iter().map(|(&base, a)| a.end - base).sum();
         let mut status = [0; 64];
         status[..4].copy_from_slice(&64u32.to_le_bytes());
@@ -109,6 +120,10 @@ impl Memory {
         })
     }
     pub(super) fn free_range(&self, start: u64, end: u64) -> bool {
+        #[cfg(feature = "native-mono-memory")]
+        if self.shared_overlaps(start, end) {
+            return false;
+        }
         !self
             .allocations
             .range(..=start)
@@ -163,6 +178,7 @@ impl Memory {
         }
         Ok((start, end))
     }
+    #[cfg(not(feature = "native-mono-memory"))]
     fn find_free(&self, size: u64, top_down: bool) -> Option<u64> {
         let mut cursor = GRANULARITY;
         let mut found = None;
@@ -187,6 +203,41 @@ impl Memory {
         }
         found
     }
+    #[cfg(feature = "native-mono-memory")]
+    fn find_free(&self, size: u64, top_down: bool) -> Option<u64> {
+        let mut cursor = GRANULARITY;
+        let mut found = None;
+        let intervals = {
+            let mut spans: Vec<_> = self
+                .allocations
+                .iter()
+                .map(|(&base, a)| (base, a.end))
+                .collect();
+            spans.extend(self.shared.values().map(|m| (m.base(), m.end())));
+            spans.sort_unstable();
+            spans.into_iter()
+        };
+        for (base, end) in intervals {
+            if base >= APP_END {
+                break;
+            }
+            if cursor.checked_add(size)? <= base {
+                if !top_down {
+                    return Some(cursor);
+                }
+                found = Some((base - size) & !(GRANULARITY - 1));
+            }
+            cursor = cursor.max(end.div_ceil(GRANULARITY) * GRANULARITY);
+        }
+        if cursor.checked_add(size)? <= APP_END {
+            return Some(if top_down {
+                (APP_END - size) & !(GRANULARITY - 1)
+            } else {
+                cursor
+            });
+        }
+        found
+    }
     fn commit(&mut self, start: u64, end: u64, protection: u32) -> Result<(), u32> {
         let permissions = Self::protection_permissions(protection)?;
         if end - start > 256 * 1024 * 1024 {
@@ -196,7 +247,11 @@ impl Memory {
             .step_by(PAGE as usize)
             .filter(|p| !self.pages.contains_key(p))
             .count();
-        if (self.pages.len() + missing) as u64 * PAGE > 512 * 1024 * 1024 {
+        #[cfg(feature = "native-mono-memory")]
+        let exceeds_capacity = self.committed_bytes() + missing as u64 * PAGE > 512 * 1024 * 1024;
+        #[cfg(not(feature = "native-mono-memory"))]
+        let exceeds_capacity = (self.pages.len() + missing) as u64 * PAGE > 512 * 1024 * 1024;
+        if exceeds_capacity {
             return Err(8);
         }
         for p in (start..end).step_by(PAGE as usize) {
@@ -356,6 +411,13 @@ impl Memory {
             return Err(87);
         }
         let start = address & !(PAGE - 1);
+        // An exact-byte foreign region cannot truthfully be described as a
+        // Win32 page allocation. Reject that page instead of reporting it free
+        // or exposing neighbouring unregistered native bytes.
+        #[cfg(feature = "native-mono-memory")]
+        if self.shared_overlaps(start, start + PAGE) {
+            return Err(87);
+        }
         let allocation = self
             .allocations
             .range(..=start)
@@ -405,6 +467,13 @@ impl Memory {
                     .next()
                     .map(|(&b, _)| b.min(APP_END))
                     .unwrap_or(APP_END);
+                #[cfg(feature = "native-mono-memory")]
+                let end = self
+                    .shared
+                    .range(start..)
+                    .next()
+                    .map(|(&base, _)| end.min(base & !(PAGE - 1)))
+                    .unwrap_or(end);
                 (0, 0, MEM_FREE, 0, 0, end)
             };
         let mut info = [0; 48];

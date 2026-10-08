@@ -4,6 +4,8 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 mod pages;
+#[cfg(feature = "native-mono-memory")]
+pub mod shared;
 mod vm;
 pub const PAGE: u64 = 4096;
 pub const READ: u8 = 1;
@@ -44,6 +46,10 @@ struct Allocation {
 }
 #[derive(Default)]
 pub struct Memory {
+    #[cfg(feature = "native-mono-memory")]
+    shared: BTreeMap<u64, shared::SharedMapping>,
+    #[cfg(feature = "native-mono-memory")]
+    shared_bytes: u64,
     pages: pages::Pages,
     // Ordered addresses are only needed by VirtualQuery over reserved holes.
     // Checked reads/writes use the hash table; neither index owns host pointers.
@@ -55,6 +61,15 @@ pub struct Memory {
     execution_stats: Option<Cell<ExecutionStats>>,
 }
 impl Memory {
+    #[cfg(feature = "native-mono-memory")]
+    fn shared_bytes(&self) -> u64 {
+        self.shared_bytes
+    }
+    #[cfg(feature = "native-mono-memory")]
+    fn committed_bytes(&self) -> u64 {
+        self.pages.len() as u64 * PAGE + self.shared_bytes()
+    }
+
     pub fn enable_execution_stats(&mut self) {
         self.execution_stats = Some(Cell::new(ExecutionStats::default()));
     }
@@ -174,7 +189,18 @@ impl Memory {
         Self::range(addr, len as usize).is_ok_and(|range| self.free_range(range.start, range.end))
     }
     pub fn merge(&mut self, mut other: Memory) -> Result<(), String> {
-        if (self.pages.len() + other.pages.len()) as u64 * PAGE > 512 * 1024 * 1024
+        #[cfg(feature = "native-mono-memory")]
+        let shared_overlap = other
+            .shared
+            .values()
+            .any(|mapping| !self.free_range(mapping.base(), mapping.end()));
+        #[cfg(feature = "native-mono-memory")]
+        let exceeds_capacity =
+            self.committed_bytes() + other.committed_bytes() > 512 * 1024 * 1024 || shared_overlap;
+        #[cfg(not(feature = "native-mono-memory"))]
+        let exceeds_capacity =
+            (self.pages.len() + other.pages.len()) as u64 * PAGE > 512 * 1024 * 1024;
+        if exceeds_capacity
             || other
                 .allocations
                 .iter()
@@ -188,6 +214,8 @@ impl Memory {
         }
         self.page_addresses.append(&mut other.page_addresses);
         self.allocations.append(&mut other.allocations);
+        #[cfg(feature = "native-mono-memory")]
+        self.shared_merge(&mut other.shared);
         self.invalidate_mapping(executable_changed);
         Ok(())
     }
@@ -209,7 +237,11 @@ impl Memory {
             return Err("invalid AMD64 mapping".into());
         }
         let range = Self::range(addr, usize::try_from(len).map_err(|_| "mapping too large")?)?;
-        if len > 256 * 1024 * 1024 || self.pages.len() as u64 * PAGE + len > 512 * 1024 * 1024 {
+        #[cfg(feature = "native-mono-memory")]
+        let used = self.committed_bytes();
+        #[cfg(not(feature = "native-mono-memory"))]
+        let used = self.pages.len() as u64 * PAGE;
+        if len > 256 * 1024 * 1024 || used + len > 512 * 1024 * 1024 {
             return Err("AMD64 mapping capacity exceeded".into());
         }
         if !self.free_range(range.start, range.end) {
@@ -289,6 +321,10 @@ impl Memory {
     }
     pub fn check(&self, addr: u64, len: usize, access: u8) -> Result<(), String> {
         let range = Self::range(addr, len)?;
+        #[cfg(feature = "native-mono-memory")]
+        if !self.shared.is_empty() && self.shared_check(addr, len, access)? {
+            return Ok(());
+        }
         if range.is_empty() {
             return Ok(());
         }
@@ -348,6 +384,10 @@ impl Memory {
     }
     fn read_access(&self, addr: u64, out: &mut [u8], access: u8) -> Result<(), String> {
         Self::range(addr, out.len())?;
+        #[cfg(feature = "native-mono-memory")]
+        if !self.shared.is_empty() && self.shared_read(addr, out, access)? {
+            return Ok(());
+        }
         if out.is_empty() {
             return Ok(());
         }
@@ -376,6 +416,10 @@ impl Memory {
     }
     pub fn write(&mut self, addr: u64, bytes: &[u8]) -> Result<(), String> {
         Self::range(addr, bytes.len())?;
+        #[cfg(feature = "native-mono-memory")]
+        if !self.shared.is_empty() && self.shared_write(addr, bytes)? {
+            return Ok(());
+        }
         if bytes.is_empty() {
             return Ok(());
         }
@@ -416,6 +460,13 @@ impl Memory {
             return Err("invalid AMD64 scalar width".into());
         }
         Self::range(addr, size)?;
+        #[cfg(feature = "native-mono-memory")]
+        if !self.shared.is_empty() {
+            let mut bytes = [0; 8];
+            if self.shared_read(addr, &mut bytes[..size], READ)? {
+                return Ok(u64::from_le_bytes(bytes));
+            }
+        }
         let base = addr & !(PAGE - 1);
         let start = (addr - base) as usize;
         if size <= 4096 - start {
@@ -443,6 +494,10 @@ impl Memory {
             return Err("invalid AMD64 scalar width".into());
         }
         Self::range(addr, size)?;
+        #[cfg(feature = "native-mono-memory")]
+        if !self.shared.is_empty() && self.shared_write(addr, &value.to_le_bytes()[..size])? {
+            return Ok(());
+        }
         let base = addr & !(PAGE - 1);
         let start = (addr - base) as usize;
         if size <= 4096 - start {
