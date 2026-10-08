@@ -7,6 +7,9 @@
 wire 既不是 Wine，也没有通用 Vulkan guest→host ABI。当前已接入原生 ARM64 图形库、
 Win64 DXGI factory4 / adapter1 的64位 COM 边界。Alice 已越过设备枚举与 D3D12 能力探测，
 进入 `D3D11CreateDevice`（pass88）；隐藏初始化窗口尚未显示，尚无 guest D3D11 设备或 Present。
+接续已选择并落地 **GS→compute 展开**：11个自有GS样例、44组输入逐DWORD验证，
+并完成展开结果→透传VS→真实PS→GPU光栅化的4096像素验证；已加入持久Vulkan buffer。
+这补上了geometry的实现路线，但还不是完整10_0能力，也没有让Alice越过设备创建。
 
 首次检查点的两个独立探针如下；后续原生库、离屏Draw和guest重放证据见下一节。
 原始游戏目录保持只读。
@@ -30,6 +33,8 @@ Win64 DXGI factory4 / adapter1 的64位 COM 边界。Alice 已越过设备枚举
 | 同一原生库、实际MoltenVK pipeline | 3组VS/PS + 2个CS成功；6组接口不匹配的组合明确拒绝 | 每个shader至少参与一个实际成功的pipeline；CS尚未dispatch |
 | Unity位置/UV VS + t0/s0 PS，64×64离屏Draw | 4096个RGBA8像素逐通道读回比较，0误差 | 真实DXBC→GPU上传/采样/Draw/同步/读回；不是guest Present |
 | Alice启动、真实Vulkan adapter | factory4、EnumAdapters、GetDesc与引用调用通过；D3D12明确不支持并回退D3D11 | guest连接了真实adapter信息；未创建D3D11 device/context |
+| 自有GS→compute→buffer读回 | 11个GS、44组输入，34,013个DWORD逐个符合独立期望 | stream0、点/线/三角形、adjacency、Cut、循环动态索引、越界归零、条件零输出、GS实例、CBV；不是完整GS/SO |
+| 展开GS→透传VS→DXBC PS→RGBA8 DrawIndexed | 4096像素逐通道符合期望，透传VS/PS亦通过独立spirv-val | 缺少原生geometryShader时仍可真正光栅化；没有guest Draw或Present |
 
 证据：`wire-out/native-graphics-probe-2026-10-08/{report.json,offscreen-rgba64.png}`、
 `wire-out/games64/alice/linked-pass-88.txt`。这不是性能对照或可见游戏首帧。
@@ -48,6 +53,7 @@ min16目前保守升为允许的32位实现。
 | VS | 0 | 0–13 | 14–141 | 142–157 | 158–165 | 64 |
 | PS | 1 | 0–13 | 14–141 | 142–157 | 158–165 | 128 |
 | CS | 2 | 0–13 | 14–141 | 142–157 | 158–165 | 192 |
+| GS（compute展开） | 3 | 0–13 | 14–141 | 142–157 | 158–165 | 192（目前拒绝dispatch push data） |
 
 shared push data从0开始；出现push block时保留256B。反射实际SPIR-V descriptor类型、
 定长数组，以及VS输出/PS输入的location、component、scalar/vector形状。
@@ -85,10 +91,68 @@ debug返回NO_INTERFACE，非NULL输出先检查并置NULL，不创建假device�
 Alice的下一调用参数已经从真实guest stack读取：driver type=UNKNOWN、flags=`0x20`
 （BGRA_SUPPORT）、SDK=7，feature-level依次为11_1 / 11_0 / 10_1 / 10_0。
 没有9_x回退；本机MoltenVK的geometryShader=false，10_x及以上要求geometry能力。
-因此当前8个VS/PS/CS成功也不能证明满足最低10_0。下一阶段除COM/device/context和资源外，
-还需实际geometry/SO等能力补齐或具有对应实现的后端；不能仅填一个10_0/11_0使创建返回成功。
+因此当前8个VS/PS/CS成功也不能证明满足最低10_0。GS已开始通过compute实际补齐，
+下一阶段仍需COM/device/context、完整资源/状态、VS→GS的输入衔接、SO等；
+不能仅填一个10_0/11_0使创建返回成功。
 原版DXVK的必要扩展仍缺失，macOS fork降低feature请求不等于完成该语义补齐。
 参数证据在`wire-out/games64/alice/d3d11-state-pass88.txt`。
+
+## GS compute展开与持久buffer（2026-10-08接续）
+
+`src/platform/native_geometry.h` 是wire独立实现的IR pass，只调用外部MIT编译器API，
+上游源码保持未修改。在原始GS经过上游legalization后，将入口改成compute，
+保留原有算术、精度标志、SSA/control flow和资源声明，改写I/O与Emit/Cut。
+没有启用或假报Vulkan的geometryShader feature，也没有CPU guest JIT。
+
+每个workgroup的local size为1×1×1；group.x是primitive ID、group.y是GS instance ID。
+输入按声明顺序保存为planar 32-bit words，逐层解析原始array/vector地址；
+动态索引先检查声明范围，越界用安全地址加载并返回零，不读取其它图元的数据。
+输出值保存在每次invocation私有scratch中；EmitVertex将全部输出快照写入该invocation的独立区间。
+Cut标记下一顶点是新strip的开头，连续Cut不会生成虚假顶点。
+
+输出记录为`[count, (strip_start, payload...) × (max_vertices+1)]`。
+末尾额外记录是overflow sink；count饱和为max_vertices+1，fence完成后发现超额即失败，
+不覆盖调用方结果。无发射/条件提前退出仍有确定的count=0。
+原始IR与展开指令数量、标量I/O、max vertices、instance数、descriptor/dispatch和buffer范围均有界。
+当前限定一个stream；patch输入、多stream、DclXfb/SO、descriptor数组、UAV写入、
+image/sampler/texel-buffer与push-data dispatch明确拒绝，不作为已实现能力报告。
+
+Rust的`GeometryInfo`复制全部native元数据，检查packed offsets/长度与类型；
+`GeometryBatch`保存输出payload、每次invocation的count和list indices。
+点逐顶点输出；line/triangle strip转换时重置Cut边界、保留三角形绕序，
+未构成完整图元的尾部顶点不参与光栅化，但payload仍保留。
+两个普通unit测试覆盖跨invocation/Cut/空输出/绕序及坏记录拒绝。
+
+`wire_gpu_geometry_vertex`根据输出生成透传VS；初始光栅化接口接受Position与基本
+scalar/vector用户输出，拒绝数组/其他builtin扩展，PS限定无资源RGBA8输出、无depth/blend。
+实际创建vertex/index buffer、render target、pipeline并调用DrawIndexed；
+通过显式barrier/fence读回RGBA8，失败不改调用方输出。
+当前走同步staging与host strip assembly，尚有GS读回和重新上传；
+这不是性能优化或游戏帧率证据。正式接入后应复用GPU资源，逐步减少这些同步。
+
+持久buffer支持真实Vulkan allocation/map、owned初始数据、范围检查的更新/读回与RAII销毁，
+Rust Buffer和Shader均持有context/library的Rc，拒绝跨context绑定，
+最后一项资源释放后才销毁device。usage为CBV/storage/vertex/index，各自检查实际device范围。
+GS dispatch目前接受反射完全匹配的CBV及只读buffer SRV，缺失/多余/重复/type或usage错误的
+binding在GPU提交之前失败；不接受可能在失败时修改外部资源的UAV写入。
+
+测试shader源码在`tests/native_graphics/geometry_fixtures.cpp`，全部为本项目原创，
+通过外部parser/signature/hash API生成合法DXBC，未使用游戏GS或第三方测试shader。
+上游当前code builder遗漏source immediate tokens，container builder用通用MD5；
+fixture工具直接保留自有token序列并调用上游DXBC hash helper修正，不修改上游库。
+`tools/probe_geometry.py`独立比较每次发射的Position/UINT ID/strip marker，输入规模为1、2、7、127图元。
+11个GS与生成的透传VS、实际PS共13个SPIR-V均通过`spirv-val --target-env vulkan1.3`。
+44组覆盖adjacency、重复Cut、循环动态寻址、越界归零、条件零输出、3个GS实例、
+CBV的真实更新/读取和overflow拒绝，34,013个DWORD符合期望。
+展开后的fullscreen triangle实际DrawIndexed，4096个RGBA8像素全部为期望的64/128/191/255。
+短buffer、越界index/更新与overflow的失败输出保留，原有Unity 8shader/5pipeline/纹理Draw亦通过复验。
+
+证据：`wire-out/geometry-probe-2026-10-08/{report.json,geometry-rgba64.bin,*.spv}`；
+Rust原生两项ignored测试另行通过，日志`/private/tmp/wire-geometry-native-rust-tests.txt`。
+默认release回归271项通过，Clippy all-targets `-D warnings`通过。
+这些都是后端功能证据，`guest_connected=false`；Alice仍需设备、上下文、资源和交换链接入。
+`linked-pass-90.txt`实际重放仍到60,249,414条退休指令、126,117次API，
+停在D3D11CreateDevice，隐藏窗口状态保持真实；不是新的游戏首帧。
 
 ## 版本与 Vulkan 功能差异
 
@@ -195,6 +259,7 @@ geometry / SO / logicOp 等缺失不能通过调低校验就变成支持；
 | 已完成 | 官方 MoltenVK 独立GPU执行；原生DXBC转译 | checked读回、真实设备功能、8个实际内嵌shader的转译结果 |
 | 已完成 | 原生shader库的C边界、资源映射与离屏Draw | malformed container/短输出/跨context拒绝；8shader验证、5pipeline、4096像素读回 |
 | 部分完成 | Win64 COM / factory、adapter；D3D12能力回退 | 真实adapter/引用/布局/失败原子性；Alice到D3D11CreateDevice；下一步device/context与资源 |
+| 部分完成 | GS→compute、持久buffer与展开后光栅化 | 11GS/44组/34,013DWORD、4096像素；仍需VS→GS、更多资源/状态/SO和guest Draw接入 |
 | 之后 | 交换链与离屏Draw，再接Present / visible窗口 | 实际guest命令输出可对照像素，再取得可见游戏首帧 |
 | 同步完成 | Win64 MSG、输入、等待、resize / close | 真实宿主事件进入guest WNDPROC；不能仅展示独立探针窗口 |
 | 首帧后 | 持续运行与CPU/GPU耗时profile | 真实游戏持续负载、首帧时间与帧时间；不以探针替代性能收益 |
@@ -292,6 +357,22 @@ cd wire-out/games64/alice/runtime
 | WIRE_DXBC_VERTEX / WIRE_DXBC_PIXEL | 061ea774 / e8ef222f 对应.dxbc绝对路径 |
 | WIRE_DXBC_COMPUTE | ff9a4e9b 对应.dxbc绝对路径 |
 | WIRE_DXBC_BLIT_VERTEX / WIRE_DXBC_BLIT_PIXEL | 30e1f7ac / aaaff3e4 对应.dxbc绝对路径 |
+| WIRE_GS_FIXTURES | 下述fixture工具生成的目录绝对路径 |
 
-然后运行 `cargo test --release --lib gpu::tests -- --ignored --nocapture`。
+然后运行 `cargo test --release --lib gpu::tests -- --ignored --nocapture --test-threads=1`。
 默认全回归不会隐式加载/tmp中的第三方依赖；原始游戏、DXBC和SPIR-V均不提交入库。
+
+自有GS验证：
+
+```sh
+xcrun clang++ -std=c++17 -O2 -Wall -Wextra -Werror -Wno-unused-private-field \
+  -I /private/tmp/dxbc-spirv-main tests/native_graphics/geometry_fixtures.cpp \
+  /private/tmp/wire-dxbc-spirv-build/libdxbc_spv.a -o wire-out/geometry-fixtures
+wire-out/geometry-fixtures wire-out/geometry-fixtures-2026-10-08
+python3 tools/probe_geometry.py \
+  --backend wire-out/libwire_graphics.dylib \
+  --moltenvk /private/tmp/wire-moltenvk-1.4.2/MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib \
+  --fixtures wire-out/geometry-fixtures-2026-10-08 \
+  --out wire-out/geometry-probe-2026-10-08 \
+  --validator /private/tmp/wire-spirv-tools-build/tools/spirv-val
+```

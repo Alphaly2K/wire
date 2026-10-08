@@ -76,7 +76,7 @@ def main():
                 raise AssertionError(f'{name}: invalid DXBC accepted')
             rejected.append(dict(case=name, error=error.value.decode(errors='replace')))
         invalid('truncated_container', payload[:-1])
-        invalid('unsupported_stage', payload, 8)
+        invalid('geometry_stage_mismatch', payload, 8)
         bad = bytearray(payload)
         struct.pack_into('<I', bad, 32, len(bad) - 4)
         invalid('chunk_outside_container', bad)

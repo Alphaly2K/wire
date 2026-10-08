@@ -1,4 +1,6 @@
 //! Optional host graphics library. Native pointers stay here, never in guest memory.
+mod geometry;
+pub use geometry::{GeometryBatch, GeometryInfo, GeometryIo};
 use std::{
     ffi::{c_char, c_void, CString},
     path::Path,
@@ -50,6 +52,45 @@ type Close = unsafe extern "C" fn(*mut c_void);
 type Compile =
     unsafe extern "C" fn(*mut c_void, *const u8, usize, u32, *mut c_char, usize) -> *mut c_void;
 type ShaderInfo = unsafe extern "C" fn(*mut c_void, *mut View) -> i32;
+type GeometryQuery = unsafe extern "C" fn(*mut c_void, *mut geometry::View) -> i32;
+type GeometryDispatch = unsafe extern "C" fn(
+    *mut c_void,
+    *mut c_void,
+    *const u32,
+    usize,
+    u32,
+    *const BufferBinding,
+    usize,
+    *mut u32,
+    usize,
+    *mut c_char,
+    usize,
+) -> i32;
+type GeometryDraw = unsafe extern "C" fn(
+    *mut c_void,
+    *mut c_void,
+    *mut c_void,
+    *const u32,
+    usize,
+    *const u32,
+    usize,
+    *mut u8,
+    usize,
+    *mut c_char,
+    usize,
+) -> i32;
+type BufferCreate =
+    unsafe extern "C" fn(*mut c_void, *const u8, usize, u32, *mut c_char, usize) -> *mut c_void;
+type BufferWrite =
+    unsafe extern "C" fn(*mut c_void, usize, *const u8, usize, *mut c_char, usize) -> i32;
+type BufferRead =
+    unsafe extern "C" fn(*mut c_void, usize, *mut u8, usize, *mut c_char, usize) -> i32;
+#[repr(C)]
+struct BufferBinding {
+    set: u32,
+    binding: u32,
+    buffer: *mut c_void,
+}
 type Pipeline = unsafe extern "C" fn(
     *mut c_void,
     *mut c_void,
@@ -113,6 +154,13 @@ struct Inner {
     free_shader: Close,
     pipeline: Pipeline,
     blit: Blit,
+    geometry_query: GeometryQuery,
+    geometry_dispatch: GeometryDispatch,
+    geometry_draw: GeometryDraw,
+    buffer_create: BufferCreate,
+    buffer_free: Close,
+    buffer_write: BufferWrite,
+    buffer_read: BufferRead,
     info: AdapterInfo,
 }
 impl Drop for Inner {
@@ -124,6 +172,62 @@ impl Drop for Inner {
 }
 #[derive(Clone)]
 pub struct NativeGraphics(Rc<Inner>);
+pub struct Buffer {
+    graphics: NativeGraphics,
+    handle: NonNull<c_void>,
+    size: usize,
+}
+impl Drop for Buffer {
+    fn drop(&mut self) {
+        unsafe { (self.graphics.0.buffer_free)(self.handle.as_ptr()) };
+    }
+}
+impl Buffer {
+    pub fn write(&mut self, offset: usize, bytes: &[u8]) -> Result<(), String> {
+        if offset > self.size || bytes.len() > self.size - offset {
+            return Err("buffer write range".into());
+        }
+        let mut error = [0u8; 4096];
+        if unsafe {
+            (self.graphics.0.buffer_write)(
+                self.handle.as_ptr(),
+                offset,
+                bytes.as_ptr(),
+                bytes.len(),
+                error.as_mut_ptr().cast(),
+                error.len(),
+            )
+        } == 0
+        {
+            return Err(message(&error));
+        }
+        Ok(())
+    }
+    pub fn read(&self, offset: usize, size: usize) -> Result<Vec<u8>, String> {
+        if offset > self.size || size > self.size - offset {
+            return Err("buffer read range".into());
+        }
+        let mut result = vec![0; size];
+        let mut error = [0u8; 4096];
+        if unsafe {
+            (self.graphics.0.buffer_read)(
+                self.handle.as_ptr(),
+                offset,
+                result.as_mut_ptr(),
+                size,
+                error.as_mut_ptr().cast(),
+                error.len(),
+            )
+        } == 0
+        {
+            return Err(message(&error));
+        }
+        Ok(result)
+    }
+    pub fn size(&self) -> usize {
+        self.size
+    }
+}
 pub struct Shader {
     graphics: NativeGraphics,
     handle: NonNull<c_void>,
@@ -131,6 +235,12 @@ pub struct Shader {
     pub bindings: Vec<Binding>,
     pub stage: u32,
     pub push_bytes: u32,
+    geometry: Option<GeometryInfo>,
+}
+impl Shader {
+    pub fn geometry(&self) -> Option<&GeometryInfo> {
+        self.geometry.as_ref()
+    }
 }
 impl Drop for Shader {
     fn drop(&mut self) {
@@ -165,6 +275,13 @@ impl NativeGraphics {
             let free_shader = library.symbol(b"wire_gpu_shader_free\0")?;
             let pipeline = library.symbol(b"wire_gpu_pipeline\0")?;
             let blit = library.symbol(b"wire_gpu_blit_rgba64\0")?;
+            let geometry_query = library.symbol(b"wire_gpu_geometry_info\0")?;
+            let geometry_dispatch = library.symbol(b"wire_gpu_geometry_dispatch\0")?;
+            let geometry_draw = library.symbol(b"wire_gpu_geometry_draw_rgba64\0")?;
+            let buffer_create = library.symbol(b"wire_gpu_buffer_create\0")?;
+            let buffer_free = library.symbol(b"wire_gpu_buffer_free\0")?;
+            let buffer_write = library.symbol(b"wire_gpu_buffer_write\0")?;
+            let buffer_read = library.symbol(b"wire_gpu_buffer_read\0")?;
             let mut info: Info = std::mem::zeroed();
             let mut error = [0u8; 4096];
             let context = NonNull::new(open(
@@ -193,6 +310,13 @@ impl NativeGraphics {
                 free_shader,
                 pipeline,
                 blit,
+                geometry_query,
+                geometry_dispatch,
+                geometry_draw,
+                buffer_create,
+                buffer_free,
+                buffer_write,
+                buffer_read,
                 info,
             })))
         }
@@ -200,8 +324,32 @@ impl NativeGraphics {
     pub fn adapter(&self) -> &AdapterInfo {
         &self.0.info
     }
+    /// Persistent Vulkan buffer with owned copied data. Usage: CBV=1, storage=2,
+    /// vertex=4, index=8. The native library checks actual device limits.
+    pub fn create_buffer(&self, bytes: &[u8], usage: u32) -> Result<Buffer, String> {
+        if bytes.is_empty() || bytes.len() > 64 * 1024 * 1024 || usage == 0 || usage & !15 != 0 {
+            return Err("buffer size/usage limits".into());
+        }
+        let mut error = [0u8; 4096];
+        let handle = NonNull::new(unsafe {
+            (self.0.buffer_create)(
+                self.0.context.as_ptr(),
+                bytes.as_ptr(),
+                bytes.len(),
+                usage,
+                error.as_mut_ptr().cast(),
+                error.len(),
+            )
+        })
+        .ok_or_else(|| message(&error))?;
+        Ok(Buffer {
+            graphics: self.clone(),
+            handle,
+            size: bytes.len(),
+        })
+    }
     pub fn compile(&self, bytes: &[u8], stage: u32) -> Result<Shader, String> {
-        if !(32..=1024 * 1024).contains(&bytes.len()) || !matches!(stage, 1 | 2 | 4) {
+        if !(32..=1024 * 1024).contains(&bytes.len()) || !matches!(stage, 1 | 2 | 4 | 8) {
             return Err("invalid shader size/stage".into());
         }
         let mut error = [0u8; 4096];
@@ -223,6 +371,7 @@ impl NativeGraphics {
             bindings: Vec::new(),
             stage,
             push_bytes: 0,
+            geometry: None,
         };
         let mut view: View = unsafe { std::mem::zeroed() };
         if unsafe { (self.0.info_fn)(handle.as_ptr(), &mut view) } == 0
@@ -240,6 +389,65 @@ impl NativeGraphics {
                 unsafe { std::slice::from_raw_parts(view.bindings, view.binding_count) }.to_vec();
         }
         shader.push_bytes = view.push_bytes;
+        if stage == 8 {
+            let mut g: geometry::View = unsafe { std::mem::zeroed() };
+            if unsafe { (self.0.geometry_query)(handle.as_ptr(), &mut g) } == 0
+                || g.input_count > 128
+                || g.output_count > 128
+                || (g.input_count != 0 && g.inputs.is_null())
+                || (g.output_count != 0 && g.outputs.is_null())
+                || !(1..=6).contains(&g.input_vertices)
+                || !(1..=1024).contains(&g.max_vertices)
+                || !(1..=32).contains(&g.instances)
+                || g.input_words > 768
+                || g.vertex_words > 128
+                || g.max_vertices * g.vertex_words > 1024
+                || g.invocation_words != 1 + (g.max_vertices + 1) * (g.vertex_words + 1)
+                || !matches!(g.output_primitive, 0 | 1 | 3)
+                || g.reserved != 0
+            {
+                return Err("invalid native geometry metadata".into());
+            }
+            let copy = |p, n| {
+                if n == 0 {
+                    Vec::new()
+                } else {
+                    unsafe { std::slice::from_raw_parts(p, n) }.to_vec()
+                }
+            };
+            let inputs = copy(g.inputs, g.input_count);
+            let outputs = copy(g.outputs, g.output_count);
+            for (list, words) in [(&inputs, g.input_words), (&outputs, g.vertex_words)] {
+                let mut end = 0;
+                for io in list {
+                    if io.array_size == 0
+                        || io.word_offset != end
+                        || !(1..=4).contains(&io.vector_size)
+                        || io.array_dimensions > 2
+                        || !matches!(io.scalar_type, 5 | 9 | 12)
+                    {
+                        return Err("invalid geometry I/O packing".into());
+                    }
+                    end = end
+                        .checked_add(io.array_size)
+                        .ok_or("geometry I/O capacity")?;
+                }
+                if end != words {
+                    return Err("invalid geometry I/O size".into());
+                }
+            }
+            shader.geometry = Some(GeometryInfo {
+                inputs,
+                outputs,
+                input_vertices: g.input_vertices,
+                output_primitive: g.output_primitive,
+                max_vertices: g.max_vertices,
+                instances: g.instances,
+                input_words: g.input_words,
+                vertex_words: g.vertex_words,
+                invocation_words: g.invocation_words,
+            });
+        }
         Ok(shader)
     }
     pub fn validate_pipeline(
@@ -306,11 +514,177 @@ impl NativeGraphics {
         }
         Ok(output)
     }
+    /// Expand a resource-free GS on the GPU and restore list indices on the host.
+    /// Input is packed using the shader's checked geometry metadata.
+    pub fn expand_geometry(
+        &self,
+        shader: &Shader,
+        input: &[u32],
+        primitives: u32,
+    ) -> Result<GeometryBatch, String> {
+        self.expand_geometry_with_buffers(shader, input, primitives, &[])
+    }
+    /// Buffer bindings use GS descriptor set 3 and the reflected binding number.
+    pub fn expand_geometry_with_buffers(
+        &self,
+        shader: &Shader,
+        input: &[u32],
+        primitives: u32,
+        buffers: &[(u32, &Buffer)],
+    ) -> Result<GeometryBatch, String> {
+        if !Rc::ptr_eq(&self.0, &shader.graphics.0) {
+            return Err("shader belongs to another GPU".into());
+        }
+        if buffers.len() > 256 {
+            return Err("GS resource capacity".into());
+        }
+        let mut bindings = Vec::with_capacity(buffers.len());
+        for (binding, buffer) in buffers {
+            if !Rc::ptr_eq(&self.0, &buffer.graphics.0) {
+                return Err("buffer belongs to another GPU".into());
+            }
+            bindings.push(BufferBinding {
+                set: 3,
+                binding: *binding,
+                buffer: buffer.handle.as_ptr(),
+            });
+        }
+        let g = shader
+            .geometry
+            .as_ref()
+            .ok_or("not a geometry expansion shader")?;
+        let size = u64::from(primitives) * u64::from(g.instances) * u64::from(g.invocation_words);
+        if primitives == 0
+            || size > 16 * 1024 * 1024
+            || u64::from(primitives) * u64::from(g.input_words) != input.len() as u64
+        {
+            return Err("GS dispatch buffer/count limits".into());
+        }
+        let mut output = vec![0; size as usize];
+        let mut error = [0u8; 4096];
+        if unsafe {
+            (self.0.geometry_dispatch)(
+                self.0.context.as_ptr(),
+                shader.handle.as_ptr(),
+                input.as_ptr(),
+                input.len(),
+                primitives,
+                bindings.as_ptr(),
+                bindings.len(),
+                output.as_mut_ptr(),
+                output.len(),
+                error.as_mut_ptr().cast(),
+                error.len(),
+            )
+        } == 0
+        {
+            return Err(message(&error));
+        }
+        g.assemble(&output)
+    }
+    /// Rasterize expanded geometry to a 64x64 diagnostic render target using a
+    /// real DXBC pixel shader. This does not present a guest window.
+    pub fn draw_geometry_rgba64(
+        &self,
+        geometry: &Shader,
+        pixel: &Shader,
+        batch: &GeometryBatch,
+    ) -> Result<Vec<u8>, String> {
+        for shader in [geometry, pixel] {
+            if !Rc::ptr_eq(&self.0, &shader.graphics.0) {
+                return Err("shader belongs to another GPU".into());
+            }
+        }
+        let g = geometry
+            .geometry
+            .as_ref()
+            .ok_or("not a geometry expansion shader")?;
+        if batch.output_primitive != g.output_primitive || batch.vertex_words != g.vertex_words {
+            return Err("GS draw output layout mismatch".into());
+        }
+        let mut output = vec![0; 64 * 64 * 4];
+        let mut error = [0u8; 4096];
+        if unsafe {
+            (self.0.geometry_draw)(
+                self.0.context.as_ptr(),
+                geometry.handle.as_ptr(),
+                pixel.handle.as_ptr(),
+                batch.vertices.as_ptr(),
+                batch.vertices.len(),
+                batch.indices.as_ptr(),
+                batch.indices.len(),
+                output.as_mut_ptr(),
+                output.len(),
+                error.as_mut_ptr().cast(),
+                error.len(),
+            )
+        } == 0
+        {
+            return Err(message(&error));
+        }
+        Ok(output)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires explicit external native library, MoltenVK and generated original GS fixtures"]
+    fn geometry_gpu_resources_draw_and_lifetime() {
+        let path = |n| std::path::PathBuf::from(std::env::var_os(n).expect(n));
+        let graphics =
+            NativeGraphics::load(&path("WIRE_NATIVE_GRAPHICS"), &path("WIRE_MOLTENVK")).unwrap();
+        let fixtures = path("WIRE_GS_FIXTURES");
+        let gs = graphics
+            .compile(&std::fs::read(fixtures.join("triangle.dxbc")).unwrap(), 8)
+            .unwrap();
+        let ps = graphics
+            .compile(&std::fs::read(fixtures.join("color.ps.dxbc")).unwrap(), 2)
+            .unwrap();
+        let screen = [-1.0f32, -1., 0., 1., 3., -1., 0., 1., -1., 3., 0., 1.].map(f32::to_bits);
+        let batch = graphics.expand_geometry(&gs, &screen, 1).unwrap();
+        assert_eq!(batch.indices, [0, 1, 2]);
+        assert_eq!(
+            graphics.draw_geometry_rgba64(&gs, &ps, &batch).unwrap(),
+            [64, 128, 191, 255].repeat(4096)
+        );
+        let resource_gs = graphics
+            .compile(
+                &std::fs::read(fixtures.join("constant-buffer.dxbc")).unwrap(),
+                8,
+            )
+            .unwrap();
+        assert!(graphics.expand_geometry(&resource_gs, &screen, 1).is_err());
+        assert!(graphics.create_buffer(&[0; 15], 1).is_err());
+        let mut buffer = graphics.create_buffer(&[0; 16], 1).unwrap();
+        buffer.write(0, &77u32.to_le_bytes()).unwrap();
+        let original = buffer.read(0, 16).unwrap();
+        assert!(buffer.write(14, &[1; 4]).is_err());
+        assert_eq!(buffer.read(0, 16).unwrap(), original);
+        assert!(buffer.read(15, 2).is_err());
+        let batch = graphics
+            .expand_geometry_with_buffers(&resource_gs, &screen, 1, &[(0, &buffer)])
+            .unwrap();
+        let g = resource_gs.geometry.as_ref().unwrap();
+        let id = g.outputs.iter().find(|io| io.location == 1).unwrap();
+        for v in batch.vertices.as_chunks::<6>().0 {
+            assert_eq!(v[id.word_offset as usize + 1], 77);
+        }
+        assert!(graphics
+            .expand_geometry_with_buffers(&resource_gs, &screen, 1, &[(0, &buffer), (0, &buffer)])
+            .is_err());
+        let other =
+            NativeGraphics::load(&path("WIRE_NATIVE_GRAPHICS"), &path("WIRE_MOLTENVK")).unwrap();
+        assert!(other.expand_geometry(&gs, &screen, 1).is_err());
+        let foreign = other.create_buffer(&[0; 16], 1).unwrap();
+        assert!(graphics
+            .expand_geometry_with_buffers(&resource_gs, &screen, 1, &[(0, &foreign)])
+            .is_err());
+        drop(graphics);
+        assert_eq!(buffer.read(0, 16).unwrap(), original);
+        gs.graphics.expand_geometry(&gs, &screen, 1).unwrap();
+    }
     #[test]
     #[ignore = "requires explicit external native library, MoltenVK and isolated DXBC fixtures"]
     fn native_shader_lifetime_validation_and_context_ownership() {

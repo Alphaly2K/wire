@@ -10,10 +10,17 @@ Unity内嵌VS/PS执行64×64离屏Draw，4096个RGBA8像素读回逐通道比较
 此Draw是宿主后端验证，不是guest Present。具体许可、COM/资源边界与复跑见
 [Win64图形接入设计](d3d11-dxvk-moltenvk-design.md)。
 
+2026-10-08继续补齐MoltenVK缺少原生GS的路线：已实现独立GS→compute IR pass，
+11个原创GS、44组输入逐项比较34,013个输出DWORD，覆盖Cut/绕序、adjacency、循环动态索引、
+越界归零、条件零输出、GS实例、CBV与超额发射拒绝。
+持久Vulkan buffer与Rust Rc所有权/跨设备拒绝也已接入；展开结果经过生成的透传VS和真实DXBC PS
+实际DrawIndexed，4096个RGBA8像素符合期望，全部13个GS/VS/PS SPIR-V通过独立验证。
+这是宿主后端补齐，不是完整10_0、guest Draw或Present；SO、VS→GS与更多资源/状态仍待实现。
+
 ## 当前真实结果
 
 AliceToPapa隔离副本推进到 **60,249,414 条退休指令、60,379,506 work、126,117 次已完成API**
-（`linked-pass-88.txt`）。从13条EXE入口开始已实际执行UnityPlayer的TLS/DllMain、EXE入口，
+（最新重放`linked-pass-90.txt`，与pass88/89相同）。从13条EXE入口开始已实际执行UnityPlayer的TLS/DllMain、EXE入口，
 动态加载Mono的TLS/DllMain及合作worker；异常链仍执行真实guest handler与同帧RtlUnwindEx。
 此前curl/SSPI、显示器、HKCU、资源图标、类注册、WNDPROC、DC与目录枚举均已越过。
 本轮`CreateDXGIFactory2`、真实Apple M4 adapter枚举/Desc/引用、D3D12明确失败后的
@@ -268,13 +275,16 @@ cd wire-out/games64/alice/runtime
 
 下一阶段从真实 `D3D11CreateDevice` 开始接设备/资源/能力补齐及消息分发，再以正式窗口和实际 Present 验收；
 不以 LoadLibrary 成功、错误退出0或空窗口当作游戏跑通。
-当前完整release回归通过269项：12 unit、37 differential、9 FPU、26 IR、1 Wasm、109 Win32、75 AMD64。
+当前完整release回归通过271项：14 unit、37 differential、9 FPU、26 IR、1 Wasm、109 Win32、75 AMD64。
 本轮新增4项覆盖COM身份/引用/parent、Win64 Desc布局/高指针、readonly保护、故障原子性、
-private data短buffer、D3D12 named/ordinal/动态查找与真实失败。原生GPU ignored测试另行通过1项，
-包含Rust shader/context/library生命周期、跨context拒绝及实际Draw/readback；两项既有Metal测试
+private data短buffer、D3D12 named/ordinal/动态查找与真实失败。GS新增两个unit测试检查strip/绕序与坏记录。
+原生GPU ignored测试另行通过2项，包含Rust shader/buffer/context/library生命周期、
+跨context拒绝、CBV更新/绑定及实际Draw/readback；两项既有Metal测试
 本轮保持默认ignored，未修改PE32 Metal实现。
 日志：`/private/tmp/wire-native-graphics-all-tests.txt`、`wire-native-graphics-rust-tests.txt`、
 `wire-native-graphics-clippy.txt`。Clippy release all-targets `-D warnings`、format、diff whitespace检查通过。
+本次日志改为`/private/tmp/wire-geometry-{all-tests,native-rust-tests,clippy}.txt`；
+GS证据在`wire-out/geometry-probe-2026-10-08/`。
 默认cargo build / Wire.app没有捆绑第三方GPU二进制；backend构建与验证详见图形设计文档。
 旧文档的13条入口/无 Win64 runtime 是历史状态。
 

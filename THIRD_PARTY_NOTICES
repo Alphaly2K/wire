@@ -80,6 +80,10 @@ license notice obligations.
   component. Win64 DXGI COM code is independently implemented; GUID/layout/slot
   facts were checked against fixed DXVK Native directx headers, and D3D12
   ordinals against Wine 10.0 d3d12.spec. Those files are not copied.
+  src/platform/native_geometry.h implements GS-to-compute lowering independently
+  through the unchanged compiler's IR API. tests/native_graphics/geometry_fixtures.cpp
+  contains original test shaders and calls its parser/signature/DXBC hash helpers.
+  No upstream shader, lowering implementation or source patch is copied.
 
 ## Test dependencies (not linked into wire)
 

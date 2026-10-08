@@ -36,7 +36,8 @@ def main():
     subprocess.run(args, check=True)
     # These hashes identify the inputs supplied by the caller; they do not
     # certify a revision. Use unchanged upstream archives/checked checkouts.
-    inputs = [root / 'src/platform/native_graphics.cpp', root / 'src/platform/native_graphics.h', library]
+    inputs = [root / 'src/platform/native_graphics.cpp', root / 'src/platform/native_graphics.h',
+              root / 'src/platform/native_geometry.h', library]
     manifest = dict(target='macOS ARM64', command=args,
                     inputs={str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs},
                     output_sha256=hashlib.sha256(out.read_bytes()).hexdigest())

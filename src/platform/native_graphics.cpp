@@ -4,6 +4,7 @@
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
 #include "native_graphics.h"
+#include "native_geometry.h"
 #include "dxbc/dxbc_api.h"
 #include "spirv/spirv_builder.h"
 #include "ir/passes/ir_pass_lower_io.h"
@@ -22,6 +23,9 @@
 static_assert(sizeof(WireGpuInfo) == 312, "host adapter ABI");
 static_assert(sizeof(WireBinding) == 16, "host descriptor ABI");
 static_assert(sizeof(WireShaderInfo) == 40, "host shader ABI (64-bit host only)");
+static_assert(sizeof(WireGeometryIo) == 32, "geometry I/O ABI");
+static_assert(sizeof(WireGeometryInfo) == 64, "geometry ABI (64-bit host only)");
+static_assert(sizeof(WireBufferBinding) == 16, "buffer binding ABI (64-bit host only)");
 
 namespace {
 using namespace dxbc_spv;
@@ -138,6 +142,7 @@ std::unique_ptr<Context> open_gpu(const char *path, WireGpuInfo& info) {
   enabled.shaderOutputViewportIndex = v12.shaderOutputViewportIndex;
   enabled.shaderOutputLayer = v12.shaderOutputLayer;
   VkPhysicalDeviceFeatures core = {};
+  core.robustBufferAccess = features.features.robustBufferAccess;
   core.shaderStorageImageWriteWithoutFormat = features.features.shaderStorageImageWriteWithoutFormat;
   core.shaderStorageImageReadWithoutFormat = features.features.shaderStorageImageReadWithoutFormat;
   core.shaderClipDistance = features.features.shaderClipDistance;
@@ -178,11 +183,14 @@ struct Shader {
   uint32_t stage = 0, push_bytes = 0;
   bool sampled_rgba2d = true;
   std::map<std::pair<uint32_t,uint32_t>,std::vector<uint32_t>> inputs, outputs;
+  wire_geometry::Geometry geometry;
 };
 struct Mapping : spirv::ResourceMapping {
   uint32_t set;
-  explicit Mapping(uint32_t stage) : set(stage == 1 ? 0 : stage == 2 ? 1 : 2) { }
+  explicit Mapping(uint32_t stage) : set(stage == 1 ? 0 : stage == 2 ? 1 : stage == 4 ? 2 : 3) { }
   spirv::DescriptorBinding mapDescriptor(ir::ScalarType type, uint32_t space, uint32_t reg) override {
+    if (space == 1 && set == 3 && type == ir::ScalarType::eUav && reg < 2)
+      return {3,166+reg};
     if (space) throw std::runtime_error("SM5.1 register spaces unsupported");
     uint32_t base = 0, limit = 0;
     switch (type) {
@@ -359,23 +367,27 @@ void literal_workgroup_size(std::vector<uint32_t>& w) {
 }
 std::unique_ptr<Shader> compile(Context& c, const uint8_t *data, size_t size, uint32_t stage) {
   validate_dxbc(data, size);
-  if (stage != 1 && stage != 2 && stage != 4) throw std::runtime_error("only VS / PS / CS supported");
+  if (stage != 1 && stage != 2 && stage != 4 && stage != 8) throw std::runtime_error("only VS / PS / CS / emulated GS supported");
   LoggerCapture logger;
   dxbc::Converter::Options options;
   ir::CompileOptions legalization;
   legalization.min16Options.enableFloat16 = false; legalization.min16Options.enableInt16 = false;
   auto builder = dxbc::compileShaderToLegalizedIr(data, size, options, legalization);
   if (!builder) throw std::runtime_error("DXBC conversion failed: " + logger.messages);
-  uint32_t expected = stage == 1 ? uint32_t(ir::ShaderStage::eVertex) : stage == 2 ? uint32_t(ir::ShaderStage::ePixel) : uint32_t(ir::ShaderStage::eCompute);
+  uint32_t expected = stage == 1 ? uint32_t(ir::ShaderStage::eVertex) : stage == 2 ? uint32_t(ir::ShaderStage::ePixel) : stage == 4 ? uint32_t(ir::ShaderStage::eCompute) : uint32_t(ir::ShaderStage::eGeometry);
   uint32_t entries = 0;
+  ir::SsaDef entry;
   auto declarations = builder->getDeclarations();
   for (auto it = declarations.first; it != declarations.second; ++it) {
     const auto& op = *it;
     if (op.getOpCode() != ir::OpCode::eEntryPoint) continue;
     if (uint32_t(op.getOperand(op.getFirstLiteralOperandIndex())) != expected) throw std::runtime_error("shader stage mismatch");
     entries++;
+    entry = op.getDef();
   }
   if (entries != 1) throw std::runtime_error("shader entry point count");
+  wire_geometry::Geometry geometry;
+  if (stage == 8) geometry = wire_geometry::lower(*builder,entry);
   ir::LowerIoPass io(*builder); io.lowerSampleCountToSpecConstant(0);
   Mapping mapping(stage);
   spirv::SpirvBuilder::Options spv;
@@ -389,6 +401,7 @@ std::unique_ptr<Shader> compile(Context& c, const uint8_t *data, size_t size, ui
   spv.supportsZeroInfNanPreserveF32 = c.floats.shaderSignedZeroInfNanPreserveFloat32;
   spirv::SpirvBuilder lower(*builder, mapping, spv); lower.buildSpirvBinary();
   auto result = std::make_unique<Shader>(); result->owner = &c; result->stage = stage; result->words = lower.getSpirvBinary();
+  result->geometry = std::move(geometry);
   if (result->words.size() > 4 * 1024 * 1024) throw std::runtime_error("SPIR-V output capacity");
   literal_workgroup_size(result->words); reflect(*result);
   return result;
@@ -397,7 +410,7 @@ std::unique_ptr<Shader> compile(Context& c, const uint8_t *data, size_t size, ui
 struct PipelineScope {
   Context& c;
   std::vector<VkShaderModule> modules;
-  std::array<VkDescriptorSetLayout, 3> sets = {};
+  std::array<VkDescriptorSetLayout, 4> sets = {};
   VkPipelineLayout layout = VK_NULL_HANDLE;
   VkRenderPass pass = VK_NULL_HANDLE;
   VkPipeline pipeline = VK_NULL_HANDLE;
@@ -423,23 +436,25 @@ struct PipelineScope {
 VkShaderStageFlagBits vk_stage(uint32_t stage) {
   return stage == 1 ? VK_SHADER_STAGE_VERTEX_BIT : stage == 2 ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_COMPUTE_BIT;
 }
-void build_pipeline(Context& c, PipelineScope& p, Shader *vertex, Shader *pixel, Shader *compute) {
+void build_pipeline(Context& c, PipelineScope& p, Shader *vertex, Shader *pixel, Shader *compute,
+                    const std::vector<VkVertexInputAttributeDescription> *vertex_attributes = nullptr,
+                    uint32_t vertex_stride = 48, VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) {
   for (auto s : {vertex, pixel, compute})
     if (s && s->owner != &c) throw std::runtime_error("shader belongs to another GPU");
   if ((compute && (vertex || pixel)) || (!compute && (!vertex || !pixel))) throw std::runtime_error("invalid pipeline stage combination");
-  if ((vertex && vertex->stage != 1) || (pixel && pixel->stage != 2) || (compute && compute->stage != 4)) throw std::runtime_error("pipeline stage mismatch");
+  if ((vertex && vertex->stage != 1) || (pixel && pixel->stage != 2) || (compute && compute->stage != 4 && compute->stage != 8)) throw std::runtime_error("pipeline stage mismatch");
   if (pixel) for (const auto& input : pixel->inputs) {
     auto found = vertex->outputs.find(input.first);
     if (found == vertex->outputs.end() || found->second != input.second)
       throw std::runtime_error("shader I/O location mismatch");
   }
-  std::array<std::map<uint32_t,VkDescriptorSetLayoutBinding>,3> bindings;
+  std::array<std::map<uint32_t,VkDescriptorSetLayoutBinding>,4> bindings;
   uint32_t push_bytes = 0; VkShaderStageFlags push_stages = 0;
   std::vector<VkPipelineShaderStageCreateInfo> stages;
   for (Shader *s : {vertex, pixel, compute}) {
     if (!s) continue;
     for (auto b : s->bindings) {
-      if (b.set >= 3) throw std::runtime_error("descriptor set capacity");
+      if (b.set >= 4) throw std::runtime_error("descriptor set capacity");
       if (bindings[b.set].count(b.binding)) throw std::runtime_error("duplicate descriptor binding");
       bindings[b.set][b.binding] = {b.binding, VkDescriptorType(b.descriptor_type), b.count, vk_stage(s->stage), nullptr};
     }
@@ -454,7 +469,7 @@ void build_pipeline(Context& c, PipelineScope& p, Shader *vertex, Shader *pixel,
     si.stage = vk_stage(s->stage); si.module = module; si.pName = "main"; stages.push_back(si);
   }
   if (push_bytes > c.properties.limits.maxPushConstantsSize) throw std::runtime_error("push constant capacity");
-  for (uint32_t set = 0; set < 3; set++) {
+  for (uint32_t set = 0; set < 4; set++) {
     std::vector<VkDescriptorSetLayoutBinding> entries;
     for (auto b : bindings[set]) entries.push_back(b.second);
     VkDescriptorSetLayoutCreateInfo ci = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
@@ -463,7 +478,7 @@ void build_pipeline(Context& c, PipelineScope& p, Shader *vertex, Shader *pixel,
   }
   VkPushConstantRange push = { push_stages, 0, push_bytes };
   VkPipelineLayoutCreateInfo layout = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
-  layout.setLayoutCount = 3; layout.pSetLayouts = p.sets.data();
+  layout.setLayoutCount = 4; layout.pSetLayouts = p.sets.data();
   layout.pushConstantRangeCount = push_bytes ? 1 : 0; layout.pPushConstantRanges = push_bytes ? &push : nullptr;
   check(c.fn<PFN_vkCreatePipelineLayout>("vkCreatePipelineLayout")(c.device, &layout, nullptr, &p.layout), "pipeline layout");
   if (compute) {
@@ -486,12 +501,13 @@ void build_pipeline(Context& c, PipelineScope& p, Shader *vertex, Shader *pixel,
   // locations, and no draw/vertex read is executed by this operation.
   std::array<VkVertexInputAttributeDescription, 3> attributes;
   for (uint32_t i = 0; i < 3; i++) attributes[i] = {i, 0, VK_FORMAT_R32G32B32A32_SFLOAT, i*16};
-  VkVertexInputBindingDescription binding = {0,48,VK_VERTEX_INPUT_RATE_VERTEX};
+  VkVertexInputBindingDescription binding = {0,vertex_stride,VK_VERTEX_INPUT_RATE_VERTEX};
   VkPipelineVertexInputStateCreateInfo vi = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
   vi.vertexBindingDescriptionCount = 1; vi.pVertexBindingDescriptions = &binding;
-  vi.vertexAttributeDescriptionCount = 3; vi.pVertexAttributeDescriptions = attributes.data();
+  vi.vertexAttributeDescriptionCount = vertex_attributes ? uint32_t(vertex_attributes->size()) : 3;
+  vi.pVertexAttributeDescriptions = vertex_attributes ? vertex_attributes->data() : attributes.data();
   VkPipelineInputAssemblyStateCreateInfo ia = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
-  ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  ia.topology = topology;
   VkViewport viewport = {0,0,64,64,0,1}; VkRect2D scissor = {{0,0},{64,64}};
   VkPipelineViewportStateCreateInfo vs = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
   vs.viewportCount = 1; vs.pViewports = &viewport; vs.scissorCount = 1; vs.pScissors = &scissor;
@@ -573,6 +589,47 @@ VkDeviceMemory allocate(Context& c, const VkMemoryRequirements& req, VkMemoryPro
   VkDeviceMemory memory = VK_NULL_HANDLE;
   check(c.fn<PFN_vkAllocateMemory>("vkAllocateMemory")(c.device,&info,nullptr,&memory),"allocate GPU memory");
   return memory;
+}
+struct Buffer {
+  Context& c;
+  VkBuffer handle = VK_NULL_HANDLE;
+  VkDeviceMemory memory = VK_NULL_HANDLE;
+  void *mapped = nullptr;
+  size_t size;
+  uint32_t usage;
+  PFN_vkDestroyBuffer destroy;
+  PFN_vkFreeMemory free_memory;
+  PFN_vkUnmapMemory unmap;
+  Buffer(Context& context, size_t bytes, uint32_t flags) : c(context), size(bytes), usage(flags),
+    destroy(c.fn<PFN_vkDestroyBuffer>("vkDestroyBuffer")),
+    free_memory(c.fn<PFN_vkFreeMemory>("vkFreeMemory")),
+    unmap(c.fn<PFN_vkUnmapMemory>("vkUnmapMemory")) { }
+  ~Buffer() {
+    if (mapped) unmap(c.device,memory);
+    if (handle) destroy(c.device,handle,nullptr);
+    if (memory) free_memory(c.device,memory,nullptr);
+  }
+};
+std::unique_ptr<Buffer> create_buffer(Context& c, const uint8_t *data, size_t size, uint32_t usage) {
+  if (!size || size > 64*1024*1024 || !usage || (usage&~15u) ||
+      ((usage&1) && (size%16 || size > c.properties.limits.maxUniformBufferRange)) ||
+      ((usage&2) && size > c.properties.limits.maxStorageBufferRange))
+    throw std::runtime_error("buffer size/usage limits");
+  auto b = std::make_unique<Buffer>(c,size,usage);
+  VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO}; bi.size = size;
+  bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  if (usage&1) bi.usage |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+  if (usage&2) bi.usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+  if (usage&4) bi.usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+  if (usage&8) bi.usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+  check(c.fn<PFN_vkCreateBuffer>("vkCreateBuffer")(c.device,&bi,nullptr,&b->handle),"create owned buffer");
+  VkMemoryRequirements req;
+  c.fn<PFN_vkGetBufferMemoryRequirements>("vkGetBufferMemoryRequirements")(c.device,b->handle,&req);
+  b->memory = allocate(c,req,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  check(c.fn<PFN_vkBindBufferMemory>("vkBindBufferMemory")(c.device,b->handle,b->memory,0),"bind owned buffer");
+  check(c.fn<PFN_vkMapMemory>("vkMapMemory")(c.device,b->memory,0,VK_WHOLE_SIZE,0,&b->mapped),"map owned buffer");
+  if (data) std::memcpy(b->mapped,data,size); else std::memset(b->mapped,0,size);
+  return b;
 }
 void blit_rgba64(Context& c, Shader *vertex, Shader *pixel, const uint8_t *source, size_t size,
                  uint8_t *output, size_t capacity) {
@@ -705,6 +762,257 @@ void blit_rgba64(Context& c, Shader *vertex, Shader *pixel, const uint8_t *sourc
   b.pending = false;
   std::memcpy(output,static_cast<uint8_t*>(b.mapped)+read_offset,bytes);
 }
+void geometry_dispatch(Context& c, Shader *shader, const uint32_t *input, size_t input_words,
+                       uint32_t primitives, const WireBufferBinding *resources, size_t resource_count,
+                       uint32_t *output, size_t output_words) {
+  if (!shader || shader->owner != &c || shader->stage != 8)
+    throw std::runtime_error("GS shader/context mismatch");
+  const auto& g = shader->geometry;
+  uint64_t required_input = uint64_t(primitives)*g.input_words;
+  uint64_t required_output = uint64_t(primitives)*g.instances*g.invocation_words;
+  if (!primitives || primitives > c.properties.limits.maxComputeWorkGroupCount[0] ||
+      g.instances > c.properties.limits.maxComputeWorkGroupCount[1] ||
+      required_input != input_words || required_output > output_words || !output ||
+      (input_words && !input) || required_input > 16*1024*1024 || required_output > 16*1024*1024)
+    throw std::runtime_error("GS dispatch buffer/count limits");
+  if (shader->push_bytes) throw std::runtime_error("GS push data dispatch not implemented");
+  if (resource_count > 256 || (resource_count && !resources)) throw std::runtime_error("GS resource capacity");
+  std::map<std::pair<uint32_t,uint32_t>,Buffer*> supplied;
+  for (size_t i = 0; i < resource_count; i++) {
+    const auto& r = resources[i]; auto b = static_cast<Buffer*>(r.buffer);
+    if (!b || &b->c != &c || r.set != 3 || r.binding >= 166 || !supplied.emplace(std::make_pair(r.set,r.binding),b).second)
+      throw std::runtime_error("GS buffer context/binding mismatch");
+  }
+  size_t matched = 0;
+  uint32_t uniforms = 0, storage = 0;
+  for (auto binding : shader->bindings) {
+    if (binding.set != 3 || binding.count != 1) throw std::runtime_error("GS descriptor array/set not implemented");
+    bool internal = binding.binding == 166 || binding.binding == 167;
+    if (internal) {
+      if (binding.descriptor_type != VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) throw std::runtime_error("GS internal buffer type");
+      storage++; continue;
+    }
+    auto found = supplied.find({binding.set,binding.binding});
+    if (found == supplied.end()) throw std::runtime_error("GS required buffer not bound");
+    if (binding.binding < 14 && binding.descriptor_type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && (found->second->usage&1)) uniforms++;
+    else if (binding.binding >= 14 && binding.binding < 142 &&
+        binding.descriptor_type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && (found->second->usage&2)) storage++;
+    else throw std::runtime_error("GS descriptor type/usage not implemented");
+    matched++;
+  }
+  if (matched != resource_count) throw std::runtime_error("GS unused buffer binding");
+  VkDeviceSize alignment = std::max(VkDeviceSize(4),c.properties.limits.minStorageBufferOffsetAlignment);
+  VkDeviceSize input_bytes = std::max(VkDeviceSize(4),VkDeviceSize(input_words)*4);
+  VkDeviceSize output_offset = (input_bytes+alignment-1)/alignment*alignment;
+  VkDeviceSize output_bytes = required_output*4;
+  if (input_bytes > c.properties.limits.maxStorageBufferRange || output_bytes > c.properties.limits.maxStorageBufferRange)
+    throw std::runtime_error("GS storage buffer range");
+  PipelineScope pipeline(c); build_pipeline(c,pipeline,nullptr,nullptr,shader);
+  BlitScope b(c);
+  VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+  bi.size = output_offset+output_bytes; bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+  check(c.fn<PFN_vkCreateBuffer>("vkCreateBuffer")(c.device,&bi,nullptr,&b.buffer),"GS storage buffer");
+  VkMemoryRequirements req;
+  c.fn<PFN_vkGetBufferMemoryRequirements>("vkGetBufferMemoryRequirements")(c.device,b.buffer,&req);
+  b.buffer_memory = allocate(c,req,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  check(c.fn<PFN_vkBindBufferMemory>("vkBindBufferMemory")(c.device,b.buffer,b.buffer_memory,0),"GS bind buffer");
+  check(c.fn<PFN_vkMapMemory>("vkMapMemory")(c.device,b.buffer_memory,0,VK_WHOLE_SIZE,0,&b.mapped),"GS map buffer");
+  std::memset(b.mapped,0,size_t(bi.size));
+  if (input_words) std::memcpy(b.mapped,input,input_words*4);
+  std::vector<VkDescriptorPoolSize> pool_sizes;
+  if (storage) pool_sizes.push_back({VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,storage});
+  if (uniforms) pool_sizes.push_back({VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,uniforms});
+  VkDescriptorPoolCreateInfo pool = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+  pool.maxSets = 1; pool.poolSizeCount = uint32_t(pool_sizes.size()); pool.pPoolSizes = pool_sizes.data();
+  check(c.fn<PFN_vkCreateDescriptorPool>("vkCreateDescriptorPool")(c.device,&pool,nullptr,&b.descriptors),"GS descriptor pool");
+  VkDescriptorSetAllocateInfo da = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+  da.descriptorPool = b.descriptors; da.descriptorSetCount = 1; da.pSetLayouts = &pipeline.sets[3];
+  VkDescriptorSet set;
+  check(c.fn<PFN_vkAllocateDescriptorSets>("vkAllocateDescriptorSets")(c.device,&da,&set),"GS descriptor set");
+  std::vector<VkDescriptorBufferInfo> infos; infos.reserve(shader->bindings.size());
+  std::vector<VkWriteDescriptorSet> writes;
+  for (auto binding : shader->bindings) {
+    VkWriteDescriptorSet write = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = set; write.dstBinding = binding.binding; write.descriptorCount = 1;
+    write.descriptorType = VkDescriptorType(binding.descriptor_type);
+    if (binding.binding == 166) infos.push_back({b.buffer,0,input_bytes});
+    else if (binding.binding == 167) infos.push_back({b.buffer,output_offset,output_bytes});
+    else {
+      auto resource = supplied.at({binding.set,binding.binding});
+      infos.push_back({resource->handle,0,resource->size});
+    }
+    write.pBufferInfo = &infos.back();
+    writes.push_back(write);
+  }
+  c.fn<PFN_vkUpdateDescriptorSets>("vkUpdateDescriptorSets")(c.device,uint32_t(writes.size()),writes.data(),0,nullptr);
+  VkCommandPoolCreateInfo pi = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+  pi.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT; pi.queueFamilyIndex = c.family;
+  check(c.fn<PFN_vkCreateCommandPool>("vkCreateCommandPool")(c.device,&pi,nullptr,&b.commands),"GS command pool");
+  VkCommandBufferAllocateInfo ca = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+  ca.commandPool = b.commands; ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ca.commandBufferCount = 1;
+  VkCommandBuffer command;
+  check(c.fn<PFN_vkAllocateCommandBuffers>("vkAllocateCommandBuffers")(c.device,&ca,&command),"GS command buffer");
+  VkCommandBufferBeginInfo begin = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+  begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  check(c.fn<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer")(command,&begin),"GS begin command");
+  c.fn<PFN_vkCmdBindPipeline>("vkCmdBindPipeline")(command,VK_PIPELINE_BIND_POINT_COMPUTE,pipeline.pipeline);
+  c.fn<PFN_vkCmdBindDescriptorSets>("vkCmdBindDescriptorSets")(command,VK_PIPELINE_BIND_POINT_COMPUTE,pipeline.layout,3,1,&set,0,nullptr);
+  c.fn<PFN_vkCmdDispatch>("vkCmdDispatch")(command,primitives,g.instances,1);
+  VkBufferMemoryBarrier host = {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+  host.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT; host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+  host.srcQueueFamilyIndex = host.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  host.buffer = b.buffer; host.offset = output_offset; host.size = output_bytes;
+  VkMemoryBarrier resources_host = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+  resources_host.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT; resources_host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+  c.fn<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(command,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&resources_host,1,&host,0,nullptr);
+  check(c.fn<PFN_vkEndCommandBuffer>("vkEndCommandBuffer")(command),"GS end command");
+  VkFenceCreateInfo fi = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+  check(c.fn<PFN_vkCreateFence>("vkCreateFence")(c.device,&fi,nullptr,&b.fence),"GS fence");
+  VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO}; submit.commandBufferCount = 1; submit.pCommandBuffers = &command;
+  check(c.fn<PFN_vkQueueSubmit>("vkQueueSubmit")(c.queue,1,&submit,b.fence),"GS submit"); b.pending = true;
+  check(c.fn<PFN_vkWaitForFences>("vkWaitForFences")(c.device,1,&b.fence,VK_TRUE,5000000000ull),"GS wait"); b.pending = false;
+  auto result = reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(b.mapped)+output_offset);
+  for (uint64_t i = 0; i < uint64_t(primitives)*g.instances; i++)
+    if (result[i*g.invocation_words] > g.max_vertices) throw std::runtime_error("GS emitted more than declared max vertices");
+  std::memcpy(output,result,size_t(output_bytes));
+}
+Shader geometry_vertex_shader(Context& c, const wire_geometry::Geometry& g,
+                               std::vector<VkVertexInputAttributeDescription>& attributes) {
+  using namespace ir;
+  Builder b;
+  auto function = b.add(Op::Function({}));
+  auto entry = b.add(Op::EntryPoint(function,ShaderStage::eVertex));
+  b.add(Op::Label());
+  bool position = false;
+  for (uint32_t i = 0; i < g.outputs.size(); i++) {
+    const auto& io = g.outputs[i];
+    if (io.array_dimensions || !io.array_size || io.array_size != io.vector_size ||
+        io.vector_size > 4 || i >= c.properties.limits.maxVertexInputAttributes)
+      throw std::runtime_error("GS forwarding VS aggregate/attribute limit");
+    auto scalar = ScalarType(io.scalar_type);
+    Type type(scalar,io.array_size);
+    SsaDef output;
+    if (io.built_in == uint32_t(BuiltIn::ePosition)) {
+      if (type != Type(ScalarType::eF32,4) || position) throw std::runtime_error("GS forwarding position type");
+      position = true; output = b.add(Op::DclOutputBuiltIn(type,entry,BuiltIn::ePosition));
+    } else if (io.built_in == UINT32_MAX) {
+      output = b.add(Op::DclOutput(type,entry,io.location,io.component));
+    } else throw std::runtime_error("GS forwarding built-in not implemented");
+    const std::array<VkFormat,4> floats = {VK_FORMAT_R32_SFLOAT,VK_FORMAT_R32G32_SFLOAT,VK_FORMAT_R32G32B32_SFLOAT,VK_FORMAT_R32G32B32A32_SFLOAT};
+    const std::array<VkFormat,4> uints = {VK_FORMAT_R32_UINT,VK_FORMAT_R32G32_UINT,VK_FORMAT_R32G32B32_UINT,VK_FORMAT_R32G32B32A32_UINT};
+    const std::array<VkFormat,4> ints = {VK_FORMAT_R32_SINT,VK_FORMAT_R32G32_SINT,VK_FORMAT_R32G32B32_SINT,VK_FORMAT_R32G32B32A32_SINT};
+    VkFormat format = scalar == ScalarType::eF32 ? floats[io.array_size-1] : scalar == ScalarType::eU32 ? uints[io.array_size-1] : ints[io.array_size-1];
+    attributes.push_back({i,0,format,io.word_offset*4});
+    auto input = b.add(Op::DclInput(type,entry,i,0));
+    b.add(Op::OutputStore(output,{},b.add(Op::InputLoad(type,input,{}))));
+  }
+  if (!position) throw std::runtime_error("GS forwarding requires position");
+  if (g.output_primitive == 0) {
+    auto point = b.add(Op::DclOutputBuiltIn(ScalarType::eF32,entry,BuiltIn::ePointSize));
+    b.add(Op::OutputStore(point,{},b.makeConstant(1.0f)));
+  }
+  b.add(Op::Return()); b.add(Op::FunctionEnd());
+  Mapping mapping(1); spirv::SpirvBuilder::Options options; options.includeDebugNames = false;
+  spirv::SpirvBuilder compiler(b,mapping,options); compiler.buildSpirvBinary();
+  Shader shader; shader.owner = &c; shader.stage = 1; shader.words = compiler.getSpirvBinary();
+  reflect(shader); return shader;
+}
+void geometry_draw_rgba64(Context& c, Shader *geometry, Shader *pixel,
+    const uint32_t *vertices, size_t words, const uint32_t *indices, size_t count,
+    uint8_t *output, size_t capacity) {
+  constexpr size_t bytes = 64*64*4;
+  if (!geometry || geometry->owner != &c || geometry->stage != 8 ||
+      !pixel || pixel->owner != &c || pixel->stage != 2)
+    throw std::runtime_error("GS draw shader/context mismatch");
+  const auto& g = geometry->geometry;
+  if (!output || capacity < bytes || !g.vertex_words || words%g.vertex_words ||
+      words > 16*1024*1024 || count > 16*1024*1024 || (words && !vertices) || (count && !indices))
+    throw std::runtime_error("GS draw buffer limits");
+  uint32_t arity = g.output_primitive == 0 ? 1 : g.output_primitive == 1 ? 2 : 3;
+  if (count%arity) throw std::runtime_error("GS list index arity");
+  for (size_t i = 0; i < count; i++) if (indices[i] >= words/g.vertex_words)
+    throw std::runtime_error("GS draw index outside vertex buffer");
+  if (!pixel->bindings.empty() || pixel->push_bytes || pixel->outputs.size() != 1 ||
+      pixel->outputs.at({0,0}) != std::vector<uint32_t>({22,32,4}))
+    throw std::runtime_error("GS draw PS resources/output not implemented");
+  std::vector<VkVertexInputAttributeDescription> attributes;
+  auto vertex = geometry_vertex_shader(c,g,attributes);
+  PipelineScope p(c);
+  VkPrimitiveTopology topology = arity == 1 ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST : arity == 2 ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  build_pipeline(c,p,&vertex,pixel,nullptr,&attributes,g.vertex_words*4,topology);
+  BlitScope b(c);
+  VkDeviceSize index_offset = VkDeviceSize(words)*4;
+  VkDeviceSize read_offset = std::max(VkDeviceSize(256),(index_offset+count*4+255)/256*256);
+  VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+  bi.size = read_offset+bytes; bi.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT|VK_BUFFER_USAGE_INDEX_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  check(c.fn<PFN_vkCreateBuffer>("vkCreateBuffer")(c.device,&bi,nullptr,&b.buffer),"GS draw buffer");
+  VkMemoryRequirements req;
+  c.fn<PFN_vkGetBufferMemoryRequirements>("vkGetBufferMemoryRequirements")(c.device,b.buffer,&req);
+  b.buffer_memory = allocate(c,req,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  check(c.fn<PFN_vkBindBufferMemory>("vkBindBufferMemory")(c.device,b.buffer,b.buffer_memory,0),"GS draw bind buffer");
+  check(c.fn<PFN_vkMapMemory>("vkMapMemory")(c.device,b.buffer_memory,0,VK_WHOLE_SIZE,0,&b.mapped),"GS draw map");
+  if (words) std::memcpy(b.mapped,vertices,words*4);
+  if (count) std::memcpy(static_cast<uint8_t*>(b.mapped)+index_offset,indices,count*4);
+  VkImageCreateInfo ii = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO}; ii.imageType = VK_IMAGE_TYPE_2D;
+  ii.format = VK_FORMAT_R8G8B8A8_UNORM; ii.extent = {64,64,1}; ii.mipLevels = 1; ii.arrayLayers = 1;
+  ii.samples = VK_SAMPLE_COUNT_1_BIT; ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+  ii.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+  check(c.fn<PFN_vkCreateImage>("vkCreateImage")(c.device,&ii,nullptr,&b.images[1]),"GS render target");
+  c.fn<PFN_vkGetImageMemoryRequirements>("vkGetImageMemoryRequirements")(c.device,b.images[1],&req);
+  b.image_memory[1] = allocate(c,req,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  check(c.fn<PFN_vkBindImageMemory>("vkBindImageMemory")(c.device,b.images[1],b.image_memory[1],0),"GS bind render target");
+  VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+  vi.image = b.images[1]; vi.viewType = VK_IMAGE_VIEW_TYPE_2D; vi.format = ii.format;
+  vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+  check(c.fn<PFN_vkCreateImageView>("vkCreateImageView")(c.device,&vi,nullptr,&b.views[1]),"GS render target view");
+  VkFramebufferCreateInfo fi = {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+  fi.renderPass = p.pass; fi.attachmentCount = 1; fi.pAttachments = &b.views[1]; fi.width = 64; fi.height = 64; fi.layers = 1;
+  check(c.fn<PFN_vkCreateFramebuffer>("vkCreateFramebuffer")(c.device,&fi,nullptr,&b.framebuffer),"GS framebuffer");
+  VkCommandPoolCreateInfo pi = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+  pi.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT; pi.queueFamilyIndex = c.family;
+  check(c.fn<PFN_vkCreateCommandPool>("vkCreateCommandPool")(c.device,&pi,nullptr,&b.commands),"GS draw command pool");
+  VkCommandBufferAllocateInfo ca = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+  ca.commandPool = b.commands; ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ca.commandBufferCount = 1;
+  VkCommandBuffer command;
+  check(c.fn<PFN_vkAllocateCommandBuffers>("vkAllocateCommandBuffers")(c.device,&ca,&command),"GS draw command");
+  VkCommandBufferBeginInfo begin = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO}; begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  check(c.fn<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer")(command,&begin),"GS draw begin");
+  VkClearValue clear = {}; clear.color.float32[3] = 1;
+  VkRenderPassBeginInfo render = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+  render.renderPass = p.pass; render.framebuffer = b.framebuffer; render.renderArea = {{0,0},{64,64}};
+  render.clearValueCount = 1; render.pClearValues = &clear;
+  c.fn<PFN_vkCmdBeginRenderPass>("vkCmdBeginRenderPass")(command,&render,VK_SUBPASS_CONTENTS_INLINE);
+  c.fn<PFN_vkCmdBindPipeline>("vkCmdBindPipeline")(command,VK_PIPELINE_BIND_POINT_GRAPHICS,p.pipeline);
+  if (count) {
+    VkDeviceSize offset = 0;
+    c.fn<PFN_vkCmdBindVertexBuffers>("vkCmdBindVertexBuffers")(command,0,1,&b.buffer,&offset);
+    c.fn<PFN_vkCmdBindIndexBuffer>("vkCmdBindIndexBuffer")(command,b.buffer,index_offset,VK_INDEX_TYPE_UINT32);
+    c.fn<PFN_vkCmdDrawIndexed>("vkCmdDrawIndexed")(command,uint32_t(count),1,0,0,0);
+  }
+  c.fn<PFN_vkCmdEndRenderPass>("vkCmdEndRenderPass")(command);
+  VkImageMemoryBarrier transition = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+  transition.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; transition.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+  transition.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; transition.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+  transition.srcQueueFamilyIndex = transition.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  transition.image = b.images[1]; transition.subresourceRange = vi.subresourceRange;
+  auto barrier = c.fn<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
+  barrier(command,VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,0,nullptr,1,&transition);
+  VkBufferImageCopy copy = {}; copy.bufferOffset = read_offset;
+  copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT,0,0,1}; copy.imageExtent = {64,64,1};
+  c.fn<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(command,b.images[1],transition.newLayout,b.buffer,1,&copy);
+  VkBufferMemoryBarrier host = {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+  host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+  host.srcQueueFamilyIndex = host.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  host.buffer = b.buffer; host.offset = read_offset; host.size = bytes;
+  barrier(command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,0,nullptr,1,&host,0,nullptr);
+  check(c.fn<PFN_vkEndCommandBuffer>("vkEndCommandBuffer")(command),"GS draw end");
+  VkFenceCreateInfo fence = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+  check(c.fn<PFN_vkCreateFence>("vkCreateFence")(c.device,&fence,nullptr,&b.fence),"GS draw fence");
+  VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO}; submit.commandBufferCount = 1; submit.pCommandBuffers = &command;
+  check(c.fn<PFN_vkQueueSubmit>("vkQueueSubmit")(c.queue,1,&submit,b.fence),"GS draw submit"); b.pending = true;
+  check(c.fn<PFN_vkWaitForFences>("vkWaitForFences")(c.device,1,&b.fence,VK_TRUE,5000000000ull),"GS draw wait"); b.pending = false;
+  std::memcpy(output,static_cast<uint8_t*>(b.mapped)+read_offset,bytes);
+}
 } // namespace
 
 extern "C" {
@@ -726,6 +1034,53 @@ int wire_gpu_shader_info(void *shader, WireShaderInfo *info) {
   *info = {s.words.data(),s.words.size(),s.bindings.data(),s.bindings.size(),s.stage,s.push_bytes}; return 1;
 }
 void wire_gpu_shader_free(void *shader) { delete static_cast<Shader*>(shader); }
+int wire_gpu_geometry_info(void *shader, WireGeometryInfo *info) {
+  if (!shader || !info || static_cast<Shader*>(shader)->stage != 8) return 0;
+  const auto& g = static_cast<Shader*>(shader)->geometry;
+  *info = {g.inputs.data(),g.outputs.data(),g.inputs.size(),g.outputs.size(),g.input_vertices,
+    g.output_primitive,g.max_vertices,g.instances,g.input_words,g.vertex_words,g.invocation_words,0};
+  return 1;
+}
+void *wire_gpu_geometry_vertex(void *gpu, void *geometry, char *error, size_t capacity) {
+  try { auto g = static_cast<Shader*>(geometry); auto c = static_cast<Context*>(gpu);
+    if (!c || !g || g->owner != c || g->stage != 8) throw std::runtime_error("GS forwarding shader/context mismatch");
+    std::vector<VkVertexInputAttributeDescription> attributes;
+    return new Shader(geometry_vertex_shader(*c,g->geometry,attributes));
+  } catch (const std::exception& e) { error_text(error,capacity,e.what()); return nullptr; }
+}
+int wire_gpu_geometry_dispatch(void *gpu, void *shader, const uint32_t *input, size_t input_words,
+    uint32_t primitives, const WireBufferBinding *bindings, size_t binding_count,
+    uint32_t *output, size_t output_words, char *error, size_t capacity) {
+  try { if (!gpu) throw std::runtime_error("missing GPU");
+    geometry_dispatch(*static_cast<Context*>(gpu),static_cast<Shader*>(shader),input,input_words,primitives,bindings,binding_count,output,output_words); return 1;
+  } catch (const std::exception& e) { error_text(error,capacity,e.what()); return 0; }
+}
+void *wire_gpu_buffer_create(void *gpu, const uint8_t *data, size_t size, uint32_t usage, char *error, size_t capacity) {
+  try { if (!gpu) throw std::runtime_error("missing GPU");
+    return create_buffer(*static_cast<Context*>(gpu),data,size,usage).release();
+  } catch (const std::exception& e) { error_text(error,capacity,e.what()); return nullptr; }
+}
+void wire_gpu_buffer_free(void *buffer) { delete static_cast<Buffer*>(buffer); }
+int wire_gpu_buffer_write(void *buffer, size_t offset, const uint8_t *data, size_t size, char *error, size_t capacity) {
+  try { auto b = static_cast<Buffer*>(buffer);
+    if (!b || offset > b->size || size > b->size-offset || (size && !data)) throw std::runtime_error("buffer write range");
+    if (size) std::memcpy(static_cast<uint8_t*>(b->mapped)+offset,data,size); return 1;
+  } catch (const std::exception& e) { error_text(error,capacity,e.what()); return 0; }
+}
+int wire_gpu_buffer_read(void *buffer, size_t offset, uint8_t *data, size_t size, char *error, size_t capacity) {
+  try { auto b = static_cast<Buffer*>(buffer);
+    if (!b || offset > b->size || size > b->size-offset || (size && !data)) throw std::runtime_error("buffer read range");
+    if (size) std::memcpy(data,static_cast<uint8_t*>(b->mapped)+offset,size); return 1;
+  } catch (const std::exception& e) { error_text(error,capacity,e.what()); return 0; }
+}
+int wire_gpu_geometry_draw_rgba64(void *gpu, void *geometry, void *pixel,
+    const uint32_t *vertices, size_t words, const uint32_t *indices, size_t count,
+    uint8_t *output, size_t output_size, char *error, size_t capacity) {
+  try { if (!gpu) throw std::runtime_error("missing GPU");
+    geometry_draw_rgba64(*static_cast<Context*>(gpu),static_cast<Shader*>(geometry),static_cast<Shader*>(pixel),
+      vertices,words,indices,count,output,output_size); return 1;
+  } catch (const std::exception& e) { error_text(error,capacity,e.what()); return 0; }
+}
 int wire_gpu_pipeline(void *gpu, void *vertex, void *pixel, void *compute, char *error, size_t capacity) {
   try { if (!gpu) throw std::runtime_error("missing GPU");
     auto& c = *static_cast<Context*>(gpu); PipelineScope p(c);
