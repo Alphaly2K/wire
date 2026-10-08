@@ -1,0 +1,3 @@
+# Preserve upstream license bytes and valid unified-diff context indentation.
+licenses/*.txt -whitespace
+patches/*.patch -whitespace
