@@ -1581,9 +1581,11 @@ impl Cpu64 {
             }
             M::Movd | M::Movq => {
                 let size = if i.mnemonic() == M::Movd { 4 } else { 8 };
-                if i.op0_kind() == OpKind::Register && Self::xmm_index(i.op0_register()).is_ok() {
+                if i.op0_kind() == OpKind::Register
+                    && (R::XMM0..=R::XMM15).contains(&i.op0_register())
+                {
                     let value = if i.op1_kind() == OpKind::Register
-                        && Self::xmm_index(i.op1_register()).is_ok()
+                        && (R::XMM0..=R::XMM15).contains(&i.op1_register())
                     {
                         self.vector_read(i, 1, mem, size)?
                     } else {
