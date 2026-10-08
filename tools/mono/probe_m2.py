@@ -85,6 +85,8 @@ def main():
         raise RuntimeError("Missing checked static IL call evidence")
     if args.checked_memory and "PASS scoped checked IL" not in content:
         raise RuntimeError("Missing scoped checked IL evidence")
+    if args.checked_memory and "PASS exact rooted reference slots" not in content:
+        raise RuntimeError("Missing exact rooted reference slot evidence")
     if args.sample_mono and "PASS original Unity Mono leaf" not in content:
         raise RuntimeError("Missing original Unity Mono layout evidence")
     if args.native_services and "PASS typed native Windows services" not in content:
@@ -114,6 +116,9 @@ def main():
               "checked_patch_sha256": sha256(HERE / "patches/0010-scoped-checked-interpreter-memory.patch"),
               "scope_local_optimization_patch_sha256": sha256(HERE / "patches/0015-scope-local-interpreter-optimizations.patch"),
               "checked_static_call_patch_sha256": sha256(HERE / "patches/0016-checked-same-image-static-il-calls.patch"),
+              "reference_slot_patch_sha256": sha256(HERE / "patches/0017-exact-rooted-reference-slots.patch"),
+              "exact_rooted_reference_slots_verified": args.checked_memory,
+              "guest_raw_reference_stores_integrated": False,
               "native_game_backend_enabled": False,
               "shared_backing_verified": True,
               "fixed_signature_cross_arch_float_struct_exception_verified": True,
@@ -142,7 +147,7 @@ def main():
               "production_native_pointer_validation": False,
               "m3_admission": False,
               "admission_blockers": ["Complete checked unsafe IL and managed/native helper coverage",
-                                     "Managed reference write barriers and production roots/scheduler",
+                                     "General managed references/arrays, guest raw-store ownership and production roots/scheduler",
                                      "Production Windows service ownership, complete binding and scheduler",
                                      "Full Unity ABI profile and typed callback coverage"]}
     (root / "results.json").write_text(json.dumps(report, indent=2) + "\n")

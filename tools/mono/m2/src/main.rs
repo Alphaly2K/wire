@@ -54,6 +54,7 @@ mod concurrency;
 mod gc;
 mod layout;
 mod perf;
+mod refs;
 mod services;
 
 impl Mono {
@@ -587,6 +588,7 @@ fn main() {
     concurrency::run(&mono);
     if let Some(blocks) = args.get(5) {
         checked::run(&mono, &mut *guest, blocks);
+        guest = refs::run(&mono, guest, blocks);
     }
     if let Some(assembly) = args.get(7) {
         let root = std::path::Path::new(&args[4])

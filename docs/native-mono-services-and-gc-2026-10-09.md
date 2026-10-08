@@ -164,3 +164,26 @@ P/Invoke的原始库/entry/flags；所有行 `abi_verified=0`。声明数量不�
 编辑保留并拒绝继续。build前复核patch hashes和每个修改source file hash，configuration也
 记录这些hash。重叠hunk的重复/升级、未知编辑保护、旧patch内容变动拒绝，3个工具回归通过。
 真实source prepare连续执行也通过。修复既不重置source tree，也不重新下载SDK/开发工具。
+
+## 后续：精确 rooted reference slots
+
+0017新增显式version-2 adapter的reference store/load（op5/6）；version1仍拒绝reference。
+每个8B槽位独立持有一个strong v2 handle，输入值须为NULL或已登记weak handle仍指向的
+确切对象。完整range/permission/guard检查之后，在HostRegion lease内调用真实BDWGC
+`mono_gc_wbarrier_generic_store`；成功替换后才释放旧root。load同时核对bytes与strong
+root target一致，不能把普通bits或被非类型化写入破坏的数据当作对象。
+
+GC只扫描Mono自己的handle存储，不直接扫描HostRegion bytes；直接GC_add_roots注册
+shared bytes会绕过每次native访问必须持lease的契约，所以未采用。普通scalar write/
+copy/fill覆盖引用槽也被拒绝。fixture刻意使用非page对齐guest地址，host槽位仍8B对齐。
+
+实测：readonly、one-shot guard、偏移/普通slot、未知bits、NULL/root不一致、scalar
+fill覆盖、owner revoke均返回AccessViolationException且失败不改root。创建、验证、替换
+和清空在分别attach并退出的native threads进行，main stack不观察managed地址。释放
+factory句柄后slot仍保活；替换后旧对象的weak target清空、新对象存活；清空后新旧两个
+对象均可回收。该结果不是永久保活整个堆。完整M2与M1仍通过，noexec denied=0；链接
+审计304对象、668依赖、0 unmatched，Clippy clean。精确运行hash与调用数在results/log。
+
+这只准入显式登记的独立引用槽。guest x64 raw stores尚未接入typed reference ownership，
+引用数组、object fields、一般helper以及生产roots/scheduler仍未完成；不能把此fixture
+当完整unsafe-IL sandbox或打开真实游戏原生后端。

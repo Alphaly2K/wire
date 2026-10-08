@@ -1,0 +1,98 @@
+--- a/mono/mini/interp/interp.h
++++ b/mono/mini/interp/interp.h
+@@ -48,6 +48,7 @@
+ /* Wire prototype ABI 1. Thread-local, exact-image scope, checked-method optimizations off.
+  * Operations: 1 read, 2 write, 3 copy, 4 fill. Zero means completed; every
+  * other result is a managed AccessViolationException, with no native fallback.
++ * Version 2 adds 5 reference store / 6 reference load of an exact rooted slot.
+  * buffer is a bounded interpreter scratch area, never a guest data pointer.
+  * This is not a complete unsafe-IL sandbox or a Unity backend enablement. */
+ typedef int (*WireMonoMemoryAccess) (int operation, guint64 address,
+--- a/mono/mini/interp/interp.c
++++ b/mono/mini/interp/interp.c
+@@ -87,6 +87,7 @@
+  * Retaining image/user_data and restoring TLS across nested calls is the host's
+  * responsibility. Raw pointer escape and C intrinsics remain separate work. */
+ static gboolean wire_memory_prepared;
++static __thread guint32 wire_memory_version;
+ static __thread MonoImage *wire_memory_image;
+ static __thread WireMonoMemoryAccess wire_memory_access;
+ static __thread gpointer wire_memory_user_data;
+@@ -104,8 +105,9 @@
+ wire_mono_set_memory_adapter (guint32 version, MonoImage *image,
+     WireMonoMemoryAccess access, gpointer user_data)
+ {
+-    if (version != 1 || (!!image != !!access) || (access && !wire_memory_prepared))
++    if ((version != 1 && version != 2) || (!!image != !!access) || (access && !wire_memory_prepared))
+         return -1;
++    wire_memory_version = version;
+     wire_memory_image = image;
+     wire_memory_access = access;
+     wire_memory_user_data = user_data;
+@@ -132,6 +134,9 @@
+ wire_memory_opcode_allowed (MintOpcode opcode)
+ {
+     switch (opcode) {
++    case MINT_LDIND_REF:
++    case MINT_LDIND_REF_CHECK:
++    case MINT_STIND_REF:
+     case MINT_CALL:
+     case MINT_LDNULL:
+     case MINT_RET:
+@@ -1485,6 +1490,14 @@
+         } \
+     } \
+ } while (0)
++/* Version 2 delegates the complete rooted-slot operation to its owner,
++ * including value admission and the GC write barrier. No raw fallback. */
++#define WIRE_REF_IO(op, addr, buffer) do { \
++    if (wire_memory_version != 2) \
++        THROW_EX (mono_get_exception_not_supported ("Wire reference access requires a version-2 rooted slot adapter"), ip); \
++    if (wire_memory_access ((op), (guint64)(gsize)(addr), 0, (buffer), sizeof (gpointer), wire_memory_user_data) != 0) \
++        THROW_EX (mono_exception_from_name (mono_get_corlib (), "System", "AccessViolationException"), ip); \
++} while (0)
+ #define WIRE_IO(op, addr, second, buffer, size) do { \
+     gpointer wire_at = (gpointer)(gsize)(addr); \
+     gpointer wire_second = (gpointer)(gsize)(second); \
+@@ -4862,21 +4875,37 @@
+ 			MINT_IN_BREAK;
+ 		}
+ 		MINT_IN_CASE(MINT_LDIND_REF)
+-			WIRE_LOAD (LOCAL_VAR (ip [2], gpointer), gpointer, gpointer);
++            if (WIRE_SCOPED ()) {
++                gpointer value = NULL;
++                WIRE_REF_IO (6, LOCAL_VAR (ip [2], gpointer), &value);
++                LOCAL_VAR (ip [1], gpointer) = value;
++                ip += 3;
++                MINT_IN_BREAK;
++            }
+ 			LOCAL_VAR (ip [1], gpointer) = *(gpointer*)LOCAL_VAR (ip [2], gpointer);
+ 			ip += 3;
+ 			MINT_IN_BREAK;
+ 		MINT_IN_CASE(MINT_LDIND_REF_CHECK) {
+ 			gpointer ptr = LOCAL_VAR (ip [2], gpointer);
+-			WIRE_LOAD (ptr, gpointer, gpointer);
++            if (WIRE_SCOPED ()) {
++                gpointer value = NULL;
++                WIRE_REF_IO (6, ptr, &value);
++                LOCAL_VAR (ip [1], gpointer) = value;
++                ip += 3;
++                MINT_IN_BREAK;
++            }
+ 			NULL_CHECK (ptr);
+ 			LOCAL_VAR (ip [1], gpointer) = *(gpointer*)LOCAL_VAR (ip [2], gpointer);
+ 			ip += 3;
+ 			MINT_IN_BREAK;
+ 		}
+ 		MINT_IN_CASE(MINT_STIND_REF) {
+-            if (WIRE_SCOPED ())
+-                THROW_EX (mono_get_exception_not_supported ("Wire checked reference store requires a GC write barrier"), ip);
++            if (WIRE_SCOPED ()) {
++                gpointer value = LOCAL_VAR (ip [2], gpointer);
++                WIRE_REF_IO (5, LOCAL_VAR (ip [1], gpointer), &value);
++                ip += 3;
++                MINT_IN_BREAK;
++            }
+ 			gpointer ptr = LOCAL_VAR (ip [1], gpointer);
+ 			NULL_CHECK (ptr);
+ 			mono_gc_wbarrier_generic_store_internal (ptr, LOCAL_VAR (ip [2], MonoObject*));

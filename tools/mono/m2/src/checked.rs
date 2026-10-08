@@ -4,7 +4,7 @@ use std::ffi::CStr;
 
 type MemoryAccess = unsafe extern "C" fn(i32, u64, u64, Object, usize, Object) -> i32;
 type InstallMemory = unsafe extern "C" fn(u32, Object, Option<MemoryAccess>, Object) -> i32;
-unsafe extern "C" fn checked_access(
+pub(super) unsafe extern "C" fn checked_access(
     op: i32,
     address: u64,
     second: u64,

@@ -28,4 +28,11 @@
     ldc.i4.0
     ret
   }
+  .method public static object ReferenceLoad(native int src) cil managed {
+    .maxstack 1
+    ldarg.0
+    ldind.ref
+    ret
+  }
+
 }
