@@ -173,6 +173,310 @@ pub enum Control {
         args: Vec<u64>,
     },
 }
+fn kernel_export(name: &str) -> bool {
+    if user::arity(name).is_some()
+        || display::arity(name).is_some()
+        || registry::arity(name).is_some()
+        || sockets::is_call(name)
+        || sspi::arity(name).is_some()
+        || tracing::is_call(name)
+        || dxgi::arity(name).is_some()
+        || (modules::is_query(name) && !name.starts_with("K32"))
+        || name.starts_with("BCrypt")
+        || name.starts_with("time")
+        || matches!(
+            name,
+            "CommandLineToArgvW"
+                | "SHGetKnownFolderPath"
+                | "CoTaskMemAlloc"
+                | "CoTaskMemFree"
+                | "CoCreateInstance"
+                | "CoInitialize"
+                | "CoInitializeEx"
+                | "CoUninitialize"
+                | "RoInitialize"
+                | "RoUninitialize"
+                | "OpenProcessToken"
+                | "OpenThreadToken"
+                | "GetTokenInformation"
+                | "GetSidSubAuthority"
+                | "GetSidSubAuthorityCount"
+                | "GetSidIdentifierAuthority"
+                | "IsValidSid"
+                | "GetLengthSid"
+                | "CopySid"
+                | "EqualSid"
+                | "GetSidLengthRequired"
+                | "InitializeSid"
+                | "SystemParametersInfoA"
+                | "SystemParametersInfoW"
+                | "GetSystemMetrics"
+        )
+    {
+        return false;
+    }
+    import_arity(name).is_some()
+}
+fn import_arity(name: &str) -> Option<usize> {
+    Some(match name {
+        name if timers::arity(name).is_some() => timers::arity(name).unwrap(),
+        name if dxgi::arity(name).is_some() => dxgi::arity(name).unwrap(),
+        name if find::arity(name).is_some() => find::arity(name).unwrap(),
+        name if user::arity(name).is_some() => user::arity(name).unwrap(),
+        name if registry::arity(name).is_some() => registry::arity(name).unwrap(),
+        name if display::arity(name).is_some() => display::arity(name).unwrap(),
+        name if sspi::arity(name).is_some() => sspi::arity(name).unwrap(),
+        "GetSystemDirectoryA"
+        | "GetSystemDirectoryW"
+        | "GetWindowsDirectoryA"
+        | "GetWindowsDirectoryW"
+        | "GetSystemWindowsDirectoryA"
+        | "GetSystemWindowsDirectoryW" => 2,
+        "GetVersion" => 0,
+        "RtlGetVersion" | "GetVersionExA" | "GetVersionExW" => 1,
+        "RtlVerifyVersionInfo" | "VerifyVersionInfoW" | "VerSetConditionMask" => 3,
+        "SetDllDirectoryW" | "SetDllDirectoryA" => 1,
+        "GetDllDirectoryW" | "GetDllDirectoryA" => 2,
+        "WaitOnAddress" => 4,
+        "WakeByAddressSingle" | "WakeByAddressAll" => 1,
+        "WSAStartup" => 2,
+        "WSASetLastError" => 1,
+        "WSACleanup" | "WSAGetLastError" => 0,
+        "InitializeCriticalSection" | "TryEnterCriticalSection" => 1,
+        "SetCriticalSectionSpinCount" => 2,
+        "AddVectoredExceptionHandler" => 2,
+        "RemoveVectoredExceptionHandler" => 1,
+        "RaiseException" => 4,
+        "RtlUnwindEx" => 6,
+        "RtlAddFunctionTable" | "RtlLookupFunctionEntry" => 3,
+        "RtlDeleteFunctionTable" => 1,
+        "RtlInstallFunctionTableCallback" => 6,
+        "GetModuleHandleExA" | "GetModuleHandleExW" => 3,
+        "EventRegister" | "EventWrite" | "EventWriteString" | "EventSetInformation" => 4,
+        "EventUnregister" => 1,
+        "EventEnabled" => 2,
+        "EventProviderEnabled" => 3,
+        "EventWriteTransfer" => 6,
+        "FormatMessageA" | "FormatMessageW" => 7,
+        "K32EnumProcessModules"
+        | "EnumProcessModules"
+        | "K32GetModuleInformation"
+        | "GetModuleInformation"
+        | "K32GetModuleBaseNameA"
+        | "K32GetModuleBaseNameW"
+        | "GetModuleBaseNameA"
+        | "GetModuleBaseNameW"
+        | "K32GetModuleFileNameExA"
+        | "K32GetModuleFileNameExW"
+        | "GetModuleFileNameExA"
+        | "GetModuleFileNameExW" => 4,
+        "K32EnumProcessModulesEx" | "EnumProcessModulesEx" => 5,
+        "GetSidSubAuthority" | "EqualSid" => 2,
+        "CopySid" | "InitializeSid" => 3,
+        "GetSidSubAuthorityCount"
+        | "GetSidIdentifierAuthority"
+        | "IsValidSid"
+        | "GetLengthSid"
+        | "GetSidLengthRequired" => 1,
+        "LocalAlloc" | "GlobalAlloc" => 2,
+        "LocalReAlloc" | "GlobalReAlloc" => 3,
+        "LocalSize" | "GlobalSize" | "LocalLock" | "GlobalLock" | "LocalUnlock"
+        | "GlobalUnlock" | "GlobalFree" | "LocalFlags" | "GlobalFlags" => 1,
+        "OpenProcessToken" => 3,
+        "OpenThreadToken" => 4,
+        "GetTokenInformation" => 5,
+        "MoveFileExW" | "MoveFileExA" => 3,
+        "MoveFileW" | "MoveFileA" => 2,
+        "DeleteFileW" | "DeleteFileA" | "RemoveDirectoryW" | "RemoveDirectoryA" => 1,
+        "DuplicateHandle" => 7,
+        "SetFileAttributesW" | "SetFileAttributesA" => 2,
+        "SHGetKnownFolderPath" => 4,
+        "CoTaskMemAlloc" | "CoTaskMemFree" => 1,
+        "CoCreateInstance" => 5,
+        "timeGetTime" => 0,
+        "timeBeginPeriod" | "timeEndPeriod" => 1,
+        "timeGetDevCaps" => 2,
+        "CreateDirectoryW" | "CreateDirectoryA" => 2,
+        "GetDateFormatEx" => 7,
+        "GetTimeFormatEx" => 6,
+        "EnumSystemLocalesEx" | "GetLocaleInfoEx" | "GetLocaleInfoW" | "LCIDToLocaleName" => 4,
+        "LocaleNameToLCID" | "GetUserDefaultLocaleName" | "GetSystemDefaultLocaleName" => 2,
+        "IsValidLocaleName" => 1,
+        "GetUserDefaultLCID"
+        | "GetSystemDefaultLCID"
+        | "GetThreadLocale"
+        | "GetUserDefaultLangID"
+        | "GetSystemDefaultLangID" => 0,
+        "CreateToolhelp32Snapshot"
+        | "Process32First"
+        | "Process32Next"
+        | "Process32FirstW"
+        | "Process32NextW"
+        | "Thread32First"
+        | "Thread32Next" => 2,
+        "SystemParametersInfoA" | "SystemParametersInfoW" => 4,
+        "GetSystemMetrics" => 1,
+        "CreateThread" => 6,
+        "Sleep"
+        | "ExitThread"
+        | "ResumeThread"
+        | "SuspendThread"
+        | "GetThreadId"
+        | "GetThreadPriority"
+        | "DisableThreadLibraryCalls" => 1,
+        "SwitchToThread" => 0,
+        "QueueUserAPC" => 3,
+        "SleepEx" => 2,
+        "GetExitCodeThread"
+        | "SetThreadPriority"
+        | "SetThreadAffinityMask"
+        | "SetThreadDescription"
+        | "GetThreadDescription"
+        | "GetThreadContext" => 2,
+        "CreateSemaphoreExW" | "CreateSemaphoreExA" => 6,
+        "CreateSemaphoreW" | "CreateSemaphoreA" => 4,
+        "OpenSemaphoreW" | "OpenSemaphoreA" | "ReleaseSemaphore" => 3,
+        "GetLogicalProcessorInformationEx" => 3,
+        "GetActiveProcessorCount" | "GetMaximumProcessorCount" => 1,
+        "GetActiveProcessorGroupCount" | "GetMaximumProcessorGroupCount" => 0,
+        "BCryptGenRandom" | "BCryptOpenAlgorithmProvider" => 4,
+        "BCryptCloseAlgorithmProvider" => 2,
+        "GetEnvironmentVariableW" | "GetEnvironmentVariableA" => 3,
+        "SetEnvironmentVariableW" | "SetEnvironmentVariableA" => 2,
+        "GlobalMemoryStatusEx" => 1,
+        "CreateFileW" | "CreateFileA" => 7,
+        "SetFilePointerEx" => 4,
+        "GetFileSizeEx" | "GetFileSize" => 2,
+        "GetFileInformationByHandle" => 2,
+        "GetFileInformationByHandleEx" | "GetFileTime" => 4,
+        "CreateFileMappingW" | "CreateFileMappingA" | "MapViewOfFileEx" => 6,
+        "MapViewOfFile" => 5,
+        "UnmapViewOfFile" => 1,
+        "FlushViewOfFile" => 2,
+        "FlushFileBuffers" => 1,
+        "GetFileAttributesW"
+        | "GetFileAttributesA"
+        | "SetCurrentDirectoryW"
+        | "SetCurrentDirectoryA" => 1,
+        "GetCurrentDirectoryW" | "GetCurrentDirectoryA" => 2,
+        "GetFileAttributesExW" | "GetFileAttributesExA" => 3,
+        "CommandLineToArgvW" => 2,
+        "LocalFree" => 1,
+        "RoInitialize" | "CoInitialize" => 1,
+        "CoInitializeEx" => 2,
+        "RoUninitialize" | "CoUninitialize" => 0,
+        "GetCurrentProcessId"
+        | "GetCurrentThreadId"
+        | "GetCurrentProcess"
+        | "GetCurrentThread"
+        | "GetLastError"
+        | "GetCommandLineA"
+        | "GetCommandLineW"
+        | "GetTickCount"
+        | "GetTickCount64"
+        | "IsDebuggerPresent"
+        | "TlsAlloc"
+        | "GetProcessHeap"
+        | "AreFileApisANSI"
+        | "GetACP"
+        | "GetOEMCP"
+        | "GetConsoleOutputCP"
+        | "GetConsoleCP" => 0,
+        "GetErrorMode" => 0,
+        "SetErrorMode" => 1,
+        "GetThreadErrorMode" => 0,
+        "SetThreadErrorMode" => 2,
+        "GetEnvironmentStringsW" => 0,
+        "AcquireSRWLockExclusive"
+        | "WakeAllConditionVariable"
+        | "WakeConditionVariable"
+        | "InitializeConditionVariable"
+        | "ReleaseSRWLockExclusive"
+        | "AcquireSRWLockShared"
+        | "ReleaseSRWLockShared"
+        | "TryAcquireSRWLockExclusive"
+        | "TryAcquireSRWLockShared"
+        | "InitializeSRWLock" => 1,
+        "InitOnceBeginInitialize" => 4,
+        "InitOnceComplete" => 3,
+        "SystemTimeToFileTime" | "FileTimeToSystemTime" | "CompareFileTime" => 2,
+        "SystemTimeToTzSpecificLocalTime" | "TzSpecificLocalTimeToSystemTime" => 3,
+        "GetTimeZoneInformation" => 1,
+        "SetThreadStackGuarantee" => 1,
+        "VirtualAlloc" | "VirtualProtect" | "VirtualFreeEx" | "VirtualQueryEx" => 4,
+        "VirtualAllocEx" | "VirtualProtectEx" => 5,
+        "VirtualFree" | "VirtualQuery" => 3,
+        "CreateEventW"
+        | "CreateEventA"
+        | "CreateEventExW"
+        | "CreateEventExA"
+        | "WaitForMultipleObjects" => 4,
+        "WaitForMultipleObjectsEx" => 5,
+        "OpenEventW" | "OpenEventA" | "WaitForSingleObjectEx" => 3,
+        "WaitForSingleObject" => 2,
+        "SetEvent" | "ResetEvent" => 1,
+        "CreatePipe" => 4,
+        "GetHandleInformation" => 2,
+        "SetHandleInformation" => 3,
+        "ReadFile" => 5,
+        "InitializeProcThreadAttributeList" => 4,
+        "UpdateProcThreadAttribute" => 7,
+        "DeleteProcThreadAttributeList" => 1,
+        "CreateProcessW" => 10,
+        "FlsAlloc"
+        | "FlsGetValue"
+        | "FlsFree"
+        | "GetModuleHandleA"
+        | "LoadLibraryW"
+        | "LoadLibraryA"
+        | "FreeLibrary"
+        | "GetStdHandle"
+        | "GetFileType"
+        | "CloseHandle"
+        | "IsValidCodePage"
+        | "FreeEnvironmentStringsW" => 1,
+        "GetProcAddress" | "FlsSetValue" | "SetStdHandle" | "GetConsoleMode" | "GetCPInfo"
+        | "GetTempPathW" | "GetTempPath2W" => 2,
+        "LoadLibraryExW" | "LoadLibraryExA" | "GetCPInfoExA" | "GetCPInfoExW" => 3,
+        "GetSystemTimeAsFileTime"
+        | "GetSystemTimePreciseAsFileTime"
+        | "GetSystemTime"
+        | "GetLocalTime"
+        | "GetSystemInfo"
+        | "GetNativeSystemInfo"
+        | "QueryPerformanceCounter"
+        | "QueryPerformanceFrequency"
+        | "InitializeSListHead"
+        | "GetStartupInfoW"
+        | "GetStartupInfoA"
+        | "GetModuleHandleW"
+        | "SetLastError"
+        | "IsProcessorFeaturePresent"
+        | "TlsGetValue"
+        | "TlsFree"
+        | "EncodePointer"
+        | "DecodePointer"
+        | "SetUnhandledExceptionFilter"
+        | "ExitProcess"
+        | "EnterCriticalSection"
+        | "LeaveCriticalSection"
+        | "DeleteCriticalSection" => 1,
+        "TlsSetValue" | "InitializeCriticalSectionAndSpinCount" => 2,
+        "HeapAlloc"
+        | "HeapFree"
+        | "HeapSize"
+        | "InitializeCriticalSectionEx"
+        | "GetModuleFileNameW"
+        | "GetModuleFileNameA" => 3,
+        "HeapReAlloc" | "GetStringTypeW" => 4,
+        "WriteFile" | "WriteConsoleW" => 5,
+        "MultiByteToWideChar" | "LCMapStringW" => 6,
+        "WideCharToMultiByte" => 8,
+        "LCMapStringEx" => 9,
+        _ => return None,
+    })
+}
+
 impl Runtime64 {
     pub fn new(
         mem: &mut Memory,
@@ -810,264 +1114,11 @@ impl Runtime64 {
         {
             return Err(format!("unimplemented Win64 import: {dll}!{name}"));
         }
-        let arity = match name {
-            name if timers::arity(name).is_some() => timers::arity(name).unwrap(),
-            name if dxgi::arity(name).is_some() => dxgi::arity(name).unwrap(),
-            name if find::arity(name).is_some() => find::arity(name).unwrap(),
-            name if user::arity(name).is_some() => user::arity(name).unwrap(),
-            name if registry::arity(name).is_some() => registry::arity(name).unwrap(),
-            name if display::arity(name).is_some() => display::arity(name).unwrap(),
-            name if sspi::arity(name).is_some() => sspi::arity(name).unwrap(),
-            "GetSystemDirectoryA"
-            | "GetSystemDirectoryW"
-            | "GetWindowsDirectoryA"
-            | "GetWindowsDirectoryW"
-            | "GetSystemWindowsDirectoryA"
-            | "GetSystemWindowsDirectoryW" => 2,
-            "GetVersion" => 0,
-            "RtlGetVersion" | "GetVersionExA" | "GetVersionExW" => 1,
-            "RtlVerifyVersionInfo" | "VerifyVersionInfoW" | "VerSetConditionMask" => 3,
-            "SetDllDirectoryW" | "SetDllDirectoryA" => 1,
-            "GetDllDirectoryW" | "GetDllDirectoryA" => 2,
-            "WaitOnAddress" => 4,
-            "WakeByAddressSingle" | "WakeByAddressAll" => 1,
-            "WSAStartup" => 2,
-            "WSASetLastError" => 1,
-            "WSACleanup" | "WSAGetLastError" => 0,
-            "InitializeCriticalSection" | "TryEnterCriticalSection" => 1,
-            "SetCriticalSectionSpinCount" => 2,
-            "AddVectoredExceptionHandler" => 2,
-            "RemoveVectoredExceptionHandler" => 1,
-            "RaiseException" => 4,
-            "RtlUnwindEx" => 6,
-            "RtlAddFunctionTable" | "RtlLookupFunctionEntry" => 3,
-            "RtlDeleteFunctionTable" => 1,
-            "RtlInstallFunctionTableCallback" => 6,
-            "GetModuleHandleExA" | "GetModuleHandleExW" => 3,
-            "EventRegister" | "EventWrite" | "EventWriteString" | "EventSetInformation" => 4,
-            "EventUnregister" => 1,
-            "EventEnabled" => 2,
-            "EventProviderEnabled" => 3,
-            "EventWriteTransfer" => 6,
-            "FormatMessageA" | "FormatMessageW" => 7,
-            "K32EnumProcessModules"
-            | "EnumProcessModules"
-            | "K32GetModuleInformation"
-            | "GetModuleInformation"
-            | "K32GetModuleBaseNameA"
-            | "K32GetModuleBaseNameW"
-            | "GetModuleBaseNameA"
-            | "GetModuleBaseNameW"
-            | "K32GetModuleFileNameExA"
-            | "K32GetModuleFileNameExW"
-            | "GetModuleFileNameExA"
-            | "GetModuleFileNameExW" => 4,
-            "K32EnumProcessModulesEx" | "EnumProcessModulesEx" => 5,
-            "GetSidSubAuthority" | "EqualSid" => 2,
-            "CopySid" | "InitializeSid" => 3,
-            "GetSidSubAuthorityCount"
-            | "GetSidIdentifierAuthority"
-            | "IsValidSid"
-            | "GetLengthSid"
-            | "GetSidLengthRequired" => 1,
-            "LocalAlloc" | "GlobalAlloc" => 2,
-            "LocalReAlloc" | "GlobalReAlloc" => 3,
-            "LocalSize" | "GlobalSize" | "LocalLock" | "GlobalLock" | "LocalUnlock"
-            | "GlobalUnlock" | "GlobalFree" | "LocalFlags" | "GlobalFlags" => 1,
-            "OpenProcessToken" => 3,
-            "OpenThreadToken" => 4,
-            "GetTokenInformation" => 5,
-            "MoveFileExW" | "MoveFileExA" => 3,
-            "MoveFileW" | "MoveFileA" => 2,
-            "DeleteFileW" | "DeleteFileA" | "RemoveDirectoryW" | "RemoveDirectoryA" => 1,
-            "DuplicateHandle" => 7,
-            "SetFileAttributesW" | "SetFileAttributesA" => 2,
-            "SHGetKnownFolderPath" => 4,
-            "CoTaskMemAlloc" | "CoTaskMemFree" => 1,
-            "CoCreateInstance" => 5,
-            "timeGetTime" => 0,
-            "timeBeginPeriod" | "timeEndPeriod" => 1,
-            "timeGetDevCaps" => 2,
-            "CreateDirectoryW" | "CreateDirectoryA" => 2,
-            "GetDateFormatEx" => 7,
-            "GetTimeFormatEx" => 6,
-            "EnumSystemLocalesEx" | "GetLocaleInfoEx" | "GetLocaleInfoW" | "LCIDToLocaleName" => 4,
-            "LocaleNameToLCID" | "GetUserDefaultLocaleName" | "GetSystemDefaultLocaleName" => 2,
-            "IsValidLocaleName" => 1,
-            "GetUserDefaultLCID"
-            | "GetSystemDefaultLCID"
-            | "GetThreadLocale"
-            | "GetUserDefaultLangID"
-            | "GetSystemDefaultLangID" => 0,
-            "CreateToolhelp32Snapshot"
-            | "Process32First"
-            | "Process32Next"
-            | "Process32FirstW"
-            | "Process32NextW"
-            | "Thread32First"
-            | "Thread32Next" => 2,
-            "SystemParametersInfoA" | "SystemParametersInfoW" => 4,
-            "GetSystemMetrics" => 1,
-            "CreateThread" => 6,
-            "Sleep"
-            | "ExitThread"
-            | "ResumeThread"
-            | "SuspendThread"
-            | "GetThreadId"
-            | "GetThreadPriority"
-            | "DisableThreadLibraryCalls" => 1,
-            "SwitchToThread" => 0,
-            "QueueUserAPC" => 3,
-            "SleepEx" => 2,
-            "GetExitCodeThread"
-            | "SetThreadPriority"
-            | "SetThreadAffinityMask"
-            | "SetThreadDescription"
-            | "GetThreadDescription"
-            | "GetThreadContext" => 2,
-            "CreateSemaphoreExW" | "CreateSemaphoreExA" => 6,
-            "CreateSemaphoreW" | "CreateSemaphoreA" => 4,
-            "OpenSemaphoreW" | "OpenSemaphoreA" | "ReleaseSemaphore" => 3,
-            "GetLogicalProcessorInformationEx" => 3,
-            "GetActiveProcessorCount" | "GetMaximumProcessorCount" => 1,
-            "GetActiveProcessorGroupCount" | "GetMaximumProcessorGroupCount" => 0,
-            "BCryptGenRandom" | "BCryptOpenAlgorithmProvider" => 4,
-            "BCryptCloseAlgorithmProvider" => 2,
-            "GetEnvironmentVariableW" | "GetEnvironmentVariableA" => 3,
-            "SetEnvironmentVariableW" | "SetEnvironmentVariableA" => 2,
-            "GlobalMemoryStatusEx" => 1,
-            "CreateFileW" | "CreateFileA" => 7,
-            "SetFilePointerEx" => 4,
-            "GetFileSizeEx" | "GetFileSize" => 2,
-            "GetFileInformationByHandle" => 2,
-            "GetFileInformationByHandleEx" | "GetFileTime" => 4,
-            "CreateFileMappingW" | "CreateFileMappingA" | "MapViewOfFileEx" => 6,
-            "MapViewOfFile" => 5,
-            "UnmapViewOfFile" => 1,
-            "FlushViewOfFile" => 2,
-            "FlushFileBuffers" => 1,
-            "GetFileAttributesW"
-            | "GetFileAttributesA"
-            | "SetCurrentDirectoryW"
-            | "SetCurrentDirectoryA" => 1,
-            "GetCurrentDirectoryW" | "GetCurrentDirectoryA" => 2,
-            "GetFileAttributesExW" | "GetFileAttributesExA" => 3,
-            "CommandLineToArgvW" => 2,
-            "LocalFree" => 1,
-            "RoInitialize" | "CoInitialize" => 1,
-            "CoInitializeEx" => 2,
-            "RoUninitialize" | "CoUninitialize" => 0,
-            "GetCurrentProcessId"
-            | "GetCurrentThreadId"
-            | "GetCurrentProcess"
-            | "GetCurrentThread"
-            | "GetLastError"
-            | "GetCommandLineA"
-            | "GetCommandLineW"
-            | "GetTickCount"
-            | "GetTickCount64"
-            | "IsDebuggerPresent"
-            | "TlsAlloc"
-            | "GetProcessHeap"
-            | "AreFileApisANSI"
-            | "GetACP"
-            | "GetOEMCP"
-            | "GetConsoleOutputCP" => 0,
-            "GetErrorMode" => 0,
-            "SetErrorMode" => 1,
-            "GetThreadErrorMode" => 0,
-            "SetThreadErrorMode" => 2,
-            "GetEnvironmentStringsW" => 0,
-            "AcquireSRWLockExclusive"
-            | "WakeAllConditionVariable"
-            | "WakeConditionVariable"
-            | "InitializeConditionVariable"
-            | "ReleaseSRWLockExclusive"
-            | "AcquireSRWLockShared"
-            | "ReleaseSRWLockShared"
-            | "TryAcquireSRWLockExclusive"
-            | "TryAcquireSRWLockShared"
-            | "InitializeSRWLock" => 1,
-            "InitOnceBeginInitialize" => 4,
-            "InitOnceComplete" => 3,
-            "SystemTimeToFileTime" | "FileTimeToSystemTime" | "CompareFileTime" => 2,
-            "SystemTimeToTzSpecificLocalTime" | "TzSpecificLocalTimeToSystemTime" => 3,
-            "GetTimeZoneInformation" => 1,
-            "SetThreadStackGuarantee" => 1,
-            "VirtualAlloc" | "VirtualProtect" | "VirtualFreeEx" | "VirtualQueryEx" => 4,
-            "VirtualAllocEx" | "VirtualProtectEx" => 5,
-            "VirtualFree" | "VirtualQuery" => 3,
-            "CreateEventW"
-            | "CreateEventA"
-            | "CreateEventExW"
-            | "CreateEventExA"
-            | "WaitForMultipleObjects" => 4,
-            "WaitForMultipleObjectsEx" => 5,
-            "OpenEventW" | "OpenEventA" | "WaitForSingleObjectEx" => 3,
-            "WaitForSingleObject" => 2,
-            "SetEvent" | "ResetEvent" => 1,
-            "CreatePipe" => 4,
-            "GetHandleInformation" => 2,
-            "SetHandleInformation" => 3,
-            "ReadFile" => 5,
-            "InitializeProcThreadAttributeList" => 4,
-            "UpdateProcThreadAttribute" => 7,
-            "DeleteProcThreadAttributeList" => 1,
-            "CreateProcessW" => 10,
-            "FlsAlloc"
-            | "FlsGetValue"
-            | "FlsFree"
-            | "GetModuleHandleA"
-            | "LoadLibraryW"
-            | "LoadLibraryA"
-            | "FreeLibrary"
-            | "GetStdHandle"
-            | "GetFileType"
-            | "CloseHandle"
-            | "IsValidCodePage"
-            | "FreeEnvironmentStringsW" => 1,
-            "GetProcAddress" | "FlsSetValue" | "SetStdHandle" | "GetConsoleMode" | "GetCPInfo"
-            | "GetTempPathW" | "GetTempPath2W" => 2,
-            "LoadLibraryExW" | "LoadLibraryExA" => 3,
-            "GetSystemTimeAsFileTime"
-            | "GetSystemTimePreciseAsFileTime"
-            | "GetSystemTime"
-            | "GetLocalTime"
-            | "GetSystemInfo"
-            | "GetNativeSystemInfo"
-            | "QueryPerformanceCounter"
-            | "QueryPerformanceFrequency"
-            | "InitializeSListHead"
-            | "GetStartupInfoW"
-            | "GetStartupInfoA"
-            | "GetModuleHandleW"
-            | "SetLastError"
-            | "IsProcessorFeaturePresent"
-            | "TlsGetValue"
-            | "TlsFree"
-            | "EncodePointer"
-            | "DecodePointer"
-            | "SetUnhandledExceptionFilter"
-            | "ExitProcess"
-            | "EnterCriticalSection"
-            | "LeaveCriticalSection"
-            | "DeleteCriticalSection" => 1,
-            "TlsSetValue" | "InitializeCriticalSectionAndSpinCount" => 2,
-            "HeapAlloc"
-            | "HeapFree"
-            | "HeapSize"
-            | "InitializeCriticalSectionEx"
-            | "GetModuleFileNameW"
-            | "GetModuleFileNameA" => 3,
-            "HeapReAlloc" | "GetStringTypeW" => 4,
-            "WriteFile" | "WriteConsoleW" => 5,
-            "MultiByteToWideChar" | "LCMapStringW" => 6,
-            "WideCharToMultiByte" => 8,
-            "LCMapStringEx" => 9,
-            _ => return Err(format!("unimplemented Win64 import: {dll}!{name}")),
-        };
+        let arity = import_arity(name)
+            .ok_or_else(|| format!("unimplemented Win64 import: {dll}!{name}"))?;
         let mut args = cpu.arguments(mem, arity)?;
         let dwords: &[usize] = match name {
+            "GetCPInfoExA" | "GetCPInfoExW" => &[0, 1],
             name if dxgi::arity(name).is_some() => dxgi::dwords(name),
             "FindFirstFileExA" | "FindFirstFileExW" => &[1, 3, 5],
             name if user::arity(name).is_some() => user::dwords(name),
@@ -4143,18 +4194,32 @@ impl Runtime64 {
                     }
                 }
             }
-            "GetACP" | "GetOEMCP" | "GetConsoleOutputCP" => 932,
+            "GetACP" | "GetOEMCP" | "GetConsoleOutputCP" | "GetConsoleCP" => 932,
             "IsValidCodePage" => matches!(args[0] as u32, 932 | 1252 | 65001) as u64,
-            "GetCPInfo" => {
+            "GetCPInfo" | "GetCPInfoExA" | "GetCPInfoExW" => {
+                let extended = name != "GetCPInfo";
                 let cp = match args[0] as u32 {
                     0 | 1 | 3 => 932,
                     value => value,
                 };
-                if !matches!(cp, 932 | 1252 | 65001) {
+                if extended && args[1] != 0 {
+                    self.set_error(mem, 1004)?;
+                    0
+                } else if !matches!(cp, 932 | 1252 | 65001) {
                     self.set_error(mem, 87)?;
                     0
                 } else {
-                    let mut info = [0; 20];
+                    let wide = name.ends_with('W');
+                    let mut info = vec![
+                        0;
+                        if !extended {
+                            20
+                        } else if wide {
+                            544
+                        } else {
+                            284
+                        }
+                    ];
                     info[..4].copy_from_slice(
                         &(if cp == 932 {
                             2u32
@@ -4169,7 +4234,29 @@ impl Runtime64 {
                     if cp == 932 {
                         info[6..10].copy_from_slice(&[0x81, 0x9f, 0xe0, 0xfc]);
                     }
-                    mem.write(args[1], &info)?;
+                    if extended {
+                        let unicode_default = if cp == 932 {
+                            0x30fbu16
+                        } else if cp == 65001 {
+                            0xfffd
+                        } else {
+                            0x3f
+                        };
+                        info[18..20].copy_from_slice(&unicode_default.to_le_bytes());
+                        info[20..24].copy_from_slice(&cp.to_le_bytes());
+                        let name = match cp {
+                            932 => "932 (Japanese Shift-JIS)",
+                            1252 => "1252 (Western European)",
+                            _ => "65001 (UTF-8)",
+                        };
+                        let bytes: Vec<u8> = if wide {
+                            name.encode_utf16().flat_map(u16::to_le_bytes).collect()
+                        } else {
+                            name.as_bytes().to_vec()
+                        };
+                        info[24..24 + bytes.len()].copy_from_slice(&bytes);
+                    }
+                    mem.write(args[if extended { 2 } else { 1 }], &info)?;
                     1
                 }
             }
@@ -4543,7 +4630,9 @@ impl Runtime64 {
                     }
                     .to_owned();
                     let known = (matches!(provider.as_str(), "kernel32.dll" | "kernelbase.dll")
-                        && timers::arity(&function).is_some())
+                        && kernel_export(&function))
+                        || (matches!(provider.as_str(), "kernel32.dll" | "kernelbase.dll")
+                            && timers::arity(&function).is_some())
                         || (matches!(
                             provider.as_str(),
                             "ntdll.dll" | "kernel32.dll" | "kernelbase.dll"

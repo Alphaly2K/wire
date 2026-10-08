@@ -369,6 +369,143 @@ fn win64_get_proc_address_null_module_resolves_main_and_missing_exports_return_n
         );
     }
 }
+#[test]
+fn win64_dynamic_kernel_exports_are_available_before_static_gateway_registration() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let text = STACK + 0x200;
+    runtime.register_provider("kernel32.dll");
+    mem.write(text, b"kernel32.dll\0").unwrap();
+    let module = startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "GetModuleHandleA",
+        &[text],
+    );
+    for name in [
+        "GetConsoleCP",
+        "GetThreadContext",
+        "GetFileAttributesExW",
+        "CreateWaitableTimerExW",
+        "SetThreadErrorMode",
+        "GetThreadErrorMode",
+    ] {
+        assert!(runtime
+            .gateways
+            .values()
+            .all(|n| !n.ends_with(&format!("!{name}"))));
+        mem.write(text, format!("{name}\0").as_bytes()).unwrap();
+        let p = startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetProcAddress",
+            &[module, text],
+        );
+        assert_ne!(p, 0, "{name}");
+        assert_eq!(runtime.gateways[&p], format!("kernel32.dll!{name}"));
+    }
+    for name in [
+        "CoCreateInstance",
+        "BCryptGenRandom",
+        "MessageBoxW",
+        "DoesNotExist",
+    ] {
+        mem.write(text, format!("{name}\0").as_bytes()).unwrap();
+        assert_eq!(
+            startup_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "GetProcAddress",
+                &[module, text]
+            ),
+            0,
+            "{name}"
+        );
+        assert_eq!(
+            startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+            127
+        );
+    }
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetConsoleCP", &[]),
+        932
+    );
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "SetThreadErrorMode",
+            &[0x8000, text]
+        ),
+        1
+    );
+    assert_eq!(mem.read_int(text, 4).unwrap(), 0);
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetThreadErrorMode", &[]),
+        0x8000
+    );
+}
+#[test]
+fn win64_extended_codepage_info_has_windows_layout_and_checked_full_outputs() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let output = STACK + 0x400;
+    for (name, size, cp, maximum, unicode_default) in [
+        ("GetCPInfoExW", 544, 0, 2, 0x30fb),
+        ("GetCPInfoExA", 284, 1252, 1, 0x3f),
+        ("GetCPInfoExW", 544, 65001, 4, 0xfffd),
+    ] {
+        mem.write(output, &[0xaa; 560]).unwrap();
+        assert_eq!(
+            startup_call(&mut mem, &mut cpu, &mut runtime, name, &[cp, 0, output]),
+            1
+        );
+        assert_eq!(mem.read_int(output, 4).unwrap(), maximum);
+        assert_eq!(mem.read_int(output + 18, 2).unwrap(), unicode_default);
+        assert_eq!(
+            mem.read_int(output + 20, 4).unwrap(),
+            if cp == 0 { 932 } else { cp }
+        );
+        assert_ne!(mem.read_int(output + 24, 1).unwrap(), 0);
+        assert_eq!(mem.read_int(output + size - 1, 1).unwrap(), 0);
+        assert_eq!(mem.read_int(output + size, 1).unwrap(), 0xaa);
+    }
+    mem.write(output, &[0xaa; 560]).unwrap();
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetCPInfoExW",
+            &[0, 1, output]
+        ),
+        0
+    );
+    assert_eq!(mem.read_int(output, 8).unwrap(), 0xaaaaaaaaaaaaaaaa);
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        1004
+    );
+    cpu.regs[4] = STACK + 0x1f88;
+    mem.write_int(cpu.regs[4], 8, BASE).unwrap();
+    cpu.regs[1] = 0;
+    cpu.regs[2] = 0;
+    cpu.regs[8] = STACK + 8192 - 16;
+    mem.write(cpu.regs[8], &[0xaa; 16]).unwrap();
+    let before = cpu.clone();
+    let calls = runtime.api_calls;
+    assert!(runtime
+        .dispatch("kernel32.dll", "GetCPInfoExW", &mut cpu, &mut mem)
+        .is_err());
+    assert_eq!(cpu, before);
+    assert_eq!(runtime.api_calls, calls);
+    assert_eq!(
+        mem.read_int(STACK + 8192 - 16, 8).unwrap(),
+        0xaaaaaaaaaaaaaaaa
+    );
+}
 
 #[test]
 fn win64_com_missing_factory_and_multimedia_timer_reference_balance() {

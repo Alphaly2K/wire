@@ -81,8 +81,17 @@ Input System module state changed to: Initialized.
 | pass-109 | 219,185,690 | 367,281 | 等待定时器实际运行；Mono暂停线程后GetThreadContext |
 | pass-110 | 291,364,669 | 464,830 | 真正读取暂停线程寄存器后继续；QueueUserAPC |
 | pass-111 | 598,723,699 | 1,223,023 | APC/alertable wait通过；600M预算；托管System.IO缺SetThreadErrorMode |
+| pass-112 | 387,616,539 | 587,668 | 线程错误模式通过；GetConsoleCP |
+| pass-113 | 520,943,132 | 717,098 | 控制台代码页通过；GetCPInfoExW |
 
 指令与 API 计数受真实时间/线程调度影响，上表不构成相同路径的性能 AB 对照。
+
+`16dd486`保存了D3D11资源与Mono线程服务检查点，完整release回归281项通过，Clippy无warning。
+之后统一Win64 API参数表与kernel32/kernelbase动态导出发现：已实现函数不再依赖此前是否登记静态gateway。
+其它DLL的专属函数不会因此出现在kernel32；未知函数仍返回NULL/ERROR_PROC_NOT_FOUND。
+GetConsoleCP沿用CP932 profile；GetCPInfoEx A/W输出284/544字节，代码页/默认字符/lead-byte表与A/W名称完整写入，
+无效flags及checked输出fault保留原输出。新增两项回归后完整release283项通过，Clippy无warning。
+pass114正在沿实际游戏继续，不将该检查点当作正式窗口或首帧验收。
 
 ## 距离正式窗口的剩余工作
 
