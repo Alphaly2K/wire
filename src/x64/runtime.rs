@@ -21,6 +21,7 @@ mod files;
 mod find;
 mod guid;
 mod heap;
+mod identity;
 mod locale;
 mod mapping;
 mod modules;
@@ -222,6 +223,11 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
     if sockets::is_call(name) && !dll.eq_ignore_ascii_case("ws2_32.dll") {
         return false;
     }
+    if (user::keyboard_arity(name).is_some() || name == "TrackMouseEvent")
+        && !dll.eq_ignore_ascii_case("user32.dll")
+    {
+        return false;
+    }
     if devices::arity(name).is_some() && !devices::export(dll, name) {
         return false;
     }
@@ -229,6 +235,9 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
         return false;
     }
     if winrt::arity(name).is_some() && !winrt::export(dll, name) {
+        return false;
+    }
+    if identity::arity(name).is_some() && !identity::export(dll, name) {
         return false;
     }
     if !dll.eq_ignore_ascii_case("kernel32.dll")
@@ -294,13 +303,15 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
         && !com_export(dll, name)
         && !automation::export(dll, name)
         && !winhttp::export(dll, name)
+        && !identity::export(dll, name)
     {
         return false;
     }
     true
 }
 fn kernel_export(name: &str) -> bool {
-    if devices::arity(name).is_some()
+    if identity::user(name)
+        || devices::arity(name).is_some()
         || automation::arity(name).is_some()
         || winhttp::arity(name).is_some()
         || winrt::arity(name).is_some()
@@ -350,6 +361,7 @@ fn kernel_export(name: &str) -> bool {
 }
 fn import_arity(name: &str) -> Option<usize> {
     Some(match name {
+        name if identity::arity(name).is_some() => identity::arity(name).unwrap(),
         name if automation::arity(name).is_some() => automation::arity(name).unwrap(),
         name if winhttp::arity(name).is_some() => winhttp::arity(name).unwrap(),
         name if sockets::arity(name).is_some() => sockets::arity(name).unwrap(),
@@ -1230,6 +1242,13 @@ impl Runtime64 {
             args[4] &= 0xff;
         }
         let dwords: &[usize] = match name {
+            name if identity::arity(name).is_some() => {
+                if name.contains("Ex") {
+                    &[0]
+                } else {
+                    &[]
+                }
+            }
             name if automation::arity(name).is_some() => automation::dwords(name),
             name if winhttp::arity(name).is_some() => winhttp::dwords(name),
             name if sockets::arity(name).is_some() => sockets::dwords(name),
@@ -1402,6 +1421,7 @@ impl Runtime64 {
                     None => return Ok(Control::Blocked),
                 }
             }
+            name if identity::arity(name).is_some() => self.identity_call(mem, name, &args)?,
             name if winrt::arity(name).is_some() => self.winrt_call(mem, name, &args)?,
             name if guid::arity(name).is_some() => self.guid_call(mem, name, &args)?,
             name if dxgi::arity(name).is_some() => self.dxgi_call(mem, name, &args)?,
@@ -4814,6 +4834,7 @@ impl Runtime64 {
                         || (provider == "d3d12.dll" && dxgi::d3d12_export(&function))
                         || (provider == "d3d11.dll" && dxgi::d3d11_export(&function))
                         || guid::export(&provider, &function)
+                        || identity::export(&provider, &function)
                         || devices::export(&provider, &function)
                         || winrt::export(&provider, &function)
                         || com_export(&provider, &function)

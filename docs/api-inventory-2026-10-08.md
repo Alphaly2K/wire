@@ -1,7 +1,8 @@
 # 四个游戏的 Win32 API 批量清单（2026-10-08）
 
 已实现 [tools/api_inventory.py](../tools/api_inventory.py)，不启动游戏即可批量扫描原始目录。
-本次四个目录共 198 个 PE，读取、解析并对照 wire ABI 表耗时 **17.91秒**。
+本次四个目录共 198 个 PE，读取、解析并对照 wire ABI 表耗时 **17.79秒**。
+该时长包含扫描、coverage查询和历史轨迹合并，不是纯PE解析AB。
 扫描所有具有 MZ/PE 头的文件，包含子目录 DLL、托管程序集和改名插件；原始样本只读。
 
 完整结果保存在本机，不提交游戏数据：
@@ -21,21 +22,21 @@
 | Rewrite | x86 | 6 | 448 | 0 | 448 | 0 | 0 |
 | Koikake | x86 | 13 | 443 | 192 | 635 | 0 | 30 |
 | Totsulover | x86 | 19 | 863 | 301 | 1152 | 0 | 179 |
-| AliceToPapa | x64 | 160 | 877 | 108 | 984 | 1304 | 441 |
+| AliceToPapa | x64 | 160 | 877 | 108 | 984 | 1304 | 431 |
 
 `abi_known` 只表示当前 wire 有 ABI/分派登记，不能证明所有参数分支或实际后端功能都已支持。
 例如 Rewrite 的 ABI 缺失为 0，不表示画面、音频和游戏流程已经完整可用。
 工具共用 PE32 `native_export` 和 Win64 实际 dispatch 的 `import_supported`，不维护第二份手写支持名单。
 API-set 别名按当前运行时映射查询；不宣称支持完整 Windows API-set schema。
 
-合并已有 PE32 `api.log`、Win64 启动诊断及 pass123–142 全程统计后：
+合并已有 PE32 `api.log`、Win64 启动诊断及 pass123–152 全程统计后：
 
 | 游戏 | 已观测外部 DLL 调用/尝试的符号 | 已观测且来源明确的外部 DLL 动态查询符号 |
 | --- | ---: | ---: |
 | Rewrite | 281 | 0 |
 | Koikake | 193 | 0 |
 | Totsulover | 46 | 0 |
-| AliceToPapa | 240 | 118 |
+| AliceToPapa | 257 | 119 |
 
 PE32 旧日志中的 `GetProcAddress` 只有函数名，缺少 DLL 来源，保留为 `provider_unresolved`，
 没有计入上表动态查询列。0 不表示游戏没有动态查询。
@@ -128,19 +129,25 @@ USER32 消息循环及extra/time/position元数据已成组接入，当前实际
 
 pass126–142已经接入DXGI output、windowed交换链、InputLayout、真实guest Draw/Present，
 以及BSTR named/ordinal组、WinHTTP proxy discovery、Winsock事件和IP地址/字节序转换组。
-Alice native导入ABI缺失由467降为441，已观测外部调用/尝试符号由200增为240。
+当时Alice native导入ABI缺失由467降为441，已观测外部调用/尝试符号由200增为240。
 当前profile没有网络transport，socket/WSASocket创建明确返回64位INVALID_SOCKET；
 pass141证明游戏自行处理失败继续运行，不把它统计成网络支持。
 CriticalSectionEx flags=1曾为参数分支故障，ABI本来已登记；修复低位flags校验后pass142继续推进。
 
-最新pass142：退休指令2,282,797,097，已完成/接受API4,472,765，
+历史pass142：退休指令2,282,797,097，已完成/接受API4,472,765，
 335次真实GPU Draw、112次成功Present；1024×720正式窗口由guest自己显示。
 用户已观察到Unity logo动画，最后成功Present的单帧捕获为深色背景；尚未验收游戏标题画面或可玩。
-当前明确阻塞为 `user32.dll!GetKeyboardLayout`，下一组候选是USER32键盘布局/输入语言查询。
-这些接口应与现有guest locale/codepage/profile一致，再验证宿主输入分发；不靠强显窗口或空成功推进。
+当时阻塞为 `user32.dll!GetKeyboardLayout`，现已按清单成组接入虚拟US非IME布局/键盘映射，
+与日语LCID/CP932明确分离；同时接入TrackMouseEvent真实能力失败与隔离计算机/账户身份查询。
+native导入ABI缺失继续由441降为431，观测外部调用/尝试符号为257、动态查询为119。
+packed sqrt、Device1/Context1部分语义和typeless资源/view不属于普通Win32导入，但仍由TSV保存。
+pass150曾暴露D32-only视图clear flags=3的过严aspect检查，已修正为仅清视图实际存在的aspect。
+pass152已继续到3,348,585,448退休指令、6,332,527完成API、398 Draw/144 Present，
+最新边界为R16资源/RTV之后的SRV格式/范围校验。
+最新标题画面和可玩性仍待验收，不以单帧空背景或GPU计数替代。
 
-所选全部历史轨迹中的外部调用/尝试ABI缺失共2个：最新的GetKeyboardLayout，
-以及pass128的DialogBoxParamW。后者是当时NOTOPMOST定位失败引出的错误对话框路径，
+所选全部历史轨迹中的外部调用/尝试ABI缺失现为1个：pass128的DialogBoxParamW。
+这是当时NOTOPMOST定位失败引出的错误对话框路径，
 定位修复后最新重放已不触发；清单保留历史证据，不把它误当作最新启动前置API。
 COM vtable gateway仍在JSON/TSV独立保存，不属于普通PE导入计数。
 
@@ -151,12 +158,12 @@ COM vtable gateway仍在JSON/TSV独立保存，不属于普通PE导入计数。
 新增2项Win64回归覆盖默认关闭、真实调用计数、完整模块/序数/转义查询、checked fault不算完成及process故障留存。
 四个原始目录扫描已实际执行；GUI游戏仅使用隔离运行副本。
 pass124已经实际通过HID/SetupAPI空枚举及set销毁，pass125通过设备通知注册；
-`wire.dxgi!Adapter.EnumOutputs`/隐藏初始化窗口是当时的历史边界，当前pass142已越过真实Draw/Present。
+`wire.dxgi!Adapter.EnumOutputs`/隐藏初始化窗口是当时的历史边界，当前重放已越过真实Draw/Present。
 这些COM虚表方法没有普通Win32导入项，完整TSV仍能保存它们的真实调用/故障。
 
 设备发现组另有2项回归覆盖Windows GUID布局、64位set生命周期、空枚举记录、失效句柄、
 输出fault原子性、HidD输出保留、HidP错误/LastError与DLL专属动态导出；相关Win64服务51项回归通过。
 通知组另有1项回归覆盖过滤/recipient校验、故障不取得token、注销/窗口清理与DLL导出归属。
-最新全项目release回归313项通过、6项ignored，Clippy all-targets `-D warnings`通过。
+最新全项目release回归323项通过、6项ignored，Clippy all-targets `-D warnings`通过。
 本轮新增BSTR、消息元数据、WinHTTP、WSA事件、IP转换、无transport创建失败与CriticalSectionEx分支回归；
 图形后端的GPU像素/状态及真实WSI验证见 [图形设计记录](d3d11-dxvk-moltenvk-design.md)。

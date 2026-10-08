@@ -1206,9 +1206,13 @@ int wire_gpu_texture_copy(void *dst,void *src,const WireTextureCopy *region,char
   catch(const std::exception& e){error_text(error,capacity,e.what());return 0;}
 }
 uint32_t wire_gpu_format_support(void *gpu, uint32_t format) {
-  auto c = static_cast<Context*>(gpu); auto f = dxgi_format(format);
+  auto c = static_cast<Context*>(gpu); auto f = texture_storage_format(format);
   if (!c || f == VK_FORMAT_UNDEFINED) return 0;
   VkFormatProperties p = {}; c->format_properties(c->physical,f,&p);
+  if(format==27 || format==39 || format==53 || format==90) {
+    // Only storage capabilities: the caller must select a supported typed view.
+    return (p.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)?0x320:0;
+  }
   uint32_t result = 0;
   if (p.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) result |= 0x20 | 0x100 | 0x200 | 0x1000;
   if (p.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) result |= 0x20 | 0x4000;

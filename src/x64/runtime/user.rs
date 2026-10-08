@@ -1,9 +1,11 @@
 //! Checked Win64 USER32 objects. Guest class pointers never become host pointers.
 use super::{Memory, Runtime64, READ};
 mod gdi;
+mod keyboard;
 mod message;
 mod raw;
 mod window;
+pub(super) use keyboard::arity as keyboard_arity;
 pub(super) use message::arity as message_arity;
 use std::collections::BTreeMap;
 pub use window::WindowCall;
@@ -90,6 +92,9 @@ impl Default for User {
     }
 }
 pub(super) fn arity(name: &str) -> Option<usize> {
+    if let Some(arity) = keyboard::arity(name) {
+        return Some(arity);
+    }
     if let Some(arity) = message::arity(name) {
         return Some(arity);
     }
@@ -119,7 +124,7 @@ pub(super) fn arity(name: &str) -> Option<usize> {
         | "RegisterClassExW"
         | "EnableMouseInPointer" => 1,
         "GetCursor" | "IsMouseInPointerEnabled" => 0,
-        "ClipCursor" | "GetClipCursor" | "GetCursorPos" => 1,
+        "ClipCursor" | "GetClipCursor" | "GetCursorPos" | "TrackMouseEvent" => 1,
         "DwmGetWindowAttribute" => 4,
         "DwmIsCompositionEnabled" => 1,
         "AdjustWindowRect" => 3,
@@ -136,6 +141,9 @@ pub(super) fn arity(name: &str) -> Option<usize> {
     })
 }
 pub(super) fn dwords(name: &str) -> &'static [usize] {
+    if keyboard::arity(name).is_some() {
+        return keyboard::dwords(name);
+    }
     if message::arity(name).is_some() {
         return message::dwords(name);
     }
@@ -182,6 +190,9 @@ impl Runtime64 {
         args: &[u64],
     ) -> Result<u64, String> {
         let wide = name.ends_with('W');
+        if keyboard::arity(name).is_some() {
+            return self.keyboard_layout_call(mem, name, args);
+        }
         if raw::arity(name).is_some() {
             return self.raw_input_call(mem, name, args);
         }
@@ -221,6 +232,40 @@ impl Runtime64 {
             return self.window_query(mem, name, args);
         }
         match name {
+            "TrackMouseEvent" => {
+                // TRACKMOUSEEVENT is 24 bytes on Win64 (including tail padding).
+                // The current AppKit bridge has no hover/leave tracking source.
+                // Query/cancel the actual empty registration state; registration
+                // must fail rather than promise notifications we cannot deliver.
+                let mut data = [0; 24];
+                mem.read(args[0], &mut data)?;
+                let size = u32::from_le_bytes(data[..4].try_into().unwrap());
+                let flags = u32::from_le_bytes(data[4..8].try_into().unwrap());
+                if size != 24 {
+                    self.set_error(mem, 87)?;
+                    return Ok(0);
+                }
+                if flags & 0x40000000 != 0 {
+                    let mut output = [0; 24];
+                    output[..4].copy_from_slice(&24u32.to_le_bytes());
+                    mem.write(args[0], &output)?;
+                    return Ok(1);
+                }
+                let window = u64::from_le_bytes(data[8..16].try_into().unwrap());
+                if !self.user.windows.contains_key(&window) {
+                    self.set_error(mem, 1400)?;
+                    return Ok(0);
+                }
+                if flags & !(0x80000000 | 0x10 | 3) != 0 {
+                    self.set_error(mem, 87)?;
+                    return Ok(0);
+                }
+                if flags & 0x80000000 != 0 || flags & 3 == 0 {
+                    return Ok(1); // Nothing was armed; cancellation needs no backend.
+                }
+                self.set_error(mem, 50)?;
+                Ok(0)
+            }
             "GetClipCursor" => {
                 write_rect(mem, args[0], self.user.cursor_clip)?;
                 Ok(1)

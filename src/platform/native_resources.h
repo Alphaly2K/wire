@@ -1,5 +1,15 @@
 // Independently implemented owned Vulkan images and synchronous transfer scope.
 // SPDX-License-Identifier: LGPL-2.1-only
+// Typeless is a resource storage choice, never a shader/vertex/view format.
+VkFormat texture_storage_format(uint32_t format,uint32_t bind=0) {
+  if(format==39)return (bind&0x40)?VK_FORMAT_D32_SFLOAT:VK_FORMAT_R32_SFLOAT;
+  if(format==53)return (bind&0x40)?VK_FORMAT_D16_UNORM:VK_FORMAT_R16_SFLOAT;
+  return dxgi_format(format==27?28:format==90?87:format);
+}
+bool rgba8_family(uint32_t format) {return format>=27 && format<=32;}
+bool bgra8_family(uint32_t format) {return format==87 || format==90 || format==91;}
+bool r32_color_family(uint32_t format) {return format==39 || (format>=41 && format<=43);}
+bool r16_color_family(uint32_t format) {return format==53 || format==54 || (format>=56 && format<=59);}
 struct Commands {
   Context& c;
   BlitScope scope;
@@ -34,14 +44,14 @@ struct Texture {
   VkDeviceMemory memory=VK_NULL_HANDLE;
   VkImageAspectFlags aspect;
   uint32_t block=1,bytes=0;
-  Texture(Context& context,WireTextureDesc d):c(context),desc(d),format(dxgi_format(d.format)) {
-    aspect=(d.format==40 || d.format==55)?VK_IMAGE_ASPECT_DEPTH_BIT:
+  Texture(Context& context,WireTextureDesc d):c(context),desc(d),format(texture_storage_format(d.format,d.bind)) {
+    aspect=(d.format==40 || d.format==55 || ((d.format==39 || d.format==53) && (d.bind&0x40)))?VK_IMAGE_ASPECT_DEPTH_BIT:
       (d.format==19 || d.format==20 || d.format==45)?VK_IMAGE_ASPECT_DEPTH_BIT|VK_IMAGE_ASPECT_STENCIL_BIT:VK_IMAGE_ASPECT_COLOR_BIT;
     switch(d.format) {
       case 2:case 3:case 4: bytes=16;break;
       case 6:case 7:case 8:bytes=12;break;
       case 10:case 11:case 12:case 13:case 14:case 16:case 17:case 18:case 19:case 20:bytes=8;break;
-      case 49:case 50:case 51:case 52:case 54:case 55:case 56:case 57:case 58:case 59:bytes=2;break;
+      case 49:case 50:case 51:case 52:case 53:case 54:case 55:case 56:case 57:case 58:case 59:bytes=2;break;
       case 61:case 62:case 63:case 64:bytes=1;break;
       case 71:case 72:case 80:block=4;bytes=8;break;
       case 74:case 75:case 77:case 78:case 83:block=4;bytes=16;break;
@@ -73,7 +83,7 @@ std::unique_ptr<Texture> create_texture(Context& c,const WireTextureDesc& d) {
     throw std::runtime_error("depth/stencil view-only or typeless texture binding unsupported");
   if(!d.width || !d.height || !d.mips || !d.layers || d.width>c.properties.limits.maxImageDimension2D ||
      d.height>c.properties.limits.maxImageDimension2D || d.layers>c.properties.limits.maxImageArrayLayers || d.mips>14 ||
-     d.mips>uint32_t(32-__builtin_clz(std::max(std::max(d.width,d.height),(d.bind&0x200)?d.layers:1u))) || d.bind&~0x768u || dxgi_format(d.format)==VK_FORMAT_UNDEFINED)
+     d.mips>uint32_t(32-__builtin_clz(std::max(std::max(d.width,d.height),(d.bind&0x200)?d.layers:1u))) || d.bind&~0x768u || texture_storage_format(d.format,d.bind)==VK_FORMAT_UNDEFINED)
     throw std::runtime_error("texture dimensions/format/usage unsupported");
   auto t=std::make_unique<Texture>(c,d);uint64_t total=0;
   for(uint32_t mip=0;mip<d.mips;mip++)total+=uint64_t(t->size(mip))*(t->volume()?1:d.layers);
@@ -83,8 +93,8 @@ std::unique_ptr<Texture> create_texture(Context& c,const WireTextureDesc& d) {
   if((d.bind&0x20) && !(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT))throw std::runtime_error("render target format unsupported");
   if((d.bind&0x40) && !(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT))throw std::runtime_error("depth target format unsupported");
   VkImageCreateInfo ii={VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};ii.imageType=VK_IMAGE_TYPE_2D;ii.format=t->format;
-  if(d.bind&0x400) {
-    if(!(d.format==28 || d.format==29 || d.format==87 || d.format==91))throw std::runtime_error("mutable image format family unsupported");
+  if(d.format==27 || d.format==90 || ((d.format==39 || d.format==53) && !(d.bind&0x40)) || (d.bind&0x400)) {
+    if(!(rgba8_family(d.format) || bgra8_family(d.format) || r32_color_family(d.format) || r16_color_family(d.format)))throw std::runtime_error("mutable image format family unsupported");
     ii.flags|=VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
   }
   if(d.bind&0x100) {if(d.width!=d.height || d.layers%6)throw std::runtime_error("cube texture dimensions");ii.flags|=VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;}
@@ -111,7 +121,8 @@ void texture_write(Texture& t,uint32_t subresource,const uint8_t *data,size_t si
 }
 void texture_read(Texture& t,uint32_t subresource,uint8_t *data,size_t size) {
   if(subresource>=t.subresources() || !data)throw std::runtime_error("texture read subresource/output");
-  bool depth=t.desc.format==19 || t.desc.format==20 || t.desc.format==40;
+  bool depth=t.desc.format==19 || t.desc.format==20 || t.desc.format==40 || t.desc.format==55 ||
+    ((t.desc.format==39 || t.desc.format==53) && (t.desc.bind&0x40));
   if(t.aspect!=VK_IMAGE_ASPECT_COLOR_BIT && !depth)throw std::runtime_error("texture read depth format unsupported");
   uint32_t mip=subresource%t.desc.mips,layer=t.volume()?0:subresource/t.desc.mips;
   if(size!=t.size(mip))throw std::runtime_error("texture tight read size");
@@ -142,6 +153,16 @@ std::unique_ptr<ImageView> create_image_view(Texture& t,WireImageViewDesc d) {
   bool compatible=d.format==t.desc.format || ((t.desc.bind&0x400) &&
     (((d.format==28 || d.format==29) && (t.desc.format==28 || t.desc.format==29)) ||
      ((d.format==87 || d.format==91) && (t.desc.format==87 || t.desc.format==91))));
+  if(t.desc.format==27)compatible=d.format>=28 && d.format<=32;
+  if(t.desc.format==90)compatible=d.format==87 || d.format==91;
+  if(t.desc.format==39) {
+    compatible=(t.aspect==VK_IMAGE_ASPECT_DEPTH_BIT)?
+      ((d.kind==2 && d.format==40) || (d.kind==0 && d.format==41)):(d.format>=41 && d.format<=43);
+  }
+  if(t.desc.format==53) {
+    compatible=(t.aspect==VK_IMAGE_ASPECT_DEPTH_BIT)?
+      ((d.kind==2 && d.format==55) || (d.kind==0 && d.format==56)):(d.format==54 || (d.format>=56 && d.format<=59));
+  }
   VkImageAspectFlags aspect=t.aspect;
   if(t.desc.format==19) {
     compatible=(d.kind==2 && d.format==20) || (d.kind==0 && (d.format==21 || d.format==22));
@@ -151,8 +172,13 @@ std::unique_ptr<ImageView> create_image_view(Texture& t,WireImageViewDesc d) {
      d.layer>=t.desc.layers || d.layers>t.desc.layers-d.layer || d.kind>5 ||
      ((d.kind==0 || d.kind>=3) && !(t.desc.bind&8)) || (d.kind==1 && (!(t.desc.bind&0x20) || d.mips!=1)) ||
      (d.kind==2 && (!(t.desc.bind&0x40) || d.mips!=1)))throw std::runtime_error("image view format/range/usage unsupported");
+  auto format=((t.desc.format==39 || t.desc.format==53) && t.aspect==VK_IMAGE_ASPECT_DEPTH_BIT)?t.format:dxgi_format(d.format);VkFormatProperties fp={};
+  if(format==VK_FORMAT_UNDEFINED)throw std::runtime_error("typeless/unknown image view format");
+  t.c.format_properties(t.c.physical,format,&fp);
+  auto required=d.kind==1?VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT:d.kind==2?VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT:VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+  if(!(fp.optimalTilingFeatures&required))throw std::runtime_error("typed image view format capability unsupported");
   auto v=std::make_unique<ImageView>(t,d);VkImageViewCreateInfo vi={VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-  vi.image=t.handle;vi.format=dxgi_format(d.format);vi.viewType=d.layers==1?VK_IMAGE_VIEW_TYPE_2D:VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+  vi.image=t.handle;vi.format=format;vi.viewType=d.layers==1?VK_IMAGE_VIEW_TYPE_2D:VK_IMAGE_VIEW_TYPE_2D_ARRAY;
   if(d.kind==5) {if(!t.volume() || d.layer!=0 || d.layers!=1)throw std::runtime_error("volume view range");vi.viewType=VK_IMAGE_VIEW_TYPE_3D;}
   else if((d.kind>=3 && d.kind<=4)) {if(!(t.desc.bind&0x100) || d.layer%6 || d.layers%6 || (d.kind==3 && d.layers!=6))throw std::runtime_error("cube view range");vi.viewType=d.kind==3?VK_IMAGE_VIEW_TYPE_CUBE:VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;}
   vi.subresourceRange={aspect,d.mip,d.mips,d.layer,d.layers};
@@ -179,10 +205,16 @@ void clear_image_view(ImageView& v,const float *rgba) {
   v.t.barrier(cmd.command,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_GENERAL,v.desc.mip,v.desc.layer,1,v.desc.layers);cmd.submit();
 }
 void clear_depth_view(ImageView& v,uint32_t flags,float depth,uint32_t stencil) {
-  if(v.desc.kind!=2 || !flags || flags&~3u || !std::isfinite(depth) || depth<0 || depth>1 || stencil>255)
+  if(v.desc.kind!=2 || flags&~3u || stencil>255)
     throw std::runtime_error("invalid depth/stencil view clear");
-  VkImageAspectFlags aspect=((flags&1)?VK_IMAGE_ASPECT_DEPTH_BIT:0)|((flags&2)?VK_IMAGE_ASPECT_STENCIL_BIT:0);
-  if((v.t.aspect&aspect)!=aspect)throw std::runtime_error("requested depth/stencil aspect absent");
+  // ClearFlags select only aspects actually present in the DSV. A stencil bit
+  // on a depth-only view is ignored; it does not imply stencil support.
+  VkImageAspectFlags aspect=(((flags&1)?VK_IMAGE_ASPECT_DEPTH_BIT:0)|((flags&2)?VK_IMAGE_ASPECT_STENCIL_BIT:0))&v.t.aspect;
+  if(!aspect)return;
+  if(aspect&VK_IMAGE_ASPECT_DEPTH_BIT) {
+    if(std::isnan(depth))throw std::runtime_error("invalid depth view clear value");
+    depth=std::clamp(depth,0.f,1.f);
+  }else depth=0; // Unused depth must not introduce a Vulkan validation error.
   Commands cmd(v.t.c);v.t.barrier(cmd.command,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_GENERAL,v.desc.mip,v.desc.layer,1,v.desc.layers);
   VkClearDepthStencilValue value={depth,stencil};VkImageSubresourceRange range={aspect,v.desc.mip,1,v.desc.layer,v.desc.layers};
   v.t.c.fn<PFN_vkCmdClearDepthStencilImage>("vkCmdClearDepthStencilImage")(cmd.command,v.t.handle,VK_IMAGE_LAYOUT_GENERAL,&value,1,&range);
@@ -207,7 +239,10 @@ std::unique_ptr<BufferView> create_buffer_view(Buffer& b,uint32_t format,size_t 
 }
 void texture_copy(Texture& dst,Texture& src,const WireTextureCopy& r) {
   if(&dst.c!=&src.c || dst.aspect!=src.aspect || dst.block!=src.block || dst.bytes!=src.bytes || dst.volume()!=src.volume() ||
-     (dst.format!=src.format && !((dst.desc.format==28 || dst.desc.format==29) && (src.desc.format==28 || src.desc.format==29))) ||
+     (dst.format!=src.format && !(rgba8_family(dst.desc.format) && rgba8_family(src.desc.format)) &&
+      !(bgra8_family(dst.desc.format) && bgra8_family(src.desc.format)) &&
+      !(r32_color_family(dst.desc.format) && r32_color_family(src.desc.format)) &&
+      !(r16_color_family(dst.desc.format) && r16_color_family(src.desc.format))) ||
      r.dst_sub>=dst.subresources() || r.src_sub>=src.subresources() || (&dst==&src && r.dst_sub==r.src_sub))
     throw std::runtime_error("texture copy context/format/subresource mismatch");
   uint32_t dm=r.dst_sub%dst.desc.mips,sm=r.src_sub%src.desc.mips;

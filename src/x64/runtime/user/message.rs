@@ -295,6 +295,58 @@ mod tests {
         (runtime, mem)
     }
     #[test]
+    fn mouse_tracking_reports_empty_state_and_real_absent_delivery() {
+        let (mut r, mut m) = fixture();
+        let data = STACK + 128;
+        m.write_int(data, 4, 24).unwrap();
+        m.write_int(data + 8, 8, HWND).unwrap();
+        for flags in [1, 2, 3, 0x11, 0x12] {
+            m.write_int(data + 4, 4, flags).unwrap();
+            assert_eq!(r.user_call(&mut m, "TrackMouseEvent", &[data]).unwrap(), 0);
+            assert_eq!(m.read_int(crate::x64::runtime::TEB + 0x68, 4).unwrap(), 50);
+            assert!(r.user.events.is_empty());
+        }
+        m.write_int(data + 4, 4, 0x80000003).unwrap();
+        assert_eq!(r.user_call(&mut m, "TrackMouseEvent", &[data]).unwrap(), 1);
+        m.write_int(data + 4, 4, 0x40000000).unwrap();
+        m.write_int(data + 8, 8, u64::MAX).unwrap();
+        assert_eq!(r.user_call(&mut m, "TrackMouseEvent", &[data]).unwrap(), 1);
+        assert_eq!(m.read_int(data, 4).unwrap(), 24);
+        assert_eq!(m.read_int(data + 4, 4).unwrap(), 0);
+        assert_eq!(m.read_int(data + 8, 8).unwrap(), 0);
+        assert_eq!(m.read_int(data + 16, 8).unwrap(), 0);
+        m.write_int(data + 4, 4, 2).unwrap();
+        m.write_int(data + 8, 8, HWND ^ (1 << 40)).unwrap();
+        assert_eq!(r.user_call(&mut m, "TrackMouseEvent", &[data]).unwrap(), 0);
+        assert_eq!(
+            m.read_int(crate::x64::runtime::TEB + 0x68, 4).unwrap(),
+            1400
+        );
+        m.write_int(data, 4, 16).unwrap();
+        assert_eq!(r.user_call(&mut m, "TrackMouseEvent", &[data]).unwrap(), 0);
+        assert_eq!(m.read_int(crate::x64::runtime::TEB + 0x68, 4).unwrap(), 87);
+        // QUERY writes the complete Win64 structure atomically.
+        let crossing = STACK + 4090;
+        m.write(crossing, &[0xaa; 24]).unwrap();
+        m.write_int(crossing, 4, 24).unwrap();
+        m.write_int(crossing + 4, 4, 0x40000000).unwrap();
+        let mut before = [0; 24];
+        m.read(crossing, &mut before).unwrap();
+        m.protect(STACK + 4096, 4096, READ).unwrap();
+        assert!(r.user_call(&mut m, "TrackMouseEvent", &[crossing]).is_err());
+        let mut after = [0; 24];
+        m.read(crossing, &mut after).unwrap();
+        assert_eq!(after, before);
+        assert!(crate::x64::runtime::import_supported(
+            "user32.dll",
+            "TrackMouseEvent"
+        ));
+        assert!(!crate::x64::runtime::import_supported(
+            "kernel32.dll",
+            "TrackMouseEvent"
+        ));
+    }
+    #[test]
     fn message_metadata_is_per_thread_full_width_and_commits_after_checked_output() {
         let (mut r, mut m) = fixture();
         let extra = 0xfedcba9876543210;

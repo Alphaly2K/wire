@@ -1,6 +1,6 @@
 # AMD64 / Unity / Mono 启动推进（2026-10-08 接续）
 
-这是接续 `b48b1f7` 的窗口/图形初始化检查点。普通 `wire run` 仍拒绝 AMD64；
+这是接续 `654a605` 的Unity logo之后初始化检查点。普通 `wire run` 仍拒绝 AMD64；
 实际启动使用 `wire probe64 --startup`。解释器是主路径，所有高地址访问仍经过 checked guest memory，
 没有把 guest 机器码交给宿主 CPU，也没有引入 QEMU GPL 实现。
 
@@ -19,13 +19,13 @@ Unity内嵌VS/PS执行64×64离屏Draw，4096个RGBA8像素读回逐通道比较
 
 ## 当前真实结果
 
-AliceToPapa隔离副本的 **pass142 已实际执行335次guest GPU Draw、112次DXGI Present**。
+AliceToPapa隔离副本的 **pass152 已实际执行398次guest GPU Draw、144次DXGI Present**。
 窗口由guest自己改为 `visible=true`、客户区1024×720，HWND=`0x7ffd00630000`，
 标题 `AliceToPapaADV_1-0-0`。不再停在隐藏bootstrap窗口，也没有强制显示guest隐藏窗口。
-最新退休指令2,282,797,097、work2,287,546,940、已完成API4,472,765，
-日志为 `wire-out/games64/alice/linked-pass-142.txt` 与 `api-pass-142.tsv`。
+最新退休指令3,348,585,448、work3,355,396,173、已完成API6,332,527，
+日志为 `wire-out/games64/alice/linked-pass-152.txt` 与 `api-pass-152.tsv`。
 这证明Win64窗口、实际guest Draw和公开Vulkan WSI提交路径已经越过；
-用户已实际观察到 **Unity logo动画**。pass137–142保存的是最后一次成功Present，
+用户已实际观察到 **Unity logo动画**。pass137–152保存的是最后一次成功Present，
 该时刻为深色背景；单帧捕获不能否定之前的动画，也不足以验收游戏标题画面、输入或持续可玩。
 
 pass126–132逐步补齐DXGI虚拟output/modes、GetWindowPlacement/DWM、NOTOPMOST定位、
@@ -46,7 +46,11 @@ Winsock owned手动复位event与合作等待；pass139已经越过这些边界�
 曾停在socket ordinal23。隔离profile无网络transport，socket/WSASocketA/W已接入真实能力失败，
 返回完整64位INVALID_SOCKET；pass141证明guest自行处理失败并继续。
 修正CriticalSectionEx低位flags后，pass142又前进约2.9亿退休指令，
-目前停在 `user32.dll!GetKeyboardLayout`；线程6的网络尝试没有继续阻止主线程推进。
+当时停在 `user32.dll!GetKeyboardLayout`；后续键盘、packed sqrt、鼠标跟踪与身份查询已越过。
+pass146/147曾因缺少Device1而发生真实空对象读取；补齐实际Device1/Context1 vtable后，
+pass148继续约4.3亿指令，到R32 typeless深度纹理创建；pass150–152继续越过其view/clear及R16纹理/RTV。
+当前明确失败是CreateShaderResourceView的format/range/usage校验，尚不能当作新shader已开始渲染。
+线程6的网络尝试没有继续阻止主线程推进。
 原始游戏目录保持只读，运行与Player.log只写在 `wire-out/games64/alice/runtime/`。
 
 CPU解释器/IR仍为主路径，没有guest CPU JIT。此前Mono的TLS/DllMain、合作线程、
@@ -132,8 +136,117 @@ HID/SetupAPI隔离设备枚举为空，WinRT Gamepad无注册类时真实失败�
 | pass-140 | 1,990,805,404 | 4,217,882 | 地址转换通过；338 Draw / 113 Present；socket ordinal23 |
 | pass-141 | 1,993,384,119 | 4,220,631 | socket真实失败回退；332 Draw / 111 Present；CriticalSectionEx flags=1 |
 | pass-142 | 2,282,797,097 | 4,472,765 | critical section修复通过；335 Draw / 112 Present；`GetKeyboardLayout` |
+| pass-143 | 2,579,099,762 | 4,982,429 | 键盘布局查询通过；338 Draw / 113 Present；`SQRTPS` |
+| pass-144 | 2,857,875,295 | 5,498,459 | SQRTPS通过；401 Draw / 144 Present；`TrackMouseEvent` |
+| pass-145 | 2,864,441,305 | 5,506,021 | 鼠标跟踪真实失败后继续；399 Draw / 144 Present；`GetComputerNameW` |
+| pass-146 | 2,855,877,159 | 5,496,864 | 身份查询通过；391 Draw / 141 Present；缺少Device1导致Unity空对象读取 |
+| pass-147 | 2,854,687,975 | 5,488,685 | 显式Windows7-like开关未解决；366 Draw / 133 Present；同一空Device1读取 |
+| pass-148 | 3,281,270,686 | 6,203,425 | Device1通过；401 Draw / 145 Present；`CreateTexture2D(format=39/0x27)` |
+| pass-149 | 3,270,966,962 | 6,192,414 | 398 Draw / 144 Present；同一R32 typeless边界 |
+| pass-150 | 3,292,130,479 | 6,220,488 | R32资源/view通过；399 Draw / 144 Present；depth-only视图clear flags=3 |
+| pass-151 | 3,346,638,205 | 6,333,631 | depth clear通过；309 Draw / 114 Present；R16 typeless `format=53/0x35` |
+| pass-152 | 3,348,585,448 | 6,332,527 | R16纹理及4次RTV创建通过；398 Draw / 144 Present；SRV格式/范围校验 |
 
 指令与 API 计数受真实时间/线程调度影响，上表不构成相同路径的性能 AB 对照。
+
+## 键盘查询与 packed SSE 平方根（2026-10-08）
+
+按静态清单成组接入GetKeyboardLayout / List / NameA/W、GetKeyboardType、
+MapVirtualKeyA/W / ExA/W、ToUnicode / Ex与GetKeyNameTextA/W，共13个Win64入口。
+隔离桌面明确使用一个虚拟US非IME布局：HKL=`04090409`、KLID=`00000409`，
+与日语LCID=`0411`及ACP/OEMCP=932独立；不宣称已接入日本JIS扫描码或宿主布局切换。
+实现普通set-1扫描码、左右modifier、keypad/navigation、Shift/Caps/Ctrl字符与英文键名。
+GetKeyboardLayout可查询存活guest线程；参数DWORD截断，HKL与buffer保持64位。
+查询/转换支持checked输出、短buffer终止与跨页故障原子性；这些入口只属于USER32，
+不会出现在kernel32/kernelbase/imm32的静态分派或动态导出中。
+
+ToUnicode仅使用caller提供的256字节状态，无dead-key或Alt+numpad组合backend；
+不消费host text，也不更新guest排队按键状态。现有TranslateMessage继续消费宿主已解析的Unicode，
+因此输入查询不会吞掉缓存的日语文字。AppKit目前仍没有完整的Windows物理扫描码、
+左右modifier事件或多布局同步，这组查询的完成不代表整个输入系统已完成。
+布局字符/键名规则适配固定Hangover Wine的LGPL源码，保留原始input.c、notice和hash，
+范围见`third_party/hangover/README.md`；没有引入QEMU GPL实现。
+
+pass143真实完成GetKeyboardLayout一次及MapVirtualKeyExA 119次，
+越过输入初始化并继续到SQRTPS。已将SQRTPS/SQRTPD接入既有精确整数平方根路径，
+逐lane处理MXCSR舍入、DAZ、NaN与异常；聚合全部lane异常后才提交目标XMM。
+packed m128保持16字节对齐/readable校验；scalar形式保持高lane。
+扩展Unicorn差分覆盖single/double、scalar/packed、四种舍入、零、NaN、非正规数及随机位模式；
+独立回归检查多lane invalid/denormal聚合、unmasked #XM、内存fault和目标不提前提交。
+
+pass144继续到TrackMouseEvent。已登记其Win64 ABI并校验24字节TRACKMOUSEEVENT、
+完整HWND和flags；QUERY返回实际空注册状态，CANCEL空注册可成功。
+AppKit目前没有hover/leave tracking事件源，HOVER/LEAVE/NONCLIENT注册仍真实返回
+FALSE/ERROR_NOT_SUPPORTED，而非报告将投递不存在的事件。
+回归覆盖空查询、取消、非法size/HWND、未投递消息、专属DLL归属及跨页QUERY输出fault。
+本次完整release回归323项通过，6项ignored；Clippy release all-targets `-D warnings`通过。
+日志为`/private/tmp/wire-keyboard-final-{all-tests,clippy}.txt`。
+
+pass145确认Unity处理TrackMouseEvent的真实失败并继续，随后到GetComputerNameW。
+已成组接入GetComputerNameA/W、GetComputerNameExA/W、GetUserNameA/W。
+它们返回隔离guest身份：NetBIOS `WIRE`、DNS hostname/FQDN `wire`、无DNS domain，
+账户名`wire`与已有`C:\\Users\\wire`目录一致；不查询或暴露宿主账户/网络身份。
+长度参数是DWORD指针，计算机名成功长度不含NUL，用户名成功长度包含NUL；
+短buffer更新required含NUL，分别返回ERROR_BUFFER_OVERFLOW / MORE_DATA / INSUFFICIENT_BUFFER。
+空domain仍写NUL；invalid Ex类型失败不改输出。成功前检查所有输出，支持跨页fault原子性。
+计算机名入口只属于kernel32/kernelbase，用户名只属于advapi32，静态/动态导出归属均有回归。
+
+pass146完成GetComputerNameW后停在UnityPlayer `0x18093f906` 对RCX=0的真实读取，
+不是新缺失Win32导入。只读反汇编确认该地址执行`mov rax,[rcx]`，随后调用vtable slot33
+CheckFeatureSupport(feature=5,size=56)。指针从global `0x182128f18` 读取；
+初始化在 `0x18091b602` QueryInterface请求IID
+`a04bfb29-08ef-43d6-a49c-a9bdbdcbe686`（ID3D11Device1），未检查失败返回即保存为空。
+pass146时bridge只支持ID3D11Device及基础vtable，Device1真实返回E_NOINTERFACE。
+没有映射空地址；随后独立接入Device1/Context1公开ABI及下述实际语义。
+
+Unity二进制含有`force-windows-7-like-d3d11`字符串，但实际诊断不能据此假定基础路径有效。
+诊断CLI新增可重复`--guest-arg VALUE`：以Windows规则分别quote每个literal参数，
+更新GetCommandLineA/W与PEB CommandLine的checked缓冲和UTF16长度，保留原EXE路径。
+参数不会经过shell，也不修改Windows版本查询；默认不添加兼容开关。
+回归覆盖空参数、引号、空格、尾随反斜杠、日语/CP932、NUL/超长拒绝和跨输出fault原子性。
+pass147显式使用`--guest-arg -force-windows-7-like-d3d11`，仍在同一地址发生空Device1读取；
+该开关未解决问题，未设为默认。
+
+## Device1 / Context1与typeless纹理（2026-10-08接续）
+
+按公开ABI独立追加Device1的7槽和Context1的19槽，保留所有基础槽号、IUnknown身份、
+AddRef/Release与保护页。DxgiDevice→Device1查询返回控制Device，保持接口查询传递性。
+GetImmediateContext1返回真实已有Context；copy/update的flags=0转入实际基础操作。
+SetConstantBuffers1只支持完整buffer（first=0、count=4096或NULL默认）；partial/offset明确拒绝。
+DiscardResource/View/View1校验owner、类型及rect内存后保留内容作为合法discard hint，
+不更改绑定与引用。deferred/context-state、Blend/Raster1和共享资源创建返回真实UNSUPPORTED，
+预检并清零输出；GetConstantBuffers1、ClearView、SwapDeviceContextState与非零copy flags等仍未实现。
+CheckFeatureSupport(feature=5,size=56)沿用实际支持范围，全零不广告高级能力。
+公开声明核对来源为Wine 10.0固定commit `b073859675060c9211fcbccfd90e4e87520dc2c2` 的
+`include/d3d11_1.idl`；没有移植Wine/DXVK renderer实现，不宣称完整D3D11.1。
+
+pass148以默认参数越过上述空对象读取，继续到线程23的1×1、format=39（0x27）、bind=0x48深度纹理创建。
+原descriptor诊断以十六进制输出，不能将其中27读成十进制RGBA8格式；新诊断同时打印十进制format。
+pass149仅包含RGBA8/BGRA8修复，仍在同一R32边界，未因此继续。
+宿主后端现独立实现RGBA8/BGRA8/R32/R16 typeless存储：27→UNORM RGBA、90→UNORM BGRA，
+使用mutable image；typed views必须明确选择28–32或87/91，资源GetDesc仍保留原typeless格式。
+不会把typeless格式作为shader/vertex/view类型，默认/typeless或跨族view失败。
+typed view按真实GPU格式能力验证；sRGB清除转换线性颜色，copy始终保留原始字节。
+39带DEPTH_STENCIL时保留真正的D32 storage，DSV40与FLOAT SRV41共享深度aspect；
+无depth bind时使用R32 storage并允许FLOAT/UINT/SINT view41–43，不将D32纹理替换成普通颜色附件。
+depth上的UINT/SINT与默认typeless view仍拒绝；允许深度按4B像素读回和同格式copy。
+独立GPU探针验证两族、7种typed SRV、多层mip、UNORM/sRGB clear及typed↔typeless复制共928字节，
+再验证R32 color/depth、视图限制、depth clear和copy，共1024字节。
+pass151继续到128×1、format=53（0x35）的R16 typeless颜色纹理；已使用R16 storage与正确2B像素布局，
+颜色支持FLOAT54/UNORM56/UINT57/SNORM58/SINT59；depth bind使用D16 storage、DSV55及UNORM SRV56。
+五种颜色view、UNORM clear与D16 clear/读回另检查576字节，最终四族共1600字节。
+原有深度、cube、volume与传输回归继续通过。证据为
+`wire-out/typeless-resource-probe-2026-10-08/report.json`。
+guest COM回归另覆盖原descriptor、view引用、invalid HRESULT及输出fault不创建对象/增加引用。
+资源探针退出仍有MoltenVK报告1MB未释放，不能据此声称已完成泄漏排查。
+
+pass150越过R32创建/view，暴露ClearDepthStencilView对flags=3的过严检查：
+depth-only视图没有stencil时，应取flags与存在aspect的交集，只清真实depth；
+stencil-only/flags=0在该视图上是合法无操作，不表示实现了stencil存储。
+核对DXVK Native 1.9.2的公开兼容行为后独立修正，未复制其context实现；
+微软公开文档还明确Depth需要clamp到0–1，现对有限值和±Inf正确clamp，使用中的NaN仍明确拒绝。
+回归覆盖flags=3实际depth clear、stencil-only未使用NaN、无flags、4种clamp与错误保留像素。
+guest COM实际验证FLOAT来自XMM3并在D32资源读回32个正确深度像素。
 
 `16dd486`保存了D3D11资源与Mono线程服务检查点，完整release回归281项通过，Clippy无warning。
 之后统一Win64 API参数表与kernel32/kernelbase动态导出发现：已实现函数不再依赖此前是否登记静态gateway。
@@ -410,16 +523,17 @@ cd wire-out/games64/alice/runtime
   --moltenvk /private/tmp/wire-moltenvk-1.4.2/MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib
 ```
 
-下一步按API清单成组核对USER32键盘布局/输入语言查询，再检查Unity logo之后的
-托管初始化、实际API/COM阻塞与游戏标题画面；
+下一步按用户最新指示先抓无capture/API统计的实际启动profile并优化性能，
+同时保留SRV真实失败的descriptor诊断；后续继续检查Unity logo之后的游戏标题画面。
 不以LoadLibrary成功、GPU帧数或空背景当作游戏跑通。
-最新完整release回归313项通过：25 unit、37 differential、9 FPU、26 IR、1 Wasm、109 Win32、106 AMD64，6项ignored。
+最新完整release回归323项通过：29 unit、37 differential、9 FPU、26 IR、1 Wasm、109 Win32、112 AMD64，6项ignored。
 本轮新增WSA事件与IP转换回归，覆盖manual-reset生命周期、Win32/WSA共用等待、64位指针/句柄、
 Windows地址族与网络字节、A/W错误码、动态named/ordinal导出、短buffer及checked故障不提前提交；
 无network provider的创建失败另覆盖64位INVALID_SOCKET、startup优先级及event仍可正常使用。
 CriticalSectionEx回归覆盖guest实际的flags=1、低位组合、DWORD截断、递归owner/释放、
 不支持的高位功能及跨页输出fault，不提前改变CPU、输出或完成调用统计。
-日志为 `/private/tmp/wire-present-final-{all-tests,clippy}.txt`；Clippy all-targets `-D warnings`通过。
+日志为 `/private/tmp/wire-logo-final-{all-tests,clippy}.txt`；Clippy all-targets `-D warnings`通过。
+本轮原生COM回归另见`/private/tmp/wire-typeless-native-com.txt`，资源与Draw探针见图形设计记录。
 Python扫描器5项原创fixture回归通过。API汇总、设备发现/通知的故障原子性、生命周期与DLL发现均有独立覆盖。
 最终Clippy all-targets、format、diff whitespace检查通过。
 此前图形检查点新增4项覆盖COM身份/引用/parent、Win64 Desc布局/高指针、readonly保护、故障原子性、

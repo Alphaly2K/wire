@@ -12,6 +12,18 @@ const DEVICE: Guid = guid(
     0x4e88,
     [0x82, 0x53, 0x81, 0x9d, 0xf9, 0xbb, 0xf1, 0x40],
 );
+const DEVICE1: Guid = guid(
+    0xa04bfb29,
+    0x08ef,
+    0x43d6,
+    [0xa4, 0x9c, 0xa9, 0xbd, 0xbd, 0xcb, 0xe6, 0x86],
+);
+const CONTEXT1: Guid = guid(
+    0xbb2c6faa,
+    0xb5fb,
+    0x4082,
+    [0x8e, 0x6b, 0x38, 0x8b, 0x8c, 0xfa, 0x90, 0xe1],
+);
 const CONTEXT: Guid = guid(
     0xc0bfa96c,
     0xe089,
@@ -161,7 +173,9 @@ pub(super) fn arity(name: &str) -> Option<usize> {
     }
     abi::DEVICE
         .iter()
+        .chain(abi::DEVICE1)
         .chain(abi::CONTEXT)
+        .chain(abi::CONTEXT1)
         .chain(DXGI)
         .chain(QUERY)
         .chain(CHILD_ABI)
@@ -177,7 +191,9 @@ pub(super) fn dwords(name: &str) -> &'static [usize] {
     }
     abi::DEVICE
         .iter()
+        .chain(abi::DEVICE1)
         .chain(abi::CONTEXT)
+        .chain(abi::CONTEXT1)
         .chain(DXGI)
         .chain(QUERY)
         .chain(CHILD_ABI)
@@ -189,8 +205,16 @@ pub(super) fn dwords(name: &str) -> &'static [usize] {
 }
 pub(super) fn methods(kind: Kind) -> Vec<&'static str> {
     match kind {
-        Kind::Device => abi::DEVICE.iter().map(|(n, _, _)| *n).collect(),
-        Kind::Context => abi::CONTEXT.iter().map(|(n, _, _)| *n).collect(),
+        Kind::Device => abi::DEVICE
+            .iter()
+            .chain(abi::DEVICE1)
+            .map(|(n, _, _)| *n)
+            .collect(),
+        Kind::Context => abi::CONTEXT
+            .iter()
+            .chain(abi::CONTEXT1)
+            .map(|(n, _, _)| *n)
+            .collect(),
         Kind::Srv | Kind::Rtv | Kind::Dsv => CHILD_ABI
             .iter()
             .chain(VIEW_ABI)
@@ -274,8 +298,8 @@ pub(super) fn supports(kind: Kind, iid: &Guid) -> bool {
         return true;
     }
     match kind {
-        Kind::Device => *iid == DEVICE,
-        Kind::Context => *iid == CONTEXT || *iid == CHILD,
+        Kind::Device => *iid == DEVICE || *iid == DEVICE1,
+        Kind::Context => *iid == CONTEXT || *iid == CHILD || *iid == CONTEXT1,
         Kind::Buffer => {
             *iid == CHILD
                 || *iid
@@ -326,7 +350,7 @@ fn texture_layout(format: u32, width: u32, height: u32) -> (u32, u32) {
         2..=4 => (1, 16),
         6..=8 => (1, 12),
         10..=14 | 16..=20 => (1, 8),
-        49..=52 | 54..=59 => (1, 2),
+        49..=59 => (1, 2),
         61..=64 => (1, 1),
         71 | 72 | 80 => (4, 8),
         74 | 75 | 77 | 78 | 83 => (4, 16),
@@ -528,6 +552,80 @@ impl Runtime64 {
         }
         let method = name.rsplit('.').next().unwrap();
         match method {
+            "GetImmediateContext1" => self.d3d11_call(mem, "D3D.Device.GetImmediateContext", a),
+            "CreateDeferredContext1"
+            | "CreateBlendState1"
+            | "CreateRasterizerState1"
+            | "OpenSharedResource1"
+            | "OpenSharedResourceByName"
+            | "CreateDeviceContextState" => {
+                // These optional 11.1 operations have no backend capability yet.
+                // Every slot has its real Win64 ABI and returns an actual failure.
+                let out = *a.last().unwrap();
+                if out == 0 {
+                    return Ok(INVALID_ARG);
+                }
+                mem.check(out, 8, WRITE)?;
+                if method == "CreateDeviceContextState" && a[6] != 0 {
+                    mem.check(a[6], 4, WRITE)?;
+                }
+                mem.write_int(out, 8, 0)?;
+                if method == "CreateDeviceContextState" && a[6] != 0 {
+                    mem.write_int(a[6], 4, 0)?;
+                }
+                Ok(UNSUPPORTED)
+            }
+            "CopySubresourceRegion1" if a[9] == 0 => {
+                self.d3d11_call(mem, "D3D.Context.CopySubresourceRegion", &a[..9])
+            }
+            "UpdateSubresource1" if a[7] == 0 => {
+                self.d3d11_call(mem, "D3D.Context.UpdateSubresource", &a[..7])
+            }
+            method if method.ends_with("SetConstantBuffers1") => {
+                if a[1] > 14 || a[2] > 14 - a[1] {
+                    return Err("D3D11.1 constant buffer range".into());
+                }
+                for n in 0..a[2] {
+                    if (a[4] != 0 && mem.read_int(a[4] + n * 4, 4)? != 0)
+                        || (a[5] != 0 && mem.read_int(a[5] + n * 4, 4)? != 4096)
+                    {
+                        return Err(
+                            "D3D11.1 constant buffer offsets/partial bindings unsupported".into(),
+                        );
+                    }
+                }
+                self.d3d11_call(
+                    mem,
+                    &format!("D3D.Context.{}", method.trim_end_matches('1')),
+                    &a[..4],
+                )
+            }
+            "DiscardResource" | "DiscardView" | "DiscardView1" => {
+                let object = self
+                    .graphics
+                    .objects
+                    .get(&a[1])
+                    .ok_or("D3D11.1 invalid discard object")?;
+                let valid = if method == "DiscardResource" {
+                    matches!(object.kind, Kind::Buffer | Kind::Texture)
+                } else {
+                    matches!(object.kind, Kind::Srv | Kind::Rtv | Kind::Dsv)
+                };
+                if !valid || object.parent != owner {
+                    return Err("D3D11.1 discard type/device mismatch".into());
+                }
+                if method == "DiscardView1" {
+                    if a[3] > 4096 {
+                        return Err("D3D11.1 discard rectangle capacity".into());
+                    }
+                    if a[3] != 0 {
+                        mem.check(a[2], a[3] as usize * 16, READ)?;
+                    }
+                }
+                // Discard is a hint making contents undefined. Retaining those
+                // bytes is permitted; bindings and owned resource refs stay live.
+                Ok(0)
+            }
             "CreateInputLayout" => self.create_input_layout(mem, a),
             "QueryInterface" => {
                 if a[1] == 0 || a[2] == 0 {
@@ -581,7 +679,9 @@ impl Runtime64 {
                     }),
                     _ => None,
                 };
-                let target = if kind == Kind::DxgiDevice && (iid == UNKNOWN || iid == DEVICE) {
+                let target = if kind == Kind::DxgiDevice
+                    && (iid == UNKNOWN || supports(Kind::Device, &iid))
+                {
                     self.graphics.retain(owner)?;
                     owner
                 } else if kind == Kind::Device && supports(Kind::DxgiDevice, &iid) {
@@ -703,6 +803,12 @@ impl Runtime64 {
                     return Err("D3D11 cross-device image view".into());
                 }
                 let d = native.desc();
+                if matches!(d.format, 27 | 39 | 53 | 90) && a[2] == 0 {
+                    if a[3] != 0 {
+                        mem.write_int(a[3], 8, 0)?;
+                    }
+                    return Ok(INVALID_ARG);
+                }
                 let kind = match method {
                     "CreateShaderResourceView" => Kind::Srv,
                     "CreateRenderTargetView" => Kind::Rtv,
@@ -811,9 +917,36 @@ impl Runtime64 {
                     _ => 0x40,
                 };
                 if bind & required == 0 {
+                    if a[3] != 0 {
+                        mem.write_int(a[3], 8, 0)?;
+                    }
                     return Ok(INVALID_ARG);
                 }
-                let native = native.view(v)?;
+                if (d.format == 27 && !(28..=32).contains(&v.format))
+                    || (d.format == 90 && !matches!(v.format, 87 | 91))
+                    || (d.format == 39
+                        && if d.bind & 0x40 != 0 {
+                            !((kind == Kind::Dsv && v.format == 40)
+                                || (kind == Kind::Srv && v.format == 41))
+                        } else {
+                            !(41..=43).contains(&v.format)
+                        })
+                    || (d.format == 53
+                        && if d.bind & 0x40 != 0 {
+                            !((kind == Kind::Dsv && v.format == 55)
+                                || (kind == Kind::Srv && v.format == 56))
+                        } else {
+                            !(v.format == 54 || (56..=59).contains(&v.format))
+                        })
+                {
+                    if a[3] != 0 {
+                        mem.write_int(a[3], 8, 0)?;
+                    }
+                    return Ok(INVALID_ARG);
+                }
+                let native = native
+                    .view(v)
+                    .map_err(|error| format!("{error}; resource={d:?}; view={v:?}"))?;
                 if a[3] == 0 {
                     return Ok(1);
                 }
@@ -991,7 +1124,10 @@ impl Runtime64 {
                     .iter()
                     .map(|b| u32::from_le_bytes(*b))
                     .collect();
-                self.trace_note(format!("D3D11 texture descriptor={d:x?}"));
+                self.trace_note(format!(
+                    "D3D11 texture descriptor={d:x?}; format={} (0x{:x}), bind=0x{:x}",
+                    d[4], d[4], d[8]
+                ));
                 if d[0] == 0
                     || d[1] == 0
                     || d[0] > 8192

@@ -1012,6 +1012,150 @@ mod tests {
         )
         .unwrap();
         assert_eq!(m.read_int(DATA + 64, 4).unwrap(), 0);
+        // Typeless storage retains the guest descriptor, requires typed views,
+        // and checks output faults before any COM resource/reference mutation.
+        for (format, bind, view_format) in [
+            (27, 0x28, 28u32),
+            (39, 0x48, 41),
+            (53, 0x28, 56),
+            (90, 0x28, 87),
+        ] {
+            let color_desc = [8u32, 4, 1, 1, format, 1, 0, 0, bind, 0, 0];
+            m.write(
+                DATA + 1024,
+                &color_desc
+                    .iter()
+                    .flat_map(|x| x.to_le_bytes())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            call(
+                &mut r,
+                &mut m,
+                "D3D.Device.CreateTexture2D",
+                &[device, DATA + 1024, 0, DATA + 72],
+            )
+            .unwrap();
+            let color = m.read_int(DATA + 72, 8).unwrap();
+            call(
+                &mut r,
+                &mut m,
+                "D3D.Resource.GetDesc",
+                &[color, DATA + 1088],
+            )
+            .unwrap();
+            assert_eq!(m.read_int(DATA + 1088 + 16, 4).unwrap(), format as u64);
+            assert_eq!(
+                call(
+                    &mut r,
+                    &mut m,
+                    "D3D.Device.CreateShaderResourceView",
+                    &[device, color, 0, DATA + 80]
+                )
+                .unwrap(),
+                INVALID_ARG
+            );
+            assert_eq!(m.read_int(DATA + 80, 8).unwrap(), 0);
+            m.write(
+                DATA + 1088,
+                &[view_format, 4, 0, 1, 0, 0]
+                    .iter()
+                    .flat_map(|x| x.to_le_bytes())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let refs = r.graphics.objects[&color].refs;
+            let objects = r.graphics.objects.len();
+            assert!(call(
+                &mut r,
+                &mut m,
+                "D3D.Device.CreateShaderResourceView",
+                &[device, color, DATA + 1088, DATA + 2 * PAGE - 4]
+            )
+            .is_err());
+            assert_eq!(r.graphics.objects[&color].refs, refs);
+            assert_eq!(r.graphics.objects.len(), objects);
+            call(
+                &mut r,
+                &mut m,
+                "D3D.Device.CreateShaderResourceView",
+                &[device, color, DATA + 1088, DATA + 80],
+            )
+            .unwrap();
+            let color_view = m.read_int(DATA + 80, 8).unwrap();
+            assert_eq!(r.graphics.objects[&color].refs, refs + 1);
+            if format == 39 {
+                m.write(
+                    DATA + 1088,
+                    &[40u32, 3, 0, 0, 0, 0]
+                        .iter()
+                        .flat_map(|x| x.to_le_bytes())
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap();
+                call(
+                    &mut r,
+                    &mut m,
+                    "D3D.Device.CreateDepthStencilView",
+                    &[device, color, DATA + 1088, DATA + 88],
+                )
+                .unwrap();
+                let dsv = m.read_int(DATA + 88, 8).unwrap();
+                call(
+                    &mut r,
+                    &mut m,
+                    "D3D.Device.GetImmediateContext1",
+                    &[device, DATA + 96],
+                )
+                .unwrap();
+                let context = m.read_int(DATA + 96, 8).unwrap();
+                let mut clear_cpu = Cpu64::new(0x7ffe00000000, STACK);
+                clear_cpu.regs[1] = context;
+                clear_cpu.regs[2] = dsv;
+                clear_cpu.regs[8] = 3; // Unity clears depth + absent stencil.
+                clear_cpu.regs[9] = 0xdeadbeef;
+                clear_cpu.xmm[3][..4].copy_from_slice(&0.375f32.to_le_bytes());
+                m.write_int(STACK + 40, 8, 7).unwrap();
+                assert_eq!(
+                    r.dispatch(
+                        DLL,
+                        "D3D.Context.ClearDepthStencilView",
+                        &mut clear_cpu,
+                        &mut m
+                    )
+                    .unwrap(),
+                    Control::Returned
+                );
+                let Some(d3d11::Resource::Texture { native, .. }) =
+                    r.graphics.resources.get(&color)
+                else {
+                    panic!("R32 texture expected")
+                };
+                assert_eq!(
+                    native.read(0, 8 * 4 * 4).unwrap(),
+                    0.375f32.to_le_bytes().repeat(32)
+                );
+                call(&mut r, &mut m, "D3D.Child.Release", &[dsv]).unwrap();
+                call(&mut r, &mut m, "D3D.Context.Release", &[context]).unwrap();
+                assert_eq!(r.graphics.objects[&color].refs, refs + 1);
+            }
+            m.write_int(DATA + 1088, 4, format as u64).unwrap();
+            m.write_int(DATA + 1092, 4, 4).unwrap();
+            assert_eq!(
+                call(
+                    &mut r,
+                    &mut m,
+                    "D3D.Device.CreateRenderTargetView",
+                    &[device, color, DATA + 1088, DATA + 88]
+                )
+                .unwrap(),
+                INVALID_ARG
+            );
+            assert_eq!(m.read_int(DATA + 88, 8).unwrap(), 0);
+            assert_eq!(r.graphics.objects[&color].refs, refs + 1);
+            call(&mut r, &mut m, "D3D.Child.Release", &[color_view]).unwrap();
+            call(&mut r, &mut m, "D3D.Child.Release", &[color]).unwrap();
+        }
         // Exercise the mixed integer/FLOAT Win64 clear ABI against real GPU data.
         // XMM3 holds depth while R9 deliberately contains unrelated integer bits.
         let td = [8u32, 4, 1, 1, 19, 1, 0, 0, 0x40, 0, 0];
@@ -1343,6 +1487,215 @@ mod tests {
             call(&mut r, &mut m, "Output.WaitForVBlank", &[output]).unwrap(),
             UNSUPPORTED
         );
+    }
+    #[test]
+    fn d3d11_1_interfaces_keep_base_slots_identity_references_and_real_optional_failures() {
+        let (mut r, mut m) = setup();
+        let f = factory(&mut r, &mut m);
+        call(&mut r, &mut m, "Factory.EnumAdapters1", &[f, 0, DATA + 32]).unwrap();
+        let adapter = m.read_int(DATA + 32, 8).unwrap();
+        m.write_int(DATA + 64, 4, 0xa000).unwrap();
+        assert_eq!(
+            call(
+                &mut r,
+                &mut m,
+                "D3D11CreateDevice",
+                &[
+                    adapter,
+                    0,
+                    0,
+                    0x20,
+                    DATA + 64,
+                    1,
+                    7,
+                    DATA + 80,
+                    DATA + 88,
+                    DATA + 96
+                ]
+            )
+            .unwrap(),
+            0
+        );
+        let device = m.read_int(DATA + 80, 8).unwrap();
+        let context = m.read_int(DATA + 96, 8).unwrap();
+        let device1 = guid(
+            0xa04bfb29,
+            0x08ef,
+            0x43d6,
+            [0xa4, 0x9c, 0xa9, 0xbd, 0xbd, 0xcb, 0xe6, 0x86],
+        );
+        let context1 = guid(
+            0xbb2c6faa,
+            0xb5fb,
+            0x4082,
+            [0x8e, 0x6b, 0x38, 0x8b, 0x8c, 0xfa, 0x90, 0xe1],
+        );
+        for (object, iid, prefix) in [(device, device1, "Device"), (context, context1, "Context")] {
+            let refs = r.graphics.objects[&object].refs;
+            m.write(DATA + 128, &iid).unwrap();
+            call(
+                &mut r,
+                &mut m,
+                &format!("D3D.{prefix}.QueryInterface"),
+                &[object, DATA + 128, DATA + 144],
+            )
+            .unwrap();
+            assert_eq!(m.read_int(DATA + 144, 8).unwrap(), object);
+            assert_eq!(r.graphics.objects[&object].refs, refs + 1);
+            call(&mut r, &mut m, &format!("D3D.{prefix}.Release"), &[object]).unwrap();
+            assert_eq!(r.graphics.objects[&object].refs, refs);
+        }
+        let vtable = m.read_int(device, 8).unwrap();
+        for (slot, name) in [
+            (33, "D3D.Device.CheckFeatureSupport"),
+            (43, "D3D.Device.GetImmediateContext1"),
+            (49, "D3D.Device.OpenSharedResourceByName"),
+        ] {
+            assert_eq!(
+                r.gateways[&m.read_int(vtable + slot * 8, 8).unwrap()],
+                format!("{DLL}!{name}")
+            );
+        }
+        assert!(m.write_int(vtable + 43 * 8, 8, 0).is_err());
+        let vtable = m.read_int(context, 8).unwrap();
+        for (offset, name) in [
+            (0, "D3D.Context.CopySubresourceRegion1"),
+            (18, "D3D.Context.DiscardView1"),
+        ] {
+            assert_eq!(
+                r.gateways[&m
+                    .read_int(vtable + (abi::CONTEXT.len() as u64 + offset) * 8, 8)
+                    .unwrap()],
+                format!("{DLL}!{name}")
+            );
+        }
+        call(
+            &mut r,
+            &mut m,
+            "D3D.Device.GetImmediateContext1",
+            &[device, DATA + 144],
+        )
+        .unwrap();
+        assert_eq!(m.read_int(DATA + 144, 8).unwrap(), context);
+        call(&mut r, &mut m, "D3D.Context.Release", &[context]).unwrap();
+        let refs = r.graphics.objects[&device].refs;
+        m.write(
+            DATA + 128,
+            &guid(
+                0x54ec77fa,
+                0x1377,
+                0x44e6,
+                [0x8c, 0x32, 0x88, 0xfd, 0x5f, 0x44, 0xc8, 0x4c],
+            ),
+        )
+        .unwrap();
+        call(
+            &mut r,
+            &mut m,
+            "D3D.Device.QueryInterface",
+            &[device, DATA + 128, DATA + 144],
+        )
+        .unwrap();
+        let dxgi = m.read_int(DATA + 144, 8).unwrap();
+        m.write(DATA + 128, &device1).unwrap();
+        call(
+            &mut r,
+            &mut m,
+            "Object.QueryInterface",
+            &[dxgi, DATA + 128, DATA + 144],
+        )
+        .unwrap();
+        assert_eq!(m.read_int(DATA + 144, 8).unwrap(), device);
+        call(&mut r, &mut m, "D3D.Device.Release", &[device]).unwrap();
+        call(&mut r, &mut m, "Object.Release", &[dxgi]).unwrap();
+        assert_eq!(r.graphics.objects[&device].refs, refs);
+        m.write(DATA + 128, &device1).unwrap();
+        assert!(call(
+            &mut r,
+            &mut m,
+            "D3D.Device.QueryInterface",
+            &[device, DATA + 128, DATA + 2 * PAGE - 4]
+        )
+        .is_err());
+        assert_eq!(r.graphics.objects[&device].refs, refs);
+        let objects = r.graphics.objects.len();
+        for (name, args) in [
+            (
+                "D3D.Device.CreateDeferredContext1",
+                vec![device, 0, DATA + 144],
+            ),
+            (
+                "D3D.Device.CreateBlendState1",
+                vec![device, DATA + 256, DATA + 144],
+            ),
+            (
+                "D3D.Device.CreateRasterizerState1",
+                vec![device, DATA + 256, DATA + 144],
+            ),
+            (
+                "D3D.Device.OpenSharedResource1",
+                vec![device, 1, DATA + 128, DATA + 144],
+            ),
+            (
+                "D3D.Device.OpenSharedResourceByName",
+                vec![device, DATA + 256, 1, DATA + 128, DATA + 144],
+            ),
+        ] {
+            m.write_int(DATA + 144, 8, u64::MAX).unwrap();
+            assert_eq!(call(&mut r, &mut m, name, &args).unwrap(), UNSUPPORTED);
+            assert_eq!(m.read_int(DATA + 144, 8).unwrap(), 0);
+            assert_eq!(r.graphics.objects.len(), objects);
+        }
+        m.write(DATA + 256, &[0xaa; 56]).unwrap();
+        assert_eq!(
+            call(
+                &mut r,
+                &mut m,
+                "D3D.Device.CheckFeatureSupport",
+                &[device, 5, DATA + 256, 56]
+            )
+            .unwrap(),
+            0
+        );
+        let mut data = [0; 56];
+        m.read(DATA + 256, &mut data).unwrap();
+        assert_eq!(data, [0; 56]);
+        m.write_int(DATA + 144, 8, 0x1234).unwrap();
+        assert!(call(
+            &mut r,
+            &mut m,
+            "D3D.Device.CreateDeviceContextState",
+            &[
+                device,
+                0,
+                0,
+                0,
+                7,
+                DATA + 128,
+                DATA + 2 * PAGE - 2,
+                DATA + 144
+            ]
+        )
+        .is_err());
+        assert_eq!(m.read_int(DATA + 144, 8).unwrap(), 0x1234);
+        // A whole-buffer Context1 setter reaches the real base binding state.
+        call(
+            &mut r,
+            &mut m,
+            "D3D.Context.VSSetConstantBuffers1",
+            &[context, 0, 1, 0, 0, 0],
+        )
+        .unwrap();
+        let refs = r.graphics.objects[&context].refs;
+        m.write_int(DATA + 256, 4, 1).unwrap();
+        assert!(call(
+            &mut r,
+            &mut m,
+            "D3D.Context.VSSetConstantBuffers1",
+            &[context, 0, 1, 0, DATA + 256, 0]
+        )
+        .is_err());
+        assert_eq!(r.graphics.objects[&context].refs, refs);
     }
     #[test]
     fn experimental_d3d11_device_context_query_identity_and_faults_keep_real_references() {

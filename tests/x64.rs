@@ -6,6 +6,409 @@ use wire::x64::{
 const BASE: u64 = 0x140000000;
 const STACK: u64 = 0x7ff000000000;
 #[test]
+fn win64_isolated_identity_names_validate_lengths_domains_exports_and_output_faults() {
+    let (mut m, mut cpu, mut r) = startup();
+    let out = STACK + 0x100;
+    let size = STACK + 0x200;
+    for (dll, name, text, success_size, error) in [
+        ("kernel32.dll", "GetComputerNameA", "WIRE", 4, 111),
+        ("kernelbase.dll", "GetComputerNameW", "WIRE", 4, 111),
+        ("kernel32.dll", "GetComputerNameExA", "wire", 4, 234),
+        ("kernel32.dll", "GetComputerNameExW", "wire", 4, 234),
+        ("advapi32.dll", "GetUserNameA", "wire", 5, 122),
+        ("advapi32.dll", "GetUserNameW", "wire", 5, 122),
+    ] {
+        let args = if name.contains("Ex") {
+            vec![0xaaaa00000003, out, size]
+        } else {
+            vec![out, size]
+        };
+        for n in [0, 4] {
+            m.write(out, &[0xcc; 16]).unwrap();
+            m.write_int(size, 4, n).unwrap();
+            assert_eq!(
+                startup_dll_call(&mut m, &mut cpu, &mut r, dll, name, &args),
+                0
+            );
+            assert_eq!(m.read_int(size, 4).unwrap(), 5);
+            assert_eq!(m.read_int(out, 8).unwrap(), 0xcccccccccccccccc);
+            assert_eq!(
+                startup_call(&mut m, &mut cpu, &mut r, "GetLastError", &[]),
+                error
+            );
+        }
+        m.write_int(size, 4, 5).unwrap();
+        assert_eq!(
+            startup_dll_call(&mut m, &mut cpu, &mut r, dll, name, &args),
+            1
+        );
+        assert_eq!(m.read_int(size, 4).unwrap(), success_size);
+        let expected: Vec<u8> = if name.ends_with('W') {
+            text.encode_utf16()
+                .chain([0])
+                .flat_map(u16::to_le_bytes)
+                .collect()
+        } else {
+            text.bytes().chain([0]).collect()
+        };
+        let mut actual = vec![0; expected.len()];
+        m.read(out, &mut actual).unwrap();
+        assert_eq!(actual, expected);
+        assert!(!wire::x64::runtime::import_supported("user32.dll", name));
+        if dll == "advapi32.dll" {
+            assert!(!wire::x64::runtime::import_supported("kernel32.dll", name));
+        }
+        r.register_provider(dll);
+        m.write(out, format!("{dll}\0").as_bytes()).unwrap();
+        let module = startup_call(&mut m, &mut cpu, &mut r, "LoadLibraryA", &[out]);
+        m.write(out, format!("{name}\0").as_bytes()).unwrap();
+        let gateway = startup_call(&mut m, &mut cpu, &mut r, "GetProcAddress", &[module, out]);
+        assert_eq!(r.gateways[&gateway], format!("{dll}!{name}"));
+    }
+    for kind in [2, 6] {
+        m.write_int(size, 4, 1).unwrap();
+        assert_eq!(
+            startup_call(
+                &mut m,
+                &mut cpu,
+                &mut r,
+                "GetComputerNameExW",
+                &[kind, out, size]
+            ),
+            1
+        );
+        assert_eq!(m.read_int(size, 4).unwrap(), 0);
+        assert_eq!(m.read_int(out, 2).unwrap(), 0);
+    }
+    m.write_int(size, 4, 12).unwrap();
+    assert_eq!(
+        startup_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "GetComputerNameExW",
+            &[8, out, size]
+        ),
+        0
+    );
+    assert_eq!(m.read_int(size, 4).unwrap(), 12);
+    // Both buffer and size-pointer outputs are checked before either is changed.
+    const DATA: u64 = 0x700000000;
+    m.map(DATA, 8192, READ | WRITE).unwrap();
+    for (buffer, count) in [(DATA + 4092, size), (out, DATA + 4094)] {
+        m.write_int(count, 4, 5).unwrap();
+        m.write(buffer, &[0xaa; 10]).unwrap();
+        m.protect(DATA + 4096, 4096, READ).unwrap();
+        cpu.regs[4] = STACK + 0x1f88;
+        cpu.regs[1] = buffer;
+        cpu.regs[2] = count;
+        let before = cpu.clone();
+        let calls = r.api_calls;
+        assert!(r
+            .dispatch("kernel32.dll", "GetComputerNameW", &mut cpu, &mut m)
+            .is_err());
+        assert_eq!(cpu.regs, before.regs);
+        assert_eq!(cpu.rip, before.rip);
+        assert_eq!(r.api_calls, calls);
+        assert_eq!(m.read_int(count, 4).unwrap(), 5);
+        let mut bytes = [0; 10];
+        m.read(buffer, &mut bytes).unwrap();
+        assert_eq!(bytes, [0xaa; 10]);
+        m.protect(DATA + 4096, 4096, READ | WRITE).unwrap();
+    }
+}
+fn keyboard_call(
+    m: &mut Memory,
+    cpu: &mut Cpu64,
+    r: &mut wire::x64::runtime::Runtime64,
+    name: &str,
+    args: &[u64],
+) -> u64 {
+    startup_dll_call(m, cpu, r, "user32.dll", name, args)
+}
+#[test]
+fn win64_keyboard_layout_queries_keep_hkl_width_thread_ids_and_dll_ownership() {
+    let (mut m, mut cpu, mut r) = startup();
+    let out = STACK + 0x100;
+    let hkl = keyboard_call(&mut m, &mut cpu, &mut r, "GetKeyboardLayout", &[0]);
+    assert_eq!(hkl, 0x04090409);
+    assert_eq!(
+        keyboard_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "GetKeyboardLayout",
+            &[0xaaaa00000001]
+        ),
+        hkl
+    );
+    assert_eq!(
+        keyboard_call(&mut m, &mut cpu, &mut r, "GetKeyboardLayout", &[999]),
+        0
+    );
+    assert_eq!(
+        keyboard_call(&mut m, &mut cpu, &mut r, "GetKeyboardLayoutList", &[0, 1]),
+        1
+    );
+    m.write(out, &[0xaa; 24]).unwrap();
+    assert_eq!(
+        keyboard_call(&mut m, &mut cpu, &mut r, "GetKeyboardLayoutList", &[8, out]),
+        1
+    );
+    assert_eq!(m.read_int(out, 8).unwrap(), hkl);
+    assert_eq!(m.read_int(out + 8, 8).unwrap(), 0xaaaaaaaaaaaaaaaa);
+    assert_eq!(
+        keyboard_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "GetKeyboardLayoutList",
+            &[u32::MAX as u64, out]
+        ),
+        0
+    );
+    for (name, expected) in [
+        ("GetKeyboardLayoutNameA", b"00000409\0".to_vec()),
+        (
+            "GetKeyboardLayoutNameW",
+            "00000409\0"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect(),
+        ),
+    ] {
+        assert_eq!(keyboard_call(&mut m, &mut cpu, &mut r, name, &[out]), 1);
+        let mut data = vec![0; expected.len()];
+        m.read(out, &mut data).unwrap();
+        assert_eq!(data, expected);
+    }
+    for (code, expected) in [(0, 4), (1, 0), (2, 12), (3, 0)] {
+        assert_eq!(
+            keyboard_call(&mut m, &mut cpu, &mut r, "GetKeyboardType", &[code]),
+            expected
+        );
+    }
+    m.write(out, b"user32.dll\0").unwrap();
+    r.register_provider("user32.dll");
+    let module = startup_call(&mut m, &mut cpu, &mut r, "LoadLibraryA", &[out]);
+    for name in [
+        "GetKeyboardLayout",
+        "GetKeyboardLayoutList",
+        "GetKeyboardLayoutNameW",
+        "MapVirtualKeyExA",
+        "ToUnicode",
+        "ToUnicodeEx",
+        "GetKeyNameTextW",
+    ] {
+        assert!(wire::x64::runtime::import_supported("user32.dll", name));
+        for dll in ["kernel32.dll", "kernelbase.dll", "imm32.dll"] {
+            assert!(!wire::x64::runtime::import_supported(dll, name));
+        }
+        m.write(out, format!("{name}\0").as_bytes()).unwrap();
+        let gateway = startup_call(&mut m, &mut cpu, &mut r, "GetProcAddress", &[module, out]);
+        assert_eq!(r.gateways[&gateway], format!("user32.dll!{name}"));
+    }
+    // Explicit layouts remain full-width handles, not truncated DWORDs.
+    assert_eq!(
+        keyboard_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "MapVirtualKeyExW",
+            &[65, 0, hkl | (1 << 32)]
+        ),
+        0
+    );
+}
+#[test]
+fn win64_keyboard_scan_maps_and_unicode_use_explicit_state_without_consuming_it() {
+    let (mut m, mut cpu, mut r) = startup();
+    let state_ptr = STACK + 0x200;
+    let out = STACK + 0x400;
+    for name in [
+        "MapVirtualKeyA",
+        "MapVirtualKeyW",
+        "MapVirtualKeyExA",
+        "MapVirtualKeyExW",
+    ] {
+        for (code, kind, expected) in [
+            (65, 0, 0x1e),
+            (0x1e, 1, 65),
+            (65, 2, 65),
+            (0xba, 2, 59),
+            (0xa3, 4, 0xe01d),
+            (0xe01d, 3, 0xa3),
+            (0xe01d, 1, 0x11),
+            (0x36, 3, 0xa1),
+            (0x36, 1, 0x10),
+            (0x67, 0, 0x47),
+            (0x47, 1, 0x24),
+            (0xdead, 1, 0),
+            (65, 99, 0),
+        ] {
+            let mut args = vec![code | (0xabcd << 32), kind | (0xabcd << 32)];
+            if name.contains("Ex") {
+                args.push(0x04090409);
+            }
+            assert_eq!(
+                keyboard_call(&mut m, &mut cpu, &mut r, name, &args),
+                expected
+            );
+        }
+    }
+    for (vk, shift, caps, ctrl, alt, expected) in [
+        (65, false, false, false, false, Some(97)),
+        (65, true, false, false, false, Some(65)),
+        (65, false, true, false, false, Some(65)),
+        (65, true, true, false, false, Some(97)),
+        (65, false, false, true, false, Some(1)),
+        (65, false, false, true, true, None),
+        (0x32, true, false, true, false, Some(0)),
+        (0xdb, false, false, true, false, Some(27)),
+        (0xba, true, false, false, false, Some(58)),
+        (0x67, false, false, false, false, Some(55)),
+        (0x67, true, false, false, false, None),
+        (0x70, false, false, false, false, None),
+    ] {
+        let mut state = [0; 256];
+        state[0x10] = if shift { 0x80 } else { 0 };
+        state[0x14] = caps as u8;
+        state[0x11] = if ctrl { 0x80 } else { 0 };
+        state[0x12] = if alt { 0x80 } else { 0 };
+        m.write(state_ptr, &state).unwrap();
+        for name in ["ToUnicode", "ToUnicodeEx"] {
+            let mut args = vec![vk, 0, state_ptr, out, 2, 4];
+            if name.ends_with("Ex") {
+                args.push(0x04090409);
+            }
+            for _ in 0..2 {
+                m.write_int(out, 4, u32::MAX as u64).unwrap();
+                assert_eq!(
+                    keyboard_call(&mut m, &mut cpu, &mut r, name, &args),
+                    expected.is_some() as u64
+                );
+                assert_eq!(m.read_int(out, 4).unwrap(), expected.unwrap_or(0));
+            }
+        }
+        let mut after = [0; 256];
+        m.read(state_ptr, &mut after).unwrap();
+        assert_eq!(after, state);
+    }
+    m.write(state_ptr, &[0; 256]).unwrap();
+    assert_eq!(
+        keyboard_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "ToUnicode",
+            &[65, 0x801e, state_ptr, out, 2, 0]
+        ),
+        0
+    );
+    assert_eq!(
+        keyboard_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "ToUnicode",
+            &[65, 0x801e, state_ptr, out, 1, 2]
+        ),
+        1
+    );
+    assert_eq!(m.read_int(out, 2).unwrap(), 97);
+    // Zero/negative lengths do not dereference input/output pointers.
+    for size in [0, u32::MAX as u64] {
+        assert_eq!(
+            keyboard_call(
+                &mut m,
+                &mut cpu,
+                &mut r,
+                "ToUnicode",
+                &[65, 0, 1, 1, size, 0]
+            ),
+            0
+        );
+    }
+}
+#[test]
+fn win64_keyboard_key_names_truncate_terminate_and_fold_modifier_sides() {
+    let (mut m, mut cpu, mut r) = startup();
+    let out = STACK + 0x100;
+    for name in ["GetKeyNameTextA", "GetKeyNameTextW"] {
+        for (lparam, size, expected) in [
+            (0x01e0000, 32, "A"),
+            (0x11d0000, 32, "Right Ctrl"),
+            (0x31d0000, 32, "Ctrl"),
+            (0x1470000, 32, "Home"),
+            (0x0470000, 32, "Num 7"),
+            (0x11d0000, 4, "Rig"),
+            (0x11d0000, 1, ""),
+            (0x07f0000, 32, ""),
+        ] {
+            m.write(out, &[0xcc; 64]).unwrap();
+            assert_eq!(
+                keyboard_call(&mut m, &mut cpu, &mut r, name, &[lparam, out, size]),
+                expected.len() as u64
+            );
+            let expected: Vec<u8> = if name.ends_with('W') {
+                expected
+                    .encode_utf16()
+                    .chain([0])
+                    .flat_map(u16::to_le_bytes)
+                    .collect()
+            } else {
+                expected.bytes().chain([0]).collect()
+            };
+            let mut data = vec![0; expected.len()];
+            m.read(out, &mut data).unwrap();
+            assert_eq!(data, expected);
+            assert_eq!(m.read_int(out + data.len() as u64, 1).unwrap(), 0xcc);
+        }
+    }
+}
+#[test]
+fn win64_keyboard_cross_page_faults_preserve_outputs_cpu_and_completed_calls() {
+    let (mut m, mut cpu, mut r) = startup();
+    const DATA: u64 = 0x700000000;
+    m.map(DATA, 8192, READ | WRITE).unwrap();
+    m.write(STACK + 0x200, &[0; 256]).unwrap();
+    for (name, args, read_fault) in [
+        ("GetKeyboardLayoutNameW", vec![DATA + 4090], false),
+        ("GetKeyboardLayoutList", vec![1, DATA + 4092], false),
+        ("GetKeyNameTextW", vec![0x11d0000, DATA + 4092, 32], false),
+        (
+            "ToUnicode",
+            vec![65, 0, STACK + 0x200, DATA + 4094, 2, 4],
+            false,
+        ),
+        ("ToUnicode", vec![65, 0, DATA + 4090, DATA, 2, 4], true),
+    ] {
+        m.protect(DATA + 4096, 4096, READ | WRITE).unwrap();
+        m.write(DATA, &vec![0xaa; 8192]).unwrap();
+        cpu.regs[4] = STACK + 0x1f88;
+        m.write_int(cpu.regs[4], 8, BASE).unwrap();
+        for (i, value) in args.into_iter().enumerate() {
+            if i < 4 {
+                cpu.regs[[1, 2, 8, 9][i]] = value;
+            } else {
+                m.write_int(cpu.regs[4] + 40 + (i as u64 - 4) * 8, 8, value)
+                    .unwrap();
+            }
+        }
+        m.protect(DATA + 4096, 4096, if read_fault { 0 } else { READ })
+            .unwrap();
+        let before = cpu.clone();
+        let calls = r.api_calls;
+        assert!(r.dispatch("user32.dll", name, &mut cpu, &mut m).is_err());
+        assert_eq!(cpu.regs, before.regs);
+        assert_eq!(cpu.rip, before.rip);
+        assert_eq!(r.api_calls, calls);
+        let mut data = [0; 4096];
+        m.read(DATA, &mut data).unwrap();
+        assert_eq!(data, [0xaa; 4096]);
+    }
+}
+#[test]
 fn win64_critical_section_ex_ignores_low_flags_and_preserves_recursive_ownership_and_faults() {
     let (mut m, mut cpu, mut r) = startup();
     let section = STACK + 0x100;
@@ -7777,15 +8180,23 @@ fn amd64_sse_compare_nan_daz_flags_and_unmasked_faults_are_checked() {
 }
 
 #[test]
-fn amd64_sse_sqrt_uses_exact_integer_rounding_and_preserves_upper_lanes() {
+fn amd64_sse_sqrt_scalar_and_packed_match_integer_rounding_and_preserve_scalar_upper_lanes() {
     use unicorn_engine::{Arch, Mode, Prot, RegisterX86 as U, Unicorn};
     let mut uc = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
     uc.mem_map(BASE, 4096, Prot::ALL).unwrap();
     let mut mem = Memory::default();
     mem.map(BASE, 4096, READ | WRITE | EXECUTE).unwrap();
     let mut seed = 0x922145327f013456u64;
-    for size in [4, 8] {
-        let code = [if size == 4 { 0xf3 } else { 0xf2 }, 0x0f, 0x51, 0xc1];
+    for (size, packed) in [(4, false), (8, false), (4, true), (8, true)] {
+        let mut code = Vec::new();
+        if packed {
+            if size == 8 {
+                code.push(0x66);
+            }
+        } else {
+            code.push(if size == 4 { 0xf3 } else { 0xf2 });
+        }
+        code.extend([0x0f, 0x51, 0xc1]);
         uc.mem_write(BASE, &code).unwrap();
         mem.write(BASE, &code).unwrap();
         for rounding in 0..4 {
@@ -7824,20 +8235,86 @@ fn amd64_sse_sqrt_uses_exact_integer_rounding_and_preserves_upper_lanes() {
                     let mut cpu = Cpu64::new(BASE, STACK);
                     cpu.mxcsr |= rounding << 13 | mode;
                     cpu.xmm[0] = [0xbb; 16];
-                    cpu.xmm[1][..size].copy_from_slice(&bits.to_le_bytes()[..size]);
+                    for lane in 0..if packed { 16 / size } else { 1 } {
+                        let bits = if n <= 5 {
+                            bits
+                        } else {
+                            bits.rotate_left(lane as u32 * 17)
+                        };
+                        cpu.xmm[1][lane * size..lane * size + size]
+                            .copy_from_slice(&bits.to_le_bytes()[..size]);
+                    }
                     uc.reg_write(U::MXCSR, cpu.mxcsr as u64).unwrap();
                     uc.reg_write_long(U::XMM0, &cpu.xmm[0]).unwrap();
                     uc.reg_write_long(U::XMM1, &cpu.xmm[1]).unwrap();
-                    uc.emu_start(BASE, BASE + 4, 0, 1).unwrap();
+                    uc.emu_start(BASE, BASE + code.len() as u64, 0, 1).unwrap();
                     cpu.step(&mut mem).unwrap();
                     assert_eq!(
                         &*uc.reg_read_long(U::XMM0).unwrap(),
                         &cpu.xmm[0],
-                        "size={size} bits={bits:x} round={rounding}"
+                        "size={size} packed={packed} bits={bits:x} round={rounding}"
                     );
                 }
             }
         }
+    }
+}
+
+#[test]
+fn amd64_packed_sqrt_aggregates_exceptions_and_checks_memory_before_committing() {
+    let mut mem = Memory::default();
+    mem.map(BASE, 4096, READ | WRITE | EXECUTE).unwrap();
+    for lane in [4, 8] {
+        let mut code = Vec::new();
+        if lane == 8 {
+            code.push(0x66);
+        }
+        code.extend([0x0f, 0x51, 0xc1]);
+        mem.write(BASE, &code).unwrap();
+        let mut cpu = Cpu64::new(BASE, STACK);
+        cpu.mxcsr &= !(1 << 7); // Unmask invalid, leave denormal masked.
+        cpu.xmm[0] = [0x55; 16];
+        let inputs: [u64; 4] = if lane == 4 {
+            [0xbf800000, 2, 0x40800000, 0x41100000]
+        } else {
+            [0xbff0000000000000, 4, 0, 0]
+        };
+        for (n, bits) in inputs.into_iter().take(16 / lane).enumerate() {
+            cpu.xmm[1][n * lane..n * lane + lane].copy_from_slice(&bits.to_le_bytes()[..lane]);
+        }
+        let before = cpu.clone();
+        assert!(cpu.step(&mut mem).unwrap_err().contains("#XM"));
+        assert_eq!(cpu.mxcsr, before.mxcsr | 3); // Both invalid and denormal lanes observed.
+        assert_eq!(cpu.xmm, before.xmm);
+        assert_eq!(cpu.rip, before.rip);
+        assert_eq!(cpu.rflags, before.rflags);
+        assert_eq!(cpu.retired, before.retired);
+        // Memory form SQRTPS/PD xmm0,[rax]: m128 requires alignment and readable data.
+        *code.last_mut().unwrap() = 0;
+        mem.write(BASE, &code).unwrap();
+        for address in [BASE + 0x101, BASE + 4096] {
+            let mut cpu = before.clone();
+            cpu.regs[0] = address;
+            let before = cpu.clone();
+            assert!(cpu.step(&mut mem).is_err());
+            assert_eq!(cpu, before);
+        }
+        // The aligned memory form replaces every destination lane.
+        cpu = before.clone();
+        cpu.mxcsr |= 1 << 7;
+        cpu.regs[0] = BASE + 0x100;
+        mem.write(BASE + 0x100, &cpu.xmm[1]).unwrap();
+        cpu.step(&mut mem).unwrap();
+        assert_eq!(cpu.mxcsr & 0x3f, 3);
+        assert_eq!(
+            cpu.xmm[0][..lane],
+            if lane == 4 {
+                0xffc00000u64
+            } else {
+                0xfff8000000000000u64
+            }
+            .to_le_bytes()[..lane]
+        );
     }
 }
 

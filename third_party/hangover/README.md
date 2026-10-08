@@ -13,6 +13,7 @@ file used below expressly permits LGPL 2.1 or later; wire selects LGPL 2.1.
 | dlls/win32u/defwnd.c | windowpos.c / geometry.c; default window messages and nonclient geometry |
 | include/d3d9.h | unmodified d3d9.h; derived d3d9-methods.tsv, COM slot/arity ABI only |
 | dlls/kernelbase/path.c | unmodified path.c; PathRemoveFileSpec, PathAddExtension, PathUnquoteSpaces A/W adapted in src/file_api.rs |
+| dlls/win32u/input.c | unmodified input.c; bounded virtual US scan/character/key-name rules in src/x64/runtime/user/keyboard.rs |
 
 Copyright 1999, 2000 Marcus Meissner (oleaut.c).
 Copyright 1993, 1996 Alexandre Julliard, 1995 Alex Korobka,
@@ -163,3 +164,19 @@ file padding. Each file explicitly permits LGPL-2.1-or-later; wire selects
 LGPL 2.1. These reviews do not import a native Wine loader, server or backend.
 No GPL QEMU implementation is incorporated. Unicorn remains a development-only
 oracle and is absent from the runtime dependency graph.
+
+## Win64 virtual keyboard (2026-10-08)
+
+`input.c` is an unchanged snapshot from the pinned Hangover Wine commit above.
+SHA-256: `7f0af87de96832b5fb8ee68cb27643ec43e0e3475ae81b504b4025dc44337ccd`.
+Copyright 1993 Bob Amstadt and David Metcalfe, 1996 Albrecht Kleine and
+Frans van Dorsselaer, 1997 David Faure, 1998 Morten Welinder and Ulrich Weigand,
+2001 Eric Pouech, 2002 Alexandre Julliard; LGPL-2.1-or-later, selecting LGPL 2.1.
+The original notices are retained. No C snapshot is built or linked.
+The Rust adaptation replaces native pointers/driver calls with checked guest
+memory and an explicit single non-IME US layout (HKL 04090409 / KLID 00000409),
+independent of the Japanese locale/CP932. It implements ordinary set-1 scans,
+modifier sides, keypad/navigation keys, character modifiers and English names.
+It does not import Wine's driver, registry, server, layout loader, dead-key
+or Alt+numpad composition backend. Host-resolved text remains in the existing
+TranslateMessage queue; ToUnicode uses only the supplied 256-byte state.

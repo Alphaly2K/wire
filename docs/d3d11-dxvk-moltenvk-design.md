@@ -6,8 +6,9 @@
 **当前不能通过复制 DXVK DLL + MoltenVK 就完成 wire 的游戏渲染。**
 wire 既不是 Wine，也没有通用 Vulkan guest→host ABI。当前已接入原生 ARM64 图形库、
 Win64 DXGI factory4 / adapter1与基础D3D11 device/context、资源的64位COM边界。
-Alice的pass142已建立guest自己显示的1024×720正式窗口，执行335次真实GPU Draw与112次Present。
-用户已观察到Unity logo动画；最新单帧捕获在动画之后为深色背景。当前停在GetKeyboardLayout导入，
+Alice的pass152已建立guest自己显示的1024×720正式窗口，执行398次真实GPU Draw与144次Present。
+用户已观察到Unity logo动画；最新单帧捕获在动画之后为深色背景。已越过键盘和Device1初始化，
+R32/R16 typeless资源已越过，当前重放边界为SRV格式/范围/usage校验，
 尚未验收游戏标题画面或持续可玩。最新证据见文末windowed Draw/Present检查点。
 原有pass111的Mono初始化与隐藏窗口描述属于历史推进，已越过这些边界。
 接续已选择并落地 **GS→compute 展开**：11个自有GS样例、44组输入逐DWORD验证，
@@ -430,7 +431,7 @@ guest通过真实DXGI adapter创建native Vulkan关联的device/context；当前
 
 ## Windowed guest Draw / Present（2026-10-08）
 
-实际Alice pass142：1024×720、visible=true、335次guest GPU Draw、112次成功Present，
+历史Alice pass142：1024×720、visible=true、335次guest GPU Draw、112次成功Present，
 随后停在 `user32.dll!GetKeyboardLayout`。此前BSTR、消息元数据、WinHTTP、WSA事件、
 地址转换、socket真实失败回退与CriticalSectionEx低位flags已通过实际路径。
 完整日志与调用证据为 `wire-out/games64/alice/{linked-pass-142.txt,api-pass-142.tsv}`。
@@ -479,6 +480,49 @@ D3D11 feature level仍是日志明确的实验性10_0子集。旧native库缺新
 独立资源/Draw退出仍偶见MoltenVK报告1MB仍分配，pass135/137–141为7MB、pass142为6MB，
 尚未归因，不能宣称全路径无泄漏。
 本轮没有帧率/MIPS AB；实际游戏帧内容与持续可玩需要另行验收。
+
+## Unity logo之后：Device1与typeless资源
+
+pass146/147在UnityPlayer `0x18093f906`读取NULL；只读反汇编追到初始化
+QueryInterface(ID3D11Device1)失败后保存的空指针。显式Windows7-like命令行开关未解决问题。
+独立追加公开Device1/Context1的7/19槽并保持基础槽、COM身份、引用及跨接口查询后，
+默认参数pass148实际继续到3,281,270,686退休指令、6,203,425次完成API、401 Draw/145 Present。
+没有映射零页或伪造Device1对象；CheckFeatureSupport的高级能力仍为实际支持范围。
+GetImmediateContext1、flags=0 copy/update与完整CBV绑定进入真实基础路径；discard是合法保留内容hint。
+未支持的deferred/context-state、扩展state与shared创建返回UNSUPPORTED，检查并清零输出。
+partial CBV、GetConstantBuffers1、ClearView、SwapDeviceContextState和非零copy flags等仍明确失败，
+这不是完整D3D11.1。仅核对Wine 10.0固定commit `b073859675060c9211fcbccfd90e4e87520dc2c2`
+`include/d3d11_1.idl`的公开ABI，未复制Wine/DXVK渲染实现。
+
+pass148的1×1纹理format为39（诊断hex `27`）、bind=0x48，实际是R32 typeless深度资源。
+pass149只含RGBA8/BGRA8修复，仍在此边界；新诊断同时打印decimal format，避免混淆。
+新增资源storage规则：27/90使用UNORM RGBA/BGRA mutable image；view必须选择同族的明确typed格式。
+39带depth bind使用D32 storage，DSV40/FLOAT SRV41保持真实depth aspect；无depth bind使用R32 storage，
+支持FLOAT/UINT/SINT views41–43。typed view另查GPU实际sample/attachment能力，
+typeless仅报告storage能力，不能用于vertex或typed shader/view；默认、typeless、跨族view失败。
+资源GetDesc保留原格式；sRGB clear正确编码，copy保留原始字节。
+不支持D32上的UINT/SINT重解释或跨color/depth aspect复制；D32没有stencil存储。
+pass150实际越过R32资源/view后，曾因flags=3的ClearDepthStencilView拒绝absent stencil。
+独立修正为flags与视图aspect取交集；只清实际depth，无交集时合法无操作。
+语义核对DXVK Native 1.9.2 `src/d3d11/d3d11_context.cpp`，本地参考快照SHA-256为
+`114bef3a76506de211f7c119cdcb1101b5d0b5245c76391631863bb717efba3c`；没有复制其context实现。
+[Microsoft公开文档](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/nf-d3d11-id3d11devicecontext-cleardepthstencilview)
+明确Depth clamp到0–1，已覆盖有限越界和±Inf；未使用depth不触发校验，实际NaN depth仍拒绝。
+pass151越过clear，到128×1的R16 typeless颜色纹理format53（0x35）。
+已接入正确2B像素布局和R16 storage，颜色view54/56–59；depth bind使用D16 storage与DSV55/SRV56。
+五种颜色view、UNORM clear与D16 clear/读回均真实验证；这没有扩展为全部DXGI typeless格式族。
+默认参数pass152已完成R16纹理和4次RTV创建，继续至SRV格式/范围校验失败：
+3,348,585,448退休指令、6,332,527完成API、398 Draw/144 Present。SRV故障诊断已追加资源/view描述符，
+尚未验收游戏标题画面；用户指示本轮之后先进行profile和性能优化。
+
+`typeless-resource-probe-2026-10-08/report.json`验证四族、typed SRV/mip/layer、
+UNORM/sRGB清除、R32/R16 depth清除和复制共1600字节及8项R32 clear检查；
+guest COM回归覆盖descriptor、引用、fault原子性与flags=3的真实XMM3 depth clear。
+`typeless-draw-probe-2026-10-08/report.json`完成10组768像素检查，新增R32 depth test/write逐像素验证，
+并保留6组失败不改附件的验证；两份自有shader的SPIR-V独立验证通过。
+原生资源/view生命周期与Win64交换链ignored回归均另行执行通过。
+这些独立验证不是guest标题画面；资源探针退出仍有1MB、pass148/149仍有6MB的MoltenVK分配报告，
+不能宣称已经无泄漏或出现性能提升。
 
 原创Draw探针复跑：先按前文生成geometry-fixtures，再执行
 

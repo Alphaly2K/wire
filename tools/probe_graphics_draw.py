@@ -104,6 +104,18 @@ def main():
         reset();d.raster[1]=3;draw();assert get(target,width*height*4)==expected((8,6,24,18));checks+=1
         reset();d.raster[1]=2;draw();assert get(target,width*height*4)==background*(width*height);checks+=1
         d.raster[1]=1
+        # R32 typeless must remain a depth attachment with real depth testing
+        # and writes; it has no stencil aspect to silently substitute.
+        depth32=make_texture(TextureDesc(width,height,1,1,39,0x48))
+        dsv32=make_view(depth32,ViewDesc(40,0,1,0,1,2))
+        make_view(depth32,ViewDesc(41,0,1,0,1,0))
+        d.depth=dsv32;d.depth_state[3]=0
+        ok(clear(rtv,(c.c_float*4)(.125,.25,.5,1),error,len(error)))
+        ok(clear_depth(dsv32,3,.75,7,error,len(error)))
+        draw();assert get(target,width*height*4)==expected((8,6,24,18));checks+=1
+        want_depth32=b''.join(struct.pack('<f',.5 if 8<=x<24 and 6<=y<18 else .75) for y in range(height) for x in range(width))
+        assert get(depth32,width*height*4)==want_depth32;checks+=1
+        d.depth=dsv;d.depth_state[3]=1
         # Reject bad state/ranges before any GPU write, retaining both attachments.
         rejected=[]
         for field,value in [('count',1000000),('index_format',28),('base_vertex',-20),('attribute_count',33),('binding_count',0)]:

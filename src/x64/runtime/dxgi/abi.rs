@@ -49,6 +49,42 @@ pub(super) const DEVICE: &[(&str, usize, &[usize])] = &[
     ("D3D.Device.SetExceptionMode", 2, &[1]),
     ("D3D.Device.GetExceptionMode", 1, &[]),
 ];
+// ID3D11Device1 appends these seven slots to ID3D11Device.
+pub(super) const DEVICE1: &[(&str, usize, &[usize])] = &[
+    ("D3D.Device.GetImmediateContext1", 2, &[]),
+    ("D3D.Device.CreateDeferredContext1", 3, &[1]),
+    ("D3D.Device.CreateBlendState1", 3, &[]),
+    ("D3D.Device.CreateRasterizerState1", 3, &[]),
+    ("D3D.Device.CreateDeviceContextState", 8, &[1, 3, 4]),
+    ("D3D.Device.OpenSharedResource1", 4, &[]),
+    ("D3D.Device.OpenSharedResourceByName", 5, &[2]),
+];
+// ID3D11DeviceContext1 appends these nineteen slots to ID3D11DeviceContext.
+pub(super) const CONTEXT1: &[(&str, usize, &[usize])] = &[
+    (
+        "D3D.Context.CopySubresourceRegion1",
+        10,
+        &[2, 3, 4, 5, 7, 9],
+    ),
+    ("D3D.Context.UpdateSubresource1", 8, &[2, 5, 6, 7]),
+    ("D3D.Context.DiscardResource", 2, &[]),
+    ("D3D.Context.DiscardView", 2, &[]),
+    ("D3D.Context.VSSetConstantBuffers1", 6, &[1, 2]),
+    ("D3D.Context.HSSetConstantBuffers1", 6, &[1, 2]),
+    ("D3D.Context.DSSetConstantBuffers1", 6, &[1, 2]),
+    ("D3D.Context.GSSetConstantBuffers1", 6, &[1, 2]),
+    ("D3D.Context.PSSetConstantBuffers1", 6, &[1, 2]),
+    ("D3D.Context.CSSetConstantBuffers1", 6, &[1, 2]),
+    ("D3D.Context.VSGetConstantBuffers1", 6, &[1, 2]),
+    ("D3D.Context.HSGetConstantBuffers1", 6, &[1, 2]),
+    ("D3D.Context.DSGetConstantBuffers1", 6, &[1, 2]),
+    ("D3D.Context.GSGetConstantBuffers1", 6, &[1, 2]),
+    ("D3D.Context.PSGetConstantBuffers1", 6, &[1, 2]),
+    ("D3D.Context.CSGetConstantBuffers1", 6, &[1, 2]),
+    ("D3D.Context.SwapDeviceContextState", 3, &[]),
+    ("D3D.Context.ClearView", 5, &[4]),
+    ("D3D.Context.DiscardView1", 4, &[3]),
+];
 pub(super) const CONTEXT: &[(&str, usize, &[usize])] = &[
     ("D3D.Context.QueryInterface", 3, &[]),
     ("D3D.Context.AddRef", 1, &[]),

@@ -954,17 +954,40 @@ impl Cpu64 {
                 }
                 self.vector_write(i, 0, value, mem, 16)?;
             }
-            M::Sqrtss | M::Sqrtsd => {
-                let size = if i.mnemonic() == M::Sqrtss { 4 } else { 8 };
-                let source =
-                    u64::from_le_bytes(self.vector_read(i, 1, mem, size)?[..8].try_into().unwrap());
-                let value = if size == 4 {
-                    self.simd_sqrt::<Single>(source, 23, 127, simd_exception)?
+            M::Sqrtss | M::Sqrtsd | M::Sqrtps | M::Sqrtpd => {
+                let scalar = matches!(i.mnemonic(), M::Sqrtss | M::Sqrtsd);
+                let lane = if matches!(i.mnemonic(), M::Sqrtss | M::Sqrtps) {
+                    4
                 } else {
-                    self.simd_sqrt::<Double>(source, 52, 1023, simd_exception)?
+                    8
                 };
-                let destination = Self::xmm_index(i.op0_register())?;
-                self.xmm[destination][..size].copy_from_slice(&value.to_le_bytes()[..size]);
+                let size = if scalar { lane } else { 16 };
+                if !scalar && i.op1_kind() == OpKind::Memory && !self.address(i)?.is_multiple_of(16)
+                {
+                    return Err("unaligned AMD64 packed square root access (#GP)".into());
+                }
+                let source = self.vector_read(i, 1, mem, size)?;
+                let mut value = self.vector_read(i, 0, mem, 16)?;
+                for n in (0..size).step_by(lane) {
+                    let mut bits = [0; 8];
+                    bits[..lane].copy_from_slice(&source[n..n + lane]);
+                    let result = if lane == 4 {
+                        self.simd_sqrt::<Single>(u64::from_le_bytes(bits), 23, 127, simd_exception)
+                    } else {
+                        self.simd_sqrt::<Double>(u64::from_le_bytes(bits), 52, 1023, simd_exception)
+                    };
+                    match result {
+                        Ok(result) => {
+                            value[n..n + lane].copy_from_slice(&result.to_le_bytes()[..lane])
+                        }
+                        Err(e) if !*simd_exception => return Err(e),
+                        Err(_) => {}
+                    }
+                }
+                if *simd_exception {
+                    return Err("unmasked SIMD floating-point exception (#XM)".into());
+                }
+                self.vector_write(i, 0, value, mem, 16)?;
             }
             M::Ucomiss | M::Comiss | M::Ucomisd | M::Comisd => {
                 let size = if matches!(i.mnemonic(), M::Ucomiss | M::Comiss) {

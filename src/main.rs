@@ -13,7 +13,7 @@ fn main() -> ExitCode {
         eprintln!("wire — Watari-Is-a-Runtime-Environment (M2 spike)");
         eprintln!("usage:");
         eprintln!("  wire imports <program.exe>");
-        eprintln!("  wire probe64 <program.exe> [--max-instr N] [--startup] [--dll] [--window] [--cpu-stats] [--api-trace PATH] [--graphics-backend PATH --moltenvk PATH] (experimental AMD64 diagnostic)");
+        eprintln!("  wire probe64 <program.exe> [--max-instr N] [--startup] [--dll] [--window] [--cpu-stats] [--api-trace PATH] [--guest-arg VALUE] [--graphics-backend PATH --moltenvk PATH] (experimental AMD64 diagnostic)");
         eprintln!("  wire prepare <program.exe> [--out program.wir]");
         eprintln!(
             "  wire run <program.exe> [--ir program.wir] [--op-stats] [--max-instr N] [--log-dir DIR] [--cwd DIR] [--trace-cpu] [--present|--headless] [--software-render] [--capture-frames DIR] [--stop-after-presents N]"
@@ -580,9 +580,14 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
         let mut capture_frame = None;
         let mut graphics_backend = None;
         let mut moltenvk = None;
+        let mut guest_args = Vec::new();
         let mut opt = opts.iter();
         while let Some(flag) = opt.next() {
             match flag.as_str() {
+                "--guest-arg" => {
+                    guest_args.push(opt.next().ok_or("--guest-arg needs a value")?.clone());
+                    startup = true;
+                }
                 "--graphics-backend" => {
                     graphics_backend = Some(opt.next().ok_or("--graphics-backend needs a path")?);
                     startup = true;
@@ -619,7 +624,7 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
                 }
                 _ => {
                     return Err(
-                        "usage: wire probe64 <exe> [--max-instr N] [--startup] [--dll] [--window] [--cpu-stats] [--api-trace PATH] [--capture-frame PPM] [--graphics-backend PATH --moltenvk PATH]"
+                        "usage: wire probe64 <exe> [--max-instr N] [--startup] [--dll] [--window] [--cpu-stats] [--api-trace PATH] [--capture-frame PPM] [--guest-arg VALUE] [--graphics-backend PATH --moltenvk PATH]"
                             .into(),
                     )
                 }
@@ -643,6 +648,7 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
                 graphics,
                 api_trace,
                 capture_frame,
+                &guest_args,
             );
         }
         let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
@@ -761,9 +767,13 @@ fn run_startup64(
     graphics: Option<wire::gpu::NativeGraphics>,
     api_trace: Option<&str>,
     capture_frame: Option<&str>,
+    guest_args: &[String],
 ) -> Result<(), String> {
     use wire::x64::process::{Outcome, Process64};
     let mut process = Process64::load(Path::new(path), dll_attach)?;
+    process
+        .runtime
+        .append_guest_arguments(&mut process.memory, guest_args)?;
     if api_trace.is_some() {
         process.runtime.enable_api_inventory();
     }
