@@ -198,6 +198,276 @@ fn amd64_faults_do_not_commit_registers_flags_or_store_and_fetch_stops_at_page_e
     assert_eq!(cpu.rip, before.rip);
 }
 #[test]
+fn amd64_decode_cache_tracks_code_writes_protection_remapping_and_guarded_page_boundaries() {
+    const OTHER: u64 = BASE + 0x10000;
+    let mut mem = Memory::default();
+    mem.enable_execution_stats();
+    mem.map(BASE, 8192, WRITE | EXECUTE).unwrap(); // Execute does not require READ.
+    let mut cpu = Cpu64::new(BASE, STACK);
+    let mov = |value: u64| {
+        let mut code = vec![0x48, 0xb8];
+        code.extend(value.to_le_bytes());
+        code
+    };
+    mem.write(BASE, &mov(0x123456789abcdef0)).unwrap();
+    for _ in 0..2 {
+        cpu.rip = BASE;
+        cpu.step(&mut mem).unwrap();
+        assert_eq!(cpu.regs[0], 0x123456789abcdef0);
+    }
+    mem.write_int(BASE + 2, 8, 0x23456789abcdef01).unwrap();
+    cpu.rip = BASE;
+    cpu.step(&mut mem).unwrap();
+    assert_eq!(cpu.regs[0], 0x23456789abcdef01);
+    mem.protect(BASE, 4096, READ | WRITE).unwrap();
+    cpu.rip = BASE;
+    let before = cpu.clone();
+    assert!(cpu.step(&mut mem).is_err());
+    assert_eq!(cpu, before);
+    mem.write(BASE, &mov(0x3456789abcdef012)).unwrap();
+    mem.protect(BASE, 4096, READ | EXECUTE).unwrap();
+    cpu.step(&mut mem).unwrap();
+    assert_eq!(cpu.regs[0], 0x3456789abcdef012);
+    // Rearming a guard on the exact cached code page invalidates the execution proof.
+    mem.virtual_protect(BASE, 4096, 0x120).unwrap();
+    cpu.rip = BASE;
+    let before = cpu.clone();
+    assert!(cpu.step(&mut mem).unwrap_err().contains("guard-page"));
+    assert_eq!(cpu, before);
+    cpu.step(&mut mem).unwrap();
+    assert_eq!(cpu.regs[0], 0x3456789abcdef012);
+    mem.unmap(BASE, 8192).unwrap();
+    mem.map(BASE, 8192, READ | WRITE | EXECUTE).unwrap();
+    mem.write(BASE, &mov(0x456789abcdef0123)).unwrap();
+    cpu.rip = BASE;
+    cpu.step(&mut mem).unwrap();
+    assert_eq!(cpu.regs[0], 0x456789abcdef0123);
+    // Cache entries are owned by Memory, never shared across address spaces.
+    let mut second = Memory::default();
+    second.map(BASE, 4096, READ | WRITE | EXECUTE).unwrap();
+    second.write(BASE, &mov(0x56789abcdef01234)).unwrap();
+    cpu.rip = BASE;
+    cpu.step(&mut second).unwrap();
+    assert_eq!(cpu.regs[0], 0x56789abcdef01234);
+    // A short instruction at page end does not consume a following guard.
+    mem.write(BASE + 4095, &[0x90]).unwrap();
+    mem.virtual_protect(BASE + 4096, 4096, 0x140).unwrap();
+    for _ in 0..2 {
+        cpu.rip = BASE + 4095;
+        cpu.step(&mut mem).unwrap();
+    }
+    let query = mem.virtual_query(BASE + 4096).unwrap();
+    assert_eq!(u32::from_le_bytes(query[36..40].try_into().unwrap()), 0x140);
+    // A cached crossing instruction must continue to check both pages.
+    mem.virtual_protect(BASE + 4096, 4096, 0x40).unwrap();
+    mem.write(BASE + 4095, &mov(0x6789abcdef012345)).unwrap();
+    cpu.rip = BASE + 4095;
+    cpu.step(&mut mem).unwrap();
+    mem.virtual_protect(BASE + 4096, 4096, 0x140).unwrap();
+    cpu.rip = BASE + 4095;
+    let before = cpu.clone();
+    assert!(cpu.step(&mut mem).unwrap_err().contains("guard-page"));
+    assert_eq!(cpu, before);
+    cpu.step(&mut mem).unwrap();
+    assert_eq!(cpu.regs[0], 0x6789abcdef012345);
+    // Decommit/recommit at the same address cannot reuse the old instruction.
+    let allocation = mem.virtual_alloc(OTHER, 4096, 0x3000, 0x40).unwrap();
+    mem.write(allocation, &mov(0x789abcdef0123456)).unwrap();
+    cpu.rip = allocation;
+    cpu.step(&mut mem).unwrap();
+    mem.virtual_free(allocation, 4096, 0x4000).unwrap();
+    mem.virtual_alloc(allocation, 4096, 0x1000, 0x40).unwrap();
+    mem.write(allocation, &mov(0x89abcdef01234567)).unwrap();
+    cpu.rip = allocation;
+    cpu.step(&mut mem).unwrap();
+    assert_eq!(cpu.regs[0], 0x89abcdef01234567);
+    let stats = mem.execution_stats().unwrap();
+    assert!(stats.ir_steps >= 10);
+    assert_eq!(stats.fallback_steps, 0);
+}
+
+#[test]
+fn amd64_scalar_ir_preserves_address_width_gs_and_fault_atomicity() {
+    let mut mem = Memory::default();
+    mem.map(BASE, 4096, READ | WRITE | EXECUTE).unwrap();
+    mem.map(STACK, 8192, READ | WRITE).unwrap();
+    mem.map(0x10000, 4096, READ | WRITE).unwrap();
+    mem.enable_execution_stats();
+    let mut cpu = Cpu64::new(BASE, STACK + 0x800);
+    cpu.gs_base = STACK;
+    cpu.regs[0] = 0xfeed000000010000;
+    cpu.regs[1] = 0xbeef000000000002;
+    // addr32 [eax+ecx*4], addr32 [ecx*4+0x10000] (no base), GS:addr32
+    // and GS-prefixed LEA, which must ignore the segment base.
+    let cases: &[(&[u8], u64)] = &[
+        (&[0x67, 0x48, 0x8b, 0x14, 0x88], 0x123456789abcdef0),
+        (
+            &[0x67, 0x48, 0x8b, 0x14, 0x8d, 0, 0, 1, 0],
+            0x123456789abcdef0,
+        ),
+        (
+            &[0x65, 0x67, 0x48, 0x8b, 0x14, 0x8d, 0, 0, 0, 0],
+            0xfedcba9876543210,
+        ),
+        (&[0x65, 0x67, 0x48, 0x8d, 0x14, 0x88], 0x10008),
+    ];
+    mem.write_int(0x10008, 8, 0x123456789abcdef0).unwrap();
+    mem.write_int(STACK + 8, 8, 0xfedcba9876543210).unwrap();
+    for (code, expected) in cases {
+        mem.write(BASE, code).unwrap();
+        cpu.rip = BASE;
+        cpu.step(&mut mem).unwrap();
+        assert_eq!(cpu.regs[2], *expected);
+    }
+    // A read succeeds, but an ALU write crosses into a readonly page.
+    mem.write(BASE, &[0x48, 0x83, 0x00, 1]).unwrap();
+    cpu.regs[0] = STACK + 4092;
+    mem.write_int(cpu.regs[0], 8, u64::MAX).unwrap();
+    mem.protect(STACK + 4096, 4096, READ).unwrap();
+    cpu.rip = BASE;
+    let before = cpu.clone();
+    assert!(cpu.step(&mut mem).is_err());
+    assert_eq!(cpu, before);
+    assert_eq!(mem.read_int(cpu.regs[0], 8).unwrap(), u64::MAX);
+    // False CMOV still reads/faults, and a successful I32 false CMOV clears high bits.
+    mem.write(BASE, &[0x0f, 0x44, 0x08]).unwrap();
+    cpu.rflags &= !0x40;
+    cpu.regs[0] = 1 << 48;
+    let before = cpu.clone();
+    assert!(cpu.step(&mut mem).is_err());
+    assert_eq!(cpu, before);
+    cpu.regs[0] = STACK;
+    cpu.step(&mut mem).unwrap();
+    assert_eq!(cpu.regs[1], 2);
+    // POP [RSP] uses the incremented RSP. A destination failure rolls it back.
+    mem.write(BASE, &[0x8f, 0x04, 0x24]).unwrap();
+    cpu.rip = BASE;
+    cpu.regs[4] = STACK + 4088;
+    mem.write_int(cpu.regs[4], 8, 0x5555666677778888).unwrap();
+    let before = cpu.clone();
+    assert!(cpu.step(&mut mem).is_err());
+    assert_eq!(cpu, before);
+    mem.protect(STACK + 4096, 4096, READ | WRITE).unwrap();
+    cpu.step(&mut mem).unwrap();
+    assert_eq!(cpu.regs[4], STACK + 4096);
+    assert_eq!(mem.read_int(cpu.regs[4], 8).unwrap(), 0x5555666677778888);
+    assert_eq!(mem.execution_stats().unwrap().fallback_steps, 0);
+}
+
+#[test]
+fn amd64_scalar_ir_all_conditions_and_typed_memory_alu_match_unicorn() {
+    use unicorn_engine::{Arch, Mode, Prot, RegisterX86 as U, Unicorn};
+    let mut uc = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+    uc.mem_map(BASE, 8192, Prot::ALL).unwrap();
+    uc.mem_map(STACK, 4096, Prot::ALL).unwrap();
+    let mut mem = Memory::default();
+    mem.map(BASE, 8192, READ | WRITE | EXECUTE).unwrap();
+    mem.map(STACK, 4096, READ | WRITE).unwrap();
+    mem.enable_execution_stats();
+    // Cover every condition, including parity and signed-overflow combinations.
+    for cc in 0..16 {
+        for code in [
+            vec![0x0f, 0x80 + cc, 8, 0, 0, 0],
+            vec![0x48, 0x0f, 0x40 + cc, 0xc3],
+            vec![0x0f, 0x90 + cc, 0xc4], // SETcc AH preserves other bits.
+        ] {
+            mem.write(BASE, &code).unwrap();
+            uc.mem_write(BASE, &code).unwrap();
+            uc.ctl_remove_cache(BASE, BASE + 4096).unwrap();
+            for pattern in 0..64u64 {
+                let flags = 0x202
+                    | [1, 4, 16, 64, 128, 2048]
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| pattern & (1 << index) != 0)
+                        .map(|(_, bit)| bit)
+                        .sum::<u64>();
+                let mut cpu = Cpu64::new(BASE, STACK + 0x800);
+                cpu.regs[0] = 0x123456789abcdef0;
+                cpu.regs[3] = 0xfedcba9876543210;
+                cpu.rflags = flags;
+                uc.reg_write(U::RAX, cpu.regs[0]).unwrap();
+                uc.reg_write(U::RBX, cpu.regs[3]).unwrap();
+                uc.reg_write(U::RFLAGS, flags).unwrap();
+                uc.emu_start(BASE, BASE + 4096, 0, 1).unwrap();
+                cpu.step(&mut mem).unwrap();
+                assert_eq!(
+                    cpu.regs[0],
+                    uc.reg_read(U::RAX).unwrap(),
+                    "cc={cc} flags={flags:x}"
+                );
+                assert_eq!(
+                    cpu.rip,
+                    uc.reg_read(U::RIP).unwrap(),
+                    "cc={cc} flags={flags:x}"
+                );
+                assert_eq!(cpu.rflags, flags);
+            }
+        }
+    }
+    for bits in [8, 16, 32, 64] {
+        let mut code = Vec::new();
+        for bytes in [
+            vec![if bits == 8 { 0x00 } else { 0x01 }, 0x07], // ADD [RDI],acc
+            vec![if bits == 8 { 0x80 } else { 0x83 }, 0x17, 0xff], // ADC [RDI],-1
+            vec![if bits == 8 { 0x2a } else { 0x2b }, 0x07], // SUB acc,[RDI]
+            vec![if bits == 8 { 0x80 } else { 0x83 }, 0xd8, 0xfe], // SBB acc,-2
+            vec![if bits == 8 { 0x3a } else { 0x3b }, 0x07], // CMP acc,[RDI]
+            vec![if bits == 8 { 0x84 } else { 0x85 }, 0x07], // TEST [RDI],acc
+            vec![if bits == 8 { 0xfe } else { 0xff }, 0x07], // INC [RDI]
+            vec![if bits == 8 { 0xfe } else { 0xff }, 0x0f], // DEC [RDI]
+            vec![if bits == 8 { 0xf6 } else { 0xf7 }, 0x1f], // NEG [RDI]
+            vec![if bits == 8 { 0xf6 } else { 0xf7 }, 0x17], // NOT [RDI]
+        ] {
+            if bits == 16 {
+                code.push(0x66);
+            }
+            if bits == 64 {
+                code.push(0x48);
+            }
+            code.extend(bytes);
+        }
+        mem.write(BASE, &code).unwrap();
+        uc.mem_write(BASE, &code).unwrap();
+        uc.ctl_remove_cache(BASE, BASE + 4096).unwrap();
+        for value in [0, 1, u64::MAX, 0x8000800080808080, 0xfedcba9876543210] {
+            let mut cpu = Cpu64::new(BASE, STACK + 0x800);
+            cpu.regs[0] = value;
+            cpu.regs[7] = STACK;
+            cpu.rflags = 0xad7;
+            mem.write_int(STACK, 8, value.rotate_left(17)).unwrap();
+            uc.mem_write(STACK, &value.rotate_left(17).to_le_bytes())
+                .unwrap();
+            uc.reg_write(U::RAX, value).unwrap();
+            uc.reg_write(U::RDI, STACK).unwrap();
+            uc.reg_write(U::RFLAGS, cpu.rflags).unwrap();
+            while cpu.rip < BASE + code.len() as u64 {
+                let decoded = cpu.decode(&mem).unwrap();
+                uc.emu_start(cpu.rip, BASE + 4096, 0, 1).unwrap();
+                cpu.step(&mut mem).unwrap();
+                assert_eq!(cpu.regs[0], uc.reg_read(U::RAX).unwrap());
+                assert_eq!(cpu.rip, uc.reg_read(U::RIP).unwrap());
+                let flag_mask = if decoded.mnemonic() == iced_x86::Mnemonic::Test {
+                    0x8c5
+                } else {
+                    0x8d5
+                };
+                assert_eq!(
+                    cpu.rflags & flag_mask,
+                    uc.reg_read(U::RFLAGS).unwrap() & flag_mask,
+                    "bits={bits} {decoded:?}"
+                );
+                let mut bytes = [0; 8];
+                uc.mem_read(STACK, &mut bytes).unwrap();
+                assert_eq!(mem.read_int(STACK, 8).unwrap(), u64::from_le_bytes(bytes));
+            }
+        }
+    }
+    let stats = mem.execution_stats().unwrap();
+    assert_eq!(stats.ir_steps, 16 * 3 * 64 + 4 * 5 * 10);
+    assert_eq!(stats.fallback_steps, 0);
+}
+#[test]
 fn amd64_integer_flags_and_rex_register_aliases_match_unicorn() {
     use unicorn_engine::{Arch, Mode, Prot, RegisterX86 as U, Unicorn};
     let registers = [

@@ -19,8 +19,8 @@ Unity内嵌VS/PS执行64×64离屏Draw，4096个RGBA8像素读回逐通道比较
 
 ## 当前真实结果
 
-AliceToPapa隔离副本推进到 **1,377,667,739 条退休指令、1,380,420,617 work、2,662,022 次已完成API**
-（最新完成诊断重放`linked-pass-116.txt`）。从13条EXE入口开始已实际执行UnityPlayer的TLS/DllMain、EXE入口，
+AliceToPapa隔离副本推进到 **2,081,189,211 条退休指令、2,085,024,567 work、3,706,308 次已完成API**
+（兼容检查点`linked-pass-117.txt`，最新完整性能重放见下方）。从13条EXE入口开始已实际执行UnityPlayer的TLS/DllMain、EXE入口，
 动态加载Mono的TLS/DllMain及合作worker；异常链仍执行真实guest handler与同帧RtlUnwindEx。
 此前curl/SSPI、显示器、HKCU、资源图标、类注册、WNDPROC、DC与目录枚举均已越过。
 本轮`CreateDXGIFactory2`、真实Apple M4 adapter枚举/Desc/引用、D3D12明确失败后的
@@ -30,8 +30,8 @@ COM音频设备缺少factory时真实失败，Unity进入自己的无音频回�
 托管System.IO因动态导入SetThreadErrorMode缺失报异常；线程错误模式、动态导出与代码页查询已补齐。
 pass115查明每个小HeapAlloc占一整页，导致512MiB提交额度耗尽，随后Mono错误路径栈溢出。
 小堆块已改为64KiB slab，pass116未再遇提交额度耗尽；在1.3B work时提交249MiB。
-Mono程序集加载和domain重置实际完成，PhysX后端完成选择；后续guest代码在`0x120b0439e`请求x87 FLD，
-停于AMD64尚未实现的数据/算术x87路径，仍未到正式窗口。
+Mono程序集加载和domain重置实际完成，PhysX后端完成选择；pass116的x87 FLD边界已补齐，
+pass117继续到 `ole32.dll!CoCreateGuid` 未实现边界，仍未到正式窗口。
 没有忽略INT3、认证失败或guest对窗口的隐藏状态。
 
 游戏实际写出的 `Player.log` 包含：
@@ -40,8 +40,8 @@ Mono程序集加载和domain重置实际完成，PhysX后端完成选择；后�
 Mono path[0] = 'C:/AliceToPapaADV_1-0-0_Data/Managed'
 Mono config path = 'C:/MonoBleedingEdge/etc'
 Input System module state changed to: Initialized.
-- Loaded All Assemblies, in 185.640 seconds
-- Finished resetting the current domain, in  3.634 seconds
+- Loaded All Assemblies, in 184.923 seconds
+- Finished resetting the current domain, in  3.573 seconds
 [Physics::Module] Name: PhysX
 ```
 
@@ -50,7 +50,14 @@ Input System module state changed to: Initialized.
 但 `visible=false`；这是引擎的隐藏初始化窗口，不是已经显示的游戏界面。
 `--window` 已实际验证 AppKit 主线程初始化并到达同一 D3D11 边界（pass89），按真实 visible 标志呈现，
 不会把隐藏窗口强制显示来充当正式窗口证据。
-启动指令数是兼容进度，不是性能收益。AMD64 仍使用逐指令 decode，没有64位安装期 IR。
+启动指令数是兼容进度，不是性能收益。按用户要求当前暂停功能扩展，先接入AMD64定长标量IR并复测；
+首次执行后缓存IR，未覆盖的操作缓存解码记录回退。尚无64位安装期AOT。
+测量范围和结果见 [AMD64性能记录](performance-amd64-ir-2026-10-08.md)。
+本轮完整性能复测仍到CoCreateGuid：before为20.69亿退休指令/536.798秒，
+最终IR为13.61亿/54.766秒，整体MIPS 3.85→24.86；程序集加载183.887→18.898秒。
+真实计时器使线程轮询和指令/API量不同，时间差不能当作同指令序列的纯IR提速。
+这两份Player.log已分别保存到 `wire-out/perf-amd64-2026-10-08/alice-full/`；
+仍无正式窗口，未继续补CoCreateGuid或扩展图形功能。完整release290项通过、5项ignored。
 既有 PE32 / Metal 路径不受这条诊断路线替换。
 
 | 重放 | 退休指令 | 已完成 API | 最后边界 |
@@ -119,7 +126,7 @@ checked跨页失败不改变CPU或留下部分store；新产生的未屏蔽算�
 尚未实现x87延迟异常投递。x87环境指令/FPREM/FPATAN等尚未补齐，不宣称完整x87。
 2,304组Unicorn寄存器方向/pop/舍入算术差分通过；独立FP80半ULP舍入、64位整数、
 跨页load/store、未屏蔽异常拒绝与高指针上下文恢复通过。
-完整release286项通过、5项ignored，Clippy无warning；pass117已启动继续验证实际guest路径。
+完整release286项通过、5项ignored，Clippy无warning；pass117已完成并停于CoCreateGuid，见上方真实结果。
 
 Win64窗口定位已准备并通过独立回归：SetWindowPos/MoveWindow使用40字节WINDOWPOS及
 56字节NCCALCSIZE_PARAMS，HWND/lppos/LPARAM保持64位；WM_WINDOWPOSCHANGING可修改位置/尺寸，
@@ -265,7 +272,7 @@ EH-only 与有 termination handler 的元数据分别处理，后者实际调用
 
 这不是完整 SEH/unwind：跨帧/chain/versioned metadata、collided unwind、动态 table callback 异常查找、
 CPU fault→SEH 与 stack-overflow guarantee 仍明确失败。
-CONTEXT 仅支持 CONTROL/INTEGER/FLOAT；高于32位的既有 x87 ip/dp 恢复仍拒绝，不能截断。
+CONTEXT 仅支持 CONTROL/INTEGER/FLOAT；x87 ip/dp 已扩为完整64位并保持Win64捕获/恢复，不能截断。
 
 ## CPU 与浮点边界
 
@@ -280,9 +287,8 @@ NaN/indefinite 和异常；多个 lane 聚合异常，unmasked #XM 时只提交 
 CVTDQ2PD 的 m64 只读8字节、允许不对齐。
 Unicorn 对部分 float→integer 转换不更新 MXCSR，因此寄存器结果做差分，异常状态另用独立架构向量检查。
 
-x87 当前只补 FNSTCW / FLDCW / FNSTSW / FNINIT / FNCLEX / WAIT，
-状态保留既有 FP80 payload，不降成 F64。**尚无完整 AMD64 x87 算术、栈或环境指令**。
-既有 Fpu ip/dp 为32位；控制指令不修改它们，后续完整64位 FPU 指针必须单独扩展。
+x87 已在这些控制指令上补数据/算术/栈操作与部分软件超越函数，范围及差分见前文pass116接续。
+状态保持FP80，FIP/FDP为64位；环境指令、更多超越函数与未屏蔽异常的延迟投递仍未完成。
 
 ## 文件元数据、时区与映射
 
@@ -339,9 +345,9 @@ cd wire-out/games64/alice/runtime
   --moltenvk /private/tmp/wire-moltenvk-1.4.2/MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib
 ```
 
-下一阶段从真实 `D3D11CreateDevice` 开始接设备/资源/能力补齐及消息分发，再以正式窗口和实际 Present 验收；
+性能复测完成后从实际CoCreateGuid边界继续补运行时，再接交换链/guest Draw和Present；
 不以 LoadLibrary 成功、错误退出0或空窗口当作游戏跑通。
-当前完整release回归通过271项：14 unit、37 differential、9 FPU、26 IR、1 Wasm、109 Win32、75 AMD64。
+当前完整release回归通过290项：16 unit、37 differential、9 FPU、26 IR、1 Wasm、109 Win32、92 AMD64，5项ignored。
 本轮新增4项覆盖COM身份/引用/parent、Win64 Desc布局/高指针、readonly保护、故障原子性、
 private data短buffer、D3D12 named/ordinal/动态查找与真实失败。GS新增两个unit测试检查strip/绕序与坏记录。
 原生GPU ignored测试另行通过2项，包含Rust shader/buffer/context/library生命周期、

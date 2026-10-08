@@ -138,6 +138,9 @@ def summarize(args):
     parsed = [(path, parse_sample(path)) for path in args.samples]
     names = demangle({n["symbol"] for _, nodes in parsed for n in nodes})
     folded, reports = collections.Counter(), []
+    def runtime_entry(symbol):
+        return (("wire::cpu" in symbol and symbol.endswith("::run_loop"))
+                or ("wire::x64::process" in symbol and symbol.endswith("::run")))
     for path, nodes in parsed:
         categories, inclusive = collections.Counter(), collections.Counter()
         self_time, function_inclusive = collections.Counter(), collections.Counter()
@@ -152,8 +155,7 @@ def summarize(args):
                 stack.append(names[nodes[index]["symbol"]])
                 index = nodes[index]["parent"]
             stack.reverse()
-            entry = next((i for i, s in enumerate(stack)
-                          if "wire::cpu" in s and s.endswith("::run_loop")), None)
+            entry = next((i for i, s in enumerate(stack) if runtime_entry(s)), None)
             if entry is None:
                 continue  # exclude loader, IR parse/bind, reports, teardown
             stack = stack[entry:]
@@ -166,13 +168,23 @@ def summarize(args):
             # A host API can invoke another guest run_loop. Classify against
             # that innermost loop so callback dispatch is not charged to its
             # enclosing USER32 API merely because it is an ancestor.
-            inner = max(i for i, s in enumerate(stack)
-                        if "wire::cpu" in s and s.endswith("::run_loop"))
+            inner = max(i for i, s in enumerate(stack) if runtime_entry(s))
             execution = ";".join(stack[inner:])
             categories["runtime"] += weight
             # Rust demangling prints Cpu's inherent methods as <Cpu>::fpu_op,
             # dropping the source module. Include that ancestor's self time.
-            if "wire::cpu::fpu" in execution or "::fpu_op" in execution:
+            if "wire::x64" in execution:
+                if "Cpu64>::decode" in execution:
+                    group = "AMD64 decode and fetch"
+                elif "ScalarIr>::" in execution:
+                    group = "AMD64 scalar IR"
+                elif "Cpu64>::step" in execution:
+                    group = "AMD64 step and fallback"
+                elif "wire::x64::runtime" in execution:
+                    group = "API outside guest execution"
+                else:
+                    group = "outer dispatch and other"
+            elif "wire::cpu::fpu" in execution or "::fpu_op" in execution:
                 group = "x87 software execution"
             elif "::step_x86" in execution:
                 group = "other raw fallback"
@@ -200,7 +212,7 @@ def summarize(args):
         print('top runtime self time:', self_time.most_common(10))
     total = sum(r["samples"].get("runtime", 0) for r in reports)
     if not total:
-        raise SystemExit("no guest run_loop samples found")
+        raise SystemExit("no guest runtime samples found")
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "summary.json").write_text(json.dumps(reports, indent=2) + "\n")
     (args.out / "runtime-folded.txt").write_text(

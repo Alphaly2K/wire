@@ -1,11 +1,29 @@
 //! Sparse, checked low-canonical AMD64 user address space. Host data is never executable.
-use std::{cell::Cell, collections::BTreeMap};
+use std::{
+    cell::{Cell, OnceCell},
+    collections::BTreeMap,
+};
 mod vm;
 pub const PAGE: u64 = 4096;
 pub const READ: u8 = 1;
 pub const WRITE: u8 = 2;
 pub const EXECUTE: u8 = 4;
 const USER_END: u64 = 1 << 47;
+const DECODE_SLOTS: usize = 16384;
+struct TranslationSlot {
+    epoch: Cell<u64>,
+    pc: Cell<u64>,
+    // Separate cells keep the cold iced record off scalar IR cache hits.
+    ir: Cell<Option<super::cpu::ir::ScalarIr>>,
+    instruction: Cell<iced_x86::Instruction>,
+}
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ExecutionStats {
+    pub ir_steps: u64,
+    pub fallback_steps: u64,
+    pub translations: u64,
+    pub invalidations: u64,
+}
 struct Page {
     data: Box<[u8; 4096]>,
     permissions: u8,
@@ -23,8 +41,108 @@ struct Allocation {
 pub struct Memory {
     pages: BTreeMap<u64, Page>,
     allocations: BTreeMap<u64, Allocation>,
+    decode_epoch: u64,
+    decoded: OnceCell<Box<[TranslationSlot]>>,
+    checked_execute_page: Cell<Option<u64>>,
+    execution_stats: Option<Cell<ExecutionStats>>,
 }
 impl Memory {
+    pub fn enable_execution_stats(&mut self) {
+        self.execution_stats = Some(Cell::new(ExecutionStats::default()));
+    }
+    pub fn execution_stats(&self) -> Option<ExecutionStats> {
+        self.execution_stats.as_ref().map(Cell::get)
+    }
+    pub(crate) fn record_execution(&self, ir: bool) {
+        if let Some(stats) = &self.execution_stats {
+            let mut value = stats.get();
+            if ir {
+                value.ir_steps += 1;
+            } else {
+                value.fallback_steps += 1;
+            }
+            stats.set(value);
+        }
+    }
+    fn invalidate_decode(&mut self) {
+        self.checked_execute_page.set(None);
+        if let Some(stats) = &self.execution_stats {
+            let mut value = stats.get();
+            value.invalidations += 1;
+            stats.set(value);
+        }
+        self.decode_epoch = self.decode_epoch.wrapping_add(1);
+        if self.decode_epoch == 0 {
+            self.decoded.take();
+        }
+    }
+    fn decode_slot(address: u64) -> usize {
+        ((address ^ (address >> 16) ^ (address >> 32)) as usize) & (DECODE_SLOTS - 1)
+    }
+    fn translation(&self, address: u64) -> Option<&TranslationSlot> {
+        let entry = &self.decoded.get()?[Self::decode_slot(address)];
+        (entry.epoch.get() == self.decode_epoch && entry.pc.get() == address).then_some(entry)
+    }
+    fn check_cached_execute(&self, address: u64, len: usize) -> Result<(), String> {
+        let base = address & !(PAGE - 1);
+        let single_page = len != 0 && len as u64 <= PAGE - (address - base);
+        if single_page && self.checked_execute_page.get() == Some(base) {
+            return Ok(());
+        }
+        self.check(address, len, EXECUTE)?;
+        // This proof is only reused by cached translations in this Memory.
+        // There is one cooperative host CPU; every mapping/protection/code
+        // mutation clears it. A guarded page is never cached before success,
+        // and a crossing instruction always checks both pages again.
+        if single_page {
+            self.checked_execute_page.set(Some(base));
+        }
+        Ok(())
+    }
+    pub(crate) fn cached_ir(
+        &self,
+        address: u64,
+    ) -> Result<Option<super::cpu::ir::ScalarIr>, String> {
+        let Some(ir) = self.translation(address).and_then(|entry| entry.ir.get()) else {
+            return Ok(None);
+        };
+        self.check_cached_execute(address, ir.len as usize)?;
+        Ok(Some(ir))
+    }
+    pub(crate) fn cached_instruction(
+        &self,
+        address: u64,
+    ) -> Result<Option<iced_x86::Instruction>, String> {
+        let Some(entry) = self.translation(address) else {
+            return Ok(None);
+        };
+        let instruction = entry.instruction.get();
+        self.check_cached_execute(address, instruction.len())?;
+        Ok(Some(instruction))
+    }
+    pub(crate) fn cache_instruction(&self, instruction: iced_x86::Instruction) {
+        let cache = self.decoded.get_or_init(|| {
+            (0..DECODE_SLOTS)
+                .map(|_| TranslationSlot {
+                    epoch: Cell::new(0),
+                    pc: Cell::new(u64::MAX),
+                    ir: Cell::new(None),
+                    instruction: Cell::new(iced_x86::Instruction::default()),
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice()
+        });
+        let entry = &cache[Self::decode_slot(instruction.ip())];
+        entry.pc.set(instruction.ip());
+        entry.epoch.set(self.decode_epoch);
+        entry.instruction.set(instruction);
+        entry.ir.set(super::cpu::ir::ScalarIr::lower(&instruction));
+        if let Some(stats) = &self.execution_stats {
+            let mut value = stats.get();
+            value.translations += 1;
+            stats.set(value);
+        }
+    }
     pub fn available(&self, addr: u64, len: u64) -> bool {
         if !addr.is_multiple_of(PAGE) || len == 0 || !len.is_multiple_of(PAGE) {
             return false;
@@ -42,6 +160,7 @@ impl Memory {
         }
         self.pages.append(&mut other.pages);
         self.allocations.append(&mut other.allocations);
+        self.invalidate_decode();
         Ok(())
     }
     fn range(addr: u64, len: usize) -> Result<std::ops::Range<u64>, String> {
@@ -88,6 +207,7 @@ impl Memory {
                 protection_locked: false,
             },
         );
+        self.invalidate_decode();
         Ok(())
     }
     pub fn map_image(&mut self, addr: u64, len: u64, permissions: u8) -> Result<(), String> {
@@ -133,6 +253,7 @@ impl Memory {
             page.permissions = permissions;
             page.protection.set(Self::windows_protection(permissions));
         }
+        self.invalidate_decode();
         Ok(())
     }
     pub fn check(&self, addr: u64, len: usize, access: u8) -> Result<(), String> {
@@ -145,14 +266,18 @@ impl Memory {
                 .pages
                 .get(&p)
                 .ok_or_else(|| format!("unmapped AMD64 address {addr:#x}"))?;
-            if page.protection.get() & crate::mem::PAGE_GUARD != 0 {
-                page.protection
-                    .set(page.protection.get() & !crate::mem::PAGE_GUARD);
-                return Err(format!("AMD64 guard-page fault at {p:#x}"));
-            }
-            if page.permissions & access != access {
-                return Err(format!("AMD64 access {access} denied at {addr:#x}"));
-            }
+            Self::check_page(page, p, addr, access)?;
+        }
+        Ok(())
+    }
+    fn check_page(page: &Page, base: u64, address: u64, access: u8) -> Result<(), String> {
+        if page.protection.get() & crate::mem::PAGE_GUARD != 0 {
+            page.protection
+                .set(page.protection.get() & !crate::mem::PAGE_GUARD);
+            return Err(format!("AMD64 guard-page fault at {base:#x}"));
+        }
+        if page.permissions & access != access {
+            return Err(format!("AMD64 access {access} denied at {address:#x}"));
         }
         Ok(())
     }
@@ -179,6 +304,7 @@ impl Memory {
             self.pages.remove(&p);
         }
         self.allocations.remove(&addr);
+        self.invalidate_decode();
         Ok(())
     }
     pub fn read(&self, addr: u64, out: &mut [u8]) -> Result<(), String> {
@@ -188,6 +314,21 @@ impl Memory {
         self.read_access(addr, out, EXECUTE)
     }
     fn read_access(&self, addr: u64, out: &mut [u8], access: u8) -> Result<(), String> {
+        Self::range(addr, out.len())?;
+        if out.is_empty() {
+            return Ok(());
+        }
+        let base = addr & !(PAGE - 1);
+        let start = (addr - base) as usize;
+        if out.len() <= 4096 - start {
+            let page = self
+                .pages
+                .get(&base)
+                .ok_or_else(|| format!("unmapped AMD64 address {addr:#x}"))?;
+            Self::check_page(page, base, addr, access)?;
+            out.copy_from_slice(&page.data[start..start + out.len()]);
+            return Ok(());
+        }
         self.check(addr, out.len(), access)?;
         let mut offset = 0;
         while offset < out.len() {
@@ -201,15 +342,39 @@ impl Memory {
         Ok(())
     }
     pub fn write(&mut self, addr: u64, bytes: &[u8]) -> Result<(), String> {
+        Self::range(addr, bytes.len())?;
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let base = addr & !(PAGE - 1);
+        let start = (addr - base) as usize;
+        if bytes.len() <= 4096 - start {
+            let page = self
+                .pages
+                .get_mut(&base)
+                .ok_or_else(|| format!("unmapped AMD64 address {addr:#x}"))?;
+            Self::check_page(page, base, addr, WRITE)?;
+            let code_changed = page.permissions & EXECUTE != 0;
+            page.data[start..start + bytes.len()].copy_from_slice(bytes);
+            if code_changed {
+                self.invalidate_decode();
+            }
+            return Ok(());
+        }
         self.check(addr, bytes.len(), WRITE)?;
         let mut offset = 0;
+        let mut code_changed = false;
         while offset < bytes.len() {
             let at = addr + offset as u64;
             let start = (at & (PAGE - 1)) as usize;
             let n = (4096 - start).min(bytes.len() - offset);
-            self.pages.get_mut(&(at & !(PAGE - 1))).unwrap().data[start..start + n]
-                .copy_from_slice(&bytes[offset..offset + n]);
+            let page = self.pages.get_mut(&(at & !(PAGE - 1))).unwrap();
+            code_changed |= page.permissions & EXECUTE != 0;
+            page.data[start..start + n].copy_from_slice(&bytes[offset..offset + n]);
             offset += n;
+        }
+        if code_changed {
+            self.invalidate_decode();
         }
         Ok(())
     }

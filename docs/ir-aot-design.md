@@ -88,6 +88,45 @@ displacement、segment，FS/GS 基址在运行时取当前线程值，不能在�
 常量池、地址描述符、guest-PC 映射和恢复表都要计入**总 IR 尺寸**；8B 指令不等于每条 guest 只占8B。
 若 8B 编码无法兼顾实际热点，应通过对照测试决定是否整体升级为另一个定长格式，避免添加变长 escape 解码。
 
+## AMD64 标量执行 IR（2026-10-08）
+
+AMD64 bring-up 此前并未复用 PE32 的 IR，逐条执行时反复运行 iced 解码和通用 operand 分发。
+目前已接入独立的 `src/x64/cpu/ir.rs`，作为常见标量指令的默认执行路径。
+这是**首次执行时按需翻译并缓存的 IR 数据**；尚不是 AMD64 安装期 AOT，`wire prepare` / `.wir` v3
+仍只支持 PE32。Mono 新生成的 guest x86 代码同样在 checked guest 地址空间内转成数据记录执行，
+没有生成宿主 CPU 可执行代码。不可据此宣称自动满足 App Store 的分发要求。
+
+本阶段采用固定 **24B** 标量记录，每条 guest 指令对应一条 IR，不需要再次解释 iced operand。
+64位立即数和 displacement/绝对 RIP-relative 地址各占8B；余下8B分别保存 typed opcode、
+guest 长度、dst、src、base、index、寻址属性和 aux。opcode 低两位编入 I8/I16/I32/I64，
+aux 仅用于扩展源类型或16种条件。AH/CH/DH/BH 用寄存器描述符中的高字节位表示，
+I32 写回清高32位，I8/I16 合并保留其他位。GS 基址运行时从当前线程读取，LEA 忽略 segment；
+address32 在整个有效地址计算后回绕，再加 GS。所有内存读写继续经过 checked memory。
+
+共26个操作族：NOP、MOV、零/符号扩展、LEA、ADD/ADC/SUB/SBB/CMP/AND/OR/XOR/TEST、
+INC/DEC/NEG/NOT、JMP/Jcc/CMOV/SETcc、PUSH/POP/CALL/RET。有效地址与运算融合，
+不拆成多个临时寻址 dispatch。SSE、x87、REP、其余整数指令仍使用已缓存的 iced 记录和既有执行器。
+FLAGS **全部 eager**，没有扩大死标志删除范围，也没有做跨指令融合或删除 guest 边界。
+
+每个 Memory 拥有16,384个 direct-mapped translation slot，完整 PC 与 epoch 必须匹配。
+IR 和 cold iced 记录分开读取；总缓存还包含原始 PC、epoch 和 fallback，不能把24B当成全部空间成本。
+写入可执行页、映射/解映射、commit/decommit、保护变化与 file-view 更新均使 epoch 失效；
+当前全局失效比较保守。cache hit仍验证原 guest 指令的EXECUTE/guard权限；
+对完全位于同一页的指令复用该页已成功检查的EXECUTE证明，所有上述失效动作同时清除此证明。
+此证明只适用于当前单host CPU协作调度；未来异步guest写入必须重新论证。跨页指令完整检查两页。
+页内 miss 一次读取至多15B，仅确实缺字节才跨页续读，页尾NOP不会提前消耗下一页guard。
+
+标量 IR 执行只备份 GPR/RFLAGS/RIP，不复制 XMM/FP80；所有 opcode 最多一次store，且store是
+最后一个可失败的副作用。失败回滚标量状态，checked跨页write先验证全范围，避免留下半次写入。
+POP 的内存目标在 RSP 更新后求地址；false CMOV仍读取源。retired/work均按原始guest边界提交。
+尚未更改现有 Cpu64 的16 GPR、XMM、FP80上下文，也未将 PE32 的 vreg8=FLAGS 默默改成 R8。
+完整 AMD64 64槽 vreg profile、常量池的8B打包和持久 AOT 版本需单独设计；本记录不作为磁盘 Rust ABI。
+
+AMD64 CALL 当前保持普通 guest 调用语义，间接目标每次真实读取，后续仍由 Process64 的受控
+Win64 gateway 分发。**AMD64 尚无 CALL_NATIVE lowering**，不能把普通 CALL opcode当成已完成的
+原生直达优化；未来接入须保持 IAT hook、Win64 shadow space、callback、线程与异常状态规则。
+独立性能对照与当前实际覆盖率见 [AMD64 性能记录](performance-amd64-ir-2026-10-08.md)。
+
 ## vreg file：64 × 8B = 512B
 
 用户提出的编号适合调试、跨边界和简单解释器。建议保留编号，但修正 x87 的精度表示：

@@ -6,6 +6,7 @@ use iced_x86::{
 };
 use rustc_apfloat::ieee::{Double, Single};
 use rustc_apfloat::{Float, FloatConvert, Round, Status, StatusAnd};
+pub(crate) mod ir;
 mod x87;
 const CF: u64 = 1;
 const PF: u64 = 4;
@@ -275,15 +276,26 @@ impl Cpu64 {
         })
     }
     pub fn decode(&self, mem: &Memory) -> Result<Instruction, String> {
+        if let Some(instruction) = mem.cached_instruction(self.rip)? {
+            return Ok(instruction);
+        }
         let mut bytes = [0; 15];
-        for n in 1..=15 {
-            mem.fetch(
-                self.rip.checked_add(n as u64 - 1).ok_or("RIP overflow")?,
-                &mut bytes[n - 1..n],
-            )?;
+        // Read only this page first. A one-byte instruction at its end must
+        // never touch an inaccessible/guarded following page speculatively.
+        let available =
+            (super::memory::PAGE - (self.rip & (super::memory::PAGE - 1))).min(15) as usize;
+        mem.fetch(self.rip, &mut bytes[..available])?;
+        for n in available..=15 {
+            if n > available {
+                mem.fetch(
+                    self.rip.checked_add(n as u64 - 1).ok_or("RIP overflow")?,
+                    &mut bytes[n - 1..n],
+                )?;
+            }
             let mut decoder = Decoder::with_ip(64, &bytes[..n], self.rip, DecoderOptions::NONE);
             let i = decoder.decode();
             if !i.is_invalid() {
+                mem.cache_instruction(i);
                 return Ok(i);
             }
             if decoder.last_error() != DecoderError::NoMoreBytes {
@@ -293,7 +305,17 @@ impl Cpu64 {
         Err("AMD64 instruction exceeds 15 bytes".into())
     }
     pub fn step(&mut self, mem: &mut Memory) -> Result<(), String> {
+        if let Some(ir) = mem.cached_ir(self.rip)? {
+            ir.step(self, mem)?;
+            mem.record_execution(true);
+            return Ok(());
+        }
         let i = self.decode(mem)?;
+        if let Some(ir) = mem.cached_ir(self.rip)? {
+            ir.step(self, mem)?;
+            mem.record_execution(true);
+            return Ok(());
+        }
         let string = matches!(
             i.mnemonic(),
             M::Stosb | M::Stosw | M::Stosd | M::Stosq | M::Movsb | M::Movsw | M::Movsq
@@ -349,6 +371,7 @@ impl Cpu64 {
         next.retired += (!partial) as u64;
         next.work += 1;
         *self = next;
+        mem.record_execution(false);
         Ok(())
     }
     fn execute_string(&mut self, i: &Instruction, mem: &mut Memory) -> Result<bool, String> {

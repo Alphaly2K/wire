@@ -56,6 +56,7 @@ impl Memory {
             page.data[start..start + n].copy_from_slice(&bytes[copied..copied + n]);
             copied += n;
         }
+        self.invalidate_decode();
         Ok(())
     }
     pub fn memory_status(&self) -> [u8; 64] {
@@ -203,6 +204,7 @@ impl Memory {
                 protection: Cell::new(protection),
             });
         }
+        self.invalidate_decode();
         Ok(())
     }
     pub fn virtual_alloc(
@@ -282,6 +284,7 @@ impl Memory {
         } else {
             return Err(87);
         }
+        self.invalidate_decode();
         Ok(())
     }
     pub fn virtual_protect(
@@ -298,6 +301,7 @@ impl Memory {
             page.permissions = permissions;
             page.protection.set(protection);
         }
+        self.invalidate_decode();
         Ok(old)
     }
     pub(crate) fn validate_protect(

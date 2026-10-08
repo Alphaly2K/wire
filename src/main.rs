@@ -13,7 +13,7 @@ fn main() -> ExitCode {
         eprintln!("wire — Watari-Is-a-Runtime-Environment (M2 spike)");
         eprintln!("usage:");
         eprintln!("  wire imports <program.exe>");
-        eprintln!("  wire probe64 <program.exe> [--max-instr N] [--startup] [--dll] [--window] [--graphics-backend PATH --moltenvk PATH] (experimental AMD64 diagnostic)");
+        eprintln!("  wire probe64 <program.exe> [--max-instr N] [--startup] [--dll] [--window] [--cpu-stats] [--graphics-backend PATH --moltenvk PATH] (experimental AMD64 diagnostic)");
         eprintln!("  wire prepare <program.exe> [--out program.wir]");
         eprintln!(
             "  wire run <program.exe> [--ir program.wir] [--op-stats] [--max-instr N] [--log-dir DIR] [--cwd DIR] [--trace-cpu] [--present|--headless] [--software-render] [--capture-frames DIR] [--stop-after-presents N]"
@@ -575,6 +575,7 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
         let mut startup = false;
         let mut dll_attach = false;
         let mut window = false;
+        let mut cpu_stats = false;
         let mut graphics_backend = None;
         let mut moltenvk = None;
         let mut opt = opts.iter();
@@ -589,6 +590,7 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
                     startup = true;
                 }
                 "--startup" => startup = true,
+                "--cpu-stats" => cpu_stats = true,
                 "--window" => {
                     window = true;
                     startup = true;
@@ -606,7 +608,7 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
                 }
                 _ => {
                     return Err(
-                        "usage: wire probe64 <exe> [--max-instr N] [--startup] [--dll] [--window] [--graphics-backend PATH --moltenvk PATH]"
+                        "usage: wire probe64 <exe> [--max-instr N] [--startup] [--dll] [--window] [--cpu-stats] [--graphics-backend PATH --moltenvk PATH]"
                             .into(),
                     )
                 }
@@ -621,7 +623,7 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
             _ => return Err("--graphics-backend and --moltenvk must be provided together".into()),
         };
         if startup {
-            return run_startup64(path, limit, dll_attach, window, graphics);
+            return run_startup64(path, limit, dll_attach, window, cpu_stats, graphics);
         }
         let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
         let pe = wire::x64::pe::Pe64::parse(&bytes)?;
@@ -659,10 +661,15 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
         )?;
         let rsp = STACK + reserve - 40;
         mem.write_int(rsp, 8, RETURN)?;
+        if cpu_stats {
+            mem.enable_execution_stats();
+        }
         let mut cpu = wire::x64::cpu::Cpu64::new(pe.image_base + pe.entry_rva as u64, rsp);
         println!("experimental AMD64 CPU probe: base={:#x} RIP={:#x} RSP={rsp:#x}; startup services disabled", pe.image_base, cpu.rip);
+        let start = std::time::Instant::now();
         while cpu.work < limit {
             if cpu.rip == RETURN {
+                report_execution64(start, &cpu, &mem);
                 println!(
                     "entry returned RAX={:#x}; retired={}",
                     cpu.regs[0], cpu.retired
@@ -670,6 +677,7 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
                 return Ok(());
             }
             if let Some(name) = gateways.get(&cpu.rip) {
+                report_execution64(start, &cpu, &mem);
                 println!(
                     "import boundary: {name}; retired={}; integer args={:x?}",
                     cpu.retired,
@@ -680,6 +688,7 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
                 );
             }
             if let Err(e) = cpu.step(&mut mem) {
+                report_execution64(start, &cpu, &mem);
                 println!(
                     "retired={}; RIP={:#x}; regs={:x?}",
                     cpu.retired, cpu.rip, cpu.regs
@@ -687,6 +696,7 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
                 return Err(e);
             }
         }
+        report_execution64(start, &cpu, &mem);
         Err(format!(
             "AMD64 probe budget limit ({limit}, includes REP elements) at {:#x}",
             cpu.rip
@@ -701,11 +711,32 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
     }
 }
 
+fn report_execution64(
+    start: std::time::Instant,
+    cpu: &wire::x64::cpu::Cpu64,
+    mem: &wire::x64::memory::Memory,
+) {
+    let elapsed = start.elapsed().as_secs_f64();
+    println!(
+        "AMD64 execution: retired={} work={} seconds={elapsed:.6} MIPS={:.3}",
+        cpu.retired,
+        cpu.work,
+        cpu.retired as f64 / elapsed.max(1e-9) / 1e6
+    );
+    if let Some(stats) = mem.execution_stats() {
+        println!(
+            "AMD64 CPU stats: IR={} fallback={} translations={} invalidations={}",
+            stats.ir_steps, stats.fallback_steps, stats.translations, stats.invalidations
+        );
+    }
+}
+
 fn run_startup64(
     path: &str,
     limit: u64,
     dll_attach: bool,
     window: bool,
+    cpu_stats: bool,
     graphics: Option<wire::gpu::NativeGraphics>,
 ) -> Result<(), String> {
     use wire::x64::process::{Outcome, Process64};
@@ -728,6 +759,10 @@ fn run_startup64(
     for (name, base) in &process.modules {
         println!("  mapped {name} at {base:#x}");
     }
+    if cpu_stats {
+        process.memory.enable_execution_stats();
+    }
+    let start = std::time::Instant::now();
     let outcome = loop {
         let slice = process.cpu.work.saturating_add(25_000_000).min(limit);
         let result = process.run(slice);
@@ -751,6 +786,7 @@ fn run_startup64(
             break result;
         }
     };
+    report_execution64(start, &process.cpu, &process.memory);
     process.poll_window(true)?;
     if outcome.is_err() {
         println!(
