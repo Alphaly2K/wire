@@ -83,4 +83,15 @@ public static class GuestBridge {
     }
     public static object BoxInt() { return (object)73; }
     public static object NewArray() { return new int[] { 17, 29, 43, 71 }; }
+    public static int CheckedArrayLength(int[] values) { return values.Length; }
+    public static int CheckedArrayRead(int[] values, int index) { return values[index]; }
+    public static int CheckedArrayWrite(int[] values, int index, int value) { values[index] = value; return values[index]; }
+    public static unsafe int CheckedArrayByRef(int[] values, int index, int value) {
+        fixed (int* cell = &values[index]) { *cell = value; return *cell; }
+    }
+    public static int CheckedArraySum(int[] values) {
+        int sum = 0; for (int i = 0; i < values.Length; ++i) sum += values[i]; return sum;
+    }
+    public static long CheckedArrayWrongWidth(long[] values, int index) { return values[index]; }
+
 }

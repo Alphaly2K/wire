@@ -87,6 +87,8 @@ def main():
         raise RuntimeError("Missing scoped checked IL evidence")
     if args.checked_memory and "PASS exact rooted reference slots" not in content:
         raise RuntimeError("Missing exact rooted reference slot evidence")
+    if args.checked_memory and "PASS exact checked Int32 arrays" not in content:
+        raise RuntimeError("Missing exact checked Int32 array evidence")
     if args.sample_mono and "PASS original Unity Mono leaf" not in content:
         raise RuntimeError("Missing original Unity Mono layout evidence")
     if args.native_services and "PASS typed native Windows services" not in content:
@@ -119,6 +121,9 @@ def main():
               "reference_slot_patch_sha256": sha256(HERE / "patches/0017-exact-rooted-reference-slots.patch"),
               "exact_rooted_reference_slots_verified": args.checked_memory,
               "guest_raw_reference_stores_integrated": False,
+              "pinned_int32_array_patch_sha256": sha256(HERE / "patches/0018-exact-pinned-int32-array-operations.patch"),
+              "exact_checked_pinned_int32_arrays_verified": args.checked_memory,
+              "general_managed_arrays_admitted": False,
               "native_game_backend_enabled": False,
               "shared_backing_verified": True,
               "fixed_signature_cross_arch_float_struct_exception_verified": True,

@@ -187,3 +187,25 @@ factory句柄后slot仍保活；替换后旧对象的weak target清空、新对�
 这只准入显式登记的独立引用槽。guest x64 raw stores尚未接入typed reference ownership，
 引用数组、object fields、一般helper以及生产roots/scheduler仍未完成；不能把此fixture
 当完整unsafe-IL sandbox或打开真实游戏原生后端。
+
+## 后续：精确 pinned Int32[] 受检访问
+
+0018显式version3加入array length、Int32 load/store和element address；此前版本在受检
+scope里仍拒绝array，不产生raw fallback。注册时用native API核对真实rank=1、element
+class=System.Int32和length，retained pinned owner保证payload稳定。每次array操作先核对
+确切object identity及live handle，再解析signed Int32 index；对象header不直接解引用。
+
+ldelem/stelem走已有Memory检查，ldelema仅返回已映射的element byref，后续ldind/stind仍
+走相同权限检查。底层payload的两个guest别名共享16B backing且所有host访问持lease。
+它只覆盖显式登记的Int32[]，没有准入newarr、reference/struct/multidimensional arrays。
+
+实测长循环sum、Int32负值和bit pattern、guest别名双向可见、readonly write/byref、
+one-shot guard、-1/length/INT32_MIN/MAX三个element路径、NULL、真实但未登记array、
+错误宽度opcode拒绝及撤销的所有array/byref/alias路径。退休mapping/owner后weak target
+清空，原main stack未观察managed地址。失败写入采用与原payload不同的值，独立核对
+payload没有改变。循环触发的MINT_CHECKPOINT只执行既有runtime interruption checkpoint，
+核对后加入许可，继续保留Mono自己的exception边界。
+
+完整M2 `checks=447 denied=0`，M1全通过，五个executable mapping反向测试退出86；审计
+304 objects/668 dependencies/0 unmatched。Clippy clean。一般array/object/helpers、
+生产thread/roots与typed guest引用写入仍未完成，游戏backend/M3继续为false。

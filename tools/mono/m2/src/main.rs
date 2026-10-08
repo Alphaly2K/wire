@@ -49,6 +49,7 @@ macro_rules! symbol {
     }};
 }
 mod abi;
+mod arrays;
 mod checked;
 mod concurrency;
 mod gc;
@@ -589,6 +590,7 @@ fn main() {
     if let Some(blocks) = args.get(5) {
         checked::run(&mono, &mut *guest, blocks);
         guest = refs::run(&mono, guest, blocks);
+        guest = arrays::run(&mono, guest);
     }
     if let Some(assembly) = args.get(7) {
         let root = std::path::Path::new(&args[4])
