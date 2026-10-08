@@ -1868,6 +1868,56 @@ fn amd64_scalar_ir_all_conditions_and_typed_memory_alu_match_unicorn() {
     assert_eq!(stats.fallback_steps, 0);
 }
 #[test]
+fn amd64_adc_sbb_carry_boundaries_all_widths_match_unicorn() {
+    use unicorn_engine::{Arch, Mode, Prot, RegisterX86 as U, Unicorn};
+    let mut memory = Memory::default();
+    memory.map(BASE, 4096, READ | WRITE | EXECUTE).unwrap();
+    let mut uc = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+    uc.mem_map(BASE, 4096, Prot::ALL).unwrap();
+    for bits in [8, 16, 32, 64] {
+        let mask = u64::MAX >> (64 - bits);
+        let sign = 1u64 << (bits - 1);
+        let values = [0, 1, sign - 1, sign, sign + 1, mask - 1, mask];
+        for subtract in [false, true] {
+            let opcode = if subtract { 0x18 } else { 0x10 };
+            let code = match bits {
+                8 => vec![opcode, 0xd8],
+                16 => vec![0x66, opcode + 1, 0xd8],
+                32 => vec![opcode + 1, 0xd8],
+                _ => vec![0x48, opcode + 1, 0xd8],
+            };
+            memory.write(BASE, &code).unwrap();
+            uc.mem_write(BASE, &code).unwrap();
+            for a in values {
+                for b in values {
+                    for carry in [0, 1] {
+                        let mut cpu = Cpu64::new(BASE, STACK);
+                        cpu.regs[0] = (0xa5a55a5ac3c33c3c & !mask) | a;
+                        cpu.regs[3] = (0x123456789abcdef0 & !mask) | b;
+                        cpu.rflags = 0x202 | carry;
+                        uc.reg_write(U::RAX, cpu.regs[0]).unwrap();
+                        uc.reg_write(U::RBX, cpu.regs[3]).unwrap();
+                        uc.reg_write(U::RFLAGS, cpu.rflags).unwrap();
+                        uc.emu_start(BASE, BASE + code.len() as u64, 0, 1).unwrap();
+                        cpu.step(&mut memory).unwrap();
+                        assert_eq!(
+                            cpu.regs[0],
+                            uc.reg_read(U::RAX).unwrap(),
+                            "{bits} sub={subtract} a={a:x} b={b:x} carry={carry}"
+                        );
+                        assert_eq!(
+                            cpu.rflags & 0x8d5,
+                            uc.reg_read(U::RFLAGS).unwrap() & 0x8d5,
+                            "{bits} sub={subtract} a={a:x} b={b:x} carry={carry}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn amd64_integer_flags_and_rex_register_aliases_match_unicorn() {
     use unicorn_engine::{Arch, Mode, Prot, RegisterX86 as U, Unicorn};
     let registers = [
@@ -2902,7 +2952,7 @@ fn win64_waitable_timers_reset_consume_cancel_and_share_named_object_identity() 
     );
 }
 #[test]
-fn amd64_suspended_thread_context_reads_saved_guest_registers_across_single_step_budgets() {
+fn amd64_suspended_thread_context_reads_saved_guest_registers_across_small_and_large_budgets() {
     use wire::x64::process::{Outcome, Process64};
     const CODE: u64 = 0x590000000;
     const WORKER: u64 = CODE + 4096;
@@ -2924,67 +2974,69 @@ fn amd64_suspended_thread_context_reads_saved_guest_registers_across_single_step
     let path =
         std::env::temp_dir().join(format!("wire-thread-context64-{}.exe", std::process::id()));
     std::fs::write(&path, fixture()).unwrap();
-    let mut p = Process64::load(&path, false).unwrap();
-    p.memory
-        .map(CODE, 3 * 4096, READ | WRITE | EXECUTE)
-        .unwrap();
-    let parameter = 0x8877665544332211;
-    let magic = 0x123456789abcdef0;
-    for offset in [0, 1536] {
-        p.memory.write(DATA + offset, &[0xaa; 1232]).unwrap();
-        p.memory.write_int(DATA + offset + 48, 4, 0x100003).unwrap();
-    }
-    let mut main = vec![0x48, 0x83, 0xec, 0x38];
-    call(
-        &mut p,
-        &mut main,
-        "CreateThread",
-        &[0, 0, WORKER, parameter, 4, 0],
-    );
-    main.extend([0x49, 0x89, 0xc4, 0x4c, 0x89, 0xe1]); // r12=handle, rcx=r12
-    mov(&mut main, 2, DATA);
-    call(&mut p, &mut main, "GetThreadContext", &[]);
-    mov(&mut main, 7, DATA + 3072);
-    main.extend([0x48, 0x89, 0x07, 0x4c, 0x89, 0xe1]);
-    call(&mut p, &mut main, "ResumeThread", &[]);
-    call(&mut p, &mut main, "SwitchToThread", &[]);
-    main.extend([0x4c, 0x89, 0xe1]);
-    call(&mut p, &mut main, "SuspendThread", &[]);
-    main.extend([0x4c, 0x89, 0xe1]);
-    mov(&mut main, 2, DATA + 1536);
-    call(&mut p, &mut main, "GetThreadContext", &[]);
-    main.extend([0x48, 0x83, 0xc4, 0x38, 0xc3]);
-    p.memory.write(CODE, &main).unwrap();
-    let mut worker = Vec::new();
-    mov(&mut worker, 13, magic);
-    worker.extend([0xeb, 0xfe]);
-    p.memory.write(WORKER, &worker).unwrap();
-    p.cpu.rip = CODE;
-    loop {
-        match p.run(p.cpu.work + 1).unwrap() {
-            Outcome::Budget => assert!(p.cpu.work < 20000),
-            result => {
-                assert_eq!(result, Outcome::Returned(1));
-                break;
+    for slice in [1, 100_000] {
+        let mut p = Process64::load(&path, false).unwrap();
+        p.memory
+            .map(CODE, 3 * 4096, READ | WRITE | EXECUTE)
+            .unwrap();
+        let parameter = 0x8877665544332211;
+        let magic = 0x123456789abcdef0;
+        for offset in [0, 1536] {
+            p.memory.write(DATA + offset, &[0xaa; 1232]).unwrap();
+            p.memory.write_int(DATA + offset + 48, 4, 0x100003).unwrap();
+        }
+        let mut main = vec![0x48, 0x83, 0xec, 0x38];
+        call(
+            &mut p,
+            &mut main,
+            "CreateThread",
+            &[0, 0, WORKER, parameter, 4, 0],
+        );
+        main.extend([0x49, 0x89, 0xc4, 0x4c, 0x89, 0xe1]); // r12=handle, rcx=r12
+        mov(&mut main, 2, DATA);
+        call(&mut p, &mut main, "GetThreadContext", &[]);
+        mov(&mut main, 7, DATA + 3072);
+        main.extend([0x48, 0x89, 0x07, 0x4c, 0x89, 0xe1]);
+        call(&mut p, &mut main, "ResumeThread", &[]);
+        call(&mut p, &mut main, "SwitchToThread", &[]);
+        main.extend([0x4c, 0x89, 0xe1]);
+        call(&mut p, &mut main, "SuspendThread", &[]);
+        main.extend([0x4c, 0x89, 0xe1]);
+        mov(&mut main, 2, DATA + 1536);
+        call(&mut p, &mut main, "GetThreadContext", &[]);
+        main.extend([0x48, 0x83, 0xc4, 0x38, 0xc3]);
+        p.memory.write(CODE, &main).unwrap();
+        let mut worker = Vec::new();
+        mov(&mut worker, 13, magic);
+        worker.extend([0xeb, 0xfe]);
+        p.memory.write(WORKER, &worker).unwrap();
+        p.cpu.rip = CODE;
+        loop {
+            match p.run(p.cpu.work + slice).unwrap() {
+                Outcome::Budget => assert!(p.cpu.work < 20000),
+                result => {
+                    assert_eq!(result, Outcome::Returned(1));
+                    break;
+                }
             }
         }
+        assert_eq!(p.memory.read_int(DATA + 3072, 8).unwrap(), 1);
+        assert_eq!(p.memory.read_int(DATA + 128, 8).unwrap(), parameter);
+        assert_eq!(p.memory.read_int(DATA + 248, 8).unwrap(), WORKER);
+        assert_eq!(p.memory.read_int(DATA + 1536 + 224, 8).unwrap(), magic); // r13
+        assert_eq!(
+            p.memory.read_int(DATA + 1536 + 248, 8).unwrap(),
+            WORKER + 10
+        );
+        assert_eq!(
+            p.memory.read_int(DATA + 1536 + 256, 8).unwrap(),
+            0xaaaaaaaaaaaaaaaa
+        );
+        assert_eq!(
+            p.memory.read_int(DATA + 1536, 8).unwrap(),
+            0xaaaaaaaaaaaaaaaa
+        );
     }
-    assert_eq!(p.memory.read_int(DATA + 3072, 8).unwrap(), 1);
-    assert_eq!(p.memory.read_int(DATA + 128, 8).unwrap(), parameter);
-    assert_eq!(p.memory.read_int(DATA + 248, 8).unwrap(), WORKER);
-    assert_eq!(p.memory.read_int(DATA + 1536 + 224, 8).unwrap(), magic); // r13
-    assert_eq!(
-        p.memory.read_int(DATA + 1536 + 248, 8).unwrap(),
-        WORKER + 10
-    );
-    assert_eq!(
-        p.memory.read_int(DATA + 1536 + 256, 8).unwrap(),
-        0xaaaaaaaaaaaaaaaa
-    );
-    assert_eq!(
-        p.memory.read_int(DATA + 1536, 8).unwrap(),
-        0xaaaaaaaaaaaaaaaa
-    );
     std::fs::remove_file(path).unwrap();
 }
 #[test]
@@ -4192,6 +4244,613 @@ fn amd64_window_creation_executes_messages_with_full_createstruct_and_rolls_back
         }
     }
     std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn win64_system_times_use_real_cpu_counters_and_preflight_all_outputs() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    const DATA: u64 = 0x6d0000000;
+    mem.map(DATA, 4096, READ | WRITE).unwrap();
+    assert!(wire::x64::runtime::import_supported(
+        "kernel32.dll",
+        "GetSystemTimes"
+    ));
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetSystemTimes",
+            &[DATA, DATA + 8, DATA + 16]
+        ),
+        1
+    );
+    let first: [u64; 3] = std::array::from_fn(|n| mem.read_int(DATA + n as u64 * 8, 8).unwrap());
+    assert!(first[1] >= first[0]);
+    assert!(first[1] > 0 && first[2] > 0);
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetSystemTimes",
+            &[DATA, DATA + 8, DATA + 16]
+        ),
+        1
+    );
+    for (n, before) in first.into_iter().enumerate() {
+        assert!(mem.read_int(DATA + n as u64 * 8, 8).unwrap() >= before);
+    }
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetSystemTimes",
+            &[0, 0, 0]
+        ),
+        1
+    );
+    mem.write(DATA, &[0xa5; 24]).unwrap();
+    cpu.regs[4] = STACK + 0x1f88;
+    mem.write_int(cpu.regs[4], 8, BASE).unwrap();
+    cpu.regs[1] = DATA;
+    cpu.regs[2] = DATA + 8;
+    cpu.regs[8] = DATA + 4096 - 4;
+    let before = cpu.clone();
+    let calls = runtime.api_calls;
+    assert!(runtime
+        .dispatch("kernel32.dll", "GetSystemTimes", &mut cpu, &mut mem)
+        .is_err());
+    assert_eq!(cpu, before);
+    assert_eq!(runtime.api_calls, calls);
+    let mut output = [0; 24];
+    mem.read(DATA, &mut output).unwrap();
+    assert_eq!(output, [0xa5; 24]);
+}
+
+#[test]
+fn win64_create_directory_validates_default_security_and_faults_before_creating() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    const DATA: u64 = 0x6e0000000;
+    mem.map(DATA, 4096, READ | WRITE).unwrap();
+    let root = std::env::temp_dir().join(format!("wire-mkdir64-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    runtime.set_filesystem(wire::fs::GuestFs::new(&root).unwrap());
+    let security = DATA + 256;
+    for (name, api, inherit) in [
+        ("日本", "CreateDirectoryW", 1),
+        ("plain", "CreateDirectoryA", 0),
+    ] {
+        let path = format!("\\\\?\\C:\\{name}\0");
+        let bytes: Vec<u8> = if api.ends_with('W') {
+            path.encode_utf16().flat_map(u16::to_le_bytes).collect()
+        } else {
+            path.into_bytes()
+        };
+        mem.write(DATA, &bytes).unwrap();
+        mem.write(security, &[0; 24]).unwrap();
+        mem.write_int(security, 4, 24).unwrap();
+        mem.write_int(security + 16, 4, inherit).unwrap();
+        assert_eq!(
+            startup_call(&mut mem, &mut cpu, &mut runtime, api, &[DATA, security]),
+            1
+        );
+        assert!(root.join(name).is_dir());
+        assert_eq!(
+            startup_call(&mut mem, &mut cpu, &mut runtime, api, &[DATA, security]),
+            0
+        );
+        assert_eq!(
+            startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+            183
+        );
+    }
+    for length in [0, 12, 24, u32::MAX] {
+        let name = format!("length-{length}");
+        mem.write(DATA, format!("C:\\{name}\0").as_bytes()).unwrap();
+        mem.write_int(security, 4, length as u64).unwrap();
+        assert_eq!(
+            startup_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "CreateDirectoryA",
+                &[DATA, security]
+            ),
+            1
+        );
+        assert!(root.join(name).is_dir());
+    }
+    mem.write(DATA, b"C:\\not-created\0").unwrap();
+    for (length, descriptor, error) in [(0, 0x123456780000, 50), (24, 0x123456780000, 50)] {
+        mem.write_int(security, 4, length).unwrap();
+        mem.write_int(security + 8, 8, descriptor).unwrap();
+        assert_eq!(
+            startup_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "CreateDirectoryA",
+                &[DATA, security]
+            ),
+            0
+        );
+        assert_eq!(
+            startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+            error
+        );
+        assert!(!root.join("not-created").exists());
+    }
+    cpu.regs[4] = STACK + 0x1f88;
+    mem.write_int(cpu.regs[4], 8, BASE).unwrap();
+    cpu.regs[1] = DATA;
+    cpu.regs[2] = DATA + 4096 - 12;
+    let before = cpu.clone();
+    let calls = runtime.api_calls;
+    assert!(runtime
+        .dispatch("kernel32.dll", "CreateDirectoryA", &mut cpu, &mut mem)
+        .is_err());
+    assert_eq!(cpu, before);
+    assert_eq!(runtime.api_calls, calls);
+    assert!(!root.join("not-created").exists());
+    // Only the eight-byte descriptor field is consumed, not unused tail bytes.
+    mem.write(DATA, b"C:\\short-security\0").unwrap();
+    mem.write_int(DATA + 4096 - 8, 8, 0).unwrap();
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "CreateDirectoryA",
+            &[DATA, DATA + 4096 - 16]
+        ),
+        1
+    );
+    assert!(root.join("short-security").is_dir());
+    mem.write(DATA, b"C:\\..\\outside\0").unwrap();
+    mem.write(security, &[0; 24]).unwrap();
+    mem.write_int(security, 4, 24).unwrap();
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "CreateDirectoryA",
+            &[DATA, security]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        5
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn win64_directory_handles_share_native_batches_restart_after_rename_and_stay_confined() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    const DATA: u64 = 0x6c0000000;
+    mem.map(DATA, 8192, READ | WRITE).unwrap();
+    let root = std::env::temp_dir().join(format!("wire-directory64-{}", std::process::id()));
+    std::fs::create_dir_all(root.join("items/sub")).unwrap();
+    std::fs::write(root.join("items/A.txt"), b"abc").unwrap();
+    std::fs::File::create(root.join("items/B.txt"))
+        .unwrap()
+        .set_len(0x100000007)
+        .unwrap();
+    std::fs::write(root.join("items/あ.txt"), b"x").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(std::env::temp_dir(), root.join("items/escape.txt")).unwrap();
+    runtime.set_filesystem(wire::fs::GuestFs::new(&root).unwrap());
+    mem.write(DATA, b"C:\\items\0").unwrap();
+    let handle = startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "CreateFileA",
+        &[DATA, 1, 7, 0, 3, 0x02000000, 0],
+    );
+    assert_ne!(handle, u64::MAX);
+    let iosb = DATA + 128;
+    let output = DATA + 256;
+    let name = |mem: &Memory, at: u64| {
+        let n = mem.read_int(at + 60, 4).unwrap() as usize;
+        let mut bytes = vec![0; n];
+        mem.read(at + 68, &mut bytes).unwrap();
+        String::from_utf16(
+            &bytes
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|b| u16::from_le_bytes(*b))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+    };
+    let query = |mem: &mut Memory,
+                 cpu: &mut Cpu64,
+                 runtime: &mut wire::x64::runtime::Runtime64,
+                 h,
+                 single,
+                 restart| {
+        startup_dll_call(
+            mem,
+            cpu,
+            runtime,
+            "ntdll.dll",
+            "NtQueryDirectoryFile",
+            &[
+                h,
+                0,
+                0,
+                0,
+                iosb,
+                output,
+                4096,
+                0x100000002,
+                single,
+                0,
+                restart,
+            ],
+        )
+    };
+    assert!(wire::x64::runtime::import_supported(
+        "ntdll.dll",
+        "NtQueryDirectoryFile"
+    ));
+    assert!(!wire::x64::runtime::import_supported(
+        "kernel32.dll",
+        "NtQueryDirectoryFile"
+    ));
+    runtime.register_provider("ntdll.dll");
+    for (dll, expected) in [("ntdll.dll", true), ("kernel32.dll", false)] {
+        mem.write(DATA + 6144, format!("{dll}\0").as_bytes())
+            .unwrap();
+        let module = startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "LoadLibraryA",
+            &[DATA + 6144],
+        );
+        mem.write(DATA + 6144, b"NtQueryDirectoryFile\0").unwrap();
+        let gateway = startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetProcAddress",
+            &[module, DATA + 6144],
+        );
+        if expected {
+            assert_ne!(gateway, 0);
+            assert_eq!(runtime.gateways[&gateway], "ntdll.dll!NtQueryDirectoryFile");
+        } else {
+            assert_eq!(gateway, 0);
+        }
+    }
+    startup_call(&mut mem, &mut cpu, &mut runtime, "SetLastError", &[0x1234]);
+    assert_eq!(query(&mut mem, &mut cpu, &mut runtime, handle, 1, 0), 0);
+    assert_eq!(mem.read_int(iosb, 8).unwrap(), 0);
+    assert_eq!(mem.read_int(iosb + 8, 8).unwrap(), 80);
+    assert_eq!(name(&mem, output), "A.txt");
+    assert_eq!(mem.read_int(output + 40, 8).unwrap(), 3);
+    let modified = root
+        .join("items/A.txt")
+        .metadata()
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    assert_eq!(
+        mem.read_int(output + 24, 8).unwrap(),
+        116444736000000000 + (modified.as_nanos() / 100) as u64
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        0x1234
+    );
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "DuplicateHandle",
+            &[u64::MAX, handle, u64::MAX, DATA + 96, 0, 0, 2]
+        ),
+        1
+    );
+    let copy = mem.read_int(DATA + 96, 8).unwrap();
+    assert_eq!(
+        query(&mut mem, &mut cpu, &mut runtime, copy, 0x100000001, 0),
+        0
+    );
+    assert_eq!(name(&mem, output), "B.txt");
+    assert_eq!(mem.read_int(output + 40, 8).unwrap(), 0x100000007);
+    assert_eq!(query(&mut mem, &mut cpu, &mut runtime, handle, 0, 0), 0);
+    assert_eq!(name(&mem, output), "sub");
+    assert_eq!(mem.read_int(output + 56, 4).unwrap() & 0x10, 0x10);
+    assert_eq!(mem.read_int(output + 40, 8).unwrap(), 0);
+    let next = mem.read_int(output, 4).unwrap();
+    assert_eq!(next % 8, 0);
+    assert_eq!(name(&mem, output + next), "あ.txt");
+    assert_eq!(mem.read_int(output + next, 4).unwrap(), 0);
+    mem.write(output, &[0xcc; 128]).unwrap();
+    assert_eq!(
+        query(&mut mem, &mut cpu, &mut runtime, copy, 0, 0),
+        0x80000006
+    );
+    assert_eq!(mem.read_int(iosb, 4).unwrap(), 0x80000006);
+    assert_eq!(mem.read_int(iosb + 8, 8).unwrap(), 0);
+    assert_eq!(mem.read_int(output, 8).unwrap(), 0xcccccccccccccccc);
+    std::fs::rename(root.join("items"), root.join("renamed")).unwrap();
+    std::fs::create_dir_all(root.join("items")).unwrap();
+    std::fs::write(root.join("items/imposter.txt"), b"wrong directory").unwrap();
+    assert_eq!(query(&mut mem, &mut cpu, &mut runtime, handle, 1, 1), 0);
+    assert_eq!(name(&mem, output), "A.txt");
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "CloseHandle", &[handle]),
+        1
+    );
+    // The duplicate keeps both the real directory descriptor and its cursor alive.
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetFileInformationByHandleEx",
+            &[copy, 14, output, 4096]
+        ),
+        1
+    );
+    assert_eq!(name(&mem, output), "B.txt");
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetFileInformationByHandleEx",
+            &[copy, 15, output, 4096]
+        ),
+        1
+    );
+    assert_eq!(name(&mem, output), "A.txt");
+    assert_eq!(
+        query(&mut mem, &mut cpu, &mut runtime, copy, 0, 0),
+        0x80000006
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "CloseHandle", &[copy]),
+        1
+    );
+    assert_eq!(
+        query(&mut mem, &mut cpu, &mut runtime, copy, 0, 0),
+        0xc0000008
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn win64_directory_queries_preserve_outputs_and_cursor_on_checked_faults_and_short_buffers() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    const DATA: u64 = 0x6d0000000;
+    mem.map(DATA, 8192, READ | WRITE).unwrap();
+    let root = std::env::temp_dir().join(format!("wire-directory-fault64-{}", std::process::id()));
+    std::fs::create_dir_all(root.join("items")).unwrap();
+    std::fs::write(root.join("items/A.txt"), b"abc").unwrap();
+    std::fs::write(root.join("items/B.bin"), b"x").unwrap();
+    runtime.set_filesystem(wire::fs::GuestFs::new(&root).unwrap());
+    mem.write(DATA, b"C:\\items\0").unwrap();
+    for (access, disposition, flags, error) in [
+        (1, 3, 0, 5),
+        (2, 3, 0x02000000, 5),
+        (1, 2, 0x02000000, 5),
+        (1, 3, 0x02200000, 50),
+    ] {
+        assert_eq!(
+            startup_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "CreateFileA",
+                &[DATA, access, 7, 0, disposition, flags, 0]
+            ),
+            u64::MAX
+        );
+        assert_eq!(
+            startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+            error
+        );
+    }
+    let h = startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "CreateFileA",
+        &[DATA, 1, 7, 0, 3, 0x02000000, 0],
+    );
+    assert_ne!(h, u64::MAX);
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "CreateFileA",
+            &[DATA, 1, 0, 0, 3, 0x02000000, 0]
+        ),
+        u64::MAX
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        32
+    );
+    let iosb = DATA + 128;
+    let output = DATA + 256;
+    mem.write(iosb, &[0xcc; 16]).unwrap();
+    mem.write(output, &[0xcc; 128]).unwrap();
+    let mut args = [h, 0, 0, 0, iosb, output, 64, 2, 1, 0, 0];
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "ntdll.dll",
+            "NtQueryDirectoryFile",
+            &args
+        ),
+        0xc0000023
+    );
+    assert_eq!(mem.read_int(iosb + 8, 8).unwrap(), 0);
+    assert_eq!(mem.read_int(output, 8).unwrap(), 0xcccccccccccccccc);
+    // Faulting either output must not initialize or advance the directory cursor.
+    for (index, address) in [(4, DATA + 8192 - 8), (5, DATA + 8192 - 40)] {
+        args[6] = 128;
+        args[index] = address;
+        mem.write(iosb, &[0xcc; 16]).unwrap();
+        cpu.regs[4] = STACK + 0x1f88;
+        mem.write_int(cpu.regs[4], 8, BASE).unwrap();
+        for (i, &a) in args.iter().enumerate() {
+            if i < 4 {
+                cpu.regs[[1, 2, 8, 9][i]] = a;
+            } else {
+                mem.write_int(cpu.regs[4] + 40 + (i as u64 - 4) * 8, 8, a)
+                    .unwrap();
+            }
+        }
+        let before = cpu.clone();
+        let calls = runtime.api_calls;
+        assert!(runtime
+            .dispatch("ntdll.dll", "NtQueryDirectoryFile", &mut cpu, &mut mem)
+            .is_err());
+        assert_eq!(cpu, before);
+        assert_eq!(runtime.api_calls, calls);
+        assert_eq!(mem.read_int(iosb, 8).unwrap(), 0xcccccccccccccccc);
+        assert_eq!(mem.read_int(output, 8).unwrap(), 0xcccccccccccccccc);
+        args[4] = iosb;
+        args[5] = output;
+    }
+    // Capture a counted UTF-16 pattern on first success, then ignore later patterns.
+    mem.write(DATA + 1024, &[0; 16]).unwrap();
+    mem.write_int(DATA + 1024, 2, 10).unwrap();
+    mem.write_int(DATA + 1026, 2, 10).unwrap();
+    mem.write_int(DATA + 1032, 8, DATA + 1056).unwrap();
+    mem.write(
+        DATA + 1056,
+        &"*.txt"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    args[9] = DATA + 1024;
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "ntdll.dll",
+            "NtQueryDirectoryFile",
+            &args
+        ),
+        0
+    );
+    assert_eq!(mem.read_int(output + 68, 2).unwrap(), b'A' as u64);
+    mem.write(
+        DATA + 1056,
+        &"*.bin"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    args[10] = 1;
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "ntdll.dll",
+            "NtQueryDirectoryFile",
+            &args
+        ),
+        0
+    );
+    assert_eq!(mem.read_int(output + 68, 2).unwrap(), b'A' as u64);
+    args[10] = 0;
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "ntdll.dll",
+            "NtQueryDirectoryFile",
+            &args
+        ),
+        0x80000006
+    );
+    args[7] = 4; // FileBasicInformation is not a directory enumeration class.
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "ntdll.dll",
+            "NtQueryDirectoryFile",
+            &args
+        ),
+        0xc0000003
+    );
+    assert_eq!(mem.read_int(iosb, 4).unwrap(), 0xc0000003);
+    args[7] = 2;
+    args[1] = 1;
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "ntdll.dll",
+            "NtQueryDirectoryFile",
+            &args
+        ),
+        0xc00000bb
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "CloseHandle", &[h]),
+        1
+    );
+    let metadata_only = startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "CreateFileA",
+        &[DATA, 0, 7, 0, 3, 0x02000000, 0],
+    );
+    args[0] = metadata_only;
+    args[1] = 0;
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "ntdll.dll",
+            "NtQueryDirectoryFile",
+            &args
+        ),
+        0xc0000022
+    );
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "CloseHandle",
+            &[metadata_only]
+        ),
+        1
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -12671,6 +13330,156 @@ fn amd64_sse_predicate_masks_and_sign_masks_match_unicorn() {
     assert_eq!(cpu.rip, before.rip);
     assert_eq!(cpu.retired, 0);
     assert_eq!(cpu.mxcsr, before.mxcsr | 1);
+}
+
+#[test]
+fn amd64_sse_insert_extract_all_controls_and_operand_forms_match_unicorn() {
+    use unicorn_engine::{Arch, Mode, Prot, RegisterX86 as U, Unicorn};
+    let mut uc = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+    uc.mem_map(BASE, 4096, Prot::ALL).unwrap();
+    uc.mem_map(STACK, 4096, Prot::ALL).unwrap();
+    let mut mem = Memory::default();
+    mem.map(BASE, 4096, READ | WRITE | EXECUTE).unwrap();
+    mem.map(STACK, 4096, READ | WRITE).unwrap();
+    let mut forms = vec![
+        ("pextrw-sse2", vec![0x66, 0x45, 0x0f, 0xc5, 0xc1]),
+        ("pinsrw", vec![0x66, 0x45, 0x0f, 0xc4, 0xc8]),
+        ("pinsrw-m16", vec![0x66, 0x44, 0x0f, 0xc4, 0x09]),
+    ];
+    for (name, opcode, rex) in [
+        ("pextrb", 0x14, 0x45),
+        ("pextrb-rexw", 0x14, 0x4d),
+        ("pextrw", 0x15, 0x45),
+        ("pextrw-rexw", 0x15, 0x4d),
+        ("pextrd", 0x16, 0x45),
+        ("pextrq", 0x16, 0x4d),
+        ("extractps", 0x17, 0x45),
+        ("pinsrb", 0x20, 0x45),
+        ("pinsrd", 0x22, 0x45),
+        ("pinsrq", 0x22, 0x4d),
+        ("insertps", 0x21, 0x45),
+    ] {
+        forms.push((name, vec![0x66, rex, 0x0f, 0x3a, opcode, 0xc8]));
+        forms.push((name, vec![0x66, rex & !1, 0x0f, 0x3a, opcode, 0x09]));
+    }
+    // Source aliases the destination: selectors must use the original lanes.
+    forms.push(("insertps-alias", vec![0x66, 0x45, 0x0f, 0x3a, 0x21, 0xc9]));
+    for (name, mut code) in forms {
+        code.push(0);
+        for control in 0..=255u8 {
+            *code.last_mut().unwrap() = control;
+            mem.write(BASE, &code).unwrap();
+            uc.mem_write(BASE, &code).unwrap();
+            uc.ctl_remove_cache(BASE, BASE + 4096).unwrap();
+            let mut cpu = Cpu64::new(BASE, STACK);
+            cpu.regs[1] = STACK + 3;
+            cpu.regs[8] = 0xfedcba9876543210;
+            cpu.xmm[8] = [
+                0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+                0xff, 0,
+            ];
+            cpu.xmm[9] = [
+                0x80, 0x7f, 0xff, 0x7f, 1, 0, 0x80, 0xff, 0xff, 0xff, 0x81, 0x7f, 0, 0, 0, 0x80,
+            ];
+            cpu.rflags = 0xad7;
+            cpu.mxcsr = 0xffbf;
+            let initial = cpu.clone();
+            let data: Vec<u8> = (0..32).map(|n| (n * 37 + 19) as u8).collect();
+            mem.write(STACK, &data).unwrap();
+            uc.mem_write(STACK, &data).unwrap();
+            uc.reg_write(U::RCX, cpu.regs[1]).unwrap();
+            uc.reg_write(U::R8, cpu.regs[8]).unwrap();
+            uc.reg_write(U::RFLAGS, cpu.rflags).unwrap();
+            uc.reg_write(U::MXCSR, cpu.mxcsr as u64).unwrap();
+            uc.reg_write_long(U::XMM8, &cpu.xmm[8]).unwrap();
+            uc.reg_write_long(U::XMM9, &cpu.xmm[9]).unwrap();
+            uc.emu_start(BASE, BASE + code.len() as u64, 0, 1).unwrap();
+            cpu.step(&mut mem).unwrap();
+            let label = format!("{name} code={code:02x?} control={control:02x}");
+            assert_eq!(cpu.regs[8], uc.reg_read(U::R8).unwrap(), "{label}");
+            assert_eq!(&cpu.xmm[9], &*uc.reg_read_long(U::XMM9).unwrap(), "{label}");
+            assert_eq!(cpu.xmm[8], initial.xmm[8], "{label}");
+            assert_eq!(cpu.rflags, uc.reg_read(U::RFLAGS).unwrap(), "{label}");
+            assert_eq!(cpu.mxcsr as u64, uc.reg_read(U::MXCSR).unwrap(), "{label}");
+            let mut actual = [0; 32];
+            mem.read(STACK, &mut actual).unwrap();
+            assert_eq!(
+                &actual,
+                uc.mem_read_as_vec(STACK, 32).unwrap().as_slice(),
+                "{label}"
+            );
+            assert_eq!(cpu.regs[1], initial.regs[1]);
+            assert_eq!(cpu.rip, BASE + code.len() as u64);
+            assert_eq!(cpu.retired, 1);
+        }
+    }
+}
+
+#[test]
+fn amd64_sse_insert_extract_checked_widths_and_faults_preserve_state() {
+    let mut mem = Memory::default();
+    mem.map(BASE, 4096, READ | WRITE | EXECUTE).unwrap();
+    mem.map(STACK, 8192, READ | WRITE).unwrap();
+    for (code, width, store) in [
+        (vec![0x66, 0x44, 0x0f, 0x3a, 0x14, 0x09, 0xff], 1, true),
+        (vec![0x66, 0x44, 0x0f, 0x3a, 0x15, 0x09, 0xff], 2, true),
+        (vec![0x66, 0x44, 0x0f, 0x3a, 0x16, 0x09, 0xff], 4, true),
+        (vec![0x66, 0x4c, 0x0f, 0x3a, 0x16, 0x09, 0xff], 8, true),
+        (vec![0x66, 0x44, 0x0f, 0x3a, 0x17, 0x09, 0xff], 4, true),
+        (vec![0x66, 0x44, 0x0f, 0x3a, 0x20, 0x09, 0xff], 1, false),
+        (vec![0x66, 0x44, 0x0f, 0xc4, 0x09, 0xff], 2, false),
+        (vec![0x66, 0x44, 0x0f, 0x3a, 0x22, 0x09, 0xff], 4, false),
+        (vec![0x66, 0x4c, 0x0f, 0x3a, 0x22, 0x09, 0xff], 8, false),
+        // All-zero INSERTPS still reads m32 and faults on inaccessible memory.
+        (vec![0x66, 0x44, 0x0f, 0x3a, 0x21, 0x09, 0xff], 4, false),
+    ] {
+        mem.write(BASE, &code).unwrap();
+        mem.protect(STACK + 4096, 4096, 0).unwrap();
+        let mut cpu = Cpu64::new(BASE, STACK);
+        cpu.regs[1] = STACK + 4096 - width;
+        cpu.xmm[9] = [0xa5; 16];
+        cpu.rflags = 0xad7;
+        cpu.mxcsr = 0xffbf;
+        cpu.step(&mut mem).unwrap(); // Exact-width access never touches the next page.
+        for protection in [0x01, 0x02, 0x104] {
+            // Read-only permits loads; NOACCESS and guard must fault on both paths.
+            if !store && protection == 0x02 {
+                continue;
+            }
+            mem.virtual_protect(STACK + 4096, 4096, protection).unwrap();
+            let mut cpu = Cpu64::new(BASE, STACK);
+            cpu.regs[1] = STACK + 4096 - width / 2;
+            cpu.xmm[9] = [0x5a; 16];
+            cpu.rflags = 0xad7;
+            cpu.mxcsr = 0xffbf;
+            let before = cpu.clone();
+            let mut bytes = [0; 16];
+            mem.read(STACK + 4080, &mut bytes).unwrap();
+            assert!(
+                cpu.step(&mut mem).is_err(),
+                "code={code:02x?} protection={protection:x}"
+            );
+            assert_eq!(cpu, before);
+            let mut after = [0; 16];
+            mem.read(STACK + 4080, &mut after).unwrap();
+            assert_eq!(after, bytes); // No partial store before a later page fault.
+            if protection == 0x104 {
+                cpu.step(&mut mem).unwrap(); // One-shot guard was consumed.
+            }
+        }
+        mem.protect(STACK + 4096, 4096, READ | WRITE).unwrap();
+    }
+    // Unsupported MMX forms must not modify the aliased x87 state.
+    for code in [[0x0f, 0xc5, 0xc1, 0xff], [0x0f, 0xc4, 0xc1, 0xff]] {
+        mem.write(BASE, &code).unwrap();
+        let mut cpu = Cpu64::new(BASE, STACK);
+        let before = cpu.clone();
+        assert!(cpu
+            .step(&mut mem)
+            .unwrap_err()
+            .contains("unsupported AMD64 vector register"));
+        assert_eq!(cpu, before);
+    }
 }
 
 #[test]

@@ -216,6 +216,9 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
     if import_arity(name).is_none() {
         return false;
     }
+    if name == "NtQueryDirectoryFile" && !dll.eq_ignore_ascii_case("ntdll.dll") {
+        return false;
+    }
     if automation::arity(name).is_some() && !automation::export(dll, name) {
         return false;
     }
@@ -278,6 +281,7 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
         && !(dll.eq_ignore_ascii_case("advapi32.dll") && registry::arity(name).is_some())
         && !(dll.eq_ignore_ascii_case("ntdll.dll") && unwind::is_call(name))
         && !(dll.eq_ignore_ascii_case("ntdll.dll") && version::is_call(name))
+        && !(dll.eq_ignore_ascii_case("ntdll.dll") && name == "NtQueryDirectoryFile")
         && !(dll.eq_ignore_ascii_case("ws2_32.dll") && sockets::is_call(name))
         && !(dll.eq_ignore_ascii_case("secur32.dll") && sspi::arity(name).is_some())
         && !(dll.eq_ignore_ascii_case("winmm.dll")
@@ -328,6 +332,7 @@ fn kernel_export(name: &str) -> bool {
         || (modules::is_query(name) && !name.starts_with("K32"))
         || name.starts_with("BCrypt")
         || name.starts_with("time")
+        || name == "NtQueryDirectoryFile"
         || matches!(
             name,
             "CommandLineToArgvW"
@@ -497,6 +502,7 @@ fn import_arity(name: &str) -> Option<usize> {
         "GetFileSizeEx" | "GetFileSize" => 2,
         "GetFileInformationByHandle" => 2,
         "GetFileInformationByHandleEx" | "GetFileTime" => 4,
+        "NtQueryDirectoryFile" => 11,
         "CreateFileMappingW" | "CreateFileMappingA" | "MapViewOfFileEx" => 6,
         "MapViewOfFile" => 5,
         "UnmapViewOfFile" => 1,
@@ -586,6 +592,7 @@ fn import_arity(name: &str) -> Option<usize> {
         "GetProcAddress" | "FlsSetValue" | "SetStdHandle" | "GetConsoleMode" | "GetCPInfo"
         | "GetTempPathW" | "GetTempPath2W" => 2,
         "LoadLibraryExW" | "LoadLibraryExA" | "GetCPInfoExA" | "GetCPInfoExW" => 3,
+        "GetSystemTimes" => 3,
         "GetSystemTimeAsFileTime"
         | "GetSystemTimePreciseAsFileTime"
         | "GetSystemTime"
@@ -1330,6 +1337,7 @@ impl Runtime64 {
             "CreateFileW" | "CreateFileA" => &[1, 2, 4, 5],
             "SetFilePointerEx" => &[3],
             "GetFileInformationByHandleEx" => &[1, 3],
+            "NtQueryDirectoryFile" => &[6, 7],
             "CreateFileMappingW" | "CreateFileMappingA" => &[2, 3, 4],
             "MapViewOfFile" | "MapViewOfFileEx" => &[1, 2, 3],
             "GetCurrentDirectoryW" | "GetCurrentDirectoryA" => &[0],
@@ -2124,7 +2132,25 @@ impl Runtime64 {
             }
             "CreateDirectoryW" | "CreateDirectoryA" => {
                 if args[1] != 0 {
-                    return Err("Win64 directory security attributes not implemented".into());
+                    // CreateDirectory consumes only lpSecurityDescriptor.
+                    // nLength and bInheritHandle do not affect this operation.
+                    let descriptor = args[1]
+                        .checked_add(8)
+                        .ok_or("invalid Win64 directory security attribute address")?;
+                    let error = if mem.read_int(descriptor, 8)? != 0 {
+                        50 // Explicit security descriptors are not implemented.
+                    } else {
+                        0
+                    };
+                    if error != 0 {
+                        self.set_error(mem, error)?;
+                        returned.regs[0] = 0;
+                        *cpu = returned;
+                        self.unblock();
+                        self.api_calls += 1;
+                        self.record(dll, name, &args, 0);
+                        return Ok(Control::Returned);
+                    }
                 }
                 let path = Self::path_name(mem, args[0], name.ends_with('W'))?;
                 let result = self
@@ -2880,6 +2906,10 @@ impl Runtime64 {
                         u64::MAX
                     }
                 }
+            }
+            "NtQueryDirectoryFile" => self.nt_query_directory(mem, &args)?,
+            "GetFileInformationByHandleEx" if matches!(args[1], 14 | 15) => {
+                self.full_directory_info(mem, &args)?
             }
             "GetFileInformationByHandle" | "GetFileInformationByHandleEx" | "GetFileTime" => {
                 let result = (|| -> Result<Vec<u8>, u32> {
@@ -3966,6 +3996,27 @@ impl Runtime64 {
                 mem.write_int(args[0], 8, (self.start.elapsed().as_nanos() / 100) as u64)?;
                 1
             }
+            "GetSystemTimes" => {
+                for &pointer in &args[..3] {
+                    if pointer != 0 {
+                        mem.check(pointer, 8, WRITE)?;
+                    }
+                }
+                match time::system_cpu_times() {
+                    Ok(times) => {
+                        for (&pointer, ticks) in args[..3].iter().zip(times) {
+                            if pointer != 0 {
+                                mem.write_int(pointer, 8, ticks)?;
+                            }
+                        }
+                        1
+                    }
+                    Err(error) => {
+                        self.set_error(mem, error)?;
+                        0
+                    }
+                }
+            }
             "QueryPerformanceFrequency" => {
                 mem.write_int(args[0], 8, 10_000_000)?;
                 1
@@ -4830,6 +4881,7 @@ impl Runtime64 {
                             provider.as_str(),
                             "kernel32.dll" | "kernelbase.dll" | "ntdll.dll"
                         ) && version::is_call(&function))
+                        || (provider == "ntdll.dll" && function == "NtQueryDirectoryFile")
                         || (provider == "ws2_32.dll" && sockets::is_call(&function))
                         || (provider == "secur32.dll" && sspi::arity(&function).is_some())
                         || (provider == "dxgi.dll" && dxgi::export(&function))

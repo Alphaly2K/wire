@@ -150,6 +150,7 @@ struct ImageView {
   ~ImageView(){if(handle)t.c.fn<PFN_vkDestroyImageView>("vkDestroyImageView")(t.c.device,handle,nullptr);}
 };
 std::unique_ptr<ImageView> create_image_view(Texture& t,WireImageViewDesc d) {
+  const bool srv=d.kind==0 || d.kind==6;
   bool compatible=d.format==t.desc.format || ((t.desc.bind&0x400) &&
     (((d.format==28 || d.format==29) && (t.desc.format==28 || t.desc.format==29)) ||
      ((d.format==87 || d.format==91) && (t.desc.format==87 || t.desc.format==91))));
@@ -157,19 +158,19 @@ std::unique_ptr<ImageView> create_image_view(Texture& t,WireImageViewDesc d) {
   if(t.desc.format==90)compatible=d.format==87 || d.format==91;
   if(t.desc.format==39) {
     compatible=(t.aspect==VK_IMAGE_ASPECT_DEPTH_BIT)?
-      ((d.kind==2 && d.format==40) || (d.kind==0 && d.format==41)):(d.format>=41 && d.format<=43);
+      ((d.kind==2 && d.format==40) || (srv && d.format==41)):(d.format>=41 && d.format<=43);
   }
   if(t.desc.format==53) {
     compatible=(t.aspect==VK_IMAGE_ASPECT_DEPTH_BIT)?
-      ((d.kind==2 && d.format==55) || (d.kind==0 && d.format==56)):(d.format==54 || (d.format>=56 && d.format<=59));
+      ((d.kind==2 && d.format==55) || (srv && d.format==56)):(d.format==54 || (d.format>=56 && d.format<=59));
   }
   VkImageAspectFlags aspect=t.aspect;
   if(t.desc.format==19) {
-    compatible=(d.kind==2 && d.format==20) || (d.kind==0 && (d.format==21 || d.format==22));
-    if(d.kind==0)aspect=d.format==21?VK_IMAGE_ASPECT_DEPTH_BIT:VK_IMAGE_ASPECT_STENCIL_BIT;
+    compatible=(d.kind==2 && d.format==20) || (srv && (d.format==21 || d.format==22));
+    if(srv)aspect=d.format==21?VK_IMAGE_ASPECT_DEPTH_BIT:VK_IMAGE_ASPECT_STENCIL_BIT;
   }else if(t.desc.format==20 && d.kind!=2)compatible=false;
   if(!compatible || !d.mips || !d.layers || d.mip>=t.desc.mips || d.mips>t.desc.mips-d.mip ||
-     d.layer>=t.desc.layers || d.layers>t.desc.layers-d.layer || d.kind>5 ||
+     d.layer>=t.desc.layers || d.layers>t.desc.layers-d.layer || d.kind>6 ||
      ((d.kind==0 || d.kind>=3) && !(t.desc.bind&8)) || (d.kind==1 && (!(t.desc.bind&0x20) || d.mips!=1)) ||
      (d.kind==2 && (!(t.desc.bind&0x40) || d.mips!=1)))throw std::runtime_error("image view format/range/usage unsupported");
   auto format=((t.desc.format==39 || t.desc.format==53) && t.aspect==VK_IMAGE_ASPECT_DEPTH_BIT)?t.format:dxgi_format(d.format);VkFormatProperties fp={};
@@ -179,6 +180,7 @@ std::unique_ptr<ImageView> create_image_view(Texture& t,WireImageViewDesc d) {
   if(!(fp.optimalTilingFeatures&required))throw std::runtime_error("typed image view format capability unsupported");
   auto v=std::make_unique<ImageView>(t,d);VkImageViewCreateInfo vi={VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
   vi.image=t.handle;vi.format=format;vi.viewType=d.layers==1?VK_IMAGE_VIEW_TYPE_2D:VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+  if(d.kind==6) {if(t.volume())throw std::runtime_error("array view of volume texture");vi.viewType=VK_IMAGE_VIEW_TYPE_2D_ARRAY;}
   if(d.kind==5) {if(!t.volume() || d.layer!=0 || d.layers!=1)throw std::runtime_error("volume view range");vi.viewType=VK_IMAGE_VIEW_TYPE_3D;}
   else if((d.kind>=3 && d.kind<=4)) {if(!(t.desc.bind&0x100) || d.layer%6 || d.layers%6 || (d.kind==3 && d.layers!=6))throw std::runtime_error("cube view range");vi.viewType=d.kind==3?VK_IMAGE_VIEW_TYPE_CUBE:VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;}
   vi.subresourceRange={aspect,d.mip,d.mips,d.layer,d.layers};

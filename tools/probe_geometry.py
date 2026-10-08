@@ -69,7 +69,7 @@ def main():
     rows = []
     try:
         for path in sorted(args.fixtures.glob('*.dxbc')):
-            if '.ps.' in path.name:
+            if '.ps.' in path.name or '.vs.' in path.name:
                 continue
             blob = path.read_bytes()
             handle = lib.wire_gpu_compile(context, c.create_string_buffer(blob), len(blob), 8, error, len(error))

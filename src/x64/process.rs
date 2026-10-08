@@ -701,6 +701,12 @@ impl Process64 {
         Ok(())
     }
     pub fn run(&mut self, budget: u64) -> Result<Outcome, String> {
+        // The caller may have suspended the active context between slices.
+        // Within this cooperative loop only a native gateway can change its
+        // suspension state; ordinary guest instructions cannot do so.
+        if self.cpu.work < budget && !self.scheduling && self.runtime.active_suspended() {
+            self.schedule(false, budget)?;
+        }
         while self.cpu.work < budget {
             if self.presenter.is_some() && self.cpu.work >= self.next_ui_work {
                 self.poll_window(false)?;
@@ -828,7 +834,9 @@ impl Process64 {
                 }
                 return Ok(Outcome::Returned(self.cpu.regs[0]));
             }
-            if let Some(name) = self.runtime.gateways.get(&self.cpu.rip).cloned() {
+            let gateway = self.runtime.gateways.get(&self.cpu.rip).cloned();
+            let native_call = gateway.is_some();
+            if let Some(name) = gateway {
                 let (dll, function) = name.split_once('!').ok_or("invalid AMD64 gateway")?;
                 let control = self
                     .runtime
@@ -1010,10 +1018,32 @@ impl Process64 {
                     Control::Exited(code) => return Ok(Outcome::Exited(code)),
                 }
             } else {
-                self.cpu.step(&mut self.memory)?;
+                // Guest instructions cannot mutate host thread metadata or
+                // dispatch an API. Keep the outer scheduler/callback machinery
+                // outside this tight loop, with the same budget/UI/quantum
+                // boundaries and a gateway/sentinel check after every step.
+                let mut until = budget;
+                if self.presenter.is_some() {
+                    until = until.min(self.next_ui_work);
+                }
+                if !self.contexts.is_empty() {
+                    until = until.min(self.quantum_start.saturating_add(10000));
+                }
+                loop {
+                    if !self.cpu.step_cached(&mut self.memory)? {
+                        self.cpu.step_fallback(&mut self.memory)?;
+                    }
+                    if self.cpu.work >= until
+                        || self.cpu.rip == RETURN
+                        || self.cpu.rip == CALLBACK_RETURN
+                        || self.runtime.gateways.contains_key(&self.cpu.rip)
+                    {
+                        break;
+                    }
+                }
             }
             if !self.scheduling
-                && (self.runtime.active_suspended()
+                && ((native_call && self.runtime.active_suspended())
                     || self.cpu.work - self.quantum_start >= 10000 && !self.contexts.is_empty())
             {
                 self.schedule(false, budget)?;

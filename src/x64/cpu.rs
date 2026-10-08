@@ -221,6 +221,7 @@ impl Cpu64 {
             _ => Err("unsupported AMD64 vector destination".into()),
         }
     }
+    #[inline(always)]
     fn flags(&mut self, a: u64, b: u64, result: u64, bits: u32, sub: bool, carry: bool) {
         let m = mask(bits);
         let sign = 1u64 << (bits - 1);
@@ -228,9 +229,11 @@ impl Cpu64 {
         let b = b & m;
         let r = result & m;
         let c = if sub {
-            (a as u128) < b as u128 + carry as u128
+            a < b || (carry && a == b)
         } else {
-            a as u128 + b as u128 + carry as u128 > m as u128
+            // Compare the width-truncated sum, including the full-cycle case
+            // b=mask and carry=1. No widened arithmetic is needed for CF.
+            r < a || (carry && r == a)
         };
         let o = if sub {
             ((a ^ b) & (a ^ r) & sign) != 0
@@ -305,11 +308,21 @@ impl Cpu64 {
         Err("AMD64 instruction exceeds 15 bytes".into())
     }
     pub fn step(&mut self, mem: &mut Memory) -> Result<(), String> {
+        if self.step_cached(mem)? {
+            return Ok(());
+        }
+        self.step_fallback(mem)
+    }
+    #[inline(always)]
+    pub(crate) fn step_cached(&mut self, mem: &mut Memory) -> Result<bool, String> {
         if let Some(ir) = mem.cached_ir(self.rip)? {
             ir.step(self, mem)?;
             mem.record_execution(true);
-            return Ok(());
+            return Ok(true);
         }
+        Ok(false)
+    }
+    pub(crate) fn step_fallback(&mut self, mem: &mut Memory) -> Result<(), String> {
         let i = self.decode(mem)?;
         if let Some(ir) = mem.cached_ir(self.rip)? {
             ir.step(self, mem)?;
@@ -1365,6 +1378,63 @@ impl Cpu64 {
                     value[size..].copy_from_slice(&old[size..]);
                 }
                 self.vector_write(i, 0, value, mem, size)?;
+            }
+            M::Pextrb | M::Pextrw | M::Pextrd | M::Pextrq | M::Extractps => {
+                let width = match i.mnemonic() {
+                    M::Pextrb => 1,
+                    M::Pextrw => 2,
+                    M::Pextrq => 8,
+                    _ => 4,
+                };
+                let source = self.vector_read(i, 1, mem, 16)?;
+                let at = (i.immediate8() as usize & (16 / width - 1)) * width;
+                let mut bytes = [0; 8];
+                bytes[..width].copy_from_slice(&source[at..at + width]);
+                // Register forms zero extend to the decoded GPR width; memory
+                // forms write only the element width. FLAGS/MXCSR are untouched.
+                self.write(i, 0, u64::from_le_bytes(bytes), mem)?;
+            }
+            M::Pinsrb | M::Pinsrw | M::Pinsrd | M::Pinsrq => {
+                let width = match i.mnemonic() {
+                    M::Pinsrb => 1,
+                    M::Pinsrw => 2,
+                    M::Pinsrq => 8,
+                    _ => 4,
+                };
+                let mut value = self.vector_read(i, 0, mem, 16)?;
+                let source = self.read(i, 1, mem)?.to_le_bytes();
+                let at = (i.immediate8() as usize & (16 / width - 1)) * width;
+                value[at..at + width].copy_from_slice(&source[..width]);
+                self.vector_write(i, 0, value, mem, 16)?;
+            }
+            M::Insertps => {
+                // A memory source is always m32, even when the selector names
+                // another register lane or the zero mask clears every lane.
+                let source = self.vector_read(
+                    i,
+                    1,
+                    mem,
+                    if i.op1_kind() == OpKind::Memory {
+                        4
+                    } else {
+                        16
+                    },
+                )?;
+                let mut value = self.vector_read(i, 0, mem, 16)?;
+                let control = i.immediate8() as usize;
+                let from = if i.op1_kind() == OpKind::Memory {
+                    0
+                } else {
+                    (control >> 6) * 4
+                };
+                let to = ((control >> 4) & 3) * 4;
+                value[to..to + 4].copy_from_slice(&source[from..from + 4]);
+                for lane in 0..4 {
+                    if control & (1 << lane) != 0 {
+                        value[lane * 4..lane * 4 + 4].fill(0);
+                    }
+                }
+                self.vector_write(i, 0, value, mem, 16)?;
             }
             M::Movlhps | M::Movhlps => {
                 let mut value = self.vector_read(i, 0, mem, 16)?;

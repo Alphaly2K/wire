@@ -280,6 +280,7 @@ impl ScalarIr {
         address
     }
 
+    #[inline(always)]
     fn read(&self, cpu: &Cpu64, operand: u8, bits: u32, mem: &Memory) -> Result<u64, String> {
         Ok(match operand {
             MEMORY => mem.read_int(self.address(cpu), (bits / 8) as usize)?,
@@ -288,6 +289,7 @@ impl ScalarIr {
         })
     }
 
+    #[inline(always)]
     fn write(
         &self,
         cpu: &mut Cpu64,
@@ -333,6 +335,7 @@ impl ScalarIr {
     /// No vector/x87 state is touched. Each opcode has at most one store,
     /// and that checked store is its last fallible effect. Scalar rollback
     /// therefore preserves the original step's architectural fault boundary.
+    #[inline(always)]
     pub(super) fn step(&self, cpu: &mut Cpu64, mem: &mut Memory) -> Result<(), String> {
         // A scalar opcode can only write its explicit destination and RSP.
         // Memory/constant selectors still produce an in-range, untouched GPR.
@@ -356,6 +359,7 @@ impl ScalarIr {
         Ok(())
     }
 
+    #[inline(always)]
     fn execute(&self, cpu: &mut Cpu64, mem: &mut Memory) -> Result<(), String> {
         let op = self.opcode >> 2;
         let bits = 8 << (self.opcode & 3);

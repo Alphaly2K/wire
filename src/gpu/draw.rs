@@ -1,5 +1,35 @@
 //! Borrowed, typed host draw descriptions. Raw pointers never cross guest ABI.
 use super::*;
+/// Cache the same non-builtin input locations used by native pipeline validation.
+/// This lets a new VS ignore unused elements in a previously bound input layout.
+pub(super) fn input_locations(words: &[u32]) -> Result<std::collections::BTreeSet<u32>, String> {
+    if words.len() < 5 || words[0] != 0x07230203 {
+        return Err("invalid shader input reflection header".into());
+    }
+    let mut locations = std::collections::BTreeMap::new();
+    let mut inputs = Vec::new();
+    let mut at = 5;
+    while at < words.len() {
+        let count = (words[at] >> 16) as usize;
+        let opcode = words[at] & 65535;
+        if count == 0 || count > words.len() - at {
+            return Err("shader input reflection instruction bounds".into());
+        }
+        let w = &words[at..at + count];
+        if opcode == 71 && count == 4 && w[2] == 30 {
+            if locations.insert(w[1], w[3]).is_some() {
+                return Err("duplicate shader input location decoration".into());
+            }
+        } else if opcode == 59 && count >= 4 && w[3] == 1 {
+            inputs.push(w[2]);
+        }
+        at += count;
+    }
+    Ok(inputs
+        .into_iter()
+        .filter_map(|id| locations.get(&id).copied())
+        .collect())
+}
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Attribute {

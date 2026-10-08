@@ -19,6 +19,24 @@ Unity内嵌VS/PS执行64×64离屏Draw，4096个RGBA8像素读回逐通道比较
 
 ## 当前真实结果
 
+本轮已越过 UINT_MAX SRV、SIMD 插入/提取和全屏 Draw 的旧输入布局。
+pass155 完成 6,649 次 GPU Draw / 840 次 Present，实际后续捕获为蓝色背景和加载沙漏，
+已经进入 Naninovel 服务初始化；标题与可玩性仍未验收。
+同步目录句柄、NtQueryDirectoryFile 与动态导出已补齐并回归；
+pass161 已通过默认安全属性与 extended DOS 路径建立 Saves，pass162 停在
+SleepConditionVariableSRW。GetSystemTimes 和 Logo 透明混合已修正，保存内容尚未完成。
+用户已对照 CrossOver 确认加载页为蓝色，背景问题关闭；按指示冻结该功能终点，优先优化解释执行。
+本轮实现、限制、测试与最新接续见 [资源加载记录](unity-resource-loading-2026-10-08.md)。
+2026-10-09 两组冻结功能的真实窗口 AB/BA：到同一 SRW 错误的 wall 中位数
+147.462→105.639 秒，退休吞吐 31.968→43.927 MIPS；完整 release 336 项通过。
+内联标量 IR 与紧凑循环仍保留 checked memory、完整 FLAGS 和原始调度边界。
+详见 [资源加载性能记录](performance-unity-resource-2026-10-09.md)。
+当前版本逐阶段捕获确认约 2 秒的 Unity Logo 淡入淡出；加载页只有首帧后就遇到 SRW
+未实现错误，不能把它视为沙漏动画或可玩性验收。背景颜色不再列为待修复项。
+原生 Mono 计划已复核，尚未接入或构建；结论与 M1/M2 需要补的边界见
+[Mono 计划复核](native-mono-plan-review-2026-10-09.md)。
+下述 pass152 的 SRV 失败是历史检查点，已越过。
+
 AliceToPapa隔离副本的 **pass152 已实际执行398次guest GPU Draw、144次DXGI Present**。
 窗口由guest自己改为 `visible=true`、客户区1024×720，HWND=`0x7ffd00630000`，
 标题 `AliceToPapaADV_1-0-0`。不再停在隐藏bootstrap窗口，也没有强制显示guest隐藏窗口。
@@ -530,7 +548,7 @@ cd wire-out/games64/alice/runtime
 148.256→97.417秒，退休指令吞吐22.34→33.16 MIPS；完整release328项通过。
 owned页槽位缓存仍逐次检查数据权限/guard，FLAGS完整计算，图形后端与功能终点冻结。
 采样、确定性矩阵及完整重放见[Unity logo阶段性能记录](performance-unity-logo-2026-10-08.md)。
-该SRV实际为ArraySize=UINT_MAX的剩余slice范围，后续应补齐范围归一化再继续标题画面验证。
+该SRV实际为ArraySize=UINT_MAX的剩余slice范围；本轮已补齐范围归一化并继续后续资源加载。
 此前功能检查点完整release回归323项通过：29 unit、37 differential、9 FPU、26 IR、1 Wasm、109 Win32、112 AMD64，6项ignored。
 后续CPU检查点为328项通过，AMD64增至117项，其余分组与6项ignored保持一致。
 本轮新增WSA事件与IP转换回归，覆盖manual-reset生命周期、Win32/WSA共用等待、64位指针/句柄、

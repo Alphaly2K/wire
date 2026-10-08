@@ -6,10 +6,17 @@
 **当前不能通过复制 DXVK DLL + MoltenVK 就完成 wire 的游戏渲染。**
 wire 既不是 Wine，也没有通用 Vulkan guest→host ABI。当前已接入原生 ARM64 图形库、
 Win64 DXGI factory4 / adapter1与基础D3D11 device/context、资源的64位COM边界。
-Alice的pass152已建立guest自己显示的1024×720正式窗口，执行398次真实GPU Draw与144次Present。
-用户已观察到Unity logo动画；最新单帧捕获在动画之后为深色背景。已越过键盘和Device1初始化，
-R32/R16 typeless资源已越过，当前重放边界为SRV格式/范围/usage校验，
-尚未验收游戏标题画面或持续可玩。最新证据见文末windowed Draw/Present检查点。
+Alice的pass155在guest自己显示的1024×720正式窗口内完成6,649次真实GPU Draw与840次Present。
+用户已观察到Unity logo动画；后续捕获现在为蓝色背景及加载沙漏。
+已越过typeless资源、UINT_MAX SRV范围、SIMD插入/提取和全屏Draw的旧输入布局，
+进入Naninovel资源初始化，尚未验收游戏标题画面或持续可玩。
+最新实现、验证及限制见[资源加载接续](unity-resource-loading-2026-10-08.md)；文末pass152属于历史检查点。
+pass162 的 Logo alpha 混合已修正：未启用 independent blend 时只检查 RT0，
+disabled blend 不消费无效的 factors/operations。逐阶段帧确认 Logo 不再被黑色纹理矩形包围，
+1/30/90 的不同亮度仍体现动画阶段。Logo 外围 guest 实际绘制 RGB(35,31,32)，加载页 guest
+实际清成蓝色。2026-10-09 用户对照 CrossOver 确认加载页确实为蓝色并关闭背景排查，
+不在 Clear/Present 中强制改色；当前逐帧捕获已确认 Logo 淡入淡出。
+当前按用户要求优先性能优化；功能重放的 SRW 条件变量等待边界保持明确失败。
 原有pass111的Mono初始化与隐藏窗口描述属于历史推进，已越过这些边界。
 接续已选择并落地 **GS→compute 展开**：11个自有GS样例、44组输入逐DWORD验证，
 并完成展开结果→透传VS→真实PS→GPU光栅化的4096像素验证；已加入持久Vulkan buffer。

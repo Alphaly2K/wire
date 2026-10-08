@@ -61,6 +61,22 @@ impl GuestFs {
         if host.is_absolute() && host.starts_with(&self.root) {
             return self.confined(host.to_path_buf());
         }
+        // .NET uses the extended DOS namespace for absolute local paths.
+        // Only the supported C: drive is accepted; this is never a host path,
+        // UNC share or arbitrary NT device namespace.
+        let name = if let Some(local) = name.strip_prefix("\\\\?\\") {
+            let bytes = local.as_bytes();
+            if bytes.len() < 3
+                || !bytes[0].eq_ignore_ascii_case(&b'c')
+                || bytes[1] != b':'
+                || bytes[2] != b'\\'
+            {
+                return Err(5);
+            }
+            local
+        } else {
+            name
+        };
         let mut s = name.replace('\\', "/");
         if s.starts_with("//") {
             return Err(5);
@@ -128,5 +144,8 @@ impl GuestFs {
             return Err(5);
         }
         Ok(p)
+    }
+    pub(crate) fn confined_host_path(&self, path: PathBuf) -> Result<PathBuf, u32> {
+        self.confined(path)
     }
 }

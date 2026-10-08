@@ -3,6 +3,7 @@
 use super::*;
 mod draw;
 mod layout;
+mod view;
 pub(in crate::x64::runtime) fn export(name: &str) -> bool {
     matches!(name, "D3D11CreateDevice" | "D3D11CreateDeviceAndSwapChain")
 }
@@ -853,11 +854,14 @@ impl Runtime64 {
                     }
                     v.mip = words[base];
                     if kind == Kind::Srv {
-                        v.mips = if words[3] == u32::MAX {
-                            d.mips.saturating_sub(v.mip)
-                        } else {
-                            words[3]
+                        let Some(mips) = view::remaining_range(v.mip, words[3], d.mips) else {
+                            if a[3] != 0 {
+                                mem.write_int(a[3], 8, 0)?;
+                            }
+                            return Ok(INVALID_ARG);
                         };
+                        v.mips = mips;
+                        desc[12..16].copy_from_slice(&mips.to_le_bytes());
                     }
                     if kind == Kind::Srv && dimension == 8 {
                         v.kind = 5;
@@ -866,15 +870,35 @@ impl Runtime64 {
                     } else if kind == Kind::Srv && matches!(dimension, 9 | 10) {
                         v.kind = if dimension == 9 { 3 } else { 4 };
                         v.layer = if dimension == 9 { 0 } else { words[4] };
-                        v.layers = if dimension == 9 {
-                            6
-                        } else {
-                            words[5].checked_mul(6).ok_or("cube view layer overflow")?
+                        let cubes = if dimension == 9 { 1 } else { words[5] };
+                        let Some(cubes) = (v.layer.is_multiple_of(6))
+                            .then(|| view::remaining_range(v.layer / 6, cubes, d.layers / 6))
+                            .flatten()
+                        else {
+                            if a[3] != 0 {
+                                mem.write_int(a[3], 8, 0)?;
+                            }
+                            return Ok(INVALID_ARG);
                         };
+                        v.layers = cubes * 6;
+                        if dimension == 10 {
+                            desc[20..24].copy_from_slice(&cubes.to_le_bytes());
+                        }
                     } else if dimension == plain + 1 {
                         let at = base + if kind == Kind::Srv { 2 } else { 1 };
                         v.layer = words[at];
-                        v.layers = words[at + 1];
+                        let Some(layers) = view::remaining_range(v.layer, words[at + 1], d.layers)
+                        else {
+                            if a[3] != 0 {
+                                mem.write_int(a[3], 8, 0)?;
+                            }
+                            return Ok(INVALID_ARG);
+                        };
+                        v.layers = layers;
+                        desc[(at + 1) * 4..(at + 2) * 4].copy_from_slice(&layers.to_le_bytes());
+                        if kind == Kind::Srv {
+                            v.kind = 6;
+                        }
                     } else {
                         v.layers = 1;
                     }
@@ -894,6 +918,8 @@ impl Runtime64 {
                     };
                     if cube {
                         v.kind = if d.layers == 6 { 3 } else { 4 };
+                    } else if kind == Kind::Srv && array {
+                        v.kind = 6;
                     }
                     desc[..4].copy_from_slice(&d.format.to_le_bytes());
                     desc[4..8].copy_from_slice(&dim.to_le_bytes());
@@ -1359,15 +1385,17 @@ impl Runtime64 {
                     Kind::Blend => {
                         d[0] <= 1
                             && d[1] <= 1
-                            && (0..8).all(|n| {
+                            && (0..if d[1] == 0 { 1 } else { 8 }).all(|n| {
                                 let i = 2 + n * 8;
                                 d[i] <= 1
-                                    && [1, 2, 4, 5].iter().all(|&j| {
-                                        (1..=19).contains(&d[i + j])
-                                            && d[i + j] != 12
-                                            && d[i + j] != 13
-                                    })
-                                    && [3, 6].iter().all(|&j| (1..=5).contains(&d[i + j]))
+                                    && (d[i] == 0
+                                        || ([1, 2, 4, 5].iter().all(|&j| {
+                                            (1..=19).contains(&d[i + j])
+                                                && d[i + j] != 12
+                                                && d[i + j] != 13
+                                        }) && [3, 6]
+                                            .iter()
+                                            .all(|&j| (1..=5).contains(&d[i + j]))))
                                     && d[i + 7] & 255 <= 15
                             })
                     }

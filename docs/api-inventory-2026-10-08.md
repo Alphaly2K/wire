@@ -144,7 +144,16 @@ packed sqrt、Device1/Context1部分语义和typeless资源/view不属于普通W
 pass150曾暴露D32-only视图clear flags=3的过严aspect检查，已修正为仅清视图实际存在的aspect。
 pass152已继续到3,348,585,448退休指令、6,332,527完成API、398 Draw/144 Present，
 最新边界为R16资源/RTV之后的SRV格式/范围校验。
-最新标题画面和可玩性仍待验收，不以单帧空背景或GPU计数替代。
+SRV范围已在后续修复；pass155完成6,649 Draw/840 Present并进入Naninovel服务初始化，
+捕获到蓝色背景与加载沙漏。同步目录句柄与ntdll专属NtQueryDirectoryFile已接入，
+包括Mono使用的动态GetProcAddress导出；不是仅增加静态ABI条目。
+目录的sharing/cursor/metadata/fault回归及实际接续见[资源加载记录](unity-resource-loading-2026-10-08.md)。
+上面的整目录ABI计数仍是此前扫描快照，本轮没有重新计算四目录汇总。
+后续 pass161 的 Saves 路径已越过；默认 SECURITY_ATTRIBUTES 与 extended DOS C 盘路径
+已经正确解析。pass162 完成 7,799,612 API 调用，最新明确缺失为
+kernel32!SleepConditionVariableSRW。GetSystemTimes 已使用真实 host CPU 计数接入，
+没有将条件变量等待用立即成功代替。按用户要求在此冻结功能，优先做性能对照。
+最新标题画面和可玩性仍待验收，不以单帧或GPU计数替代。
 
 所选全部历史轨迹中的外部调用/尝试ABI缺失现为1个：pass128的DialogBoxParamW。
 这是当时NOTOPMOST定位失败引出的错误对话框路径，

@@ -58,6 +58,8 @@ WIRE_GPU_EXPORT int wire_gpu_texture_write(void *texture, uint32_t subresource, 
 WIRE_GPU_EXPORT int wire_gpu_texture_read(void *texture, uint32_t subresource, uint8_t *data,
     size_t size, char *error, size_t capacity);
 typedef struct WireImageViewDesc {uint32_t format,mip,mips,layer,layers,kind;} WireImageViewDesc;
+/* kind: 0=2D SRV, 1=RTV, 2=DSV, 3=cube SRV, 4=cube array SRV,
+   5=3D SRV, 6=2D array SRV (including a single layer). */
 /* Checked host descriptions for guest draws. Resource pointers are owned native
    objects, never values read from the guest. Only reflected bindings are sent. */
 typedef struct WireVertexBuffer {void *buffer;uint32_t stride,offset;} WireVertexBuffer;

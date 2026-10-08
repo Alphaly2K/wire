@@ -2807,6 +2807,24 @@ fn filesystem_confines_paths_and_symlinks_and_handles_case() {
         fs.resolve("c:\\sub\\test.txt").unwrap(),
         v.dir.join("Sub/Test.TXT")
     );
+    assert_eq!(
+        fs.resolve("\\\\?\\c:\\sub\\test.txt").unwrap(),
+        v.dir.join("Sub/Test.TXT")
+    );
+    assert_eq!(
+        fs.resolve("\\\\?\\C:\\Sub\\new-file").unwrap(),
+        v.dir.join("Sub/new-file")
+    );
+    for unsupported in [
+        "\\\\?\\UNC\\server\\file",
+        "\\\\?\\D:\\file",
+        "\\\\?\\C:relative",
+        "\\\\.\\C:\\file",
+        "\\\\?\\GLOBALROOT\\Device\\file",
+        "\\\\?\\C:\\..\\outside",
+    ] {
+        assert!(fs.resolve(unsupported).is_err(), "{unsupported}");
+    }
     assert!(fs.resolve("../outside").is_err());
     assert!(fs.resolve("C:\\..\\outside").is_err());
     assert!(fs.resolve("\\\\server\\file").is_err());
@@ -2819,6 +2837,7 @@ fn filesystem_confines_paths_and_symlinks_and_handles_case() {
     std::os::unix::fs::symlink(std::env::temp_dir(), v.dir.join("escape")).unwrap();
     assert!(fs.resolve("C:\\escape\\new-file").is_err());
     assert!(fs.resolve("C:\\escape").is_err());
+    assert!(fs.resolve("\\\\?\\C:\\escape\\new-file").is_err());
 }
 
 #[test]

@@ -1,4 +1,5 @@
 //! Real confined file handles, with sharing, access and endpoint lifetime checks.
+mod directory;
 use std::{
     collections::BTreeMap,
     fs::{File, Metadata, OpenOptions},
@@ -69,6 +70,7 @@ struct OpenFile {
     share_access: u32,
     share: u32,
     flags: u32,
+    directory: Option<std::rc::Rc<std::cell::RefCell<directory::Cursor>>>,
 }
 pub(super) struct Files {
     next: u64,
@@ -99,7 +101,7 @@ impl Files {
         // Append-only, execute, delete and security access need separate semantics.
         if access & !0xc012019f != 0
             || access & 4 != 0 && access & (0x40000000 | 2) == 0
-            || attributes & !0x18000080 != 0
+            || attributes & !0x1a000080 != 0
         {
             return Err(50);
         }
@@ -121,7 +123,8 @@ impl Files {
         if !path.parent().is_some_and(|p| p.is_dir()) {
             return Err(3);
         }
-        if path.is_dir() {
+        let directory = path.is_dir();
+        if directory && (attributes & 0x02000000 == 0 || disposition != 3 || rights & 2 != 0) {
             return Err(5);
         }
         let existed = path.exists();
@@ -163,6 +166,7 @@ impl Files {
                 share_access: rights,
                 share,
                 flags: inherit as u32,
+                directory: directory.then(Default::default),
             },
         );
         Ok((handle, existed))
@@ -203,6 +207,7 @@ impl Files {
             share_access: original.share_access,
             share: original.share,
             flags: inherit as u32,
+            directory: original.directory.clone(),
         };
         let id = self.next;
         self.next += 1;
@@ -226,14 +231,14 @@ impl Files {
     }
     pub fn read(&mut self, handle: u64, bytes: &mut [u8]) -> Result<usize, u32> {
         let file = self.handles.get_mut(&handle).ok_or(6u32)?;
-        if file.access & 1 == 0 {
+        if file.access & 1 == 0 || file.directory.is_some() {
             return Err(5);
         }
         file.file.read(bytes).map_err(|e| crate::fs::win_error(&e))
     }
     pub fn write(&mut self, handle: u64, bytes: &[u8]) -> Result<usize, u32> {
         let file = self.handles.get_mut(&handle).ok_or(6u32)?;
-        if file.access & 2 == 0 {
+        if file.access & 2 == 0 || file.directory.is_some() {
             return Err(5);
         }
         file.file.write(bytes).map_err(|e| crate::fs::win_error(&e))
@@ -256,7 +261,7 @@ impl Files {
     }
     pub fn mapping_file(&self, handle: u64) -> Result<File, u32> {
         let file = self.handles.get(&handle).ok_or(6u32)?;
-        if file.access & 1 == 0 {
+        if file.access & 1 == 0 || file.directory.is_some() {
             return Err(5);
         }
         file.file.try_clone().map_err(|e| crate::fs::win_error(&e))

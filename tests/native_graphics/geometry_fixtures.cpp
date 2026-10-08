@@ -123,6 +123,28 @@ void vertex_fixture(const std::filesystem::path& path) {
   out.add(dxbc::SignatureEntry("SV_POSITION",0,0,0,0xf,dxbc::SignatureSysval::ePosition,ir::ScalarType::eF32));
   write_fixture(path,code,in,out);
 }
+void procedural_vertex_fixture(const std::filesystem::path& path) {
+  // A fullscreen triangle from SV_VertexID, with no IA attributes or CBVs.
+  Words w;auto input=reg(1,{0},false,1);input.push_back(6);op(w,96,input);
+  auto output=reg(2,{0});output.push_back(1);op(w,103,output);op(w,104,{1});
+  move(w,reg(2,{0}),{0x4e46,0xbf800000,0x3f800000,0x3f000000,0x3f800000});
+  for(uint32_t id=1;id<=2;id++) {
+    auto equal=reg(0,{0},false,1),source=reg(1,{0},true);
+    equal.insert(equal.end(),source.begin(),source.end());equal.insert(equal.end(),{0x4001,id});op(w,32,equal);
+    auto select=reg(2,{0}),condition=reg(0,{0},true);
+    condition[0]&=~(0xffu<<4); // xxxx selector, one condition for all channels.
+    select.insert(select.end(),condition.begin(),condition.end());
+    Words position={0x4e46,id==1?0x40400000u:0xbf800000u,id==1?0x3f800000u:0xc0400000u,0x3f000000,0x3f800000};
+    select.insert(select.end(),position.begin(),position.end());auto old=reg(2,{0},true);
+    select.insert(select.end(),old.begin(),old.end());op(w,55,select);
+  }
+  op(w,62);Words code={(1u<<16)|0x40,uint32_t(w.size()+2)};code.insert(code.end(),w.begin(),w.end());
+  code.insert(code.begin(),{0x52444853u,uint32_t(code.size()*4)});
+  dxbc::Signature in(util::FourCC("ISGN")),out(util::FourCC("OSGN"));
+  in.add(dxbc::SignatureEntry("SV_VERTEXID",0,0,0,0x101,dxbc::SignatureSysval::eVertexId,ir::ScalarType::eU32));
+  out.add(dxbc::SignatureEntry("SV_POSITION",0,0,0,0xf,dxbc::SignatureSysval::ePosition,ir::ScalarType::eF32));
+  write_fixture(path,code,in,out);
+}
 }
 int main(int argc, char** argv) {
   if (argc != 2) return 2;
@@ -141,4 +163,5 @@ int main(int argc, char** argv) {
   pixel_fixture(out/"color.ps.dxbc");
   pixel_fixture(out/"constant-color.ps.dxbc",true);
   vertex_fixture(out/"offset.vs.dxbc");
+  procedural_vertex_fixture(out/"procedural.vs.dxbc");
 }

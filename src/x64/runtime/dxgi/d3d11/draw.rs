@@ -86,10 +86,10 @@ impl Runtime64 {
                     return Err("D3D11 guest draw descriptor array unsupported".into());
                 }
                 let resource = match (binding.binding, binding.descriptor_type) {
-                    (slot @ 0..14, 6) => BindingResource::Constant(buffer(bound(
-                        &format!("{stage}SetConstantBuffers"),
-                        slot as usize,
-                    ))?),
+                    (slot @ 0..14, 6) => BindingResource::Constant(
+                        buffer(bound(&format!("{stage}SetConstantBuffers"), slot as usize))
+                            .map_err(|e| format!("{e}; {stage} constant buffer b{slot}"))?,
+                    ),
                     (slot @ 14..142, 2) => BindingResource::Image(view(bound(
                         &format!("{stage}SetShaderResources"),
                         (slot - 14) as usize,
@@ -127,6 +127,9 @@ impl Runtime64 {
         if bound("IASetInputLayout", 0) != 0 {
             for raw in state("IASetInputLayout")?.as_chunks::<24>().0 {
                 let d = words::<6>(raw, "input attribute")?;
+                if !vertex.input_locations.contains(&d[0]) {
+                    continue;
+                }
                 attributes.push(Attribute {
                     location: d[0],
                     format: d[1],
@@ -148,7 +151,8 @@ impl Runtime64 {
             let [stride, offset] = words::<2>(raw, "vertex binding")?;
             vertices.push(Vertex {
                 slot,
-                buffer: buffer(bound("IASetVertexBuffers", slot))?,
+                buffer: buffer(bound("IASetVertexBuffers", slot))
+                    .map_err(|e| format!("{e}; vertex buffer slot {slot}"))?,
                 stride,
                 offset,
             });

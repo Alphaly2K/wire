@@ -520,6 +520,7 @@ pub struct Shader {
     pub bindings: Vec<Binding>,
     pub stage: u32,
     pub push_bytes: u32,
+    pub(crate) input_locations: std::collections::BTreeSet<u32>,
     geometry: Option<GeometryInfo>,
 }
 impl Shader {
@@ -748,6 +749,7 @@ impl NativeGraphics {
             bindings: Vec::new(),
             stage,
             push_bytes: 0,
+            input_locations: Default::default(),
             geometry: None,
         };
         let mut view: View = unsafe { std::mem::zeroed() };
@@ -761,6 +763,7 @@ impl NativeGraphics {
             return Err("invalid native shader metadata".into());
         }
         shader.words = unsafe { std::slice::from_raw_parts(view.words, view.word_count) }.to_vec();
+        shader.input_locations = draw::input_locations(&shader.words)?;
         if view.binding_count != 0 {
             shader.bindings =
                 unsafe { std::slice::from_raw_parts(view.bindings, view.binding_count) }.to_vec();

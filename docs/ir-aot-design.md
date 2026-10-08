@@ -109,7 +109,8 @@ INC/DEC/NEG/NOT、JMP/Jcc/CMOV/SETcc、PUSH/POP/CALL/RET。有效地址与运算
 FLAGS **全部 eager**，没有扩大死标志删除范围，也没有做跨指令融合或删除 guest 边界。
 
 每个 Memory 拥有16,384个 direct-mapped translation slot，完整 PC 与 epoch 必须匹配。
-IR 和 cold iced 记录分开读取；总缓存还包含原始 PC、epoch 和 fallback，不能把24B当成全部空间成本。
+PC/epoch/IR 组成密集的热数组，iced 记录放在同样有界的独立冷数组；
+scalar hit 不加载 cold iced 记录。总缓存还包含原始 PC、epoch 和 fallback，不能把24B当成全部空间成本。
 写入可执行页，或涉及旧/新EXECUTE页的映射、解映射、commit/decommit、保护及file-view更新，
 仍使全局 epoch 失效。仅非执行数据页的变化保留IR；所有映射/保护变化都清除EXECUTE证明。
 cache hit仍验证原 guest 指令的EXECUTE/guard权限；
@@ -122,6 +123,13 @@ cache hit仍验证原 guest 指令的EXECUTE/guard权限；
 所有 opcode 最多一次store，且store是
 最后一个可失败的副作用。失败回滚标量状态，checked跨页write先验证全范围，避免留下半次写入。
 POP 的内存目标在 RSP 更新后求地址；false CMOV仍读取源。retired/work均按原始guest边界提交。
+2026-10-09 的执行循环内联 cached IR 查找、标量分发、operand 读写与完整 FLAGS 计算，
+miss 仍进入原 checked decode/fallback。CF 使用等价的本宽度比较，ADC 的全周期进位
+与 SBB 的相等借位均保留；没有删除任何标志计算。
+Process64 将普通 guest 指令放入紧凑循环，在预算、窗口轮询或 10,000-work 线程 quantum
+中最早的边界返回外层。每步仍检查精确 gateway 地址和 RETURN/CALLBACK_RETURN；
+暂停状态在 run 入口和每次 API 后检查。这个假设依赖当前单 host CPU 合作调度，
+不适用于未来异步修改线程元数据的执行器。fault、自修改和每指令退休边界保持不变。
 checked数据页使用owned槽位及64项地址缓存，只缓存完整页地址与整数槽位，不缓存权限或裸宿主指针。
 每次读写仍检查当前Page的权限与一次性guard；槽位回收前清除对应地址项，Vec扩容不会改变整数索引。
 单页整数读写采用固定宽度拷贝，跨页继续先检查全范围；VirtualQuery另保留有序页地址索引。
@@ -133,6 +141,7 @@ Win64 gateway 分发。**AMD64 尚无 CALL_NATIVE lowering**，不能把普通 C
 原生直达优化；未来接入须保持 IAT hook、Win64 shadow space、callback、线程与异常状态规则。
 独立性能对照与当前实际覆盖率见 [AMD64 性能记录](performance-amd64-ir-2026-10-08.md)。
 Unity logo阶段的后续启动对照及页缓存验证见 [完整启动性能记录](performance-unity-logo-2026-10-08.md)。
+资源加载阶段的内联与循环优化见 [后续性能记录](performance-unity-resource-2026-10-09.md)。
 
 ## vreg file：64 × 8B = 512B
 

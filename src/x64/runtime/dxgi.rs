@@ -785,6 +785,348 @@ mod tests {
         m.read_int(DATA + 32, 8).unwrap()
     }
     #[test]
+    fn blend_state_validates_only_active_target_and_enabled_factors() {
+        let (mut r, mut m) = setup();
+        let device = r.dxgi_object(&mut m, Kind::Device, 0).unwrap();
+        let mut desc = [0u32; 66];
+        // Valid alpha blending in RT0; unused RT1..7 have zero enum fields.
+        desc[2..10].copy_from_slice(&[1, 5, 6, 1, 2, 1, 1, 15]);
+        for (independent, enabled, expected) in [(0, 1, 0), (0, 0, 0), (1, 1, INVALID_ARG)] {
+            desc[1] = independent;
+            desc[2] = enabled;
+            if enabled != 0 {
+                desc[3..9].copy_from_slice(&[5, 6, 1, 2, 1, 1]);
+            }
+            if independent != 0 {
+                desc[10] = 1;
+            } // active RT1 has invalid factors
+            if enabled == 0 {
+                desc[3..9].fill(0);
+            }
+            m.write(
+                DATA + 256,
+                &desc
+                    .iter()
+                    .flat_map(|v| v.to_le_bytes())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            m.write_int(DATA + 32, 8, 0xaaaaaaaa).unwrap();
+            assert_eq!(
+                call(
+                    &mut r,
+                    &mut m,
+                    "D3D.Device.CreateBlendState",
+                    &[device, DATA + 256, DATA + 32]
+                )
+                .unwrap(),
+                expected
+            );
+            let state = m.read_int(DATA + 32, 8).unwrap();
+            if expected == 0 {
+                call(&mut r, &mut m, "D3D.State.GetDesc", &[state, DATA + 1024]).unwrap();
+                let mut got = [0; 264];
+                m.read(DATA + 1024, &mut got).unwrap();
+                assert_eq!(
+                    got.as_slice(),
+                    &desc
+                        .iter()
+                        .flat_map(|v| v.to_le_bytes())
+                        .collect::<Vec<_>>()
+                );
+                call(&mut r, &mut m, "D3D.Child.Release", &[state]).unwrap();
+            } else {
+                assert_eq!(state, 0);
+            }
+        }
+        // Ignoring unused fields must not hide an invalid enabled RT0.
+        desc[1] = 0;
+        desc[2] = 1;
+        desc[3] = 0;
+        m.write(
+            DATA + 256,
+            &desc
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert_eq!(
+            call(
+                &mut r,
+                &mut m,
+                "D3D.Device.CreateBlendState",
+                &[device, DATA + 256, DATA + 32]
+            )
+            .unwrap(),
+            INVALID_ARG
+        );
+        assert_eq!(m.read_int(DATA + 32, 8).unwrap(), 0);
+        call(&mut r, &mut m, "D3D.Device.Release", &[device]).unwrap();
+        assert!(r.graphics.objects.is_empty());
+    }
+    #[test]
+    #[ignore = "requires native Vulkan backend and original WIRE_GS_FIXTURES shaders"]
+    fn native_procedural_draw_ignores_stale_layout_but_checks_active_inputs() {
+        let (mut r, mut m) = setup();
+        r.graphics.fixture = None;
+        r.attach_graphics(
+            NativeGraphics::load(
+                std::path::Path::new(&std::env::var("WIRE_NATIVE_GRAPHICS").unwrap()),
+                std::path::Path::new(&std::env::var("WIRE_MOLTENVK").unwrap()),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let fixtures = std::path::PathBuf::from(std::env::var_os("WIRE_GS_FIXTURES").unwrap());
+        let f = factory(&mut r, &mut m);
+        call(&mut r, &mut m, "Factory.EnumAdapters", &[f, 0, DATA + 32]).unwrap();
+        let adapter = m.read_int(DATA + 32, 8).unwrap();
+        call(
+            &mut r,
+            &mut m,
+            "D3D11CreateDevice",
+            &[adapter, 0, 0, 0, 0, 0, 7, DATA + 40, 0, DATA + 48],
+        )
+        .unwrap();
+        let device = m.read_int(DATA + 40, 8).unwrap();
+        let context = m.read_int(DATA + 48, 8).unwrap();
+        let mut shaders = Vec::new();
+        for (name, method) in [
+            ("procedural.vs.dxbc", "D3D.Device.CreateVertexShader"),
+            ("offset.vs.dxbc", "D3D.Device.CreateVertexShader"),
+            ("color.ps.dxbc", "D3D.Device.CreatePixelShader"),
+        ] {
+            let bytes = std::fs::read(fixtures.join(name)).unwrap();
+            m.write(DATA + 1024, &bytes).unwrap();
+            call(
+                &mut r,
+                &mut m,
+                method,
+                &[device, DATA + 1024, bytes.len() as u64, 0, DATA + 56],
+            )
+            .unwrap();
+            shaders.push(m.read_int(DATA + 56, 8).unwrap());
+        }
+        let Some(d3d11::Resource::Shader(procedural)) = r.graphics.resources.get(&shaders[0])
+        else {
+            panic!("VS")
+        };
+        assert!(procedural.input_locations.is_empty());
+        let Some(d3d11::Resource::Shader(regular)) = r.graphics.resources.get(&shaders[1]) else {
+            panic!("VS")
+        };
+        assert_eq!(regular.input_locations, [0].into_iter().collect());
+        let texture_desc = [16u32, 16, 1, 1, 28, 1, 0, 0, 0x20, 0, 0];
+        m.write(
+            DATA + 1024,
+            &texture_desc
+                .iter()
+                .flat_map(|x| x.to_le_bytes())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        call(
+            &mut r,
+            &mut m,
+            "D3D.Device.CreateTexture2D",
+            &[device, DATA + 1024, 0, DATA + 64],
+        )
+        .unwrap();
+        let texture = m.read_int(DATA + 64, 8).unwrap();
+        call(
+            &mut r,
+            &mut m,
+            "D3D.Device.CreateRenderTargetView",
+            &[device, texture, 0, DATA + 72],
+        )
+        .unwrap();
+        let target = m.read_int(DATA + 72, 8).unwrap();
+        m.write_int(DATA + 80, 8, target).unwrap();
+        call(
+            &mut r,
+            &mut m,
+            "D3D.Context.OMSetRenderTargets",
+            &[context, 1, DATA + 80, 0],
+        )
+        .unwrap();
+        // A retained POSITION layout and a mapped VB are harmless when the VS
+        // only uses VertexId; switching to a VS using POSITION must fail.
+        let layout = r.dxgi_object(&mut m, Kind::Layout, device).unwrap();
+        r.graphics.resources.insert(
+            layout,
+            d3d11::Resource::State(
+                [0u32, 2, 0, 0, 0, 0]
+                    .into_iter()
+                    .flat_map(u32::to_le_bytes)
+                    .collect(),
+            ),
+        );
+        call(
+            &mut r,
+            &mut m,
+            "D3D.Context.IASetInputLayout",
+            &[context, layout],
+        )
+        .unwrap();
+        let desc = [48u32, 2, 1, 0x10000, 0, 0];
+        m.write(
+            DATA + 1024,
+            &desc
+                .iter()
+                .flat_map(|x| x.to_le_bytes())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        call(
+            &mut r,
+            &mut m,
+            "D3D.Device.CreateBuffer",
+            &[device, DATA + 1024, 0, DATA + 88],
+        )
+        .unwrap();
+        let vb = m.read_int(DATA + 88, 8).unwrap();
+        call(
+            &mut r,
+            &mut m,
+            "D3D.Context.Map",
+            &[context, vb, 0, 4, 0, DATA + 128],
+        )
+        .unwrap();
+        m.write_int(DATA + 96, 8, vb).unwrap();
+        m.write_int(DATA + 104, 4, 16).unwrap();
+        m.write_int(DATA + 108, 4, 0).unwrap();
+        call(
+            &mut r,
+            &mut m,
+            "D3D.Context.IASetVertexBuffers",
+            &[context, 0, 1, DATA + 96, DATA + 104, DATA + 108],
+        )
+        .unwrap();
+        let vc = r
+            .graphics
+            .backend
+            .as_ref()
+            .unwrap()
+            .create_buffer(&[0; 16], 1)
+            .unwrap();
+        let cb = r.dxgi_object(&mut m, Kind::Buffer, device).unwrap();
+        r.graphics.resources.insert(
+            cb,
+            d3d11::Resource::Buffer {
+                desc: vec![],
+                native: vc,
+                mapped: None,
+            },
+        );
+        m.write_int(DATA + 112, 8, cb).unwrap();
+        call(
+            &mut r,
+            &mut m,
+            "D3D.Context.VSSetConstantBuffers",
+            &[context, 0, 1, DATA + 112],
+        )
+        .unwrap();
+        for (name, shader) in [("VS", shaders[0]), ("PS", shaders[2])] {
+            call(
+                &mut r,
+                &mut m,
+                &format!("D3D.Context.{name}SetShader"),
+                &[context, shader, 0, 0],
+            )
+            .unwrap();
+        }
+        call(
+            &mut r,
+            &mut m,
+            "D3D.Context.IASetPrimitiveTopology",
+            &[context, 4],
+        )
+        .unwrap();
+        m.write(
+            DATA + 192,
+            &[0f32, 0., 16., 16., 0., 1.]
+                .into_iter()
+                .flat_map(f32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        call(
+            &mut r,
+            &mut m,
+            "D3D.Context.RSSetViewports",
+            &[context, 1, DATA + 192],
+        )
+        .unwrap();
+        call(&mut r, &mut m, "D3D.Context.Draw", &[context, 3, 0]).unwrap();
+        let Some(d3d11::Resource::Texture { native, .. }) = r.graphics.resources.get(&texture)
+        else {
+            panic!("texture")
+        };
+        let pixels = native.read(0, 16 * 16 * 4).unwrap();
+        assert_eq!(pixels, [64u8, 128, 191, 255].repeat(256));
+        assert_eq!(r.graphics.drawn, 1);
+        call(
+            &mut r,
+            &mut m,
+            "D3D.Context.VSSetShader",
+            &[context, shaders[1], 0, 0],
+        )
+        .unwrap();
+        assert!(call(&mut r, &mut m, "D3D.Context.Draw", &[context, 3, 0])
+            .unwrap_err()
+            .contains("vertex buffer slot 0"));
+        assert_eq!(r.graphics.drawn, 1);
+        let Some(d3d11::Resource::Texture { native, .. }) = r.graphics.resources.get(&texture)
+        else {
+            panic!("texture")
+        };
+        assert_eq!(native.read(0, 16 * 16 * 4).unwrap(), pixels);
+        call(
+            &mut r,
+            &mut m,
+            "D3D.Context.VSSetShader",
+            &[context, shaders[0], 0, 0],
+        )
+        .unwrap();
+        call(
+            &mut r,
+            &mut m,
+            "D3D.Context.IASetVertexBuffers",
+            &[context, 0, 1, 0, DATA + 104, DATA + 108],
+        )
+        .unwrap();
+        call(&mut r, &mut m, "D3D.Context.Draw", &[context, 3, 0]).unwrap();
+        assert_eq!(r.graphics.drawn, 2);
+        call(
+            &mut r,
+            &mut m,
+            "D3D.Context.VSSetShader",
+            &[context, shaders[1], 0, 0],
+        )
+        .unwrap();
+        assert!(call(&mut r, &mut m, "D3D.Context.Draw", &[context, 3, 0])
+            .unwrap_err()
+            .contains("vertex buffer slot 0"));
+        assert_eq!(r.graphics.drawn, 2);
+        let Some(d3d11::Resource::Texture { native, .. }) = r.graphics.resources.get(&texture)
+        else {
+            panic!("texture")
+        };
+        assert_eq!(native.read(0, 16 * 16 * 4).unwrap(), pixels);
+        call(&mut r, &mut m, "D3D.Context.Unmap", &[context, vb, 0]).unwrap();
+        call(&mut r, &mut m, "D3D.Context.ClearState", &[context]).unwrap();
+        for p in shaders.into_iter().chain([layout, cb, vb, target, texture]) {
+            call(&mut r, &mut m, "D3D.Child.Release", &[p]).unwrap();
+        }
+        call(&mut r, &mut m, "D3D.Context.Release", &[context]).unwrap();
+        call(&mut r, &mut m, "D3D.Device.Release", &[device]).unwrap();
+        call(&mut r, &mut m, "Object.Release", &[adapter]).unwrap();
+        call(&mut r, &mut m, "Object.Release", &[f]).unwrap();
+        assert!(r.graphics.objects.is_empty());
+        assert!(r.graphics.resources.is_empty());
+    }
+    #[test]
     #[ignore = "requires explicitly provided native Vulkan backend"]
     fn native_swapchain_backbuffer_fault_resize_lifetime_and_deferred_present() {
         let (mut r, mut m) = setup();
@@ -1084,6 +1426,101 @@ mod tests {
             .unwrap();
             let color_view = m.read_int(DATA + 80, 8).unwrap();
             assert_eq!(r.graphics.objects[&color].refs, refs + 1);
+            // Even a one-layer resource may have an array SRV. Materialize
+            // all-remaining ranges in GetDesc without modifying guest input.
+            let array_desc = [view_format, 5, 0, u32::MAX, 0, u32::MAX];
+            m.write(
+                DATA + 1152,
+                &array_desc
+                    .iter()
+                    .flat_map(|x| x.to_le_bytes())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            assert_eq!(
+                call(
+                    &mut r,
+                    &mut m,
+                    "D3D.Device.CreateShaderResourceView",
+                    &[device, color, DATA + 1152, DATA + 1200]
+                )
+                .unwrap(),
+                0
+            );
+            let array_view = m.read_int(DATA + 1200, 8).unwrap();
+            call(
+                &mut r,
+                &mut m,
+                "D3D.View.GetDesc",
+                &[array_view, DATA + 1216],
+            )
+            .unwrap();
+            for (offset, value) in [(4, 5), (12, 1), (20, 1)] {
+                assert_eq!(m.read_int(DATA + 1216 + offset, 4).unwrap(), value);
+            }
+            assert_eq!(m.read_int(DATA + 1152 + 12, 4).unwrap(), u32::MAX as u64);
+            assert_eq!(m.read_int(DATA + 1152 + 20, 4).unwrap(), u32::MAX as u64);
+            let Some(d3d11::Resource::View {
+                native: d3d11::NativeView::Image(native),
+                ..
+            }) = r.graphics.resources.get(&array_view)
+            else {
+                panic!("array SRV expected")
+            };
+            assert_eq!((native.desc().kind, native.desc().layers), (6, 1));
+            call(&mut r, &mut m, "D3D.Child.Release", &[array_view]).unwrap();
+            let objects = r.graphics.objects.len();
+            assert_eq!(
+                call(
+                    &mut r,
+                    &mut m,
+                    "D3D.Device.CreateShaderResourceView",
+                    &[device, color, DATA + 1152, 0]
+                )
+                .unwrap(),
+                1
+            );
+            assert_eq!(r.graphics.objects.len(), objects);
+            assert_eq!(r.graphics.objects[&color].refs, refs + 1);
+            // Invalid ranges fail with HRESULT, a cleared output and no refs;
+            // a checked output fault preserves its prior contents and objects.
+            assert!(call(
+                &mut r,
+                &mut m,
+                "D3D.Device.CreateShaderResourceView",
+                &[device, color, DATA + 1152, DATA + 2 * PAGE - 4]
+            )
+            .is_err());
+            for desc in [
+                [view_format, 5, 1, u32::MAX, 0, u32::MAX],
+                [view_format, 5, 0, u32::MAX, 1, u32::MAX],
+                [view_format, 5, 0, u32::MAX, 0, 0],
+                [view_format, 5, 0, u32::MAX, 0, 2],
+                [view_format, 5, 0, u32::MAX, u32::MAX, u32::MAX],
+            ] {
+                m.write(
+                    DATA + 1152,
+                    &desc
+                        .iter()
+                        .flat_map(|x| x.to_le_bytes())
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap();
+                m.write_int(DATA + 1200, 8, u64::MAX).unwrap();
+                assert_eq!(
+                    call(
+                        &mut r,
+                        &mut m,
+                        "D3D.Device.CreateShaderResourceView",
+                        &[device, color, DATA + 1152, DATA + 1200]
+                    )
+                    .unwrap(),
+                    INVALID_ARG
+                );
+                assert_eq!(m.read_int(DATA + 1200, 8).unwrap(), 0);
+                assert_eq!(r.graphics.objects.len(), objects);
+                assert_eq!(r.graphics.objects[&color].refs, refs + 1);
+            }
             if format == 39 {
                 m.write(
                     DATA + 1088,
@@ -1155,6 +1592,94 @@ mod tests {
             assert_eq!(r.graphics.objects[&color].refs, refs + 1);
             call(&mut r, &mut m, "D3D.Child.Release", &[color_view]).unwrap();
             call(&mut r, &mut m, "D3D.Child.Release", &[color]).unwrap();
+        }
+        // Nonzero first mip/slice, including cube units and RTV/DSV layouts,
+        // must become finite ranges at both the COM and native boundaries.
+        for (method, td, input, expected, native_range) in [
+            (
+                "D3D.Device.CreateShaderResourceView",
+                [8u32, 8, 4, 4, 28, 1, 0, 0, 8, 0, 0],
+                [28u32, 5, 1, u32::MAX, 2, u32::MAX],
+                [28u32, 5, 1, 3, 2, 2],
+                (6, 1, 3, 2, 2),
+            ),
+            (
+                "D3D.Device.CreateRenderTargetView",
+                [8, 8, 4, 4, 28, 1, 0, 0, 0x20, 0, 0],
+                [28, 5, 1, 2, u32::MAX, 0],
+                [28, 5, 1, 2, 2, 0],
+                (1, 1, 1, 2, 2),
+            ),
+            (
+                "D3D.Device.CreateDepthStencilView",
+                [8, 8, 4, 4, 39, 1, 0, 0, 0x40, 0, 0],
+                [40, 4, 0, 1, 2, u32::MAX],
+                [40, 4, 0, 1, 2, 2],
+                (2, 1, 1, 2, 2),
+            ),
+            (
+                "D3D.Device.CreateShaderResourceView",
+                [8, 8, 4, 18, 28, 1, 0, 0, 8, 0, 4],
+                [28, 10, 1, u32::MAX, 6, u32::MAX],
+                [28, 10, 1, 3, 6, 2],
+                (4, 1, 3, 6, 12),
+            ),
+        ] {
+            m.write(
+                DATA + 1024,
+                &td.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<_>>(),
+            )
+            .unwrap();
+            assert_eq!(
+                call(
+                    &mut r,
+                    &mut m,
+                    "D3D.Device.CreateTexture2D",
+                    &[device, DATA + 1024, 0, DATA + 72]
+                )
+                .unwrap(),
+                0
+            );
+            let texture = m.read_int(DATA + 72, 8).unwrap();
+            let input: Vec<_> = input.iter().flat_map(|x| x.to_le_bytes()).collect();
+            m.write(DATA + 1088, &input).unwrap();
+            assert_eq!(
+                call(
+                    &mut r,
+                    &mut m,
+                    method,
+                    &[device, texture, DATA + 1088, DATA + 80]
+                )
+                .unwrap(),
+                0
+            );
+            let view = m.read_int(DATA + 80, 8).unwrap();
+            call(&mut r, &mut m, "D3D.View.GetDesc", &[view, DATA + 1152]).unwrap();
+            let size = if method.ends_with("RenderTargetView") {
+                20
+            } else {
+                24
+            };
+            let mut actual = vec![0; size];
+            m.read(DATA + 1152, &mut actual).unwrap();
+            let expected: Vec<_> = expected.iter().flat_map(|x| x.to_le_bytes()).collect();
+            assert_eq!(actual, expected[..size]);
+            let mut untouched = vec![0; 24];
+            m.read(DATA + 1088, &mut untouched).unwrap();
+            assert_eq!(untouched, input);
+            let Some(d3d11::Resource::View {
+                native: d3d11::NativeView::Image(native),
+                ..
+            }) = r.graphics.resources.get(&view)
+            else {
+                panic!("native image view expected")
+            };
+            let d = native.desc();
+            assert_eq!((d.kind, d.mip, d.mips, d.layer, d.layers), native_range);
+            assert_eq!(r.graphics.objects[&texture].refs, 2);
+            call(&mut r, &mut m, "D3D.Child.Release", &[view]).unwrap();
+            assert_eq!(r.graphics.objects[&texture].refs, 1);
+            call(&mut r, &mut m, "D3D.Child.Release", &[texture]).unwrap();
         }
         // Exercise the mixed integer/FLOAT Win64 clear ABI against real GPU data.
         // XMM3 holds depth while R9 deliberately contains unrelated integer bits.

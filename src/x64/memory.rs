@@ -14,9 +14,13 @@ const DECODE_SLOTS: usize = 16384;
 struct TranslationSlot {
     epoch: Cell<u64>,
     pc: Cell<u64>,
-    // Separate cells keep the cold iced record off scalar IR cache hits.
     ir: Cell<Option<super::cpu::ir::ScalarIr>>,
-    instruction: Cell<iced_x86::Instruction>,
+}
+struct TranslationCache {
+    // Scalar hits only touch densely packed PC/epoch/IR records. The larger
+    // iced records are retained in a separate, equally bounded cold array.
+    slots: Box<[TranslationSlot]>,
+    instructions: Box<[Cell<iced_x86::Instruction>]>,
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ExecutionStats {
@@ -46,7 +50,7 @@ pub struct Memory {
     page_addresses: BTreeSet<u64>,
     allocations: BTreeMap<u64, Allocation>,
     decode_epoch: u64,
-    decoded: OnceCell<Box<[TranslationSlot]>>,
+    decoded: OnceCell<TranslationCache>,
     checked_execute_page: Cell<Option<u64>>,
     execution_stats: Option<Cell<ExecutionStats>>,
 }
@@ -94,7 +98,7 @@ impl Memory {
         ((address ^ (address >> 16) ^ (address >> 32)) as usize) & (DECODE_SLOTS - 1)
     }
     fn translation(&self, address: u64) -> Option<&TranslationSlot> {
-        let entry = &self.decoded.get()?[Self::decode_slot(address)];
+        let entry = &self.decoded.get()?.slots[Self::decode_slot(address)];
         (entry.epoch.get() == self.decode_epoch && entry.pc.get() == address).then_some(entry)
     }
     fn check_cached_execute(&self, address: u64, len: usize) -> Result<(), String> {
@@ -113,6 +117,7 @@ impl Memory {
         }
         Ok(())
     }
+    #[inline(always)]
     pub(crate) fn cached_ir(
         &self,
         address: u64,
@@ -127,29 +132,34 @@ impl Memory {
         &self,
         address: u64,
     ) -> Result<Option<iced_x86::Instruction>, String> {
-        let Some(entry) = self.translation(address) else {
+        let Some(_) = self.translation(address) else {
             return Ok(None);
         };
-        let instruction = entry.instruction.get();
+        let instruction =
+            self.decoded.get().unwrap().instructions[Self::decode_slot(address)].get();
         self.check_cached_execute(address, instruction.len())?;
         Ok(Some(instruction))
     }
     pub(crate) fn cache_instruction(&self, instruction: iced_x86::Instruction) {
-        let cache = self.decoded.get_or_init(|| {
-            (0..DECODE_SLOTS)
+        let cache = self.decoded.get_or_init(|| TranslationCache {
+            slots: (0..DECODE_SLOTS)
                 .map(|_| TranslationSlot {
                     epoch: Cell::new(0),
                     pc: Cell::new(u64::MAX),
                     ir: Cell::new(None),
-                    instruction: Cell::new(iced_x86::Instruction::default()),
                 })
                 .collect::<Vec<_>>()
-                .into_boxed_slice()
+                .into_boxed_slice(),
+            instructions: (0..DECODE_SLOTS)
+                .map(|_| Cell::new(iced_x86::Instruction::default()))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
         });
-        let entry = &cache[Self::decode_slot(instruction.ip())];
+        let slot = Self::decode_slot(instruction.ip());
+        let entry = &cache.slots[slot];
         entry.pc.set(instruction.ip());
         entry.epoch.set(self.decode_epoch);
-        entry.instruction.set(instruction);
+        cache.instructions[slot].set(instruction);
         entry.ir.set(super::cpu::ir::ScalarIr::lower(&instruction));
         if let Some(stats) = &self.execution_stats {
             let mut value = stats.get();
