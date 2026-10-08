@@ -19,8 +19,8 @@ Unity内嵌VS/PS执行64×64离屏Draw，4096个RGBA8像素读回逐通道比较
 
 ## 当前真实结果
 
-AliceToPapa隔离副本最新推进到 **1,808,121,280 条退休指令、1,812,138,376 work、3,854,319 次已完成/接受API**
-（`linked-pass-123.txt`，全程汇总`api-pass-123.tsv`）。从13条EXE入口开始已实际执行UnityPlayer的TLS/DllMain、EXE入口，
+AliceToPapa隔离副本最新推进到 **1,803,222,221 条退休指令、1,807,236,071 work、3,851,692 次已完成/接受API**
+（`linked-pass-125.txt`，全程汇总`api-pass-125.tsv`）。从13条EXE入口开始已实际执行UnityPlayer的TLS/DllMain、EXE入口，
 动态加载Mono的TLS/DllMain及合作worker；异常链仍执行真实guest handler与同帧RtlUnwindEx。
 此前curl/SSPI、显示器、HKCU、资源图标、类注册、WNDPROC、DC与目录枚举均已越过。
 本轮`CreateDXGIFactory2`、真实Apple M4 adapter枚举/Desc/引用、D3D12明确失败后的
@@ -32,8 +32,12 @@ pass115查明每个小HeapAlloc占一整页，导致512MiB提交额度耗尽，�
 小堆块已改为64KiB slab，pass116未再遇提交额度耗尽；在1.3B work时提交249MiB。
 Mono程序集加载和domain重置实际完成，PhysX后端完成选择；pass116的x87 FLD边界已补齐，
 pass117继续到 `ole32.dll!CoCreateGuid`；随后已接入GUID、HSTRING/WinRT、mouse pointer和raw input查询/真实失败回退。
-pass123当前停在线程26的 **`hid.dll!HidD_GetHidGuid`**，仍未到正式窗口。
+pass123停在线程26的`hid.dll!HidD_GetHidGuid`；最新pass125已越过该设备发现组，仍未到正式窗口。
 Windows.Gaming.Input.Gamepad缺少注册类时返回REGDB_E_CLASSNOTREG，Unity实际继续自己的回退，未伪造设备。
+按批量清单成组接入HID/SetupAPI后，pass124已实际完成GetHidGuid、GetClassDevsA、
+EnumDeviceInterfaces的空枚举和DestroyDeviceInfoList，继续到RegisterDeviceNotificationW。
+通知注册/注销及窗口销毁清理也已接入，pass125实际完成注册及后续输入初始化，
+目前停在 **`wire.dxgi!Adapter.EnumOutputs`** 未实现边界。
 没有忽略INT3、认证失败或guest对窗口的隐藏状态。
 
 游戏实际写出的 `Player.log` 包含：
@@ -60,13 +64,14 @@ Input System module state changed to: Initialized.
 真实计时器使线程轮询和指令/API量不同，时间差不能当作同指令序列的纯IR提速。
 这两份Player.log已分别保存到 `wire-out/perf-amd64-2026-10-08/alice-full/`；
 这是到CoCreateGuid的历史性能对照；之后恢复运行时推进，不能把新增实际路径和诊断统计的耗时与该对照直接比较。
-最新仍无正式窗口。本轮完整release298项通过、5项ignored；随后新增2项API汇总回归定向通过。
+最新仍无正式窗口。本轮完整release303项通过、5项ignored。
 既有 PE32 / Metal 路径不受这条诊断路线替换。
 
 本次另外开发批量API扫描，198个PE约18秒，包含普通/延迟导入、CLR P/Invoke、forwarder和运行轨迹，
 已生成四个游戏按DLL分组的清单。`probe64 --api-trace PATH`默认关闭，开启时记录全程调用/查询/分派故障，
 避免最近调用环形缓冲区丢失动态导入证据。结果、复跑及证据边界见
-[API清单记录](api-inventory-2026-10-08.md)。下一批按清单成组处理HID/SetupAPI，不再只补一个调用后重放。
+[API清单记录](api-inventory-2026-10-08.md)。HID/SetupAPI和通知组已通过实际路径，
+下一批按真实COM轨迹处理DXGI output/交换链接口，不再只补一个调用后重放。
 
 | 重放 | 退休指令 | 已完成 API | 最后边界 |
 | --- | ---: | ---: | --- |
@@ -115,6 +120,8 @@ Input System module state changed to: Initialized.
 | pass-121 | 1,798,936,012 | 3,843,963 | HSTRING/WinRT回退通过；`RegisterRawInputDevices` |
 | pass-122 | 1,798,402,000 | 3,843,661 | raw input真实失败回退；`HidD_GetHidGuid` |
 | pass-123 | 1,808,121,280 | 3,854,319 | 消息队列/全程API汇总接入；同一HID边界 |
+| pass-124 | 1,800,454,041 | 3,846,116 | HID/SetupAPI通过；`RegisterDeviceNotificationW` |
+| pass-125 | 1,803,222,221 | 3,851,692 | 设备通知/输入初始化通过；DXGI `Adapter.EnumOutputs` |
 
 指令与 API 计数受真实时间/线程调度影响，上表不构成相同路径的性能 AB 对照。
 
@@ -173,6 +180,11 @@ Win64 MSG、消息等待和宿主输入→guest消息分发已实现并通过独
 
 ## 已实现的运行时范围
 
+- HID class GUID使用Windows字段布局；隔离PnP设备数据库为空，SetupAPI HDEVINFO有owned高地址生命周期，
+  32字节Win64 device/interface记录、ERROR_NO_MORE_ITEMS、无效set/record及checked故障保持真实语义。
+  HidD未知设备句柄失败并保留输出；无owned preparsed data的HidP返回INVALID_PREPARSED_DATA，
+  MaxDataListLength为0且不修改LastError。没有物理HID/gamepad或report解析器，DEFAULT/PROFILE仍不支持。
+  设备通知A/W登记owned window/interface订阅、注销及窗口销毁清理，不虚构设备arrival；service/handle通知拒绝。
 - GUID创建使用宿主OS熵与Windows字段布局；字符串解析/格式化、task heap所有权及动态导出成组接入。
   profile没有HKCR ProgID/activation-context注册，未解析名字真实返回CO_E_CLASSSTRING。
 - HSTRING reference使用guest 24字节header和完整64位指针；owned copy只读、引用计数与释放，
@@ -373,10 +385,11 @@ cd wire-out/games64/alice/runtime
   --moltenvk /private/tmp/wire-moltenvk-1.4.2/MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib
 ```
 
-下一步按API清单从实际HID边界成组补设备发现，再接交换链/guest Draw和Present；
+下一步按COM轨迹从实际DXGI output边界成组补图形接口，再接交换链/guest Draw和Present；
 不以 LoadLibrary 成功、错误退出0或空窗口当作游戏跑通。
-最新完整release回归通过298项：20 unit、37 differential、9 FPU、26 IR、1 Wasm、109 Win32、96 AMD64，5项ignored。
-之后新增2项API汇总回归定向通过；Python扫描器5项原创fixture回归通过。最终Clippy all-targets、format、diff whitespace检查通过。
+最新完整release回归通过303项：21 unit、37 differential、9 FPU、26 IR、1 Wasm、109 Win32、100 AMD64，5项ignored。
+Python扫描器5项原创fixture回归通过。API汇总、设备发现/通知的故障原子性、生命周期与DLL发现均有独立覆盖。
+最终Clippy all-targets、format、diff whitespace检查通过。
 此前图形检查点新增4项覆盖COM身份/引用/parent、Win64 Desc布局/高指针、readonly保护、故障原子性、
 private data短buffer、D3D12 named/ordinal/动态查找与真实失败。GS新增两个unit测试检查strip/绕序与坏记录。
 原生GPU ignored测试另行通过2项，包含Rust shader/buffer/context/library生命周期、

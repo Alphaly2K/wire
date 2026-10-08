@@ -271,6 +271,69 @@ mod tests {
         (runtime, mem)
     }
     #[test]
+    fn device_notifications_own_high_handles_validate_filters_and_cleanup_window() {
+        let (mut r, mut m) = fixture();
+        let filter = STACK + 128;
+        m.write_int(filter, 4, 32).unwrap();
+        m.write_int(filter + 4, 4, 5).unwrap();
+        m.write(filter + 12, &crate::x64::runtime::devices::HID_GUID)
+            .unwrap();
+        let token = r
+            .device_call(&mut m, "RegisterDeviceNotificationW", &[HWND, filter, 0])
+            .unwrap();
+        assert!(token > u32::MAX as u64 && token != HWND);
+        assert_eq!(
+            r.device_call(&mut m, "RegisterDeviceNotificationA", &[0, filter, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            r.device_call(&mut m, "RegisterDeviceNotificationW", &[HWND, filter, 2])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            r.device_call(&mut m, "RegisterDeviceNotificationW", &[HWND, filter, 1])
+                .unwrap(),
+            0
+        );
+        let fault = STACK + 8180;
+        m.write_int(fault, 4, 32).unwrap();
+        m.write_int(fault + 4, 4, 5).unwrap();
+        assert!(r
+            .device_call(&mut m, "RegisterDeviceNotificationW", &[HWND, fault, 0])
+            .is_err());
+        let other = r
+            .device_call(&mut m, "RegisterDeviceNotificationA", &[HWND, 0, 4])
+            .unwrap();
+        assert_eq!(other, token + 16); // Failed registrations did not acquire ownership.
+        assert_eq!(
+            r.device_call(&mut m, "UnregisterDeviceNotification", &[token])
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            r.device_call(&mut m, "UnregisterDeviceNotification", &[token])
+                .unwrap(),
+            0
+        );
+        r.remove_device_notifications(HWND);
+        assert_eq!(
+            r.device_call(&mut m, "UnregisterDeviceNotification", &[other])
+                .unwrap(),
+            0
+        );
+        assert!(r.user.events.is_empty());
+        assert!(crate::x64::runtime::import_supported(
+            "user32.dll",
+            "RegisterDeviceNotificationW"
+        ));
+        assert!(!crate::x64::runtime::import_supported(
+            "kernel32.dll",
+            "RegisterDeviceNotificationW"
+        ));
+    }
+    #[test]
     fn msg_layout_filters_and_faults_preserve_full_width_posted_data() {
         let (mut r, mut m) = fixture();
         let out = STACK + 128;

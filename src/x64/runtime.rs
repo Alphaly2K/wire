@@ -11,6 +11,7 @@ use std::{
 mod address;
 mod apc;
 mod command;
+mod devices;
 mod display;
 mod dxgi;
 mod events;
@@ -101,6 +102,7 @@ pub struct Runtime64 {
     local_blocks: std::collections::BTreeSet<u64>,
     task_blocks: std::collections::BTreeSet<u64>,
     hstrings: winrt::Strings,
+    devices: devices::Devices,
     rng_handles: std::collections::BTreeSet<u64>,
     exe_path: String,
     pub gateways: BTreeMap<u64, String>,
@@ -202,6 +204,9 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
     if import_arity(name).is_none() {
         return false;
     }
+    if devices::arity(name).is_some() && !devices::export(dll, name) {
+        return false;
+    }
     if guid::arity(name).is_some() && !guid::export(dll, name) {
         return false;
     }
@@ -264,6 +269,7 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
                 "BCryptGenRandom" | "BCryptOpenAlgorithmProvider" | "BCryptCloseAlgorithmProvider"
             ))
         && !guid::export(dll, name)
+        && !devices::export(dll, name)
         && !winrt::export(dll, name)
         && !com_export(dll, name)
     {
@@ -272,7 +278,8 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
     true
 }
 fn kernel_export(name: &str) -> bool {
-    if winrt::arity(name).is_some()
+    if devices::arity(name).is_some()
+        || winrt::arity(name).is_some()
         || guid::arity(name).is_some()
         || user::arity(name).is_some()
         || display::arity(name).is_some()
@@ -319,6 +326,7 @@ fn kernel_export(name: &str) -> bool {
 }
 fn import_arity(name: &str) -> Option<usize> {
     Some(match name {
+        name if devices::arity(name).is_some() => devices::arity(name).unwrap(),
         name if winrt::arity(name).is_some() => winrt::arity(name).unwrap(),
         name if guid::arity(name).is_some() => guid::arity(name).unwrap(),
         name if timers::arity(name).is_some() => timers::arity(name).unwrap(),
@@ -655,6 +663,7 @@ impl Runtime64 {
             local_blocks: std::collections::BTreeSet::new(),
             task_blocks: std::collections::BTreeSet::new(),
             hstrings: Default::default(),
+            devices: Default::default(),
             rng_handles: std::collections::BTreeSet::new(),
             exe_path: command.trim_matches('"').to_owned(),
             gateways: BTreeMap::new(),
@@ -828,6 +837,8 @@ impl Runtime64 {
             name,
             "kernel32.dll"
                 | "kernelbase.dll"
+                | "hid.dll"
+                | "setupapi.dll"
                 | "secur32.dll"
                 | "dxgi.dll"
                 | "d3d12.dll"
@@ -1186,6 +1197,7 @@ impl Runtime64 {
             .ok_or_else(|| format!("unimplemented Win64 import: {dll}!{name}"))?;
         let mut args = cpu.arguments(mem, arity)?;
         let dwords: &[usize] = match name {
+            name if devices::arity(name).is_some() => devices::dwords(name),
             name if winrt::arity(name).is_some() => winrt::dwords(name),
             "StringFromGUID2" => &[2],
             "GetCPInfoExA" | "GetCPInfoExW" => &[0, 1],
@@ -1334,6 +1346,7 @@ impl Runtime64 {
             self.delay_hooks.remove(&cpu.rip);
         }
         let ret = match name {
+            name if devices::arity(name).is_some() => self.device_call(mem, name, &args)?,
             name if user::message_arity(name).is_some() => {
                 match self.message_call(mem, name, &args)? {
                     Some(value) => value,
@@ -4739,6 +4752,7 @@ impl Runtime64 {
                         || (provider == "d3d12.dll" && dxgi::d3d12_export(&function))
                         || (provider == "d3d11.dll" && dxgi::d3d11_export(&function))
                         || guid::export(&provider, &function)
+                        || devices::export(&provider, &function)
                         || winrt::export(&provider, &function)
                         || com_export(&provider, &function)
                         || (provider == "winmm.dll"

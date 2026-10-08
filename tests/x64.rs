@@ -646,15 +646,278 @@ fn win64_api_inventory_retains_gateway_failure_after_process_error() {
     std::fs::write(&exe, fixture()).unwrap();
     let mut process = wire::x64::process::Process64::load(&exe, false).unwrap();
     process.runtime.enable_api_inventory();
-    process.cpu.rip = process.runtime.register("hid.dll", "HidD_GetHidGuid");
+    process.cpu.rip = process.runtime.register("hid.dll", "HidD_UnknownForTest");
     assert!(process
         .run(10)
         .unwrap_err()
         .contains("unimplemented Win64 import"));
     let tsv = process.runtime.api_inventory_tsv().unwrap();
-    assert!(tsv.contains("failed\thid.dll\tHidD_GetHidGuid\t1\n"));
+    assert!(tsv.contains("failed\thid.dll\tHidD_UnknownForTest\t1\n"));
     assert!(!tsv.contains("completed\thid.dll"));
     std::fs::remove_dir_all(dir).unwrap();
+}
+#[test]
+fn win64_device_discovery_has_owned_empty_sets_full_pointer_layouts_and_checked_outputs() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let guid = STACK + 0x100;
+    let data = STACK + 0x200;
+    startup_dll_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "hid.dll",
+        "HidD_GetHidGuid",
+        &[guid],
+    );
+    let mut actual = [0; 16];
+    mem.read(guid, &mut actual).unwrap();
+    assert_eq!(
+        actual,
+        [0xb2, 0x55, 0x1e, 0x4d, 0x6f, 0xf1, 0xcf, 0x11, 0x88, 0xcb, 0, 0x11, 0x11, 0, 0, 0x30]
+    );
+    let set = startup_dll_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "setupapi.dll",
+        "SetupDiGetClassDevsA",
+        &[guid, 0, 0, 0xabcdef0100000012],
+    );
+    assert!(set > u32::MAX as u64 && set != u64::MAX);
+    mem.write(data, &[0xa5; 32]).unwrap();
+    mem.write_int(data, 4, 32).unwrap();
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "setupapi.dll",
+            "SetupDiEnumDeviceInterfaces",
+            &[set, 0, guid, 0, data]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        259
+    );
+    let mut record = [0; 32];
+    mem.read(data, &mut record).unwrap();
+    assert_eq!(record[..4], 32u32.to_le_bytes());
+    assert_eq!(record[4..], [0; 28]);
+    mem.write_int(data + 24, 8, 0xfedcba9876543210).unwrap();
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "setupapi.dll",
+            "SetupDiEnumDeviceInfo",
+            &[set, 0, data]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        259
+    );
+    assert_eq!(mem.read_int(data + 24, 8).unwrap(), 0xfedcba9876543210);
+    let required = data + 64;
+    mem.write_int(required, 4, 0x55555555).unwrap();
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "setupapi.dll",
+            "SetupDiGetDeviceInterfaceDetailW",
+            &[set, data, 0, 0, required, 0]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        87
+    );
+    assert_eq!(mem.read_int(required, 4).unwrap(), 0x55555555);
+    let fault = STACK + 8184;
+    mem.write(fault, &[0xaa; 8]).unwrap();
+    cpu.regs[4] = STACK + 0x1f88;
+    cpu.regs[1] = fault;
+    let before = cpu.clone();
+    assert!(runtime
+        .dispatch("hid.dll", "HidD_GetHidGuid", &mut cpu, &mut mem)
+        .is_err());
+    assert_eq!(cpu.regs, before.regs);
+    assert_eq!(mem.read_int(fault, 8).unwrap(), 0xaaaaaaaaaaaaaaaa);
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "setupapi.dll",
+            "SetupDiDestroyDeviceInfoList",
+            &[set]
+        ),
+        1
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        0
+    );
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "setupapi.dll",
+            "SetupDiEnumDeviceInfo",
+            &[set, 0, data]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        6
+    );
+    let another = startup_dll_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "setupapi.dll",
+        "SetupDiGetClassDevsW",
+        &[0, 0, 0, 4],
+    );
+    assert!(another > set);
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "setupapi.dll",
+            "SetupDiGetClassDevsW",
+            &[0, 0, 0, 2]
+        ),
+        u64::MAX
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        87
+    );
+}
+#[test]
+fn win64_hid_absence_preserves_outputs_status_and_dll_export_ownership() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let output = STACK + 0x100;
+    let text = STACK + 0x200;
+    mem.write(output, &[0xaa; 128]).unwrap();
+    for (name, args) in [
+        ("HidD_GetAttributes", vec![0x7777777700000001, output]),
+        ("HidD_GetPreparsedData", vec![0x7777777700000001, output]),
+        (
+            "HidD_GetManufacturerString",
+            vec![0x7777777700000001, output, 128],
+        ),
+        (
+            "HidD_GetProductString",
+            vec![0x7777777700000001, output, 128],
+        ),
+        (
+            "HidD_GetSerialNumberString",
+            vec![0x7777777700000001, output, 128],
+        ),
+    ] {
+        assert_eq!(
+            startup_dll_call(&mut mem, &mut cpu, &mut runtime, "hid.dll", name, &args),
+            0
+        );
+        assert_eq!(
+            startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+            6
+        );
+    }
+    startup_call(&mut mem, &mut cpu, &mut runtime, "SetLastError", &[0x1234]);
+    for (name, args) in [
+        ("HidP_GetCaps", vec![0, output]),
+        ("HidP_GetButtonCaps", vec![0, output, output + 8, 0]),
+        ("HidP_GetValueCaps", vec![0, output, output + 8, 0]),
+        (
+            "HidP_GetData",
+            vec![0, output, output + 8, 0, output + 16, 16],
+        ),
+        ("HidP_SetUsageValue", vec![0, 1, 0, 1, 1, 0, output, 16]),
+        (
+            "HidP_SetUsages",
+            vec![0, 1, 0, output, output + 8, 0, output + 16, 16],
+        ),
+    ] {
+        assert_eq!(
+            startup_dll_call(&mut mem, &mut cpu, &mut runtime, "hid.dll", name, &args),
+            0xc0110001
+        );
+    }
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "hid.dll",
+            "HidP_MaxDataListLength",
+            &[0, 0]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        0x1234
+    );
+    let mut bytes = [0; 128];
+    mem.read(output, &mut bytes).unwrap();
+    assert_eq!(bytes, [0xaa; 128]);
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "hid.dll",
+            "HidD_FreePreparsedData",
+            &[0]
+        ),
+        1
+    );
+    mem.write(text, b"hid.dll\0").unwrap();
+    let module = startup_call(&mut mem, &mut cpu, &mut runtime, "LoadLibraryA", &[text]);
+    assert_ne!(module, 0);
+    mem.write(text, b"HidD_GetHidGuid\0").unwrap();
+    let gateway = startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "GetProcAddress",
+        &[module, text],
+    );
+    assert_eq!(
+        runtime.gateways.get(&gateway).unwrap(),
+        "hid.dll!HidD_GetHidGuid"
+    );
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetProcAddress",
+            &[wire::x64::runtime::TEB + 0x10000, text]
+        ),
+        0
+    );
+    assert!(!wire::x64::runtime::import_supported(
+        "kernel32.dll",
+        "HidD_GetHidGuid"
+    ));
+    assert!(!wire::x64::runtime::import_supported(
+        "hid.dll",
+        "SetupDiEnumDeviceInterfaces"
+    ));
 }
 #[test]
 fn win64_get_proc_address_null_module_resolves_main_and_missing_exports_return_null() {

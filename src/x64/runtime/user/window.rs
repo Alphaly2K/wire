@@ -532,6 +532,7 @@ impl Runtime64 {
         Ok(WindowStep::Returned(result))
     }
     fn remove_window(&mut self, handle: u64) {
+        self.remove_device_notifications(handle);
         self.user.windows.remove(&handle);
         self.user.events.retain(|m| m.event.window != handle);
         self.user.keyboard.remove_window64(handle);

@@ -60,6 +60,24 @@ headers, immutable copies, reference counts and API-set dispatch. No Wine
 implementation or allocator is imported. Missing WinRT classes fail with
 REGDB_E_CLASSNOTREG; there is no invented activation factory or gamepad.
 
+Semantic review on 2026-10-08 additionally covers `dlls/setupapi/devinst.c`
+(Copyright 2000 Andreas Mohr for CodeWeavers), `dlls/hid/hidd.c`
+(Copyright 2006 Kevin Koltzau, 2015 Aric Stewart), `dlls/hid/hidp.c`
+and `include/ddk/hidpi.h` (Copyright 2015 Aric Stewart), all at the same
+pinned Wine commit and expressly LGPL-2.1-or-later. No upstream implementation
+or header is copied into wire. `src/x64/runtime/devices.rs` independently
+serializes public HID GUID data and checked SetupAPI Win64 layouts, owns
+empty device sets, and returns actual absence/invalid-descriptor errors.
+There is no native Wine PnP database, HID driver or report parser backend.
+`dlls/user32/input.c` at that same commit was also reviewed for notification
+registration and A/W equivalence (LGPL-2.1-or-later; Copyright 1993 Bob Amstadt,
+1996 Albrecht Kleine, 1997 David Faure, 1998 Morten Welinder/Ulrich Weigand,
+2012 Henri Verbeet and 2018 Zebediah Figura for CodeWeavers).
+Wire owns subscriptions to its static empty device profile, validates the
+full-width recipient and filter, and releases them on window destruction.
+Service and device-handle notifications remain unsupported; no upstream
+notification implementation, service manager or hotplug backend is imported.
+
 - `geometry.c`: `07df351f137ce4f11215a449997ed3f324981b8034bb5728fe3e42dd3844892b`
 - `d3d9.h`: `fb49b3c44acec5e100a5c0ff1622f7d0207842d87fc513b49047a818e8c351b2`
 - `d3d9-methods.tsv`: `0467452cc8f2e299d6acfc2433212ac374a67951204b83cbdf3ddcf9187fc94f`
