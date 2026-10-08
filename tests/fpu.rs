@@ -338,7 +338,7 @@ fn x87_save_restore_environment_and_full_stack() {
     assert_eq!(v.cpu.fpu.tags, 0xffff);
     assert_eq!(v.cpu.fpu.cw, 0x37f);
     assert_eq!(v.mem.read_u16(DATA + 8).unwrap(), before.tags);
-    assert_eq!(v.mem.read_u32(DATA + 12).unwrap(), before.ip);
+    assert_eq!(v.mem.read_u32(DATA + 12).unwrap() as u64, before.ip);
     v.run(&[0xdd, 0x25, 0, 0, 2, 0]).unwrap();
     assert_eq!(v.cpu.fpu.regs, before.regs);
     assert_eq!(v.cpu.fpu.tags, before.tags);

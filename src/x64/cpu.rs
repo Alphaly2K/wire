@@ -6,6 +6,7 @@ use iced_x86::{
 };
 use rustc_apfloat::ieee::{Double, Single};
 use rustc_apfloat::{Float, FloatConvert, Round, Status, StatusAnd};
+mod x87;
 const CF: u64 = 1;
 const PF: u64 = 4;
 const AF: u64 = 16;
@@ -717,6 +718,79 @@ impl Cpu64 {
             return Ok(());
         }
         match i.mnemonic() {
+            M::Fld
+            | M::Fild
+            | M::Fst
+            | M::Fstp
+            | M::Fist
+            | M::Fistp
+            | M::Fisttp
+            | M::Fadd
+            | M::Faddp
+            | M::Fiadd
+            | M::Fmul
+            | M::Fmulp
+            | M::Fimul
+            | M::Fsub
+            | M::Fsubp
+            | M::Fsubr
+            | M::Fsubrp
+            | M::Fisub
+            | M::Fisubr
+            | M::Fdiv
+            | M::Fdivp
+            | M::Fdivr
+            | M::Fdivrp
+            | M::Fidiv
+            | M::Fidivr
+            | M::Fcom
+            | M::Fcomp
+            | M::Fcompp
+            | M::Ficom
+            | M::Ficomp
+            | M::Fucom
+            | M::Fucomp
+            | M::Fucompp
+            | M::Fcomi
+            | M::Fcomip
+            | M::Fucomi
+            | M::Fucomip
+            | M::Fcmovb
+            | M::Fcmove
+            | M::Fcmovbe
+            | M::Fcmovu
+            | M::Fcmovnb
+            | M::Fcmovne
+            | M::Fcmovnbe
+            | M::Fcmovnu
+            | M::Fxch
+            | M::Ffree
+            | M::Ffreep
+            | M::Fchs
+            | M::Fabs
+            | M::Ftst
+            | M::Fxam
+            | M::Fld1
+            | M::Fldl2t
+            | M::Fldl2e
+            | M::Fldpi
+            | M::Fldlg2
+            | M::Fldln2
+            | M::Fldz
+            | M::Fsqrt
+            | M::Frndint
+            | M::Fscale
+            | M::F2xm1
+            | M::Fyl2x
+            | M::Fyl2xp1
+            | M::Fsin
+            | M::Fcos
+            | M::Fsincos
+            | M::Fincstp
+            | M::Fdecstp
+            | M::Fnop => {
+                self.execute_x87(i, mem)?;
+            }
             M::Nop
             | M::Endbr64
             | M::Pause

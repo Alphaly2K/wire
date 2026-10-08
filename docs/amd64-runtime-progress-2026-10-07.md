@@ -19,8 +19,8 @@ Unity内嵌VS/PS执行64×64离屏Draw，4096个RGBA8像素读回逐通道比较
 
 ## 当前真实结果
 
-AliceToPapa隔离副本推进到 **756,848,329 条退休指令、758,283,917 work、1,364,898 次已完成API**
-（最新完成诊断重放`linked-pass-115.txt`）。从13条EXE入口开始已实际执行UnityPlayer的TLS/DllMain、EXE入口，
+AliceToPapa隔离副本推进到 **1,377,667,739 条退休指令、1,380,420,617 work、2,662,022 次已完成API**
+（最新完成诊断重放`linked-pass-116.txt`）。从13条EXE入口开始已实际执行UnityPlayer的TLS/DllMain、EXE入口，
 动态加载Mono的TLS/DllMain及合作worker；异常链仍执行真实guest handler与同帧RtlUnwindEx。
 此前curl/SSPI、显示器、HKCU、资源图标、类注册、WNDPROC、DC与目录枚举均已越过。
 本轮`CreateDXGIFactory2`、真实Apple M4 adapter枚举/Desc/引用、D3D12明确失败后的
@@ -29,7 +29,9 @@ COM音频设备缺少factory时真实失败，Unity进入自己的无音频回�
 暂停线程的真实CPU快照与APC/alertable wait已接通。pass111实际进入MonoManager ReloadAssembly，
 托管System.IO因动态导入SetThreadErrorMode缺失报异常；线程错误模式、动态导出与代码页查询已补齐。
 pass115查明每个小HeapAlloc占一整页，导致512MiB提交额度耗尽，随后Mono错误路径栈溢出。
-小堆块已改为64KiB slab，pass116继续重放；在325M work时提交206MiB，尚未到正式窗口。
+小堆块已改为64KiB slab，pass116未再遇提交额度耗尽；在1.3B work时提交249MiB。
+Mono程序集加载和domain重置实际完成，PhysX后端完成选择；后续guest代码在`0x120b0439e`请求x87 FLD，
+停于AMD64尚未实现的数据/算术x87路径，仍未到正式窗口。
 没有忽略INT3、认证失败或guest对窗口的隐藏状态。
 
 游戏实际写出的 `Player.log` 包含：
@@ -38,6 +40,9 @@ pass115查明每个小HeapAlloc占一整页，导致512MiB提交额度耗尽，�
 Mono path[0] = 'C:/AliceToPapaADV_1-0-0_Data/Managed'
 Mono config path = 'C:/MonoBleedingEdge/etc'
 Input System module state changed to: Initialized.
+- Loaded All Assemblies, in 185.640 seconds
+- Finished resetting the current domain, in  3.634 seconds
+[Physics::Module] Name: PhysX
 ```
 
 当前证据还不足以验收托管游戏入口、正式窗口、D3D11/DXGI Present 或持续可玩。
@@ -87,6 +92,7 @@ Input System module state changed to: Initialized.
 | pass-113 | 520,943,132 | 717,098 | 控制台代码页通过；GetCPInfoExW |
 | pass-114 | 761,820,010 | 1,363,934 | 反复28字节HeapAlloc失败，随后Mono错误路径栈溢出 |
 | pass-115 | 756,848,329 | 1,364,898 | 明确诊断：AMD64 mapping capacity exceeded，512MiB提交额度用尽 |
+| pass-116 | 1,377,667,739 | 2,662,022 | Mono加载/domain重置完成；guest x87 FLD未实现 |
 
 指令与 API 计数受真实时间/线程调度影响，上表不构成相同路径的性能 AB 对照。
 
@@ -95,7 +101,7 @@ Input System module state changed to: Initialized.
 其它DLL的专属函数不会因此出现在kernel32；未知函数仍返回NULL/ERROR_PROC_NOT_FOUND。
 GetConsoleCP沿用CP932 profile；GetCPInfoEx A/W输出284/544字节，代码页/默认字符/lead-byte表与A/W名称完整写入，
 无效flags及checked输出fault保留原输出。新增两项回归后完整release283项通过，Clippy无warning。
-pass116正在沿实际游戏继续，不将该检查点当作正式窗口或首帧验收。
+pass116已经完成并明确下一个x87边界；不将Mono加载完成当作正式窗口或首帧验收。
 
 小堆分配按16–2048字节桶使用64KiB owned slab，保留16字节对齐、HEAP_ZERO_MEMORY与HeapSize。
 释放块可重用，同桶多余空slab回收；大块保留独立页。HeapReAlloc保留旧数据，失败保留旧块。
@@ -104,6 +110,16 @@ guest process heap与native callback/COM页分别管理，不允许HeapFree释�
 当前游戏325M work时提交206MiB，而旧路径350M–450M work观察为415–420MiB；
 时间与调度路径不同，不能据此宣称MIPS或启动时延的AB收益。
 完整release284项通过，Clippy无warning；诊断命令每25M work打印PC/API数/提交MiB与最近三个API。
+
+pass116的x87边界已补：AMD64 FLD/FST/P、FILD/FIST/P/TP、基本浮点/整数算术、
+比较/FCOMI、FCMOV、交换/释放、常量、舍入/sqrt/scale及既有软件超越函数复用同一FP80核心。
+32/64/80位实数与有符号16/32/64位整数转换、control-word舍入和栈tag保持；
+FIP/FDP扩为完整64位，Win64异常上下文捕获/恢复不再截断，PE32环境仍明确序列化32位布局。
+checked跨页失败不改变CPU或留下部分store；新产生的未屏蔽算术异常仍明确拒绝，
+尚未实现x87延迟异常投递。x87环境指令/FPREM/FPATAN等尚未补齐，不宣称完整x87。
+2,304组Unicorn寄存器方向/pop/舍入算术差分通过；独立FP80半ULP舍入、64位整数、
+跨页load/store、未屏蔽异常拒绝与高指针上下文恢复通过。
+完整release286项通过、5项ignored，Clippy无warning；pass117已启动继续验证实际guest路径。
 
 ## 距离正式窗口的剩余工作
 

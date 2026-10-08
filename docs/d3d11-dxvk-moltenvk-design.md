@@ -421,5 +421,6 @@ guest通过真实DXGI adapter创建native Vulkan关联的device/context；当前
 独立探针退出偶见MoltenVK报告1MB仍分配，真实guest进程退出报告0MB；尚未归因，不声明全路径无泄漏。
 
 实际Alice Unity启动已越过device/context、内置纹理资源与音频设备探测，
-最新完成的pass109到219,185,690退休指令，暂停线程后请求GetThreadContext。
+最新完成的pass116到1,377,667,739退休指令，Mono程序集加载/domain重置完成，
+随后guest x87 FLD边界已补；pass117沿真实游戏继续。
 窗口仍是314×211且visible=false的bootstrap。DXGI交换链、guest Draw/Present和正式窗口显示尚未验收。

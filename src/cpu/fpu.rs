@@ -146,8 +146,8 @@ pub struct Fpu {
     /// Physical register order; register payloads remain intact when freed.
     pub regs: [u128; 8],
     pub tags: u16,
-    pub ip: u32,
-    pub dp: u32,
+    pub ip: u64,
+    pub dp: u64,
     pub opcode: u16,
 }
 impl Default for Fpu {
@@ -167,28 +167,28 @@ impl Fpu {
     pub fn top(&self) -> usize {
         ((self.sw >> 11) & 7) as usize
     }
-    fn set_top(&mut self, n: usize) {
+    pub(crate) fn set_top(&mut self, n: usize) {
         self.sw = (self.sw & !0x3800) | ((n as u16 & 7) << 11);
     }
-    fn index(&self, i: usize) -> usize {
+    pub(crate) fn index(&self, i: usize) -> usize {
         (self.top() + i) & 7
     }
     fn tag(&self, i: usize) -> u16 {
         (self.tags >> (2 * i)) & 3
     }
-    fn set_tag(&mut self, i: usize, tag: u16) {
+    pub(crate) fn set_tag(&mut self, i: usize, tag: u16) {
         self.tags = (self.tags & !(3 << (2 * i))) | (tag << (2 * i));
     }
-    fn exception(&mut self, bits: u16) {
+    pub(crate) fn exception(&mut self, bits: u16) {
         self.sw |= bits;
         if bits & !self.cw & 0x3f != 0 {
             self.sw |= 0x8080;
         }
     }
-    fn status(&mut self, s: Status) {
+    pub(crate) fn status(&mut self, s: Status) {
         self.exception((s.bits() as u16 & 1) | ((s.bits() as u16 & 0x1e) << 1));
     }
-    fn operands(&mut self, values: &[Ext]) {
+    pub(crate) fn operands(&mut self, values: &[Ext]) {
         self.sw &= !C1;
         if values.iter().any(|x| x.is_denormal()) {
             self.exception(2);
@@ -212,7 +212,7 @@ impl Fpu {
             },
         );
     }
-    fn get(&mut self, i: usize) -> Ext {
+    pub(crate) fn get(&mut self, i: usize) -> Ext {
         if self.tag(self.index(i)) == 3 {
             self.sw &= !C1;
             self.exception(0x41);
@@ -221,10 +221,10 @@ impl Fpu {
             Ext::from_bits(self.st_bits(i))
         }
     }
-    fn put(&mut self, i: usize, value: Ext) {
+    pub(crate) fn put(&mut self, i: usize, value: Ext) {
         self.set_st_bits(i, value.to_bits());
     }
-    fn push(&mut self, value: Ext) {
+    pub(crate) fn push(&mut self, value: Ext) {
         let n = (self.top() + 7) & 7;
         let value = if self.tag(n) != 3 {
             self.sw |= C1;
@@ -237,11 +237,11 @@ impl Fpu {
         self.set_top(n);
         self.put(0, value);
     }
-    fn pop(&mut self) {
+    pub(crate) fn pop(&mut self) {
         self.set_tag(self.top(), 3);
         self.set_top(self.top() + 1);
     }
-    fn round(&self) -> Round {
+    pub(crate) fn round(&self) -> Round {
         match (self.cw >> 10) & 3 {
             0 => Round::NearestTiesToEven,
             1 => Round::TowardNegative,
@@ -249,7 +249,75 @@ impl Fpu {
             _ => Round::TowardZero,
         }
     }
-    fn accept(&mut self, r: StatusAnd<Ext>, truncated: Ext) -> Ext {
+    pub(crate) fn load_real_bits(&mut self, bits: u128, size: usize) -> Ext {
+        if size == 10 {
+            return Ext::from_bits(bits);
+        }
+        let (denormal, converted): (bool, StatusAnd<Ext>) = if size == 4 {
+            let x = Single::from_bits(bits);
+            (
+                x.is_denormal(),
+                x.convert_r(Round::NearestTiesToEven, &mut false),
+            )
+        } else {
+            let x = Double::from_bits(bits);
+            (
+                x.is_denormal(),
+                x.convert_r(Round::NearestTiesToEven, &mut false),
+            )
+        };
+        if denormal {
+            self.exception(2);
+        }
+        self.status(converted.status);
+        converted.value
+    }
+    pub(crate) fn store_real_bits(&mut self, size: usize) -> u128 {
+        let x = self.get(0);
+        self.operands(&[x]);
+        let (status, value, rounded_up) = match size {
+            4 => {
+                let r: StatusAnd<Single> = x.convert_r(self.round(), &mut false);
+                let t: StatusAnd<Single> = x.convert_r(Round::TowardZero, &mut false);
+                (r.status, r.value.to_bits(), r.value.abs() > t.value.abs())
+            }
+            8 => {
+                let r: StatusAnd<Double> = x.convert_r(self.round(), &mut false);
+                let t: StatusAnd<Double> = x.convert_r(Round::TowardZero, &mut false);
+                (r.status, r.value.to_bits(), r.value.abs() > t.value.abs())
+            }
+            _ => (Status::OK, x.to_bits(), false),
+        };
+        self.status(status);
+        if rounded_up {
+            self.sw |= C1;
+        }
+        value
+    }
+    pub(crate) fn store_int_bits(&mut self, size: usize, truncate: bool) -> u128 {
+        let x = self.get(0);
+        self.operands(&[x]);
+        let round = if truncate {
+            Round::TowardZero
+        } else {
+            self.round()
+        };
+        let r = x.to_i128_r(size * 8, round, &mut false);
+        self.status(r.status);
+        let value = if r.status.contains(Status::INVALID_OP) {
+            1u128 << (size * 8 - 1)
+        } else {
+            r.value as u128
+        };
+        if r.status.contains(Status::INEXACT) && Ext::from_i128(r.value).value.abs() > x.abs() {
+            self.sw |= C1;
+        }
+        value
+    }
+    pub(crate) fn load_constant(&mut self, index: usize) {
+        self.push(LOAD_CONSTANTS[((self.cw >> 10) & 3) as usize][index]);
+    }
+    pub(crate) fn accept(&mut self, r: StatusAnd<Ext>, truncated: Ext) -> Ext {
         self.status(r.status);
         if r.status.contains(Status::INEXACT) && r.value.abs() > truncated.abs() {
             self.sw |= C1;
@@ -272,7 +340,7 @@ impl Fpu {
             .convert_r(Round::NearestTiesToEven, &mut false);
         (r.status | rounded.status).and(extended.value)
     }
-    fn binary(&mut self, a: Ext, b: Ext, kind: usize) -> Ext {
+    pub(crate) fn binary(&mut self, a: Ext, b: Ext, kind: usize) -> Ext {
         self.operands(&[a, b]);
         let op = |round| match kind {
             0 => a.add_r(b, round),
@@ -299,7 +367,7 @@ impl Fpu {
         }
         self.accept(result, trunc.value)
     }
-    fn compare(&mut self, a: Ext, b: Ext, quiet: bool) -> u16 {
+    pub(crate) fn compare(&mut self, a: Ext, b: Ext, quiet: bool) -> u16 {
         self.operands(&[a, b]);
         if a.is_signaling() || b.is_signaling() || (!quiet && (a.is_nan() || b.is_nan())) {
             self.exception(1);
@@ -311,11 +379,11 @@ impl Fpu {
             _ => 0,
         }
     }
-    fn compare_sw(&mut self, a: Ext, b: Ext, quiet: bool) {
+    pub(crate) fn compare_sw(&mut self, a: Ext, b: Ext, quiet: bool) {
         let flags = self.compare(a, b, quiet);
         self.sw = (self.sw & !(C0 | C2 | C3)) | flags;
     }
-    fn sqrt(&mut self, x: Ext) -> Ext {
+    pub(crate) fn sqrt(&mut self, x: Ext) -> Ext {
         self.operands(&[x]);
         if x.is_nan() {
             return self.accept(x.add_r(Ext::ZERO, self.round()), x);
@@ -406,7 +474,7 @@ impl Fpu {
         }
         (sum.scalbn(1) / Self::ln2()).value
     }
-    fn log_multiply(&mut self, plus_one: bool) {
+    pub(crate) fn log_multiply(&mut self, plus_one: bool) {
         let x = self.get(0);
         let y = self.get(1);
         self.operands(&[x, y]);
@@ -450,7 +518,7 @@ impl Fpu {
         self.put(1, result);
         self.pop();
     }
-    fn exp2_minus_one(&mut self) {
+    pub(crate) fn exp2_minus_one(&mut self) {
         let x = self.get(0);
         self.operands(&[x]);
         if x.is_nan() {
@@ -489,7 +557,7 @@ impl Fpu {
         self.exception(0x20);
         self.put(0, v);
     }
-    fn trig(&mut self, op: u8) {
+    pub(crate) fn trig(&mut self, op: u8) {
         let x = self.get(0);
         self.operands(&[x]);
         // Invalid/denormal operand exceptions precede any stack mutation.
@@ -785,49 +853,14 @@ impl Cpu {
         }
     }
     fn fpu_load_real(&mut self, mem: &GuestMem, a: u32, size: u32) -> Result<Ext, CpuError> {
-        let r: StatusAnd<Ext> = match size {
-            4 => Single::from_bits(mem.read_u32(a)? as u128)
-                .convert_r(Round::NearestTiesToEven, &mut false),
-            8 => Double::from_bits(mem.read_u64(a)? as u128)
-                .convert_r(Round::NearestTiesToEven, &mut false),
-            _ => {
-                let mut bytes = [0; 16];
-                mem.read_bytes(a, &mut bytes[..10])?;
-                return Ok(Ext::from_bits(u128::from_le_bytes(bytes)));
-            }
-        };
-        // The source denormal must be detected before widening.
-        let denormal = if size == 4 {
-            Single::from_bits(mem.read_u32(a)? as u128).is_denormal()
-        } else {
-            Double::from_bits(mem.read_u64(a)? as u128).is_denormal()
-        };
-        if denormal {
-            self.fpu.exception(2);
-        }
-        self.fpu.status(r.status);
-        Ok(r.value)
+        let mut bytes = [0; 16];
+        mem.read_bytes(a, &mut bytes[..size as usize])?;
+        Ok(self
+            .fpu
+            .load_real_bits(u128::from_le_bytes(bytes), size as usize))
     }
     fn fpu_store_real(&mut self, mem: &GuestMem, a: u32, size: u32) -> Result<(), CpuError> {
-        let x = self.fpu.get(0);
-        self.fpu.operands(&[x]);
-        let (status, value, truncated) = match size {
-            4 => {
-                let r: StatusAnd<Single> = x.convert_r(self.fpu.round(), &mut false);
-                let t: StatusAnd<Single> = x.convert_r(Round::TowardZero, &mut false);
-                (r.status, r.value.to_bits(), r.value.abs() > t.value.abs())
-            }
-            8 => {
-                let r: StatusAnd<Double> = x.convert_r(self.fpu.round(), &mut false);
-                let t: StatusAnd<Double> = x.convert_r(Round::TowardZero, &mut false);
-                (r.status, r.value.to_bits(), r.value.abs() > t.value.abs())
-            }
-            _ => (Status::OK, x.to_bits(), false),
-        };
-        self.fpu.status(status);
-        if truncated {
-            self.fpu.sw |= C1;
-        }
+        let value = self.fpu.store_real_bits(size as usize);
         mem.write_bytes(a, &value.to_le_bytes()[..size as usize])?;
         Ok(())
     }
@@ -838,23 +871,7 @@ impl Cpu {
         size: u32,
         truncate: bool,
     ) -> Result<(), CpuError> {
-        let x = self.fpu.get(0);
-        self.fpu.operands(&[x]);
-        let round = if truncate {
-            Round::TowardZero
-        } else {
-            self.fpu.round()
-        };
-        let r = x.to_i128_r(size as usize * 8, round, &mut false);
-        self.fpu.status(r.status);
-        let value = if r.status.contains(Status::INVALID_OP) {
-            1u128 << (size * 8 - 1)
-        } else {
-            r.value as u128
-        };
-        if r.status.contains(Status::INEXACT) && Ext::from_i128(r.value).value.abs() > x.abs() {
-            self.fpu.sw |= C1;
-        }
+        let value = self.fpu.store_int_bits(size as usize, truncate);
         mem.write_bytes(a, &value.to_le_bytes()[..size as usize])?;
         Ok(())
     }
@@ -875,7 +892,7 @@ impl Cpu {
         let environment =
             b < 0xc0 && matches!((op, (b >> 3) & 7), (0xd9, 4..=7) | (0xdd, 4 | 6 | 7));
         if !nonwaiting && !environment {
-            self.fpu.ip = eip0;
+            self.fpu.ip = eip0 as u64;
             self.fpu.opcode = ((op as u16 & 7) << 8) | b as u16;
         }
         if b >= 0xc0 {
@@ -946,8 +963,7 @@ impl Cpu {
                         | if x.is_negative() { C1 } else { 0 };
                 }
                 (0xd9, 0xe8..=0xee) => {
-                    let x = LOAD_CONSTANTS[((self.fpu.cw >> 10) & 3) as usize][(b - 0xe8) as usize];
-                    self.fpu.push(x);
+                    self.fpu.load_constant((b - 0xe8) as usize);
                 }
                 (0xd9, 0xf0) => self.fpu.exp2_minus_one(),
                 (0xd9, 0xf1 | 0xf9) => self.fpu.log_multiply(b == 0xf9),
@@ -1055,7 +1071,7 @@ impl Cpu {
             let a = rm.addr.unwrap().wrapping_add(seg);
             let g = rm.reg;
             if !matches!((op, g), (0xd9, 4..=7) | (0xdd, 4 | 6 | 7)) {
-                self.fpu.dp = a;
+                self.fpu.dp = a as u64;
             }
             match (op, g) {
                 (0xd8 | 0xdc | 0xda | 0xde, _) => {
@@ -1162,8 +1178,8 @@ impl Cpu {
                 self.fpu.cw = mem.read_u16(a)?;
                 self.fpu.sw = mem.read_u16(a + 2)?;
                 self.fpu.tags = mem.read_u16(a + 4)?;
-                self.fpu.ip = mem.read_u16(a + 6)? as u32;
-                self.fpu.dp = mem.read_u16(a + 10)? as u32;
+                self.fpu.ip = mem.read_u16(a + 6)? as u64;
+                self.fpu.dp = mem.read_u16(a + 10)? as u64;
             } else {
                 for (off, value) in [
                     (0, self.fpu.cw),
@@ -1181,16 +1197,16 @@ impl Cpu {
             self.fpu.cw = mem.read_u16(a)?;
             self.fpu.sw = mem.read_u16(a + 4)?;
             self.fpu.tags = mem.read_u16(a + 8)?;
-            self.fpu.ip = mem.read_u32(a + 12)?;
+            self.fpu.ip = mem.read_u32(a + 12)? as u64;
             self.fpu.opcode = mem.read_u16(a + 18)?;
-            self.fpu.dp = mem.read_u32(a + 20)?;
+            self.fpu.dp = mem.read_u32(a + 20)? as u64;
         } else {
             mem.write_u32(a, self.fpu.cw as u32 | 0xffff0000)?;
             mem.write_u32(a + 4, self.fpu.sw as u32 | 0xffff0000)?;
             mem.write_u32(a + 8, self.fpu.tags as u32 | 0xffff0000)?;
-            mem.write_u32(a + 12, self.fpu.ip)?;
+            mem.write_u32(a + 12, self.fpu.ip as u32)?;
             mem.write_u32(a + 16, (self.fpu.opcode as u32) << 16)?;
-            mem.write_u32(a + 20, self.fpu.dp)?;
+            mem.write_u32(a + 20, self.fpu.dp as u32)?;
             mem.write_u32(a + 24, 0xffff0000)?;
         }
         Ok(())

@@ -19,9 +19,9 @@ fn write_context(mem: &GuestMem, p: u32, ctx: &ThreadCtx) -> Result<(), String> 
         (28, ctx.fpu.cw as u32),
         (32, ctx.fpu.sw as u32),
         (36, ctx.fpu.tags as u32),
-        (40, ctx.fpu.ip),
+        (40, ctx.fpu.ip as u32),
         (44, (ctx.fpu.opcode as u32) << 16),
-        (48, ctx.fpu.dp),
+        (48, ctx.fpu.dp as u32),
         (144, 0x53),
         (148, 0x23),
         (152, 0x23),
@@ -66,9 +66,9 @@ fn read_context(mem: &GuestMem, p: u32, mut ctx: ThreadCtx) -> Result<ThreadCtx,
     ctx.fpu.cw = mem.read_u16(p + 28).map_err(|e| e.to_string())?;
     ctx.fpu.sw = mem.read_u16(p + 32).map_err(|e| e.to_string())?;
     ctx.fpu.tags = mem.read_u16(p + 36).map_err(|e| e.to_string())?;
-    ctx.fpu.ip = mem.read_u32(p + 40).map_err(|e| e.to_string())?;
+    ctx.fpu.ip = mem.read_u32(p + 40).map_err(|e| e.to_string())? as u64;
     ctx.fpu.opcode = mem.read_u16(p + 46).map_err(|e| e.to_string())?;
-    ctx.fpu.dp = mem.read_u32(p + 48).map_err(|e| e.to_string())?;
+    ctx.fpu.dp = mem.read_u32(p + 48).map_err(|e| e.to_string())? as u64;
     for i in 0..8 {
         let mut bytes = [0; 16];
         mem.read_bytes(p + 56 + i as u32 * 10, &mut bytes[..10])

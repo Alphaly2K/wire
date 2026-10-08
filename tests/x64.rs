@@ -3647,6 +3647,8 @@ fn amd64_vectored_software_exceptions_execute_guest_handlers_and_restore_full_co
         original.fpu.cw = 0x0b7f;
         original.fpu.sw = 3 << 11;
         original.fpu.set_st_bits(0, 0x3fff8000000000000000);
+        original.fpu.ip = CODE + 0x123;
+        original.fpu.dp = DATA + 0x456;
         original.rflags = 0x602;
         let expected_fpu = original.fpu;
         let raise = p.runtime.register("kernel32.dll", "RaiseException");
@@ -5342,6 +5344,160 @@ fn amd64_x87_control_words_status_and_pending_exceptions_use_checked_high_addres
     assert_eq!(cpu.rip, before.rip);
     assert_eq!(cpu.fpu.cw, before.fpu.cw);
     assert_eq!(cpu.retired, before.retired);
+}
+#[test]
+fn amd64_x87_keeps_extended_precision_high_pointers_rounding_and_fault_atomicity() {
+    const ONE: u128 = 0x3fff_8000_0000_0000_0000;
+    let mut mem = Memory::default();
+    mem.map(BASE, 8192, READ | WRITE | EXECUTE).unwrap();
+    let mut cpu = Cpu64::new(BASE, STACK);
+    cpu.regs[7] = BASE + 0x100;
+    cpu.regs[6] = BASE + 0x120;
+    cpu.regs[2] = BASE + 0x140;
+    // Extended 1 + 2^-64 is halfway at FP80 precision, invisible in binary64.
+    mem.write(BASE, &[0xdb, 0x2f, 0xdb, 0x2e, 0xde, 0xc1, 0xdb, 0x3a])
+        .unwrap();
+    mem.write(BASE + 0x100, &ONE.to_le_bytes()[..10]).unwrap();
+    mem.write(
+        BASE + 0x120,
+        &(((16383u128 - 64) << 64) | (1 << 63)).to_le_bytes()[..10],
+    )
+    .unwrap();
+    for (control, expected, status) in [(0x037f, ONE, 0x20), (0x0b7f, ONE + 1, 0x220)] {
+        cpu.rip = BASE;
+        cpu.fpu = wire::cpu::Fpu::default();
+        cpu.fpu.cw = control;
+        for _ in 0..3 {
+            cpu.step(&mut mem).unwrap();
+        }
+        assert_eq!(cpu.fpu.st_bits(0), expected);
+        assert_eq!(cpu.fpu.sw & 0x23f, status);
+        assert_eq!(cpu.fpu.ip, BASE + 4);
+        assert_eq!(cpu.fpu.dp, BASE + 0x120);
+        cpu.step(&mut mem).unwrap();
+        let mut bytes = [0; 16];
+        mem.read(BASE + 0x140, &mut bytes[..10]).unwrap();
+        assert_eq!(u128::from_le_bytes(bytes), expected);
+        assert_eq!(cpu.fpu.tags, 0xffff);
+        assert_eq!(cpu.fpu.ip, BASE + 6);
+        assert_eq!(cpu.fpu.dp, BASE + 0x140);
+    }
+    // Signed 64-bit loads are exact; integer stores use CW or truncate explicitly.
+    mem.write(BASE, &[0xdf, 0x2f, 0xdf, 0x3a]).unwrap();
+    for value in [i64::MIN, i64::MAX, -(1i64 << 54) - 1] {
+        cpu.rip = BASE;
+        cpu.fpu = wire::cpu::Fpu::default();
+        mem.write_int(BASE + 0x100, 8, value as u64).unwrap();
+        cpu.step(&mut mem).unwrap();
+        cpu.step(&mut mem).unwrap();
+        assert_eq!(mem.read_int(BASE + 0x140, 8).unwrap(), value as u64);
+    }
+    mem.write_int(BASE + 0x100, 8, 2.75f64.to_bits()).unwrap();
+    for (control, expected) in [(0x037f, 3), (0x077f, 2), (0x0b7f, 3), (0x0f7f, 2)] {
+        mem.write(BASE, &[0xdd, 0x07, 0xdb, 0x1a]).unwrap();
+        cpu.rip = BASE;
+        cpu.fpu = wire::cpu::Fpu::default();
+        cpu.fpu.cw = control;
+        cpu.step(&mut mem).unwrap();
+        cpu.step(&mut mem).unwrap();
+        assert_eq!(mem.read_int(BASE + 0x140, 4).unwrap(), expected);
+        assert_eq!(cpu.fpu.sw & 0x20, 0x20);
+    }
+    mem.write(BASE, &[0xdd, 0x07, 0xdb, 0x0a]).unwrap();
+    cpu.rip = BASE;
+    cpu.fpu = wire::cpu::Fpu::default();
+    cpu.step(&mut mem).unwrap();
+    cpu.step(&mut mem).unwrap();
+    assert_eq!(mem.read_int(BASE + 0x140, 4).unwrap(), 2);
+    // Read/write failures spanning pages preserve every CPU field and byte.
+    for code in [[0xdb, 0x2f], [0xdb, 0x3f]] {
+        mem.write(BASE, &code).unwrap();
+        cpu.rip = BASE;
+        cpu.regs[7] = BASE + 8192 - 5;
+        mem.write(cpu.regs[7], &[0xa5; 5]).unwrap();
+        let before = cpu.clone();
+        assert!(cpu.step(&mut mem).is_err());
+        assert_eq!(cpu, before);
+        let mut bytes = [0; 5];
+        mem.read(cpu.regs[7], &mut bytes).unwrap();
+        assert_eq!(bytes, [0xa5; 5]);
+    }
+    // An unsupported new unmasked exception must not emit a store or pop.
+    mem.write(BASE, &[0xdb, 0x1a]).unwrap();
+    cpu.rip = BASE;
+    cpu.fpu = wire::cpu::Fpu::default();
+    cpu.fpu.cw &= !1;
+    cpu.fpu.set_st_bits(0, 0x7fff_c000_0000_0000_0000);
+    let before = cpu.clone();
+    let previous = mem.read_int(BASE + 0x140, 4).unwrap();
+    assert!(cpu
+        .step(&mut mem)
+        .unwrap_err()
+        .contains("deferred delivery"));
+    assert_eq!(cpu, before);
+    assert_eq!(mem.read_int(BASE + 0x140, 4).unwrap(), previous);
+}
+#[test]
+fn amd64_x87_arithmetic_register_directions_and_pops_match_unicorn() {
+    use unicorn_engine::{Arch, Mode, Prot, RegisterX86 as U, Unicorn};
+    let mut uc = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+    uc.mem_map(BASE, 4096, Prot::ALL).unwrap();
+    let mut mem = Memory::default();
+    mem.map(BASE, 4096, READ | WRITE | EXECUTE).unwrap();
+    let mut seed = 0xa71c_3319_8455_1281u64;
+    for opcode in [0xd8, 0xdc, 0xde] {
+        for byte in [0xc1, 0xc9, 0xe1, 0xe9, 0xf1, 0xf9] {
+            for rounding in 0..4u16 {
+                let mut code = vec![
+                    0xdb, 0xe3, 0xd9, 0x6f, 0x20, 0xdd, 0x07, 0xdd, 0x06, opcode, byte,
+                ];
+                // DC writes ST1 and leaves ST0 intact; discard ST0 to observe it.
+                if opcode == 0xdc {
+                    code.extend([0xdd, 0xd8]);
+                }
+                code.extend([0xdd, 0x1a, 0xdf, 0xe0]);
+                mem.write(BASE, &code).unwrap();
+                uc.mem_write(BASE, &code).unwrap();
+                mem.write_int(BASE + 0x120, 2, (0x037f | (rounding << 10)) as u64)
+                    .unwrap();
+                uc.mem_write(BASE + 0x120, &(0x037f | (rounding << 10)).to_le_bytes())
+                    .unwrap();
+                for _ in 0..32 {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    let a = f64::from_bits((seed & 0x800f_ffff_ffff_ffff) | (0x3ffu64 << 52));
+                    seed = seed.rotate_left(19).wrapping_add(0x772f_1591_5328);
+                    let b = f64::from_bits((seed & 0x800f_ffff_ffff_ffff) | (0x400u64 << 52));
+                    let mut cpu = Cpu64::new(BASE, STACK);
+                    for (r, at, reg) in [
+                        (7, BASE + 0x100, U::RDI),
+                        (6, BASE + 0x140, U::RSI),
+                        (2, BASE + 0x180, U::RDX),
+                    ] {
+                        cpu.regs[r] = at;
+                        uc.reg_write(reg, at).unwrap();
+                    }
+                    for (at, value) in [(BASE + 0x100, a.to_bits()), (BASE + 0x140, b.to_bits())] {
+                        mem.write_int(at, 8, value).unwrap();
+                        uc.mem_write(at, &value.to_le_bytes()).unwrap();
+                    }
+                    uc.emu_start(BASE, BASE + code.len() as u64, 0, 0).unwrap();
+                    while cpu.rip < BASE + code.len() as u64 {
+                        cpu.step(&mut mem).unwrap();
+                    }
+                    let output = uc.mem_read_as_vec(BASE + 0x180, 8).unwrap();
+                    assert_eq!(
+                        mem.read_int(BASE + 0x180, 8).unwrap(),
+                        u64::from_le_bytes(output.try_into().unwrap()),
+                        "{opcode:x} {byte:x} round={rounding} a={a} b={b}"
+                    );
+                    // Unicorn does not model all sticky x87 precision flags.
+                    assert_eq!(cpu.regs[0] & 0x3800, uc.reg_read(U::RAX).unwrap() & 0x3800);
+                }
+            }
+        }
+    }
 }
 #[test]
 fn amd64_sse_compare_nan_daz_flags_and_unmasked_faults_are_checked() {

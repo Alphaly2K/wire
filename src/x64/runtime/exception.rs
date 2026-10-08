@@ -25,8 +25,8 @@ pub(crate) fn capture(cpu: &Cpu64) -> [u8; CONTEXT_SIZE] {
         data[288 + n * 16..298 + n * 16].copy_from_slice(&cpu.fpu.st_bits(n).to_le_bytes()[..10]);
     }
     data[262..264].copy_from_slice(&cpu.fpu.opcode.to_le_bytes());
-    data[264..272].copy_from_slice(&(cpu.fpu.ip as u64).to_le_bytes());
-    data[272..280].copy_from_slice(&(cpu.fpu.dp as u64).to_le_bytes());
+    data[264..272].copy_from_slice(&cpu.fpu.ip.to_le_bytes());
+    data[272..280].copy_from_slice(&cpu.fpu.dp.to_le_bytes());
     data[280..284].copy_from_slice(&cpu.mxcsr.to_le_bytes());
     data[284..288].copy_from_slice(&0xffffu32.to_le_bytes());
     for n in 0..16 {
@@ -69,17 +69,12 @@ pub(crate) fn restore(mem: &Memory, pointer: u64, parent: &Cpu64) -> Result<Cpu6
         if dword(52) & !0xffff != 0 || dword(280) != dword(52) {
             return Err("invalid AMD64 exception MXCSR state".into());
         }
-        if qword(264) > u32::MAX as u64 || qword(272) > u32::MAX as u64 {
-            return Err(
-                "64-bit x87 exception instruction/data pointers are not implemented".into(),
-            );
-        }
         cpu.mxcsr = dword(52);
         cpu.fpu.cw = word(256);
         cpu.fpu.sw = word(258);
         cpu.fpu.opcode = word(262);
-        cpu.fpu.ip = qword(264) as u32;
-        cpu.fpu.dp = qword(272) as u32;
+        cpu.fpu.ip = qword(264);
+        cpu.fpu.dp = qword(272);
         for n in 0..8 {
             let mut bits = [0; 16];
             bits[..10].copy_from_slice(&data[288 + n * 16..298 + n * 16]);
