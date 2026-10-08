@@ -58,6 +58,13 @@ public static class GuestBridge {
     public static double ThrowFloatRoundTrip(double value, float scale, long bias) {
         GuestFloatCallback(value, scale, bias); throw new ArgumentException("owned typed exception");
     }
+    public static unsafe int CachedWrite(long address, int value) { *(int*)address = value; return value; }
+    public static int CachedPrimitive(int value) { return value + 1; }
+    public static int PureCompute(int count) {
+        int[] values = new int[256]; for (int i = 0; i < values.Length; i++) values[i] = i * 3 + 1;
+        int sum = 7; for (int i = 0; i < count; i++) { sum = unchecked(sum * 33) ^ i; sum = unchecked(sum + values[i & 255]); }
+        return sum;
+    }
     public static int RoundTrip(int value) { return GuestCallback(value) + 3; }
     public static int PlatformContract() { try { return (int)Environment.OSVersion.Platform; } catch { return -1; } }
     public static int HostFilesystemContract() { try { return System.IO.File.Exists("/etc/hosts") ? 1 : 0; } catch { return -1; } }

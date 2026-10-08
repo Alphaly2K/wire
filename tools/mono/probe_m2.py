@@ -35,7 +35,7 @@ def main():
         parser.error("Runtime input must be an existing built noexec Mono probe tree")
     root.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
-    for name in ("DYLD_INSERT_LIBRARIES", "MONO_ENV_OPTIONS", "MONO_PATH"):
+    for name in ("DYLD_INSERT_LIBRARIES", "MONO_ENV_OPTIONS", "MONO_PATH", "WIRE_MONO_PERF_ONLY"):
         env.pop(name, None)
     records = []
     records.append(execute([sdk / "bin/mono", sdk / "lib/mono/4.5/mcs.exe", "-optimize+", "-unsafe",
@@ -74,6 +74,8 @@ def main():
     for marker in ("PASS original PE", "PASS typed PE/IL ABI", "PASS shared pinned Mono array", "PASS two attached Mono threads", "PASS scoped guest", "WIRE_NOEXEC_GUARD checks="):
         if marker not in content:
             raise RuntimeError(f"Missing bridge evidence: {marker}")
+    if args.checked_memory and "PASS checked scope rejects preexisting unchecked method transform" not in content:
+        raise RuntimeError("Missing cached unchecked transform rejection")
     if args.checked_memory and "PASS scoped checked IL" not in content:
         raise RuntimeError("Missing scoped checked IL evidence")
     if args.sample_mono and "PASS original Unity Mono leaf" not in content:
@@ -103,6 +105,7 @@ def main():
               "class_libraries": {name: sha256(runtime / "probe/classlib/mono/4.5" / name)
                                   for name in ("mscorlib.dll", "System.dll", "System.Core.dll")},
               "checked_patch_sha256": sha256(HERE / "patches/0010-scoped-checked-interpreter-memory.patch"),
+              "scope_local_optimization_patch_sha256": sha256(HERE / "patches/0015-scope-local-interpreter-optimizations.patch"),
               "native_game_backend_enabled": False,
               "shared_backing_verified": True,
               "fixed_signature_cross_arch_float_struct_exception_verified": True,

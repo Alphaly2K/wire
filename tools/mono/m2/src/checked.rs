@@ -117,6 +117,28 @@ pub(super) fn run(mono: &Mono, state: *mut Guest, blocks: &str) {
     unsafe { &mut (*state).memory }
         .map(DATA, 8192, READ | WRITE)
         .unwrap();
+    // Compile once outside the checked scope. Later activation must reject
+    // this cached transform rather than trust an optimized instruction stream.
+    let mut cached_arg = 31i32;
+    let mut cached_args = [(&mut cached_arg as *mut i32).cast()];
+    let cached = mono.find("CachedPrimitive", 1);
+    assert_eq!(invoke_i32(mono, cached, &mut cached_args, None), 32);
+    let cached_region = HostRegion::owned(8).unwrap();
+    let mut cached_address = cached_region.with_native(|p| p.as_ptr() as u64).unwrap();
+    let mut cached_value = 71i32;
+    let mut cached_write_args = [
+        (&mut cached_address as *mut u64).cast(),
+        (&mut cached_value as *mut i32).cast(),
+    ];
+    let cached_write = mono.find("CachedWrite", 2);
+    assert_eq!(
+        invoke_i32(mono, cached_write, &mut cached_write_args, None),
+        71
+    );
+    unsafe { &mut (*state).memory }
+        .map_shared_data(cached_address, cached_region.clone(), READ, READ)
+        .unwrap();
+
     assert_eq!(
         unsafe { install(99, mono.image, Some(checked_access), state.cast(),) },
         -1
@@ -125,6 +147,37 @@ pub(super) fn run(mono: &Mono, state: *mut Guest, blocks: &str) {
         unsafe { install(1, mono.image, Some(checked_access), state.cast(),) },
         0
     );
+    invoke_i32(
+        mono,
+        cached,
+        &mut cached_args,
+        Some("NotSupportedException"),
+    );
+    cached_value = 99;
+    std::hint::black_box(cached_value);
+    cached_region
+        .with_native(|_| {
+            invoke_i32(
+                mono,
+                cached_write,
+                &mut cached_write_args,
+                Some("NotSupportedException"),
+            );
+        })
+        .unwrap();
+    assert_eq!(
+        unsafe { &(*state).memory }
+            .read_int(cached_address, 4)
+            .unwrap(),
+        71
+    );
+    cached_region.revoke().unwrap();
+    drop(
+        unsafe { &mut (*state).memory }
+            .unmap_shared_data(cached_address)
+            .unwrap(),
+    );
+    println!("PASS checked scope rejects preexisting unchecked method transform");
     let mut at = AT;
     let mut value = 37i32;
     let mut parameters = [

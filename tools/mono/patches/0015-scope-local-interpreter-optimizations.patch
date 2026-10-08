@@ -1,0 +1,183 @@
+--- a/mono/mini/interp/interp.h
++++ b/mono/mini/interp/interp.h
+@@ -45,7 +45,7 @@
+  */
+ MONO_API void mono_ee_interp_init (const char *);
+ 
+-/* Wire prototype ABI 1. Thread-local, exact-image scope, optimizations off.
++/* Wire prototype ABI 1. Thread-local, exact-image scope, checked-method optimizations off.
+  * Operations: 1 read, 2 write, 3 copy, 4 fill. Zero means completed; every
+  * other result is a managed AccessViolationException, with no native fallback.
+  * buffer is a bounded interpreter scratch area, never a guest data pointer.
+@@ -53,6 +53,9 @@
+ typedef int (*WireMonoMemoryAccess) (int operation, guint64 address,
+     guint64 second, gpointer buffer, gsize length, gpointer user_data);
+ MONO_API int wire_mono_prepare_memory_adapter (guint32 version);
++/* Internal transform query: no global optimization mutation. */
++gboolean wire_mono_method_memory_scoped (MonoMethod *method);
++gboolean wire_mono_memory_adapter_prepared (void);
+ MONO_API int wire_mono_set_memory_adapter (guint32 version, MonoImage *image,
+     WireMonoMemoryAccess access, gpointer user_data);
+ 
+--- a/mono/mini/interp/interp.c
++++ b/mono/mini/interp/interp.c
+@@ -86,6 +86,7 @@
+  * Scope is an exact image; runtime wrappers and other images are not covered.
+  * Retaining image/user_data and restoring TLS across nested calls is the host's
+  * responsibility. Raw pointer escape and C intrinsics remain separate work. */
++static gboolean wire_memory_prepared;
+ static __thread MonoImage *wire_memory_image;
+ static __thread WireMonoMemoryAccess wire_memory_access;
+ static __thread gpointer wire_memory_user_data;
+@@ -95,7 +96,7 @@
+ {
+     if (version != 1 || mono_get_root_domain ())
+         return -1;
+-    mono_interp_opt = INTERP_OPT_NONE;
++    wire_memory_prepared = TRUE;
+     return 0;
+ }
+ 
+@@ -103,7 +104,7 @@
+ wire_mono_set_memory_adapter (guint32 version, MonoImage *image,
+     WireMonoMemoryAccess access, gpointer user_data)
+ {
+-    if (version != 1 || (!!image != !!access) || (access && mono_interp_opt != INTERP_OPT_NONE))
++    if (version != 1 || (!!image != !!access) || (access && !wire_memory_prepared))
+         return -1;
+     wire_memory_image = image;
+     wire_memory_access = access;
+@@ -111,8 +112,14 @@
+     return 0;
+ }
+ 
+-static gboolean
+-wire_memory_scoped (MonoMethod *method)
++gboolean
++wire_mono_memory_adapter_prepared (void)
++{
++    return wire_memory_prepared;
++}
++
++gboolean
++wire_mono_method_memory_scoped (MonoMethod *method)
+ {
+     return wire_memory_access && method->wrapper_type == MONO_WRAPPER_NONE &&
+         m_class_get_image (method->klass) == wire_memory_image;
+@@ -1464,11 +1471,15 @@
+ 
+ /* These macros preserve the interpreter's own exception/unwind boundary.
+  * Rust callbacks only return status; they never longjmp or unwind over FFI. */
+-#define WIRE_SCOPED() wire_memory_scoped (frame->imethod->method)
++#define WIRE_SCOPED() wire_mono_method_memory_scoped (frame->imethod->method)
+ #define WIRE_CHECK_OPCODE(op) do { \
+-    if (WIRE_SCOPED () && !wire_memory_opcode_allowed (op)) { \
+-        g_warning ("Wire memory scope rejected %s", mono_interp_opname (op)); \
+-        THROW_EX (mono_get_exception_not_supported ("Wire primitive memory scope excludes this operation"), ip); \
++    if (WIRE_SCOPED ()) { \
++        if (!frame->imethod->wire_memory_checked_transform) \
++            THROW_EX (mono_get_exception_not_supported ("Wire scope rejects a cached unchecked transform"), ip); \
++        if (!wire_memory_opcode_allowed (op)) { \
++            g_warning ("Wire memory scope rejected %s", mono_interp_opname (op)); \
++            THROW_EX (mono_get_exception_not_supported ("Wire primitive memory scope excludes this operation"), ip); \
++        } \
+     } \
+ } while (0)
+ #define WIRE_IO(op, addr, second, buffer, size) do { \
+--- a/mono/mini/interp/interp-internals.h
++++ b/mono/mini/interp/interp-internals.h
+@@ -134,6 +134,7 @@
+ 	guint32 alloca_size;
+ 	int num_clauses; // clauses
+ 	int transformed; // boolean
++	int wire_memory_checked_transform; // transformed with scoped hooks and no IL optimizations
+ 	unsigned int param_count;
+ 	unsigned int hasthis; // boolean
+ 	MonoProfilerCallInstrumentationFlags prof_flags;
+--- a/mono/mini/interp/transform.h
++++ b/mono/mini/interp/transform.h
+@@ -144,6 +144,7 @@
+ typedef struct
+ {
+ 	MonoMethod *method;
++	gboolean wire_memory_checked_transform;
+ 	MonoMethod *inlined_method;
+ 	MonoMethodHeader *header;
+ 	InterpMethod *rtm;
+--- a/mono/mini/interp/transform.c
++++ b/mono/mini/interp/transform.c
+@@ -2594,6 +2594,14 @@
+ {
+ 	MonoMethodHeaderSummary header;
+ 
++    /* Preserve a real method-entry boundary before future TLS scopes exist.
++     * A cached runtime-invoke wrapper must not contain an unchecked inline
++     * body whose image/transform admission would otherwise disappear. */
++    if (wire_mono_memory_adapter_prepared () &&
++        (td->method->wrapper_type != MONO_WRAPPER_NONE ||
++         m_class_get_image (td->method->klass) != m_class_get_image (method->klass)))
++        return FALSE;
++
+ 	if (method->flags & METHOD_ATTRIBUTE_REQSECOBJ)
+ 		/* Used to mark methods containing StackCrawlMark locals */
+ 		return FALSE;
+@@ -2972,7 +2980,7 @@
+ 	}
+ 
+ 	g_assert (csignature->call_convention != MONO_CALL_FASTCALL);
+-	if ((mono_interp_opt & INTERP_OPT_INLINE) && op == -1 && !is_virtual && target_method && interp_method_check_inlining (td, target_method, csignature)) {
++	if (((td->wire_memory_checked_transform ? INTERP_OPT_NONE : mono_interp_opt) & INTERP_OPT_INLINE) && op == -1 && !is_virtual && target_method && interp_method_check_inlining (td, target_method, csignature)) {
+ 		MonoMethodHeader *mheader = interp_method_get_header (target_method, error);
+ 		return_val_if_nok (error, FALSE);
+ 
+@@ -5450,7 +5458,7 @@
+ 					newobj_fast->data [2] = params_stack_size;
+ 					newobj_fast->data [3] = csignature->param_count;
+ 
+-					if ((mono_interp_opt & INTERP_OPT_INLINE) && interp_method_check_inlining (td, m, csignature)) {
++					if (((td->wire_memory_checked_transform ? INTERP_OPT_NONE : mono_interp_opt) & INTERP_OPT_INLINE) && interp_method_check_inlining (td, m, csignature)) {
+ 						MonoMethodHeader *mheader = interp_method_get_header (m, error);
+ 						goto_if_nok (error, exit);
+ 
+@@ -8199,7 +8207,7 @@
+ 	}
+ 
+ 	needs_retry = interp_local_deadce (td, local_ref_count);
+-	if (mono_interp_opt & INTERP_OPT_BBLOCKS)
++	if ((td->wire_memory_checked_transform ? INTERP_OPT_NONE : mono_interp_opt) & INTERP_OPT_BBLOCKS)
+ 		needs_retry |= interp_optimize_bblocks (td);
+ 
+ 	if (needs_retry)
+@@ -8224,13 +8232,13 @@
+ static void
+ interp_optimize_code (TransformData *td)
+ {
+-	if (mono_interp_opt & INTERP_OPT_BBLOCKS)
++	if ((td->wire_memory_checked_transform ? INTERP_OPT_NONE : mono_interp_opt) & INTERP_OPT_BBLOCKS)
+ 		interp_optimize_bblocks (td);
+ 
+-	if (mono_interp_opt & INTERP_OPT_CPROP)
++	if ((td->wire_memory_checked_transform ? INTERP_OPT_NONE : mono_interp_opt) & INTERP_OPT_CPROP)
+ 		MONO_TIME_TRACK (mono_interp_stats.cprop_time, interp_cprop (td));
+ 
+-	if (mono_interp_opt & INTERP_OPT_SUPER_INSTRUCTIONS)
++	if ((td->wire_memory_checked_transform ? INTERP_OPT_NONE : mono_interp_opt) & INTERP_OPT_SUPER_INSTRUCTIONS)
+ 		MONO_TIME_TRACK (mono_interp_stats.super_instructions_time, interp_super_instructions (td));
+ }
+ 
+@@ -8285,6 +8293,7 @@
+ 	td = &transform_data;
+ 
+ 	td->method = method;
++	td->wire_memory_checked_transform = wire_mono_method_memory_scoped (method);
+ 	td->rtm = rtm;
+ 	td->code_size = header->code_size;
+ 	td->header = header;
+@@ -8375,6 +8384,7 @@
+ 	rtm->clauses = (MonoExceptionClause*)mono_mem_manager_alloc0 (td->mem_manager, header->num_clauses * sizeof (MonoExceptionClause));
+ 	memcpy (rtm->clauses, header->clauses, header->num_clauses * sizeof(MonoExceptionClause));
+ 	rtm->code = (gushort*)td->new_code;
++	rtm->wire_memory_checked_transform = td->wire_memory_checked_transform;
+ 	rtm->init_locals = header->init_locals;
+ 	rtm->num_clauses = header->num_clauses;
+ 	for (i = 0; i < header->num_clauses; i++) {

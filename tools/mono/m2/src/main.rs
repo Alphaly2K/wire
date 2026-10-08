@@ -53,6 +53,7 @@ mod checked;
 mod concurrency;
 mod gc;
 mod layout;
+mod perf;
 mod services;
 
 impl Mono {
@@ -526,6 +527,13 @@ fn main() {
         "usage: probe runtime.dylib classlib-root GuestBridge.dll fixture.exe [CheckedBlocks.dll] [sample-mono.dll] [NativeServicesProbe.dll]"
     );
     let mono = Mono::load(&args[1], &args[2], &args[3], args.len() >= 6);
+    if std::env::var_os("WIRE_MONO_PERF_ONLY").is_some() {
+        perf::run(&mono);
+        unsafe {
+            (mono.cleanup)(mono.domain);
+        }
+        return;
+    }
     let bytes = pe_fixture();
     std::fs::write(&args[4], &bytes).unwrap();
     let pe = Pe64::parse(&bytes).unwrap();

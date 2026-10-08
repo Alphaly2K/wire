@@ -60,3 +60,7 @@ cargo test --release --features native-mono-memory --test mono_shared
 File.Exists/Directory.Exists/FileStream、LastError、owner撤销与GC；添加环境变量
 `WIRE_MONO_REFLECTION_INVENTORY=1` 再验证 managed reflection inventory。
 这些是隔离原型，不会启用游戏原生后端，不是通用native-pointer sandbox。
+
+0015只禁用受检方法的IL优化，普通trusted类库保持优化；拒绝缓存unchecked方法，并保留
+wrapper/image inline边界。`perf_interp.py`接受冻结runtime，以同一纯IL checksum运行三对
+AB/BA对照；结果用于配置比较，不能替代真实游戏性能报告。

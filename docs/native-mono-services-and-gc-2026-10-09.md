@@ -118,3 +118,25 @@ sret占RCX，后续input在RDX、double在XMM2、int64在R9，返回RAX仍为sre
 这些是固定原创签名的闭环，尚不是所有Unity_Injected ABI的动态dispatcher或通用delegate
 入口池。异常通过mono_runtime_invoke的独立exception out返回；owner token以RAII恢复，
 没有跨C ABI Rust unwind。完整服务/GC/布局回归继续通过，noexec guard `checks=106 denied=0`。
+
+## 后续：选择性 IL 优化
+
+补丁0015取消prepare对global mono_interp_opt的修改。每个受检方法在TransformData中固定
+禁用inline/cprop/super/bblock，并把已采用受检转换的状态随InterpMethod发布。scope内每次
+opcode dispatch拒绝此前缓存的未受检转换；原有permit table和checked访存不变。
+
+第一次负例发现runtime-invoke wrapper会提前inline一个未受检方法，从而绕过callee entry。
+因此prepare在VM初始化前额外保留wrapper和跨image的inline边界，防止未来scope激活时边界
+已经消失。同image的普通IL仍可优化。测试含cached primitive及cached unsafe store：第二次
+调用在readonly native backing上被拒绝，原值71没有改成99。全部14个故障和typed/GC/服务
+回归继续通过，M2 guard `checks=105 denied=0`。这不扩大unsafe/helper/reference的许可范围。
+
+冻结0015前后的dylib，同一driver、IL及类库，进行AB/BA/AB三对进程运行，每进程预热后7次
+20000000迭代，合计每配置21个计时样本。算术+scalar数组workload checksum均为1523661319。
+wall中位数从0.297357秒降至0.138959秒，配置比值2.140。
+每次运行noexec guard均为denied=0。完整hash、命令、CPU/wall及原始样本在
+`wire-out/native-mono-scope-opt-perf/results.json`。这是受控pure IL配置对照，没有与原始x64
+Mono或真实游戏比较；不能宣称游戏整体已经快了2倍。
+
+复测工具为`tools/mono/perf_interp.py`，传入冻结的旧runtime、同一M2 driver output与新runtime。
+早前0010的全局禁用优化说明保留为历史阶段；当前未受检的trusted类库已经恢复普通优化。

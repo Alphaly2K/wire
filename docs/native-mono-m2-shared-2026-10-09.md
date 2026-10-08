@@ -29,7 +29,7 @@ mach_vm_protect executable 或 MAP_JIT 申请。五个 guard 反向测试均以8
 ## unsafe 适配的具体范围
 
 补丁 `0010-scoped-checked-interpreter-memory.patch` 提供版本1的 prototype API：
-VM 初始化前 `wire_mono_prepare_memory_adapter` 禁用 IL inline/cprop/super/bblock
+该阶段在VM 初始化前 `wire_mono_prepare_memory_adapter` 全局禁用 IL inline/cprop/super/bblock
 优化；在当前线程上为一个明确的 MonoImage 安装访问 callback。callback 的
 read/write/copy/fill 操作调用 wire checked Memory，失败由 Mono 自己的异常边界
 转换为 AccessViolationException。Rust callback 只返回状态，不跨 C ABI unwind。
@@ -49,7 +49,8 @@ main_loop 标签检查。未知调用、native helper/intrinsic、数组/引用�
 scope 是明确的单线程/单 image 原型，不是所有 Mono 程序的沙箱。未安装 scope
 的 M1/线程 fixture 只运行本项目控制的 IL；绝不能据此放行任意游戏 IL。
 禁用优化是为了防止安全 hook 被当前 transform 的优化/inline 形式绕过，
-不是最终性能方案。生产实现需要逐种低阶访存及 helper 的语义覆盖，再保留优化。
+不是最终性能方案。后续0015已仅对受检方法禁用优化，并保留wrapper/image边界及缓存拒绝；
+详见服务与GC记录。生产实现仍需逐种低阶访存及 helper 的语义覆盖。
 
 ## 对象、线程和原始 ABI 的边界
 
