@@ -91,6 +91,8 @@ def main():
         raise RuntimeError("Missing exact checked Int32 array evidence")
     if args.sample_mono and "PASS original Unity Mono leaf" not in content:
         raise RuntimeError("Missing original Unity Mono layout evidence")
+    if args.sample_mono and "PASS original Unity method/signature/type metadata leaves" not in content:
+        raise RuntimeError("Missing original method/signature/type metadata ABI evidence")
     if args.native_services and "PASS typed native Windows services" not in content:
         raise RuntimeError("Missing native service evidence")
     if args.native_services:
@@ -140,6 +142,9 @@ def main():
               "real_unity_leaf_layout_verified": bool(args.sample_mono),
               "immutable_class_type_leaf_layout_verified": "CLASS_ABI_PROFILE compatible=1" in content,
               "immutable_class_profile_checked": bool(args.sample_mono),
+              "resolved_metadata_profile_patch_sha256": sha256(HERE / "patches/0019-resolved-method-signature-type-profile-views.patch"),
+              "original_method_signature_type_leaves_verified": bool(args.sample_mono),
+              "full_metadata_vtable_abi_verified": False,
               "immutable_class_profile_incompatible": "CLASS_ABI_PROFILE compatible=0" in content,
               "platform_contract": platform_contract,
               "trusted_classlib_native_services_verified": args.native_services,

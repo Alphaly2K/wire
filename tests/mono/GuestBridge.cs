@@ -98,6 +98,9 @@ public static class GuestBridge {
         return text;
     }
     public static object BoxInt() { return (object)73; }
+    public sealed class MetadataInstance {
+        public double Echo(float value, ref long count) { return value + count; }
+    }
     private static int domainCounter;
     public static int DomainCounter(int delta) { domainCounter += delta; return domainCounter; }
     public static int DomainRaise() { throw new ArgumentException("domain-owned exception"); }

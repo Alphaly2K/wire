@@ -55,6 +55,7 @@ mod concurrency;
 mod domains;
 mod gc;
 mod layout;
+mod metadata;
 mod perf;
 mod refs;
 mod scheduler;
@@ -615,6 +616,7 @@ fn main() {
 
     if let Some(sample) = args.get(6) {
         layout::run(&mono, sample);
+        metadata::run(&mono, sample);
         let platform = mono.invoke(mono.find("PlatformContract", 0), ptr::null_mut());
         let platform = unsafe { *(unbox(platform) as *const i32) };
         let host_file = mono.invoke(mono.find("HostFilesystemContract", 0), ptr::null_mut());

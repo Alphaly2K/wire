@@ -248,3 +248,27 @@ token，再调用native unload。新域复用ID甚至地址时所有旧token仍�
 三轮reset/exception/GC/reclaim/unload均通过无JIT guard；完整M2服务/metadata清单和
 其他内存/调度回归继续通过。精确运行hash/count保留results。实际Unity allocator/TLS/
 日志/初始化和game backend仍未准入；这仅补齐原生VM域生命周期的独立证据。
+
+## 后续：真实 method/signature/type metadata ABI
+
+0019为当前native VM已经解析的method、signature、type提供有限诊断只读views，caller
+负责持有domain并在卸载前revoke；不是接受guest pointer的生产API，也不自行pin metadata。
+原始Unity x64 DLL仅装入独立Memory，所有imports指向trap，原始DllMain/VM仍未初始化。
+
+四个原创method覆盖static与instance、InternalCall metadata、double/float/int64、24B
+struct、ref及out。原始DLL的method name/class/flags/iflags/token/cached signature，与
+signature count/instance/return/params iterator，以及type kind/byref，共74项和native C API
+结果相同。params iterator每次更新值及终点NULL都比较；instance正例1个，byref正例3个，
+不是仅静态无引用标量的假阳性。未知version/NULL参数views返回NULL且size清零。
+
+| MonoMethod字段 | 实测offset/size |
+| --- | --- |
+| flags / iflags | 0x0/2B，0x2/2B |
+| token | 0x4/4B |
+| klass | 0x8/8B |
+| signature | 0x10/8B |
+| name | 0x18/8B |
+
+最新完整M2 noexec `checks=479 denied=0`。字段匹配扩大了候选源码与样本的ABI证据，
+但还没验证所有generic/inflated method、custom modifiers、metadata/vtable生命周期或
+Unity allocator/TLS callbacks；full metadata ABI与M3/game admission继续为false。
