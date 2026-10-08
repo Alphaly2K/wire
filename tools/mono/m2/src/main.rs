@@ -56,6 +56,7 @@ mod gc;
 mod layout;
 mod perf;
 mod refs;
+mod scheduler;
 mod services;
 
 impl Mono {
@@ -139,6 +140,10 @@ impl Mono {
             add_icall(
                 c"GuestBridge::GuestConcurrentCallback".as_ptr(),
                 concurrency::guest_concurrent_callback as *const () as Object,
+            );
+            add_icall(
+                c"GuestBridge::QueuedCallback".as_ptr(),
+                scheduler::queued_callback as *const () as Object,
             );
             let assembly = open(domain, filename.as_ptr());
             assert!(!assembly.is_null());
@@ -587,6 +592,7 @@ fn main() {
     abi::run(&mono, &mut *guest);
     shared_array_probe(&mono, &mut *guest);
     concurrency::run(&mono);
+    scheduler::run(&mono);
     if let Some(blocks) = args.get(5) {
         checked::run(&mono, &mut *guest, blocks);
         guest = refs::run(&mono, guest, blocks);

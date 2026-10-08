@@ -76,7 +76,7 @@ def main():
         command.append(args.managed_inventory.resolve())
     records.append(execute(command, guarded, root, "run-guest-bridge"))
     content = (root / "run-guest-bridge.log").read_text()
-    for marker in ("PASS original PE", "PASS typed PE/IL ABI", "PASS shared pinned Mono array", "PASS two attached Mono threads", "PASS scoped guest", "WIRE_NOEXEC_GUARD checks="):
+    for marker in ("PASS original PE", "PASS typed PE/IL ABI", "PASS shared pinned Mono array", "PASS two attached Mono threads", "PASS queued owner-thread Mono callbacks", "PASS scoped guest", "WIRE_NOEXEC_GUARD checks="):
         if marker not in content:
             raise RuntimeError(f"Missing bridge evidence: {marker}")
     if args.checked_memory and "PASS checked scope rejects preexisting unchecked method transform" not in content:
@@ -126,6 +126,9 @@ def main():
               "general_managed_arrays_admitted": False,
               "native_game_backend_enabled": False,
               "shared_backing_verified": True,
+              "queued_owner_thread_nested_callbacks_verified": True,
+              "queued_gc_suspend_mode": "preemptive",
+              "production_guest_thread_scheduler_integrated": False,
               "fixed_signature_cross_arch_float_struct_exception_verified": True,
               "unsafe_il_checked": False,
               "scoped_primitive_il_checked": args.checked_memory,

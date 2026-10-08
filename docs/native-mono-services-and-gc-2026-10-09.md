@@ -209,3 +209,25 @@ payload没有改变。循环触发的MINT_CHECKPOINT只执行既有runtime inter
 完整M2 `checks=447 denied=0`，M1全通过，五个executable mapping反向测试退出86；审计
 304 objects/668 dependencies/0 unmatched。Clippy clean。一般array/object/helpers、
 生产thread/roots与typed guest引用写入仍未完成，游戏backend/M3继续为false。
+
+## 后续：固定 owner-thread queue 与嵌套重入
+
+新scheduler fixture让两个各自attach的Mono worker经容量4的queue向固定native Mono owner
+提交100个scalar请求；workers不持有Guest/Memory pointer。owner解释原创Win64函数，
+遇到data gateway进入IL；IL再次回guest时同owner inline执行，避免排队等待自己。每次
+跨入Mono前均结束RefCell borrow、mutable Guest reference和guest访存lease。
+
+测试总计300个guest activations/两层nested gateway，两个worker返回独立checksum7825/
+12825，native Mono线程身份不同，guest执行始终在owner线程。10次GC在worker等待reply
+时触发，worker持有的IL array locals在等待之后仍完整。整段bounded send+reply wait使用
+Mono public enter/exit GC-safe region，stack marker位于真实native stack且RAII成对恢复。
+当前实际suspend模式是preemptive，blocking transition API在该模式可为no-op；没有宣称
+验证了cooperative GC或iOS线程调度。
+
+已排队请求在owner revoke时明确返回error，closed queue新请求立即拒绝；C#收到受控
+InvalidOperationException。Rust panic被FFI入口捕获，不穿过Mono栈。完整M2包含服务与
+实际metadata inventory继续通过，noexec `checks=462 denied=0`，Clippy clean。
+
+这验证固定owner/排队/重入的候选方案，但仍是scalar fixture；尚未接入生产Runtime64
+thread handles、含managed-reference的queue messages、AppKit owner、domain unload和
+正式guest scheduler。后续接入必须保留每个native Mono线程自己的TLS身份和GC边界。

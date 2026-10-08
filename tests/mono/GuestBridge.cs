@@ -29,6 +29,22 @@ public static class GuestBridge {
         return sum;
     }
     public static int ReleaseWorkers() { WorkerStart.Set(); return 1; }
+    [MethodImpl(MethodImplOptions.InternalCall)]
+    private static extern int QueuedCallback(int value, int depth);
+    public static int QueuedRoundTrip(int value, int depth) {
+        int result = QueuedCallback(value, depth);
+        if (result == int.MinValue) throw new InvalidOperationException("queued execution owner revoked");
+        return result + 3;
+    }
+    public static int QueuedWorker(int id) {
+        int[] keptAcrossNativeWait = new int[] { id, 37 };
+        int sum = 0;
+        for (int i = 0; i < 50; ++i) sum += QueuedRoundTrip(id * 100 + i, 2);
+        if (keptAcrossNativeWait[0] != id || keptAcrossNativeWait[1] != 37)
+            throw new InvalidOperationException("queued wait lost interpreter roots");
+        return sum;
+    }
+
     public static int MarshalHelperWrite(long p, int value) { System.Runtime.InteropServices.Marshal.WriteInt32(new IntPtr(p), value); return value; }
     public struct Pair { public int Left; public int Right; }
     public static unsafe int ReadI32(long p) { return *(int*)p; }
