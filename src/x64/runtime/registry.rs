@@ -28,7 +28,7 @@ fn root(handle: u64) -> Option<u32> {
     let value = handle as u32;
     (matches!(value, 0x80000000..=0x80000003 | 0x80000005)
         && (handle == value as u64 || handle == 0xffffffff00000000 | value as u64))
-        .then_some(value - 0x80000000)
+        .then(|| value - 0x80000000)
 }
 impl Registry {
     fn resolve(&self, handle: u64) -> Result<(Key, u32), u64> {
