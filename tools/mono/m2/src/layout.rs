@@ -174,6 +174,87 @@ pub(super) fn run(mono: &Mono, sample: &str) {
             .unwrap();
         regions.push((at, region));
     }
+    let profile_field = symbol!(
+        mono.library,
+        "wire_mono_profile_class_field",
+        unsafe extern "C" fn(u32, Object, u32, *mut u32) -> Object
+    );
+    for field in 1..=6 {
+        let mut size = 0;
+        let pointer = unsafe { profile_field(1, class, field, &mut size) };
+        assert!(!pointer.is_null() && size > 0);
+        let region = unsafe {
+            HostRegion::foreign(
+                NonNull::new(pointer.cast()).unwrap(),
+                size as usize,
+                object_pin.clone(),
+            )
+        }
+        .unwrap();
+        memory
+            .map_shared_data(pointer as u64, region.clone(), READ, READ)
+            .unwrap();
+        regions.push((pointer as u64, region));
+        println!(
+            "NATIVE_CLASS_PROFILE field={field} offset={:#x} size={size}",
+            pointer as u64 - class as u64
+        );
+    }
+    let mut compatible = true;
+    for name in [
+        "mono_class_get_name",
+        "mono_class_get_namespace",
+        "mono_class_get_image",
+        "mono_class_get_parent",
+        "mono_class_get_type",
+    ] {
+        let symbol_name = CString::new(name).unwrap();
+        let pointer = unsafe { libc::dlsym(mono.library, symbol_name.as_ptr()) };
+        assert!(!pointer.is_null());
+        let native: unsafe extern "C" fn(Object) -> Object =
+            unsafe { std::mem::transmute(pointer) };
+        let expected = unsafe { native(class) } as u64;
+        match run(&mut memory, exports.names[name], &[class as u64]) {
+            Ok(actual) if actual == expected => {
+                println!("PASS original class metadata leaf {name}")
+            }
+            result => {
+                compatible = false;
+                println!("CLASS_ABI_INCOMPATIBLE export={name} native={expected:#x} original={result:?}; profile rejected, no mapping widened");
+            }
+        }
+    }
+    let class_type = symbol!(
+        mono.library,
+        "mono_class_get_type",
+        unsafe extern "C" fn(Object) -> Object
+    );
+    let type_kind = symbol!(
+        mono.library,
+        "mono_type_get_type",
+        unsafe extern "C" fn(Object) -> i32
+    );
+    let ty = unsafe { class_type(class) };
+    assert_eq!(
+        run(
+            &mut memory,
+            exports.names["mono_type_get_type"],
+            &[ty as u64]
+        )
+        .unwrap(),
+        unsafe { type_kind(ty) } as u64
+    );
+    println!("PASS original type-kind metadata leaf mono_type_get_type");
+    println!(
+        "CLASS_ABI_PROFILE compatible={} native_game_admission=0",
+        u8::from(compatible)
+    );
+    let mut size = 99;
+    assert!(unsafe { profile_field(2, class, 1, &mut size) }.is_null());
+    assert_eq!(size, 0);
+    size = 99;
+    assert!(unsafe { profile_field(1, class, 99, &mut size) }.is_null());
+    assert_eq!(size, 0);
     let expected = unsafe { unbox(object) } as u64;
     let result = run(
         &mut memory,

@@ -115,7 +115,7 @@ def autogen(root, env):
     # libraries are deliberately not built. autogen prints a corefx warning.
 
 
-def build_runtime(root, env, mode, jobs):
+def build_runtime(root, env, mode, jobs, msvc_class_abi=False):
     mono = root / "sources" / LOCK["sources"][0]["directory"]
     build = root / ("build-" + mode)
     build.mkdir(exist_ok=True)
@@ -129,7 +129,8 @@ def build_runtime(root, env, mode, jobs):
                "--enable-dont-register-main-static-data=yes"]
     if mode == "runtime":
         options.append("--enable-minimal=jit")
-        env = dict(env, CPPFLAGS="-DWIRE_MONO_NO_EXEC=1")
+        env = dict(env, CPPFLAGS="-DWIRE_MONO_NO_EXEC=1" +
+                   (" -DWIRE_MONO_MSVC_CLASS_ABI=1" if msvc_class_abi else ""))
     manifest = {"arguments": list(map(str, options)),
                 "environment": {key: env.get(key, "") for key in
                                 ("CC", "CXX", "CFLAGS", "CXXFLAGS", "CPPFLAGS",
@@ -148,6 +149,7 @@ def main():
     parser.add_argument("stage", choices=("prepare", "tools", "autogen", "runtime", "aot-tool", "all"))
     parser.add_argument("--output", type=Path, default=REPO / "wire-out/native-mono-m1")
     parser.add_argument("--jobs", type=int, default=6)
+    parser.add_argument("--msvc-class-abi", action="store_true", help="opt in to Windows MonoClass bit-field layout for diagnostic runtime")
     args = parser.parse_args()
     root = args.output.resolve()
     if not root.is_relative_to(REPO / "wire-out"):
@@ -163,7 +165,7 @@ def main():
         elif stage == "autogen":
             autogen(root, env)
         else:
-            build_runtime(root, env, stage, args.jobs)
+            build_runtime(root, env, stage, args.jobs, args.msvc_class_abi)
 
 
 if __name__ == "__main__":

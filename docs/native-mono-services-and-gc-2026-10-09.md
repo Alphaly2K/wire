@@ -1,0 +1,108 @@
+# 原生 Mono：GC、Windows 文件服务和元数据 ABI（2026-10-09）
+
+本轮继续独立分支 `codex/native-mono-shared-memory` 的 M2 原型，没有修改 CPU、SSE、
+IR 或主 checkout 的游戏运行路径。**游戏原生 Mono 后端和 M3 准入仍为 false。**
+输出目录为该 worktree 的 `wire-out/native-mono-m2-services/`；SDK、游戏及主 checkout
+的构建工具仅作为只读输入。没有 push。
+
+## BDWGC 的解释器栈缺陷
+
+真实类库的完整反射枚举曾崩溃，SDK 类库中的 StringBuilder 也出现异常。根因是候选
+Mono 的 `mono_gc_set_gc_callbacks` 为空：IL 解释器的局部引用位于独立 `mono_valloc`
+数据栈，不在 native pthread 栈中，BDWGC 没有扫描它们。这不是 IL 优化开关导致的故障。
+
+补丁 0012 保存 mini_gc_init 安装的 callbacks，在已有的线程 roots 扫描中调用
+`interp_mark_func`，用 `GC_push_all_eager` 立即把活跃槽值加入标记工作。扫描跨度由
+解释器自己的活动栈指针和 fragment position 决定，不永久注册整个 mmap 或托管堆。
+
+回归包含：128 个 4096B 数组强制 GC 后 checksum=8128；StringBuilder 重复10000次、
+每128次 GC 后仍有30000字符；完整反射枚举100个 P/Invoke；native Mono thread 退栈后
+保持 attach 和空闲，8次 GC 清除旧局部数组的 weak handle。回收前不读取 weak target，
+避免宿主寄存器意外保活。现有 M1 core/interop/threads/gc/layout 均通过。
+
+## 预编译的 typed Windows 服务
+
+补丁 0011 在 ImplMap 解析之后、普通库加载和 dllmap 之前提供一次安装的 method-qualified
+resolver。只绑定明确 MonoImage、声明类型、方法名、完整类型签名、charset、Winapi flags
+匹配的静态 ARM64 入口。同名错误签名返回 EntryPointNotFound。不会生成机器码。
+
+首次调用前必须安装 provider：先执行失败的 File.Exists 再安装，会留下缓存的失败 wrapper。
+Unix Mono 的 SetLastError wrapper 捕获 errno；入口在所有宿主操作之后写 errno，由 Mono
+保留到每线程 LastError TLS。两个真实 native Mono thread 的2/87错误在同步等待后仍独立。
+
+入口复用现有 Runtime64 文件和版本服务。Cpu64 只装载 Win64 参数/返回 frame，包含第5个及
+后续 stack arguments，不执行 guest 指令。测试服务所有者与 GuestFs root 由 TLS scope 保留；
+撤销后 cached static entry 返回错误50，不执行文件访问。这个 TLS 原型不是生产的跨线程
+共享文件句柄、Process64 execution token 或 owner-thread scheduler。
+
+核对并绑定的真实类库方法包括：
+
+- `Interop.Kernel32.GetFileAttributesExPrivate`、`SetThreadErrorMode` 和 Path.GetFullPathName；
+- Environment 的 Platform、OSVersion 和真正的 InternalCall `GetNewLine`；
+- MonoIO 的 Windows separators、GetCurrentDirectory；
+- MonoIO Open、Close、Read、Write、Seek、GetLength、GetFileType、Flush。
+
+全部 InternalCall 安装前核对实际 signature 及 InternalCall implementation flag；输出和
+数组只接收受控 native Mono marshaling/已核对类库。Read/Write 校验 byte[]、长度和范围，
+短期 pin 后每次最多64KiB，通过 checked scratch 复制；不把 native pointer 转为 guest 地址
+后直接解引用。**这仍不是任意 native-pointer 或任意游戏 IL 的通用 sandbox。**
+
+实测 Windows File.Exists/Directory.Exists、相对路径、大小写、UTF-16、结构体大小36、
+missing2、escape5、invalid-level87、失败不部分改写输出。真实 FileStream 完成读取、seek、
+EOF、180123B分块读写、GC、追加及 File.ReadAllBytes；宿主独立复核隔离目录最终180124B的
+每个字节。反射调用 MonoIO.Read 的无效 handle 返回6、无效 range返回87，原数组不变。
+`/etc/hosts` 解析到 guest `C:\etc\hosts`，测试中不可见。owner撤销后的文件打开也失败。
+
+实际 mscorlib 的 CLI metadata scanner 读取 ImplMap/ModuleRef/MethodDef/Param/FieldMarshal，
+记录完整类型、flags和原始MarshalAs blob，生成 `pinvoke-contracts.tsv`。100条 P/Invoke 与
+可选 managed reflection inventory 一致。100不是覆盖率，也不是原计划290个Mono导出查询。
+
+## MSVC 位字段 ABI
+
+补丁0013由 native C编译器提供 MonoClass 六个不可变字段的精确地址和大小。原始用户Mono
+叶函数在原有 checked Cpu64 中运行；原始DllMain、VM、GC从不初始化，imports绑定拒绝入口。
+未知地址不会通过扩大metadata映射来掩盖。
+
+首次检查发现name/image/parent/type等偏移不匹配。原因是Windows编译器位字段 ABI：
+Clang默认与MSVC对MonoClass的guint位字段和相邻guint8字段采用不同分组规则。补丁0014仅为
+MonoClass提供显式 `ms_struct` opt-in，构建参数为 `--msvc-class-abi`；默认不改变该布局。
+这不是在未知位置插入8B填充，也不是证明所有Mono内部结构都已经兼容。
+
+| 字段 | ARM64默认 | MSVC opt-in / 原始DLL |
+| --- | --- | --- |
+| parent | 0x28 | 0x30 |
+| image | 0x38 | 0x40 |
+| name | 0x40 | 0x48 |
+| namespace | 0x48 | 0x50 |
+| byval MonoType | 0xb0 | 0xb8 |
+
+opt-in重建后原始 `mono_class_get_name/namespace/image/parent/type` 的返回pointer全部与native
+C API一致，原始 `mono_type_get_type` 同样一致。对象/数组header、length/data和unbox原回归
+仍通过。version/field无效时profile接口返回NULL且size清零。未opt-in的诊断会记录不匹配并
+拒绝准入，results不会把诊断运行成功写成元数据兼容。
+
+## 验证和继续条件
+
+最新开启opt-in的M2运行 `checks=105 denied=0`，所有原型通过。M1的五个反向 executable
+mapping测试退出86，core/interop/threads/gc/layout全部通过。链接审计仍为304对象、668依赖、
+0 unmatched；没有选入GPL atomic stack/malloc设施。原型Cargo Clippy `-D warnings`通过。
+这些证据不替代最终发行许可、签名或iOS验收。
+
+```sh
+python3 tools/mono/build.py prepare --output wire-out/native-mono-checked-runtime
+python3 tools/mono/build.py runtime --output wire-out/native-mono-checked-runtime --msvc-class-abi
+python3 tools/mono/audit_build.py --output wire-out/native-mono-checked-runtime
+WIRE_MONO_REFLECTION_INVENTORY=1 python3 tools/mono/probe_m2.py \
+  --runtime-output wire-out/native-mono-game-classlib \
+  --output wire-out/native-mono-m2-services --checked-memory --native-services \
+  --sample-mono '<原始 mono-2.0-bdwgc.dll>'
+python3 tools/mono/probe.py run --output wire-out/native-mono-game-classlib
+```
+
+runtime/classlib/support的准备方法见M1/M2文档。构建hash、source hash、类库hash和每个命令结果
+保留于ignored输出。`windows_vfs_bound=0`表示游戏Process未接入；fixture的VFS已经验证。
+
+M2还需完成 reference/array/helper 的受检 IL覆盖、write barriers、生产roots与scheduler，
+更多Win64↔ARM64 typed float/struct/sret与callback、完整metadata/vtable/engine生命周期。
+Windows服务还只有已测子集。0010全局禁用IL优化仍是原型限制，必须在保留检查后改成选择性
+配置；没有真实游戏加速数据。完成这些契约之前不启用游戏后端。

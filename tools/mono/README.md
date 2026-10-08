@@ -52,3 +52,11 @@ cargo test --release --features native-mono-memory --test mono_shared
 所有实际游戏后端准入标志仍为false；primitive scope明确拒绝未适配的调用/引用
 路径，不能当作通用IL sandbox。完整证据和下一阶段阻塞见
 `docs/native-mono-m2-shared-2026-10-09.md`。
+
+后续的 typed Windows 服务、BDWGC interpreter stack roots 及 MSVC MonoClass ABI
+验证见 `docs/native-mono-services-and-gc-2026-10-09.md`。运行真实 Windows 类库时，
+`build.py runtime --msvc-class-abi` 显式选择 MonoClass 的 MSVC 位字段布局；默认不启用。
+`probe_m2.py --checked-memory --sample-mono <DLL> --native-services` 验证受控类库的
+File.Exists/Directory.Exists/FileStream、LastError、owner撤销与GC；添加环境变量
+`WIRE_MONO_REFLECTION_INVENTORY=1` 再验证 managed reflection inventory。
+这些是隔离原型，不会启用游戏原生后端，不是通用native-pointer sandbox。

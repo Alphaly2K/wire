@@ -1,0 +1,31 @@
+--- a/mono/metadata/unity-utils.c
++++ b/mono/metadata/unity-utils.c
+@@ -2176,4 +2176,26 @@
+ 	}
+ 
+ 	return TRUE;
+-}
+\ No newline at end of file
++}
++/* wire version-1 diagnostic view of resolved immutable class fields.
++ * Only the native VM supplies klass. This is not an entry for guest pointers. */
++MONO_API gpointer
++wire_mono_profile_class_field (guint32 version, MonoClass *klass, guint32 field, guint32 *size)
++{
++	if (!size)
++		return NULL;
++	*size = 0;
++	if (version != 1 || !klass)
++		return NULL;
++#define WIRE_CLASS_FIELD(id, member) case id: *size = sizeof (klass->member); return &klass->member
++	switch (field) {
++	WIRE_CLASS_FIELD (1, class_kind);
++	WIRE_CLASS_FIELD (2, name);
++	WIRE_CLASS_FIELD (3, name_space);
++	WIRE_CLASS_FIELD (4, image);
++	WIRE_CLASS_FIELD (5, parent);
++	WIRE_CLASS_FIELD (6, _byval_arg);
++	default: return NULL;
++	}
++#undef WIRE_CLASS_FIELD
++}

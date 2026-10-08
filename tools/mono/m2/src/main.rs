@@ -50,7 +50,9 @@ macro_rules! symbol {
 }
 mod checked;
 mod concurrency;
+mod gc;
 mod layout;
+mod services;
 
 impl Mono {
     fn load(library: &str, classlib: &str, assembly: &str, checked: bool) -> Self {
@@ -88,6 +90,18 @@ impl Mono {
             "mono_add_internal_call",
             unsafe extern "C" fn(*const c_char, Object)
         );
+        if std::env::var_os("WIRE_MONO_TRACE").is_some() {
+            let parse = symbol!(
+                library,
+                "mono_jit_parse_options",
+                unsafe extern "C" fn(i32, *mut *mut c_char)
+            );
+            let option = CString::new("--trace=mscorlib").unwrap();
+            let mut options = [option.as_ptr() as *mut c_char];
+            unsafe {
+                parse(1, options.as_mut_ptr());
+            }
+        }
         if checked {
             let prepare = symbol!(
                 library,
@@ -178,7 +192,71 @@ impl Mono {
     fn invoke(&self, method: Object, args: *mut Object) -> Object {
         let mut exception = ptr::null_mut();
         let result = unsafe { (self.invoke)(method, ptr::null_mut(), args, &mut exception) };
-        assert!(exception.is_null(), "managed exception crossed as result");
+        if !exception.is_null() {
+            let get_class = symbol!(
+                self.library,
+                "mono_object_get_class",
+                unsafe extern "C" fn(Object) -> Object
+            );
+            let get_name = symbol!(
+                self.library,
+                "mono_class_get_name",
+                unsafe extern "C" fn(Object) -> *const c_char
+            );
+            let get_parent = symbol!(
+                self.library,
+                "mono_class_get_parent",
+                unsafe extern "C" fn(Object) -> Object
+            );
+            let field = symbol!(
+                self.library,
+                "mono_class_get_field_from_name",
+                unsafe extern "C" fn(Object, *const c_char) -> Object
+            );
+            let value = symbol!(
+                self.library,
+                "mono_field_get_value",
+                unsafe extern "C" fn(Object, Object, Object)
+            );
+            let to_utf8 = symbol!(
+                self.library,
+                "mono_string_to_utf8",
+                unsafe extern "C" fn(Object) -> *mut c_char
+            );
+            let free = symbol!(self.library, "mono_free", unsafe extern "C" fn(Object));
+            let mut class = unsafe { get_class(exception) };
+            let name = unsafe { std::ffi::CStr::from_ptr(get_name(class)) }
+                .to_string_lossy()
+                .into_owned();
+            let mut message = ptr::null_mut::<c_void>();
+            while !class.is_null() {
+                let message_field = unsafe { field(class, c"_message".as_ptr()) };
+                if !message_field.is_null() {
+                    unsafe {
+                        value(
+                            exception,
+                            message_field,
+                            (&mut message as *mut Object).cast(),
+                        );
+                    }
+                    break;
+                }
+                class = unsafe { get_parent(class) };
+            }
+            let mut detail = String::new();
+            if !message.is_null() {
+                let text = unsafe { to_utf8(message) };
+                if !text.is_null() {
+                    detail = unsafe { std::ffi::CStr::from_ptr(text) }
+                        .to_string_lossy()
+                        .into_owned();
+                    unsafe {
+                        free(text.cast());
+                    }
+                }
+            }
+            panic!("managed exception: {name}: {detail}");
+        }
         assert!(!result.is_null());
         result
     }
@@ -442,8 +520,8 @@ fn pe_fixture() -> Vec<u8> {
 fn main() {
     let args: Vec<_> = std::env::args().collect();
     assert!(
-        (5..=7).contains(&args.len()),
-        "usage: probe runtime.dylib classlib-root GuestBridge.dll fixture.exe [CheckedBlocks.dll] [sample-mono.dll]"
+        (5..=8).contains(&args.len()),
+        "usage: probe runtime.dylib classlib-root GuestBridge.dll fixture.exe [CheckedBlocks.dll] [sample-mono.dll] [NativeServicesProbe.dll]"
     );
     let mono = Mono::load(&args[1], &args[2], &args[3], args.len() >= 6);
     let bytes = pe_fixture();
@@ -499,6 +577,14 @@ fn main() {
     if let Some(blocks) = args.get(5) {
         checked::run(&mono, &mut *guest, blocks);
     }
+    if let Some(assembly) = args.get(7) {
+        let root = std::path::Path::new(&args[4])
+            .parent()
+            .unwrap()
+            .join("windows-service-vfs");
+        services::run(&mono, assembly, &root);
+    }
+
     if let Some(sample) = args.get(6) {
         layout::run(&mono, sample);
         let platform = mono.invoke(mono.find("PlatformContract", 0), ptr::null_mut());

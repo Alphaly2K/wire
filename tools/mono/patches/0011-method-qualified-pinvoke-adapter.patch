@@ -1,0 +1,57 @@
+--- a/mono/metadata/native-library.h
++++ b/mono/metadata/native-library.h
+@@ -44,6 +44,13 @@
+     const char     *method_name;
+ } MonoQCallFunc;
+ 
++/* wire prototype: bind a precompiled typed entry for this exact method.
++ * 0 delegates to the normal loader, 1 binds a non-null target, -1 rejects.
++ * Installed once. Cached targets and the callback must outlive this VM. */
++typedef int (*WirePInvokeAdapter) (MonoMethod *method, const char *scope,
++                                 const char *entry, guint32 flags, gpointer *target);
++MONO_API int wire_mono_install_pinvoke_adapter (guint32 version, WirePInvokeAdapter adapter);
++
+ typedef void * (*PInvokeOverrideFn) (const char *libraryName, const char *entrypointName);
+ 
+ void
+--- a/mono/metadata/native-library.c
++++ b/mono/metadata/native-library.c
+@@ -62,6 +62,17 @@
+ static MonoDl *internal_module; // used when pinvoking `__Internal`
+ 
+ static PInvokeOverrideFn pinvoke_override;
++static gpointer volatile wire_pinvoke_adapter;
++
++int
++wire_mono_install_pinvoke_adapter (guint32 version, WirePInvokeAdapter adapter)
++{
++	if (version != 1 || !adapter)
++		return -1;
++	/* Immutable after installation, including across domain reloads. */
++	return mono_atomic_cas_ptr (&wire_pinvoke_adapter, (gpointer)adapter, NULL) == NULL ? 0 : -1;
++}
++
+ 
+ // Did we initialize the temporary directory for dynamic libraries
+ // FIXME: this is racy
+@@ -1372,6 +1383,20 @@
+ 		orig_scope = mono_metadata_string_heap (image, scope_token);
+ 	}
+ 
++	WirePInvokeAdapter wire_adapter = (WirePInvokeAdapter)mono_atomic_load_ptr (&wire_pinvoke_adapter);
++	if (wire_adapter) {
++		int handled = wire_adapter (method, orig_scope, orig_import, piinfo->piflags, &addr);
++		if (handled != 0) {
++			if (handled == 1 && addr) {
++				piinfo->addr = addr;
++				return addr;
++			}
++			status_out->err_code = LOOKUP_PINVOKE_ERR_NO_SYM;
++			status_out->err_arg = g_strdup (orig_import);
++			return NULL;
++		}
++	}
++
+ #ifndef DISABLE_DLLMAP
+ 	// FIXME: The dllmap remaps System.Native to mono-native
+ 	mono_dllmap_lookup (image, orig_scope, orig_import, &new_scope, &new_import);

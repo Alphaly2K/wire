@@ -73,9 +73,13 @@ Runtime64队列、guest SEH、domain unload、finalizer→guest或任意nested c
 仅登记真实对象的特定不可变字段、scalar payload与所需metadata字节；不暴露
 整个宿主metadata页。候选的全部vtable/class/metadata和Unity生命周期仍未匹配。
 
-## 已确认的下一阶段阻塞
+## 本阶段记录的阻塞（后续已有部分解决）
 
-使用游戏真实类库的系统契约探测得到：
+本节是该阶段的历史结果。后续修复了BDWGC interpreter roots，并通过typed Windows文件查询
+和FileStream子集；MSVC MonoClass位字段ABI也已有显式opt-in探测。最新证据与仍未完成的契约
+见[服务与GC记录](native-mono-services-and-gc-2026-10-09.md)。游戏后端仍未接入。
+
+使用游戏真实类库的系统契约探测当时得到：
 
 ```text
 platform=Unix
