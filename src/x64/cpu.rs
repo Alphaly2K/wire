@@ -298,7 +298,7 @@ impl Cpu64 {
             let mut decoder = Decoder::with_ip(64, &bytes[..n], self.rip, DecoderOptions::NONE);
             let i = decoder.decode();
             if !i.is_invalid() {
-                mem.cache_instruction(i);
+                mem.cache_instruction(i, &bytes[..i.len()]);
                 return Ok(i);
             }
             if decoder.last_error() != DecoderError::NoMoreBytes {
@@ -312,6 +312,66 @@ impl Cpu64 {
             return Ok(());
         }
         self.step_fallback(mem)
+    }
+    /// Budgeted execution can group safe REP elements; step() remains exactly
+    /// one work unit so existing fault/restart users retain their contract.
+    pub fn step_bounded(&mut self, mem: &mut Memory, remaining: u64) -> Result<u64, String> {
+        if remaining == 0 {
+            return Ok(0);
+        }
+        let before = self.work;
+        self.step_with_budget(mem, remaining)?;
+        Ok(self.work - before)
+    }
+    #[inline(always)]
+    pub fn step_with_budget(&mut self, mem: &mut Memory, remaining: u64) -> Result<(), String> {
+        self.step_with_budget_guarded(mem, remaining, |_, _| true)
+    }
+    /// The predicate rejects a segment containing an externally observed PC.
+    /// Single steps still execute when a segment is rejected.
+    #[inline(always)]
+    pub fn step_with_budget_guarded(
+        &mut self,
+        mem: &mut Memory,
+        remaining: u64,
+        allowed: impl FnMut(u64, u64) -> bool,
+    ) -> Result<(), String> {
+        if remaining != 0 && !self.step_cached_guarded(mem, remaining, allowed)? {
+            self.step_fallback(mem)?;
+        }
+        Ok(())
+    }
+    #[inline(always)]
+    pub(crate) fn step_cached_guarded(
+        &mut self,
+        mem: &mut Memory,
+        remaining: u64,
+        allowed: impl FnMut(u64, u64) -> bool,
+    ) -> Result<bool, String> {
+        if let Some(ir) = mem.cached_ir(self.rip)? {
+            if ir.is_scalar() {
+                if ir.register_only() && mem.try_register_segment(self, remaining, allowed) {
+                    return Ok(true);
+                }
+                ir.step_scalar(self, mem)?;
+                mem.record_execution(true);
+            } else {
+                self.step_cached_extended(ir, mem, remaining)?;
+            }
+            return Ok(true);
+        }
+        Ok(false)
+    }
+    #[inline(never)]
+    fn step_cached_extended(
+        &mut self,
+        ir: ir::ScalarIr,
+        mem: &mut Memory,
+        remaining: u64,
+    ) -> Result<(), String> {
+        let work = ir.step_bounded(self, mem, remaining)?;
+        mem.record_executions(true, work);
+        Ok(())
     }
     #[inline(always)]
     pub(crate) fn step_cached(&mut self, mem: &mut Memory) -> Result<bool, String> {
@@ -385,6 +445,7 @@ impl Cpu64 {
         next.work += 1;
         *self = next;
         mem.record_execution(false);
+        mem.record_fallback(&i);
         Ok(())
     }
     fn execute_string(&mut self, i: &Instruction, mem: &mut Memory) -> Result<bool, String> {
@@ -2105,20 +2166,27 @@ impl Cpu64 {
         if count > 16 {
             return Err("AMD64 gateway argument limit".into());
         }
-        (0..count)
-            .map(|i| {
-                if i < 4 {
-                    Ok(self.regs[[1, 2, 8, 9][i]])
-                } else {
-                    mem.read_int(
-                        self.regs[4]
-                            .checked_add(40 + (i as u64 - 4) * 8)
-                            .ok_or("AMD64 argument overflow")?,
-                        8,
-                    )
-                }
-            })
-            .collect()
+        let mut values = vec![0; count];
+        self.arguments_into(mem, &mut values)?;
+        Ok(values)
+    }
+    pub(crate) fn arguments_into(&self, mem: &Memory, values: &mut [u64]) -> Result<(), String> {
+        if values.len() > 16 {
+            return Err("AMD64 gateway argument limit".into());
+        }
+        for (i, value) in values.iter_mut().enumerate() {
+            *value = if i < 4 {
+                self.regs[[1, 2, 8, 9][i]]
+            } else {
+                mem.read_int(
+                    self.regs[4]
+                        .checked_add(40 + (i as u64 - 4) * 8)
+                        .ok_or("AMD64 argument overflow")?,
+                    8,
+                )?
+            };
+        }
+        Ok(())
     }
     /// Callee pops only return address; caller owns shadow space/stack arguments.
     pub fn return_integer(&mut self, mem: &Memory, value: u64) -> Result<(), String> {
