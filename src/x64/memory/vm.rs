@@ -208,6 +208,7 @@ impl Memory {
                         data: Box::new([0; 4096]),
                         permissions,
                         protection: Cell::new(protection),
+                        generation: 0,
                     },
                 );
             }

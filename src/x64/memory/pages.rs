@@ -71,6 +71,7 @@ impl Pages {
             .map(|(_, page)| page)
     }
 
+    #[inline(always)]
     pub(super) fn get_mut(&mut self, address: &u64) -> Option<&mut Page> {
         let index = self.slot(address)?;
         self.slots[index].as_mut().map(|(_, page)| page)
@@ -123,6 +124,9 @@ impl Pages {
 
     pub(super) fn values(&self) -> impl Iterator<Item = &Page> {
         self.slots.iter().flatten().map(|(_, page)| page)
+    }
+    pub(super) fn values_mut(&mut self) -> impl Iterator<Item = &mut Page> {
+        self.slots.iter_mut().flatten().map(|(_, page)| page)
     }
 
     pub(super) fn into_entries(self) -> impl Iterator<Item = (u64, Page)> {

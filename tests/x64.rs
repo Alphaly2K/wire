@@ -2165,6 +2165,57 @@ fn win64_gateway_dispatch_preserves_custom_addresses_and_executes_guest_gaps() {
         assert_eq!(process.cpu.retired, retired);
         assert_eq!(process.runtime.api_calls, calls + 1);
     }
+    // A warmed register segment may approach a custom gateway, but must not
+    // execute the instruction bytes registered at that interior address.
+    process
+        .memory
+        .protect(BASE + 0x1000, 4096, READ | WRITE | EXECUTE)
+        .unwrap();
+    process.memory.write(first - 8, &[0x90; 24]).unwrap();
+    process
+        .memory
+        .protect(BASE + 0x1000, 4096, READ | EXECUTE)
+        .unwrap();
+    process.cpu.rip = first - 8;
+    process.cpu.regs[4] = rsp;
+    process.cpu.rip = first;
+    process.cpu.decode(&process.memory).unwrap();
+    process.cpu.rip = first - 8;
+    process.cpu.decode(&process.memory).unwrap();
+    process.memory.write_int(rsp, 8, first + 16).unwrap();
+    let retired = process.cpu.retired;
+    let calls = process.runtime.api_calls;
+    assert_eq!(process.run(process.cpu.work + 9).unwrap(), Outcome::Budget);
+    assert_eq!(process.cpu.retired, retired + 8);
+    assert_eq!(process.runtime.api_calls, calls + 1);
+    assert_eq!(process.cpu.rip, first + 16);
+    // A linked target can equal both ends of a singleton gateway envelope.
+    // The preceding sixteen NOPs may be grouped, but the warmed target's
+    // bytes must never execute in place of the registered API.
+    process.runtime.gateways =
+        std::collections::BTreeMap::from([(first, "kernel32.dll!GetCurrentThreadId".into())])
+            .into();
+    process
+        .memory
+        .protect(BASE + 0x1000, 4096, READ | WRITE | EXECUTE)
+        .unwrap();
+    process.memory.write(first - 16, &[0x90; 32]).unwrap();
+    process
+        .memory
+        .protect(BASE + 0x1000, 4096, READ | EXECUTE)
+        .unwrap();
+    process.cpu.rip = first;
+    process.cpu.decode(&process.memory).unwrap();
+    process.cpu.rip = first - 16;
+    process.cpu.decode(&process.memory).unwrap();
+    process.cpu.regs[4] = rsp;
+    process.memory.write_int(rsp, 8, first + 16).unwrap();
+    let retired = process.cpu.retired;
+    let calls = process.runtime.api_calls;
+    assert_eq!(process.run(process.cpu.work + 17).unwrap(), Outcome::Budget);
+    assert_eq!(process.cpu.retired, retired + 16);
+    assert_eq!(process.runtime.api_calls, calls + 1);
+    assert_eq!(process.cpu.rip, first + 16);
     std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
