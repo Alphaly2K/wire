@@ -42,6 +42,19 @@ typedef struct WireBufferBinding {
   uint32_t set, binding;
   void *buffer;
 } WireBufferBinding;
+typedef struct WireTextureDesc { uint32_t width,height,mips,layers,format,bind; } WireTextureDesc;
+WIRE_GPU_EXPORT void *wire_gpu_texture_create(void *gpu, const WireTextureDesc *desc, char *error, size_t capacity);
+WIRE_GPU_EXPORT void wire_gpu_texture_free(void *texture);
+typedef struct WireTextureCopy {uint32_t dst_sub,src_sub,x,y,left,top,right,bottom;} WireTextureCopy;
+WIRE_GPU_EXPORT int wire_gpu_texture_copy(void *dst,void *src,const WireTextureCopy *region,char *error,size_t capacity);
+WIRE_GPU_EXPORT int wire_gpu_texture_write(void *texture, uint32_t subresource, const uint8_t *data,
+    size_t size, char *error, size_t capacity);
+WIRE_GPU_EXPORT int wire_gpu_texture_read(void *texture, uint32_t subresource, uint8_t *data,
+    size_t size, char *error, size_t capacity);
+typedef struct WireImageViewDesc {uint32_t format,mip,mips,layer,layers,kind;} WireImageViewDesc;
+WIRE_GPU_EXPORT void *wire_gpu_image_view_create(void *texture,const WireImageViewDesc *desc,char *error,size_t capacity);
+WIRE_GPU_EXPORT void wire_gpu_image_view_free(void *view);
+WIRE_GPU_EXPORT int wire_gpu_image_view_clear(void *view,const float *rgba,char *error,size_t capacity);
 /* Owned host buffers: usage bit 1=CBV, 2=storage, 4=vertex, 8=index.
    Calls are serialized, and every submitted operation waits for completion.
    Buffer handles retain their context in the Rust owner. Initial data is copied. */
@@ -52,7 +65,15 @@ WIRE_GPU_EXPORT int wire_gpu_buffer_write(void *buffer, size_t offset, const uin
     size_t size, char *error, size_t capacity);
 WIRE_GPU_EXPORT int wire_gpu_buffer_read(void *buffer, size_t offset, uint8_t *data,
     size_t size, char *error, size_t capacity);
+WIRE_GPU_EXPORT void *wire_gpu_buffer_view_create(void *buffer,uint32_t format,size_t offset,size_t size,char *error,size_t capacity);
+WIRE_GPU_EXPORT void wire_gpu_buffer_view_free(void *view);
 WIRE_GPU_EXPORT uint32_t wire_gpu_abi(void);
+/* Native format capabilities, intersected with the bridge's implemented scope.
+   DXGI format in, D3D11_FORMAT_SUPPORT mask out; zero means unsupported. */
+WIRE_GPU_EXPORT uint32_t wire_gpu_format_support(void *gpu, uint32_t format);
+/* Fence-completed queue timestamp. Frequency derives from timestampPeriod. */
+WIRE_GPU_EXPORT int wire_gpu_timestamp(void *gpu, uint64_t *ticks, uint64_t *frequency,
+    char *error, size_t capacity);
 WIRE_GPU_EXPORT void *wire_gpu_open(const char *library, WireGpuInfo *info, char *error, size_t capacity);
 WIRE_GPU_EXPORT void wire_gpu_close(void *gpu);
 WIRE_GPU_EXPORT void *wire_gpu_compile(void *gpu, const uint8_t *data, size_t size,

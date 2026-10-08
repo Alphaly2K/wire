@@ -1,14 +1,29 @@
 //! Waitable event/semaphore objects with shared names and per-handle access.
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    time::{Duration, Instant},
+};
 const FULL_ACCESS: u32 = 0x1f0003;
 enum State {
-    Event { manual: bool, signaled: bool },
-    Semaphore { count: i32, maximum: i32 },
+    Event {
+        manual: bool,
+        signaled: bool,
+    },
+    Semaphore {
+        count: i32,
+        maximum: i32,
+    },
+    Timer {
+        manual: bool,
+        signaled: bool,
+        due: Option<Instant>,
+        period: Duration,
+    },
 }
 impl State {
     fn ready(&self) -> bool {
         match self {
-            Self::Event { signaled, .. } => *signaled,
+            Self::Event { signaled, .. } | Self::Timer { signaled, .. } => *signaled,
             Self::Semaphore { count, .. } => *count > 0,
         }
     }
@@ -17,9 +32,37 @@ impl State {
             Self::Event {
                 manual: false,
                 signaled,
+            }
+            | Self::Timer {
+                manual: false,
+                signaled,
+                ..
             } => *signaled = false,
             Self::Semaphore { count, .. } => *count -= 1,
             _ => {}
+        }
+    }
+    fn refresh(&mut self, now: Instant) {
+        if let Self::Timer {
+            due,
+            period,
+            signaled,
+            ..
+        } = self
+        {
+            if let Some(deadline) = *due {
+                if now >= deadline {
+                    *signaled = true;
+                    *due = if period.is_zero() {
+                        None
+                    } else {
+                        // Skip elapsed periods; signals are a state, not accumulated credits.
+                        let remaining = period.as_nanos()
+                            - now.duration_since(deadline).as_nanos() % period.as_nanos();
+                        now.checked_add(Duration::from_nanos(remaining as u64))
+                    };
+                }
+            }
         }
     }
 }
@@ -101,7 +144,10 @@ impl Events {
             .find(|(_, event)| event.name == name)
             .map(|(&id, _)| id)
             .ok_or(2u32)?;
-        if matches!(self.objects[&object].state, State::Semaphore { .. }) != semaphore {
+        if !matches!(
+            (&self.objects[&object].state, semaphore),
+            (State::Semaphore { .. }, true) | (State::Event { .. }, false)
+        ) {
             return Err(6);
         }
         self.handle(object, access)
@@ -141,6 +187,95 @@ impl Events {
             },
         );
         Ok((handle, false))
+    }
+    pub fn timer(
+        &mut self,
+        manual: bool,
+        name: Option<String>,
+        access: u32,
+    ) -> Result<(u64, bool), u32> {
+        if access & !FULL_ACCESS != 0 {
+            return Err(5);
+        }
+        let name = Self::name(name)?;
+        if name.is_some() {
+            if let Some((&object, _)) = self.objects.iter().find(|(_, obj)| obj.name == name) {
+                if !matches!(self.objects[&object].state, State::Timer { .. }) {
+                    return Err(6);
+                }
+                return self.handle(object, access).map(|handle| (handle, true));
+            }
+        }
+        let object = self.next;
+        let handle = self.handle(object, access)?;
+        self.objects.insert(
+            object,
+            Object {
+                state: State::Timer {
+                    manual,
+                    signaled: false,
+                    due: None,
+                    period: Duration::ZERO,
+                },
+                name,
+            },
+        );
+        Ok((handle, false))
+    }
+    pub fn open_timer(&mut self, name: String, access: u32) -> Result<u64, u32> {
+        if access & !FULL_ACCESS != 0 {
+            return Err(5);
+        }
+        let name = Self::name(Some(name))?;
+        let object = self
+            .objects
+            .iter()
+            .find(|(_, obj)| obj.name == name)
+            .map(|(&id, _)| id)
+            .ok_or(2u32)?;
+        if !matches!(self.objects[&object].state, State::Timer { .. }) {
+            return Err(6);
+        }
+        self.handle(object, access)
+    }
+    pub fn set_timer(
+        &mut self,
+        handle: u64,
+        deadline: Option<Instant>,
+        period: Duration,
+    ) -> Result<(), u32> {
+        let &(object, access) = self.handles.get(&handle).ok_or(6u32)?;
+        if access & 2 == 0 {
+            return Err(5);
+        }
+        let State::Timer {
+            signaled,
+            due,
+            period: p,
+            ..
+        } = &mut self.objects.get_mut(&object).unwrap().state
+        else {
+            return Err(6);
+        };
+        if let Some(deadline) = deadline {
+            *signaled = false;
+            *due = Some(deadline);
+            *p = period;
+        } else {
+            // CancelWaitableTimer preserves an already signaled state.
+            *due = None;
+            *p = Duration::ZERO;
+        }
+        Ok(())
+    }
+    pub fn next_timer(&self) -> Option<Instant> {
+        self.objects
+            .values()
+            .filter_map(|obj| match obj.state {
+                State::Timer { due, .. } => due,
+                _ => None,
+            })
+            .min()
     }
     pub fn release_count(&self, handle: u64, increment: i32) -> Result<i32, u32> {
         let &(object, access) = self.handles.get(&handle).ok_or(6u32)?;
@@ -183,12 +318,14 @@ impl Events {
     pub fn flags(&self, handle: u64) -> Option<u32> {
         self.handles.contains_key(&handle).then_some(0)
     }
-    pub fn waitable(&self, handle: u64) -> Result<(u64, bool), u32> {
+    pub fn waitable(&mut self, handle: u64) -> Result<(u64, bool), u32> {
         let &(object, access) = self.handles.get(&handle).ok_or(6u32)?;
         if access & 0x100000 == 0 {
             return Err(5);
         }
-        Ok((object, self.objects[&object].state.ready()))
+        let state = &mut self.objects.get_mut(&object).unwrap().state;
+        state.refresh(Instant::now());
+        Ok((object, state.ready()))
     }
     pub fn close(&mut self, handle: u64) -> bool {
         let Some((object, _)) = self.handles.remove(&handle) else {
@@ -215,6 +352,10 @@ impl Events {
             }
             objects.push(object);
         }
+        let now = Instant::now();
+        for object in &objects {
+            self.objects.get_mut(object).unwrap().state.refresh(now);
+        }
         let selected = if all {
             if !objects.iter().all(|id| self.objects[id].state.ready()) {
                 return Ok(None);
@@ -234,5 +375,32 @@ impl Events {
             self.objects.get_mut(object).unwrap().state.acquire();
         }
         Ok(Some(selected as u64))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn periodic_timer_skips_missed_periods_without_accumulating_signals() {
+        let origin = Instant::now();
+        let period = Duration::from_millis(10);
+        let mut state = State::Timer {
+            manual: false,
+            signaled: false,
+            due: Some(origin + period),
+            period,
+        };
+        state.refresh(origin + Duration::from_millis(45));
+        assert!(state.ready());
+        assert!(
+            matches!(state, State::Timer { due: Some(d), .. } if d == origin + Duration::from_millis(50))
+        );
+        state.acquire();
+        assert!(!state.ready());
+        state.refresh(origin + Duration::from_millis(49));
+        assert!(!state.ready());
+        state.refresh(origin + Duration::from_millis(50));
+        assert!(state.ready());
     }
 }

@@ -22,8 +22,13 @@ pub(super) enum Block {
         handles: Vec<u64>,
         all: bool,
         deadline: Option<Instant>,
+        alertable: bool,
     },
     Sleep(Instant),
+    SleepEx {
+        deadline: Option<Instant>,
+        alertable: bool,
+    },
     Critical(u64),
     Srw(u64, bool),
     Once(u64),
@@ -39,6 +44,8 @@ pub(super) struct Thread {
     pub winrt_refs: u32,
     pub resources: Option<(u64, u64, Vec<u64>)>,
     pub description: String,
+    pub apcs: std::collections::VecDeque<(u64, u64)>,
+    pub error_mode: u32,
 }
 pub(super) struct Threads {
     pub entries: BTreeMap<u64, Thread>,
@@ -68,6 +75,8 @@ impl Threads {
                     winrt_refs: 0,
                     resources: None,
                     description: String::new(),
+                    apcs: Default::default(),
+                    error_mode: 0,
                 },
             )]),
             handles: BTreeMap::new(),
@@ -226,6 +235,13 @@ impl Runtime64 {
         Ok(match &block {
             None => true,
             Some(Block::Sleep(deadline)) => Instant::now() >= *deadline,
+            Some(Block::SleepEx {
+                deadline,
+                alertable,
+            }) => {
+                (*alertable && !self.threads.entries[&id].apcs.is_empty())
+                    || deadline.is_some_and(|d| Instant::now() >= d)
+            }
             Some(Block::Address {
                 notified, deadline, ..
             }) => *notified || deadline.is_some_and(|d| Instant::now() >= d),
@@ -233,8 +249,10 @@ impl Runtime64 {
                 handles,
                 all,
                 deadline,
+                alertable,
             }) => {
-                deadline.is_some_and(|d| Instant::now() >= d)
+                (*alertable && !self.threads.entries[&id].apcs.is_empty())
+                    || deadline.is_some_and(|d| Instant::now() >= d)
                     || !matches!(self.wait_objects(handles, *all, false), Ok(None))
             }
             Some(Block::Critical(ptr)) => {
@@ -258,11 +276,15 @@ impl Runtime64 {
                     deadline: Some(d), ..
                 })
                 | Some(Block::Sleep(d))
+                | Some(Block::SleepEx {
+                    deadline: Some(d), ..
+                })
                 | Some(Block::Wait {
                     deadline: Some(d), ..
                 }) => Some(*d),
                 _ => None,
             })
+            .chain(self.events.next_timer())
             .min()
             .map(|d| {
                 d.saturating_duration_since(Instant::now())
@@ -443,6 +465,8 @@ impl Runtime64 {
                 winrt_refs: 0,
                 resources: Some((stack, size, tls_blocks)),
                 description: String::new(),
+                apcs: Default::default(),
+                error_mode: self.error_mode,
             },
         );
         self.threads.handles.insert(handle, id);

@@ -498,6 +498,24 @@ impl Cpu64 {
         let mut flags = 0;
         let a = self.simd_input(F::from_bits(a as u128), &mut flags);
         let b = self.simd_input(F::from_bits(b as u128), &mut flags);
+        if matches!(
+            mnemonic,
+            M::Minss | M::Minsd | M::Minps | M::Minpd | M::Maxss | M::Maxsd | M::Maxps | M::Maxpd
+        ) {
+            // Legacy SSE selects operand 2 for unordered or equal inputs, including
+            // opposite signed zeros. NaN payload/signaling bits are passed through.
+            if a.is_nan() || b.is_nan() {
+                flags = 1;
+            }
+            self.simd_accept(Status::OK.and(F::ZERO), flags, simd_exception)?;
+            let min = matches!(mnemonic, M::Minss | M::Minsd | M::Minps | M::Minpd);
+            let selected = if (min && a < b) || (!min && a > b) {
+                a
+            } else {
+                b
+            };
+            return Ok(selected.to_bits() as u64);
+        }
         let round = self.simd_round();
         if flags & 2 != 0 && self.mxcsr & (1 << 8) == 0 && !a.is_nan() && !b.is_nan() {
             self.simd_accept(Status::OK.and(F::ZERO), flags, simd_exception)?;
@@ -522,6 +540,37 @@ impl Cpu64 {
             result.value = F::NAN.copy_sign(-F::ZERO);
         }
         Ok(self.simd_accept(result, flags, simd_exception)?.to_bits() as u64)
+    }
+    fn simd_predicate<F: Float>(
+        &mut self,
+        a: u64,
+        b: u64,
+        predicate: u8,
+        simd_exception: &mut bool,
+    ) -> Result<bool, String> {
+        let mut flags = 0;
+        let a = self.simd_input(F::from_bits(a as u128), &mut flags);
+        let b = self.simd_input(F::from_bits(b as u128), &mut flags);
+        let unordered = a.is_nan() || b.is_nan();
+        let p = predicate & 7;
+        if unordered {
+            flags = if a.is_signaling() || b.is_signaling() || matches!(p, 1 | 2 | 5 | 6) {
+                1
+            } else {
+                0
+            };
+        }
+        self.simd_accept(Status::OK.and(F::ZERO), flags, simd_exception)?;
+        Ok(match p {
+            0 => a == b,
+            1 => a < b,
+            2 => a <= b,
+            3 => unordered,
+            4 => a != b,
+            5 => unordered || a >= b,
+            6 => unordered || a > b,
+            _ => !unordered,
+        })
     }
     fn simd_compare<F: Float>(
         &mut self,
@@ -925,6 +974,19 @@ impl Cpu64 {
                 };
                 self.write(i, 0, value, mem)?;
             }
+            M::Movmskps | M::Movmskpd => {
+                let source = self.vector_read(i, 1, mem, 16)?;
+                let lane = match i.mnemonic() {
+                    M::Movmskps => 4,
+                    M::Movmskpd => 8,
+                    _ => 1,
+                };
+                let mut value = 0;
+                for n in 0..16 / lane {
+                    value |= ((source[(n + 1) * lane - 1] >> 7) as u64) << n;
+                }
+                self.write(i, 0, value, mem)?;
+            }
             M::Addss
             | M::Addsd
             | M::Subss
@@ -940,7 +1002,19 @@ impl Cpu64 {
             | M::Mulps
             | M::Mulpd
             | M::Divps
-            | M::Divpd => {
+            | M::Divpd
+            | M::Minss
+            | M::Minsd
+            | M::Minps
+            | M::Minpd
+            | M::Maxss
+            | M::Maxsd
+            | M::Maxps
+            | M::Maxpd
+            | M::Cmpps
+            | M::Cmppd
+            | M::Cmpss
+            | M::Cmpsd => {
                 let packed = matches!(
                     i.mnemonic(),
                     M::Addps
@@ -951,6 +1025,12 @@ impl Cpu64 {
                         | M::Mulpd
                         | M::Divps
                         | M::Divpd
+                        | M::Minps
+                        | M::Minpd
+                        | M::Maxps
+                        | M::Maxpd
+                        | M::Cmpps
+                        | M::Cmppd
                 );
                 let size = if matches!(
                     i.mnemonic(),
@@ -962,6 +1042,12 @@ impl Cpu64 {
                         | M::Subps
                         | M::Mulps
                         | M::Divps
+                        | M::Minss
+                        | M::Minps
+                        | M::Maxss
+                        | M::Maxps
+                        | M::Cmpps
+                        | M::Cmpss
                 ) {
                     4
                 } else {
@@ -980,21 +1066,39 @@ impl Cpu64 {
                     let mut bv = [0; 8];
                     av[..size].copy_from_slice(&a[n..n + size]);
                     bv[..size].copy_from_slice(&b[n..n + size]);
-                    let result = if size == 4 {
-                        self.simd_arithmetic::<Single>(
-                            i.mnemonic(),
-                            u64::from_le_bytes(av),
-                            u64::from_le_bytes(bv),
-                            simd_exception,
-                        )
-                    } else {
-                        self.simd_arithmetic::<Double>(
-                            i.mnemonic(),
-                            u64::from_le_bytes(av),
-                            u64::from_le_bytes(bv),
-                            simd_exception,
-                        )
-                    };
+                    let result =
+                        if matches!(i.mnemonic(), M::Cmpps | M::Cmppd | M::Cmpss | M::Cmpsd) {
+                            let result = if size == 4 {
+                                self.simd_predicate::<Single>(
+                                    u64::from_le_bytes(av),
+                                    u64::from_le_bytes(bv),
+                                    i.immediate8(),
+                                    simd_exception,
+                                )
+                            } else {
+                                self.simd_predicate::<Double>(
+                                    u64::from_le_bytes(av),
+                                    u64::from_le_bytes(bv),
+                                    i.immediate8(),
+                                    simd_exception,
+                                )
+                            };
+                            result.map(|p| if p { u64::MAX } else { 0 })
+                        } else if size == 4 {
+                            self.simd_arithmetic::<Single>(
+                                i.mnemonic(),
+                                u64::from_le_bytes(av),
+                                u64::from_le_bytes(bv),
+                                simd_exception,
+                            )
+                        } else {
+                            self.simd_arithmetic::<Double>(
+                                i.mnemonic(),
+                                u64::from_le_bytes(av),
+                                u64::from_le_bytes(bv),
+                                simd_exception,
+                            )
+                        };
                     // Accrue every lane's exceptions before delivering a packed #XM.
                     match result {
                         Ok(result) => {
@@ -1597,6 +1701,36 @@ impl Cpu64 {
                     }
                 };
                 self.write(i, 0, value, mem)?;
+            }
+            M::Rcl | M::Rcr => {
+                let bits = Self::width(i, 0)?;
+                let value = self.read(i, 0, mem)? & mask(bits);
+                let masked = (self.read(i, 1, mem)? & if bits == 64 { 63 } else { 31 }) as u32;
+                let n = masked % (bits + 1);
+                let extended = value as u128 | ((self.rflags & CF) as u128) << bits;
+                let m = (1u128 << (bits + 1)) - 1;
+                let rotated = if n == 0 {
+                    extended
+                } else if i.mnemonic() == M::Rcl {
+                    ((extended << n) | (extended >> (bits + 1 - n))) & m
+                } else {
+                    ((extended >> n) | (extended << (bits + 1 - n))) & m
+                };
+                let result = (rotated as u64) & mask(bits);
+                if n != 0 {
+                    let carry = (rotated >> bits) as u64 & 1;
+                    self.rflags = (self.rflags & !CF) | carry;
+                    if masked == 1 {
+                        let sign = result >> (bits - 1) & 1;
+                        let of = if i.mnemonic() == M::Rcl {
+                            sign ^ carry
+                        } else {
+                            sign ^ (result >> (bits - 2) & 1)
+                        };
+                        self.rflags = (self.rflags & !OF) | (of << 11);
+                    }
+                }
+                self.write(i, 0, result, mem)?;
             }
             M::Shl | M::Sal | M::Shr | M::Sar | M::Rol | M::Ror => {
                 let bits = Self::width(i, 0)?;

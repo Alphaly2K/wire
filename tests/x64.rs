@@ -329,6 +329,477 @@ fn startup_call(
 ) -> u64 {
     startup_dll_call(mem, cpu, runtime, "KERNEL32.dll", name, args)
 }
+#[test]
+fn win64_get_proc_address_null_module_resolves_main_and_missing_exports_return_null() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let symbol = STACK + 0x200;
+    mem.write(symbol, b"Exported\0").unwrap();
+    let mut exports = wire::x64::pe::Exports64::default();
+    exports.names.insert("Exported".into(), BASE + 0x2345);
+    exports.ordinals.insert(7, BASE + 0x2345);
+    runtime.register_module("probe.exe", BASE, exports);
+    for module in [0, BASE] {
+        for name in [symbol, 7] {
+            assert_eq!(
+                startup_call(
+                    &mut mem,
+                    &mut cpu,
+                    &mut runtime,
+                    "GetProcAddress",
+                    &[module, name]
+                ),
+                BASE + 0x2345
+            );
+        }
+    }
+    for (module, error) in [(0, 127), (BASE, 127), (0x123456780, 126)] {
+        assert_eq!(
+            startup_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "GetProcAddress",
+                &[module, 8]
+            ),
+            0
+        );
+        assert_eq!(
+            startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+            error
+        );
+    }
+}
+
+#[test]
+fn win64_com_missing_factory_and_multimedia_timer_reference_balance() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let data = STACK + 0x200;
+    mem.write(data, &[0x55; 40]).unwrap();
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "ole32.dll",
+            "CoCreateInstance",
+            &[data, 0, 1, data + 16, data + 32]
+        ),
+        0x800401f0
+    );
+    assert_eq!(mem.read_int(data + 32, 8).unwrap(), 0);
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "ole32.dll",
+            "CoInitializeEx",
+            &[0, 0]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "ole32.dll",
+            "CoCreateInstance",
+            &[data, 0, 1, data + 16, data + 32]
+        ),
+        0x80040154
+    );
+    for (name, period, expected) in [
+        ("timeEndPeriod", 1, 97),
+        ("timeBeginPeriod", 0, 97),
+        ("timeBeginPeriod", 1, 0),
+        ("timeBeginPeriod", 1, 0),
+        ("timeEndPeriod", 1, 0),
+        ("timeEndPeriod", 1, 0),
+        ("timeEndPeriod", 1, 97),
+    ] {
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "winmm.dll",
+                name,
+                &[period]
+            ),
+            expected
+        );
+    }
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "winmm.dll",
+            "timeGetDevCaps",
+            &[data, 8]
+        ),
+        0
+    );
+    assert_eq!(mem.read_int(data, 4).unwrap(), 1);
+    assert_eq!(mem.read_int(data + 4, 4).unwrap(), u32::MAX as u64);
+}
+#[test]
+fn win64_waitable_timers_reset_consume_cancel_and_share_named_object_identity() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let data = STACK + 0x200;
+    mem.write(data, &[0; 8]).unwrap();
+    mem.write(
+        data + 16,
+        &"Timer\0"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    for manual in [0, 1] {
+        let h = startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "CreateWaitableTimerExW",
+            &[0, 0, manual, 0x1f0003],
+        );
+        assert_ne!(h, 0);
+        assert_eq!(
+            startup_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "WaitForSingleObject",
+                &[h, 0]
+            ),
+            258
+        );
+        assert_eq!(
+            startup_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "SetWaitableTimer",
+                &[h, data, 0, 0, 0, 0]
+            ),
+            1
+        );
+        assert_eq!(
+            startup_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "WaitForSingleObject",
+                &[h, 0]
+            ),
+            0
+        );
+        assert_eq!(
+            startup_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "CancelWaitableTimer",
+                &[h]
+            ),
+            1
+        );
+        assert_eq!(
+            startup_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "WaitForSingleObject",
+                &[h, 0]
+            ),
+            if manual != 0 { 0 } else { 258 }
+        );
+        mem.write_int(data, 8, (-100_000_000i64) as u64).unwrap();
+        assert_eq!(
+            startup_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "SetWaitableTimer",
+                &[h, data, 0, 0, 0, 0]
+            ),
+            1
+        );
+        assert_eq!(
+            startup_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "WaitForSingleObject",
+                &[h, 0]
+            ),
+            258
+        );
+        assert_eq!(
+            startup_call(&mut mem, &mut cpu, &mut runtime, "CloseHandle", &[h]),
+            1
+        );
+        mem.write_int(data, 8, 0).unwrap();
+    }
+    let h = startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "CreateWaitableTimerW",
+        &[0, 0, data + 16],
+    );
+    let alias = startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "OpenWaitableTimerW",
+        &[0x100000, 0, data + 16],
+    );
+    assert_ne!(alias, 0);
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "SetWaitableTimer",
+            &[alias, data, 0, 0, 0, 0]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        5
+    );
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "SetWaitableTimer",
+            &[h, data, 0, 0, 0, 0]
+        ),
+        1
+    );
+    mem.write_int(data + 64, 8, h).unwrap();
+    mem.write_int(data + 72, 8, alias).unwrap();
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "WaitForMultipleObjects",
+            &[2, data + 64, 1, 0]
+        ),
+        u32::MAX as u64
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        87
+    );
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "WaitForSingleObject",
+            &[alias, 0]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "WaitForSingleObject",
+            &[h, 0]
+        ),
+        258
+    );
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "CreateEventW",
+            &[0, 0, 0, data + 16]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        6
+    );
+}
+#[test]
+fn amd64_suspended_thread_context_reads_saved_guest_registers_across_single_step_budgets() {
+    use wire::x64::process::{Outcome, Process64};
+    const CODE: u64 = 0x590000000;
+    const WORKER: u64 = CODE + 4096;
+    const DATA: u64 = CODE + 8192;
+    fn mov(code: &mut Vec<u8>, register: u8, value: u64) {
+        code.extend([0x48 | (register >> 3), 0xb8 | (register & 7)]);
+        code.extend(value.to_le_bytes());
+    }
+    fn call(p: &mut Process64, code: &mut Vec<u8>, name: &str, args: &[u64]) {
+        for (n, &value) in args.iter().enumerate() {
+            mov(code, if n < 4 { [1, 2, 8, 9][n] } else { 0 }, value);
+            if n >= 4 {
+                code.extend([0x48, 0x89, 0x44, 0x24, 32 + (n as u8 - 4) * 8]);
+            }
+        }
+        mov(code, 0, p.runtime.register("kernel32.dll", name));
+        code.extend([0xff, 0xd0]);
+    }
+    let path =
+        std::env::temp_dir().join(format!("wire-thread-context64-{}.exe", std::process::id()));
+    std::fs::write(&path, fixture()).unwrap();
+    let mut p = Process64::load(&path, false).unwrap();
+    p.memory
+        .map(CODE, 3 * 4096, READ | WRITE | EXECUTE)
+        .unwrap();
+    let parameter = 0x8877665544332211;
+    let magic = 0x123456789abcdef0;
+    for offset in [0, 1536] {
+        p.memory.write(DATA + offset, &[0xaa; 1232]).unwrap();
+        p.memory.write_int(DATA + offset + 48, 4, 0x100003).unwrap();
+    }
+    let mut main = vec![0x48, 0x83, 0xec, 0x38];
+    call(
+        &mut p,
+        &mut main,
+        "CreateThread",
+        &[0, 0, WORKER, parameter, 4, 0],
+    );
+    main.extend([0x49, 0x89, 0xc4, 0x4c, 0x89, 0xe1]); // r12=handle, rcx=r12
+    mov(&mut main, 2, DATA);
+    call(&mut p, &mut main, "GetThreadContext", &[]);
+    mov(&mut main, 7, DATA + 3072);
+    main.extend([0x48, 0x89, 0x07, 0x4c, 0x89, 0xe1]);
+    call(&mut p, &mut main, "ResumeThread", &[]);
+    call(&mut p, &mut main, "SwitchToThread", &[]);
+    main.extend([0x4c, 0x89, 0xe1]);
+    call(&mut p, &mut main, "SuspendThread", &[]);
+    main.extend([0x4c, 0x89, 0xe1]);
+    mov(&mut main, 2, DATA + 1536);
+    call(&mut p, &mut main, "GetThreadContext", &[]);
+    main.extend([0x48, 0x83, 0xc4, 0x38, 0xc3]);
+    p.memory.write(CODE, &main).unwrap();
+    let mut worker = Vec::new();
+    mov(&mut worker, 13, magic);
+    worker.extend([0xeb, 0xfe]);
+    p.memory.write(WORKER, &worker).unwrap();
+    p.cpu.rip = CODE;
+    loop {
+        match p.run(p.cpu.work + 1).unwrap() {
+            Outcome::Budget => assert!(p.cpu.work < 20000),
+            result => {
+                assert_eq!(result, Outcome::Returned(1));
+                break;
+            }
+        }
+    }
+    assert_eq!(p.memory.read_int(DATA + 3072, 8).unwrap(), 1);
+    assert_eq!(p.memory.read_int(DATA + 128, 8).unwrap(), parameter);
+    assert_eq!(p.memory.read_int(DATA + 248, 8).unwrap(), WORKER);
+    assert_eq!(p.memory.read_int(DATA + 1536 + 224, 8).unwrap(), magic); // r13
+    assert_eq!(
+        p.memory.read_int(DATA + 1536 + 248, 8).unwrap(),
+        WORKER + 10
+    );
+    assert_eq!(
+        p.memory.read_int(DATA + 1536 + 256, 8).unwrap(),
+        0xaaaaaaaaaaaaaaaa
+    );
+    assert_eq!(
+        p.memory.read_int(DATA + 1536, 8).unwrap(),
+        0xaaaaaaaaaaaaaaaa
+    );
+    std::fs::remove_file(path).unwrap();
+}
+#[test]
+fn amd64_user_apc_wakes_alertable_target_and_preserves_64_bit_parameter_and_return() {
+    use wire::x64::process::{Outcome, Process64};
+    const CODE: u64 = 0x5a0000000;
+    const WORKER: u64 = CODE + 4096;
+    const CALLBACK: u64 = WORKER + 256;
+    const DATA: u64 = CODE + 8192;
+    fn mov(code: &mut Vec<u8>, register: u8, value: u64) {
+        code.extend([0x48 | (register >> 3), 0xb8 | (register & 7)]);
+        code.extend(value.to_le_bytes());
+    }
+    fn call(p: &mut Process64, code: &mut Vec<u8>, name: &str, args: &[u64]) {
+        for (n, &value) in args.iter().enumerate() {
+            mov(code, if n < 4 { [1, 2, 8, 9][n] } else { 0 }, value);
+            if n >= 4 {
+                code.extend([0x48, 0x89, 0x44, 0x24, 32 + (n as u8 - 4) * 8]);
+            }
+        }
+        mov(code, 0, p.runtime.register("kernel32.dll", name));
+        code.extend([0xff, 0xd0]);
+    }
+    let path = std::env::temp_dir().join(format!("wire-apc64-{}.exe", std::process::id()));
+    std::fs::write(&path, fixture()).unwrap();
+    let mut p = Process64::load(&path, false).unwrap();
+    p.memory
+        .map(CODE, 3 * 4096, READ | WRITE | EXECUTE)
+        .unwrap();
+    let mut main = vec![0x48, 0x83, 0xec, 0x38];
+    call(&mut p, &mut main, "SetErrorMode", &[1]);
+    call(&mut p, &mut main, "CreateThread", &[0, 0, WORKER, 0, 4, 0]);
+    main.extend([0x49, 0x89, 0xc4, 0x4c, 0x89, 0xe1]);
+    call(&mut p, &mut main, "ResumeThread", &[]);
+    call(&mut p, &mut main, "SwitchToThread", &[]);
+    mov(&mut main, 1, CALLBACK);
+    main.extend([0x4c, 0x89, 0xe2]); // rdx=r12 target thread
+    mov(&mut main, 8, 0x8877665544332211);
+    call(&mut p, &mut main, "QueueUserAPC", &[]);
+    main.extend([0x4c, 0x89, 0xe1]);
+    mov(&mut main, 2, u32::MAX as u64);
+    call(&mut p, &mut main, "WaitForSingleObject", &[]);
+    call(&mut p, &mut main, "GetThreadErrorMode", &[]);
+    main.extend([0x48, 0x83, 0xc4, 0x38, 0xc3]);
+    p.memory.write(CODE, &main).unwrap();
+    let mut worker = vec![0x48, 0x83, 0xec, 0x28];
+    call(&mut p, &mut worker, "GetThreadErrorMode", &[]);
+    mov(&mut worker, 7, DATA + 24);
+    worker.extend([0x48, 0x89, 0x07]);
+    call(&mut p, &mut worker, "SetThreadErrorMode", &[0x8000, 0]);
+    call(&mut p, &mut worker, "SleepEx", &[u32::MAX as u64, 1]);
+    mov(&mut worker, 7, DATA + 16);
+    worker.extend([0x48, 0x89, 0x07, 0x48, 0x83, 0xc4, 0x28, 0xc3]);
+    p.memory.write(WORKER, &worker).unwrap();
+    let mut callback = vec![0x48, 0x83, 0xec, 0x28];
+    mov(&mut callback, 0, DATA);
+    callback.extend([0x48, 0x89, 0x08]);
+    call(&mut p, &mut callback, "GetCurrentThreadId", &[]);
+    mov(&mut callback, 7, DATA + 8);
+    callback.extend([0x48, 0x89, 0x07]);
+    call(&mut p, &mut callback, "GetThreadErrorMode", &[]);
+    mov(&mut callback, 7, DATA + 32);
+    callback.extend([
+        0x48, 0x89, 0x07, 0xb8, 99, 0, 0, 0, 0x48, 0x83, 0xc4, 0x28, 0xc3,
+    ]);
+    p.memory.write(CALLBACK, &callback).unwrap();
+    p.cpu.rip = CODE;
+    loop {
+        match p.run(p.cpu.work + 1).unwrap() {
+            Outcome::Budget => assert!(p.cpu.work < 1000),
+            result => {
+                assert_eq!(result, Outcome::Returned(0));
+                break;
+            }
+        }
+    }
+    assert_eq!(p.memory.read_int(DATA, 8).unwrap(), 0x8877665544332211);
+    assert_eq!(p.memory.read_int(DATA + 8, 8).unwrap(), 2);
+    assert_eq!(p.memory.read_int(DATA + 16, 8).unwrap(), 0xc0);
+    assert_eq!(p.memory.read_int(DATA + 24, 8).unwrap(), 1);
+    assert_eq!(p.memory.read_int(DATA + 32, 8).unwrap(), 0x8000);
+    std::fs::remove_file(path).unwrap();
+}
 fn startup_dll_call(
     mem: &mut Memory,
     cpu: &mut Cpu64,
@@ -8669,4 +9140,245 @@ fn win64_srw_ownership_and_init_once_publish_context_without_fake_contention() {
     );
     assert_eq!(mem.read_int(pending, 4).unwrap(), 0);
     assert_eq!(mem.read_int(context, 8).unwrap(), 0x123456780000);
+}
+
+#[test]
+fn amd64_sse_min_max_preserve_source_nan_signed_zero_and_fault_atomicity() {
+    use unicorn_engine::{Arch, Mode, Prot, RegisterX86 as U, Unicorn};
+    let mut uc = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+    uc.mem_map(BASE, 4096, Prot::ALL).unwrap();
+    let mut mem = Memory::default();
+    mem.map(BASE, 4096, READ | WRITE | EXECUTE).unwrap();
+    for size in [4, 8] {
+        let values: Vec<u64> = if size == 4 {
+            vec![
+                0,
+                0x80000000,
+                1,
+                0x80000001,
+                1.0f32.to_bits() as u64,
+                (-2.5f32).to_bits() as u64,
+                0x7f800000,
+                0x7fc12345,
+                0x7f812345,
+            ]
+        } else {
+            vec![
+                0,
+                0x8000000000000000,
+                1,
+                0x8000000000000001,
+                1.0f64.to_bits(),
+                (-2.5f64).to_bits(),
+                0x7ff0000000000000,
+                0x7ff8123456789012,
+                0x7ff0123456789012,
+            ]
+        };
+        for packed in [false, true] {
+            for opcode in [0x5d, 0x5f] {
+                let mut code = Vec::new();
+                if !packed {
+                    code.push(if size == 4 { 0xf3 } else { 0xf2 });
+                } else if size == 8 {
+                    code.push(0x66);
+                }
+                code.extend([0x0f, opcode, 0xc1]);
+                mem.write(BASE, &code).unwrap();
+                uc.mem_write(BASE, &code).unwrap();
+                for &a in &values {
+                    for &b in &values {
+                        for mode in [0, 0x40, 0x8000, 0x8040] {
+                            let mut cpu = Cpu64::new(BASE, STACK);
+                            cpu.mxcsr |= mode;
+                            cpu.xmm[0] = [0xa5; 16];
+                            cpu.xmm[1] = [0x5a; 16];
+                            let lanes = if packed { 16 / size } else { 1 };
+                            for n in 0..lanes {
+                                cpu.xmm[0][n * size..n * size + size]
+                                    .copy_from_slice(&a.to_le_bytes()[..size]);
+                                cpu.xmm[1][n * size..n * size + size]
+                                    .copy_from_slice(&b.to_le_bytes()[..size]);
+                            }
+                            uc.reg_write(U::MXCSR, cpu.mxcsr as u64).unwrap();
+                            uc.reg_write_long(U::XMM0, &cpu.xmm[0]).unwrap();
+                            uc.reg_write_long(U::XMM1, &cpu.xmm[1]).unwrap();
+                            uc.emu_start(BASE, BASE + code.len() as u64, 0, 1).unwrap();
+                            cpu.step(&mut mem).unwrap();
+                            // Unicorn's MIN/MAX does not model DAZ on subnormals.
+                            let denormal = |v: u64| {
+                                if size == 4 {
+                                    v & 0x7f800000 == 0 && v & 0x7fffff != 0
+                                } else {
+                                    v & 0x7ff0000000000000 == 0 && v & 0xfffffffffffff != 0
+                                }
+                            };
+                            if mode & 0x40 == 0 || (!denormal(a) && !denormal(b)) {
+                                assert_eq!(&*uc.reg_read_long(U::XMM0).unwrap(), &cpu.xmm[0], "size={size} packed={packed} op={opcode:x} a={a:x} b={b:x} mode={mode:x}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    mem.write(BASE, &[0xf3, 0x0f, 0x5f, 0xc1]).unwrap();
+    let mut cpu = Cpu64::new(BASE, STACK);
+    cpu.mxcsr &= !(1 << 7);
+    cpu.xmm[1][..4].copy_from_slice(&0x7fc12345u32.to_le_bytes());
+    let before = cpu.clone();
+    assert!(cpu.step(&mut mem).unwrap_err().contains("#XM"));
+    assert_eq!(cpu.xmm, before.xmm);
+    assert_eq!(cpu.rip, before.rip);
+    assert_eq!(cpu.retired, 0);
+    assert_eq!(cpu.mxcsr, before.mxcsr | 1);
+    mem.write(BASE, &[0x0f, 0x5f, 0x07]).unwrap();
+    cpu.regs[7] = BASE + 4096 - 8;
+    let before = cpu.clone();
+    assert!(cpu.step(&mut mem).is_err());
+    assert_eq!(cpu, before);
+}
+
+#[test]
+fn amd64_sse_predicate_masks_and_sign_masks_match_unicorn() {
+    use unicorn_engine::{Arch, Mode, Prot, RegisterX86 as U, Unicorn};
+    let mut uc = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+    uc.mem_map(BASE, 4096, Prot::ALL).unwrap();
+    let mut mem = Memory::default();
+    mem.map(BASE, 4096, READ | WRITE | EXECUTE).unwrap();
+    for size in [4, 8] {
+        for packed in [false, true] {
+            for predicate in 0..8 {
+                let mut code = Vec::new();
+                if !packed {
+                    code.push(if size == 4 { 0xf3 } else { 0xf2 });
+                } else if size == 8 {
+                    code.push(0x66);
+                }
+                code.extend([0x0f, 0xc2, 0xc1, predicate]);
+                mem.write(BASE, &code).unwrap();
+                uc.mem_write(BASE, &code).unwrap();
+                for &a in &[-2.5f64, -0.0, 0.0, 1.0, f64::INFINITY, f64::NAN] {
+                    for &b in &[-3.0f64, -0.0, 0.0, 1.0, f64::INFINITY, f64::NAN] {
+                        let mut cpu = Cpu64::new(BASE, STACK);
+                        cpu.xmm[0] = [0xa5; 16];
+                        cpu.xmm[1] = [0x5a; 16];
+                        for n in 0..if packed { 16 / size } else { 1 } {
+                            let av = if size == 4 {
+                                (a as f32).to_bits() as u64
+                            } else {
+                                a.to_bits()
+                            };
+                            let bv = if size == 4 {
+                                (b as f32).to_bits() as u64
+                            } else {
+                                b.to_bits()
+                            };
+                            cpu.xmm[0][n * size..n * size + size]
+                                .copy_from_slice(&av.to_le_bytes()[..size]);
+                            cpu.xmm[1][n * size..n * size + size]
+                                .copy_from_slice(&bv.to_le_bytes()[..size]);
+                        }
+                        uc.reg_write(U::MXCSR, cpu.mxcsr as u64).unwrap();
+                        uc.reg_write_long(U::XMM0, &cpu.xmm[0]).unwrap();
+                        uc.reg_write_long(U::XMM1, &cpu.xmm[1]).unwrap();
+                        uc.emu_start(BASE, BASE + code.len() as u64, 0, 1).unwrap();
+                        cpu.step(&mut mem).unwrap();
+                        assert_eq!(&*uc.reg_read_long(U::XMM0).unwrap(), &cpu.xmm[0]);
+                        assert_eq!(cpu.rflags, 0x202);
+                        let expected = if (a.is_nan() || b.is_nan())
+                            && matches!(predicate & 7, 1 | 2 | 5 | 6)
+                        {
+                            1
+                        } else {
+                            0
+                        };
+                        assert_eq!(cpu.mxcsr & 0x3f, expected);
+                    }
+                }
+            }
+        }
+    }
+    for (code, lane) in [
+        (vec![0x0f, 0x50, 0xc1], 4),
+        (vec![0x66, 0x0f, 0x50, 0xc1], 8),
+        (vec![0x66, 0x0f, 0xd7, 0xc1], 1),
+    ] {
+        mem.write(BASE, &code).unwrap();
+        uc.mem_write(BASE, &code).unwrap();
+        for pattern in 0..256u32 {
+            let mut cpu = Cpu64::new(BASE, STACK);
+            for n in 0..16 {
+                cpu.xmm[1][n] = pattern.rotate_left(n as u32) as u8;
+            }
+            cpu.regs[0] = u64::MAX;
+            uc.reg_write(U::RAX, u64::MAX).unwrap();
+            uc.reg_write_long(U::XMM1, &cpu.xmm[1]).unwrap();
+            uc.emu_start(BASE, BASE + code.len() as u64, 0, 1).unwrap();
+            cpu.step(&mut mem).unwrap();
+            assert_eq!(cpu.regs[0], uc.reg_read(U::RAX).unwrap());
+            assert!(cpu.regs[0] < (1 << (16 / lane)));
+        }
+    }
+    mem.write(BASE, &[0x0f, 0xc2, 0xc1, 1]).unwrap();
+    let mut cpu = Cpu64::new(BASE, STACK);
+    cpu.mxcsr &= !(1 << 7);
+    cpu.xmm[1][4..8].copy_from_slice(&f32::NAN.to_le_bytes());
+    let before = cpu.clone();
+    assert!(cpu.step(&mut mem).unwrap_err().contains("#XM"));
+    assert_eq!(cpu.xmm, before.xmm);
+    assert_eq!(cpu.rip, before.rip);
+    assert_eq!(cpu.retired, 0);
+    assert_eq!(cpu.mxcsr, before.mxcsr | 1);
+}
+
+#[test]
+fn amd64_rotate_through_carry_matches_unicorn_across_widths_and_counts() {
+    use unicorn_engine::{Arch, Mode, Prot, RegisterX86 as U, Unicorn};
+    let mut uc = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+    uc.mem_map(BASE, 4096, Prot::ALL).unwrap();
+    let mut mem = Memory::default();
+    mem.map(BASE, 4096, READ | WRITE | EXECUTE).unwrap();
+    for bits in [8, 16, 32, 64] {
+        for opcode in [0xd0, 0xd8] {
+            for count in 0..=65u8 {
+                let mut code = Vec::new();
+                if bits == 16 {
+                    code.push(0x66);
+                } else if bits == 64 {
+                    code.push(0x48);
+                }
+                code.extend([if bits == 8 { 0xc0 } else { 0xc1 }, opcode, count]);
+                mem.write(BASE, &code).unwrap();
+                uc.mem_write(BASE, &code).unwrap();
+                for a in [0, 1, u64::MAX, 0xfedcba9876543210, 1u64 << (bits - 1)] {
+                    for cf in [0, 1] {
+                        let mut cpu = Cpu64::new(BASE, STACK);
+                        cpu.regs[0] = a;
+                        cpu.rflags = 0xa96 | cf;
+                        uc.reg_write(U::RAX, a).unwrap();
+                        uc.reg_write(U::RFLAGS, cpu.rflags).unwrap();
+                        uc.emu_start(BASE, BASE + code.len() as u64, 0, 1).unwrap();
+                        cpu.step(&mut mem).unwrap();
+                        assert_eq!(
+                            cpu.regs[0],
+                            uc.reg_read(U::RAX).unwrap(),
+                            "bits={bits} op={opcode:x} count={count} a={a:x} cf={cf}"
+                        );
+                        let masked = count & if bits == 64 { 63 } else { 31 };
+                        let mask = if masked == 1 || (masked as u32).is_multiple_of(bits + 1) {
+                            0xffff
+                        } else {
+                            0xffff & !0x800
+                        };
+                        assert_eq!(
+                            cpu.rflags & mask,
+                            uc.reg_read(U::RFLAGS).unwrap() & mask,
+                            "bits={bits} count={count}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

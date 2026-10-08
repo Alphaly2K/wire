@@ -51,6 +51,7 @@ struct Context {
   VkDevice device = VK_NULL_HANDLE;
   VkQueue queue = VK_NULL_HANDLE;
   uint32_t family = 0;
+  uint32_t timestamp_bits = 0;
   VkPhysicalDeviceMemoryProperties memory = {};
   VkPhysicalDeviceProperties properties = {};
   VkPhysicalDeviceFloatControlsProperties floats = {
@@ -59,6 +60,7 @@ struct Context {
   PFN_vkDestroyDevice destroy_device = nullptr;
   PFN_vkDeviceWaitIdle wait_idle = nullptr;
   PFN_vkGetDeviceProcAddr get_device = nullptr;
+  PFN_vkGetPhysicalDeviceFormatProperties format_properties = nullptr;
   ~Context() {
     if (device && wait_idle) wait_idle(device);
     if (device && destroy_device) destroy_device(device, nullptr);
@@ -108,6 +110,7 @@ std::unique_ptr<Context> open_gpu(const char *path, WireGpuInfo& info) {
   std::vector<VkPhysicalDevice> physical(count);
   check(devices(c->instance, &count, physical.data()), "physical devices");
   c->physical = physical[0];
+  c->format_properties = symbol<PFN_vkGetPhysicalDeviceFormatProperties>(get, c->instance, "vkGetPhysicalDeviceFormatProperties");
   VkPhysicalDeviceIDProperties id = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES };
   c->floats.pNext = &id;
   VkPhysicalDeviceProperties2 properties = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &c->floats };
@@ -136,6 +139,7 @@ std::unique_ptr<Context> open_gpu(const char *path, WireGpuInfo& info) {
       (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) { family = i; break; }
   if (family == UINT32_MAX) throw std::runtime_error("no graphics/compute queue");
   c->family = family;
+  c->timestamp_bits = queue_info[family].timestampValidBits;
   VkPhysicalDeviceVulkan12Features enabled = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
   enabled.bufferDeviceAddress = VK_TRUE; enabled.vulkanMemoryModel = VK_TRUE;
   enabled.vulkanMemoryModelDeviceScope = VK_TRUE;
@@ -185,6 +189,51 @@ struct Shader {
   std::map<std::pair<uint32_t,uint32_t>,std::vector<uint32_t>> inputs, outputs;
   wire_geometry::Geometry geometry;
 };
+VkFormat dxgi_format(uint32_t f) {
+  switch (f) {
+    case 2: return VK_FORMAT_R32G32B32A32_SFLOAT;
+    case 3: return VK_FORMAT_R32G32B32A32_UINT;
+    case 4: return VK_FORMAT_R32G32B32A32_SINT;
+    case 6: return VK_FORMAT_R32G32B32_SFLOAT;
+    case 10: return VK_FORMAT_R16G16B16A16_SFLOAT;
+    case 11: return VK_FORMAT_R16G16B16A16_UNORM;
+    case 16: return VK_FORMAT_R32G32_SFLOAT;
+    case 24: return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+    case 26: return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+    case 28: return VK_FORMAT_R8G8B8A8_UNORM;
+    case 29: return VK_FORMAT_R8G8B8A8_SRGB;
+    case 30: return VK_FORMAT_R8G8B8A8_UINT;
+    case 31: return VK_FORMAT_R8G8B8A8_SNORM;
+    case 32: return VK_FORMAT_R8G8B8A8_SINT;
+    case 34: return VK_FORMAT_R16G16_SFLOAT;
+    case 35: return VK_FORMAT_R16G16_UNORM;
+    case 40: return VK_FORMAT_D32_SFLOAT;
+    case 41: return VK_FORMAT_R32_SFLOAT;
+    case 42: return VK_FORMAT_R32_UINT;
+    case 43: return VK_FORMAT_R32_SINT;
+    case 45: return VK_FORMAT_D24_UNORM_S8_UINT;
+    case 49: return VK_FORMAT_R8G8_UNORM;
+    case 54: return VK_FORMAT_R16_SFLOAT;
+    case 55: return VK_FORMAT_D16_UNORM;
+    case 56: return VK_FORMAT_R16_UNORM;
+    case 57: return VK_FORMAT_R16_UINT;
+    case 61: return VK_FORMAT_R8_UNORM;
+    case 62: return VK_FORMAT_R8_UINT;
+    case 63: return VK_FORMAT_R8_SNORM;
+    case 64: return VK_FORMAT_R8_SINT;
+    case 71: return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+    case 72: return VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
+    case 74: return VK_FORMAT_BC2_UNORM_BLOCK;
+    case 75: return VK_FORMAT_BC2_SRGB_BLOCK;
+    case 77: return VK_FORMAT_BC3_UNORM_BLOCK;
+    case 78: return VK_FORMAT_BC3_SRGB_BLOCK;
+    case 80: return VK_FORMAT_BC4_UNORM_BLOCK;
+    case 83: return VK_FORMAT_BC5_UNORM_BLOCK;
+    case 87: return VK_FORMAT_B8G8R8A8_UNORM;
+    case 91: return VK_FORMAT_B8G8R8A8_SRGB;
+    default: return VK_FORMAT_UNDEFINED;
+  }
+}
 struct Mapping : spirv::ResourceMapping {
   uint32_t set;
   explicit Mapping(uint32_t stage) : set(stage == 1 ? 0 : stage == 2 ? 1 : stage == 4 ? 2 : 3) { }
@@ -619,7 +668,7 @@ std::unique_ptr<Buffer> create_buffer(Context& c, const uint8_t *data, size_t si
   VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO}; bi.size = size;
   bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT;
   if (usage&1) bi.usage |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-  if (usage&2) bi.usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+  if (usage&2) bi.usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT;
   if (usage&4) bi.usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
   if (usage&8) bi.usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
   check(c.fn<PFN_vkCreateBuffer>("vkCreateBuffer")(c.device,&bi,nullptr,&b->handle),"create owned buffer");
@@ -631,6 +680,7 @@ std::unique_ptr<Buffer> create_buffer(Context& c, const uint8_t *data, size_t si
   if (data) std::memcpy(b->mapped,data,size); else std::memset(b->mapped,0,size);
   return b;
 }
+#include "native_resources.h"
 void blit_rgba64(Context& c, Shader *vertex, Shader *pixel, const uint8_t *source, size_t size,
                  uint8_t *output, size_t capacity) {
   constexpr uint32_t side = 64;
@@ -1016,6 +1066,83 @@ void geometry_draw_rgba64(Context& c, Shader *geometry, Shader *pixel,
 } // namespace
 
 extern "C" {
+int wire_gpu_timestamp(void *gpu, uint64_t *ticks, uint64_t *frequency, char *error, size_t capacity) {
+  try {
+    auto cp=static_cast<Context*>(gpu);
+    if (!cp || !ticks || !frequency || !cp->timestamp_bits || cp->properties.limits.timestampPeriod<=0)
+      throw std::runtime_error("queue timestamps unavailable");
+    auto& c=*cp; BlitScope scope(c);
+    VkQueryPool pool=VK_NULL_HANDLE;
+    struct Pool { Context& c; VkQueryPool& p; ~Pool() { if(p) c.wait_idle(c.device); if(p) c.fn<PFN_vkDestroyQueryPool>("vkDestroyQueryPool")(c.device,p,nullptr); } } cleanup{c,pool};
+    VkQueryPoolCreateInfo qi={VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO}; qi.queryType=VK_QUERY_TYPE_TIMESTAMP;qi.queryCount=1;
+    check(c.fn<PFN_vkCreateQueryPool>("vkCreateQueryPool")(c.device,&qi,nullptr,&pool),"create timestamp query");
+    VkCommandPoolCreateInfo pi={VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO}; pi.queueFamilyIndex=c.family;
+    check(c.fn<PFN_vkCreateCommandPool>("vkCreateCommandPool")(c.device,&pi,nullptr,&scope.commands),"timestamp command pool");
+    VkCommandBufferAllocateInfo ai={VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO}; ai.commandPool=scope.commands;
+    ai.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;ai.commandBufferCount=1;VkCommandBuffer cmd;
+    check(c.fn<PFN_vkAllocateCommandBuffers>("vkAllocateCommandBuffers")(c.device,&ai,&cmd),"timestamp command buffer");
+    VkCommandBufferBeginInfo bi={VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};bi.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    check(c.fn<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer")(cmd,&bi),"timestamp begin");
+    c.fn<PFN_vkCmdResetQueryPool>("vkCmdResetQueryPool")(cmd,pool,0,1);
+    c.fn<PFN_vkCmdWriteTimestamp>("vkCmdWriteTimestamp")(cmd,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,pool,0);
+    check(c.fn<PFN_vkEndCommandBuffer>("vkEndCommandBuffer")(cmd),"timestamp end");
+    VkFenceCreateInfo fi={VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    check(c.fn<PFN_vkCreateFence>("vkCreateFence")(c.device,&fi,nullptr,&scope.fence),"timestamp fence");
+    VkSubmitInfo si={VK_STRUCTURE_TYPE_SUBMIT_INFO};si.commandBufferCount=1;si.pCommandBuffers=&cmd;
+    check(c.fn<PFN_vkQueueSubmit>("vkQueueSubmit")(c.queue,1,&si,scope.fence),"timestamp submit");scope.pending=true;
+    auto waited=c.fn<PFN_vkWaitForFences>("vkWaitForFences")(c.device,1,&scope.fence,VK_TRUE,5000000000ull);
+    if(waited!=VK_SUCCESS) {c.wait_idle(c.device);scope.pending=false;check(waited,"timestamp wait");}scope.pending=false;
+    uint64_t result=0;
+    check(c.fn<PFN_vkGetQueryPoolResults>("vkGetQueryPoolResults")(c.device,pool,0,1,sizeof(result),&result,sizeof(result),VK_QUERY_RESULT_64_BIT|VK_QUERY_RESULT_WAIT_BIT),"timestamp read");
+    if(c.timestamp_bits<64) result&=(1ull<<c.timestamp_bits)-1;
+    *ticks=result;*frequency=uint64_t(1000000000.0/double(c.properties.limits.timestampPeriod));return 1;
+  } catch(const std::exception& e) {error_text(error,capacity,e.what());return 0;}
+}
+void *wire_gpu_texture_create(void *gpu,const WireTextureDesc *desc,char *error,size_t capacity) {
+  try {if(!gpu || !desc)throw std::runtime_error("missing texture descriptor/device");return create_texture(*static_cast<Context*>(gpu),*desc).release();}
+  catch(const std::exception& e){error_text(error,capacity,e.what());return nullptr;}
+}
+void wire_gpu_texture_free(void *texture){delete static_cast<Texture*>(texture);}
+int wire_gpu_texture_write(void *texture,uint32_t subresource,const uint8_t *data,size_t size,char *error,size_t capacity) {
+  try {if(!texture)throw std::runtime_error("missing texture");texture_write(*static_cast<Texture*>(texture),subresource,data,size);return 1;}
+  catch(const std::exception& e){error_text(error,capacity,e.what());return 0;}
+}
+int wire_gpu_texture_read(void *texture,uint32_t subresource,uint8_t *data,size_t size,char *error,size_t capacity) {
+  try {if(!texture)throw std::runtime_error("missing texture");texture_read(*static_cast<Texture*>(texture),subresource,data,size);return 1;}
+  catch(const std::exception& e){error_text(error,capacity,e.what());return 0;}
+}
+void *wire_gpu_image_view_create(void *texture,const WireImageViewDesc *desc,char *error,size_t capacity) {
+  try {if(!texture || !desc)throw std::runtime_error("missing image view descriptor/resource");return create_image_view(*static_cast<Texture*>(texture),*desc).release();}
+  catch(const std::exception& e){error_text(error,capacity,e.what());return nullptr;}
+}
+void wire_gpu_image_view_free(void *view){delete static_cast<ImageView*>(view);}
+int wire_gpu_image_view_clear(void *view,const float *rgba,char *error,size_t capacity) {
+  try {if(!view)throw std::runtime_error("missing image view");clear_image_view(*static_cast<ImageView*>(view),rgba);return 1;}
+  catch(const std::exception& e){error_text(error,capacity,e.what());return 0;}
+}
+void *wire_gpu_buffer_view_create(void *buffer,uint32_t format,size_t offset,size_t size,char *error,size_t capacity) {
+  try {if(!buffer)throw std::runtime_error("missing buffer");return create_buffer_view(*static_cast<Buffer*>(buffer),format,offset,size).release();}
+  catch(const std::exception& e){error_text(error,capacity,e.what());return nullptr;}
+}
+void wire_gpu_buffer_view_free(void *view){delete static_cast<BufferView*>(view);}
+int wire_gpu_texture_copy(void *dst,void *src,const WireTextureCopy *region,char *error,size_t capacity) {
+  try {if(!dst || !src || !region)throw std::runtime_error("missing texture copy resources/region");texture_copy(*static_cast<Texture*>(dst),*static_cast<Texture*>(src),*region);return 1;}
+  catch(const std::exception& e){error_text(error,capacity,e.what());return 0;}
+}
+uint32_t wire_gpu_format_support(void *gpu, uint32_t format) {
+  auto c = static_cast<Context*>(gpu); auto f = dxgi_format(format);
+  if (!c || f == VK_FORMAT_UNDEFINED) return 0;
+  VkFormatProperties p = {}; c->format_properties(c->physical,f,&p);
+  uint32_t result = 0;
+  if (p.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) result |= 0x20 | 0x100 | 0x200 | 0x1000;
+  if (p.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) result |= 0x20 | 0x4000;
+  if (p.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT) result |= 0x8000;
+  if (p.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) result |= 0x20 | 0x10000;
+  if (p.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT) result |= 3;
+  if (format == 42 || format == 57) result |= 5;
+  if (format == 28 || format == 87) result |= 0x80000;
+  return result;
+}
 uint32_t wire_gpu_abi() { return 1; }
 void *wire_gpu_open(const char *library, WireGpuInfo *info, char *error, size_t capacity) {
   try { if (!info) throw std::runtime_error("missing info output"); WireGpuInfo value;

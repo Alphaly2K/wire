@@ -713,7 +713,7 @@ fn run_startup64(
     if let Some(graphics) = graphics {
         let info = graphics.adapter();
         println!(
-            "native Vulkan adapter: {} vendor={:#x} device={:#x}; DXGI discovery only",
+            "native Vulkan adapter: {} vendor={:#x} device={:#x}; experimental D3D11 bridge",
             info.name, info.vendor, info.device
         );
         process.runtime.attach_graphics(graphics)?;

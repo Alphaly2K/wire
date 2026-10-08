@@ -5,11 +5,13 @@
 可以复用开源 D3D11 / shader 转译代码来减少自写渲染器的工作。
 **当前不能通过复制 DXVK DLL + MoltenVK 就完成 wire 的游戏渲染。**
 wire 既不是 Wine，也没有通用 Vulkan guest→host ABI。当前已接入原生 ARM64 图形库、
-Win64 DXGI factory4 / adapter1 的64位 COM 边界。Alice 已越过设备枚举与 D3D12 能力探测，
-进入 `D3D11CreateDevice`（pass88）；隐藏初始化窗口尚未显示，尚无 guest D3D11 设备或 Present。
+Win64 DXGI factory4 / adapter1与基础D3D11 device/context、资源的64位COM边界。
+Alice已越过D3D12能力探测、D3D11初始化资源与音频探测，进入MonoManager ReloadAssembly。
+pass111到598,723,699退休指令时耗尽600M work预算，日志中的SetThreadErrorMode缺失已补齐并继续重放；
+隐藏初始化窗口尚未显示，尚无guest Draw或Present。
 接续已选择并落地 **GS→compute 展开**：11个自有GS样例、44组输入逐DWORD验证，
 并完成展开结果→透传VS→真实PS→GPU光栅化的4096像素验证；已加入持久Vulkan buffer。
-这补上了geometry的实现路线，但还不是完整10_0能力，也没有让Alice越过设备创建。
+这补上了geometry的实现路线；guest当前用明确标注的实验性10_0兼容子集继续初始化，不宣称完整10_0符合性。
 
 首次检查点的两个独立探针如下；后续原生库、离屏Draw和guest重放证据见下一节。
 原始游戏目录保持只读。
@@ -32,7 +34,7 @@ Win64 DXGI factory4 / adapter1 的64位 COM 边界。Alice 已越过设备枚举
 | 原生C ABI、同一UnityPlayer的8个DXBC | 8/8转译；全部通过独立spirv-val的Vulkan1.3验证 | 当前内嵌shader可转译；未扫描打包游戏资源 |
 | 同一原生库、实际MoltenVK pipeline | 3组VS/PS + 2个CS成功；6组接口不匹配的组合明确拒绝 | 每个shader至少参与一个实际成功的pipeline；CS尚未dispatch |
 | Unity位置/UV VS + t0/s0 PS，64×64离屏Draw | 4096个RGBA8像素逐通道读回比较，0误差 | 真实DXBC→GPU上传/采样/Draw/同步/读回；不是guest Present |
-| Alice启动、真实Vulkan adapter | factory4、EnumAdapters、GetDesc与引用调用通过；D3D12明确不支持并回退D3D11 | guest连接了真实adapter信息；未创建D3D11 device/context |
+| Alice启动、真实Vulkan adapter/device | factory4、adapter信息/引用、D3D12明确失败回退、实验性D3D11 device/context及内置纹理创建/copy/update通过 | guest连接真实设备与资源；未有guest Draw/Present |
 | 自有GS→compute→buffer读回 | 11个GS、44组输入，34,013个DWORD逐个符合独立期望 | stream0、点/线/三角形、adjacency、Cut、循环动态索引、越界归零、条件零输出、GS实例、CBV；不是完整GS/SO |
 | 展开GS→透传VS→DXBC PS→RGBA8 DrawIndexed | 4096像素逐通道符合期望，透传VS/PS亦通过独立spirv-val | 缺少原生geometryShader时仍可真正光栅化；没有guest Draw或Present |
 
@@ -376,3 +378,48 @@ python3 tools/probe_geometry.py \
   --out wire-out/geometry-probe-2026-10-08 \
   --validator /private/tmp/wire-spirv-tools-build/tools/spirv-val
 ```
+
+## Shader 编译与 App Store 规则澄清（2026-10-08）
+
+运行时 DXBC→SPIR-V→MSL 编译产生 GPU shader，通过 MoltenVK 与公开 Metal API提交，
+不把产生的代码页作为 ARM/x86 CPU 指令执行，也不为 guest CPU启用JIT。
+Apple公开的 `MTLDevice.makeLibrary(source:options:)` 明确支持从源码字符串编译Metal library。
+因此，不能把运行时shader编译等同于CPU的未签名可执行内存机制；但也不能凭这一点宣称项目必然满足上架要求。
+shader编译结果仍是GPU执行的代码，不应描述为“不是代码”。这里的区别在于由系统Metal编译器/驱动
+管理GPU程序，wire不申请ARM/x86可执行内存来运行该结果；CPU代码签名限制与审核中的外部软件规则是两层问题。
+
+2026-10-08读取的官方审核规则2.5.2限制下载、安装、执行会引入或改变app功能的代码；
+4.7明确提及retro game console和PC emulator可提供游戏下载，同时附有4.7.1–4.7.5要求。
+wire是否属于该规则的适用范围、所提供内容和具体分发方式，仍需按最终产品判断。
+**IR是数据格式、guest CPU只解释执行，都不构成自动获准上架的充分条件。**
+此前把“架构无关IR不可直接执行”视为可自动规避审核限制的推论不成立。
+
+来源：
+- https://developer.apple.com/documentation/metal/mtldevice/makelibrary(source:options:)
+- https://developer.apple.com/app-store/review/guidelines/#software-requirements
+- https://developer.apple.com/app-store/review/guidelines/#mini-apps-mini-games-streaming-games-chatbots-plug-ins-and-game-emulators
+
+## Win64 guest D3D11初始化接入（2026-10-08，未验收Present）
+
+已建立完整基础ID3D11Device/ID3D11DeviceContext槽位与Win64参数表，未实现方法明确报错。
+guest通过真实DXGI adapter创建native Vulkan关联的device/context；当前返回实验性10_0兼容子集，
+日志明确不宣称完整FL10_0符合性。higher device/context接口、debug layer与D3D12仍真实失败。
+
+- 已接通Buffer、2D/cube/3D texture、SRV/RTV/DSV与typed/structured buffer SRV的真实Vulkan资源。
+  初始数据、checked guest Map/Unmap、UpdateSubresource、CopyResource/CopySubresourceRegion与RTV clear
+  已执行真实GPU上传、复制、清除和读回；mapped状态、设备归属及范围错误明确失败。
+- shader创建调用现有native DXBC编译器；blend/depth/raster/sampler描述符保存于owned对象。
+  当前尚未将这些对象/全部状态接入guest Draw，不能以创建成功当作游戏帧已渲染。
+- immediate context弱缓存；子对象持有device，绑定持有资源，view持有源资源；释放后回收owned guest页。
+  64位COM对象不包含宿主指针，vtable/对象页保持runtime-owned readonly。
+- EVENT/TIMESTAMP/TIMESTAMP_DISJOINT query接入真实queue fence/timestamp；scoped query需Begin，
+  未ready返回S_FALSE；occlusion/pipeline statistics仍不支持。
+
+资源独立验证报告：`wire-out/graphics-resources-probe-2026-10-08/report.json`。
+验证3360字节texture数据、cube/volume多mip、staging子区域copy及512个GPU clear像素，
+所有像素为64/128/191/255；报告明确`guest_frame=false`。
+独立探针退出偶见MoltenVK报告1MB仍分配，真实guest进程退出报告0MB；尚未归因，不声明全路径无泄漏。
+
+实际Alice Unity启动已越过device/context、内置纹理资源与音频设备探测，
+最新完成的pass109到219,185,690退休指令，暂停线程后请求GetThreadContext。
+窗口仍是314×211且visible=false的bootstrap。DXGI交换链、guest Draw/Present和正式窗口显示尚未验收。

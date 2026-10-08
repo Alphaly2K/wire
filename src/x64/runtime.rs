@@ -9,6 +9,7 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 mod address;
+mod apc;
 mod command;
 mod display;
 mod dxgi;
@@ -27,6 +28,7 @@ mod sockets;
 mod sspi;
 mod threads;
 mod time;
+mod timers;
 mod token;
 mod tracing;
 mod unwind;
@@ -64,6 +66,7 @@ pub struct WindowEvent {
 
 pub struct Runtime64 {
     start: Instant,
+    timer_periods: BTreeMap<u32, u32>,
     image_base: u64,
     next_alloc: u64,
     next_module: u64,
@@ -132,6 +135,12 @@ pub enum Control {
     SwitchThread(String),
     Blocked,
     ThreadExited(u32),
+    ThreadContext {
+        dll: String,
+        args: Vec<u64>,
+        thread: u64,
+        flags: u32,
+    },
     Callbacks {
         calls: Vec<(u64, [u64; 4])>,
         release: Vec<u64>,
@@ -208,6 +217,7 @@ impl Runtime64 {
         mem.write(COMMAND_W, &wide)?;
         Ok(Self {
             start: Instant::now(),
+            timer_periods: BTreeMap::new(),
             image_base,
             next_alloc: 0x400000000,
             next_module: TEB + 0x20000,
@@ -412,6 +422,8 @@ impl Runtime64 {
                 | "secur32.dll"
                 | "dxgi.dll"
                 | "d3d12.dll"
+                | "d3d11.dll"
+                | "winmm.dll"
                 | "api-ms-win-core-synch-l1-2-0.dll"
                 | "api-ms-win-core-fibers-l1-1-1.dll"
                 | "api-ms-win-core-localization-l1-2-1.dll"
@@ -760,8 +772,14 @@ impl Runtime64 {
             && !(dll.eq_ignore_ascii_case("ntdll.dll") && version::is_call(name))
             && !(dll.eq_ignore_ascii_case("ws2_32.dll") && sockets::is_call(name))
             && !(dll.eq_ignore_ascii_case("secur32.dll") && sspi::arity(name).is_some())
+            && !(dll.eq_ignore_ascii_case("winmm.dll")
+                && matches!(
+                    name,
+                    "timeGetTime" | "timeBeginPeriod" | "timeEndPeriod" | "timeGetDevCaps"
+                ))
             && !(dll.eq_ignore_ascii_case("dxgi.dll") && dxgi::export(name))
             && !(dll.eq_ignore_ascii_case("d3d12.dll") && dxgi::d3d12_export(name))
+            && !(dll.eq_ignore_ascii_case("d3d11.dll") && dxgi::d3d11_export(name))
             && !(dll == dxgi::DLL && dxgi::arity(name).is_some())
             && !(dll.eq_ignore_ascii_case("api-ms-win-core-synch-l1-2-0.dll")
                 && matches!(
@@ -785,6 +803,7 @@ impl Runtime64 {
                     | "CoInitialize"
                     | "CoInitializeEx"
                     | "CoUninitialize"
+                    | "CoCreateInstance"
                     | "CoTaskMemAlloc"
                     | "CoTaskMemFree"
             ))
@@ -792,6 +811,7 @@ impl Runtime64 {
             return Err(format!("unimplemented Win64 import: {dll}!{name}"));
         }
         let arity = match name {
+            name if timers::arity(name).is_some() => timers::arity(name).unwrap(),
             name if dxgi::arity(name).is_some() => dxgi::arity(name).unwrap(),
             name if find::arity(name).is_some() => find::arity(name).unwrap(),
             name if user::arity(name).is_some() => user::arity(name).unwrap(),
@@ -864,6 +884,10 @@ impl Runtime64 {
             "SetFileAttributesW" | "SetFileAttributesA" => 2,
             "SHGetKnownFolderPath" => 4,
             "CoTaskMemAlloc" | "CoTaskMemFree" => 1,
+            "CoCreateInstance" => 5,
+            "timeGetTime" => 0,
+            "timeBeginPeriod" | "timeEndPeriod" => 1,
+            "timeGetDevCaps" => 2,
             "CreateDirectoryW" | "CreateDirectoryA" => 2,
             "GetDateFormatEx" => 7,
             "GetTimeFormatEx" => 6,
@@ -893,11 +917,14 @@ impl Runtime64 {
             | "GetThreadPriority"
             | "DisableThreadLibraryCalls" => 1,
             "SwitchToThread" => 0,
+            "QueueUserAPC" => 3,
+            "SleepEx" => 2,
             "GetExitCodeThread"
             | "SetThreadPriority"
             | "SetThreadAffinityMask"
             | "SetThreadDescription"
-            | "GetThreadDescription" => 2,
+            | "GetThreadDescription"
+            | "GetThreadContext" => 2,
             "CreateSemaphoreExW" | "CreateSemaphoreExA" => 6,
             "CreateSemaphoreW" | "CreateSemaphoreA" => 4,
             "OpenSemaphoreW" | "OpenSemaphoreA" | "ReleaseSemaphore" => 3,
@@ -948,6 +975,8 @@ impl Runtime64 {
             | "GetConsoleOutputCP" => 0,
             "GetErrorMode" => 0,
             "SetErrorMode" => 1,
+            "GetThreadErrorMode" => 0,
+            "SetThreadErrorMode" => 2,
             "GetEnvironmentStringsW" => 0,
             "AcquireSRWLockExclusive"
             | "WakeAllConditionVariable"
@@ -1117,7 +1146,11 @@ impl Runtime64 {
             "GetFileAttributesExW" | "GetFileAttributesExA" => &[1],
             "RoInitialize" => &[0],
             "CoInitializeEx" => &[1],
-            "SetErrorMode" => &[0],
+            "CoCreateInstance" => &[2],
+            "timeBeginPeriod" | "timeEndPeriod" => &[0],
+            "timeGetDevCaps" => &[1],
+            name if timers::arity(name).is_some() => timers::dwords(name),
+            "SetErrorMode" | "SetThreadErrorMode" => &[0],
             "InitializeProcThreadAttributeList" => &[1, 2],
             "UpdateProcThreadAttribute" => &[1],
             "CreateProcessW" => &[4, 5],
@@ -1129,6 +1162,7 @@ impl Runtime64 {
             "OpenEventW" | "OpenEventA" => &[0, 1],
             "WaitForSingleObject" => &[1],
             "WaitForSingleObjectEx" => &[1, 2],
+            "SleepEx" => &[0, 1],
             "WaitForMultipleObjects" => &[0, 2, 3],
             "WaitForMultipleObjectsEx" => &[0, 2, 3, 4],
             "VirtualAlloc" => &[2, 3],
@@ -2169,6 +2203,50 @@ impl Runtime64 {
                 _ => 0,
             },
             "CreateThread" => self.create_thread(mem, &args)?,
+            "GetThreadErrorMode" => self.threads.entries[&self.threads.active].error_mode as u64,
+            "SetThreadErrorMode" => {
+                if args[0] & !0x8007 != 0 {
+                    self.set_error(mem, 87)?;
+                    0
+                } else {
+                    if args[1] != 0 {
+                        mem.check(args[1], 4, WRITE)?;
+                    }
+                    let old = self.threads.entries[&self.threads.active].error_mode;
+                    if args[1] != 0 {
+                        mem.write_int(args[1], 4, old as u64)?;
+                    }
+                    self.threads
+                        .entries
+                        .get_mut(&self.threads.active)
+                        .unwrap()
+                        .error_mode = args[0] as u32;
+                    1
+                }
+            }
+            "QueueUserAPC" => self.queue_apc(mem, &args)?,
+            "SleepEx" => {
+                if args[1] != 0 {
+                    if let Some(control) =
+                        self.deliver_apcs(mem, dll, name, &args, &returned, cpu)?
+                    {
+                        return Ok(control);
+                    }
+                }
+                let deadline = match self.threads.entries[&self.threads.active].block {
+                    Some(threads::Block::SleepEx { deadline, .. }) => deadline,
+                    _ if args[0] == u32::MAX as u64 => None,
+                    _ => Some(Instant::now() + std::time::Duration::from_millis(args[0])),
+                };
+                if args[0] != 0 && deadline.is_none_or(|d| Instant::now() < d) {
+                    self.block(threads::Block::SleepEx {
+                        deadline,
+                        alertable: args[1] != 0,
+                    })?;
+                    return Ok(Control::Blocked);
+                }
+                0
+            }
             "ExitThread" => {
                 if !self.threads.enabled {
                     return Err("Win64 ExitThread requires a thread scheduler".into());
@@ -2270,6 +2348,40 @@ impl Runtime64 {
                 }
                 0
             }
+            "GetThreadContext" => match self.threads.id(args[0]) {
+                Err(error) => {
+                    self.set_error(mem, error)?;
+                    0
+                }
+                Ok(id) => {
+                    let thread = &self.threads.entries[&id];
+                    if id == self.threads.active || thread.suspended == 0 || thread.exit.is_some() {
+                        self.set_error(mem, 50)?;
+                        0
+                    } else if !args[1].is_multiple_of(16) {
+                        self.set_error(mem, 998)?;
+                        0
+                    } else {
+                        mem.check(args[1], exception::CONTEXT_SIZE, WRITE)?;
+                        let flags = mem.read_int(args[1] + 48, 4)? as u32;
+                        self.trace_note(format!("GetThreadContext thread={id} flags={flags:#x}"));
+                        if flags & 0x100000 == 0 || flags & !0x10001f != 0 {
+                            self.set_error(mem, 87)?;
+                            0
+                        } else {
+                            returned.regs[0] = 1;
+                            *cpu = returned;
+                            self.api_calls += 1;
+                            return Ok(Control::ThreadContext {
+                                dll: dll.into(),
+                                args,
+                                thread: id,
+                                flags,
+                            });
+                        }
+                    }
+                }
+            },
             "SetThreadDescription" | "GetThreadDescription" => match self.threads.id(args[0]) {
                 Err(error) => 0x80070000 | error as u64,
                 Ok(id) if name == "SetThreadDescription" => {
@@ -2879,6 +2991,26 @@ impl Runtime64 {
                     args[0]
                 }
             }
+            "CoCreateInstance" => {
+                if args[0] == 0 || args[3] == 0 || args[4] == 0 {
+                    0x80070057
+                } else {
+                    mem.check(args[4], 8, WRITE)?;
+                    let mut clsid = [0; 16];
+                    let mut iid = [0; 16];
+                    mem.read(args[0], &mut clsid)?;
+                    mem.read(args[3], &mut iid)?;
+                    self.trace_note(format!("Win64 COM class={clsid:02x?} iid={iid:02x?}: no registered native class factory"));
+                    mem.write_int(args[4], 8, 0)?;
+                    if self.apartment.is_none() {
+                        0x800401f0
+                    } else if args[2] == 0 {
+                        0x80070057
+                    } else {
+                        0x80040154
+                    }
+                }
+            }
             "RoInitialize" | "CoInitialize" | "CoInitializeEx" => {
                 let winrt = name == "RoInitialize";
                 let flags = if name == "CoInitialize" {
@@ -3253,6 +3385,7 @@ impl Runtime64 {
                     }
                 }
             }
+            name if timers::arity(name).is_some() => self.timer_call(mem, name, &args)?,
             "CreateEventW" | "CreateEventA" | "CreateEventExW" | "CreateEventExA"
             | "OpenEventW" | "OpenEventA" => {
                 let extended = name.contains("Ex");
@@ -3398,6 +3531,14 @@ impl Runtime64 {
                 } else {
                     (vec![args[0]], false, args[1])
                 };
+                let alertable = name.ends_with("Ex") && args[if multiple { 4 } else { 2 }] != 0;
+                if alertable && self.wait_objects(&handles, all, false).is_ok() {
+                    if let Some(control) =
+                        self.deliver_apcs(mem, dll, name, &args, &returned, cpu)?
+                    {
+                        return Ok(control);
+                    }
+                }
                 let deadline = self.wait_deadline(timeout);
                 match self.wait_objects(&handles, all, true) {
                     Ok(Some(result)) => {
@@ -3413,6 +3554,7 @@ impl Runtime64 {
                             handles,
                             all,
                             deadline,
+                            alertable,
                         })?;
                         return Ok(Control::Blocked);
                     }
@@ -3609,7 +3751,45 @@ impl Runtime64 {
             "GetCurrentProcess" => u64::MAX,
             "GetCurrentThread" => u64::MAX - 1,
             "IsDebuggerPresent" => mem.read_int(PEB + 2, 1)?,
-            "GetTickCount" => self.start.elapsed().as_millis() as u32 as u64,
+            "GetTickCount" | "timeGetTime" => self.start.elapsed().as_millis() as u32 as u64,
+            "timeGetDevCaps" => {
+                if args[1] < 8 || args[0] == 0 {
+                    97
+                } else {
+                    mem.write(
+                        args[0],
+                        &[1u32.to_le_bytes(), u32::MAX.to_le_bytes()].concat(),
+                    )?;
+                    0
+                }
+            }
+            "timeBeginPeriod" => {
+                let period = args[0] as u32;
+                if period == 0
+                    || (self.timer_periods.len() >= 256
+                        && !self.timer_periods.contains_key(&period))
+                {
+                    97
+                } else {
+                    let refs = self.timer_periods.entry(period).or_default();
+                    *refs = refs
+                        .checked_add(1)
+                        .ok_or("multimedia timer reference capacity")?;
+                    0
+                }
+            }
+            "timeEndPeriod" => {
+                let period = args[0] as u32;
+                if let Some(refs) = self.timer_periods.get_mut(&period) {
+                    *refs -= 1;
+                    if *refs == 0 {
+                        self.timer_periods.remove(&period);
+                    }
+                    0
+                } else {
+                    97
+                }
+            }
             "GetTickCount64" => self.start.elapsed().as_millis() as u64,
             "GetLastError" => mem.read_int(self.teb() + 0x68, 4)?,
             "SetLastError" => {
@@ -4303,6 +4483,12 @@ impl Runtime64 {
                 1
             }
             "GetProcAddress" => {
+                // Windows resolves a NULL module against the main executable.
+                let module_handle = if args[0] == 0 {
+                    self.image_base
+                } else {
+                    args[0]
+                };
                 let symbol = if args[1] <= 65535 {
                     format!("#{}", args[1])
                 } else {
@@ -4312,7 +4498,7 @@ impl Runtime64 {
                     "GetProcAddress lookup module={:#x} symbol={symbol}",
                     args[0]
                 ));
-                if let Some(exports) = self.guest_exports.get(&args[0]) {
+                if let Some(exports) = self.guest_exports.get(&module_handle) {
                     let address = if args[1] <= 65535 {
                         exports.ordinals.get(&(args[1] as u16)).copied()
                     } else {
@@ -4323,8 +4509,21 @@ impl Runtime64 {
                     }
                     address.unwrap_or(0)
                 } else {
-                    let Some((module, _)) = self.modules.get(&args[0]) else {
-                        return Err("invalid Win64 module handle".into());
+                    let Some((module, _)) = self.modules.get(&module_handle) else {
+                        self.set_error(
+                            mem,
+                            if module_handle == self.image_base {
+                                127
+                            } else {
+                                126
+                            },
+                        )?;
+                        returned.regs[0] = 0;
+                        *cpu = returned;
+                        self.unblock();
+                        self.api_calls += 1;
+                        self.record(dll, name, &args, 0);
+                        return Ok(Control::Returned);
                     };
                     let function = if args[1] <= 65535 {
                         if module.eq_ignore_ascii_case("ws2_32.dll") {
@@ -4343,10 +4542,12 @@ impl Runtime64 {
                         module.as_str()
                     }
                     .to_owned();
-                    let known = (matches!(
-                        provider.as_str(),
-                        "ntdll.dll" | "kernel32.dll" | "kernelbase.dll"
-                    ) && unwind::is_call(&function))
+                    let known = (matches!(provider.as_str(), "kernel32.dll" | "kernelbase.dll")
+                        && timers::arity(&function).is_some())
+                        || (matches!(
+                            provider.as_str(),
+                            "ntdll.dll" | "kernel32.dll" | "kernelbase.dll"
+                        ) && unwind::is_call(&function))
                         || (matches!(
                             provider.as_str(),
                             "kernel32.dll" | "kernelbase.dll" | "ntdll.dll"
@@ -4355,6 +4556,15 @@ impl Runtime64 {
                         || (provider == "secur32.dll" && sspi::arity(&function).is_some())
                         || (provider == "dxgi.dll" && dxgi::export(&function))
                         || (provider == "d3d12.dll" && dxgi::d3d12_export(&function))
+                        || (provider == "d3d11.dll" && dxgi::d3d11_export(&function))
+                        || (provider == "winmm.dll"
+                            && matches!(
+                                function.as_str(),
+                                "timeGetTime"
+                                    | "timeBeginPeriod"
+                                    | "timeEndPeriod"
+                                    | "timeGetDevCaps"
+                            ))
                         || (provider == "user32.dll" && display::arity(&function).is_some())
                         || (provider == "user32.dll" && user::arity(&function).is_some())
                         || (provider == "imm32.dll" && user::ime_arity(&function).is_some())
@@ -4363,7 +4573,10 @@ impl Runtime64 {
                         || (matches!(provider.as_str(), "kernel32.dll" | "kernelbase.dll")
                             && matches!(
                                 function.as_str(),
-                                "GetTempPath2W"
+                                "GetErrorMode"
+                                    | "GetThreadErrorMode"
+                                    | "SetThreadErrorMode"
+                                    | "GetTempPath2W"
                                     | "WaitOnAddress"
                                     | "WakeByAddressSingle"
                                     | "WakeByAddressAll"

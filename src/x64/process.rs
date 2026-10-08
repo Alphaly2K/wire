@@ -862,6 +862,37 @@ impl Process64 {
                     Control::ThreadExited(code) => {
                         self.exit_thread(code, budget)?;
                     }
+                    Control::ThreadContext {
+                        dll,
+                        args,
+                        thread,
+                        flags,
+                    } => {
+                        self.accept_threads()?;
+                        let context = self
+                            .contexts
+                            .get(&thread)
+                            .ok_or("suspended guest thread has no CPU context")?;
+                        let data = super::runtime::exception::capture(&context.cpu);
+                        // Only requested groups are written; home slots and
+                        // unrequested components keep the caller's bytes.
+                        for (bit, ranges) in [
+                            (1, &[(56, 58), (66, 72), (152, 160), (248, 256)][..]),
+                            (2, &[(120, 152), (160, 248)][..]),
+                            (4, &[(58, 66)][..]),
+                            (8, &[(52, 56), (256, 768)][..]),
+                            (16, &[(72, 120)][..]),
+                        ] {
+                            if flags & bit != 0 {
+                                for &(start, end) in ranges {
+                                    self.memory
+                                        .write(args[1] + start as u64, &data[start..end])?;
+                                }
+                            }
+                        }
+                        self.runtime
+                            .complete_call(&dll, "GetThreadContext", &args, 1);
+                    }
                     Control::LoadModule {
                         path,
                         search,

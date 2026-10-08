@@ -1,9 +1,11 @@
 //! Host-backed DXGI discovery. Win64 COM layout is serialized explicitly;
-//! host pointers never enter guest memory. No D3D feature level is advertised.
+//! host pointers never enter guest memory. D3D11 is an experimental subset.
 //! ABI checked against DXVK Native c8dc91fa directx/dxgi*.h; no implementation copied.
 use super::{Memory, Runtime64, PAGE, READ, WRITE};
 use crate::gpu::{AdapterInfo, NativeGraphics};
 use std::collections::BTreeMap;
+mod abi;
+mod d3d11;
 
 pub(super) const DLL: &str = "wire.dxgi";
 const INVALID: u64 = 0x887a0001;
@@ -123,6 +125,7 @@ pub(super) fn export(name: &str) -> bool {
         "CreateDXGIFactory" | "CreateDXGIFactory1" | "CreateDXGIFactory2"
     )
 }
+pub(super) use d3d11::export as d3d11_export;
 pub(super) fn d3d12_export(name: &str) -> bool {
     matches!(name, "D3D12CreateDevice" | "D3D12GetDebugInterface")
 }
@@ -139,6 +142,9 @@ pub(super) fn symbol<'a>(dll: &str, name: &'a str) -> &'a str {
     }
 }
 pub(super) fn arity(name: &str) -> Option<usize> {
+    if let Some(arity) = d3d11::arity(name) {
+        return Some(arity);
+    }
     match name {
         "CreateDXGIFactory" | "CreateDXGIFactory1" => Some(2),
         "CreateDXGIFactory2" => Some(3),
@@ -153,6 +159,9 @@ pub(super) fn arity(name: &str) -> Option<usize> {
     }
 }
 pub(super) fn dwords(name: &str) -> &'static [usize] {
+    if d3d11::arity(name).is_some() {
+        return d3d11::dwords(name);
+    }
     match name {
         "CreateDXGIFactory2" => &[0],
         "D3D12CreateDevice" => &[1],
@@ -162,10 +171,25 @@ pub(super) fn dwords(name: &str) -> &'static [usize] {
         _ => &[],
     }
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Kind {
     Factory,
     Adapter,
+    Device,
+    Context,
+    DxgiDevice,
+    Query,
+    Buffer,
+    Texture,
+    Shader,
+    Blend,
+    Depth,
+    Raster,
+    Sampler,
+    Layout,
+    Srv,
+    Rtv,
+    Dsv,
 }
 struct Object {
     kind: Kind,
@@ -178,7 +202,11 @@ struct Object {
 pub(super) struct Graphics {
     backend: Option<NativeGraphics>,
     objects: BTreeMap<u64, Object>,
-    tables: [u64; 2],
+    tables: BTreeMap<Kind, u64>,
+    devices: BTreeMap<u64, d3d11::Device>,
+    queries: BTreeMap<u64, d3d11::Query>,
+    contexts: BTreeMap<u64, d3d11::Context>,
+    resources: BTreeMap<u64, d3d11::Resource>,
     #[cfg(test)]
     fixture: Option<AdapterInfo>,
 }
@@ -208,6 +236,22 @@ impl Graphics {
         o.refs = o.refs.checked_add(1).ok_or("DXGI reference capacity")?;
         Ok(o.refs as u64)
     }
+    fn retain_many(&mut self, addresses: &[u64]) -> Result<(), String> {
+        let mut counts = BTreeMap::<u64, u32>::new();
+        for &p in addresses.iter().filter(|&&p| p != 0) {
+            *counts.entry(p).or_default() += 1;
+        }
+        for (&p, &count) in &counts {
+            let o = self.objects.get(&p).ok_or("invalid graphics binding")?;
+            o.refs
+                .checked_add(count)
+                .ok_or("graphics binding reference capacity")?;
+        }
+        for (p, count) in counts {
+            self.objects.get_mut(&p).unwrap().refs += count;
+        }
+        Ok(())
+    }
 }
 fn read_guid(mem: &Memory, address: u64) -> Result<Guid, String> {
     let mut iid = [0; 16];
@@ -216,10 +260,11 @@ fn read_guid(mem: &Memory, address: u64) -> Result<Guid, String> {
 }
 fn supports(kind: Kind, iid: &Guid) -> bool {
     *iid == UNKNOWN
-        || *iid == OBJECT
+        || (*iid == OBJECT && matches!(kind, Kind::Factory | Kind::Adapter | Kind::DxgiDevice))
         || match kind {
             Kind::Factory => FACTORIES.contains(iid),
             Kind::Adapter => ADAPTERS.contains(iid),
+            _ => d3d11::supports(kind, iid),
         }
 }
 impl Runtime64 {
@@ -231,15 +276,16 @@ impl Runtime64 {
         Ok(())
     }
     fn dxgi_table(&mut self, mem: &mut Memory, kind: Kind) -> Result<u64, String> {
-        let index = (kind == Kind::Adapter) as usize;
-        if self.graphics.tables[index] != 0 {
-            return Ok(self.graphics.tables[index]);
+        if let Some(&address) = self.graphics.tables.get(&kind) {
+            return Ok(address);
         }
         let mut bytes = Vec::new();
-        for (name, _) in COMMON
-            .iter()
-            .chain(if index == 0 { FACTORY } else { ADAPTER })
-        {
+        let methods: Vec<_> = match kind {
+            Kind::Factory => COMMON.iter().chain(FACTORY).map(|(n, _)| *n).collect(),
+            Kind::Adapter => COMMON.iter().chain(ADAPTER).map(|(n, _)| *n).collect(),
+            _ => d3d11::methods(kind),
+        };
+        for name in methods {
             bytes.extend_from_slice(&self.register(DLL, name).to_le_bytes());
         }
         let address = self.next_alloc;
@@ -247,10 +293,13 @@ impl Runtime64 {
         mem.write(address, &bytes)?;
         mem.seal_runtime_readonly(address)?;
         self.next_alloc += PAGE;
-        self.graphics.tables[index] = address;
+        self.graphics.tables.insert(kind, address);
         Ok(address)
     }
     fn dxgi_object(&mut self, mem: &mut Memory, kind: Kind, parent: u64) -> Result<u64, String> {
+        if self.graphics.objects.len() >= OBJECT_LIMIT {
+            return Err("graphics object capacity exceeded".into());
+        }
         let table = self.dxgi_table(mem, kind)?;
         if parent != 0
             && self
@@ -275,7 +324,11 @@ impl Runtime64 {
                 kind,
                 refs: 1,
                 parent,
-                association: 0,
+                association: if matches!(kind, Kind::Buffer | Kind::Texture) {
+                    0x78000000
+                } else {
+                    0
+                },
                 private: BTreeMap::new(),
             },
         );
@@ -294,6 +347,31 @@ impl Runtime64 {
         let parent = o.parent;
         mem.unmap(address, PAGE)?;
         self.graphics.objects.remove(&address);
+        self.graphics.devices.remove(&address);
+        self.graphics.queries.remove(&address);
+        if let Some(d3d11::Resource::Buffer {
+            mapped: Some((p, size, _)),
+            ..
+        }) = self.graphics.resources.get(&address)
+        {
+            mem.unmap(*p, *size)?;
+        }
+        if let Some(d3d11::Resource::Texture { mapped, .. }) = self.graphics.resources.get(&address)
+        {
+            for &(p, size, _) in mapped.values() {
+                mem.unmap(p, size)?;
+            }
+        }
+        if let Some(d3d11::Resource::View { resource, .. }) =
+            self.graphics.resources.remove(&address)
+        {
+            self.dxgi_release(mem, resource)?;
+        }
+        if let Some(context) = self.graphics.contexts.remove(&address) {
+            for target in context.references() {
+                self.dxgi_release(mem, target)?;
+            }
+        }
         if parent != 0 {
             self.dxgi_release(mem, parent)?;
         }
@@ -332,6 +410,9 @@ impl Runtime64 {
         name: &str,
         a: &[u64],
     ) -> Result<u64, String> {
+        if d3d11::arity(name).is_some() {
+            return self.d3d11_call(mem, name, a);
+        }
         if d3d12_export(name) {
             // Unity probes D3D12 before falling back to D3D11. There is no
             // D3D12 backend; report actual lack of support, including when
@@ -397,6 +478,9 @@ impl Runtime64 {
             .ok_or("invalid DXGI object")?;
         let kind = o.kind;
         let parent = o.parent;
+        if kind == Kind::DxgiDevice && name == "Object.QueryInterface" {
+            return self.d3d11_call(mem, "D3D.Dxgi.QueryInterface", a);
+        }
         if (name.starts_with("Factory.") && kind != Kind::Factory)
             || (name.starts_with("Adapter.") && kind != Kind::Adapter)
         {
@@ -642,6 +726,178 @@ mod tests {
             0
         );
         m.read_int(DATA + 32, 8).unwrap()
+    }
+    #[test]
+    fn experimental_d3d11_device_context_query_identity_and_faults_keep_real_references() {
+        let (mut r, mut m) = setup();
+        let f = factory(&mut r, &mut m);
+        call(&mut r, &mut m, "Factory.EnumAdapters1", &[f, 0, DATA + 32]).unwrap();
+        let adapter = m.read_int(DATA + 32, 8).unwrap();
+        m.write_int(DATA + 64, 4, 0xb100).unwrap();
+        m.write_int(DATA + 68, 4, 0xa000).unwrap();
+        let objects = r.graphics.objects.len();
+        assert!(call(
+            &mut r,
+            &mut m,
+            "D3D11CreateDevice",
+            &[
+                adapter,
+                0,
+                0,
+                0x20,
+                DATA + 64,
+                2,
+                7,
+                DATA + 2 * PAGE - 4,
+                DATA + 88,
+                DATA + 96
+            ]
+        )
+        .is_err());
+        assert_eq!(r.graphics.objects.len(), objects);
+        assert_eq!(
+            call(
+                &mut r,
+                &mut m,
+                "D3D11CreateDevice",
+                &[
+                    adapter,
+                    0,
+                    0,
+                    0x20,
+                    DATA + 64,
+                    2,
+                    7,
+                    DATA + 80,
+                    DATA + 88,
+                    DATA + 96
+                ]
+            )
+            .unwrap(),
+            0
+        );
+        let device = m.read_int(DATA + 80, 8).unwrap();
+        let context = m.read_int(DATA + 96, 8).unwrap();
+        assert_eq!(m.read_int(DATA + 88, 4).unwrap(), 0xa000);
+        assert!(device > u32::MAX as u64 && context > u32::MAX as u64);
+        assert!(m.write_int(device, 8, 0).is_err());
+        assert!(m.write_int(m.read_int(context, 8).unwrap(), 8, 0).is_err());
+        call(
+            &mut r,
+            &mut m,
+            "D3D.Device.GetImmediateContext",
+            &[device, DATA + 104],
+        )
+        .unwrap();
+        assert_eq!(m.read_int(DATA + 104, 8).unwrap(), context);
+        assert_eq!(
+            call(&mut r, &mut m, "D3D.Context.Release", &[context]).unwrap(),
+            1
+        );
+        m.write(DATA + 128, &OBJECT).unwrap();
+        assert_eq!(
+            call(
+                &mut r,
+                &mut m,
+                "D3D.Device.QueryInterface",
+                &[device, DATA + 128, DATA + 144]
+            )
+            .unwrap(),
+            NO_INTERFACE
+        );
+        m.write(
+            DATA + 128,
+            &guid(
+                0x54ec77fa,
+                0x1377,
+                0x44e6,
+                [0x8c, 0x32, 0x88, 0xfd, 0x5f, 0x44, 0xc8, 0x4c],
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            call(
+                &mut r,
+                &mut m,
+                "D3D.Device.QueryInterface",
+                &[device, DATA + 128, DATA + 144]
+            )
+            .unwrap(),
+            0
+        );
+        let dxgi_device = m.read_int(DATA + 144, 8).unwrap();
+        m.write(DATA + 128, &UNKNOWN).unwrap();
+        call(
+            &mut r,
+            &mut m,
+            "Object.QueryInterface",
+            &[dxgi_device, DATA + 128, DATA + 152],
+        )
+        .unwrap();
+        assert_eq!(m.read_int(DATA + 152, 8).unwrap(), device);
+        call(&mut r, &mut m, "D3D.Device.Release", &[device]).unwrap();
+        m.write(DATA + 160, &[0; 8]).unwrap();
+        assert_eq!(
+            call(
+                &mut r,
+                &mut m,
+                "D3D.Device.CreateQuery",
+                &[device, DATA + 160, DATA + 168]
+            )
+            .unwrap(),
+            0
+        );
+        let query = m.read_int(DATA + 168, 8).unwrap();
+        m.write_int(DATA + 176, 4, 0x12345678).unwrap();
+        assert_eq!(
+            call(
+                &mut r,
+                &mut m,
+                "D3D.Context.GetData",
+                &[context, query, DATA + 176, 4, 0]
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(m.read_int(DATA + 176, 4).unwrap(), 0x12345678);
+        let refs = r.graphics.objects[&device].refs;
+        assert!(call(
+            &mut r,
+            &mut m,
+            "D3D.Query.GetDevice",
+            &[query, DATA + 2 * PAGE - 4]
+        )
+        .is_err());
+        assert_eq!(r.graphics.objects[&device].refs, refs);
+        assert!(call(
+            &mut r,
+            &mut m,
+            "D3D.Resource.GetDesc",
+            &[device, DATA + 160]
+        )
+        .is_err());
+        assert_eq!(
+            call(&mut r, &mut m, "D3D.Query.Release", &[query]).unwrap(),
+            0
+        );
+        assert_eq!(
+            call(&mut r, &mut m, "Object.Release", &[dxgi_device]).unwrap(),
+            0
+        );
+        assert_eq!(
+            call(&mut r, &mut m, "D3D.Context.Release", &[context]).unwrap(),
+            0
+        );
+        assert_eq!(
+            call(&mut r, &mut m, "D3D.Device.Release", &[device]).unwrap(),
+            0
+        );
+        assert_eq!(
+            call(&mut r, &mut m, "Object.Release", &[adapter]).unwrap(),
+            0
+        );
+        assert_eq!(call(&mut r, &mut m, "Object.Release", &[f]).unwrap(), 0);
+        assert!(r.graphics.objects.is_empty());
     }
     #[test]
     fn win64_com_identity_adapter_layout_and_parent_lifetime() {

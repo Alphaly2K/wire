@@ -1,0 +1,181 @@
+// Independently implemented owned Vulkan images and synchronous transfer scope.
+// SPDX-License-Identifier: LGPL-2.1-only
+struct Commands {
+  Context& c;
+  BlitScope scope;
+  VkCommandBuffer command=VK_NULL_HANDLE;
+  explicit Commands(Context& context):c(context),scope(c) {
+    VkCommandPoolCreateInfo pi={VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};pi.queueFamilyIndex=c.family;
+    pi.flags=VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    check(c.fn<PFN_vkCreateCommandPool>("vkCreateCommandPool")(c.device,&pi,nullptr,&scope.commands),"resource command pool");
+    VkCommandBufferAllocateInfo ai={VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};ai.commandPool=scope.commands;
+    ai.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;ai.commandBufferCount=1;
+    check(c.fn<PFN_vkAllocateCommandBuffers>("vkAllocateCommandBuffers")(c.device,&ai,&command),"resource command buffer");
+    VkCommandBufferBeginInfo bi={VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};bi.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    check(c.fn<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer")(command,&bi),"resource begin");
+  }
+  void submit() {
+    auto queue_submit=c.fn<PFN_vkQueueSubmit>("vkQueueSubmit");auto wait=c.fn<PFN_vkWaitForFences>("vkWaitForFences");
+    check(c.fn<PFN_vkEndCommandBuffer>("vkEndCommandBuffer")(command),"resource end");
+    VkFenceCreateInfo fi={VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    check(c.fn<PFN_vkCreateFence>("vkCreateFence")(c.device,&fi,nullptr,&scope.fence),"resource fence");
+    VkSubmitInfo si={VK_STRUCTURE_TYPE_SUBMIT_INFO};si.commandBufferCount=1;si.pCommandBuffers=&command;
+    check(queue_submit(c.queue,1,&si,scope.fence),"resource submit");scope.pending=true;
+    auto result=wait(c.device,1,&scope.fence,VK_TRUE,5000000000ull);
+    if(result!=VK_SUCCESS) {c.wait_idle(c.device);scope.pending=false;check(result,"resource wait");}
+    scope.pending=false;
+  }
+};
+struct Texture {
+  Context& c;
+  WireTextureDesc desc;
+  VkFormat format;
+  VkImage handle=VK_NULL_HANDLE;
+  VkDeviceMemory memory=VK_NULL_HANDLE;
+  VkImageAspectFlags aspect;
+  uint32_t block=1,bytes=0;
+  Texture(Context& context,WireTextureDesc d):c(context),desc(d),format(dxgi_format(d.format)) {
+    aspect=(d.format==40 || d.format==55)?VK_IMAGE_ASPECT_DEPTH_BIT:d.format==45?VK_IMAGE_ASPECT_DEPTH_BIT|VK_IMAGE_ASPECT_STENCIL_BIT:VK_IMAGE_ASPECT_COLOR_BIT;
+    switch(d.format) {
+      case 2:case 3:case 4: bytes=16;break;
+      case 6:bytes=12;break;
+      case 10:case 11:case 16:bytes=8;break;
+      case 49:case 54:case 55:case 56:case 57:bytes=2;break;
+      case 61:case 62:case 63:case 64:bytes=1;break;
+      case 71:case 72:case 80:block=4;bytes=8;break;
+      case 74:case 75:case 77:case 78:case 83:block=4;bytes=16;break;
+      default:bytes=4;
+    }
+  }
+  ~Texture() {
+    if(handle)c.fn<PFN_vkDestroyImage>("vkDestroyImage")(c.device,handle,nullptr);
+    if(memory)c.fn<PFN_vkFreeMemory>("vkFreeMemory")(c.device,memory,nullptr);
+  }
+  bool volume() const {return desc.bind&0x200;}
+  uint32_t subresources() const {return desc.mips*(volume()?1:desc.layers);}
+  uint32_t depth(uint32_t mip) const {return volume()?std::max(1u,desc.layers>>mip):1;}
+  size_t size(uint32_t mip) const {
+    uint64_t w=std::max(1u,desc.width>>mip),h=std::max(1u,desc.height>>mip);
+    return size_t(((w+block-1)/block)*((h+block-1)/block)*bytes*depth(mip));
+  }
+  void barrier(VkCommandBuffer cmd,VkImageLayout old_layout,VkImageLayout layout,uint32_t mip,uint32_t layer,uint32_t levels,uint32_t layers) {
+    VkImageMemoryBarrier b={VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};b.image=handle;b.oldLayout=old_layout;b.newLayout=layout;
+    b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
+    b.subresourceRange={aspect,mip,levels,layer,layers};
+    b.srcAccessMask=old_layout==VK_IMAGE_LAYOUT_UNDEFINED?0:VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;
+    b.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;
+    c.fn<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(cmd,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,nullptr,0,nullptr,1,&b);
+  }
+};
+std::unique_ptr<Texture> create_texture(Context& c,const WireTextureDesc& d) {
+  if(!d.width || !d.height || !d.mips || !d.layers || d.width>c.properties.limits.maxImageDimension2D ||
+     d.height>c.properties.limits.maxImageDimension2D || d.layers>c.properties.limits.maxImageArrayLayers || d.mips>14 ||
+     d.mips>uint32_t(32-__builtin_clz(std::max(std::max(d.width,d.height),(d.bind&0x200)?d.layers:1u))) || d.bind&~0x368u || dxgi_format(d.format)==VK_FORMAT_UNDEFINED)
+    throw std::runtime_error("texture dimensions/format/usage unsupported");
+  auto t=std::make_unique<Texture>(c,d);uint64_t total=0;
+  for(uint32_t mip=0;mip<d.mips;mip++)total+=uint64_t(t->size(mip))*(t->volume()?1:d.layers);
+  if(total>128*1024*1024)throw std::runtime_error("texture allocation limit");
+  VkFormatProperties fp={};c.format_properties(c.physical,t->format,&fp);
+  if((d.bind&8) && !(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT))throw std::runtime_error("texture sampling format unsupported");
+  if((d.bind&0x20) && !(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT))throw std::runtime_error("render target format unsupported");
+  if((d.bind&0x40) && !(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT))throw std::runtime_error("depth target format unsupported");
+  VkImageCreateInfo ii={VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};ii.imageType=VK_IMAGE_TYPE_2D;ii.format=t->format;
+  if(d.bind&0x100) {if(d.width!=d.height || d.layers%6)throw std::runtime_error("cube texture dimensions");ii.flags|=VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;}
+  if(t->volume()) {if(d.bind&0x100 || d.width>c.properties.limits.maxImageDimension3D || d.height>c.properties.limits.maxImageDimension3D || d.layers>c.properties.limits.maxImageDimension3D || d.layers>2048)throw std::runtime_error("volume texture dimensions/flags");ii.imageType=VK_IMAGE_TYPE_3D;}
+  ii.extent={d.width,d.height,t->depth(0)};ii.mipLevels=d.mips;ii.arrayLayers=t->volume()?1:d.layers;ii.samples=VK_SAMPLE_COUNT_1_BIT;ii.tiling=VK_IMAGE_TILING_OPTIMAL;
+  ii.usage=VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  if(d.bind&8)ii.usage|=VK_IMAGE_USAGE_SAMPLED_BIT;if(d.bind&0x20)ii.usage|=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+  if(d.bind&0x40)ii.usage|=VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+  check(c.fn<PFN_vkCreateImage>("vkCreateImage")(c.device,&ii,nullptr,&t->handle),"create owned texture");
+  VkMemoryRequirements req;c.fn<PFN_vkGetImageMemoryRequirements>("vkGetImageMemoryRequirements")(c.device,t->handle,&req);
+  t->memory=allocate(c,req,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  check(c.fn<PFN_vkBindImageMemory>("vkBindImageMemory")(c.device,t->handle,t->memory,0),"bind owned texture");
+  Commands cmd(c);t->barrier(cmd.command,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_GENERAL,0,0,d.mips,t->volume()?1:d.layers);cmd.submit();return t;
+}
+void texture_write(Texture& t,uint32_t subresource,const uint8_t *data,size_t size) {
+  if(subresource>=t.subresources() || !data || t.aspect!=VK_IMAGE_ASPECT_COLOR_BIT)throw std::runtime_error("texture write subresource/aspect");
+  uint32_t mip=subresource%t.desc.mips,layer=t.volume()?0:subresource/t.desc.mips;
+  if(size!=t.size(mip))throw std::runtime_error("texture tight data size");
+  auto staging=create_buffer(t.c,data,size,2);Commands cmd(t.c);
+  t.barrier(cmd.command,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_GENERAL,mip,layer,1,1);
+  VkBufferImageCopy copy={};copy.imageSubresource={t.aspect,mip,layer,1};copy.imageExtent={std::max(1u,t.desc.width>>mip),std::max(1u,t.desc.height>>mip),t.depth(mip)};
+  t.c.fn<PFN_vkCmdCopyBufferToImage>("vkCmdCopyBufferToImage")(cmd.command,staging->handle,t.handle,VK_IMAGE_LAYOUT_GENERAL,1,&copy);
+  t.barrier(cmd.command,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_GENERAL,mip,layer,1,1);cmd.submit();
+}
+void texture_read(Texture& t,uint32_t subresource,uint8_t *data,size_t size) {
+  if(subresource>=t.subresources() || !data || t.aspect!=VK_IMAGE_ASPECT_COLOR_BIT)throw std::runtime_error("texture read subresource/aspect");
+  uint32_t mip=subresource%t.desc.mips,layer=t.volume()?0:subresource/t.desc.mips;
+  if(size!=t.size(mip))throw std::runtime_error("texture tight read size");
+  auto staging=create_buffer(t.c,nullptr,size,2);Commands cmd(t.c);
+  t.barrier(cmd.command,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_GENERAL,mip,layer,1,1);
+  VkBufferImageCopy copy={};copy.imageSubresource={t.aspect,mip,layer,1};copy.imageExtent={std::max(1u,t.desc.width>>mip),std::max(1u,t.desc.height>>mip),t.depth(mip)};
+  t.c.fn<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(cmd.command,t.handle,VK_IMAGE_LAYOUT_GENERAL,staging->handle,1,&copy);
+  VkBufferMemoryBarrier b={VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};b.buffer=staging->handle;b.offset=0;b.size=size;
+  b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;b.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;b.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
+  t.c.fn<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(cmd.command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,0,nullptr,1,&b,0,nullptr);
+  cmd.submit();std::memcpy(data,staging->mapped,size);
+}
+struct ImageView {
+  Texture& t;WireImageViewDesc desc;VkImageView handle=VK_NULL_HANDLE;
+  ImageView(Texture& texture,WireImageViewDesc d):t(texture),desc(d){}
+  ~ImageView(){if(handle)t.c.fn<PFN_vkDestroyImageView>("vkDestroyImageView")(t.c.device,handle,nullptr);}
+};
+std::unique_ptr<ImageView> create_image_view(Texture& t,WireImageViewDesc d) {
+  if(d.format!=t.desc.format || !d.mips || !d.layers || d.mip>=t.desc.mips || d.mips>t.desc.mips-d.mip ||
+     d.layer>=t.desc.layers || d.layers>t.desc.layers-d.layer || d.kind>5 ||
+     ((d.kind==0 || d.kind>=3) && !(t.desc.bind&8)) || (d.kind==1 && (!(t.desc.bind&0x20) || d.mips!=1)) ||
+     (d.kind==2 && (!(t.desc.bind&0x40) || d.mips!=1)))throw std::runtime_error("image view format/range/usage unsupported");
+  auto v=std::make_unique<ImageView>(t,d);VkImageViewCreateInfo vi={VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+  vi.image=t.handle;vi.format=t.format;vi.viewType=d.layers==1?VK_IMAGE_VIEW_TYPE_2D:VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+  if(d.kind==5) {if(!t.volume() || d.layer!=0 || d.layers!=1)throw std::runtime_error("volume view range");vi.viewType=VK_IMAGE_VIEW_TYPE_3D;}
+  else if((d.kind>=3 && d.kind<=4)) {if(!(t.desc.bind&0x100) || d.layer%6 || d.layers%6 || (d.kind==3 && d.layers!=6))throw std::runtime_error("cube view range");vi.viewType=d.kind==3?VK_IMAGE_VIEW_TYPE_CUBE:VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;}
+  vi.subresourceRange={t.aspect,d.mip,d.mips,d.layer,d.layers};
+  check(t.c.fn<PFN_vkCreateImageView>("vkCreateImageView")(t.c.device,&vi,nullptr,&v->handle),"create owned image view");return v;
+}
+void clear_image_view(ImageView& v,const float *rgba) {
+  if(!rgba || v.desc.kind!=1 || v.t.aspect!=VK_IMAGE_ASPECT_COLOR_BIT)throw std::runtime_error("clear needs color render target");
+  Commands cmd(v.t.c);v.t.barrier(cmd.command,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_GENERAL,v.desc.mip,v.desc.layer,1,v.desc.layers);
+  VkClearColorValue value={};std::memcpy(value.float32,rgba,16);
+  VkImageSubresourceRange range={v.t.aspect,v.desc.mip,1,v.desc.layer,v.desc.layers};
+  v.t.c.fn<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(cmd.command,v.t.handle,VK_IMAGE_LAYOUT_GENERAL,&value,1,&range);
+  v.t.barrier(cmd.command,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_GENERAL,v.desc.mip,v.desc.layer,1,v.desc.layers);cmd.submit();
+}
+struct BufferView {
+  Buffer& buffer;VkBufferView handle=VK_NULL_HANDLE;size_t offset,size;uint32_t format;
+  BufferView(Buffer& b,uint32_t f,size_t at,size_t bytes):buffer(b),offset(at),size(bytes),format(f){}
+  ~BufferView(){if(handle)buffer.c.fn<PFN_vkDestroyBufferView>("vkDestroyBufferView")(buffer.c.device,handle,nullptr);}
+};
+std::unique_ptr<BufferView> create_buffer_view(Buffer& b,uint32_t format,size_t offset,size_t size) {
+  if(!(b.usage&2) || !size || offset>b.size || size>b.size-offset)throw std::runtime_error("buffer view usage/range");
+  auto v=std::make_unique<BufferView>(b,format,offset,size);
+  if(format) {
+    auto f=dxgi_format(format);VkFormatProperties fp={};b.c.format_properties(b.c.physical,f,&fp);
+    if(f==VK_FORMAT_UNDEFINED || !(fp.bufferFeatures&VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT) || offset%b.c.properties.limits.minTexelBufferOffsetAlignment)
+      throw std::runtime_error("typed buffer view format/alignment unsupported");
+    VkBufferViewCreateInfo vi={VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO};vi.buffer=b.handle;vi.format=f;vi.offset=offset;vi.range=size;
+    check(b.c.fn<PFN_vkCreateBufferView>("vkCreateBufferView")(b.c.device,&vi,nullptr,&v->handle),"create owned buffer view");
+  }
+  return v;
+}
+void texture_copy(Texture& dst,Texture& src,const WireTextureCopy& r) {
+  if(&dst.c!=&src.c || dst.aspect!=src.aspect || dst.block!=src.block || dst.bytes!=src.bytes || dst.volume()!=src.volume() ||
+     (dst.format!=src.format && !((dst.desc.format==28 || dst.desc.format==29) && (src.desc.format==28 || src.desc.format==29))) ||
+     r.dst_sub>=dst.subresources() || r.src_sub>=src.subresources() || (&dst==&src && r.dst_sub==r.src_sub))
+    throw std::runtime_error("texture copy context/format/subresource mismatch");
+  uint32_t dm=r.dst_sub%dst.desc.mips,sm=r.src_sub%src.desc.mips;
+  uint32_t dw=std::max(1u,dst.desc.width>>dm),dh=std::max(1u,dst.desc.height>>dm);
+  uint32_t sw=std::max(1u,src.desc.width>>sm),sh=std::max(1u,src.desc.height>>sm);
+  if(r.left>=r.right || r.top>=r.bottom || r.right>sw || r.bottom>sh || r.x>dw || r.y>dh ||
+     r.right-r.left>dw-r.x || r.bottom-r.top>dh-r.y || r.left%src.block || r.top%src.block || r.x%dst.block || r.y%dst.block ||
+     (r.right%src.block && r.right!=sw) || (r.bottom%src.block && r.bottom!=sh))throw std::runtime_error("texture copy region bounds/alignment");
+  if(src.depth(sm)>dst.depth(dm))throw std::runtime_error("texture copy depth bounds");
+  Commands cmd(dst.c);src.barrier(cmd.command,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_GENERAL,sm,src.volume()?0:r.src_sub/src.desc.mips,1,1);
+  dst.barrier(cmd.command,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_GENERAL,dm,dst.volume()?0:r.dst_sub/dst.desc.mips,1,1);
+  for(uint32_t aspect: {uint32_t(VK_IMAGE_ASPECT_COLOR_BIT),uint32_t(VK_IMAGE_ASPECT_DEPTH_BIT),uint32_t(VK_IMAGE_ASPECT_STENCIL_BIT)}) {
+    if(!(dst.aspect&aspect))continue;
+    VkImageCopy copy={};copy.srcSubresource={aspect,sm,src.volume()?0:r.src_sub/src.desc.mips,1};copy.dstSubresource={aspect,dm,dst.volume()?0:r.dst_sub/dst.desc.mips,1};
+    copy.srcOffset={int32_t(r.left),int32_t(r.top),0};copy.dstOffset={int32_t(r.x),int32_t(r.y),0};copy.extent={r.right-r.left,r.bottom-r.top,src.depth(sm)};
+    dst.c.fn<PFN_vkCmdCopyImage>("vkCmdCopyImage")(cmd.command,src.handle,VK_IMAGE_LAYOUT_GENERAL,dst.handle,VK_IMAGE_LAYOUT_GENERAL,1,&copy);
+  }
+  dst.barrier(cmd.command,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_GENERAL,dm,dst.volume()?0:r.dst_sub/dst.desc.mips,1,1);cmd.submit();
+}

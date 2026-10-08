@@ -1,6 +1,6 @@
 # AMD64 / Unity / Mono 启动推进（2026-10-08 接续）
 
-这是接续 `37db580` 的窗口/图形初始化检查点。普通 `wire run` 仍拒绝 AMD64；
+这是接续 `bb74137` 的窗口/图形初始化检查点。普通 `wire run` 仍拒绝 AMD64；
 实际启动使用 `wire probe64 --startup`。解释器是主路径，所有高地址访问仍经过 checked guest memory，
 没有把 guest 机器码交给宿主 CPU，也没有引入 QEMU GPL 实现。
 
@@ -19,12 +19,15 @@ Unity内嵌VS/PS执行64×64离屏Draw，4096个RGBA8像素读回逐通道比较
 
 ## 当前真实结果
 
-AliceToPapa隔离副本推进到 **60,249,414 条退休指令、60,379,506 work、126,117 次已完成API**
-（最新重放`linked-pass-90.txt`，与pass88/89相同）。从13条EXE入口开始已实际执行UnityPlayer的TLS/DllMain、EXE入口，
+AliceToPapa隔离副本推进到 **598,723,699 条退休指令、600,000,000 work、1,223,023 次已完成API**
+（最新完成重放`linked-pass-111.txt`，预算耗尽）。从13条EXE入口开始已实际执行UnityPlayer的TLS/DllMain、EXE入口，
 动态加载Mono的TLS/DllMain及合作worker；异常链仍执行真实guest handler与同帧RtlUnwindEx。
 此前curl/SSPI、显示器、HKCU、资源图标、类注册、WNDPROC、DC与目录枚举均已越过。
 本轮`CreateDXGIFactory2`、真实Apple M4 adapter枚举/Desc/引用、D3D12明确失败后的
-D3D11回退通过，当前停止于 **`d3d11.dll!D3D11CreateDevice`**。
+D3D11回退及实验性device/context、真实纹理创建/copy/update通过，
+COM音频设备缺少factory时真实失败，Unity进入自己的无音频回退；等待定时器线程已实际运行。
+暂停线程的真实CPU快照与APC/alertable wait已接通。pass111实际进入MonoManager ReloadAssembly，
+托管System.IO因动态导入SetThreadErrorMode缺失报异常；该API与线程错误模式已补齐，正在继续重放。
 没有忽略INT3、认证失败或guest对窗口的隐藏状态。
 
 游戏实际写出的 `Player.log` 包含：
@@ -73,6 +76,11 @@ Input System module state changed to: Initialized.
 | pass-87 | 60,211,853 | 126,055 | D3D12 ordinal分派通过；delay-load provider缺失 |
 | pass-88 | 60,249,414 | 126,117 | D3D12明确不支持并回退；D3D11CreateDevice |
 | pass-89 | 60,249,414 | 126,117 | AppKit + 原生Vulkan；同一D3D11边界，窗口仍隐藏 |
+| pass-107 | 72,344,956 | 129,032 | D3D11资源初始化通过；GetProcAddress(NULL)被错误终止 |
+| pass-108 | 72,605,599 | 129,305 | NULL模块按主EXE查找并返回NULL；CreateWaitableTimerExW |
+| pass-109 | 219,185,690 | 367,281 | 等待定时器实际运行；Mono暂停线程后GetThreadContext |
+| pass-110 | 291,364,669 | 464,830 | 真正读取暂停线程寄存器后继续；QueueUserAPC |
+| pass-111 | 598,723,699 | 1,223,023 | APC/alertable wait通过；600M预算；托管System.IO缺SetThreadErrorMode |
 
 指令与 API 计数受真实时间/线程调度影响，上表不构成相同路径的性能 AB 对照。
 
@@ -80,13 +88,14 @@ Input System module state changed to: Initialized.
 
 当前仍处于引擎/运行时初始化；input 初始化日志不证明托管游戏入口已完成。
 Win64 USER32类/初始窗口、64位 WNDPROC / WPARAM / LPARAM 回调与可选 AppKit 桥接已经建立；
-真实游戏已通过DXGI factory与adapter，尚未请求显示当前隐藏窗口。
-接下来是D3D11 device/context、资源/状态、交换链和实际Present，以及能力差异的真实补齐。
+真实游戏已通过DXGI factory/adapter和实验性D3D11 device/context、初始化资源，尚未请求显示当前隐藏窗口。
+接下来仍需补齐运行时实际边界、交换链、guest Draw和Present，以及所需状态/能力的真实实现。
 实际请求adapter=`0x40aab5000`、driver type=UNKNOWN、flags=`0x20`（BGRA_SUPPORT）、SDK=7，
 feature-level数组为11_1 / 11_0 / 10_1 / 10_0，没有9_x回退。
 本机MoltenVK原生geometryShader=false，而10_x及以上需要geometry；
-不能将当前VS/PS/CS探针成功当作已经满足最低10_0，也不能只填一个feature-level通过创建。
-后续需要真实geometry/SO等能力补齐或具备对应实现的后端，详见图形设计文档。
+目前guest bridge明确采用实验性10_0兼容子集，已接通真实native device及资源，
+并不宣称全套feature-level规范符合性；独立geometry→compute已验证，完整guest GS/SO与Draw仍待接入。
+不能将创建成功、独立资源/Draw探针当作完整10_0或实际游戏Present，详见图形设计文档。
 既有 PE32 D3D9/Metal 能力可复用，但当前没有接通这条64位图形执行/像素路径。
 Win64 MSG、消息等待、宿主输入→guest消息分发和托管入口仍待实现/验收；桥接保留输入事件，
 没有忽略后续未知 API 或声称可交互。
@@ -94,6 +103,15 @@ Win64 MSG、消息等待、宿主输入→guest消息分发和托管入口仍待
 
 ## 已实现的运行时范围
 
+- 实验性D3D11 device/context、owned Vulkan资源、shader编译、状态描述符与真实query；
+  生命周期及GPU数据/clear像素已验证，当前不是完整FL10_0或guest Draw/Present。
+- 等待定时器接入合作调度，单次/周期、手动/自动复位、命名共享、重设与取消保留真实信号语义；
+  timer APC、系统唤醒与非NULL SECURITY_ATTRIBUTES仍不支持。
+- GetThreadContext读取暂停guest线程的真实CPU上下文，按请求写控制/整数/浮点组；
+  不使用宿主线程寄存器，当前线程/运行线程与extended XSTATE仍拒绝，SetThreadContext尚未实现。
+- QueueUserAPC有界FIFO、SleepEx与Ex wait在目标线程alertable时执行真实guest回调，
+  返回WAIT_IO_COMPLETION，不提前执行或丢弃回调；逐条预算暂停/恢复和64位参数已验证。
+  Set/GetThreadErrorMode保持线程状态隔离，动态导入可发现。
 - 可选原生Vulkan设备对应的DXGI factory4 / adapter1，完整64位COM对象/vtable/gateway、
   IUnknown身份与parent引用，最后Release回收owned页；protected readonly页不允许guest
   VirtualFree/HeapFree或VirtualProtect升级。adapter信息/UUID派生process-local LUID来自实际设备，
@@ -169,7 +187,7 @@ Win64 MSG、消息等待、宿主输入→guest消息分发和托管入口仍待
   focus/foreground当前只有进程内基本状态，没有完整activation/focus消息协议。
 - 无已安装IME的guest profile：有效窗口 ImmGetContext返回NULL，不伪造HIMC或composition；
   DC对象按窗口/线程维护，ReleaseDC/DeleteDC 区分来源与所有权，GetDeviceCaps描述逻辑显示器。
-  尚无Win64 GDI像素绘制、selected pixel format或D3D11设备，未广告未实现的raster/shading能力。
+  尚无Win64 GDI像素绘制或selected pixel format；D3D11实验性资源路径另行接入。
 - FindFirstFile / Ex、FindNextFile A/W和FindClose使用真实confined目录、64位search handle、
   320/592字节输出、FILETIME和64位文件尺寸；checked fault不消费下一个条目。
   外逃symlink不能进入枚举，基础大小写无关wildcard复用既有PE32实现；无DOS 8.3别名、

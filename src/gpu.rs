@@ -91,6 +91,51 @@ struct BufferBinding {
     binding: u32,
     buffer: *mut c_void,
 }
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct TextureDesc {
+    pub width: u32,
+    pub height: u32,
+    pub mips: u32,
+    pub layers: u32,
+    pub format: u32,
+    pub bind: u32,
+}
+type BufferViewCreate =
+    unsafe extern "C" fn(*mut c_void, u32, usize, usize, *mut c_char, usize) -> *mut c_void;
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct TextureCopy {
+    pub dst_sub: u32,
+    pub src_sub: u32,
+    pub x: u32,
+    pub y: u32,
+    pub left: u32,
+    pub top: u32,
+    pub right: u32,
+    pub bottom: u32,
+}
+type CopyTexture =
+    unsafe extern "C" fn(*mut c_void, *mut c_void, *const TextureCopy, *mut c_char, usize) -> i32;
+type TextureCreate =
+    unsafe extern "C" fn(*mut c_void, *const TextureDesc, *mut c_char, usize) -> *mut c_void;
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ImageViewDesc {
+    pub format: u32,
+    pub mip: u32,
+    pub mips: u32,
+    pub layer: u32,
+    pub layers: u32,
+    pub kind: u32,
+}
+type ImageViewCreate =
+    unsafe extern "C" fn(*mut c_void, *const ImageViewDesc, *mut c_char, usize) -> *mut c_void;
+type ImageViewClear = unsafe extern "C" fn(*mut c_void, *const f32, *mut c_char, usize) -> i32;
+type TextureRead =
+    unsafe extern "C" fn(*mut c_void, u32, *mut u8, usize, *mut c_char, usize) -> i32;
+type TextureWrite =
+    unsafe extern "C" fn(*mut c_void, u32, *const u8, usize, *mut c_char, usize) -> i32;
 type Pipeline = unsafe extern "C" fn(
     *mut c_void,
     *mut c_void,
@@ -157,6 +202,18 @@ struct Inner {
     geometry_query: GeometryQuery,
     geometry_dispatch: GeometryDispatch,
     geometry_draw: GeometryDraw,
+    timestamp: unsafe extern "C" fn(*mut c_void, *mut u64, *mut u64, *mut c_char, usize) -> i32,
+    format_support: unsafe extern "C" fn(*mut c_void, u32) -> u32,
+    texture_copy: CopyTexture,
+    texture_create: TextureCreate,
+    texture_free: Close,
+    texture_write: TextureWrite,
+    texture_read: TextureRead,
+    image_view_create: ImageViewCreate,
+    image_view_free: Close,
+    image_view_clear: ImageViewClear,
+    buffer_view_create: BufferViewCreate,
+    buffer_view_free: Close,
     buffer_create: BufferCreate,
     buffer_free: Close,
     buffer_write: BufferWrite,
@@ -172,25 +229,27 @@ impl Drop for Inner {
 }
 #[derive(Clone)]
 pub struct NativeGraphics(Rc<Inner>);
-pub struct Buffer {
+#[derive(Clone)]
+pub struct Buffer(Rc<BufferInner>);
+struct BufferInner {
     graphics: NativeGraphics,
     handle: NonNull<c_void>,
     size: usize,
 }
-impl Drop for Buffer {
+impl Drop for BufferInner {
     fn drop(&mut self) {
         unsafe { (self.graphics.0.buffer_free)(self.handle.as_ptr()) };
     }
 }
 impl Buffer {
     pub fn write(&mut self, offset: usize, bytes: &[u8]) -> Result<(), String> {
-        if offset > self.size || bytes.len() > self.size - offset {
+        if offset > self.0.size || bytes.len() > self.0.size - offset {
             return Err("buffer write range".into());
         }
         let mut error = [0u8; 4096];
         if unsafe {
-            (self.graphics.0.buffer_write)(
-                self.handle.as_ptr(),
+            (self.0.graphics.0.buffer_write)(
+                self.0.handle.as_ptr(),
                 offset,
                 bytes.as_ptr(),
                 bytes.len(),
@@ -204,14 +263,14 @@ impl Buffer {
         Ok(())
     }
     pub fn read(&self, offset: usize, size: usize) -> Result<Vec<u8>, String> {
-        if offset > self.size || size > self.size - offset {
+        if offset > self.0.size || size > self.0.size - offset {
             return Err("buffer read range".into());
         }
         let mut result = vec![0; size];
         let mut error = [0u8; 4096];
         if unsafe {
-            (self.graphics.0.buffer_read)(
-                self.handle.as_ptr(),
+            (self.0.graphics.0.buffer_read)(
+                self.0.handle.as_ptr(),
                 offset,
                 result.as_mut_ptr(),
                 size,
@@ -225,7 +284,164 @@ impl Buffer {
         Ok(result)
     }
     pub fn size(&self) -> usize {
-        self.size
+        self.0.size
+    }
+}
+#[derive(Clone)]
+pub struct Texture(Rc<TextureInner>);
+struct TextureInner {
+    graphics: NativeGraphics,
+    handle: NonNull<c_void>,
+    desc: TextureDesc,
+}
+impl Drop for TextureInner {
+    fn drop(&mut self) {
+        unsafe { (self.graphics.0.texture_free)(self.handle.as_ptr()) };
+    }
+}
+impl Texture {
+    pub fn desc(&self) -> TextureDesc {
+        self.0.desc
+    }
+    pub fn read(&self, subresource: u32, size: usize) -> Result<Vec<u8>, String> {
+        if size > 128 * 1024 * 1024 {
+            return Err("texture read capacity".into());
+        }
+        let mut output = vec![0; size];
+        let mut error = [0u8; 4096];
+        if unsafe {
+            (self.0.graphics.0.texture_read)(
+                self.0.handle.as_ptr(),
+                subresource,
+                output.as_mut_ptr(),
+                size,
+                error.as_mut_ptr().cast(),
+                error.len(),
+            )
+        } == 0
+        {
+            return Err(message(&error));
+        }
+        Ok(output)
+    }
+    pub fn view(&self, desc: ImageViewDesc) -> Result<ImageView, String> {
+        let mut error = [0u8; 4096];
+        let handle = NonNull::new(unsafe {
+            (self.0.graphics.0.image_view_create)(
+                self.0.handle.as_ptr(),
+                &desc,
+                error.as_mut_ptr().cast(),
+                error.len(),
+            )
+        })
+        .ok_or_else(|| message(&error))?;
+        Ok(ImageView {
+            texture: self.clone(),
+            handle,
+            desc,
+        })
+    }
+    pub fn copy_from(&self, source: &Texture, region: TextureCopy) -> Result<(), String> {
+        if !Rc::ptr_eq(&self.0.graphics.0, &source.0.graphics.0) {
+            return Err("cross-context texture copy".into());
+        }
+        let mut error = [0u8; 4096];
+        if unsafe {
+            (self.0.graphics.0.texture_copy)(
+                self.0.handle.as_ptr(),
+                source.0.handle.as_ptr(),
+                &region,
+                error.as_mut_ptr().cast(),
+                error.len(),
+            )
+        } == 0
+        {
+            return Err(message(&error));
+        }
+        Ok(())
+    }
+    pub fn write(&self, subresource: u32, bytes: &[u8]) -> Result<(), String> {
+        let mut error = [0u8; 4096];
+        if unsafe {
+            (self.0.graphics.0.texture_write)(
+                self.0.handle.as_ptr(),
+                subresource,
+                bytes.as_ptr(),
+                bytes.len(),
+                error.as_mut_ptr().cast(),
+                error.len(),
+            )
+        } == 0
+        {
+            return Err(message(&error));
+        }
+        Ok(())
+    }
+}
+pub struct ImageView {
+    texture: Texture,
+    handle: NonNull<c_void>,
+    desc: ImageViewDesc,
+}
+impl Drop for ImageView {
+    fn drop(&mut self) {
+        unsafe { (self.texture.0.graphics.0.image_view_free)(self.handle.as_ptr()) };
+    }
+}
+impl ImageView {
+    pub fn desc(&self) -> ImageViewDesc {
+        self.desc
+    }
+    pub fn clear(&self, rgba: [f32; 4]) -> Result<(), String> {
+        let mut error = [0u8; 4096];
+        if unsafe {
+            (self.texture.0.graphics.0.image_view_clear)(
+                self.handle.as_ptr(),
+                rgba.as_ptr(),
+                error.as_mut_ptr().cast(),
+                error.len(),
+            )
+        } == 0
+        {
+            return Err(message(&error));
+        }
+        Ok(())
+    }
+}
+pub struct BufferView {
+    buffer: Buffer,
+    handle: NonNull<c_void>,
+    range: (usize, usize, u32),
+}
+impl BufferView {
+    pub fn range(&self) -> (usize, usize, u32) {
+        self.range
+    }
+}
+impl Drop for BufferView {
+    fn drop(&mut self) {
+        unsafe { (self.buffer.0.graphics.0.buffer_view_free)(self.handle.as_ptr()) };
+    }
+}
+impl Buffer {
+    pub fn view(&self, format: u32, offset: usize, size: usize) -> Result<BufferView, String> {
+        let mut error = [0u8; 4096];
+        let handle = NonNull::new(unsafe {
+            (self.0.graphics.0.buffer_view_create)(
+                self.0.handle.as_ptr(),
+                format,
+                offset,
+                size,
+                error.as_mut_ptr().cast(),
+                error.len(),
+            )
+        })
+        .ok_or_else(|| message(&error))?;
+        Ok(BufferView {
+            buffer: self.clone(),
+            handle,
+            range: (offset, size, format),
+        })
     }
 }
 pub struct Shader {
@@ -278,6 +494,18 @@ impl NativeGraphics {
             let geometry_query = library.symbol(b"wire_gpu_geometry_info\0")?;
             let geometry_dispatch = library.symbol(b"wire_gpu_geometry_dispatch\0")?;
             let geometry_draw = library.symbol(b"wire_gpu_geometry_draw_rgba64\0")?;
+            let timestamp = library.symbol(b"wire_gpu_timestamp\0")?;
+            let format_support = library.symbol(b"wire_gpu_format_support\0")?;
+            let texture_copy = library.symbol(b"wire_gpu_texture_copy\0")?;
+            let texture_create = library.symbol(b"wire_gpu_texture_create\0")?;
+            let texture_free = library.symbol(b"wire_gpu_texture_free\0")?;
+            let texture_read = library.symbol(b"wire_gpu_texture_read\0")?;
+            let image_view_create = library.symbol(b"wire_gpu_image_view_create\0")?;
+            let image_view_free = library.symbol(b"wire_gpu_image_view_free\0")?;
+            let image_view_clear = library.symbol(b"wire_gpu_image_view_clear\0")?;
+            let texture_write = library.symbol(b"wire_gpu_texture_write\0")?;
+            let buffer_view_create = library.symbol(b"wire_gpu_buffer_view_create\0")?;
+            let buffer_view_free = library.symbol(b"wire_gpu_buffer_view_free\0")?;
             let buffer_create = library.symbol(b"wire_gpu_buffer_create\0")?;
             let buffer_free = library.symbol(b"wire_gpu_buffer_free\0")?;
             let buffer_write = library.symbol(b"wire_gpu_buffer_write\0")?;
@@ -313,6 +541,18 @@ impl NativeGraphics {
                 geometry_query,
                 geometry_dispatch,
                 geometry_draw,
+                timestamp,
+                format_support,
+                texture_copy,
+                texture_create,
+                texture_free,
+                texture_write,
+                texture_read,
+                image_view_create,
+                image_view_free,
+                image_view_clear,
+                buffer_view_create,
+                buffer_view_free,
                 buffer_create,
                 buffer_free,
                 buffer_write,
@@ -320,6 +560,44 @@ impl NativeGraphics {
                 info,
             })))
         }
+    }
+    pub fn create_texture(&self, desc: TextureDesc) -> Result<Texture, String> {
+        let mut error = [0u8; 4096];
+        let handle = NonNull::new(unsafe {
+            (self.0.texture_create)(
+                self.0.context.as_ptr(),
+                &desc,
+                error.as_mut_ptr().cast(),
+                error.len(),
+            )
+        })
+        .ok_or_else(|| message(&error))?;
+        Ok(Texture(Rc::new(TextureInner {
+            graphics: self.clone(),
+            handle,
+            desc,
+        })))
+    }
+    pub fn timestamp(&self) -> Result<(u64, u64), String> {
+        let mut ticks = 0;
+        let mut frequency = 0;
+        let mut error = [0u8; 4096];
+        if unsafe {
+            (self.0.timestamp)(
+                self.0.context.as_ptr(),
+                &mut ticks,
+                &mut frequency,
+                error.as_mut_ptr().cast(),
+                error.len(),
+            )
+        } == 0
+        {
+            return Err(message(&error));
+        }
+        Ok((ticks, frequency))
+    }
+    pub fn format_support(&self, format: u32) -> u32 {
+        unsafe { (self.0.format_support)(self.0.context.as_ptr(), format) }
     }
     pub fn adapter(&self) -> &AdapterInfo {
         &self.0.info
@@ -342,11 +620,11 @@ impl NativeGraphics {
             )
         })
         .ok_or_else(|| message(&error))?;
-        Ok(Buffer {
+        Ok(Buffer(Rc::new(BufferInner {
             graphics: self.clone(),
             handle,
             size: bytes.len(),
-        })
+        })))
     }
     pub fn compile(&self, bytes: &[u8], stage: u32) -> Result<Shader, String> {
         if !(32..=1024 * 1024).contains(&bytes.len()) || !matches!(stage, 1 | 2 | 4 | 8) {
@@ -540,13 +818,13 @@ impl NativeGraphics {
         }
         let mut bindings = Vec::with_capacity(buffers.len());
         for (binding, buffer) in buffers {
-            if !Rc::ptr_eq(&self.0, &buffer.graphics.0) {
+            if !Rc::ptr_eq(&self.0, &buffer.0.graphics.0) {
                 return Err("buffer belongs to another GPU".into());
             }
             bindings.push(BufferBinding {
                 set: 3,
                 binding: *binding,
-                buffer: buffer.handle.as_ptr(),
+                buffer: buffer.0.handle.as_ptr(),
             });
         }
         let g = shader
@@ -629,6 +907,58 @@ impl NativeGraphics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires explicit native library and MoltenVK"]
+    fn native_views_keep_resources_and_device_alive_and_reject_foreign_copies() {
+        let path = |n| std::path::PathBuf::from(std::env::var_os(n).expect(n));
+        let graphics =
+            NativeGraphics::load(&path("WIRE_NATIVE_GRAPHICS"), &path("WIRE_MOLTENVK")).unwrap();
+        let desc = TextureDesc {
+            width: 8,
+            height: 4,
+            mips: 1,
+            layers: 1,
+            format: 28,
+            bind: 0x28,
+        };
+        let texture = graphics.create_texture(desc).unwrap();
+        let view = texture
+            .view(ImageViewDesc {
+                format: 28,
+                mip: 0,
+                mips: 1,
+                layer: 0,
+                layers: 1,
+                kind: 1,
+            })
+            .unwrap();
+        let other =
+            NativeGraphics::load(&path("WIRE_NATIVE_GRAPHICS"), &path("WIRE_MOLTENVK")).unwrap();
+        let foreign = other.create_texture(desc).unwrap();
+        let region = TextureCopy {
+            dst_sub: 0,
+            src_sub: 0,
+            x: 0,
+            y: 0,
+            left: 0,
+            top: 0,
+            right: 8,
+            bottom: 4,
+        };
+        assert!(texture.copy_from(&foreign, region).is_err());
+        let buffer = graphics.create_buffer(&[0; 64], 2).unwrap();
+        let typed = buffer.view(42, 0, 64).unwrap();
+        assert!(buffer.view(42, 60, 8).is_err());
+        drop(buffer);
+        drop(texture);
+        drop(graphics);
+        view.clear([0.25, 0.5, 0.75, 1.]).unwrap();
+        assert_eq!(
+            view.texture.read(0, 128).unwrap(),
+            [64, 128, 191, 255].repeat(32)
+        );
+        assert_eq!(typed.buffer.read(0, 64).unwrap(), vec![0; 64]);
+    }
     #[test]
     #[ignore = "requires explicit external native library, MoltenVK and generated original GS fixtures"]
     fn geometry_gpu_resources_draw_and_lifetime() {
