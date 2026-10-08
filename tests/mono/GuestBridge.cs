@@ -45,6 +45,19 @@ public static class GuestBridge {
     public static unsafe int UpdatePair(long p) { Pair* pair = (Pair*)p; pair->Left += 7; pair->Right *= 2; return pair->Left + pair->Right; }
     public static unsafe int LoadPair(long p) { Pair pair = *(Pair*)p; return pair.Left + pair.Right; }
     public static unsafe int StorePair(long p, int left, int right) { Pair pair; pair.Left = left; pair.Right = right; *(Pair*)p = pair; return left + right; }
+    [MethodImpl(MethodImplOptions.InternalCall)]
+    private static extern double GuestFloatCallback(double value, float scale, long bias);
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    public struct Wide { public double Value; public long Count; public uint Tag; }
+    [MethodImpl(MethodImplOptions.InternalCall)]
+    private static extern void GuestWideCallback(ref Wide input, double scale, long bias, out Wide output);
+    public static double FloatRoundTrip(double value, float scale, long bias) { return GuestFloatCallback(value, scale, bias) + 0.25; }
+    public static Wide WideRoundTrip(Wide input, double scale, long bias) {
+        Wide output; GuestWideCallback(ref input, scale, bias, out output); output.Value += 0.5; return output;
+    }
+    public static double ThrowFloatRoundTrip(double value, float scale, long bias) {
+        GuestFloatCallback(value, scale, bias); throw new ArgumentException("owned typed exception");
+    }
     public static int RoundTrip(int value) { return GuestCallback(value) + 3; }
     public static int PlatformContract() { try { return (int)Environment.OSVersion.Platform; } catch { return -1; } }
     public static int HostFilesystemContract() { try { return System.IO.File.Exists("/etc/hosts") ? 1 : 0; } catch { return -1; } }

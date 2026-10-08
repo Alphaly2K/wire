@@ -48,6 +48,7 @@ macro_rules! symbol {
         unsafe { std::mem::transmute::<Object, $ty>(raw) }
     }};
 }
+mod abi;
 mod checked;
 mod concurrency;
 mod gc;
@@ -514,6 +515,7 @@ fn pe_fixture() -> Vec<u8> {
     bytes[0x300..0x306].copy_from_slice(&[0x89, 0xc8, 0x83, 0xc0, 11, 0xc3]);
     // Typed IntPtr + Int32 guest callback modifies the registered scalar array.
     bytes[0x400..0x407].copy_from_slice(&[0x8b, 0x01, 0x03, 0xc2, 0x89, 0x01, 0xc3]);
+    abi::extend_pe(&mut bytes);
     bytes
 }
 
@@ -572,6 +574,7 @@ fn main() {
     assert_eq!(guest.callbacks, 1);
     println!("PASS original PE -> native IL -> interpreted x64 callback: checksum=19");
 
+    abi::run(&mono, &mut *guest);
     shared_array_probe(&mono, &mut *guest);
     concurrency::run(&mono);
     if let Some(blocks) = args.get(5) {

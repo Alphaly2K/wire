@@ -71,7 +71,7 @@ def main():
         command.append(root / "NativeServicesProbe.dll")
     records.append(execute(command, guarded, root, "run-guest-bridge"))
     content = (root / "run-guest-bridge.log").read_text()
-    for marker in ("PASS original PE", "PASS shared pinned Mono array", "PASS two attached Mono threads", "PASS scoped guest", "WIRE_NOEXEC_GUARD checks="):
+    for marker in ("PASS original PE", "PASS typed PE/IL ABI", "PASS shared pinned Mono array", "PASS two attached Mono threads", "PASS scoped guest", "WIRE_NOEXEC_GUARD checks="):
         if marker not in content:
             raise RuntimeError(f"Missing bridge evidence: {marker}")
     if args.checked_memory and "PASS scoped checked IL" not in content:
@@ -105,6 +105,7 @@ def main():
               "checked_patch_sha256": sha256(HERE / "patches/0010-scoped-checked-interpreter-memory.patch"),
               "native_game_backend_enabled": False,
               "shared_backing_verified": True,
+              "fixed_signature_cross_arch_float_struct_exception_verified": True,
               "unsafe_il_checked": False,
               "scoped_primitive_il_checked": args.checked_memory,
               "complete_unsafe_il_sandbox": False,

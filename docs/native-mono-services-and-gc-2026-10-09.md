@@ -106,3 +106,15 @@ M2还需完成 reference/array/helper 的受检 IL覆盖、write barriers、生�
 更多Win64↔ARM64 typed float/struct/sret与callback、完整metadata/vtable/engine生命周期。
 Windows服务还只有已测子集。0010全局禁用IL优化仍是原型限制，必须在保留检查后改成选择性
 配置；没有真实游戏加速数据。完成这些契约之前不启用游戏后端。
+
+## 后续：typed浮点、结构体与异常
+
+原创PE与ARM64 IL已完成三组混合double/float/int64往返、两组24B结构体往返，以及guest
+callback之后返回托管ArgumentException。Win64按参数位置使用XMM0/XMM1/R8；结构体hidden
+sret占RCX，后续input在RDX、double在XMM2、int64在R9，返回RAX仍为sret地址。ARM64入口
+使用明确的ref/out签名，只有scalar字段通过checked Memory复制，不暴露native原始指针。
+包括负数、超32位整数、uint32 wrapping和nested callback；未修改CPU/SSE实现。
+
+这些是固定原创签名的闭环，尚不是所有Unity_Injected ABI的动态dispatcher或通用delegate
+入口池。异常通过mono_runtime_invoke的独立exception out返回；owner token以RAII恢复，
+没有跨C ABI Rust unwind。完整服务/GC/布局回归继续通过，noexec guard `checks=106 denied=0`。
