@@ -121,6 +121,17 @@ checked跨页失败不改变CPU或留下部分store；新产生的未屏蔽算�
 跨页load/store、未屏蔽异常拒绝与高指针上下文恢复通过。
 完整release286项通过、5项ignored，Clippy无warning；pass117已启动继续验证实际guest路径。
 
+Win64窗口定位已准备并通过独立回归：SetWindowPos/MoveWindow使用40字节WINDOWPOS及
+56字节NCCALCSIZE_PARAMS，HWND/lppos/LPARAM保持64位；WM_WINDOWPOSCHANGING可修改位置/尺寸，
+必要时实际调用guest WM_NCCALCSIZE后提交客户区，WM_WINDOWPOSCHANGED调用默认WNDPROC时
+按真实client变动派发WM_MOVE/WM_SIZE，不由定位API强制替guest处理这些消息。
+SWP_SHOWWINDOW/HIDEWINDOW改变真实guest visible标志；暂仅支持NOZORDER的同步定位，
+异步/z-order等未接通的请求返回ERROR_NOT_SUPPORTED，未声称宿主已实现这些效果。
+MoveWindow当前没有Win64 GDI invalid region，bRepaint尚无后端区域刷新；图形仍由后续Present推进。
+默认消息规则沿用固定Hangover LGPL参考，出处/著作权保留在源码。
+独立guest测试每个work暂停/恢复，验证callback修改x/cx、嵌套default通知、64位临时buffer释放、
+visible/RECT/客户区及未支持flags不改变窗口。
+
 ## 距离正式窗口的剩余工作
 
 当前仍处于引擎/运行时初始化；input 初始化日志不证明托管游戏入口已完成。

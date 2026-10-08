@@ -5,6 +5,7 @@ use crate::x64::{
     memory::{EXECUTE, READ, WRITE},
     runtime::WindowStep,
 };
+mod position;
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Operation {
     Create {
@@ -21,6 +22,12 @@ enum Operation {
         window: u64,
         previous: u64,
         stage: u8,
+    },
+    Position(position::Position),
+    DefaultPosition {
+        window: u64,
+        messages: Vec<[u64; 4]>,
+        next: usize,
     },
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,6 +50,8 @@ pub(in crate::x64::runtime) fn arity(name: &str) -> Option<usize> {
         "CreateWindowExA" | "CreateWindowExW" => 12,
         "DefWindowProcA" | "DefWindowProcW" | "SendMessageA" | "SendMessageW" => 4,
         "CallWindowProcA" | "CallWindowProcW" => 5,
+        "SetWindowPos" => 7,
+        "MoveWindow" => 6,
         "ShowWindow"
         | "GetWindowLongA"
         | "GetWindowLongW"
@@ -78,6 +87,8 @@ pub(in crate::x64::runtime) fn dwords(name: &str) -> &'static [usize] {
         | "GetWindowLongA" | "GetWindowLongW" | "GetWindowLongPtrA" | "GetWindowLongPtrW"
         | "SetWindowLongPtrA" | "SetWindowLongPtrW" => &[1],
         "SetWindowLongA" | "SetWindowLongW" => &[1, 2],
+        "SetWindowPos" => &[2, 3, 4, 5, 6],
+        "MoveWindow" => &[1, 2, 3, 4, 5],
         "CallWindowProcA" | "CallWindowProcW" | "GetWindowTextA" | "GetWindowTextW" => &[2],
         _ => &[],
     }
@@ -93,6 +104,10 @@ pub(in crate::x64::runtime) fn is_callback(name: &str) -> bool {
             | "CallWindowProcW"
             | "DestroyWindow"
             | "ShowWindow"
+            | "SetWindowPos"
+            | "MoveWindow"
+            | "DefWindowProcA"
+            | "DefWindowProcW"
     )
 }
 impl Runtime64 {
@@ -147,6 +162,15 @@ impl Runtime64 {
             & !15)
             + 8;
         mem.check(frame, 40, WRITE)?;
+        if name.starts_with("DefWindowProc") {
+            if args[1] == 0x47 {
+                return self.default_position_start(mem, name, args);
+            }
+            return self.window_query(mem, name, args).map(WindowResult::Value);
+        }
+        if matches!(name, "SetWindowPos" | "MoveWindow") {
+            return self.position_start(mem, name, args);
+        }
         let (target, parameters, operation, release) = if name.starts_with("Create") {
             let key = Self::resource_key(mem, args[1], wide)?;
             let class = self
@@ -344,6 +368,23 @@ impl Runtime64 {
         value: u64,
     ) -> Result<WindowStep, String> {
         let result = match &mut call.operation {
+            Operation::Position(position) => match self.position_resume(mem, position)? {
+                WindowStep::Next(target, args) => return Ok(WindowStep::Next(target, args)),
+                WindowStep::Returned(value) => value,
+            },
+            Operation::DefaultPosition {
+                window,
+                messages,
+                next,
+            } => {
+                if let Some(w) = self.user.windows.get(window) {
+                    if let Some(&parameters) = messages.get(*next) {
+                        *next += 1;
+                        return Ok(WindowStep::Next(w.procedure, parameters));
+                    }
+                }
+                0
+            }
             Operation::Message => value,
             Operation::Create {
                 window,

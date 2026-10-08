@@ -1044,6 +1044,170 @@ fn startup_dll_call(
     cpu.regs[0]
 }
 #[test]
+fn amd64_window_position_executes_mutable_win64_layout_and_nested_default_messages_across_budgets()
+{
+    use wire::x64::process::{Outcome, Process64};
+    const CODE: u64 = 0x6b0000000;
+    const DATA: u64 = CODE + 4096;
+    fn mov(code: &mut Vec<u8>, r: u8, value: u64) {
+        code.extend([0x48 | (r >> 3), 0xb8 | (r & 7)]);
+        code.extend(value.to_le_bytes());
+    }
+    fn call(code: &mut Vec<u8>, gateway: u64, args: &[u64], window: bool) {
+        for (n, &arg) in args.iter().enumerate() {
+            if window && n == 0 {
+                code.extend([0x48, 0x89, 0xd9]);
+            } else if n < 4 {
+                mov(code, [1, 2, 8, 9][n], arg);
+            } else {
+                mov(code, 0, arg);
+                code.extend([0x48, 0x89, 0x44, 0x24, 32 + (n as u8 - 4) * 8]);
+            }
+        }
+        mov(code, 0, gateway);
+        code.extend([0xff, 0xd0]);
+    }
+    let path = std::env::temp_dir().join(format!("wire-windowpos64-{}.exe", std::process::id()));
+    std::fs::write(&path, fixture()).unwrap();
+    let mut p = Process64::load(&path, false).unwrap();
+    let original = p.cpu.clone();
+    p.memory.map(CODE, 8192, READ | WRITE | EXECUTE).unwrap();
+    p.memory
+        .write(
+            DATA,
+            &"PositionProbe\0"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    let class = DATA + 0x100;
+    p.memory.write_int(class, 4, 80).unwrap();
+    p.memory.write_int(class + 8, 8, CODE).unwrap();
+    p.memory.write_int(class + 24, 8, BASE).unwrap();
+    p.memory.write_int(class + 64, 8, DATA).unwrap();
+    assert_ne!(
+        startup_dll_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "user32.dll",
+            "RegisterClassExW",
+            &[class]
+        ),
+        0
+    );
+    let create = p.runtime.register("user32.dll", "CreateWindowExW");
+    let position = p.runtime.register("user32.dll", "SetWindowPos");
+    let default = p.runtime.register("user32.dll", "DefWindowProcW");
+    let mut callback = Vec::new();
+    mov(&mut callback, 0, DATA + 0x400);
+    callback.extend([
+        0x48, 0xff, 0x00, 0x4c, 0x8b, 0x10, 0x42, 0x89, 0x54, 0xd0, 0,
+    ]);
+    // Record LPARAM for every message. The first positioning buffer is full-width.
+    mov(&mut callback, 0, DATA + 0x500);
+    callback.extend([0x4e, 0x89, 0x0c, 0xd0]);
+    // Applications can alter position/size in WM_WINDOWPOSCHANGING.
+    callback.extend([0x83, 0xfa, 0x46, 0x75, 16, 0x41, 0xc7, 0x41, 16]);
+    callback.extend(30u32.to_le_bytes());
+    callback.extend([0x41, 0xc7, 0x41, 24]);
+    callback.extend(800u32.to_le_bytes());
+    mov(&mut callback, 0, default);
+    callback.extend([0xff, 0xe0]); // Real guest tail call, including nested MOVE/SIZE.
+    p.memory.write(CODE, &callback).unwrap();
+    let mut main = vec![0x48, 0x83, 0xec, 0x68];
+    call(
+        &mut main,
+        create,
+        &[0, DATA, DATA, 0, 10, 20, 640, 480, 0, 0, BASE, 0],
+        false,
+    );
+    main.extend([0x48, 0x89, 0xc3]); // RBX = HWND.
+    call(&mut main, position, &[0, 0, 20, 40, 700, 600, 0x44], true);
+    main.extend([0x48, 0x83, 0xc4, 0x68, 0xc3]);
+    p.memory.write(BASE + 0x1000, &main).unwrap();
+    p.cpu = original;
+    loop {
+        match p.run(p.cpu.work + 1).unwrap() {
+            Outcome::Budget => assert!(p.cpu.work < 600),
+            Outcome::Returned(value) => {
+                assert_eq!(value, 1);
+                break;
+            }
+            result => panic!("unexpected {result:?}"),
+        }
+    }
+    let expected = [0x24, 0x81, 0x83, 1, 0x46, 0x83, 0x47, 3, 5];
+    assert_eq!(
+        p.memory.read_int(DATA + 0x400, 8).unwrap(),
+        expected.len() as u64
+    );
+    for (n, message) in expected.into_iter().enumerate() {
+        assert_eq!(
+            p.memory.read_int(DATA + 0x408 + n as u64 * 8, 4).unwrap(),
+            message
+        );
+    }
+    assert_eq!(p.memory.read_int(DATA + 0x540, 8).unwrap(), 30 | (40 << 16));
+    assert_eq!(
+        p.memory.read_int(DATA + 0x548, 8).unwrap(),
+        800 | (600 << 16)
+    );
+    let buffer = p.memory.read_int(DATA + 0x528, 8).unwrap();
+    assert!(buffer > u32::MAX as u64);
+    assert!(p.memory.read_int(buffer, 1).is_err());
+    let window = p.runtime.window_info()[0].clone();
+    assert!(window.visible);
+    assert_eq!((window.width, window.height), (800, 600));
+    assert_eq!(
+        startup_dll_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "user32.dll",
+            "GetWindowRect",
+            &[window.handle, DATA + 0x200]
+        ),
+        1
+    );
+    for (n, expected) in [30, 40, 830, 640].into_iter().enumerate() {
+        assert_eq!(
+            p.memory.read_int(DATA + 0x200 + n as u64 * 4, 4).unwrap(),
+            expected
+        );
+    }
+    assert_eq!(
+        startup_dll_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "user32.dll",
+            "SetWindowPos",
+            &[window.handle, 0, 0, 0, 1, 1, 0x4000]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "GetLastError",
+            &[]
+        ),
+        50
+    );
+    assert_eq!(
+        (
+            p.runtime.window_info()[0].width,
+            p.runtime.window_info()[0].height
+        ),
+        (800, 600)
+    );
+    std::fs::remove_file(path).unwrap();
+}
+#[test]
 fn amd64_window_creation_executes_messages_with_full_createstruct_and_rolls_back_callback_rejection(
 ) {
     use wire::x64::process::{Outcome, Process64};
