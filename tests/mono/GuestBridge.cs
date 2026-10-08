@@ -58,6 +58,13 @@ public static class GuestBridge {
     public static double ThrowFloatRoundTrip(double value, float scale, long bias) {
         GuestFloatCallback(value, scale, bias); throw new ArgumentException("owned typed exception");
     }
+    private static void CheckedIncrement(ref int value, int depth) {
+        if (depth <= 0) return; value += depth; CheckedIncrement(ref value, depth - 1);
+    }
+    public static int CheckedNestedLocal(int seed) { CheckedIncrement(ref seed, 5); return seed; }
+    public static int CheckedNestedWrite(long address, int value) { WriteI32(address, value); return ReadI32(address); }
+    public static int CheckedNestedExternal(long address, int value) { return MarshalHelperWrite(address, value); }
+    public static int CheckedNestedCached(int value) { return CachedPrimitive(value); }
     public static unsafe int CachedWrite(long address, int value) { *(int*)address = value; return value; }
     public static int CachedPrimitive(int value) { return value + 1; }
     public static int PureCompute(int count) {

@@ -64,3 +64,8 @@ File.Exists/Directory.Exists/FileStream、LastError、owner撤销与GC；添加�
 0015只禁用受检方法的IL优化，普通trusted类库保持优化；拒绝缓存unchecked方法，并保留
 wrapper/image inline边界。`perf_interp.py`接受冻结runtime，以同一纯IL checksum运行三对
 AB/BA对照；结果用于配置比较，不能替代真实游戏性能报告。
+
+`--managed-inventory <Managed目录>`只读输出实际InternalCall/PInvoke声明，需与
+`--native-services`一起使用。所有native ABI准入仍为0；声明清单不是调用覆盖率。
+prepare通过锁定archive验证整套patch的精确prefix，可重复处理覆盖早期hunk的后续patch，
+不会丢弃未知source编辑。工具回归：`python3 -m unittest discover -s tools/mono -p test_build.py`。

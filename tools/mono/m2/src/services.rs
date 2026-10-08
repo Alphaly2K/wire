@@ -1121,3 +1121,152 @@ fn inventory(mono: &Mono, output: &std::path::Path) {
     std::fs::write(output.join("pinvoke-contracts.tsv"), output_text).unwrap();
     println!("PINVOKE_CONTRACT_INVENTORY methods={count} source=actual_mscorlib_metadata managed_reflection_used=0");
 }
+
+/// Read actual game binding declarations. Loading metadata does not invoke
+/// assembly entry points, game methods or Unity initialization callbacks.
+pub(super) fn inventory_managed(mono: &Mono, input: &std::path::Path, output: &std::path::Path) {
+    let api = API.get().unwrap();
+    let open = symbol!(
+        mono.library,
+        "mono_domain_assembly_open",
+        unsafe extern "C" fn(Object, *const c_char) -> Object
+    );
+    let image = symbol!(
+        mono.library,
+        "mono_assembly_get_image",
+        unsafe extern "C" fn(Object) -> Object
+    );
+    let table = symbol!(
+        mono.library,
+        "mono_image_get_table_info",
+        unsafe extern "C" fn(Object, i32) -> Object
+    );
+    let rows = symbol!(
+        mono.library,
+        "mono_table_info_get_rows",
+        unsafe extern "C" fn(Object) -> i32
+    );
+    let decode = symbol!(
+        mono.library,
+        "mono_metadata_decode_row",
+        unsafe extern "C" fn(Object, i32, *mut u32, i32)
+    );
+    let string = symbol!(
+        mono.library,
+        "mono_metadata_string_heap",
+        unsafe extern "C" fn(Object, u32) -> *const c_char
+    );
+    let get = symbol!(
+        mono.library,
+        "mono_get_method",
+        unsafe extern "C" fn(Object, u32, Object) -> Object
+    );
+    let class_type = symbol!(
+        mono.library,
+        "mono_class_get_type",
+        unsafe extern "C" fn(Object) -> Object
+    );
+    let mut files: Vec<_> = std::fs::read_dir(input)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("dll"))
+        })
+        .collect();
+    files.sort();
+    assert!(!files.is_empty());
+    let mut result = String::from("assembly\tclass\tmethod\ttoken\tkind\treturn\tparameters\tmethod_flags\timplementation_flags\tlibrary\tentry\tpinvoke_flags\tabi_verified\n");
+    let mut failures = String::from("assembly\ttoken\treason\n");
+    let mut icalls = 0;
+    let mut pinvokes = 0;
+    let mut unresolved = 0;
+    for file in &files {
+        let name = file.file_name().unwrap().to_str().unwrap();
+        let path = CString::new(file.to_str().unwrap()).unwrap();
+        let assembly = unsafe { open(mono.domain, path.as_ptr()) };
+        if assembly.is_null() {
+            failures.push_str(&format!("{name}\t\tassembly open failed\n"));
+            unresolved += 1;
+            continue;
+        }
+        let image = unsafe { image(assembly) };
+        let methods = unsafe { table(image, 6) };
+        let maps = unsafe { table(image, 28) };
+        let modules = unsafe { table(image, 26) };
+        let mut imports = std::collections::BTreeMap::new();
+        for index in 0..unsafe { rows(maps) } {
+            let mut data = [0u32; 4];
+            unsafe {
+                decode(maps, index, data.as_mut_ptr(), 4);
+            }
+            if data[1] & 1 == 0 {
+                continue;
+            }
+            let mut module = 0;
+            unsafe {
+                decode(modules, data[3] as i32 - 1, &mut module, 1);
+            }
+            imports.insert(
+                data[1] >> 1,
+                (
+                    unsafe { text(string(image, module)) },
+                    unsafe { text(string(image, data[2])) },
+                    data[0],
+                ),
+            );
+        }
+        for index in 0..unsafe { rows(methods) } {
+            let mut data = [0u32; 6];
+            unsafe {
+                decode(methods, index, data.as_mut_ptr(), 6);
+            }
+            let is_icall = data[1] & 0x1000 != 0;
+            let is_pinvoke = data[2] & 0x2000 != 0;
+            if !is_icall && !is_pinvoke {
+                continue;
+            }
+            let token = 0x06000000 | (index as u32 + 1);
+            let method = unsafe { get(image, token, ptr::null_mut()) };
+            if method.is_null() {
+                failures.push_str(&format!("{name}\t{token:#010x}\tmethod unresolved\n"));
+                unresolved += 1;
+                continue;
+            }
+            let signature = unsafe { (api.signature)(method) };
+            if signature.is_null() {
+                failures.push_str(&format!("{name}\t{token:#010x}\tsignature unresolved\n"));
+                unresolved += 1;
+                continue;
+            }
+            let class = unsafe { (api.method_class)(method) };
+            let class = unsafe { type_name(api, class_type(class)) };
+            let method_name = unsafe { text((api.method_name)(method)) };
+            let returns = unsafe { type_name(api, (api.return_type)(signature)) };
+            let mut iterator = ptr::null_mut();
+            let mut params = Vec::new();
+            loop {
+                let ty = unsafe { (api.parameters)(signature, &mut iterator) };
+                if ty.is_null() {
+                    break;
+                }
+                params.push(unsafe { type_name(api, ty) });
+            }
+            let (library, entry, flags) = imports
+                .get(&(index as u32 + 1))
+                .cloned()
+                .unwrap_or_default();
+            let kind = if is_icall {
+                icalls += 1;
+                "InternalCall"
+            } else {
+                pinvokes += 1;
+                "PInvoke"
+            };
+            result.push_str(&format!("{name}\t{class}\t{method_name}\t{token:#010x}\t{kind}\t{returns}\t{}\t{:#06x}\t{:#06x}\t{library}\t{entry}\t{flags:#06x}\t0\n",params.join(";"),data[2],data[1]));
+        }
+    }
+    std::fs::write(output.join("managed-native-contracts.tsv"), result).unwrap();
+    std::fs::write(output.join("managed-native-unresolved.tsv"), failures).unwrap();
+    println!("MANAGED_BINDING_INVENTORY assemblies={} icalls={icalls} pinvokes={pinvokes} unresolved={unresolved} game_methods_executed=0 native_abi_admitted=0",files.len());
+}

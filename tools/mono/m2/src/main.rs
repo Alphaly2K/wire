@@ -523,8 +523,8 @@ fn pe_fixture() -> Vec<u8> {
 fn main() {
     let args: Vec<_> = std::env::args().collect();
     assert!(
-        (5..=8).contains(&args.len()),
-        "usage: probe runtime.dylib classlib-root GuestBridge.dll fixture.exe [CheckedBlocks.dll] [sample-mono.dll] [NativeServicesProbe.dll]"
+        (5..=9).contains(&args.len()),
+        "usage: probe runtime.dylib classlib-root GuestBridge.dll fixture.exe [CheckedBlocks.dll] [sample-mono.dll] [NativeServicesProbe.dll] [Managed-directory]"
     );
     let mono = Mono::load(&args[1], &args[2], &args[3], args.len() >= 6);
     if std::env::var_os("WIRE_MONO_PERF_ONLY").is_some() {
@@ -594,6 +594,11 @@ fn main() {
             .unwrap()
             .join("windows-service-vfs");
         services::run(&mono, assembly, &root);
+    }
+
+    if let Some(input) = args.get(8) {
+        let output = std::path::Path::new(&args[4]).parent().unwrap();
+        services::inventory_managed(&mono, std::path::Path::new(input), output);
     }
 
     if let Some(sample) = args.get(6) {

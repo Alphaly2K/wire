@@ -72,7 +72,7 @@ def main():
               "classlib_sha256": sha256(runtime / "probe/classlib/mono/4.5/mscorlib.dll"),
               "median_method_wall_s": {name: statistics.median(values) for name, values in samples.items()},
               "samples_per_configuration": 21,
-              "runtime_configuration": json.loads((runtime / "runtime-configuration.json").read_text()) if (runtime / "runtime-configuration.json").exists() else None, "native_game_backend_enabled": False}
+              "runtime_configuration": json.loads((libraries["candidate"].resolve().parents[4] / "runtime-configuration.json").read_text()), "native_game_backend_enabled": False}
     report["method_speed_ratio"] = report["median_method_wall_s"]["baseline"] / report["median_method_wall_s"]["candidate"]
     (output / "results.json").write_text(json.dumps(report, indent=2) + "\n")
     print(f"pure IL configuration ratio={report['method_speed_ratio']:.3f}; no real-game speed claim")

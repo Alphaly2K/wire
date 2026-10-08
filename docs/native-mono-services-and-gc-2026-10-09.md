@@ -140,3 +140,27 @@ Mono或真实游戏比较；不能宣称游戏整体已经快了2倍。
 
 复测工具为`tools/mono/perf_interp.py`，传入冻结的旧runtime、同一M2 driver output与新runtime。
 早前0010的全局禁用优化说明保留为历史阶段；当前未受检的trusted类库已经恢复普通优化。
+
+## 后续：受检静态调用与实际绑定清单
+
+0016只加入同image的静态IL `MINT_CALL`：目标不得是wrapper、P/Invoke、InternalCall、native/
+compiled code、vararg或缓存的未受检转换。callee进入后继续执行同一permit与访存检查。
+`SUB1_I4/I8`仅访问已验证的解释器locals，经核对后加入许可。现在许可349/613；这个数仍不
+是游戏兼容率。动态virtual/delegate/calli及外部helper仍未放行。
+
+回归通过递归5层的parent byref、checked child guest写入、readonly child fault、cached target
+拒绝及经同image helper到Marshal的拒绝。原始14个访存故障加一个child readonly fault共15，
+无部分改写；最新完整M2含metadata inventory的guard为 `checks=410 denied=0`。
+
+`probe_m2.py --managed-inventory <Managed目录>`在native VM中只读取实际程序集metadata，
+不调用游戏entrypoint、游戏方法或Unity初始化callbacks。样本153个DLL解析11537个InternalCall、
+1393个P/Invoke，unresolved=0，7921条方法名含_Injected。输出`managed-native-contracts.tsv`
+包含assembly、完整declaring type、method token、参数和返回类型、impl/method flags，以及
+P/Invoke的原始库/entry/flags；所有行 `abi_verified=0`。声明数量不等于使用频率，完整类型
+解析也不替代Win64↔ARM64/native marshaling/layout验证。原始153个输入hash保留于results。
+
+重复prepare的旧实现曾逐补丁reverse-check，0015覆盖0010的hunk后即失效。现在从锁定archive
+在临时树重建整套补丁，只认可现有source属于一个完整patch prefix，再应用后续patch；未知
+编辑保留并拒绝继续。build前复核patch hashes和每个修改source file hash，configuration也
+记录这些hash。重叠hunk的重复/升级、未知编辑保护、旧patch内容变动拒绝，3个工具回归通过。
+真实source prepare连续执行也通过。修复既不重置source tree，也不重新下载SDK/开发工具。

@@ -1,0 +1,39 @@
+--- a/mono/mini/interp/interp.c
++++ b/mono/mini/interp/interp.c
+@@ -132,6 +132,7 @@
+ wire_memory_opcode_allowed (MintOpcode opcode)
+ {
+     switch (opcode) {
++    case MINT_CALL:
+     case MINT_LDNULL:
+     case MINT_RET:
+     case MINT_RET_VOID:
+@@ -392,6 +393,8 @@
+     case MINT_CLT_UN_R8:
+     case MINT_ADD1_I4:
+     case MINT_ADD1_I8:
++    case MINT_SUB1_I4:
++    case MINT_SUB1_I8:
+     case MINT_NEG_I4:
+     case MINT_NEG_I8:
+     case MINT_NEG_R4:
+@@ -4136,6 +4139,19 @@
+ 		}
+ 		MINT_IN_CASE(MINT_CALL) {
+ 			cmethod = (InterpMethod*)frame->imethod->data_items [ip [2]];
++            if (WIRE_SCOPED ()) {
++                MonoMethod *target = cmethod->method;
++                if (!target || target->wrapper_type != MONO_WRAPPER_NONE ||
++                    m_class_get_image (target->klass) != wire_memory_image ||
++                    !(target->flags & METHOD_ATTRIBUTE_STATIC) ||
++                    (target->flags & METHOD_ATTRIBUTE_PINVOKE_IMPL) ||
++                    (target->iflags & METHOD_IMPL_ATTRIBUTE_INTERNAL_CALL) ||
++                    (target->iflags & METHOD_IMPL_ATTRIBUTE_CODE_TYPE_MASK) != METHOD_IMPL_ATTRIBUTE_IL ||
++                    cmethod->vararg || cmethod->code_type == IMETHOD_CODE_COMPILED ||
++                    (cmethod->transformed && !cmethod->wire_memory_checked_transform))
++                    THROW_EX (mono_get_exception_not_supported ("Wire scope only admits fresh or checked static IL calls in this image"), ip);
++            }
++
+ 			call_args_offset = ip [1];
+ 
+ #ifdef ENABLE_EXPERIMENT_TIERED

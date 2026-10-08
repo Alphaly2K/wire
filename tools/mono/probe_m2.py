@@ -18,7 +18,10 @@ def main():
     parser.add_argument("--checked-memory", action="store_true", help="verify scoped unsafe IL using patch 0010")
     parser.add_argument("--sample-mono", type=Path, help="read-only original x64 Unity Mono layout probe")
     parser.add_argument("--native-services", action="store_true", help="trusted-classlib typed Windows service prototype")
+    parser.add_argument("--managed-inventory", type=Path, help="read-only actual Managed directory binding metadata scan")
     args = parser.parse_args()
+    if args.managed_inventory and not args.native_services:
+        parser.error("--managed-inventory requires --native-services")
     if args.native_services and (not args.sample_mono or not args.checked_memory):
         parser.error("--native-services requires --sample-mono and --checked-memory")
     if args.sample_mono and not args.checked_memory:
@@ -69,6 +72,8 @@ def main():
         command.append(args.sample_mono.resolve())
     if args.native_services:
         command.append(root / "NativeServicesProbe.dll")
+    if args.managed_inventory:
+        command.append(args.managed_inventory.resolve())
     records.append(execute(command, guarded, root, "run-guest-bridge"))
     content = (root / "run-guest-bridge.log").read_text()
     for marker in ("PASS original PE", "PASS typed PE/IL ABI", "PASS shared pinned Mono array", "PASS two attached Mono threads", "PASS scoped guest", "WIRE_NOEXEC_GUARD checks="):
@@ -76,6 +81,8 @@ def main():
             raise RuntimeError(f"Missing bridge evidence: {marker}")
     if args.checked_memory and "PASS checked scope rejects preexisting unchecked method transform" not in content:
         raise RuntimeError("Missing cached unchecked transform rejection")
+    if args.checked_memory and "PASS checked static IL calls" not in content:
+        raise RuntimeError("Missing checked static IL call evidence")
     if args.checked_memory and "PASS scoped checked IL" not in content:
         raise RuntimeError("Missing scoped checked IL evidence")
     if args.sample_mono and "PASS original Unity Mono leaf" not in content:
@@ -106,6 +113,7 @@ def main():
                                   for name in ("mscorlib.dll", "System.dll", "System.Core.dll")},
               "checked_patch_sha256": sha256(HERE / "patches/0010-scoped-checked-interpreter-memory.patch"),
               "scope_local_optimization_patch_sha256": sha256(HERE / "patches/0015-scope-local-interpreter-optimizations.patch"),
+              "checked_static_call_patch_sha256": sha256(HERE / "patches/0016-checked-same-image-static-il-calls.patch"),
               "native_game_backend_enabled": False,
               "shared_backing_verified": True,
               "fixed_signature_cross_arch_float_struct_exception_verified": True,
@@ -123,11 +131,14 @@ def main():
               "bdwgc_interp_roots_patch_sha256": sha256(HERE / "patches/0012-bdwgc-interpreter-stack-roots.patch"),
               "class_profile_patch_sha256": sha256(HERE / "patches/0013-immutable-class-profile-fields.patch"),
               "msvc_class_abi_patch_sha256": sha256(HERE / "patches/0014-opt-in-msvc-class-bitfield-abi.patch"),
-              "runtime_configuration": json.loads((runtime / "runtime-configuration.json").read_text()) if (runtime / "runtime-configuration.json").exists() else None,
+              "runtime_configuration": json.loads((library.resolve().parents[4] / "runtime-configuration.json").read_text()),
               "active_and_popped_interp_roots_verified": args.native_services,
               "managed_reflection_inventory_verified": "PASS managed reflection P/Invoke inventory" in content,
               "method_qualified_patch_sha256": sha256(HERE / "patches/0011-method-qualified-pinvoke-adapter.patch"),
               "pinvoke_contract_inventory_sha256": sha256(root / "pinvoke-contracts.tsv") if args.native_services else None,
+              "managed_inventory_inputs_sha256": {p.name: sha256(p) for p in sorted(args.managed_inventory.glob("*.dll"))} if args.managed_inventory else None,
+              "managed_native_contracts_sha256": sha256(root / "managed-native-contracts.tsv") if args.managed_inventory else None,
+              "managed_inventory_diagnostics": re.search(r"MANAGED_BINDING_INVENTORY (.*)", content)[1] if args.managed_inventory else None,
               "production_native_pointer_validation": False,
               "m3_admission": False,
               "admission_blockers": ["Complete checked unsafe IL and managed/native helper coverage",

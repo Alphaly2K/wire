@@ -8,9 +8,11 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import tarfile
+import tempfile
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
@@ -38,6 +40,68 @@ def environment(root):
                MONO_BRANCH="wire-unity-prototype",
                MONO_BUILD_REVISION=LOCK["sources"][0]["revision"])
     return env
+
+
+def patch_files(patches):
+    paths = set()
+    for patch in patches:
+        for name in re.findall(r"^(?:--- a/|\+\+\+ b/)([^\t\n]+)", patch.read_text(), re.MULTILINE):
+            path = Path(name)
+            if path.is_absolute() or ".." in path.parts:
+                raise RuntimeError(f"Invalid patch path: {name}")
+            paths.add(path)
+    return sorted(paths)
+
+
+def patch_state(root, paths):
+    return {str(path): digest(root / path) if (root / path).is_file() else None for path in paths}
+
+
+def apply_patch_stack(mono, archive, directory, patches):
+    """Recognize an exact prefix of the locked patch stack, then advance it.
+
+    Later patches may edit earlier hunks, so reverse-checking each patch
+    independently is unsound. Reconstruct only affected source files from the
+    locked archive in a temporary tree; unknown edits fail before mutation.
+    """
+    paths = patch_files(patches)
+    current = patch_state(mono, paths)
+    installed = None
+    with tempfile.TemporaryDirectory(prefix="wire-mono-patches-") as temporary:
+        reference = Path(temporary)
+        with tarfile.open(archive) as package:
+            for path in paths:
+                try:
+                    member = package.getmember(str(Path(directory) / path))
+                except KeyError:
+                    continue  # A patch may add an original new file.
+                if not member.isfile():
+                    raise RuntimeError(f"Patch target is not an archive file: {path}")
+                target = reference / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(package.extractfile(member).read())
+        if patch_state(reference, paths) == current:
+            installed = 0
+        for index, patch in enumerate(patches, 1):
+            with patch.open("rb") as stream:
+                subprocess.run(["patch", "-p1", "--batch", "--forward"], cwd=reference,
+                               stdin=stream, check=True, stdout=subprocess.DEVNULL)
+            if patch_state(reference, paths) == current:
+                installed = index
+        expected = patch_state(reference, paths)
+        if installed is None:
+            raise RuntimeError("Existing patched source does not match any exact locked patch prefix; preserve and inspect local edits")
+    for patch in patches[installed:]:
+        with patch.open("rb") as stream:
+            subprocess.run(["patch", "-p1", "--batch", "--forward"], cwd=mono, stdin=stream, check=True)
+    if patch_state(mono, paths) != expected:
+        raise RuntimeError("Patch application did not reproduce the locked source state")
+    (mono / ".wire-patches.json").write_text(json.dumps({
+        "archive_sha256": digest(archive),
+        "patches": {patch.name: digest(patch) for patch in patches},
+        "files": expected,
+    }, indent=2) + "\n")
+    print(f"Validated patch stack: {installed} existing, {len(patches) - installed} applied", flush=True)
 
 
 def prepare(root, env):
@@ -79,19 +143,9 @@ def prepare(root, env):
             if link.exists():
                 link.rmdir()  # Only an empty submodule placeholder may be removed.
             link.symlink_to(target, target_is_directory=True)
-    for patch in sorted((HERE / "patches").glob("*.patch")):
-        command = ["patch", "-p1", "--batch"]
-        with patch.open("rb") as stream:
-            forward = subprocess.run(command + ["--dry-run", "--forward"], cwd=mono,
-                                     stdin=stream, stdout=subprocess.DEVNULL,
-                                     stderr=subprocess.DEVNULL)
-        if forward.returncode == 0:
-            with patch.open("rb") as stream:
-                subprocess.run(command + ["--forward"], cwd=mono, stdin=stream, check=True)
-        else:
-            with patch.open("rb") as stream:
-                subprocess.run(command + ["--dry-run", "--reverse"], cwd=mono,
-                               stdin=stream, check=True, stdout=subprocess.DEVNULL)
+    item = LOCK["sources"][0]
+    apply_patch_stack(mono, archives / item["archive"], item["directory"],
+                      sorted((HERE / "patches").glob("*.patch")))
 
 
 def build_tools(root, env, jobs):
@@ -117,6 +171,13 @@ def autogen(root, env):
 
 def build_runtime(root, env, mode, jobs, msvc_class_abi=False):
     mono = root / "sources" / LOCK["sources"][0]["directory"]
+    marker = mono / ".wire-patches.json"
+    patches = {p.name: digest(p) for p in sorted((HERE / "patches").glob("*.patch"))}
+    if not marker.exists():
+        raise RuntimeError("Run prepare first to verify the complete source patch stack")
+    source_state = json.loads(marker.read_text())
+    if source_state["patches"] != patches or patch_state(mono, [Path(p) for p in source_state["files"]]) != source_state["files"]:
+        raise RuntimeError("Source patch state changed; run prepare and inspect unexpected edits before building")
     build = root / ("build-" + mode)
     build.mkdir(exist_ok=True)
     options = [mono / "configure", "--prefix=" + str(root / ("install-" + mode)),
@@ -135,7 +196,7 @@ def build_runtime(root, env, mode, jobs, msvc_class_abi=False):
                 "environment": {key: env.get(key, "") for key in
                                 ("CC", "CXX", "CFLAGS", "CXXFLAGS", "CPPFLAGS",
                                  "MACOSX_DEPLOYMENT_TARGET", "MONO_BRANCH", "MONO_BUILD_REVISION")},
-                "patches": {p.name: digest(p) for p in sorted((HERE / "patches").glob("*.patch"))}}
+                "patches": patches, "patched_source_files": source_state["files"]}
     (root / (mode + "-configuration.json")).write_text(json.dumps(manifest, indent=2) + "\n")
     run(options, build, env, root / ("configure-" + mode + ".log"))
     # Upstream's all-recursive includes SGen-only unit-test libraries even

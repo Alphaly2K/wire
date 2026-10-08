@@ -178,6 +178,23 @@ pub(super) fn run(mono: &Mono, state: *mut Guest, blocks: &str) {
             .unwrap(),
     );
     println!("PASS checked scope rejects preexisting unchecked method transform");
+    let mut seed = 3i32;
+    let mut nested_args = [(&mut seed as *mut i32).cast()];
+    assert_eq!(
+        invoke_i32(
+            mono,
+            mono.find("CheckedNestedLocal", 1),
+            &mut nested_args,
+            None
+        ),
+        18
+    );
+    invoke_i32(
+        mono,
+        mono.find("CheckedNestedCached", 1),
+        &mut nested_args,
+        Some("NotSupportedException"),
+    );
     let mut at = AT;
     let mut value = 37i32;
     let mut parameters = [
@@ -248,6 +265,32 @@ pub(super) fn run(mono: &Mono, state: *mut Guest, blocks: &str) {
             .unwrap();
         assert_eq!(observed, bytes);
     }
+    value = 113;
+    std::hint::black_box(value);
+    assert_eq!(
+        invoke_i32(
+            mono,
+            mono.find("CheckedNestedWrite", 2),
+            &mut parameters,
+            None
+        ),
+        113
+    );
+    assert_eq!(unsafe { &(*state).memory }.read_int(AT, 4).unwrap(), 113);
+    unsafe { &mut (*state).memory }
+        .protect(DATA, 4096, READ)
+        .unwrap();
+    invoke_i32(
+        mono,
+        mono.find("CheckedNestedWrite", 2),
+        &mut parameters,
+        Some("AccessViolationException"),
+    );
+    assert_eq!(unsafe { &(*state).memory }.read_int(AT, 4).unwrap(), 113);
+    unsafe { &mut (*state).memory }
+        .protect(DATA, 4096, READ | WRITE)
+        .unwrap();
+    println!("PASS checked static IL calls: same image, recursive parent byref, checked child access, cached target rejection");
     let mut left = 31i32;
     let mut right = 43i32;
     let mut pair_args = [
@@ -364,6 +407,25 @@ pub(super) fn run(mono: &Mono, state: *mut Guest, blocks: &str) {
         write,
         &mut parameters,
         Some("AccessViolationException"),
+    );
+    // The same rejection must hold through an admitted same-image helper.
+    at = native_address;
+    std::hint::black_box(at);
+    region
+        .with_native(|_| {
+            invoke_i32(
+                mono,
+                mono.find("CheckedNestedExternal", 2),
+                &mut parameters,
+                Some("NotSupportedException"),
+            );
+        })
+        .unwrap();
+    assert_eq!(
+        unsafe { &(*state).memory }
+            .read_int(native_address, 8)
+            .unwrap(),
+        37
     );
     // An unadapted Marshal helper must be rejected before it can write to the
     // RW host allocation behind the registered READ-only guest alias.
