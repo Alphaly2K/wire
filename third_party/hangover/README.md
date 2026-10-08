@@ -4,7 +4,7 @@ Requested upstream: https://github.com/AndreRH/hangover
 Hangover commit: `56e385b7ff490edd281b288f420677093563560b`
 Its Wine submodule: https://github.com/AndreRH/wine
 Wine commit: `3ea3a14941b6a122b892c84141ce9662c008081e`
-Reviewed/adapted: 2026-10-06–2026-10-07. Both project licenses are LGPL 2.1. Every C
+Reviewed/adapted: 2026-10-06–2026-10-08. Both project licenses are LGPL 2.1. Every C
 file used below expressly permits LGPL 2.1 or later; wire selects LGPL 2.1.
 
 | Wine file | Local snapshot / adaptation |
@@ -42,6 +42,23 @@ Path source copyright 2018 Nikolay Sivov, 2018 Zhiyi Zhang,
 2021–2023 Zebediah Figura. This file explicitly permits LGPL-2.1-or-later;
 wire selects LGPL 2.1. Native pointer scanning is replaced by checked guest
 units/CP932 character boundaries. No native path/file backend is linked.
+
+2026-10-08: semantic review of `dlls/combase/combase.c` at the same pinned
+Wine commit for CoCreateGuid, GUID string functions and their HRESULTs.
+Copyright 2005 Juan Lang, 2005–2006 Robert Shearman for CodeWeavers;
+LGPL-2.1-or-later. `src/x64/runtime/guid.rs` independently serializes Windows
+GUID fields, uses host OS entropy and checked 64-bit guest allocations.
+No upstream RPC, parser or allocator implementation is copied or linked.
+The isolated profile has no HKCR ProgID/activation-context registrations;
+CLSIDFromString returns CO_E_CLASSSTRING for those unresolved names.
+
+Semantic review on 2026-10-08 also covers `dlls/combase/string.c` and
+`dlls/combase/roapi.c` at the same fixed Wine commit (LGPL-2.1-or-later).
+Copyright 2014 Martin Storsjo and, for roapi.c, 2016 Michael Müller.
+`src/x64/runtime/winrt.rs` uses independent checked guest storage for HSTRING
+headers, immutable copies, reference counts and API-set dispatch. No Wine
+implementation or allocator is imported. Missing WinRT classes fail with
+REGDB_E_CLASSNOTREG; there is no invented activation factory or gamepad.
 
 - `geometry.c`: `07df351f137ce4f11215a449997ed3f324981b8034bb5728fe3e42dd3844892b`
 - `d3d9.h`: `fb49b3c44acec5e100a5c0ff1622f7d0207842d87fc513b49047a818e8c351b2`

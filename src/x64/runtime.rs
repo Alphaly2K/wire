@@ -17,6 +17,7 @@ mod events;
 pub(crate) mod exception;
 mod files;
 mod find;
+mod guid;
 mod heap;
 mod locale;
 mod mapping;
@@ -40,6 +41,7 @@ pub(crate) enum WindowStep {
     Returned(u64),
 }
 mod version;
+mod winrt;
 
 pub const TEB: u64 = 0x7ffd00000000;
 pub const PEB: u64 = TEB + 2 * PAGE;
@@ -66,6 +68,7 @@ pub struct WindowEvent {
 }
 
 pub struct Runtime64 {
+    api_inventory: Option<BTreeMap<(String, String, String), u64>>,
     start: Instant,
     timer_periods: BTreeMap<u32, u32>,
     image_base: u64,
@@ -97,6 +100,7 @@ pub struct Runtime64 {
     environment: BTreeMap<String, (String, String)>,
     local_blocks: std::collections::BTreeSet<u64>,
     task_blocks: std::collections::BTreeSet<u64>,
+    hstrings: winrt::Strings,
     rng_handles: std::collections::BTreeSet<u64>,
     exe_path: String,
     pub gateways: BTreeMap<u64, String>,
@@ -175,8 +179,102 @@ pub enum Control {
         args: Vec<u64>,
     },
 }
+fn com_export(dll: &str, name: &str) -> bool {
+    matches!(
+        dll.to_ascii_lowercase().as_str(),
+        "ole32.dll" | "combase.dll" | "api-ms-win-core-winrt-l1-1-0.dll"
+    ) && matches!(
+        name,
+        "RoInitialize"
+            | "RoUninitialize"
+            | "CoInitialize"
+            | "CoInitializeEx"
+            | "CoUninitialize"
+            | "CoCreateInstance"
+            | "CoTaskMemAlloc"
+            | "CoTaskMemFree"
+    )
+}
+/// Whether a Win64 import has a dispatch route and known ABI. This does not
+/// certify every argument, COM method or optional backend capability.
+pub fn import_supported(dll: &str, name: &str) -> bool {
+    let name = dxgi::symbol(dll, sockets::symbol(dll, name));
+    if import_arity(name).is_none() {
+        return false;
+    }
+    if guid::arity(name).is_some() && !guid::export(dll, name) {
+        return false;
+    }
+    if winrt::arity(name).is_some() && !winrt::export(dll, name) {
+        return false;
+    }
+    if !dll.eq_ignore_ascii_case("kernel32.dll")
+        && !dll.eq_ignore_ascii_case("kernelbase.dll")
+        && !(dll.eq_ignore_ascii_case("shell32.dll")
+            && matches!(name, "CommandLineToArgvW" | "SHGetKnownFolderPath"))
+        && !(dll.eq_ignore_ascii_case("advapi32.dll")
+            && matches!(
+                name,
+                "OpenProcessToken"
+                    | "OpenThreadToken"
+                    | "GetTokenInformation"
+                    | "GetSidSubAuthority"
+                    | "GetSidSubAuthorityCount"
+                    | "GetSidIdentifierAuthority"
+                    | "IsValidSid"
+                    | "GetLengthSid"
+                    | "CopySid"
+                    | "EqualSid"
+                    | "GetSidLengthRequired"
+                    | "InitializeSid"
+            ))
+        && !(dll.eq_ignore_ascii_case("user32.dll")
+            && (display::arity(name).is_some()
+                || user::arity(name).is_some()
+                || matches!(
+                    name,
+                    "SystemParametersInfoA" | "SystemParametersInfoW" | "GetSystemMetrics"
+                )))
+        && !(dll.eq_ignore_ascii_case("psapi.dll") && modules::is_query(name))
+        && !(dll.eq_ignore_ascii_case("imm32.dll") && user::ime_arity(name).is_some())
+        && !(dll.eq_ignore_ascii_case("gdi32.dll") && user::gdi_arity(name).is_some())
+        && !(dll.eq_ignore_ascii_case("advapi32.dll") && tracing::is_call(name))
+        && !(dll.eq_ignore_ascii_case("advapi32.dll") && registry::arity(name).is_some())
+        && !(dll.eq_ignore_ascii_case("ntdll.dll") && unwind::is_call(name))
+        && !(dll.eq_ignore_ascii_case("ntdll.dll") && version::is_call(name))
+        && !(dll.eq_ignore_ascii_case("ws2_32.dll") && sockets::is_call(name))
+        && !(dll.eq_ignore_ascii_case("secur32.dll") && sspi::arity(name).is_some())
+        && !(dll.eq_ignore_ascii_case("winmm.dll")
+            && matches!(
+                name,
+                "timeGetTime" | "timeBeginPeriod" | "timeEndPeriod" | "timeGetDevCaps"
+            ))
+        && !(dll.eq_ignore_ascii_case("dxgi.dll") && dxgi::export(name))
+        && !(dll.eq_ignore_ascii_case("d3d12.dll") && dxgi::d3d12_export(name))
+        && !(dll.eq_ignore_ascii_case("d3d11.dll") && dxgi::d3d11_export(name))
+        && !(dll == dxgi::DLL && dxgi::arity(name).is_some())
+        && !(dll.eq_ignore_ascii_case("api-ms-win-core-synch-l1-2-0.dll")
+            && matches!(
+                name,
+                "WaitOnAddress" | "WakeByAddressSingle" | "WakeByAddressAll"
+            ))
+        && !(dll.eq_ignore_ascii_case("bcrypt.dll")
+            && matches!(
+                name,
+                "BCryptGenRandom" | "BCryptOpenAlgorithmProvider" | "BCryptCloseAlgorithmProvider"
+            ))
+        && !guid::export(dll, name)
+        && !winrt::export(dll, name)
+        && !com_export(dll, name)
+    {
+        return false;
+    }
+    true
+}
 fn kernel_export(name: &str) -> bool {
-    if user::arity(name).is_some()
+    if winrt::arity(name).is_some()
+        || guid::arity(name).is_some()
+        || user::arity(name).is_some()
         || display::arity(name).is_some()
         || registry::arity(name).is_some()
         || sockets::is_call(name)
@@ -221,6 +319,8 @@ fn kernel_export(name: &str) -> bool {
 }
 fn import_arity(name: &str) -> Option<usize> {
     Some(match name {
+        name if winrt::arity(name).is_some() => winrt::arity(name).unwrap(),
+        name if guid::arity(name).is_some() => guid::arity(name).unwrap(),
         name if timers::arity(name).is_some() => timers::arity(name).unwrap(),
         name if dxgi::arity(name).is_some() => dxgi::arity(name).unwrap(),
         name if find::arity(name).is_some() => find::arity(name).unwrap(),
@@ -522,6 +622,7 @@ impl Runtime64 {
         mem.write(COMMAND_A, ansi)?;
         mem.write(COMMAND_W, &wide)?;
         Ok(Self {
+            api_inventory: None,
             start: Instant::now(),
             timer_periods: BTreeMap::new(),
             image_base,
@@ -553,6 +654,7 @@ impl Runtime64 {
             environment: BTreeMap::new(),
             local_blocks: std::collections::BTreeSet::new(),
             task_blocks: std::collections::BTreeSet::new(),
+            hstrings: Default::default(),
             rng_handles: std::collections::BTreeSet::new(),
             exe_path: command.trim_matches('"').to_owned(),
             gateways: BTreeMap::new(),
@@ -839,6 +941,37 @@ impl Runtime64 {
         }
         Ok(())
     }
+    /// Opt-in aggregate diagnostics. Disabled on normal and performance runs.
+    pub fn enable_api_inventory(&mut self) {
+        self.api_inventory = Some(BTreeMap::new());
+    }
+    fn inventory_record(&mut self, kind: &str, dll: &str, name: &str) {
+        if let Some(map) = &mut self.api_inventory {
+            *map.entry((kind.into(), dll.to_ascii_lowercase(), name.into()))
+                .or_default() += 1;
+        }
+    }
+    pub(crate) fn inventory_failure(&mut self, dll: &str, name: &str) {
+        self.inventory_record("failed", dll, name);
+    }
+    pub fn api_inventory_tsv(&self) -> Option<String> {
+        let escape = |s: &str| {
+            s.replace('\\', "\\\\")
+                .replace('\t', "\\t")
+                .replace('\r', "\\r")
+                .replace('\n', "\\n")
+        };
+        let mut output = String::from("kind\tdll\tname\tcount\n");
+        for ((kind, dll, name), count) in self.api_inventory.as_ref()? {
+            output.push_str(&format!(
+                "{}\t{}\t{}\t{count}\n",
+                escape(kind),
+                escape(dll),
+                escape(name)
+            ));
+        }
+        Some(output)
+    }
     pub fn register_module(&mut self, name: &str, base: u64, exports: super::pe::Exports64) {
         self.modules.insert(base, (name.to_ascii_lowercase(), 1));
         self.guest_exports.insert(base, exports);
@@ -1046,84 +1179,15 @@ impl Runtime64 {
         mem: &mut Memory,
     ) -> Result<Control, String> {
         let name = dxgi::symbol(dll, sockets::symbol(dll, name));
-        if !dll.eq_ignore_ascii_case("kernel32.dll")
-            && !dll.eq_ignore_ascii_case("kernelbase.dll")
-            && !(dll.eq_ignore_ascii_case("shell32.dll")
-                && matches!(name, "CommandLineToArgvW" | "SHGetKnownFolderPath"))
-            && !(dll.eq_ignore_ascii_case("advapi32.dll")
-                && matches!(
-                    name,
-                    "OpenProcessToken"
-                        | "OpenThreadToken"
-                        | "GetTokenInformation"
-                        | "GetSidSubAuthority"
-                        | "GetSidSubAuthorityCount"
-                        | "GetSidIdentifierAuthority"
-                        | "IsValidSid"
-                        | "GetLengthSid"
-                        | "CopySid"
-                        | "EqualSid"
-                        | "GetSidLengthRequired"
-                        | "InitializeSid"
-                ))
-            && !(dll.eq_ignore_ascii_case("user32.dll")
-                && (display::arity(name).is_some()
-                    || user::arity(name).is_some()
-                    || matches!(
-                        name,
-                        "SystemParametersInfoA" | "SystemParametersInfoW" | "GetSystemMetrics"
-                    )))
-            && !(dll.eq_ignore_ascii_case("psapi.dll") && modules::is_query(name))
-            && !(dll.eq_ignore_ascii_case("imm32.dll") && user::ime_arity(name).is_some())
-            && !(dll.eq_ignore_ascii_case("gdi32.dll") && user::gdi_arity(name).is_some())
-            && !(dll.eq_ignore_ascii_case("advapi32.dll") && tracing::is_call(name))
-            && !(dll.eq_ignore_ascii_case("advapi32.dll") && registry::arity(name).is_some())
-            && !(dll.eq_ignore_ascii_case("ntdll.dll") && unwind::is_call(name))
-            && !(dll.eq_ignore_ascii_case("ntdll.dll") && version::is_call(name))
-            && !(dll.eq_ignore_ascii_case("ws2_32.dll") && sockets::is_call(name))
-            && !(dll.eq_ignore_ascii_case("secur32.dll") && sspi::arity(name).is_some())
-            && !(dll.eq_ignore_ascii_case("winmm.dll")
-                && matches!(
-                    name,
-                    "timeGetTime" | "timeBeginPeriod" | "timeEndPeriod" | "timeGetDevCaps"
-                ))
-            && !(dll.eq_ignore_ascii_case("dxgi.dll") && dxgi::export(name))
-            && !(dll.eq_ignore_ascii_case("d3d12.dll") && dxgi::d3d12_export(name))
-            && !(dll.eq_ignore_ascii_case("d3d11.dll") && dxgi::d3d11_export(name))
-            && !(dll == dxgi::DLL && dxgi::arity(name).is_some())
-            && !(dll.eq_ignore_ascii_case("api-ms-win-core-synch-l1-2-0.dll")
-                && matches!(
-                    name,
-                    "WaitOnAddress" | "WakeByAddressSingle" | "WakeByAddressAll"
-                ))
-            && !(dll.eq_ignore_ascii_case("bcrypt.dll")
-                && matches!(
-                    name,
-                    "BCryptGenRandom"
-                        | "BCryptOpenAlgorithmProvider"
-                        | "BCryptCloseAlgorithmProvider"
-                ))
-            && !(matches!(
-                dll.to_ascii_lowercase().as_str(),
-                "ole32.dll" | "combase.dll" | "api-ms-win-core-winrt-l1-1-0.dll"
-            ) && matches!(
-                name,
-                "RoInitialize"
-                    | "RoUninitialize"
-                    | "CoInitialize"
-                    | "CoInitializeEx"
-                    | "CoUninitialize"
-                    | "CoCreateInstance"
-                    | "CoTaskMemAlloc"
-                    | "CoTaskMemFree"
-            ))
-        {
+        if !import_supported(dll, name) {
             return Err(format!("unimplemented Win64 import: {dll}!{name}"));
         }
         let arity = import_arity(name)
             .ok_or_else(|| format!("unimplemented Win64 import: {dll}!{name}"))?;
         let mut args = cpu.arguments(mem, arity)?;
         let dwords: &[usize] = match name {
+            name if winrt::arity(name).is_some() => winrt::dwords(name),
+            "StringFromGUID2" => &[2],
             "GetCPInfoExA" | "GetCPInfoExW" => &[0, 1],
             name if dxgi::arity(name).is_some() => dxgi::dwords(name),
             "FindFirstFileExA" | "FindFirstFileExW" => &[1, 3, 5],
@@ -1270,6 +1334,14 @@ impl Runtime64 {
             self.delay_hooks.remove(&cpu.rip);
         }
         let ret = match name {
+            name if user::message_arity(name).is_some() => {
+                match self.message_call(mem, name, &args)? {
+                    Some(value) => value,
+                    None => return Ok(Control::Blocked),
+                }
+            }
+            name if winrt::arity(name).is_some() => self.winrt_call(mem, name, &args)?,
+            name if guid::arity(name).is_some() => self.guid_call(mem, name, &args)?,
             name if dxgi::arity(name).is_some() => self.dxgi_call(mem, name, &args)?,
             name if find::arity(name).is_some() => self.find_call(mem, name, &args)?,
             name if user::is_callback(name) => {
@@ -4587,6 +4659,14 @@ impl Runtime64 {
                 } else {
                     Self::ascii(mem, args[1])?
                 };
+                if self.api_inventory.is_some() {
+                    let provider = self
+                        .modules
+                        .get(&module_handle)
+                        .map(|(dll, _)| dll.clone())
+                        .unwrap_or_else(|| "?".into());
+                    self.inventory_record("lookup", &provider, &symbol);
+                }
                 self.trace_note(format!(
                     "GetProcAddress lookup module={:#x} symbol={symbol}",
                     args[0]
@@ -4629,7 +4709,13 @@ impl Runtime64 {
                     } else {
                         Self::ascii(mem, args[1])?
                     };
-                    let provider = if module.starts_with("api-ms-win-core-") {
+                    let provider = if matches!(
+                        module.as_str(),
+                        "api-ms-win-core-winrt-string-l1-1-0.dll"
+                            | "api-ms-win-core-winrt-l1-1-0.dll"
+                    ) {
+                        "combase.dll"
+                    } else if module.starts_with("api-ms-win-core-") {
                         "kernel32.dll"
                     } else {
                         module.as_str()
@@ -4652,6 +4738,9 @@ impl Runtime64 {
                         || (provider == "dxgi.dll" && dxgi::export(&function))
                         || (provider == "d3d12.dll" && dxgi::d3d12_export(&function))
                         || (provider == "d3d11.dll" && dxgi::d3d11_export(&function))
+                        || guid::export(&provider, &function)
+                        || winrt::export(&provider, &function)
+                        || com_export(&provider, &function)
                         || (provider == "winmm.dll"
                             && matches!(
                                 function.as_str(),
@@ -4897,6 +4986,7 @@ impl Runtime64 {
         Ok(Control::Returned)
     }
     fn record(&mut self, dll: &str, name: &str, args: &[u64], ret: u64) {
+        self.inventory_record("completed", dll, name);
         self.trace_note(format!("{dll}!{name} args={args:x?} -> {ret:#x}"));
     }
     fn trace_note(&mut self, message: String) {

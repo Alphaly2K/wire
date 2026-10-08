@@ -32,6 +32,11 @@ pub(super) enum Block {
     Critical(u64),
     Srw(u64, bool),
     Once(u64),
+    Messages {
+        window: u64,
+        min: u32,
+        max: u32,
+    },
 }
 pub(super) struct Thread {
     pub teb: u64,
@@ -188,6 +193,8 @@ impl Runtime64 {
         self.winrt_refs = new.winrt_refs;
     }
     pub(crate) fn finish_thread(&mut self, mem: &mut Memory, code: u32) -> Result<(), String> {
+        self.user.keyboard.exit64(self.threads.active);
+        self.user.events.retain(|m| m.tid != self.threads.active);
         let t = self.threads.entries.get_mut(&self.threads.active).unwrap();
         t.exit = Some(code);
         t.block = None;
@@ -264,6 +271,9 @@ impl Runtime64 {
                 owner == 0 && (*shared || readers == 0)
             }
             Some(Block::Once(ptr)) => mem.read_int(*ptr, 8)? != 1,
+            Some(Block::Messages { window, min, max }) => {
+                self.message_ready(id, *window, *min, *max)
+            }
         })
     }
     pub(crate) fn idle_delay(&self) -> Option<Duration> {

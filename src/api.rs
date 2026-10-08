@@ -504,7 +504,9 @@ pub(crate) fn read_str(mem: &GuestMem, addr: u32, wide: bool) -> String {
 }
 
 /// Native exports with a known ABI, including supported cdecl CRT helpers.
-pub(crate) fn native_export(dll: &str, name: &str) -> bool {
+/// Known export ABI for diagnostics and dynamic lookup. Registered ABI alone
+/// does not establish full implementation; consult runtime unimplemented logs.
+pub fn native_export(dll: &str, name: &str) -> bool {
     stack_args_bytes(dll, name).is_some()
         || (dll == "msvcrt.dll"
             && matches!(

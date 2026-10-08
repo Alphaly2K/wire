@@ -523,7 +523,11 @@ impl Process64 {
                 self.scheduling = false;
                 return Ok(());
             }
-            if let Some(delay) = self.runtime.idle_delay() {
+            if let Some(delay) = self.runtime.idle_delay().or_else(|| {
+                self.presenter
+                    .as_ref()
+                    .map(|_| std::time::Duration::from_millis(10))
+            }) {
                 if self.cpu.work >= budget {
                     return Ok(());
                 }
@@ -822,7 +826,10 @@ impl Process64 {
                 let control = self
                     .runtime
                     .dispatch(dll, function, &mut self.cpu, &mut self.memory)
-                    .map_err(|error| format!("{name}: {error}"))?;
+                    .map_err(|error| {
+                        self.runtime.inventory_failure(dll, function);
+                        format!("{name}: {error}")
+                    })?;
                 self.cpu.work += 1;
                 match control {
                     Control::Returned => {

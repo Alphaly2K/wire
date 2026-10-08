@@ -600,6 +600,63 @@ fn startup_call(
     startup_dll_call(mem, cpu, runtime, "KERNEL32.dll", name, args)
 }
 #[test]
+fn win64_api_inventory_is_opt_in_counts_calls_and_keeps_lookup_provider() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    startup_call(&mut mem, &mut cpu, &mut runtime, "GetCurrentThreadId", &[]);
+    assert!(runtime.api_inventory_tsv().is_none());
+    runtime.enable_api_inventory();
+    for _ in 0..2 {
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetCurrentThreadId", &[]);
+    }
+    let symbol = STACK + 0x200;
+    mem.write(symbol, b"Export\tWith\\Escape\0").unwrap();
+    let mut exports = wire::x64::pe::Exports64::default();
+    exports
+        .names
+        .insert("Export\tWith\\Escape".into(), BASE + 0x2345);
+    exports.ordinals.insert(7, BASE + 0x2345);
+    runtime.register_module("Guest.dll", BASE, exports);
+    for name in [symbol, 7] {
+        assert_eq!(
+            startup_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "GetProcAddress",
+                &[BASE, name]
+            ),
+            BASE + 0x2345
+        );
+    }
+    // A checked frame failure must not become a completed call.
+    cpu.regs[4] = 0;
+    assert!(runtime
+        .dispatch("kernel32.dll", "GetCurrentThreadId", &mut cpu, &mut mem)
+        .is_err());
+    let tsv = runtime.api_inventory_tsv().unwrap();
+    assert!(tsv.contains("completed\tkernel32.dll\tGetCurrentThreadId\t2\n"));
+    assert!(tsv.contains("lookup\tguest.dll\tExport\\tWith\\\\Escape\t1\n"));
+    assert!(tsv.contains("lookup\tguest.dll\t#7\t1\n"));
+}
+#[test]
+fn win64_api_inventory_retains_gateway_failure_after_process_error() {
+    let dir = std::env::temp_dir().join(format!("wire-api-inventory-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let exe = dir.join("probe.exe");
+    std::fs::write(&exe, fixture()).unwrap();
+    let mut process = wire::x64::process::Process64::load(&exe, false).unwrap();
+    process.runtime.enable_api_inventory();
+    process.cpu.rip = process.runtime.register("hid.dll", "HidD_GetHidGuid");
+    assert!(process
+        .run(10)
+        .unwrap_err()
+        .contains("unimplemented Win64 import"));
+    let tsv = process.runtime.api_inventory_tsv().unwrap();
+    assert!(tsv.contains("failed\thid.dll\tHidD_GetHidGuid\t1\n"));
+    assert!(!tsv.contains("completed\thid.dll"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+#[test]
 fn win64_get_proc_address_null_module_resolves_main_and_missing_exports_return_null() {
     let (mut mem, mut cpu, mut runtime) = startup();
     let symbol = STACK + 0x200;
@@ -1312,6 +1369,492 @@ fn startup_dll_call(
     assert_eq!(cpu.regs[4], STACK + 0x1f90);
     assert_eq!(cpu.rip, BASE);
     cpu.regs[0]
+}
+#[test]
+fn win64_guid_entropy_layout_string_roundtrip_and_task_ownership() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let guid = STACK + 0x100;
+    let string = STACK + 0x200;
+    let parsed = STACK + 0x300;
+    let output = STACK + 0x400;
+    startup_call(&mut mem, &mut cpu, &mut runtime, "SetLastError", &[0x1234]);
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..32 {
+        mem.write(guid - 1, &[0x55; 18]).unwrap();
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "ole32.dll",
+                "CoCreateGuid",
+                &[guid]
+            ),
+            0
+        );
+        let mut bytes = [0; 16];
+        mem.read(guid, &mut bytes).unwrap();
+        assert_eq!(bytes[7] >> 4, 4);
+        assert_eq!(bytes[8] >> 6, 2);
+        assert!(seen.insert(bytes));
+        assert_eq!(mem.read_int(guid - 1, 1).unwrap(), 0x55);
+        assert_eq!(mem.read_int(guid + 16, 1).unwrap(), 0x55);
+    }
+    let bytes = [
+        0x67, 0x45, 0x23, 0x01, 0xab, 0x89, 0xef, 0xcd, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd,
+        0xef,
+    ];
+    mem.write(guid, &bytes).unwrap();
+    let expected = "{01234567-89AB-CDEF-0123-456789ABCDEF}\0"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    mem.write(string, &[0x55; 80]).unwrap();
+    for capacity in [0, 38, u32::MAX as u64] {
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "ole32.dll",
+                "StringFromGUID2",
+                &[guid, string, capacity]
+            ),
+            0
+        );
+        assert_eq!(mem.read_int(string, 8).unwrap(), 0x5555555555555555);
+    }
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "combase.dll",
+            "StringFromGUID2",
+            &[guid, string, 0x100000027]
+        ),
+        39
+    );
+    let mut actual = [0; 78];
+    mem.read(string, &mut actual).unwrap();
+    assert_eq!(actual.as_slice(), expected);
+    assert_eq!(mem.read_int(string + 78, 2).unwrap(), 0x5555);
+    for name in ["CLSIDFromString", "IIDFromString"] {
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "ole32.dll",
+                name,
+                &[string, parsed]
+            ),
+            0
+        );
+        let mut actual = [0; 16];
+        mem.read(parsed, &mut actual).unwrap();
+        assert_eq!(actual, bytes);
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "combase.dll",
+                name,
+                &[0, parsed]
+            ),
+            0
+        );
+        mem.read(parsed, &mut actual).unwrap();
+        assert_eq!(actual, [0; 16]);
+    }
+    for name in ["StringFromCLSID", "StringFromIID"] {
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "ole32.dll",
+                name,
+                &[guid, output]
+            ),
+            0
+        );
+        let pointer = mem.read_int(output, 8).unwrap();
+        assert!(pointer > u32::MAX as u64);
+        mem.read(pointer, &mut actual).unwrap();
+        assert_eq!(actual.as_slice(), expected);
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "ole32.dll",
+            "CoTaskMemFree",
+            &[pointer],
+        );
+        assert!(mem.read_int(pointer, 1).is_err());
+    }
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "ole32.dll",
+            "CoCreateGuid",
+            &[0]
+        ),
+        0x80070057
+    );
+    mem.write(
+        string,
+        &"bad\0"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "ole32.dll",
+            "IIDFromString",
+            &[string, parsed]
+        ),
+        0x80070057
+    );
+    mem.write(string, &expected).unwrap();
+    mem.write_int(string + 2, 2, b'Z' as u64).unwrap();
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "ole32.dll",
+            "IIDFromString",
+            &[string, parsed]
+        ),
+        0x800401f4
+    );
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "ole32.dll",
+            "CLSIDFromString",
+            &[string, parsed]
+        ),
+        0x800401f3
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        0x1234
+    );
+}
+
+#[test]
+fn win64_hstrings_preserve_reference_lifetimes_owned_copies_and_utf16_units() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let source = STACK + 0x100;
+    let header = STACK + 0x200;
+    let output = STACK + 0x300;
+    let length = STACK + 0x400;
+    let iid = STACK + 0x500;
+    macro_rules! call {
+        ($name:expr, $args:expr) => {
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "combase.dll",
+                $name,
+                $args,
+            )
+        };
+    }
+    let data = [0x0041u16, 0, 0xd800, 0x65e5, 0];
+    mem.write(
+        source,
+        &data
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    mem.write(header, &[0x55; 24]).unwrap();
+    assert_eq!(
+        call!(
+            "WindowsCreateStringReference",
+            &[source, 0x100000004, header, output]
+        ),
+        0
+    );
+    let reference = mem.read_int(output, 8).unwrap();
+    assert_eq!(reference, header);
+    assert_eq!(mem.read_int(header + 8, 8).unwrap(), 0x5555555555555555);
+    assert_eq!(call!("WindowsGetStringLen", &[reference]), 4);
+    assert_eq!(
+        call!("WindowsGetStringRawBuffer", &[reference, length]),
+        source
+    );
+    assert_eq!(mem.read_int(length, 4).unwrap(), 4);
+    assert_eq!(
+        call!("WindowsStringHasEmbeddedNull", &[reference, length]),
+        0
+    );
+    assert_eq!(mem.read_int(length, 4).unwrap(), 1);
+    assert_eq!(call!("WindowsDuplicateString", &[reference, output]), 0);
+    let owned = mem.read_int(output, 8).unwrap();
+    assert!(owned > u32::MAX as u64 && owned != reference);
+    assert_eq!(
+        call!("WindowsCompareStringOrdinal", &[reference, owned, length]),
+        0
+    );
+    assert_eq!(mem.read_int(length, 4).unwrap(), 0);
+    mem.write_int(source, 2, 0x42).unwrap();
+    assert_eq!(call!("WindowsGetStringRawBuffer", &[reference, 0]), source);
+    let buffer = call!("WindowsGetStringRawBuffer", &[owned, 0]);
+    assert_eq!(mem.read_int(buffer, 2).unwrap(), 0x41);
+    assert!(mem.write(buffer, &[0; 2]).is_err());
+    assert_eq!(
+        call!("WindowsCompareStringOrdinal", &[reference, owned, length]),
+        0
+    );
+    assert_eq!(mem.read_int(length, 4).unwrap(), 1);
+    assert_eq!(call!("WindowsDeleteString", &[reference]), 0);
+    assert_eq!(call!("WindowsGetStringLen", &[reference]), 4);
+    assert_eq!(call!("WindowsDuplicateString", &[owned, output]), 0);
+    assert_eq!(mem.read_int(output, 8).unwrap(), owned);
+    assert_eq!(call!("WindowsDeleteString", &[owned]), 0);
+    assert_eq!(call!("WindowsGetStringLen", &[owned]), 4);
+    assert_eq!(call!("WindowsDeleteString", &[owned]), 0);
+    assert!(mem.read_int(buffer, 2).is_err());
+    assert_eq!(call!("WindowsCreateString", &[source, 4, output]), 0);
+    let created = mem.read_int(output, 8).unwrap();
+    assert_eq!(call!("WindowsGetStringLen", &[created]), 4);
+    assert_eq!(call!("WindowsDeleteString", &[created]), 0);
+    assert_eq!(call!("WindowsCreateString", &[0, 0, output]), 0);
+    assert_eq!(mem.read_int(output, 8).unwrap(), 0);
+    assert_eq!(call!("WindowsIsStringEmpty", &[0]), 1);
+    let empty = call!("WindowsGetStringRawBuffer", &[0, length]);
+    assert!(empty > u32::MAX as u64);
+    assert_eq!(mem.read_int(empty, 2).unwrap(), 0);
+    assert_eq!(mem.read_int(length, 4).unwrap(), 0);
+    assert!(mem.write(empty, &[1]).is_err());
+    mem.write_int(output, 8, 0x1234567812345678).unwrap();
+    assert_eq!(
+        call!("RoGetActivationFactory", &[reference, iid, output]),
+        0x80040154
+    );
+    assert_eq!(mem.read_int(output, 8).unwrap(), 0x1234567812345678);
+    assert_eq!(
+        call!("RoActivateInstance", &[reference, output]),
+        0x80040154
+    );
+    assert_eq!(call!("WindowsDeleteString", &[0]), 0);
+}
+
+#[test]
+fn win64_hstring_outputs_fault_before_headers_allocations_or_reference_counts_change() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let source = STACK + 0x100;
+    let header = STACK + 0x200;
+    let out = STACK + 0x300;
+    mem.write(source, &[0x41, 0, 0, 0]).unwrap();
+    mem.write(header, &[0x55; 24]).unwrap();
+    mem.write_int(out, 8, 0x5555555555555555).unwrap();
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "combase.dll",
+            "WindowsCreateStringReference",
+            &[source, 0, header, out]
+        ),
+        0x80070057
+    );
+    assert_eq!(mem.read_int(header, 8).unwrap(), 0x5555555555555555);
+    assert_eq!(mem.read_int(out, 8).unwrap(), 0x5555555555555555);
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "combase.dll",
+            "WindowsCreateString",
+            &[source, 1, out]
+        ),
+        0
+    );
+    let owned = mem.read_int(out, 8).unwrap();
+    let memory = mem.memory_status();
+    let bad = STACK + 4092;
+    cpu.regs[4] = STACK + 0x1f88;
+    mem.write_int(cpu.regs[4], 8, BASE).unwrap();
+    mem.protect(STACK + 4096, 4096, READ).unwrap();
+    for (name, args) in [
+        ("WindowsCreateStringReference", [source, 1, header, bad]),
+        ("WindowsCreateStringReference", [source, 1, bad, out]),
+        ("WindowsCreateString", [source, 1, bad, 0]),
+        ("WindowsDuplicateString", [owned, bad, 0, 0]),
+    ] {
+        for (n, value) in args.into_iter().enumerate() {
+            cpu.regs[[1, 2, 8, 9][n]] = value;
+        }
+        let before = cpu.clone();
+        let calls = runtime.api_calls;
+        assert!(runtime
+            .dispatch("combase.dll", name, &mut cpu, &mut mem)
+            .is_err());
+        assert_eq!(cpu.regs, before.regs);
+        assert_eq!(cpu.rip, before.rip);
+        assert_eq!(runtime.api_calls, calls);
+        assert_eq!(mem.memory_status(), memory);
+        assert_eq!(mem.read_int(header, 8).unwrap(), 0x5555555555555555);
+        assert_eq!(mem.read_int(out, 8).unwrap(), owned);
+    }
+    mem.protect(STACK + 4096, 4096, READ | WRITE).unwrap();
+    startup_dll_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "combase.dll",
+        "WindowsDeleteString",
+        &[owned],
+    );
+    assert!(mem.read_int(owned, 1).is_err()); // failed duplicate retained no reference
+    let module_name = STACK + 0x500;
+    let symbol = STACK + 0x600;
+    for dll in [
+        "combase.dll",
+        "api-ms-win-core-winrt-string-l1-1-0.dll",
+        "kernel32.dll",
+    ] {
+        runtime.register_provider(dll);
+        mem.write(module_name, format!("{dll}\0").as_bytes())
+            .unwrap();
+        let module = startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetModuleHandleA",
+            &[module_name],
+        );
+        mem.write(symbol, b"WindowsCreateStringReference\0")
+            .unwrap();
+        let address = startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetProcAddress",
+            &[module, symbol],
+        );
+        if dll == "kernel32.dll" {
+            assert_eq!(address, 0);
+        } else {
+            assert_eq!(
+                runtime.gateways[&address],
+                "combase.dll!WindowsCreateStringReference"
+            );
+        }
+    }
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "user32.dll",
+            "EnableMouseInPointer",
+            &[1]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        50
+    );
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "user32.dll",
+            "IsMouseInPointerEnabled",
+            &[]
+        ),
+        0
+    );
+}
+
+#[test]
+fn win64_guid_faults_are_atomic_and_exports_are_dll_scoped() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let symbol = STACK + 0x100;
+    let module_name = STACK + 0x200;
+    for dll in ["ole32.dll", "combase.dll", "kernel32.dll"] {
+        runtime.register_provider(dll);
+        mem.write(module_name, format!("{dll}\0").as_bytes())
+            .unwrap();
+        let module = startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetModuleHandleA",
+            &[module_name],
+        );
+        assert_ne!(module, 0);
+        for name in [
+            "CoCreateGuid",
+            "CLSIDFromString",
+            "IIDFromString",
+            "StringFromGUID2",
+            "StringFromCLSID",
+            "StringFromIID",
+        ] {
+            mem.write(symbol, format!("{name}\0").as_bytes()).unwrap();
+            let address = startup_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "GetProcAddress",
+                &[module, symbol],
+            );
+            if dll == "kernel32.dll" {
+                assert_eq!(address, 0);
+            } else {
+                assert_eq!(runtime.gateways[&address], format!("{dll}!{name}"));
+            }
+        }
+    }
+    let output = STACK + 4090;
+    mem.write(output, &[0x55; 16]).unwrap();
+    cpu.regs[4] = STACK + 0x1f88;
+    mem.write_int(cpu.regs[4], 8, BASE).unwrap();
+    mem.protect(STACK + 4096, 4096, READ).unwrap();
+    cpu.regs[1] = output;
+    let before = cpu.clone();
+    let calls = runtime.api_calls;
+    assert!(runtime
+        .dispatch("ole32.dll", "CoCreateGuid", &mut cpu, &mut mem)
+        .is_err());
+    assert_eq!(cpu.regs, before.regs);
+    assert_eq!(cpu.rip, before.rip);
+    assert_eq!(runtime.api_calls, calls);
+    let mut data = [0; 16];
+    mem.read(output, &mut data).unwrap();
+    assert_eq!(data, [0x55; 16]);
+    // Checked failures also cover allocating string outputs without leaking an allocation.
+    cpu.regs[1] = STACK + 0x100;
+    cpu.regs[2] = output;
+    let committed = mem.memory_status();
+    assert!(runtime
+        .dispatch("ole32.dll", "StringFromCLSID", &mut cpu, &mut mem)
+        .is_err());
+    assert_eq!(mem.memory_status(), committed);
+    assert_eq!(runtime.api_calls, calls);
 }
 #[test]
 fn amd64_window_position_executes_mutable_win64_layout_and_nested_default_messages_across_budgets()

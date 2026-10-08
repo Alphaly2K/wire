@@ -19,8 +19,8 @@ Unity内嵌VS/PS执行64×64离屏Draw，4096个RGBA8像素读回逐通道比较
 
 ## 当前真实结果
 
-AliceToPapa隔离副本推进到 **2,081,189,211 条退休指令、2,085,024,567 work、3,706,308 次已完成API**
-（兼容检查点`linked-pass-117.txt`，最新完整性能重放见下方）。从13条EXE入口开始已实际执行UnityPlayer的TLS/DllMain、EXE入口，
+AliceToPapa隔离副本最新推进到 **1,808,121,280 条退休指令、1,812,138,376 work、3,854,319 次已完成/接受API**
+（`linked-pass-123.txt`，全程汇总`api-pass-123.tsv`）。从13条EXE入口开始已实际执行UnityPlayer的TLS/DllMain、EXE入口，
 动态加载Mono的TLS/DllMain及合作worker；异常链仍执行真实guest handler与同帧RtlUnwindEx。
 此前curl/SSPI、显示器、HKCU、资源图标、类注册、WNDPROC、DC与目录枚举均已越过。
 本轮`CreateDXGIFactory2`、真实Apple M4 adapter枚举/Desc/引用、D3D12明确失败后的
@@ -31,7 +31,9 @@ COM音频设备缺少factory时真实失败，Unity进入自己的无音频回�
 pass115查明每个小HeapAlloc占一整页，导致512MiB提交额度耗尽，随后Mono错误路径栈溢出。
 小堆块已改为64KiB slab，pass116未再遇提交额度耗尽；在1.3B work时提交249MiB。
 Mono程序集加载和domain重置实际完成，PhysX后端完成选择；pass116的x87 FLD边界已补齐，
-pass117继续到 `ole32.dll!CoCreateGuid` 未实现边界，仍未到正式窗口。
+pass117继续到 `ole32.dll!CoCreateGuid`；随后已接入GUID、HSTRING/WinRT、mouse pointer和raw input查询/真实失败回退。
+pass123当前停在线程26的 **`hid.dll!HidD_GetHidGuid`**，仍未到正式窗口。
+Windows.Gaming.Input.Gamepad缺少注册类时返回REGDB_E_CLASSNOTREG，Unity实际继续自己的回退，未伪造设备。
 没有忽略INT3、认证失败或guest对窗口的隐藏状态。
 
 游戏实际写出的 `Player.log` 包含：
@@ -40,8 +42,8 @@ pass117继续到 `ole32.dll!CoCreateGuid` 未实现边界，仍未到正式窗�
 Mono path[0] = 'C:/AliceToPapaADV_1-0-0_Data/Managed'
 Mono config path = 'C:/MonoBleedingEdge/etc'
 Input System module state changed to: Initialized.
-- Loaded All Assemblies, in 184.923 seconds
-- Finished resetting the current domain, in  3.573 seconds
+- Loaded All Assemblies, in 23.206 seconds
+- Finished resetting the current domain, in  0.491 seconds
 [Physics::Module] Name: PhysX
 ```
 
@@ -50,15 +52,21 @@ Input System module state changed to: Initialized.
 但 `visible=false`；这是引擎的隐藏初始化窗口，不是已经显示的游戏界面。
 `--window` 已实际验证 AppKit 主线程初始化并到达同一 D3D11 边界（pass89），按真实 visible 标志呈现，
 不会把隐藏窗口强制显示来充当正式窗口证据。
-启动指令数是兼容进度，不是性能收益。按用户要求当前暂停功能扩展，先接入AMD64定长标量IR并复测；
+启动指令数是兼容进度，不是性能收益。此前按用户要求暂停功能扩展，接入AMD64定长标量IR并复测；
 首次执行后缓存IR，未覆盖的操作缓存解码记录回退。尚无64位安装期AOT。
 测量范围和结果见 [AMD64性能记录](performance-amd64-ir-2026-10-08.md)。
 本轮完整性能复测仍到CoCreateGuid：before为20.69亿退休指令/536.798秒，
 最终IR为13.61亿/54.766秒，整体MIPS 3.85→24.86；程序集加载183.887→18.898秒。
 真实计时器使线程轮询和指令/API量不同，时间差不能当作同指令序列的纯IR提速。
 这两份Player.log已分别保存到 `wire-out/perf-amd64-2026-10-08/alice-full/`；
-仍无正式窗口，未继续补CoCreateGuid或扩展图形功能。完整release290项通过、5项ignored。
+这是到CoCreateGuid的历史性能对照；之后恢复运行时推进，不能把新增实际路径和诊断统计的耗时与该对照直接比较。
+最新仍无正式窗口。本轮完整release298项通过、5项ignored；随后新增2项API汇总回归定向通过。
 既有 PE32 / Metal 路径不受这条诊断路线替换。
+
+本次另外开发批量API扫描，198个PE约18秒，包含普通/延迟导入、CLR P/Invoke、forwarder和运行轨迹，
+已生成四个游戏按DLL分组的清单。`probe64 --api-trace PATH`默认关闭，开启时记录全程调用/查询/分派故障，
+避免最近调用环形缓冲区丢失动态导入证据。结果、复跑及证据边界见
+[API清单记录](api-inventory-2026-10-08.md)。下一批按清单成组处理HID/SetupAPI，不再只补一个调用后重放。
 
 | 重放 | 退休指令 | 已完成 API | 最后边界 |
 | --- | ---: | ---: | --- |
@@ -100,6 +108,13 @@ Input System module state changed to: Initialized.
 | pass-114 | 761,820,010 | 1,363,934 | 反复28字节HeapAlloc失败，随后Mono错误路径栈溢出 |
 | pass-115 | 756,848,329 | 1,364,898 | 明确诊断：AMD64 mapping capacity exceeded，512MiB提交额度用尽 |
 | pass-116 | 1,377,667,739 | 2,662,022 | Mono加载/domain重置完成；guest x87 FLD未实现 |
+| pass-117 | 2,081,189,211 | 3,706,308 | x87通过；`CoCreateGuid` |
+| pass-118 | 1,799,025,225 | 3,844,123 | GUID通过；`IsMouseInPointerEnabled` |
+| pass-119 | 1,800,877,589 | 3,846,514 | mouse pointer查询通过；`EnableMouseInPointer` |
+| pass-120 | 1,798,274,204 | 3,843,439 | pointer真实失败回退；`WindowsCreateStringReference` |
+| pass-121 | 1,798,936,012 | 3,843,963 | HSTRING/WinRT回退通过；`RegisterRawInputDevices` |
+| pass-122 | 1,798,402,000 | 3,843,661 | raw input真实失败回退；`HidD_GetHidGuid` |
+| pass-123 | 1,808,121,280 | 3,854,319 | 消息队列/全程API汇总接入；同一HID边界 |
 
 指令与 API 计数受真实时间/线程调度影响，上表不构成相同路径的性能 AB 对照。
 
@@ -152,12 +167,25 @@ feature-level数组为11_1 / 11_0 / 10_1 / 10_0，没有9_x回退。
 并不宣称全套feature-level规范符合性；独立geometry→compute已验证，完整guest GS/SO与Draw仍待接入。
 不能将创建成功、独立资源/Draw探针当作完整10_0或实际游戏Present，详见图形设计文档。
 既有 PE32 D3D9/Metal 能力可复用，但当前没有接通这条64位图形执行/像素路径。
-Win64 MSG、消息等待、宿主输入→guest消息分发和托管入口仍待实现/验收；桥接保留输入事件，
-没有忽略后续未知 API 或声称可交互。
+Win64 MSG、消息等待和宿主输入→guest消息分发已实现并通过独立回归；
+游戏实际消息循环、托管入口和可交互仍待验收，没有忽略后续未知API。
 目前无法可靠给出剩余小时数或完成百分比；不是只差最后一个 API。
 
 ## 已实现的运行时范围
 
+- GUID创建使用宿主OS熵与Windows字段布局；字符串解析/格式化、task heap所有权及动态导出成组接入。
+  profile没有HKCR ProgID/activation-context注册，未解析名字真实返回CO_E_CLASSSTRING。
+- HSTRING reference使用guest 24字节header和完整64位指针；owned copy只读、引用计数与释放，
+  length/raw buffer/empty/embedded NUL/ordinal比较已接入，空字符串有稳定只读NUL buffer。
+  无注册WinRT类时activation返回REGDB_E_CLASSNOTREG，不发放虚构Gamepad factory。
+- Win64 48字节MSG、Peek/GetMessage A/W、PostMessage/PostThreadMessage/PostQuitMessage、
+  TranslateMessage与keyboard状态按线程维护。GetMessage空队列接入真实合作等待，
+  DispatchMessage执行已有guest WNDPROC并保留返回值；checked输出fault不消费消息。
+  AppKit Unicode在TranslateMessage时生成字符，键盘异步状态和取出消息后的状态分离。
+  WM_TIMER procedure、WaitMessage/MsgWait、QS高位flags、完整鼠标捕获仍未实现。
+- raw input设备/注册查询真实为空，Win64设备项16字节/header24字节；无后端的有效注册返回
+  ERROR_NOT_SUPPORTED，空注册的合法REMOVE可成功；未知raw句柄返回INVALID_HANDLE。
+  IsMouseInPointerEnabled为false，启用promotion返回不支持，不假报WM_POINTER能力。
 - 实验性D3D11 device/context、owned Vulkan资源、shader编译、状态描述符与真实query；
   生命周期及GPU数据/clear像素已验证，当前不是完整FL10_0或guest Draw/Present。
 - 等待定时器接入合作调度，单次/周期、手动/自动复位、命名共享、重设与取消保留真实信号语义；
@@ -238,7 +266,7 @@ Win64 MSG、消息等待、宿主输入→guest消息分发和托管入口仍待
 - 窗口矩形/客户区、宽窄字符串标题、pointer-width WindowLongPtr与有界extra bytes、
   同线程 SendMessage / CallWindowProc、ShowWindow / DestroyWindow 回调已建立。
   MonitorFromWindow 查询实际对象；AdjustWindowRect复用已保留LGPL来源的共用geometry。
-  子窗口/menu、跨线程发送、reentrant self-destroy、完整默认窗口行为、DPI非96和消息循环仍有边界。
+  子窗口/menu、跨线程发送、reentrant self-destroy、完整默认窗口行为、DPI非96和完整消息等待协议仍有边界。
   focus/foreground当前只有进程内基本状态，没有完整activation/focus消息协议。
 - 无已安装IME的guest profile：有效窗口 ImmGetContext返回NULL，不伪造HIMC或composition；
   DC对象按窗口/线程维护，ReleaseDC/DeleteDC 区分来源与所有权，GetDeviceCaps描述逻辑显示器。
@@ -249,7 +277,7 @@ Win64 MSG、消息等待、宿主输入→guest消息分发和托管入口仍待
   NT全部wildcard规则、case-sensitive/filter-directory/其它Ex选项或完整reparse服务。
 - probe64新增可选`--window`，native UI ID通过表映射到完整64位HWND，不截断guest句柄。
   只呈现已完成创建且由guest设为visible的窗口；主线程AppKit轮询保留native事件到有界guest事件队列。
-  目前事件尚未转成Win64 MSG，也没有64位Present像素上传。
+  事件已转成Win64 MSG；所有线程等待且有presenter时定期泵主线程UI，尚无64位Present像素上传。
 - ntdll 是隐式常驻 provider。版本查询/判断使用明确的 Windows 10.0.19045 workstation profile，
   RtlGetVersion / RtlVerifyVersionInfo、GetVersion / GetVersionEx A/W、VerifyVersionInfoW 和
   VerSetConditionMask 保留 NTSTATUS/Win32 错误区别与层级比较，而不是总返回满足。
@@ -345,10 +373,11 @@ cd wire-out/games64/alice/runtime
   --moltenvk /private/tmp/wire-moltenvk-1.4.2/MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib
 ```
 
-性能复测完成后从实际CoCreateGuid边界继续补运行时，再接交换链/guest Draw和Present；
+下一步按API清单从实际HID边界成组补设备发现，再接交换链/guest Draw和Present；
 不以 LoadLibrary 成功、错误退出0或空窗口当作游戏跑通。
-当前完整release回归通过290项：16 unit、37 differential、9 FPU、26 IR、1 Wasm、109 Win32、92 AMD64，5项ignored。
-本轮新增4项覆盖COM身份/引用/parent、Win64 Desc布局/高指针、readonly保护、故障原子性、
+最新完整release回归通过298项：20 unit、37 differential、9 FPU、26 IR、1 Wasm、109 Win32、96 AMD64，5项ignored。
+之后新增2项API汇总回归定向通过；Python扫描器5项原创fixture回归通过。最终Clippy all-targets、format、diff whitespace检查通过。
+此前图形检查点新增4项覆盖COM身份/引用/parent、Win64 Desc布局/高指针、readonly保护、故障原子性、
 private data短buffer、D3D12 named/ordinal/动态查找与真实失败。GS新增两个unit测试检查strip/绕序与坏记录。
 原生GPU ignored测试另行通过2项，包含Rust shader/buffer/context/library生命周期、
 跨context拒绝、CBV更新/绑定及实际Draw/readback；两项既有Metal测试

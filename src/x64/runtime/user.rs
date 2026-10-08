@@ -1,7 +1,10 @@
 //! Checked Win64 USER32 objects. Guest class pointers never become host pointers.
 use super::{Memory, Runtime64, READ};
 mod gdi;
+mod message;
+mod raw;
 mod window;
+pub(super) use message::arity as message_arity;
 use std::collections::BTreeMap;
 pub use window::WindowCall;
 pub(super) use window::WindowResult;
@@ -51,7 +54,9 @@ pub(super) struct User {
     foreground: u64,
     dcs: BTreeMap<u64, (u64, u64, bool)>,
     next_dc: u64,
-    events: std::collections::VecDeque<super::WindowEvent>,
+    pub(super) events: std::collections::VecDeque<message::Message>,
+    pub(super) keyboard: crate::keyboard::Keyboard,
+    cursor_pos: [i32; 2],
 }
 impl Default for User {
     fn default() -> Self {
@@ -70,10 +75,18 @@ impl Default for User {
             dcs: BTreeMap::new(),
             next_dc: super::TEB + 0x650000,
             events: std::collections::VecDeque::new(),
+            keyboard: Default::default(),
+            cursor_pos: [0; 2],
         }
     }
 }
 pub(super) fn arity(name: &str) -> Option<usize> {
+    if let Some(arity) = message::arity(name) {
+        return Some(arity);
+    }
+    if let Some(arity) = raw::arity(name) {
+        return Some(arity);
+    }
     if let Some(arity) = gdi::arity(name) {
         return Some(arity);
     }
@@ -87,9 +100,16 @@ pub(super) fn arity(name: &str) -> Option<usize> {
         "LoadIconA" | "LoadIconW" | "LoadCursorA" | "LoadCursorW" | "UnregisterClassA"
         | "UnregisterClassW" => 2,
         "LoadImageA" | "LoadImageW" => 6,
-        "DestroyIcon" | "DestroyCursor" | "SetCursor" | "ShowCursor" | "RegisterClassA"
-        | "RegisterClassW" | "RegisterClassExA" | "RegisterClassExW" => 1,
-        "GetCursor" => 0,
+        "DestroyIcon"
+        | "DestroyCursor"
+        | "SetCursor"
+        | "ShowCursor"
+        | "RegisterClassA"
+        | "RegisterClassW"
+        | "RegisterClassExA"
+        | "RegisterClassExW"
+        | "EnableMouseInPointer" => 1,
+        "GetCursor" | "IsMouseInPointerEnabled" => 0,
         "AdjustWindowRect" => 3,
         "AdjustWindowRectEx" => 4,
         "AdjustWindowRectExForDpi" => 5,
@@ -104,13 +124,19 @@ pub(super) fn arity(name: &str) -> Option<usize> {
     })
 }
 pub(super) fn dwords(name: &str) -> &'static [usize] {
+    if message::arity(name).is_some() {
+        return message::dwords(name);
+    }
+    if raw::arity(name).is_some() {
+        return raw::dwords(name);
+    }
     if window::arity(name).is_some() {
         return window::dwords(name);
     }
     match name {
         "GetDeviceCaps" => &[1],
         "ImmAssociateContextEx" => &[2],
-        "ShowCursor" => &[0],
+        "ShowCursor" | "EnableMouseInPointer" => &[0],
         "LoadImageA" | "LoadImageW" => &[2, 3, 4, 5],
         "AdjustWindowRect" => &[1, 2],
         "AdjustWindowRectEx" => &[1, 2, 3],
@@ -143,6 +169,9 @@ impl Runtime64 {
         args: &[u64],
     ) -> Result<u64, String> {
         let wide = name.ends_with('W');
+        if raw::arity(name).is_some() {
+            return self.raw_input_call(mem, name, args);
+        }
         if gdi::arity(name).is_some() {
             return self.gdi_call(mem, name, args);
         }
@@ -354,6 +383,17 @@ impl Runtime64 {
                 Ok(previous)
             }
             "GetCursor" => Ok(self.user.cursor),
+            // The native input bridge delivers legacy mouse messages. Mouse
+            // promotion to WM_POINTER is not installed in this guest profile.
+            "IsMouseInPointerEnabled" => Ok(0),
+            "EnableMouseInPointer" => {
+                if args[0] != 0 {
+                    self.set_error(mem, 50)?; // WM_POINTER promotion has no backend.
+                    Ok(0)
+                } else {
+                    Ok(1)
+                }
+            }
             "ShowCursor" => {
                 let count = self
                     .user

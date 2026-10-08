@@ -66,6 +66,8 @@ pub(in crate::x64::runtime) fn arity(name: &str) -> Option<usize> {
         | "GetWindowThreadProcessId" => 2,
         "SetWindowLongA" | "SetWindowLongW" | "SetWindowLongPtrA" | "SetWindowLongPtrW" => 3,
         "DestroyWindow"
+        | "DispatchMessageA"
+        | "DispatchMessageW"
         | "IsWindow"
         | "IsWindowVisible"
         | "IsWindowUnicode"
@@ -97,6 +99,8 @@ pub(in crate::x64::runtime) fn is_callback(name: &str) -> bool {
     matches!(
         name,
         "CreateWindowExA"
+            | "DispatchMessageA"
+            | "DispatchMessageW"
             | "CreateWindowExW"
             | "SendMessageA"
             | "SendMessageW"
@@ -132,11 +136,34 @@ impl Runtime64 {
         if self.user.events.len() >= 4096 {
             return Err("Win64 native window event capacity exceeded".into());
         }
-        self.user.events.push_back(event);
+        let time = self.start.elapsed().as_millis() as u32;
+        if !self.user.keyboard.host64([
+            event.window,
+            event.message as u64,
+            event.wparam,
+            event.lparam,
+            time as u64,
+        ]) {
+            return Ok(());
+        }
+        if (0x200..=0x20e).contains(&event.message) {
+            let w = &self.user.windows[&event.window];
+            self.user.cursor_pos = [
+                w.client[0].wrapping_add(event.lparam as u16 as i16 as i32),
+                w.client[1].wrapping_add((event.lparam >> 16) as u16 as i16 as i32),
+            ];
+        }
+        self.user.events.push_back(super::message::Message {
+            event,
+            time,
+            tid: self.user.windows[&event.window].tid,
+            point: self.user.cursor_pos,
+            hardware: true,
+        });
         Ok(())
     }
     pub fn take_window_events(&mut self) -> Vec<super::super::WindowEvent> {
-        self.user.events.drain(..).collect()
+        self.user.events.drain(..).map(|m| m.event).collect()
     }
     fn valid_procedure(&self, mem: &Memory, procedure: u64) -> Result<(), String> {
         if self.gateways.contains_key(&procedure) {
@@ -162,6 +189,26 @@ impl Runtime64 {
             & !15)
             + 8;
         mem.check(frame, 40, WRITE)?;
+        if name.starts_with("DispatchMessage") {
+            let words = super::message::read(mem, args[0])?;
+            if words[0] == 0 {
+                return Ok(WindowResult::Value(0));
+            }
+            if words[1] == 0x113 && words[3] != 0 {
+                return Err("Win64 timer-procedure dispatch is not implemented".into());
+            }
+            let mut result = self.window_start(
+                mem,
+                if wide { "SendMessageW" } else { "SendMessageA" },
+                &words[..4],
+                returned,
+            )?;
+            if let WindowResult::Callback { call, .. } = &mut result {
+                call.name = name.into();
+                call.args = args.to_vec();
+            }
+            return Ok(result);
+        }
         if name.starts_with("DefWindowProc") {
             if args[1] == 0x47 {
                 return self.default_position_start(mem, name, args);
@@ -486,7 +533,8 @@ impl Runtime64 {
     }
     fn remove_window(&mut self, handle: u64) {
         self.user.windows.remove(&handle);
-        self.user.events.retain(|event| event.window != handle);
+        self.user.events.retain(|m| m.event.window != handle);
+        self.user.keyboard.remove_window64(handle);
         if self.user.focus == handle {
             self.user.focus = 0;
         }
