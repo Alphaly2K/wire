@@ -231,3 +231,20 @@ InvalidOperationException。Rust panic被FFI入口捕获，不穿过Mono栈。�
 这验证固定owner/排队/重入的候选方案，但仍是scalar fixture；尚未接入生产Runtime64
 thread handles、含managed-reference的queue messages、AppKit owner、domain unload和
 正式guest scheduler。后续接入必须保留每个native Mono线程自己的TLS身份和GC边界。
+
+## 后续：原生 VM child-domain 生命周期
+
+新增三轮独立child-domain：创建、attach/set、打开原创程序集、调用IL、托管异常、真实
+共享array及GC，再依次revoke/unmap、释放pinned owner、GC确认weak清空、root-domain
+恢复、try_unload。每轮静态counter均从0开始，旧domain退出后root VM仍正常可调用。
+卸载使用锁定Unity fork实际的三参数`mono_domain_try_unload(domain, exc, callback)`，
+不能直接套用其他Mono版本的两参数ABI；fixture的Unity exception callback显式NULL。
+
+第一轮实测揭示native domain ID会复用（三轮复用了两次），因此不能将其当永久token。
+bridge registry现在使用独立单调generation与native ID共同验证token；先retire bridge
+token，再调用native unload。新域复用ID甚至地址时所有旧token仍拒绝，不解引用已
+卸载域的method/metadata pointer。它是fixture registry，未伪称生产provider已接入。
+
+三轮reset/exception/GC/reclaim/unload均通过无JIT guard；完整M2服务/metadata清单和
+其他内存/调度回归继续通过。精确运行hash/count保留results。实际Unity allocator/TLS/
+日志/初始化和game backend仍未准入；这仅补齐原生VM域生命周期的独立证据。

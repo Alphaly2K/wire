@@ -98,6 +98,9 @@ public static class GuestBridge {
         return text;
     }
     public static object BoxInt() { return (object)73; }
+    private static int domainCounter;
+    public static int DomainCounter(int delta) { domainCounter += delta; return domainCounter; }
+    public static int DomainRaise() { throw new ArgumentException("domain-owned exception"); }
     public static object NewArray() { return new int[] { 17, 29, 43, 71 }; }
     public static int CheckedArrayLength(int[] values) { return values.Length; }
     public static int CheckedArrayRead(int[] values, int index) { return values[index]; }

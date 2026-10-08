@@ -52,6 +52,7 @@ mod abi;
 mod arrays;
 mod checked;
 mod concurrency;
+mod domains;
 mod gc;
 mod layout;
 mod perf;
@@ -593,6 +594,7 @@ fn main() {
     shared_array_probe(&mono, &mut *guest);
     concurrency::run(&mono);
     scheduler::run(&mono);
+    domains::run(&mono, &args[3]);
     if let Some(blocks) = args.get(5) {
         checked::run(&mono, &mut *guest, blocks);
         guest = refs::run(&mono, guest, blocks);
