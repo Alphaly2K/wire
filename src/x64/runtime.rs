@@ -17,6 +17,7 @@ mod events;
 pub(crate) mod exception;
 mod files;
 mod find;
+mod heap;
 mod locale;
 mod mapping;
 mod modules;
@@ -71,6 +72,7 @@ pub struct Runtime64 {
     next_alloc: u64,
     next_module: u64,
     allocations: BTreeMap<u64, (usize, u64)>,
+    guest_heap: heap::Heap,
     tls: [Option<u64>; 64],
     fls: [Option<(u64, u64)>; 128],
     modules: BTreeMap<u64, (String, u32)>,
@@ -526,6 +528,7 @@ impl Runtime64 {
             next_alloc: 0x400000000,
             next_module: TEB + 0x20000,
             allocations: BTreeMap::new(),
+            guest_heap: Default::default(),
             tls: [None; 64],
             fls: [None; 128],
             modules: BTreeMap::new(),
@@ -888,7 +891,10 @@ impl Runtime64 {
         }
         let span = size.max(1).div_ceil(PAGE) * PAGE;
         let address = self.next_alloc;
-        if mem.map(address, span, READ | WRITE).is_err() {
+        if let Err(error) = mem.map(address, span, READ | WRITE) {
+            self.trace_note(format!(
+                "Win64 allocation failed: address={address:#x} size={size} span={span}: {error}"
+            ));
             self.set_error(mem, 8)?;
             return Ok(0);
         }
@@ -4874,30 +4880,7 @@ impl Runtime64 {
                 if args[0] != PROCESS_HEAP || args[1] & !9 != 0 {
                     return Err("unsupported Win64 heap/flags".into());
                 }
-                if name == "HeapAlloc" {
-                    self.heap_alloc(mem, args[2])?
-                } else {
-                    let Some(&(size, span)) = self.allocations.get(&args[2]) else {
-                        return Err("invalid Win64 heap allocation".into());
-                    };
-                    if name == "HeapSize" {
-                        size as u64
-                    } else if name == "HeapFree" {
-                        mem.unmap(args[2], span)?;
-                        self.allocations.remove(&args[2]);
-                        1
-                    } else {
-                        let mut old = vec![0; size.min(args[3].min(16 * 1024 * 1024) as usize)];
-                        mem.read(args[2], &mut old)?;
-                        let ptr = self.heap_alloc(mem, args[3])?;
-                        if ptr != 0 {
-                            mem.write(ptr, &old)?;
-                            mem.unmap(args[2], span)?;
-                            self.allocations.remove(&args[2]);
-                        }
-                        ptr
-                    }
-                }
+                self.guest_heap_call(mem, name, &args)?
             }
             "ExitProcess" => {
                 self.api_calls += 1;

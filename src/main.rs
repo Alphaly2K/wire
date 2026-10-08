@@ -728,7 +728,29 @@ fn run_startup64(
     for (name, base) in &process.modules {
         println!("  mapped {name} at {base:#x}");
     }
-    let outcome = process.run(limit);
+    let outcome = loop {
+        let slice = process.cpu.work.saturating_add(25_000_000).min(limit);
+        let result = process.run(slice);
+        if matches!(result, Ok(Outcome::Budget)) && process.cpu.work < limit {
+            let memory = process.memory.memory_status();
+            let committed = u64::from_le_bytes(memory[8..16].try_into().unwrap())
+                - u64::from_le_bytes(memory[16..24].try_into().unwrap());
+            println!(
+                "startup progress: work={} retired={} RIP={:#x} API calls={} committedMiB={} phase={}",
+                process.cpu.work,
+                process.cpu.retired,
+                process.cpu.rip,
+                process.runtime.api_calls,
+                committed / 1048576,
+                process.phase()
+            );
+            for line in process.runtime.trace.iter().rev().take(3).rev() {
+                println!("  {line}");
+            }
+        } else {
+            break result;
+        }
+    };
     process.poll_window(true)?;
     if outcome.is_err() {
         println!(

@@ -19,15 +19,17 @@ Unity内嵌VS/PS执行64×64离屏Draw，4096个RGBA8像素读回逐通道比较
 
 ## 当前真实结果
 
-AliceToPapa隔离副本推进到 **598,723,699 条退休指令、600,000,000 work、1,223,023 次已完成API**
-（最新完成重放`linked-pass-111.txt`，预算耗尽）。从13条EXE入口开始已实际执行UnityPlayer的TLS/DllMain、EXE入口，
+AliceToPapa隔离副本推进到 **756,848,329 条退休指令、758,283,917 work、1,364,898 次已完成API**
+（最新完成诊断重放`linked-pass-115.txt`）。从13条EXE入口开始已实际执行UnityPlayer的TLS/DllMain、EXE入口，
 动态加载Mono的TLS/DllMain及合作worker；异常链仍执行真实guest handler与同帧RtlUnwindEx。
 此前curl/SSPI、显示器、HKCU、资源图标、类注册、WNDPROC、DC与目录枚举均已越过。
 本轮`CreateDXGIFactory2`、真实Apple M4 adapter枚举/Desc/引用、D3D12明确失败后的
 D3D11回退及实验性device/context、真实纹理创建/copy/update通过，
 COM音频设备缺少factory时真实失败，Unity进入自己的无音频回退；等待定时器线程已实际运行。
 暂停线程的真实CPU快照与APC/alertable wait已接通。pass111实际进入MonoManager ReloadAssembly，
-托管System.IO因动态导入SetThreadErrorMode缺失报异常；该API与线程错误模式已补齐，正在继续重放。
+托管System.IO因动态导入SetThreadErrorMode缺失报异常；线程错误模式、动态导出与代码页查询已补齐。
+pass115查明每个小HeapAlloc占一整页，导致512MiB提交额度耗尽，随后Mono错误路径栈溢出。
+小堆块已改为64KiB slab，pass116继续重放；在325M work时提交206MiB，尚未到正式窗口。
 没有忽略INT3、认证失败或guest对窗口的隐藏状态。
 
 游戏实际写出的 `Player.log` 包含：
@@ -83,6 +85,8 @@ Input System module state changed to: Initialized.
 | pass-111 | 598,723,699 | 1,223,023 | APC/alertable wait通过；600M预算；托管System.IO缺SetThreadErrorMode |
 | pass-112 | 387,616,539 | 587,668 | 线程错误模式通过；GetConsoleCP |
 | pass-113 | 520,943,132 | 717,098 | 控制台代码页通过；GetCPInfoExW |
+| pass-114 | 761,820,010 | 1,363,934 | 反复28字节HeapAlloc失败，随后Mono错误路径栈溢出 |
+| pass-115 | 756,848,329 | 1,364,898 | 明确诊断：AMD64 mapping capacity exceeded，512MiB提交额度用尽 |
 
 指令与 API 计数受真实时间/线程调度影响，上表不构成相同路径的性能 AB 对照。
 
@@ -91,7 +95,15 @@ Input System module state changed to: Initialized.
 其它DLL的专属函数不会因此出现在kernel32；未知函数仍返回NULL/ERROR_PROC_NOT_FOUND。
 GetConsoleCP沿用CP932 profile；GetCPInfoEx A/W输出284/544字节，代码页/默认字符/lead-byte表与A/W名称完整写入，
 无效flags及checked输出fault保留原输出。新增两项回归后完整release283项通过，Clippy无warning。
-pass114正在沿实际游戏继续，不将该检查点当作正式窗口或首帧验收。
+pass116正在沿实际游戏继续，不将该检查点当作正式窗口或首帧验收。
+
+小堆分配按16–2048字节桶使用64KiB owned slab，保留16字节对齐、HEAP_ZERO_MEMORY与HeapSize。
+释放块可重用，同桶多余空slab回收；大块保留独立页。HeapReAlloc保留旧数据，失败保留旧块。
+guest process heap与native callback/COM页分别管理，不允许HeapFree释放服务对象。
+独立4096×28字节分配测试仅提交128KiB（旧实现需16MiB），数据逐块不重叠且释放/重用/重分配通过。
+当前游戏325M work时提交206MiB，而旧路径350M–450M work观察为415–420MiB；
+时间与调度路径不同，不能据此宣称MIPS或启动时延的AB收益。
+完整release284项通过，Clippy无warning；诊断命令每25M work打印PC/API数/提交MiB与最近三个API。
 
 ## 距离正式窗口的剩余工作
 

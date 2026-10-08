@@ -506,6 +506,86 @@ fn win64_extended_codepage_info_has_windows_layout_and_checked_full_outputs() {
         0xaaaaaaaaaaaaaaaa
     );
 }
+#[test]
+fn win64_small_heap_blocks_pack_reuse_and_reallocate_without_overlapping_live_data() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let heap = startup_call(&mut mem, &mut cpu, &mut runtime, "GetProcessHeap", &[]);
+    let committed = |m: &Memory| {
+        let s = m.memory_status();
+        u64::from_le_bytes(s[8..16].try_into().unwrap())
+            - u64::from_le_bytes(s[16..24].try_into().unwrap())
+    };
+    let baseline = committed(&mem);
+    let mut blocks = Vec::new();
+    for n in 0..4096u64 {
+        let p = startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "HeapAlloc",
+            &[heap, 8, 28],
+        );
+        assert_ne!(p, 0);
+        assert_eq!(p % 16, 0);
+        assert_eq!(mem.read_int(p, 8).unwrap(), 0);
+        mem.write_int(p, 8, n + 1).unwrap();
+        blocks.push(p);
+    }
+    assert!(committed(&mem) - baseline <= 128 * 1024);
+    for (n, &p) in blocks.iter().enumerate() {
+        assert_eq!(mem.read_int(p, 8).unwrap(), n as u64 + 1);
+        assert_eq!(
+            startup_call(&mut mem, &mut cpu, &mut runtime, "HeapSize", &[heap, 0, p]),
+            28
+        );
+    }
+    let p = blocks.pop().unwrap();
+    startup_call(&mut mem, &mut cpu, &mut runtime, "HeapFree", &[heap, 0, p]);
+    let reused = startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "HeapAlloc",
+        &[heap, 8, 28],
+    );
+    assert_eq!(reused, p);
+    assert_eq!(mem.read_int(reused, 8).unwrap(), 0);
+    mem.write_int(reused, 8, 0x123456789abcdef0).unwrap();
+    let grown = startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "HeapReAlloc",
+        &[heap, 8, reused, 100],
+    );
+    assert_eq!(mem.read_int(grown, 8).unwrap(), 0x123456789abcdef0);
+    assert_eq!(mem.read_int(grown + 92, 8).unwrap(), 0);
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "HeapSize",
+            &[heap, 0, grown]
+        ),
+        100
+    );
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "HeapReAlloc",
+            &[heap, 0, grown, 20_000_000]
+        ),
+        0
+    );
+    assert_eq!(mem.read_int(grown, 8).unwrap(), 0x123456789abcdef0);
+    for p in blocks.into_iter().chain(Some(grown)) {
+        startup_call(&mut mem, &mut cpu, &mut runtime, "HeapFree", &[heap, 0, p]);
+    }
+    assert!(committed(&mem) - baseline <= 128 * 1024); // one empty slab retained per used bucket
+}
 
 #[test]
 fn win64_com_missing_factory_and_multimedia_timer_reference_balance() {
