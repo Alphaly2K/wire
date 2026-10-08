@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""Compile original fixtures and run the separately built no-JIT Mono runtime.
+
+The installed Unity SDK is a read-only compiler/bootstrap input. Assemblies,
+native libraries, AOT support and logs remain in ignored wire-out output.
+"""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import time
+
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parent.parent
+FIXTURES = REPO / "tests/mono"
+DEFAULT_SDK = Path("/Applications/Unity/Hub/Editor/2022.3.62f3c1/Unity.app/Contents/MonoBleedingEdge")
+
+
+def sha256(path):
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def execute(args, env, output, label, expected=0, timeout=120):
+    start = time.monotonic()
+    result = subprocess.run(list(map(str, args)), env=env, cwd=output,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            timeout=timeout)
+    (output / (label + ".log")).write_bytes(result.stdout)
+    record = {"arguments": list(map(str, args)), "exit_code": result.returncode,
+              "expected_exit": expected, "seconds": time.monotonic() - start,
+              "log": label + ".log"}
+    print(f"{label}: exit={result.returncode}, {record['seconds']:.3f}s", flush=True)
+    if result.returncode != expected:
+        print(result.stdout.decode(errors="replace")[-10000:])
+        raise RuntimeError(f"{label} failed; see {output / record['log']}")
+    return record
+
+
+def compile_fixtures(root, sdk):
+    output = root / "probe"
+    output.mkdir(exist_ok=True)
+    env = os.environ.copy()
+    # Bootstrap/compiler invocations never inherit the runtime noexec guard.
+    for name in ("DYLD_INSERT_LIBRARIES", "MONO_ENV_OPTIONS", "MONO_PATH"):
+        env.pop(name, None)
+    classlib = output / "classlib/mono/4.5"
+    classlib.mkdir(parents=True, exist_ok=True)
+    for name in ("mscorlib.dll", "System.dll", "System.Core.dll"):
+        shutil.copy2(sdk / "lib/mono/4.5" / name, classlib / name)
+    records = []
+    records.append(execute([sdk / "bin/mono", sdk / "lib/mono/4.5/mcs.exe", "-unsafe",
+                            "-optimize+", "-out:" + str(output / "NativeProbe.exe"),
+                            FIXTURES / "NativeProbe.cs"], env, output, "compile-il"))
+    source_lock = json.loads((HERE / "source-lock.json").read_text())
+    source = root / "sources" / source_lock["sources"][0]["directory"]
+    runtime_lib = root / "build-runtime/mono/mini/.libs"
+    records.append(execute(["clang", "-std=c11", "-O2", "-g", "-I" + str(source),
+                            FIXTURES / "embed_probe.c", "-L" + str(runtime_lib),
+                            "-lmonoboehm-2.0", "-pthread", "-o", output / "embed_probe"],
+                           env, output, "compile-embedding"))
+    for name, target in (("native_probe", "libwire_mono_probe.dylib"), ("noexec_guard", "noexec_guard.dylib")):
+        records.append(execute(["clang", "-std=c11", "-O2", "-g", "-dynamiclib",
+                                FIXTURES / (name + ".c"), "-o", output / target],
+                               env, output, "compile-" + name))
+    records.append(execute(["clang", "-std=c11", "-O2", FIXTURES / "guard_selftest.c",
+                            "-o", output / "guard_selftest"], env, output, "compile-guard-test"))
+    # Only support wrappers/trampolines are emitted with interp. Managed method
+    # bodies remain IL; the game is not AOT-compiled or executed by this tool.
+    aot_env = dict(env, MONO_PATH=str(classlib))
+    for assembly in (classlib / "mscorlib.dll", output / "NativeProbe.exe"):
+        records.append(execute([root / "build-aot-tool/mono/mini/mono-boehm",
+                                "--aot=interp", assembly], aot_env, output,
+                               "aot-support-" + assembly.stem, timeout=300))
+    manifest = {"sdk": str(sdk), "runtime_is_sdk": False,
+                "class_libraries": {p.name: sha256(p) for p in classlib.glob("*.dll")},
+                "fixture_sources": {p.name: sha256(p) for p in FIXTURES.iterdir() if p.is_file()},
+                "build": records}
+    (output / "build-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+
+
+def run_probes(root, cases):
+    output = root / "probe"
+    env = os.environ.copy()
+    env.pop("MONO_ENV_OPTIONS", None)
+    env.update(DYLD_LIBRARY_PATH=str(root / "build-runtime/mono/mini/.libs") + os.pathsep + str(output),
+               DYLD_INSERT_LIBRARIES=str(output / "noexec_guard.dylib"),
+               MONO_PATH=str(output / "classlib/mono/4.5"),
+               MONO_THREADS_SUSPEND="preemptive")
+    records = []
+    for route in ("mmap", "jit", "mprotect", "vm_protect", "mach_vm_protect"):
+        records.append(execute([output / "guard_selftest", route], env, output,
+                               "guard-" + route, expected=86))
+    for case in cases:
+        records.append(execute([output / "embed_probe", output / "classlib",
+                                output / "NativeProbe.exe", case, "interp"],
+                               env, output, "run-" + case))
+        content = (output / ("run-" + case + ".log")).read_text()
+        if f"PASS {case}" not in content or "WIRE_NOEXEC_GUARD checks=" not in content:
+            raise RuntimeError(f"Missing runtime/guard evidence: {case}")
+    (output / "results.json").write_text(json.dumps(records, indent=2) + "\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("stage", choices=("compile", "run", "all"))
+    parser.add_argument("--output", type=Path, default=REPO / "wire-out/native-mono-m1")
+    parser.add_argument("--sdk", type=Path, default=DEFAULT_SDK)
+    parser.add_argument("--cases", nargs="+", choices=("core", "interop", "threads", "gc", "layout"), default=["core", "interop", "threads", "gc", "layout"])
+    args = parser.parse_args()
+    root = args.output.resolve()
+    if not root.is_relative_to(REPO / "wire-out"):
+        parser.error("Output must be below this repository's ignored wire-out directory")
+    if args.stage in ("compile", "all"):
+        compile_fixtures(root, args.sdk.resolve())
+    if args.stage in ("run", "all"):
+        run_probes(root, args.cases)
+
+
+if __name__ == "__main__":
+    main()

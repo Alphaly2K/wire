@@ -1,0 +1,42 @@
+--- a/mono/utils/mono-mmap.c
++++ b/mono/utils/mono-mmap.c
+@@ -200,9 +200,22 @@
+ 	return mono_pagesize ();
+ }
+ 
++static void
++wire_mono_check_mapping (int flags)
++{
++#ifdef WIRE_MONO_NO_EXEC
++	/* wire prototype: fail before any dynamic code mapping or protection. */
++	if (flags & (MONO_MMAP_EXEC | MONO_MMAP_JIT)) {
++		fprintf (stderr, "WIRE_MONO_NO_EXEC: rejected flags=0x%x\n", flags);
++		abort ();
++	}
++#endif
++}
++
+ static int
+ prot_from_flags (int flags)
+ {
++	wire_mono_check_mapping (flags);
+ 	int prot = PROT_NONE;
+ 	/* translate the protection bits */
+ 	if (flags & MONO_MMAP_READ)
+@@ -289,7 +302,7 @@
+ 		return NULL;
+ #endif
+ 
+-#if defined(__APPLE__) && defined(MAP_JIT) && defined(TARGET_OSX)
++#if defined(__APPLE__) && defined(MAP_JIT) && defined(TARGET_OSX) && !defined(WIRE_MONO_NO_EXEC)
+ 	if (get_darwin_version () >= DARWIN_VERSION_MOJAVE) {
+ 		/* Check for hardened runtime */
+ 		static int is_hardened_runtime;
+@@ -384,6 +397,7 @@
+ 	const char *filepath, char **error_message)
+ {
+ 	void *ptr;
++	wire_mono_check_mapping (flags);
+ 	if (file_map_func)
+ 	{
+ 		BEGIN_CRITICAL_SECTION;

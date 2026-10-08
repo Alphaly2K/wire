@@ -1,0 +1,42 @@
+--- a/mono/mini/debugger-agent.c
++++ b/mono/mini/debugger-agent.c
+@@ -10590,6 +10590,24 @@
+ 	burst_unlock();
+ }
+ 
++// Typed opaque-buffer adapters for the public Burst callback table.
++static void burst_buffer_add_byte(void *buffer, guint8 value)
++{
++	buffer_add_byte((Buffer *)buffer, value);
++}
++static void burst_buffer_add_int(void *buffer, guint32 value)
++{
++	buffer_add_int((Buffer *)buffer, value);
++}
++static void burst_buffer_add_id(void *buffer, int value)
++{
++	buffer_add_id((Buffer *)buffer, value);
++}
++static void burst_buffer_add_string(void *buffer, const char * value)
++{
++	buffer_add_string((Buffer *)buffer, value);
++}
++
+ // Called from the main thread - once only
+ static void burst_mono_install_hooks_imp(BurstMonoDebuggerCallbacks* callbacks,void* domainInitCallback)
+ {
+@@ -10606,10 +10624,10 @@
+ 	g_BurstDebugCallbacks.BurstFetchMethodName = callbacks->BurstFetchMethodName;
+ 
+ 	// Provide the callee with access to the features it will need
+-	callbacks->buffer_add_byte = buffer_add_byte;
+-	callbacks->buffer_add_int = buffer_add_int;
+-	callbacks->buffer_add_id = buffer_add_id;
+-	callbacks->buffer_add_string = buffer_add_string;
++	callbacks->buffer_add_byte = burst_buffer_add_byte;
++	callbacks->buffer_add_int = burst_buffer_add_int;
++	callbacks->buffer_add_id = burst_buffer_add_id;
++	callbacks->buffer_add_string = burst_buffer_add_string;
+ 	callbacks->buffer_add_ptr_id = buffer_add_ptr_id_unsafe;
+ 	callbacks->mono_burst_shutdown = burst_mono_shutdown;
+ 

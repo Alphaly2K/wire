@@ -1,0 +1,23 @@
+--- a/mono/metadata/boehm-gc.c
++++ b/mono/metadata/boehm-gc.c
+@@ -78,7 +78,7 @@
+ static struct GC_ms_entry*
+ mono_push_ephemerons(struct GC_ms_entry* mark_stack_ptr, struct GC_ms_entry* mark_stack_limit);
+ static void*
+-null_ephemerons_for_domain (MonoDomain* domain);
++null_ephemerons_for_domain (void* domain_pointer);
+ 
+ static void
+ register_test_toggleref_callback (void);
+@@ -2217,8 +2217,9 @@
+ }
+ 
+ static void*
+-null_ephemerons_for_domain (MonoDomain* domain)
+-{
++null_ephemerons_for_domain (void* domain_pointer)
++{
++	MonoDomain* domain = (MonoDomain*) domain_pointer;
+ 	ephemeron_node* prev_node = NULL;
+ 	ephemeron_node* current_node = NULL;
+ 

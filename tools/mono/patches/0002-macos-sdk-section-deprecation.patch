@@ -1,0 +1,19 @@
+--- a/mono/metadata/w32process-unix-osx.c
++++ b/mono/metadata/w32process-unix-osx.c
+@@ -183,12 +183,16 @@
+ static void
+ image_added (const struct mach_header *hdr32, intptr_t vmaddr_slide)
+ {
++	/* Retain the legacy section-address contract while building with SDK 13+. */
++	#pragma GCC diagnostic push
++	#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+ 	#if SIZEOF_VOID_P == 8
+ 	const struct mach_header_64 *hdr64 = (const struct mach_header_64 *)hdr32;
+ 	const struct section_64 *sec = getsectbynamefromheader_64 (hdr64, SEG_DATA, SECT_DATA);
+ 	#else
+ 	const struct section *sec = getsectbynamefromheader (hdr32, SEG_DATA, SECT_DATA);
+ 	#endif
++	#pragma GCC diagnostic pop
+ 	Dl_info dlinfo;
+ 	if (!dladdr (hdr32, &dlinfo)) return;
+ 	if (sec == NULL) return;

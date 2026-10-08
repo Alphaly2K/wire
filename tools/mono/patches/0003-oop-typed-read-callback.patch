@@ -1,0 +1,23 @@
+--- a/mono/metadata/oop.c
++++ b/mono/metadata/oop.c
+@@ -134,6 +134,11 @@
+     gint32 v = 0;
+     read_memory(&v, address, sizeof(v));
+     return v;
++}
++
++static guint32 read_unsigned_dword(const void* address)
++{
++    return (guint32)read_dword(address);
+ }
+ 
+ gint8 read_byte(const void* address)
+@@ -483,7 +488,7 @@
+ 		guint8* code_start = read_pointer(OFFSET_MEMBER(MonoJitInfo, ji, code_start));
+ 		int nativeOffset = (int)((guint8*)frameAddress - code_start);
+ 		GHashTable* method_hash = read_pointer(OFFSET_MEMBER(DebugDomainInfo, debug_info, method_hash));
+-		MonoDebugMethodAddress* address = g_hash_table_lookup_oop(method_hash, method, &read_pointer, &read_dword);
++		MonoDebugMethodAddress* address = g_hash_table_lookup_oop(method_hash, method, &read_pointer, &read_unsigned_dword);
+ 
+ 		if (address)
+ 		{

@@ -1,0 +1,66 @@
+{
+  "schema": 1,
+  "purpose": "Independent ARM64 Unity Mono interpreter prototype; not an enabled game backend",
+  "sources": [
+    {
+      "name": "mono",
+      "revision": "75711b4363fa58f05f953b3f95400d4d61c0ca35",
+      "url": "https://codeload.github.com/Unity-Technologies/mono/tar.gz/75711b4363fa58f05f953b3f95400d4d61c0ca35",
+      "archive": "mono.tar.gz",
+      "sha256": "0ffeff0a19c794439ea9915c113cc141157629b9af667e967fb5198708f9d953",
+      "directory": "mono-75711b4363fa58f05f953b3f95400d4d61c0ca35",
+      "license_scope": "MIT runtime, listed BSD components; actual linked objects still require verification"
+    },
+    {
+      "name": "bdwgc",
+      "revision": "1113fefc4ba0e895767ac780d84e9e456fd624db",
+      "url": "https://codeload.github.com/Unity-Technologies/bdwgc/tar.gz/1113fefc4ba0e895767ac780d84e9e456fd624db",
+      "archive": "bdwgc.tar.gz",
+      "sha256": "23df518aaf8bea4105dd1bbf6557b2b09d8e9b443d1a0121ad00109d9a9740a6",
+      "directory": "bdwgc-1113fefc4ba0e895767ac780d84e9e456fd624db",
+      "license_scope": "GC notices in README.md and include/gc.h; retain notices and patch records"
+    },
+    {
+      "name": "libatomic_ops",
+      "revision": "7e44a3b8dcf457207d6394e4e52e327189155e4f",
+      "url": "https://codeload.github.com/Unity-Technologies/libatomic_ops/tar.gz/7e44a3b8dcf457207d6394e4e52e327189155e4f",
+      "archive": "libatomic_ops.tar.gz",
+      "sha256": "254663acf34e96ee536150aaf400b81ccfe714cafb348ac53f4fbd481f024dc4",
+      "directory": "libatomic_ops-7e44a3b8dcf457207d6394e4e52e327189155e4f",
+      "license_scope": "Core headers permissive; exclude GPL stack/malloc facilities and GPL library"
+    }
+  ],
+  "build_tools": [
+    {
+      "name": "autoconf",
+      "version": "2.69",
+      "url": "https://ftp.gnu.org/gnu/autoconf/autoconf-2.69.tar.xz",
+      "archive": "autoconf.tar.xz",
+      "sha256": "64ebcec9f8ac5b2487125a86a7760d2591ac9e1d3dbd59489633f9de62a57684",
+      "directory": "autoconf-2.69"
+    },
+    {
+      "name": "automake",
+      "version": "1.16.5",
+      "url": "https://ftp.gnu.org/gnu/automake/automake-1.16.5.tar.xz",
+      "archive": "automake.tar.xz",
+      "sha256": "f01d58cd6d9d77fbdca9eb4bbd5ead1988228fdb73d6f7a201f5f8d6b118b469",
+      "directory": "automake-1.16.5"
+    },
+    {
+      "name": "libtool",
+      "version": "2.4.7",
+      "url": "https://ftp.gnu.org/gnu/libtool/libtool-2.4.7.tar.xz",
+      "archive": "libtool.tar.xz",
+      "sha256": "4f7f217f057ce655ff22559ad221a0fd8ef84ad1fc5fcb6990cecc333aa1635d",
+      "directory": "libtool-2.4.7"
+    }
+  ],
+  "sample": {
+    "unity_version": "6000.3.11f1",
+    "mono_pe_sha256": "86a5a4de6bcd74a637d63c96d822dc989d4ffaed6ef1c15c0e6e1f528ae6708f",
+    "unity_player_sha256": "a2022611884470ddab23927a3eb7bbaef3924c18972d30ba7b5330a8fd25bcc4",
+    "exact_source_match": false,
+    "native_backend_enabled": false
+  }
+}

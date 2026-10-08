@@ -1,0 +1,11 @@
+--- a/mono/metadata/icall.c
++++ b/mono/metadata/icall.c
+@@ -9681,6 +9681,8 @@
+ // mono_create_icall_signatures depends on this order. Handle with care.
+ typedef enum ICallSigType {
+ 	ICALL_SIG_TYPE_bool     = 0x00,
++	/* C99 stdbool may expand bool before the signature token paste. */
++	ICALL_SIG_TYPE__Bool    = ICALL_SIG_TYPE_bool,
+ 	ICALL_SIG_TYPE_boolean  = ICALL_SIG_TYPE_bool,
+ 	ICALL_SIG_TYPE_double   = 0x01,
+ 	ICALL_SIG_TYPE_float    = 0x02,
