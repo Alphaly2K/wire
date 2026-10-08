@@ -1344,6 +1344,112 @@ fn sparse_high_address_memory_is_checked_and_cross_page_writes_are_atomic() {
     assert!(m.map(BASE + 4096, 8192, READ).is_err());
     assert!(m.read(BASE + 8192, &mut [0]).is_err());
 }
+
+#[test]
+fn amd64_scalar_memory_widths_check_guards_boundaries_and_atomic_writes() {
+    let value = 0xfedcba9876543210u64;
+    let mut mem = Memory::default();
+    mem.map(STACK, 8192, READ | WRITE).unwrap();
+    for size in [1, 2, 4, 8] {
+        let expected = value & (u64::MAX >> (64 - size * 8));
+        // Unaligned, end-of-page and crossing accesses exercise both paths.
+        for at in [STACK + 3, STACK + 4096 - size as u64, STACK + 4095] {
+            mem.write_int(at, size, value).unwrap();
+            assert_eq!(mem.read_int(at, size).unwrap(), expected);
+        }
+        mem.protect(STACK + 4096, 4096, READ).unwrap();
+        let at = STACK + 4096 - (size / 2) as u64;
+        let mut before = [0; 8];
+        mem.read(at, &mut before[..size]).unwrap();
+        assert!(mem.write_int(at, size, !value).is_err());
+        let mut after = [0; 8];
+        mem.read(at, &mut after[..size]).unwrap();
+        assert_eq!(after, before);
+        mem.protect(STACK + 4096, 4096, READ | WRITE).unwrap();
+        mem.virtual_protect(STACK + 4096, 4096, 0x104).unwrap();
+        assert!(mem.read_int(at, size).unwrap_err().contains("guard"));
+        assert_eq!(mem.read_int(at, size).unwrap(), u64::from_le_bytes(before));
+        mem.virtual_protect(STACK + 4096, 4096, 0x104).unwrap();
+        assert!(mem
+            .write_int(at, size, value)
+            .unwrap_err()
+            .contains("guard"));
+        mem.read(at, &mut after[..size]).unwrap();
+        assert_eq!(after, before);
+        mem.write_int(at, size, value).unwrap();
+        assert_eq!(mem.read_int(at, size).unwrap(), expected);
+        assert!(mem.read_int(1 << 47, size).is_err());
+        assert!(mem.write_int(u64::MAX, size, value).is_err());
+    }
+    mem.map((1 << 47) - 4096, 4096, READ | WRITE).unwrap();
+    for size in [2, 4, 8] {
+        let at = (1 << 47) - size as u64;
+        mem.write_int(at, size, value).unwrap();
+        assert!(mem.read_int(at + 1, size).is_err());
+        assert!(mem.write_int(at + 1, size, 0).is_err());
+        assert_eq!(
+            mem.read_int(at, size).unwrap(),
+            value & (u64::MAX >> (64 - size * 8))
+        );
+    }
+}
+
+#[test]
+fn amd64_sparse_page_reuse_does_not_alias_old_addresses_or_merged_memory() {
+    let mut mem = Memory::default();
+    // Non-contiguous pages grow owned storage and collide in the small address
+    // cache. Every lookup must still distinguish the complete guest address.
+    for page in 0..128u64 {
+        let address = BASE + page * 0x100000;
+        mem.map(address, 4096, READ | WRITE).unwrap();
+        mem.write_int(address + 7, 8, 0x1234567800000000 | page)
+            .unwrap();
+    }
+    for page in (0..128u64).rev().chain(0..128) {
+        assert_eq!(
+            mem.read_int(BASE + page * 0x100000 + 7, 8).unwrap(),
+            0x1234567800000000 | page
+        );
+    }
+    let removed = BASE + 63 * 0x100000;
+    mem.read_int(removed + 7, 8).unwrap();
+    mem.unmap(removed, 4096).unwrap();
+    // Reuse the freed storage for an address in a different cache slot.
+    let replacement = BASE + 0x80001000;
+    mem.map(replacement, 4096, READ | WRITE).unwrap();
+    mem.write_int(replacement + 7, 8, 0xfedcba9876543210)
+        .unwrap();
+    assert!(mem
+        .read_int(removed + 7, 8)
+        .unwrap_err()
+        .contains("unmapped"));
+    let mut other = Memory::default();
+    let merged = BASE + 0x100000000;
+    other.map(merged, 8192, READ | WRITE).unwrap();
+    for page in 0..2 {
+        other
+            .write_int(merged + page * 4096 + 7, 8, 0xabcd0000 | page)
+            .unwrap();
+        assert_eq!(
+            other.read_int(merged + page * 4096 + 7, 8).unwrap(),
+            0xabcd0000 | page
+        );
+    }
+    mem.merge(other).unwrap();
+    for page in 0..2 {
+        assert_eq!(
+            mem.read_int(merged + page * 4096 + 7, 8).unwrap(),
+            0xabcd0000 | page
+        );
+    }
+    assert_eq!(
+        mem.read_int(replacement + 7, 8).unwrap(),
+        0xfedcba9876543210
+    );
+    assert!(mem.read_int(removed + 7, 8).is_err());
+    mem.map(removed, 4096, READ | WRITE).unwrap();
+    assert_eq!(mem.read_int(removed + 7, 8).unwrap(), 0);
+}
 #[test]
 fn amd64_high_registers_widths_rip_relative_and_gateway_shadow_space() {
     let b = fixture();
@@ -1520,6 +1626,64 @@ fn amd64_decode_cache_tracks_code_writes_protection_remapping_and_guarded_page_b
     let stats = mem.execution_stats().unwrap();
     assert!(stats.ir_steps >= 10);
     assert_eq!(stats.fallback_steps, 0);
+}
+
+#[test]
+fn amd64_data_mapping_changes_keep_ir_but_preserve_live_data_permissions_and_faults() {
+    const DATA: u64 = BASE + 0x200000;
+    const OTHER: u64 = BASE + 0x400000;
+    let mut mem = Memory::default();
+    mem.map(BASE, 4096, WRITE | EXECUTE).unwrap();
+    mem.write(BASE, &[0x48, 0x8b, 0x01]).unwrap(); // MOV RAX,[RCX]
+    mem.virtual_alloc(DATA, 4096, 0x3000, 4).unwrap();
+    mem.write_int(DATA, 8, 0x123456789abcdef0).unwrap();
+    mem.enable_execution_stats();
+    let mut cpu = Cpu64::new(BASE, STACK);
+    cpu.regs[1] = DATA;
+    cpu.step(&mut mem).unwrap();
+    assert_eq!(mem.execution_stats().unwrap().translations, 1);
+    mem.map(OTHER, 4096, READ | WRITE).unwrap();
+    mem.protect(OTHER, 4096, READ).unwrap();
+    mem.unmap(OTHER, 4096).unwrap();
+    let mut data_only = Memory::default();
+    data_only.map(OTHER, 4096, READ | WRITE).unwrap();
+    mem.merge(data_only).unwrap();
+    cpu.rip = BASE;
+    cpu.step(&mut mem).unwrap();
+    assert_eq!(cpu.regs[0], 0x123456789abcdef0);
+    // Retaining IR must not retain data permissions or skip a freshly armed guard.
+    mem.virtual_protect(DATA, 4096, 0x104).unwrap();
+    cpu.rip = BASE;
+    let before = cpu.clone();
+    assert!(cpu.step(&mut mem).unwrap_err().contains("guard-page"));
+    assert_eq!(cpu, before);
+    cpu.step(&mut mem).unwrap();
+    assert_eq!(cpu.regs[0], 0x123456789abcdef0);
+    mem.virtual_protect(DATA, 4096, 1).unwrap();
+    cpu.rip = BASE;
+    let before = cpu.clone();
+    assert!(cpu.step(&mut mem).unwrap_err().contains("denied"));
+    assert_eq!(cpu, before);
+    mem.virtual_free(DATA, 4096, 0x4000).unwrap();
+    assert!(cpu.step(&mut mem).unwrap_err().contains("unmapped"));
+    assert_eq!(cpu, before);
+    mem.virtual_alloc(DATA, 4096, 0x1000, 4).unwrap();
+    mem.write_int(DATA, 8, 0xfedcba9876543210).unwrap();
+    cpu.step(&mut mem).unwrap();
+    assert_eq!(cpu.regs[0], 0xfedcba9876543210);
+    mem.virtual_free(DATA, 0, 0x8000).unwrap();
+    cpu.rip = BASE;
+    let before = cpu.clone();
+    assert!(cpu.step(&mut mem).unwrap_err().contains("unmapped"));
+    assert_eq!(cpu, before);
+    let stats = mem.execution_stats().unwrap();
+    assert_eq!(stats.translations, 1);
+    assert_eq!(stats.invalidations, 0);
+    // Executable transitions still invalidate and reject the cached instruction.
+    mem.protect(BASE, 4096, READ).unwrap();
+    assert!(cpu.step(&mut mem).is_err());
+    assert_eq!(cpu, before);
+    assert_eq!(mem.execution_stats().unwrap().invalidations, 1);
 }
 
 #[test]
@@ -1890,6 +2054,67 @@ fn win64_api_inventory_retains_gateway_failure_after_process_error() {
     let tsv = process.runtime.api_inventory_tsv().unwrap();
     assert!(tsv.contains("failed\thid.dll\tHidD_UnknownForTest\t1\n"));
     assert!(!tsv.contains("completed\thid.dll"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn win64_gateway_dispatch_preserves_custom_addresses_and_executes_guest_gaps() {
+    use wire::x64::process::{Outcome, Process64};
+    let dir = std::env::temp_dir().join(format!("wire-gateway-bounds-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let exe = dir.join("probe.exe");
+    std::fs::write(&exe, fixture()).unwrap();
+    let mut process = Process64::load(&exe, false).unwrap();
+    let first = BASE + 0x1100;
+    let last = BASE + 0x1200;
+    process
+        .runtime
+        .install_gateways(std::collections::BTreeMap::from([
+            (first, "kernel32.dll!GetCurrentThreadId".into()),
+            (last, "kernel32.dll!GetCurrentThreadId".into()),
+        ]));
+    process
+        .memory
+        .protect(BASE + 0x1000, 4096, READ | WRITE | EXECUTE)
+        .unwrap();
+    // Instructions below, within and above the gateway envelope still execute.
+    for at in [first - 16, first + 16, last + 16] {
+        process.memory.write(at, &[0xb8, 42, 0, 0, 0]).unwrap();
+    }
+    process
+        .memory
+        .protect(BASE + 0x1000, 4096, READ | EXECUTE)
+        .unwrap();
+    for at in [first - 16, first + 16, last + 16] {
+        process.cpu.rip = at;
+        let retired = process.cpu.retired;
+        assert_eq!(process.run(process.cpu.work + 1).unwrap(), Outcome::Budget);
+        assert_eq!(process.cpu.regs[0], 42);
+        assert_eq!(process.cpu.retired, retired + 1);
+    }
+    // Dynamic insertions extend both ends; dispatch precedes instruction fetch.
+    let low = 0x8000;
+    let high = 0x7fff00000000;
+    for at in [low, high] {
+        process
+            .runtime
+            .gateways
+            .insert(at, "kernel32.dll!GetCurrentThreadId".into());
+    }
+    let rsp = process.cpu.regs[4];
+    for at in [first, last, low, high] {
+        process.cpu.rip = at;
+        process.cpu.regs[4] = rsp;
+        process.cpu.regs[0] = u64::MAX;
+        process.memory.write_int(rsp, 8, first + 16).unwrap();
+        let retired = process.cpu.retired;
+        let calls = process.runtime.api_calls;
+        assert_eq!(process.run(process.cpu.work + 1).unwrap(), Outcome::Budget);
+        assert_eq!(process.cpu.regs[0], 1);
+        assert_eq!(process.cpu.rip, first + 16);
+        assert_eq!(process.cpu.retired, retired);
+        assert_eq!(process.runtime.api_calls, calls + 1);
+    }
     std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
@@ -8913,6 +9138,54 @@ fn amd64_vmm_tracks_reserve_commit_image_guard_and_allocation_ownership() {
     assert!(mem.fetch(top, &mut [0]).is_ok());
     assert!(mem.write_int(top, 1, 0).is_err());
     mem.virtual_free(top, 0, 0x8000).unwrap();
+}
+
+#[test]
+fn amd64_virtual_query_orders_sparse_commit_holes_after_merge_and_reuse() {
+    use wire::mem::{MEM_COMMIT, MEM_RESERVE};
+    const DATA: u64 = 0x400000000;
+    let mut mem = Memory::default();
+    let mut other = Memory::default();
+    other.map(DATA, 4096, READ | WRITE).unwrap();
+    mem.merge(other).unwrap();
+    mem.unmap(DATA, 4096).unwrap();
+    mem.virtual_alloc(DATA, 16 * 4096, MEM_RESERVE, 4).unwrap();
+    let query = |mem: &Memory, page: u64, state: u32, pages: u64| {
+        let info = mem.virtual_query(DATA + page * 4096).unwrap();
+        assert_eq!(
+            u64::from_le_bytes(info[..8].try_into().unwrap()),
+            DATA + page * 4096
+        );
+        assert_eq!(u32::from_le_bytes(info[32..36].try_into().unwrap()), state);
+        assert_eq!(
+            u64::from_le_bytes(info[24..32].try_into().unwrap()),
+            pages * 4096
+        );
+    };
+    query(&mem, 0, MEM_RESERVE, 16);
+    // Commit out of address order, preserving the next committed-page boundary.
+    for page in [7, 2, 5] {
+        mem.virtual_alloc(DATA + page * 4096, 4096, MEM_COMMIT, 4)
+            .unwrap();
+    }
+    query(&mem, 0, MEM_RESERVE, 2);
+    query(&mem, 2, MEM_COMMIT, 1);
+    query(&mem, 3, MEM_RESERVE, 2);
+    query(&mem, 6, MEM_RESERVE, 1);
+    mem.virtual_free(DATA + 5 * 4096, 4096, 0x4000).unwrap();
+    query(&mem, 3, MEM_RESERVE, 4);
+    mem.virtual_alloc(DATA + 3 * 4096, 4096, MEM_COMMIT, 4)
+        .unwrap();
+    query(&mem, 2, MEM_COMMIT, 2);
+    mem.virtual_protect(DATA + 3 * 4096, 4096, 2).unwrap();
+    query(&mem, 2, MEM_COMMIT, 1);
+    mem.virtual_free(DATA, 0, 0x8000).unwrap();
+    mem.virtual_alloc(DATA, 16 * 4096, MEM_RESERVE, 4).unwrap();
+    query(&mem, 0, MEM_RESERVE, 16);
+    mem.virtual_alloc(DATA + 15 * 4096, 4096, MEM_COMMIT, 4)
+        .unwrap();
+    query(&mem, 0, MEM_RESERVE, 15);
+    query(&mem, 15, MEM_COMMIT, 1);
 }
 
 #[test]

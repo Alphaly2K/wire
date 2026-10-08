@@ -334,12 +334,19 @@ impl ScalarIr {
     /// and that checked store is its last fallible effect. Scalar rollback
     /// therefore preserves the original step's architectural fault boundary.
     pub(super) fn step(&self, cpu: &mut Cpu64, mem: &mut Memory) -> Result<(), String> {
-        let regs = cpu.regs;
+        // A scalar opcode can only write its explicit destination and RSP.
+        // Memory/constant selectors still produce an in-range, untouched GPR.
+        // Save both before execution: POP RSP can alias them, and POP [RSP]
+        // changes the stack pointer before its last fallible store.
+        let dst = (self.dst & 15) as usize;
+        let dst_value = cpu.regs[dst];
+        let rsp = cpu.regs[4];
         let flags = cpu.rflags;
         let rip = cpu.rip;
         cpu.rip = rip.wrapping_add(self.len as u64);
         if let Err(e) = self.execute(cpu, mem) {
-            cpu.regs = regs;
+            cpu.regs[dst] = dst_value;
+            cpu.regs[4] = rsp;
             cpu.rflags = flags;
             cpu.rip = rip;
             return Err(format!("{rip:#x} scalar IR opcode {}: {e}", self.opcode));

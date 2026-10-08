@@ -110,15 +110,21 @@ FLAGS **全部 eager**，没有扩大死标志删除范围，也没有做跨指�
 
 每个 Memory 拥有16,384个 direct-mapped translation slot，完整 PC 与 epoch 必须匹配。
 IR 和 cold iced 记录分开读取；总缓存还包含原始 PC、epoch 和 fallback，不能把24B当成全部空间成本。
-写入可执行页、映射/解映射、commit/decommit、保护变化与 file-view 更新均使 epoch 失效；
-当前全局失效比较保守。cache hit仍验证原 guest 指令的EXECUTE/guard权限；
-对完全位于同一页的指令复用该页已成功检查的EXECUTE证明，所有上述失效动作同时清除此证明。
+写入可执行页，或涉及旧/新EXECUTE页的映射、解映射、commit/decommit、保护及file-view更新，
+仍使全局 epoch 失效。仅非执行数据页的变化保留IR；所有映射/保护变化都清除EXECUTE证明。
+cache hit仍验证原 guest 指令的EXECUTE/guard权限；
+对完全位于同一页的指令复用该页已成功检查的EXECUTE证明，代码修改同样清除此证明。
 此证明只适用于当前单host CPU协作调度；未来异步guest写入必须重新论证。跨页指令完整检查两页。
 页内 miss 一次读取至多15B，仅确实缺字节才跨页续读，页尾NOP不会提前消耗下一页guard。
 
-标量 IR 执行只备份 GPR/RFLAGS/RIP，不复制 XMM/FP80；所有 opcode 最多一次store，且store是
+标量 IR 执行只备份显式目标GPR、RSP、RFLAGS和RIP，不复制全部GPR或XMM/FP80；
+当前26个opcode族只能改写该目标GPR及RSP，后续增加opcode必须重新审查此条件。
+所有 opcode 最多一次store，且store是
 最后一个可失败的副作用。失败回滚标量状态，checked跨页write先验证全范围，避免留下半次写入。
 POP 的内存目标在 RSP 更新后求地址；false CMOV仍读取源。retired/work均按原始guest边界提交。
+checked数据页使用owned槽位及64项地址缓存，只缓存完整页地址与整数槽位，不缓存权限或裸宿主指针。
+每次读写仍检查当前Page的权限与一次性guard；槽位回收前清除对应地址项，Vec扩容不会改变整数索引。
+单页整数读写采用固定宽度拷贝，跨页继续先检查全范围；VirtualQuery另保留有序页地址索引。
 尚未更改现有 Cpu64 的16 GPR、XMM、FP80上下文，也未将 PE32 的 vreg8=FLAGS 默默改成 R8。
 完整 AMD64 64槽 vreg profile、常量池的8B打包和持久 AOT 版本需单独设计；本记录不作为磁盘 Rust ABI。
 
@@ -126,6 +132,7 @@ AMD64 CALL 当前保持普通 guest 调用语义，间接目标每次真实读�
 Win64 gateway 分发。**AMD64 尚无 CALL_NATIVE lowering**，不能把普通 CALL opcode当成已完成的
 原生直达优化；未来接入须保持 IAT hook、Win64 shadow space、callback、线程与异常状态规则。
 独立性能对照与当前实际覆盖率见 [AMD64 性能记录](performance-amd64-ir-2026-10-08.md)。
+Unity logo阶段的后续启动对照及页缓存验证见 [完整启动性能记录](performance-unity-logo-2026-10-08.md)。
 
 ## vreg file：64 × 8B = 512B
 

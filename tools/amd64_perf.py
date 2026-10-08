@@ -130,6 +130,7 @@ def main():
     p.add_argument('--exe', default='AliceToPapaADV_1-0-0.exe')
     p.add_argument('--graphics-backend', type=Path)
     p.add_argument('--moltenvk', type=Path)
+    p.add_argument('--window', action='store_true', help='include the real AppKit/GPU Present path')
     p.add_argument('--sample-seconds', type=int, default=8)
     p.add_argument('--expected-error', help='real startup must stop at this exact probe64 error instead of its budget')
     p.add_argument('--skip-coverage', action='store_true', help='omit the separate statistics replay')
@@ -156,6 +157,8 @@ def main():
     for name, exe, cwd in inputs:
         runs = []
         extra = [] if args.mode == 'matrix' else ['--startup']
+        if args.window:
+            extra += ['--window']
         if args.graphics_backend:
             extra += ['--graphics-backend', str(args.graphics_backend.resolve()),
                       '--moltenvk', str(args.moltenvk.resolve())]

@@ -45,6 +45,7 @@ impl Memory {
         // The retained section owns these pages. Updating backing data preserves guest
         // protections/guard status and never grants WRITE permission to the guest.
         let mut copied = 0;
+        let mut executable_changed = false;
         while copied < bytes.len() {
             let at = base + offset + copied as u64;
             let page = self
@@ -53,10 +54,11 @@ impl Memory {
                 .ok_or("missing file view page")?;
             let start = (at & (PAGE - 1)) as usize;
             let n = (4096 - start).min(bytes.len() - copied);
+            executable_changed |= page.permissions & EXECUTE != 0;
             page.data[start..start + n].copy_from_slice(&bytes[copied..copied + n]);
             copied += n;
         }
-        self.invalidate_decode();
+        self.invalidate_mapping(executable_changed);
         Ok(())
     }
     pub fn memory_status(&self) -> [u8; 64] {
@@ -198,13 +200,19 @@ impl Memory {
             return Err(8);
         }
         for p in (start..end).step_by(PAGE as usize) {
-            self.pages.entry(p).or_insert_with(|| Page {
-                data: Box::new([0; 4096]),
-                permissions,
-                protection: Cell::new(protection),
-            });
+            self.page_addresses.insert(p);
+            if !self.pages.contains_key(&p) {
+                self.pages.insert(
+                    p,
+                    Page {
+                        data: Box::new([0; 4096]),
+                        permissions,
+                        protection: Cell::new(protection),
+                    },
+                );
+            }
         }
-        self.invalidate_decode();
+        self.invalidate_mapping(permissions & EXECUTE != 0 && missing != 0);
         Ok(())
     }
     pub fn virtual_alloc(
@@ -259,6 +267,7 @@ impl Memory {
         }
     }
     pub fn virtual_free(&mut self, address: u64, size: u64, flags: u32) -> Result<(), u32> {
+        let mut executable_changed = false;
         if flags == 0x8000 {
             let allocation = self.allocations.get(&address).copied().ok_or(487u32)?;
             if size != 0 {
@@ -267,8 +276,13 @@ impl Memory {
             if !allocation.guest {
                 return Err(487);
             }
-            self.pages
-                .retain(|&p, _| p < address || p >= allocation.end);
+            self.pages.retain(|&p, page| {
+                let keep = p < address || p >= allocation.end;
+                executable_changed |= !keep && page.permissions & EXECUTE != 0;
+                keep
+            });
+            self.page_addresses
+                .retain(|&p| p < address || p >= allocation.end);
             self.allocations.remove(&address);
         } else if flags == 0x4000 {
             let (start, end) = if size == 0 {
@@ -280,11 +294,16 @@ impl Memory {
             if !self.containing(start, end)?.1.guest {
                 return Err(487);
             }
-            self.pages.retain(|&p, _| p < start || p >= end);
+            self.pages.retain(|&p, page| {
+                let keep = p < start || p >= end;
+                executable_changed |= !keep && page.permissions & EXECUTE != 0;
+                keep
+            });
+            self.page_addresses.retain(|&p| p < start || p >= end);
         } else {
             return Err(87);
         }
-        self.invalidate_decode();
+        self.invalidate_mapping(executable_changed);
         Ok(())
     }
     pub fn virtual_protect(
@@ -296,12 +315,14 @@ impl Memory {
         let old = self.validate_protect(address, size, protection)?;
         let permissions = Self::protection_permissions(protection)?;
         let (start, end) = Self::rounded(address, size, PAGE)?;
+        let mut executable_changed = permissions & EXECUTE != 0;
         for p in (start..end).step_by(PAGE as usize) {
             let page = self.pages.get_mut(&p).unwrap();
+            executable_changed |= page.permissions & EXECUTE != 0;
             page.permissions = permissions;
             page.protection.set(protection);
         }
-        self.invalidate_decode();
+        self.invalidate_mapping(executable_changed);
         Ok(old)
     }
     pub(crate) fn validate_protect(
@@ -363,10 +384,10 @@ impl Memory {
                     )
                 } else {
                     let end = self
-                        .pages
+                        .page_addresses
                         .range(start..allocation.end)
                         .next()
-                        .map(|(&p, _)| p)
+                        .copied()
                         .unwrap_or(allocation.end);
                     (
                         base,

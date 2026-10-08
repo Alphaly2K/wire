@@ -523,10 +523,16 @@ cd wire-out/games64/alice/runtime
   --moltenvk /private/tmp/wire-moltenvk-1.4.2/MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib
 ```
 
-下一步按用户最新指示先抓无capture/API统计的实际启动profile并优化性能，
-同时保留SRV真实失败的descriptor诊断；后续继续检查Unity logo之后的游戏标题画面。
+无capture/API统计的实际启动profile和CPU性能优化已经完成；
+后续保留SRV真实失败的descriptor诊断，继续检查Unity logo之后的游戏标题画面。
 不以LoadLibrary成功、GPU帧数或空背景当作游戏跑通。
-最新完整release回归323项通过：29 unit、37 differential、9 FPU、26 IR、1 Wasm、109 Win32、112 AMD64，6项ignored。
+这轮后续CPU优化已完成：两组真实窗口AB/BA到同一R16 SRV错误，wall中位数
+148.256→97.417秒，退休指令吞吐22.34→33.16 MIPS；完整release328项通过。
+owned页槽位缓存仍逐次检查数据权限/guard，FLAGS完整计算，图形后端与功能终点冻结。
+采样、确定性矩阵及完整重放见[Unity logo阶段性能记录](performance-unity-logo-2026-10-08.md)。
+该SRV实际为ArraySize=UINT_MAX的剩余slice范围，后续应补齐范围归一化再继续标题画面验证。
+此前功能检查点完整release回归323项通过：29 unit、37 differential、9 FPU、26 IR、1 Wasm、109 Win32、112 AMD64，6项ignored。
+后续CPU检查点为328项通过，AMD64增至117项，其余分组与6项ignored保持一致。
 本轮新增WSA事件与IP转换回归，覆盖manual-reset生命周期、Win32/WSA共用等待、64位指针/句柄、
 Windows地址族与网络字节、A/W错误码、动态named/ordinal导出、短buffer及checked故障不提前提交；
 无network provider的创建失败另覆盖64位INVALID_SOCKET、startup优先级及event仍可正常使用。

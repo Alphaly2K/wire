@@ -1,8 +1,9 @@
 //! Sparse, checked low-canonical AMD64 user address space. Host data is never executable.
 use std::{
     cell::{Cell, OnceCell},
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
 };
+mod pages;
 mod vm;
 pub const PAGE: u64 = 4096;
 pub const READ: u8 = 1;
@@ -39,7 +40,10 @@ struct Allocation {
 }
 #[derive(Default)]
 pub struct Memory {
-    pages: BTreeMap<u64, Page>,
+    pages: pages::Pages,
+    // Ordered addresses are only needed by VirtualQuery over reserved holes.
+    // Checked reads/writes use the hash table; neither index owns host pointers.
+    page_addresses: BTreeSet<u64>,
     allocations: BTreeMap<u64, Allocation>,
     decode_epoch: u64,
     decoded: OnceCell<Box<[TranslationSlot]>>,
@@ -74,6 +78,16 @@ impl Memory {
         self.decode_epoch = self.decode_epoch.wrapping_add(1);
         if self.decode_epoch == 0 {
             self.decoded.take();
+        }
+    }
+    fn invalidate_mapping(&mut self, executable_changed: bool) {
+        // Mapping/guard changes always discard the cached execute permission
+        // proof. IR bytes remain valid when only non-executable data changes.
+        // Adding, removing or protecting code still invalidates all translations.
+        if executable_changed {
+            self.invalidate_decode();
+        } else {
+            self.checked_execute_page.set(None);
         }
     }
     fn decode_slot(address: u64) -> usize {
@@ -158,9 +172,13 @@ impl Memory {
         {
             return Err("AMD64 image mapping overlaps or exceeds capacity".into());
         }
-        self.pages.append(&mut other.pages);
+        let executable_changed = other.pages.values().any(|p| p.permissions & EXECUTE != 0);
+        for (address, page) in other.pages.into_entries() {
+            self.pages.insert(address, page);
+        }
+        self.page_addresses.append(&mut other.page_addresses);
         self.allocations.append(&mut other.allocations);
-        self.invalidate_decode();
+        self.invalidate_mapping(executable_changed);
         Ok(())
     }
     fn range(addr: u64, len: usize) -> Result<std::ops::Range<u64>, String> {
@@ -188,6 +206,7 @@ impl Memory {
             return Err("overlapping AMD64 mapping".into());
         }
         for p in range.step_by(PAGE as usize) {
+            self.page_addresses.insert(p);
             self.pages.insert(
                 p,
                 Page {
@@ -207,7 +226,7 @@ impl Memory {
                 protection_locked: false,
             },
         );
-        self.invalidate_decode();
+        self.invalidate_mapping(permissions & EXECUTE != 0);
         Ok(())
     }
     pub fn map_image(&mut self, addr: u64, len: u64, permissions: u8) -> Result<(), String> {
@@ -248,12 +267,14 @@ impl Memory {
         {
             return Err("unmapped AMD64 protection".into());
         }
+        let mut executable_changed = permissions & EXECUTE != 0;
         for p in range.step_by(PAGE as usize) {
             let page = self.pages.get_mut(&p).unwrap();
+            executable_changed |= page.permissions & EXECUTE != 0;
             page.permissions = permissions;
             page.protection.set(Self::windows_protection(permissions));
         }
-        self.invalidate_decode();
+        self.invalidate_mapping(executable_changed);
         Ok(())
     }
     pub fn check(&self, addr: u64, len: usize, access: u8) -> Result<(), String> {
@@ -300,11 +321,13 @@ impl Memory {
         {
             return Err("unmapped AMD64 unmap".into());
         }
+        let mut executable_changed = false;
         for p in range.step_by(PAGE as usize) {
-            self.pages.remove(&p);
+            executable_changed |= self.pages.remove(&p).unwrap().permissions & EXECUTE != 0;
+            self.page_addresses.remove(&p);
         }
         self.allocations.remove(&addr);
-        self.invalidate_decode();
+        self.invalidate_mapping(executable_changed);
         Ok(())
     }
     pub fn read(&self, addr: u64, out: &mut [u8]) -> Result<(), String> {
@@ -382,6 +405,25 @@ impl Memory {
         if !matches!(size, 1 | 2 | 4 | 8) {
             return Err("invalid AMD64 scalar width".into());
         }
+        Self::range(addr, size)?;
+        let base = addr & !(PAGE - 1);
+        let start = (addr - base) as usize;
+        if size <= 4096 - start {
+            let page = self
+                .pages
+                .get(&base)
+                .ok_or_else(|| format!("unmapped AMD64 address {addr:#x}"))?;
+            Self::check_page(page, base, addr, READ)?;
+            // Fixed-width copies lower to loads instead of a variable memmove.
+            // Slice bounds and live guest permissions are still checked.
+            return Ok(match size {
+                1 => page.data[start] as u64,
+                2 => u16::from_le_bytes(page.data[start..start + 2].try_into().unwrap()) as u64,
+                4 => u32::from_le_bytes(page.data[start..start + 4].try_into().unwrap()) as u64,
+                8 => u64::from_le_bytes(page.data[start..start + 8].try_into().unwrap()),
+                _ => unreachable!(),
+            });
+        }
         let mut bytes = [0; 8];
         self.read(addr, &mut bytes[..size])?;
         Ok(u64::from_le_bytes(bytes))
@@ -389,6 +431,28 @@ impl Memory {
     pub fn write_int(&mut self, addr: u64, size: usize, value: u64) -> Result<(), String> {
         if !matches!(size, 1 | 2 | 4 | 8) {
             return Err("invalid AMD64 scalar width".into());
+        }
+        Self::range(addr, size)?;
+        let base = addr & !(PAGE - 1);
+        let start = (addr - base) as usize;
+        if size <= 4096 - start {
+            let page = self
+                .pages
+                .get_mut(&base)
+                .ok_or_else(|| format!("unmapped AMD64 address {addr:#x}"))?;
+            Self::check_page(page, base, addr, WRITE)?;
+            let code_changed = page.permissions & EXECUTE != 0;
+            match size {
+                1 => page.data[start] = value as u8,
+                2 => page.data[start..start + 2].copy_from_slice(&(value as u16).to_le_bytes()),
+                4 => page.data[start..start + 4].copy_from_slice(&(value as u32).to_le_bytes()),
+                8 => page.data[start..start + 8].copy_from_slice(&value.to_le_bytes()),
+                _ => unreachable!(),
+            }
+            if code_changed {
+                self.invalidate_decode();
+            }
+            return Ok(());
         }
         self.write(addr, &value.to_le_bytes()[..size])
     }

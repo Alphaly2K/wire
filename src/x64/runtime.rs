@@ -19,6 +19,7 @@ mod events;
 pub(crate) mod exception;
 mod files;
 mod find;
+mod gateways;
 mod guid;
 mod heap;
 mod identity;
@@ -38,6 +39,7 @@ mod token;
 mod tracing;
 mod unwind;
 mod user;
+pub use gateways::Gateways;
 pub use user::WindowCall;
 pub(crate) enum WindowStep {
     Next(u64, [u64; 4]),
@@ -110,7 +112,7 @@ pub struct Runtime64 {
     devices: devices::Devices,
     rng_handles: std::collections::BTreeSet<u64>,
     exe_path: String,
-    pub gateways: BTreeMap<u64, String>,
+    pub gateways: Gateways,
     static_tls_count: u32,
     static_tls: Vec<(Vec<u8>, u64, u64)>,
     threads: threads::Threads,
@@ -703,7 +705,7 @@ impl Runtime64 {
             devices: Default::default(),
             rng_handles: std::collections::BTreeSet::new(),
             exe_path: command.trim_matches('"').to_owned(),
-            gateways: BTreeMap::new(),
+            gateways: BTreeMap::new().into(),
             static_tls_count: 0,
             static_tls: Vec::new(),
             threads: threads::Threads::new(stack_size),
@@ -892,7 +894,7 @@ impl Runtime64 {
         )
     }
     pub fn install_gateways(&mut self, gateways: BTreeMap<u64, String>) {
-        self.gateways = gateways;
+        self.gateways = gateways.into();
         // Kernel32 is an implicit, persistent process module.
         self.native_module("kernel32.dll", true)
             .expect("kernel32 provider");
