@@ -101,13 +101,26 @@ void fixture(const std::filesystem::path& path, uint32_t primitive, uint32_t ver
   out.add(dxbc::SignatureEntry("TEXCOORD",0,1,0,3,dxbc::SignatureSysval::eNone,ir::ScalarType::eU32));
   write_fixture(path,code,in,out);
 }
-void pixel_fixture(const std::filesystem::path& path) {
+void pixel_fixture(const std::filesystem::path& path,bool cbv=false) {
   Words w; op(w,101,reg(2,{0}));
-  move(w,reg(2,{0}),{0x4e46,0x3e800000,0x3f000000,0x3f400000,0x3f800000}); op(w,62);
+  if(cbv)op(w,89,reg(8,{0,1}));
+  move(w,reg(2,{0}),cbv?reg(8,{0,0},true):Words{0x4e46,0x3e800000,0x3f000000,0x3f400000,0x3f800000}); op(w,62);
   Words code = {0x40,uint32_t(w.size()+2)}; code.insert(code.end(),w.begin(),w.end());
   code.insert(code.begin(),{0x52444853u,uint32_t(code.size()*4)});
   dxbc::Signature in(util::FourCC("ISGN")), out(util::FourCC("OSGN"));
   out.add(dxbc::SignatureEntry("SV_TARGET",0,0,0,15,dxbc::SignatureSysval::eTarget,ir::ScalarType::eF32));
+  write_fixture(path,code,in,out);
+}
+void vertex_fixture(const std::filesystem::path& path) {
+  Words w;op(w,95,reg(1,{0}));op(w,89,reg(8,{0,1}));
+  auto output=reg(2,{0});output.push_back(1);op(w,103,output);
+  auto args=reg(2,{0});auto input=reg(1,{0},true),cbv=reg(8,{0,0},true);
+  args.insert(args.end(),input.begin(),input.end());args.insert(args.end(),cbv.begin(),cbv.end());op(w,0,args);op(w,62);
+  Words code={(1u<<16)|0x40,uint32_t(w.size()+2)};code.insert(code.end(),w.begin(),w.end());
+  code.insert(code.begin(),{0x52444853u,uint32_t(code.size()*4)});
+  dxbc::Signature in(util::FourCC("ISGN")),out(util::FourCC("OSGN"));
+  in.add(dxbc::SignatureEntry("POSITION",0,0,0,0xf0f,dxbc::SignatureSysval::eNone,ir::ScalarType::eF32));
+  out.add(dxbc::SignatureEntry("SV_POSITION",0,0,0,0xf,dxbc::SignatureSysval::ePosition,ir::ScalarType::eF32));
   write_fixture(path,code,in,out);
 }
 }
@@ -126,4 +139,6 @@ int main(int argc, char** argv) {
   fixture(out/"loop.dxbc",3,3,5,3,false,false,1,false,false,true);
   fixture(out/"out-of-range.dxbc",3,3,5,3,false,false,1,false,false,true,true);
   pixel_fixture(out/"color.ps.dxbc");
+  pixel_fixture(out/"constant-color.ps.dxbc",true);
+  vertex_fixture(out/"offset.vs.dxbc");
 }

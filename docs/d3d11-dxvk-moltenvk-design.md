@@ -6,9 +6,10 @@
 **当前不能通过复制 DXVK DLL + MoltenVK 就完成 wire 的游戏渲染。**
 wire 既不是 Wine，也没有通用 Vulkan guest→host ABI。当前已接入原生 ARM64 图形库、
 Win64 DXGI factory4 / adapter1与基础D3D11 device/context、资源的64位COM边界。
-Alice已越过D3D12能力探测、D3D11初始化资源与音频探测，进入MonoManager ReloadAssembly。
-pass111到598,723,699退休指令时耗尽600M work预算，日志中的SetThreadErrorMode缺失已补齐并继续重放；
-隐藏初始化窗口尚未显示，尚无guest Draw或Present。
+Alice的pass142已建立guest自己显示的1024×720正式窗口，执行335次真实GPU Draw与112次Present。
+用户已观察到Unity logo动画；最新单帧捕获在动画之后为深色背景。当前停在GetKeyboardLayout导入，
+尚未验收游戏标题画面或持续可玩。最新证据见文末windowed Draw/Present检查点。
+原有pass111的Mono初始化与隐藏窗口描述属于历史推进，已越过这些边界。
 接续已选择并落地 **GS→compute 展开**：11个自有GS样例、44组输入逐DWORD验证，
 并完成展开结果→透传VS→真实PS→GPU光栅化的4096像素验证；已加入持久Vulkan buffer。
 这补上了geometry的实现路线；guest当前用明确标注的实验性10_0兼容子集继续初始化，不宣称完整10_0符合性。
@@ -60,7 +61,8 @@ min16目前保守升为允许的32位实现。
 shared push data从0开始；出现push block时保留256B。反射实际SPIR-V descriptor类型、
 定长数组，以及VS输出/PS输入的location、component、scalar/vector形状。
 浮点控制按真实physical-device属性配置；Vulkan memory model与bufferDeviceAddress明确查询/启用。
-当前graphics pipeline模板为RGBA8、triangle list、F32 position/UV布局，不是完整D3D11状态集合。
+独立离屏诊断保留RGBA8/64×64模板；guest Draw使用独立的真实attachment、输入布局、viewport和状态配置。
+当前仍不是完整D3D11状态集合，未覆盖组合明确失败。
 
 两个CS最初在MoltenVK生成的LDS零初始化循环里引用未声明的`gl_WorkGroupSize`。
 shim将仅由普通U32 OpConstant构成的LocalSizeId解析成LocalSize，同时添加等价的
@@ -399,7 +401,7 @@ wire是否属于该规则的适用范围、所提供内容和具体分发方式�
 - https://developer.apple.com/app-store/review/guidelines/#software-requirements
 - https://developer.apple.com/app-store/review/guidelines/#mini-apps-mini-games-streaming-games-chatbots-plug-ins-and-game-emulators
 
-## Win64 guest D3D11初始化接入（2026-10-08，未验收Present）
+## Win64 guest D3D11初始化接入（2026-10-08历史检查点）
 
 已建立完整基础ID3D11Device/ID3D11DeviceContext槽位与Win64参数表，未实现方法明确报错。
 guest通过真实DXGI adapter创建native Vulkan关联的device/context；当前返回实验性10_0兼容子集，
@@ -409,7 +411,7 @@ guest通过真实DXGI adapter创建native Vulkan关联的device/context；当前
   初始数据、checked guest Map/Unmap、UpdateSubresource、CopyResource/CopySubresourceRegion与RTV clear
   已执行真实GPU上传、复制、清除和读回；mapped状态、设备归属及范围错误明确失败。
 - shader创建调用现有native DXBC编译器；blend/depth/raster/sampler描述符保存于owned对象。
-  当前尚未将这些对象/全部状态接入guest Draw，不能以创建成功当作游戏帧已渲染。
+  当时尚未将这些对象/全部状态接入guest Draw，不能以创建成功当作游戏帧已渲染。
 - immediate context弱缓存；子对象持有device，绑定持有资源，view持有源资源；释放后回收owned guest页。
   64位COM对象不包含宿主指针，vtable/对象页保持runtime-owned readonly。
 - EVENT/TIMESTAMP/TIMESTAMP_DISJOINT query接入真实queue fence/timestamp；scoped query需Begin，
@@ -423,4 +425,71 @@ guest通过真实DXGI adapter创建native Vulkan关联的device/context；当前
 实际Alice Unity启动已越过device/context、内置纹理资源与音频设备探测，
 最新完成的pass116到1,377,667,739退休指令，Mono程序集加载/domain重置完成，
 随后guest x87 FLD边界已补；pass117沿真实游戏继续。
-窗口仍是314×211且visible=false的bootstrap。DXGI交换链、guest Draw/Present和正式窗口显示尚未验收。
+以上pass116/117属于历史检查点；当前已越过正式窗口与guest Draw/Present，见下节。
+
+
+## Windowed guest Draw / Present（2026-10-08）
+
+实际Alice pass142：1024×720、visible=true、335次guest GPU Draw、112次成功Present，
+随后停在 `user32.dll!GetKeyboardLayout`。此前BSTR、消息元数据、WinHTTP、WSA事件、
+地址转换、socket真实失败回退与CriticalSectionEx低位flags已通过实际路径。
+完整日志与调用证据为 `wire-out/games64/alice/{linked-pass-142.txt,api-pass-142.tsv}`。
+用户观察到Unity logo动画；最后一次成功Present捕获为深色背景，不能代表之前各帧内容。
+帧数只计入真实GPU成功提交；TEST/隐藏窗口与失败提交不增加成功计数。
+首次Draw使用位置/颜色VS、两个VS常量缓冲、sRGB RTV与format20 DSV，
+实际绑定通过完整64位COM对象进入native资源，没有假Draw或CPU guest代码执行。
+
+- DXGI output来自共享1024×768、32bit、60Hz虚拟桌面profile；owned Output/Output1、parent/QI身份、
+  Win64 96B Desc、28/32B mode列表及count/短buffer语义已接通。不是宿主物理显示器枚举。
+- GetWindowPlacement为44B，DWM查询9/14与composition=false按虚拟桌面能力实现；
+  HWND_NOTOPMOST清WS_EX_TOPMOST并通过公开NSWindow level同步。虚拟ClipCursor仅约束guest鼠标坐标。
+- windowed legacy discard count1/2与sequential count1，RGBA/BGRA UNORM/sRGB28/29/87/91。
+  Unity请求flip+flags0x42时真实返回UNSUPPORTED，随后自身回退legacy sRGB/count1/flags2。
+  GetBuffer缓存identity；backbuffer、view/binding与factory/device引用有owned生命周期；resize在无外部引用/Map时才执行。
+- Present保留guest CPU在gateway，直到Presenter完成真实GPU提交后才返回成功和记录API。
+  public VK_KHR_surface/VK_EXT_metal_surface/VK_KHR_swapchain接retained CAMetalLayer，
+  acquire/semaphore/fence/blit/queuePresent；销毁surface之后释放layer。正常提交没有CPU读回。
+  sRGB先GPU raw-copy到UNORM兼容纹理再blit，避免额外sRGB解码；尺寸变化使用oldSwapchain。
+- owned typeless19深度/模板纹理以VK_D32_SFLOAT_S8_UINT存储；DSV20、depth SRV21、stencil SRV22。
+  ClearDepthStencilView按aspect执行真实GPU clear；第四Win64 FLOAT取XMM3，第五BYTE截低8bit。
+  没有将其它深度格式偷换为D32，也未声称完整typeless格式族支持。
+- InputLayout解析Win64 32B元素及signature-only ISGN/ISG1 DXBC；semantic/index匹配、append偏移、
+  slot/class/step/format能力检查，额外未使用元素不消费attribute。HRESULT失败清ppLayout；guest读故障保留输出。
+- guest Draw/DrawIndexed及其instanced变体使用借用且设备归属检查的native资源；
+  单RT/可选depth、真实VB/IB偏移/stride、签名attribute、反射CBV/2D SRV/buffer SRV/sampler。
+  传递单viewport/scissor、blend factor/sample mask、depth/stencil与front/cull状态，LOAD/STORE保留已有像素，
+  D3D上到下viewport映射到负高度Vulkan viewport。索引与顶点范围预检查，mapped资源拒绝提交。
+  当前每次Draw创建pipeline/descriptor并同步等fence，正确性优先，尚未做pipeline缓存/批处理吞吐优化。
+
+未支持的flip/exclusive/多RT/多viewport、guest GS/HS/DS/SO、push-data/descriptor数组、
+缺失shader资源、非零depth bias、特殊sampler border/reduction等仍明确失败；没有默默忽略状态。
+D3D11 feature level仍是日志明确的实验性10_0子集。旧native库缺新增必需符号时须重新构建，
+已将完整当前后端重建到标准 `wire-out/libwire_graphics.dylib`；外部依赖不提交仓库。
+
+独立验证（均非guest帧）：
+
+| 探针 | 结果 |
+| --- | --- |
+| `tools/probe_graphics_present.py` | 4格式、resize与layer/window生命周期，12次真实WSI提交 |
+| `tools/probe_graphics_resources.py` | 3组depth/stencil clear；128像素×8B逐字节检查；新增typed纹理格式上传/读回 |
+| `tools/probe_graphics_draw.py` + 原创VS/PS | 8组768像素检查：CBV、VB/IB/base偏移、viewport/scissor、blend、depth/stencil、cull；6组无效参数保留附件 |
+| native ignored Rust回归 | swapchain ownership/fault/resize、延期Present，InputLayout创建/故障输出，以及XMM3/BYTE参数验证 |
+
+报告位于 `wire-out/graphics-{present,resources,draw}-probe-2026-10-08/report.json`。
+独立资源/Draw退出仍偶见MoltenVK报告1MB仍分配，pass135/137–141为7MB、pass142为6MB，
+尚未归因，不能宣称全路径无泄漏。
+本轮没有帧率/MIPS AB；实际游戏帧内容与持续可玩需要另行验收。
+
+原创Draw探针复跑：先按前文生成geometry-fixtures，再执行
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 tools/probe_graphics_draw.py \
+  --backend wire-out/libwire_graphics.dylib \
+  --moltenvk /private/tmp/wire-moltenvk-1.4.2/MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib \
+  --fixtures wire-out/geometry-fixtures-2026-10-08 \
+  --out wire-out/graphics-draw-probe-2026-10-08 \
+  --validator /private/tmp/wire-spirv-tools-build/tools/spirv-val
+```
+
+`probe64 --capture-frame /绝对路径/latest.ppm`仅为实际Present帧诊断，按最近成功提交更新。
+它会启用GPU→CPU读回并改变计时；不开此选项时没有这条读回路径。

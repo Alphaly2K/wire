@@ -577,6 +577,7 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
         let mut window = false;
         let mut cpu_stats = false;
         let mut api_trace = None;
+        let mut capture_frame = None;
         let mut graphics_backend = None;
         let mut moltenvk = None;
         let mut opt = opts.iter();
@@ -596,6 +597,11 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
                     api_trace = Some(opt.next().ok_or("--api-trace needs a path")?.as_str());
                     startup = true;
                 }
+                "--capture-frame" => {
+                    capture_frame = Some(opt.next().ok_or("--capture-frame needs a PPM path")?.as_str());
+                    window = true;
+                    startup = true;
+                }
                 "--window" => {
                     window = true;
                     startup = true;
@@ -613,7 +619,7 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
                 }
                 _ => {
                     return Err(
-                        "usage: wire probe64 <exe> [--max-instr N] [--startup] [--dll] [--window] [--cpu-stats] [--api-trace PATH] [--graphics-backend PATH --moltenvk PATH]"
+                        "usage: wire probe64 <exe> [--max-instr N] [--startup] [--dll] [--window] [--cpu-stats] [--api-trace PATH] [--capture-frame PPM] [--graphics-backend PATH --moltenvk PATH]"
                             .into(),
                     )
                 }
@@ -629,7 +635,14 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
         };
         if startup {
             return run_startup64(
-                path, limit, dll_attach, window, cpu_stats, graphics, api_trace,
+                path,
+                limit,
+                dll_attach,
+                window,
+                cpu_stats,
+                graphics,
+                api_trace,
+                capture_frame,
             );
         }
         let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
@@ -738,6 +751,7 @@ fn report_execution64(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_startup64(
     path: &str,
     limit: u64,
@@ -746,6 +760,7 @@ fn run_startup64(
     cpu_stats: bool,
     graphics: Option<wire::gpu::NativeGraphics>,
     api_trace: Option<&str>,
+    capture_frame: Option<&str>,
 ) -> Result<(), String> {
     use wire::x64::process::{Outcome, Process64};
     let mut process = Process64::load(Path::new(path), dll_attach)?;
@@ -762,6 +777,10 @@ fn run_startup64(
     }
     if window {
         process.enable_window()?;
+    }
+    if let Some(path) = capture_frame {
+        process.capture_frame_to(Path::new(path))?;
+        println!("diagnostic Present capture: {path}; GPU readback enabled, timing is not a performance comparison");
     }
     println!(
         "experimental AMD64 startup: RIP={:#x} RSP={:#x}; interpreter; DLL attach={dll_attach}",
@@ -844,6 +863,11 @@ fn run_startup64(
             w.handle, w.visible, w.width, w.height, w.title
         );
     }
+    println!(
+        "Win64 native GPU draws: {}; presents: {}",
+        process.runtime.graphics_draws(),
+        process.runtime.graphics_presents()
+    );
     match outcome? {
         Outcome::Returned(value) => {
             println!(

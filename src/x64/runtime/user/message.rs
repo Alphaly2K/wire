@@ -30,6 +30,8 @@ pub(in crate::x64::runtime) fn arity(name: &str) -> Option<usize> {
         | "PostThreadMessageW" => 4,
         "PostQuitMessage" | "TranslateMessage" | "GetKeyState" | "GetAsyncKeyState"
         | "GetKeyboardState" => 1,
+        "GetMessageExtraInfo" | "GetMessageTime" | "GetMessagePos" => 0,
+        "SetMessageExtraInfo" => 1,
         _ => return None,
     })
 }
@@ -71,6 +73,18 @@ impl Runtime64 {
     ) -> Result<Option<u64>, String> {
         let tid = self.threads.active;
         let value = match name {
+            "GetMessageExtraInfo" | "GetMessageTime" | "GetMessagePos" => {
+                let state = self.user.message_state.get(&tid).copied().unwrap_or([0; 3]);
+                state[match name {
+                    "GetMessageExtraInfo" => 0,
+                    "GetMessageTime" => 1,
+                    _ => 2,
+                }]
+            }
+            "SetMessageExtraInfo" => {
+                let state = self.user.message_state.entry(tid).or_default();
+                std::mem::replace(&mut state[0], a[0])
+            }
             "GetAsyncKeyState" => self.user.keyboard.asynchronous(a[0] as u32) as u64,
             "GetKeyState" => {
                 let keys = self.user.keyboard.state64(tid);
@@ -170,6 +184,16 @@ impl Runtime64 {
                     bytes[36 + n * 4..40 + n * 4].copy_from_slice(&p.to_le_bytes());
                 }
                 mem.write(a[0], &bytes)?;
+                // Native and posted messages in this bridge have no injected
+                // extra-info tag. Publish metadata only after checked output.
+                self.user.message_state.insert(
+                    tid,
+                    [
+                        0,
+                        m.time as u64,
+                        (m.point[0] as u16 as u32 | ((m.point[1] as u16 as u32) << 16)) as u64,
+                    ],
+                );
                 if get || a[4] & 1 != 0 {
                     self.user.events.remove(index);
                     if m.hardware {
@@ -269,6 +293,57 @@ mod tests {
             },
         );
         (runtime, mem)
+    }
+    #[test]
+    fn message_metadata_is_per_thread_full_width_and_commits_after_checked_output() {
+        let (mut r, mut m) = fixture();
+        let extra = 0xfedcba9876543210;
+        assert_eq!(
+            r.message_call(&mut m, "SetMessageExtraInfo", &[extra])
+                .unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            r.message_call(&mut m, "GetMessageExtraInfo", &[]).unwrap(),
+            Some(extra)
+        );
+        r.threads.active = 2;
+        assert_eq!(
+            r.message_call(&mut m, "GetMessageExtraInfo", &[]).unwrap(),
+            Some(0)
+        );
+        r.threads.active = 1;
+        r.user.cursor_pos = [-10, 240];
+        r.message_call(&mut m, "PostMessageW", &[HWND, 0x8001, 0, 0])
+            .unwrap();
+        let time = r.user.events[0].time;
+        assert!(r
+            .message_call(&mut m, "PeekMessageW", &[STACK + 8180, HWND, 0, 0, 1])
+            .is_err());
+        assert_eq!(r.user.events.len(), 1);
+        assert_eq!(
+            r.message_call(&mut m, "GetMessageExtraInfo", &[]).unwrap(),
+            Some(extra)
+        );
+        assert_eq!(
+            r.message_call(&mut m, "GetMessageTime", &[]).unwrap(),
+            Some(0)
+        );
+        r.message_call(&mut m, "PeekMessageW", &[STACK + 128, HWND, 0, 0, 1])
+            .unwrap();
+        assert_eq!(
+            r.message_call(&mut m, "GetMessageExtraInfo", &[]).unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            r.message_call(&mut m, "GetMessageTime", &[]).unwrap(),
+            Some(time as u64)
+        );
+        assert_eq!(
+            r.message_call(&mut m, "GetMessagePos", &[]).unwrap(),
+            Some(0x00f0fff6)
+        );
+        assert_eq!(m.read_int(STACK + 128 + 32, 4).unwrap(), time as u64);
     }
     #[test]
     fn device_notifications_own_high_handles_validate_filters_and_cleanup_window() {

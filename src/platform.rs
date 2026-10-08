@@ -26,9 +26,35 @@ extern "C" {
         visible: i32,
     );
     pub(crate) fn wire_ui_remove(hwnd: u32);
+    pub(crate) fn wire_ui_window_topmost(hwnd: u32, topmost: i32);
+    fn wire_ui_metal_layer(hwnd: u32) -> *mut std::ffi::c_void;
+    fn wire_ui_release_metal_layer(layer: *mut std::ffi::c_void);
     fn wire_ui_frame(hwnd: u32, rgba: *const u8, width: u32, height: u32) -> i32;
     pub(crate) fn wire_ui_poll(event: *mut Event) -> i32;
     pub(crate) fn wire_ui_shutdown();
+}
+/// A retained platform layer. This pointer is confined to the native bridge.
+#[derive(Clone)]
+pub(crate) struct MetalLayer(std::rc::Rc<LayerInner>);
+struct LayerInner(std::ptr::NonNull<std::ffi::c_void>);
+impl MetalLayer {
+    #[cfg(target_os = "macos")]
+    pub(crate) fn for_window(hwnd: u32) -> Result<Self, String> {
+        let layer = std::ptr::NonNull::new(unsafe { wire_ui_metal_layer(hwnd) })
+            .ok_or("no visible native window for Metal surface")?;
+        Ok(Self(std::rc::Rc::new(LayerInner(layer))))
+    }
+    pub(crate) fn as_ptr(&self) -> *mut std::ffi::c_void {
+        self.0 .0.as_ptr()
+    }
+}
+impl Drop for LayerInner {
+    fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
+        unsafe {
+            wire_ui_release_metal_layer(self.0.as_ptr())
+        };
+    }
 }
 pub struct Presenter {
     enabled: bool,

@@ -1,4 +1,5 @@
 //! Optional host graphics library. Native pointers stay here, never in guest memory.
+pub(crate) mod draw;
 mod geometry;
 pub use geometry::{GeometryBatch, GeometryInfo, GeometryIo};
 use std::{
@@ -132,10 +133,15 @@ pub struct ImageViewDesc {
 type ImageViewCreate =
     unsafe extern "C" fn(*mut c_void, *const ImageViewDesc, *mut c_char, usize) -> *mut c_void;
 type ImageViewClear = unsafe extern "C" fn(*mut c_void, *const f32, *mut c_char, usize) -> i32;
+type DepthViewClear = unsafe extern "C" fn(*mut c_void, u32, f32, u32, *mut c_char, usize) -> i32;
 type TextureRead =
     unsafe extern "C" fn(*mut c_void, u32, *mut u8, usize, *mut c_char, usize) -> i32;
 type TextureWrite =
     unsafe extern "C" fn(*mut c_void, u32, *const u8, usize, *mut c_char, usize) -> i32;
+type SurfaceCreate =
+    unsafe extern "C" fn(*mut c_void, *const c_void, *mut c_char, usize) -> *mut c_void;
+type SurfacePresent =
+    unsafe extern "C" fn(*mut c_void, *mut c_void, u32, u32, u32, *mut c_char, usize) -> i32;
 type Pipeline = unsafe extern "C" fn(
     *mut c_void,
     *mut c_void,
@@ -198,6 +204,7 @@ struct Inner {
     info_fn: ShaderInfo,
     free_shader: Close,
     pipeline: Pipeline,
+    draw: draw::DrawFn,
     blit: Blit,
     geometry_query: GeometryQuery,
     geometry_dispatch: GeometryDispatch,
@@ -209,9 +216,13 @@ struct Inner {
     texture_free: Close,
     texture_write: TextureWrite,
     texture_read: TextureRead,
+    surface_create: SurfaceCreate,
+    surface_free: Close,
+    surface_present: SurfacePresent,
     image_view_create: ImageViewCreate,
     image_view_free: Close,
     image_view_clear: ImageViewClear,
+    image_view_clear_depth: DepthViewClear,
     buffer_view_create: BufferViewCreate,
     buffer_view_free: Close,
     buffer_create: BufferCreate,
@@ -229,6 +240,46 @@ impl Drop for Inner {
 }
 #[derive(Clone)]
 pub struct NativeGraphics(Rc<Inner>);
+pub(crate) struct Surface {
+    graphics: NativeGraphics,
+    handle: NonNull<c_void>,
+    _layer: crate::platform::MetalLayer,
+}
+impl Drop for Surface {
+    fn drop(&mut self) {
+        unsafe { (self.graphics.0.surface_free)(self.handle.as_ptr()) };
+    }
+}
+impl Surface {
+    pub(crate) fn present(
+        &mut self,
+        texture: &Texture,
+        width: u32,
+        height: u32,
+        interval: u32,
+    ) -> Result<(), String> {
+        if !Rc::ptr_eq(&self.graphics.0, &texture.0.graphics.0) {
+            return Err("presentation texture belongs to another GPU".into());
+        }
+        let mut error = [0u8; 4096];
+        let ok = unsafe {
+            (self.graphics.0.surface_present)(
+                self.handle.as_ptr(),
+                texture.0.handle.as_ptr(),
+                width,
+                height,
+                interval,
+                error.as_mut_ptr().cast(),
+                error.len(),
+            )
+        };
+        if ok == 0 {
+            Err(message(&error))
+        } else {
+            Ok(())
+        }
+    }
+}
 #[derive(Clone)]
 pub struct Buffer(Rc<BufferInner>);
 struct BufferInner {
@@ -389,6 +440,24 @@ impl Drop for ImageView {
     }
 }
 impl ImageView {
+    pub fn clear_depth(&self, flags: u32, depth: f32, stencil: u32) -> Result<(), String> {
+        let mut error = [0u8; 4096];
+        if unsafe {
+            (self.texture.0.graphics.0.image_view_clear_depth)(
+                self.handle.as_ptr(),
+                flags,
+                depth,
+                stencil,
+                error.as_mut_ptr().cast(),
+                error.len(),
+            )
+        } == 0
+        {
+            Err(message(&error))
+        } else {
+            Ok(())
+        }
+    }
     pub fn desc(&self) -> ImageViewDesc {
         self.desc
     }
@@ -490,6 +559,7 @@ impl NativeGraphics {
             let info_fn = library.symbol(b"wire_gpu_shader_info\0")?;
             let free_shader = library.symbol(b"wire_gpu_shader_free\0")?;
             let pipeline = library.symbol(b"wire_gpu_pipeline\0")?;
+            let draw = library.symbol(b"wire_gpu_draw\0")?;
             let blit = library.symbol(b"wire_gpu_blit_rgba64\0")?;
             let geometry_query = library.symbol(b"wire_gpu_geometry_info\0")?;
             let geometry_dispatch = library.symbol(b"wire_gpu_geometry_dispatch\0")?;
@@ -500,9 +570,13 @@ impl NativeGraphics {
             let texture_create = library.symbol(b"wire_gpu_texture_create\0")?;
             let texture_free = library.symbol(b"wire_gpu_texture_free\0")?;
             let texture_read = library.symbol(b"wire_gpu_texture_read\0")?;
+            let surface_create = library.symbol(b"wire_gpu_surface_create\0")?;
+            let surface_free = library.symbol(b"wire_gpu_surface_free\0")?;
+            let surface_present = library.symbol(b"wire_gpu_surface_present\0")?;
             let image_view_create = library.symbol(b"wire_gpu_image_view_create\0")?;
             let image_view_free = library.symbol(b"wire_gpu_image_view_free\0")?;
             let image_view_clear = library.symbol(b"wire_gpu_image_view_clear\0")?;
+            let image_view_clear_depth = library.symbol(b"wire_gpu_image_view_clear_depth\0")?;
             let texture_write = library.symbol(b"wire_gpu_texture_write\0")?;
             let buffer_view_create = library.symbol(b"wire_gpu_buffer_view_create\0")?;
             let buffer_view_free = library.symbol(b"wire_gpu_buffer_view_free\0")?;
@@ -537,6 +611,7 @@ impl NativeGraphics {
                 info_fn,
                 free_shader,
                 pipeline,
+                draw,
                 blit,
                 geometry_query,
                 geometry_dispatch,
@@ -548,9 +623,13 @@ impl NativeGraphics {
                 texture_free,
                 texture_write,
                 texture_read,
+                surface_create,
+                surface_free,
+                surface_present,
                 image_view_create,
                 image_view_free,
                 image_view_clear,
+                image_view_clear_depth,
                 buffer_view_create,
                 buffer_view_free,
                 buffer_create,
@@ -577,6 +656,26 @@ impl NativeGraphics {
             handle,
             desc,
         })))
+    }
+    pub(crate) fn create_surface(
+        &self,
+        layer: crate::platform::MetalLayer,
+    ) -> Result<Surface, String> {
+        let mut error = [0u8; 4096];
+        let handle = NonNull::new(unsafe {
+            (self.0.surface_create)(
+                self.0.context.as_ptr(),
+                layer.as_ptr(),
+                error.as_mut_ptr().cast(),
+                error.len(),
+            )
+        })
+        .ok_or_else(|| message(&error))?;
+        Ok(Surface {
+            graphics: self.clone(),
+            handle,
+            _layer: layer,
+        })
     }
     pub fn timestamp(&self) -> Result<(u64, u64), String> {
         let mut ticks = 0;

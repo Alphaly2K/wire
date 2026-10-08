@@ -388,6 +388,13 @@ impl Process64 {
         }
         Ok(())
     }
+    /// Save the latest successfully presented guest backbuffer as PPM.
+    /// This explicit diagnostic enables CPU readback and changes timing.
+    pub fn capture_frame_to(&mut self, path: &Path) -> Result<(), String> {
+        self.enable_window()?;
+        self.presenter.as_mut().unwrap().capture_to(path);
+        Ok(())
+    }
     pub fn poll_window(&mut self, force: bool) -> Result<(), String> {
         if let Some(presenter) = self.presenter.as_mut() {
             presenter.poll(&mut self.runtime, force)?;
@@ -832,6 +839,23 @@ impl Process64 {
                     })?;
                 self.cpu.work += 1;
                 match control {
+                    Control::Present {
+                        dll,
+                        function,
+                        args,
+                    } => {
+                        let result = self
+                            .presenter
+                            .as_mut()
+                            .ok_or_else(|| "DXGI Present requires --window".to_string())
+                            .and_then(|p| p.present(&mut self.runtime, args[0], args[1] as u32));
+                        if let Err(error) = result {
+                            self.runtime.inventory_failure(&dll, &function);
+                            return Err(format!("{dll}!{function}: {error}"));
+                        }
+                        self.cpu.return_integer(&self.memory, 0)?;
+                        self.runtime.complete_present(&dll, &function, &args);
+                    }
                     Control::Returned => {
                         self.accept_threads()?;
                     }

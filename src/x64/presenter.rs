@@ -9,6 +9,9 @@ pub(crate) struct Presenter64 {
     windows: BTreeMap<u64, u32>,
     next_id: u32,
     next_poll: Instant,
+    surfaces: BTreeMap<u64, crate::gpu::Surface>,
+    capture: Option<std::path::PathBuf>,
+    captured: u64,
 }
 impl Presenter64 {
     pub fn new() -> Result<Self, String> {
@@ -23,8 +26,14 @@ impl Presenter64 {
                 windows: BTreeMap::new(),
                 next_id: 0x60000000,
                 next_poll: Instant::now(),
+                surfaces: BTreeMap::new(),
+                capture: None,
+                captured: 0,
             })
         }
+    }
+    pub fn capture_to(&mut self, path: &std::path::Path) {
+        self.capture = Some(path.to_owned());
     }
     pub fn poll(&mut self, runtime: &mut Runtime64, force: bool) -> Result<(), String> {
         let now = Instant::now();
@@ -42,6 +51,7 @@ impl Presenter64 {
                 }
             }
             self.windows.retain(|guest, _| live.contains(guest));
+            self.surfaces.retain(|guest, _| live.contains(guest));
             for w in windows {
                 if w.width == 0 || w.height == 0 {
                     continue;
@@ -70,7 +80,8 @@ impl Presenter64 {
                         w.width,
                         w.height,
                         w.visible as i32,
-                    )
+                    );
+                    crate::platform::wire_ui_window_topmost(native, w.topmost as i32);
                 };
             }
             for _ in 0..512 {
@@ -90,9 +101,73 @@ impl Presenter64 {
         }
         Ok(())
     }
+    pub fn present(
+        &mut self,
+        runtime: &mut Runtime64,
+        chain: u64,
+        interval: u32,
+    ) -> Result<(), String> {
+        self.poll(runtime, true)?;
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (chain, interval);
+            Err("Win64 GPU presentation requires macOS".into())
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let (window, texture, gpu) = runtime.graphics_frame(chain)?;
+            let native = *self
+                .windows
+                .get(&window)
+                .ok_or("no visible native window for swapchain")?;
+            let layer = crate::platform::MetalLayer::for_window(native)?;
+            if let std::collections::btree_map::Entry::Vacant(entry) = self.surfaces.entry(window) {
+                entry.insert(gpu.create_surface(layer)?);
+            }
+            let info = runtime
+                .window_info()
+                .into_iter()
+                .find(|w| w.handle == window && w.visible)
+                .ok_or("swapchain window is hidden/destroyed")?;
+            self.surfaces.get_mut(&window).unwrap().present(
+                &texture,
+                info.width,
+                info.height,
+                interval,
+            )?;
+            if let Some(path) = &self.capture {
+                // Optional diagnostic only. Normal presentation never reads back.
+                // Capture after successful submission, without converting sRGB
+                // bytes a second time. File errors are not guest GPU failures.
+                let result = (|| -> Result<(), String> {
+                    let d = texture.desc();
+                    let rgba = texture.read(0, d.width as usize * d.height as usize * 4)?;
+                    let mut ppm = format!("P6\n{} {}\n255\n", d.width, d.height).into_bytes();
+                    for p in rgba.as_chunks::<4>().0 {
+                        ppm.extend(if matches!(d.format, 87 | 91) {
+                            [p[2], p[1], p[0]]
+                        } else {
+                            [p[0], p[1], p[2]]
+                        });
+                    }
+                    std::fs::write(path, ppm).map_err(|e| e.to_string())?;
+                    self.captured += 1;
+                    Ok(())
+                })();
+                if let Err(e) = result {
+                    runtime.trace_note(format!(
+                        "Present succeeded; diagnostic frame capture failed: {e}"
+                    ));
+                    self.capture = None;
+                }
+            }
+            Ok(())
+        }
+    }
 }
 impl Drop for Presenter64 {
     fn drop(&mut self) {
+        self.surfaces.clear();
         #[cfg(target_os = "macos")]
         unsafe {
             crate::platform::wire_ui_shutdown()

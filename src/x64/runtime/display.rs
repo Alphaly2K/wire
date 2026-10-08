@@ -1,8 +1,11 @@
 //! One virtual 1024x768/32-bit/60-Hz desktop; Win64 handles and checked outputs.
 //! This describes the guest display profile, not a native GPU or swap chain.
 use super::{Cpu64, Memory, Runtime64, READ, WRITE};
-const MONITOR: u64 = super::TEB + 0x600008;
-const DEVICE: &str = "\\\\.\\DISPLAY1";
+pub(in crate::x64::runtime) const MONITOR: u64 = super::TEB + 0x600008;
+pub(in crate::x64::runtime) const DEVICE: &str = "\\\\.\\DISPLAY1";
+pub(in crate::x64::runtime) const WIDTH: u32 = 1024;
+pub(in crate::x64::runtime) const HEIGHT: u32 = 768;
+pub(in crate::x64::runtime) const REFRESH_HZ: u32 = 60;
 pub(super) fn arity(name: &str) -> Option<usize> {
     Some(match name {
         "EnumDisplayDevicesA"
@@ -135,7 +138,10 @@ impl Runtime64 {
             bytes[offset..offset + 2].copy_from_slice(&(size as u16).to_le_bytes());
             bytes[offset + 4..offset + 8].copy_from_slice(&0x005c0020u32.to_le_bytes());
             let bits = if wide { 168 } else { 104 };
-            for (i, value) in [32u32, 1024, 768, 0, 60].into_iter().enumerate() {
+            for (i, value) in [32u32, WIDTH, HEIGHT, 0, REFRESH_HZ]
+                .into_iter()
+                .enumerate()
+            {
                 bytes[bits + 4 * i..bits + 4 * i + 4].copy_from_slice(&value.to_le_bytes());
             }
             mem.write(args[2], &bytes)?;
@@ -149,7 +155,7 @@ impl Runtime64 {
                     return Ok(0);
                 }
                 let mut bytes = vec![0; size];
-                for (i, value) in [size as u32, 0, 0, 1024, 768, 0, 0, 1024, 768, 1]
+                for (i, value) in [size as u32, 0, 0, WIDTH, HEIGHT, 0, 0, WIDTH, HEIGHT, 1]
                     .into_iter()
                     .enumerate()
                 {
@@ -171,15 +177,15 @@ impl Runtime64 {
                         // POINT is an eight-byte by-value struct in one Win64 register.
                         let x = args[0] as u32 as i32;
                         let y = (args[0] >> 32) as u32 as i32;
-                        (0..1024).contains(&x) && (0..768).contains(&y)
+                        (0..WIDTH as i32).contains(&x) && (0..HEIGHT as i32).contains(&y)
                     }
                     "MonitorFromRect" => {
                         let r = rect(mem, args[0])?;
                         r[0] < r[2]
                             && r[1] < r[3]
-                            && r[0] < 1024
+                            && r[0] < WIDTH as i32
                             && r[2] > 0
-                            && r[1] < 768
+                            && r[1] < HEIGHT as i32
                             && r[3] > 0
                     }
                     _ if args[0] == 0 => false,
@@ -189,7 +195,7 @@ impl Runtime64 {
                             return Ok(0);
                         };
                         let r = window.rect;
-                        r[0] < 1024 && r[2] > 0 && r[1] < 768 && r[3] > 0
+                        r[0] < WIDTH as i32 && r[2] > 0 && r[1] < HEIGHT as i32 && r[3] > 0
                     }
                 };
                 Ok(if intersects || args[1] != 0 {
@@ -222,7 +228,7 @@ impl Runtime64 {
             result.result = 0;
             return Ok(result);
         }
-        let mut r = [0i32, 0, 1024, 768];
+        let mut r = [0i32, 0, WIDTH as i32, HEIGHT as i32];
         if args[1] != 0 {
             let clip = rect(mem, args[1])?;
             r = [

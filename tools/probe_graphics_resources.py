@@ -3,6 +3,7 @@
 import argparse
 import ctypes as c
 import json
+import struct
 from pathlib import Path
 
 
@@ -38,8 +39,10 @@ def main():
     view = fn('wire_gpu_image_view_create', vp, [vp, c.POINTER(ViewDesc), vp, sz])
     free_view = fn('wire_gpu_image_view_free', None, [vp])
     clear = fn('wire_gpu_image_view_clear', c.c_int, [vp, c.POINTER(c.c_float), vp, sz])
+    clear_depth = fn('wire_gpu_image_view_clear_depth',c.c_int,[vp,u32,c.c_float,u32,vp,sz])
     copy = fn('wire_gpu_texture_copy', c.c_int, [vp, vp, c.POINTER(Copy), vp, sz])
     timestamp = fn('wire_gpu_timestamp', c.c_int, [vp, c.POINTER(c.c_uint64), c.POINTER(c.c_uint64), vp, sz])
+    support = fn('wire_gpu_format_support', u32, [vp, u32])
     owned, views = [], []
     gpu = open_gpu(str(args.moltenvk.resolve()).encode(), c.create_string_buffer(312), error, len(error))
     def ok(value):
@@ -70,6 +73,29 @@ def main():
         rtv = ok(view(dst, c.byref(ViewDesc(28, 0, 1, 0, 1, 1)), error, len(error))); views.append(rtv)
         ok(clear(rtv, (c.c_float*4)(.25, .5, .75, 1), error, len(error)))
         cleared = get(dst, 0, len(expected)); assert cleared == bytes((64, 128, 191, 255))*(32*16)
+        depth = make(TextureDesc(16,8,1,1,19,0x48))
+        dsv = ok(view(depth,c.byref(ViewDesc(20,0,1,0,1,2)),error,len(error)));views.append(dsv)
+        for fmt in (21,22):
+            srv = ok(view(depth,c.byref(ViewDesc(fmt,0,1,0,1,0)),error,len(error)));views.append(srv)
+        assert not view(depth,c.byref(ViewDesc(28,0,1,0,1,2)),error,len(error))
+        for flags, z, stencil, want_z, want_stencil in ((3,.375,91,.375,91),(1,.625,123,.625,91),(2,.9,7,.625,7)):
+            ok(clear_depth(dsv,flags,z,stencil,error,len(error)))
+            content=get(depth,0,16*8*8)
+            assert content==(struct.pack('<fB',want_z,want_stencil)+bytes(3))*(16*8)
+        assert not clear_depth(dsv,4,.25,0,error,len(error))
+        assert not clear_depth(dsv,1,float('nan'),0,error,len(error))
+        assert get(depth,0,16*8*8)==content
+        # Integer/SNORM vertex formats also accepted as textures must use the
+        # same byte sizes as guest upload/readback. Skip actual GPU rejections.
+        format_checks = []
+        for fmt, pixel_bytes in ((7,12),(8,12),(12,8),(13,8),(14,8),(17,8),(18,8),
+                                 (25,4),(36,4),(37,4),(38,4),(50,2),(51,2),(52,2),(58,2),(59,2)):
+            if not support(gpu,fmt)&0x20:
+                continue
+            t=make(TextureDesc(7,5,1,1,fmt,0))
+            content=bytes((i*37+fmt)&255 for i in range(7*5*pixel_bytes))
+            put(t,0,content);assert get(t,0,len(content))==content
+            format_checks.append(fmt)
         cube = make(TextureDesc(4, 4, 3, 6, 29, 0x108))
         cube_checks = 0
         for layer in range(6):
@@ -92,7 +118,9 @@ def main():
         args.out.mkdir(parents=True, exist_ok=True)
         (args.out/'clear-rgba32x16.bin').write_bytes(cleared)
         (args.out/'report.json').write_text(json.dumps(dict(texture_bytes=len(data), copy_bytes=len(expected), cube_bytes=cube_checks,volume_bytes=volume_checks,
-            clear_pixels=32*16, timestamp_frequency=freq.value, timestamps=[a.value, b.value], guest_frame=False), indent=2)+'\n')
+            clear_pixels=32*16, depth_stencil_pixels=16*8, depth_stencil_clear_checks=3,
+            typed_texture_formats=format_checks,
+            timestamp_frequency=freq.value, timestamps=[a.value, b.value], guest_frame=False), indent=2)+'\n')
         print(f'resource validation passed: {len(data)+len(expected)+cube_checks+volume_checks} bytes, {32*16} clear pixels, real queue timestamps')
     finally:
         for v in reversed(views): free_view(v)

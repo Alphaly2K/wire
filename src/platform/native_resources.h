@@ -35,12 +35,13 @@ struct Texture {
   VkImageAspectFlags aspect;
   uint32_t block=1,bytes=0;
   Texture(Context& context,WireTextureDesc d):c(context),desc(d),format(dxgi_format(d.format)) {
-    aspect=(d.format==40 || d.format==55)?VK_IMAGE_ASPECT_DEPTH_BIT:d.format==45?VK_IMAGE_ASPECT_DEPTH_BIT|VK_IMAGE_ASPECT_STENCIL_BIT:VK_IMAGE_ASPECT_COLOR_BIT;
+    aspect=(d.format==40 || d.format==55)?VK_IMAGE_ASPECT_DEPTH_BIT:
+      (d.format==19 || d.format==20 || d.format==45)?VK_IMAGE_ASPECT_DEPTH_BIT|VK_IMAGE_ASPECT_STENCIL_BIT:VK_IMAGE_ASPECT_COLOR_BIT;
     switch(d.format) {
       case 2:case 3:case 4: bytes=16;break;
-      case 6:bytes=12;break;
-      case 10:case 11:case 16:bytes=8;break;
-      case 49:case 54:case 55:case 56:case 57:bytes=2;break;
+      case 6:case 7:case 8:bytes=12;break;
+      case 10:case 11:case 12:case 13:case 14:case 16:case 17:case 18:case 19:case 20:bytes=8;break;
+      case 49:case 50:case 51:case 52:case 54:case 55:case 56:case 57:case 58:case 59:bytes=2;break;
       case 61:case 62:case 63:case 64:bytes=1;break;
       case 71:case 72:case 80:block=4;bytes=8;break;
       case 74:case 75:case 77:case 78:case 83:block=4;bytes=16;break;
@@ -68,9 +69,11 @@ struct Texture {
   }
 };
 std::unique_ptr<Texture> create_texture(Context& c,const WireTextureDesc& d) {
+  if(d.format==21 || d.format==22 || (d.format==19 && !(d.bind&0x40)))
+    throw std::runtime_error("depth/stencil view-only or typeless texture binding unsupported");
   if(!d.width || !d.height || !d.mips || !d.layers || d.width>c.properties.limits.maxImageDimension2D ||
      d.height>c.properties.limits.maxImageDimension2D || d.layers>c.properties.limits.maxImageArrayLayers || d.mips>14 ||
-     d.mips>uint32_t(32-__builtin_clz(std::max(std::max(d.width,d.height),(d.bind&0x200)?d.layers:1u))) || d.bind&~0x368u || dxgi_format(d.format)==VK_FORMAT_UNDEFINED)
+     d.mips>uint32_t(32-__builtin_clz(std::max(std::max(d.width,d.height),(d.bind&0x200)?d.layers:1u))) || d.bind&~0x768u || dxgi_format(d.format)==VK_FORMAT_UNDEFINED)
     throw std::runtime_error("texture dimensions/format/usage unsupported");
   auto t=std::make_unique<Texture>(c,d);uint64_t total=0;
   for(uint32_t mip=0;mip<d.mips;mip++)total+=uint64_t(t->size(mip))*(t->volume()?1:d.layers);
@@ -80,6 +83,10 @@ std::unique_ptr<Texture> create_texture(Context& c,const WireTextureDesc& d) {
   if((d.bind&0x20) && !(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT))throw std::runtime_error("render target format unsupported");
   if((d.bind&0x40) && !(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT))throw std::runtime_error("depth target format unsupported");
   VkImageCreateInfo ii={VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};ii.imageType=VK_IMAGE_TYPE_2D;ii.format=t->format;
+  if(d.bind&0x400) {
+    if(!(d.format==28 || d.format==29 || d.format==87 || d.format==91))throw std::runtime_error("mutable image format family unsupported");
+    ii.flags|=VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+  }
   if(d.bind&0x100) {if(d.width!=d.height || d.layers%6)throw std::runtime_error("cube texture dimensions");ii.flags|=VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;}
   if(t->volume()) {if(d.bind&0x100 || d.width>c.properties.limits.maxImageDimension3D || d.height>c.properties.limits.maxImageDimension3D || d.layers>c.properties.limits.maxImageDimension3D || d.layers>2048)throw std::runtime_error("volume texture dimensions/flags");ii.imageType=VK_IMAGE_TYPE_3D;}
   ii.extent={d.width,d.height,t->depth(0)};ii.mipLevels=d.mips;ii.arrayLayers=t->volume()?1:d.layers;ii.samples=VK_SAMPLE_COUNT_1_BIT;ii.tiling=VK_IMAGE_TILING_OPTIMAL;
@@ -103,17 +110,28 @@ void texture_write(Texture& t,uint32_t subresource,const uint8_t *data,size_t si
   t.barrier(cmd.command,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_GENERAL,mip,layer,1,1);cmd.submit();
 }
 void texture_read(Texture& t,uint32_t subresource,uint8_t *data,size_t size) {
-  if(subresource>=t.subresources() || !data || t.aspect!=VK_IMAGE_ASPECT_COLOR_BIT)throw std::runtime_error("texture read subresource/aspect");
+  if(subresource>=t.subresources() || !data)throw std::runtime_error("texture read subresource/output");
+  bool depth=t.desc.format==19 || t.desc.format==20 || t.desc.format==40;
+  if(t.aspect!=VK_IMAGE_ASPECT_COLOR_BIT && !depth)throw std::runtime_error("texture read depth format unsupported");
   uint32_t mip=subresource%t.desc.mips,layer=t.volume()?0:subresource/t.desc.mips;
   if(size!=t.size(mip))throw std::runtime_error("texture tight read size");
   auto staging=create_buffer(t.c,nullptr,size,2);Commands cmd(t.c);
   t.barrier(cmd.command,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_GENERAL,mip,layer,1,1);
-  VkBufferImageCopy copy={};copy.imageSubresource={t.aspect,mip,layer,1};copy.imageExtent={std::max(1u,t.desc.width>>mip),std::max(1u,t.desc.height>>mip),t.depth(mip)};
-  t.c.fn<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(cmd.command,t.handle,VK_IMAGE_LAYOUT_GENERAL,staging->handle,1,&copy);
+  VkBufferImageCopy copies[2]={};auto& copy=copies[0];
+  copy.imageSubresource={depth?VkImageAspectFlags(VK_IMAGE_ASPECT_DEPTH_BIT):t.aspect,mip,layer,1};
+  copy.imageExtent={std::max(1u,t.desc.width>>mip),std::max(1u,t.desc.height>>mip),t.depth(mip)};
+  size_t pixels=size/t.bytes;
+  bool stencil=depth && (t.aspect&VK_IMAGE_ASPECT_STENCIL_BIT);
+  if(stencil) {copies[1]=copy;copies[1].bufferOffset=pixels*4;copies[1].imageSubresource.aspectMask=VK_IMAGE_ASPECT_STENCIL_BIT;}
+  t.c.fn<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(cmd.command,t.handle,VK_IMAGE_LAYOUT_GENERAL,staging->handle,stencil?2:1,copies);
   VkBufferMemoryBarrier b={VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};b.buffer=staging->handle;b.offset=0;b.size=size;
   b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;b.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;b.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
   t.c.fn<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(cmd.command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,0,nullptr,1,&b,0,nullptr);
-  cmd.submit();std::memcpy(data,staging->mapped,size);
+  cmd.submit();
+  if(stencil) {
+    auto source=static_cast<const uint8_t*>(staging->mapped);std::memset(data,0,size);
+    for(size_t p=0;p<pixels;p++) {std::memcpy(data+p*8,source+p*4,4);data[p*8+4]=source[pixels*4+p];}
+  }else std::memcpy(data,staging->mapped,size);
 }
 struct ImageView {
   Texture& t;WireImageViewDesc desc;VkImageView handle=VK_NULL_HANDLE;
@@ -121,23 +139,53 @@ struct ImageView {
   ~ImageView(){if(handle)t.c.fn<PFN_vkDestroyImageView>("vkDestroyImageView")(t.c.device,handle,nullptr);}
 };
 std::unique_ptr<ImageView> create_image_view(Texture& t,WireImageViewDesc d) {
-  if(d.format!=t.desc.format || !d.mips || !d.layers || d.mip>=t.desc.mips || d.mips>t.desc.mips-d.mip ||
+  bool compatible=d.format==t.desc.format || ((t.desc.bind&0x400) &&
+    (((d.format==28 || d.format==29) && (t.desc.format==28 || t.desc.format==29)) ||
+     ((d.format==87 || d.format==91) && (t.desc.format==87 || t.desc.format==91))));
+  VkImageAspectFlags aspect=t.aspect;
+  if(t.desc.format==19) {
+    compatible=(d.kind==2 && d.format==20) || (d.kind==0 && (d.format==21 || d.format==22));
+    if(d.kind==0)aspect=d.format==21?VK_IMAGE_ASPECT_DEPTH_BIT:VK_IMAGE_ASPECT_STENCIL_BIT;
+  }else if(t.desc.format==20 && d.kind!=2)compatible=false;
+  if(!compatible || !d.mips || !d.layers || d.mip>=t.desc.mips || d.mips>t.desc.mips-d.mip ||
      d.layer>=t.desc.layers || d.layers>t.desc.layers-d.layer || d.kind>5 ||
      ((d.kind==0 || d.kind>=3) && !(t.desc.bind&8)) || (d.kind==1 && (!(t.desc.bind&0x20) || d.mips!=1)) ||
      (d.kind==2 && (!(t.desc.bind&0x40) || d.mips!=1)))throw std::runtime_error("image view format/range/usage unsupported");
   auto v=std::make_unique<ImageView>(t,d);VkImageViewCreateInfo vi={VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-  vi.image=t.handle;vi.format=t.format;vi.viewType=d.layers==1?VK_IMAGE_VIEW_TYPE_2D:VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+  vi.image=t.handle;vi.format=dxgi_format(d.format);vi.viewType=d.layers==1?VK_IMAGE_VIEW_TYPE_2D:VK_IMAGE_VIEW_TYPE_2D_ARRAY;
   if(d.kind==5) {if(!t.volume() || d.layer!=0 || d.layers!=1)throw std::runtime_error("volume view range");vi.viewType=VK_IMAGE_VIEW_TYPE_3D;}
   else if((d.kind>=3 && d.kind<=4)) {if(!(t.desc.bind&0x100) || d.layer%6 || d.layers%6 || (d.kind==3 && d.layers!=6))throw std::runtime_error("cube view range");vi.viewType=d.kind==3?VK_IMAGE_VIEW_TYPE_CUBE:VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;}
-  vi.subresourceRange={t.aspect,d.mip,d.mips,d.layer,d.layers};
+  vi.subresourceRange={aspect,d.mip,d.mips,d.layer,d.layers};
   check(t.c.fn<PFN_vkCreateImageView>("vkCreateImageView")(t.c.device,&vi,nullptr,&v->handle),"create owned image view");return v;
 }
 void clear_image_view(ImageView& v,const float *rgba) {
   if(!rgba || v.desc.kind!=1 || v.t.aspect!=VK_IMAGE_ASPECT_COLOR_BIT)throw std::runtime_error("clear needs color render target");
+  std::unique_ptr<Texture> typed;
+  if(v.desc.format!=v.t.desc.format) {
+    WireTextureDesc d={std::max(1u,v.t.desc.width>>v.desc.mip),std::max(1u,v.t.desc.height>>v.desc.mip),
+      1,v.desc.layers,v.desc.format,0};
+    typed=create_texture(v.t.c,d);
+  }
   Commands cmd(v.t.c);v.t.barrier(cmd.command,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_GENERAL,v.desc.mip,v.desc.layer,1,v.desc.layers);
   VkClearColorValue value={};std::memcpy(value.float32,rgba,16);
-  VkImageSubresourceRange range={v.t.aspect,v.desc.mip,1,v.desc.layer,v.desc.layers};
-  v.t.c.fn<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(cmd.command,v.t.handle,VK_IMAGE_LAYOUT_GENERAL,&value,1,&range);
+  VkImageSubresourceRange range={v.t.aspect,typed?0:v.desc.mip,1,typed?0:v.desc.layer,v.desc.layers};
+  v.t.c.fn<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(cmd.command,typed?typed->handle:v.t.handle,VK_IMAGE_LAYOUT_GENERAL,&value,1,&range);
+  if(typed) {
+    typed->barrier(cmd.command,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_GENERAL,0,0,1,v.desc.layers);
+    VkImageCopy copy={};copy.srcSubresource={v.t.aspect,0,0,v.desc.layers};
+    copy.dstSubresource={v.t.aspect,v.desc.mip,v.desc.layer,v.desc.layers};copy.extent={typed->desc.width,typed->desc.height,1};
+    v.t.c.fn<PFN_vkCmdCopyImage>("vkCmdCopyImage")(cmd.command,typed->handle,VK_IMAGE_LAYOUT_GENERAL,v.t.handle,VK_IMAGE_LAYOUT_GENERAL,1,&copy);
+  }
+  v.t.barrier(cmd.command,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_GENERAL,v.desc.mip,v.desc.layer,1,v.desc.layers);cmd.submit();
+}
+void clear_depth_view(ImageView& v,uint32_t flags,float depth,uint32_t stencil) {
+  if(v.desc.kind!=2 || !flags || flags&~3u || !std::isfinite(depth) || depth<0 || depth>1 || stencil>255)
+    throw std::runtime_error("invalid depth/stencil view clear");
+  VkImageAspectFlags aspect=((flags&1)?VK_IMAGE_ASPECT_DEPTH_BIT:0)|((flags&2)?VK_IMAGE_ASPECT_STENCIL_BIT:0);
+  if((v.t.aspect&aspect)!=aspect)throw std::runtime_error("requested depth/stencil aspect absent");
+  Commands cmd(v.t.c);v.t.barrier(cmd.command,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_GENERAL,v.desc.mip,v.desc.layer,1,v.desc.layers);
+  VkClearDepthStencilValue value={depth,stencil};VkImageSubresourceRange range={aspect,v.desc.mip,1,v.desc.layer,v.desc.layers};
+  v.t.c.fn<PFN_vkCmdClearDepthStencilImage>("vkCmdClearDepthStencilImage")(cmd.command,v.t.handle,VK_IMAGE_LAYOUT_GENERAL,&value,1,&range);
   v.t.barrier(cmd.command,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_GENERAL,v.desc.mip,v.desc.layer,1,v.desc.layers);cmd.submit();
 }
 struct BufferView {

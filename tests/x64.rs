@@ -5,6 +5,839 @@ use wire::x64::{
 };
 const BASE: u64 = 0x140000000;
 const STACK: u64 = 0x7ff000000000;
+#[test]
+fn win64_critical_section_ex_ignores_low_flags_and_preserves_recursive_ownership_and_faults() {
+    let (mut m, mut cpu, mut r) = startup();
+    let section = STACK + 0x100;
+    for flags in [1, 0x01000001, 0x00ffffff] {
+        assert_eq!(
+            startup_call(
+                &mut m,
+                &mut cpu,
+                &mut r,
+                "InitializeCriticalSectionEx",
+                &[section, 0xabcdef01000001f4, 0xabcdef0000000000 | flags]
+            ),
+            1
+        );
+        assert_eq!(m.read_int(section, 8).unwrap(), u64::MAX);
+        assert_eq!(m.read_int(section + 8, 4).unwrap(), u32::MAX as u64);
+        assert_eq!(m.read_int(section + 32, 8).unwrap(), 500);
+        assert_eq!(
+            startup_call(
+                &mut m,
+                &mut cpu,
+                &mut r,
+                "TryEnterCriticalSection",
+                &[section]
+            ),
+            1
+        );
+        startup_call(&mut m, &mut cpu, &mut r, "EnterCriticalSection", &[section]);
+        assert_eq!(m.read_int(section + 12, 4).unwrap(), 2);
+        let tid = startup_call(&mut m, &mut cpu, &mut r, "GetCurrentThreadId", &[]);
+        assert_eq!(m.read_int(section + 16, 8).unwrap(), tid);
+        startup_call(&mut m, &mut cpu, &mut r, "LeaveCriticalSection", &[section]);
+        assert_eq!(m.read_int(section + 12, 4).unwrap(), 1);
+        assert_eq!(m.read_int(section + 16, 8).unwrap(), tid);
+        startup_call(&mut m, &mut cpu, &mut r, "LeaveCriticalSection", &[section]);
+        assert_eq!(m.read_int(section + 12, 4).unwrap(), 0);
+        assert_eq!(m.read_int(section + 16, 8).unwrap(), 0);
+        startup_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "DeleteCriticalSection",
+            &[section],
+        );
+    }
+    for (out, flags) in [(section, 0x10000000), (STACK + 8192 - 24, 1)] {
+        m.write(out, &[0xaa; 24]).unwrap();
+        cpu.regs[1] = out;
+        cpu.regs[2] = 500;
+        cpu.regs[8] = flags;
+        let before = cpu.clone();
+        let calls = r.api_calls;
+        assert!(r
+            .dispatch(
+                "kernel32.dll",
+                "InitializeCriticalSectionEx",
+                &mut cpu,
+                &mut m
+            )
+            .is_err());
+        assert_eq!(cpu.regs, before.regs);
+        assert_eq!(cpu.rip, before.rip);
+        assert_eq!(r.api_calls, calls);
+        let mut bytes = [0; 24];
+        m.read(out, &mut bytes).unwrap();
+        assert_eq!(bytes, [0xaa; 24]);
+    }
+}
+#[test]
+fn win64_absent_socket_transport_returns_pointer_width_failure_without_creating_handles() {
+    let (mut m, mut cpu, mut r) = startup();
+    let out = STACK + 0x100;
+    for name in ["socket", "#23", "WSASocketA", "WSASocketW"] {
+        let args = if name.starts_with("WSA") {
+            vec![2, 1, 6, 0, 0, 1]
+        } else {
+            vec![2, 1, 6]
+        };
+        assert_eq!(
+            startup_dll_call(&mut m, &mut cpu, &mut r, "ws2_32.dll", name, &args),
+            u64::MAX
+        );
+        assert_eq!(
+            startup_call(&mut m, &mut cpu, &mut r, "GetLastError", &[]),
+            10093
+        );
+    }
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "ws2_32.dll",
+            "WSAStartup",
+            &[0x202, out]
+        ),
+        0
+    );
+    for name in ["socket", "#23", "WSASocketA", "WSASocketW"] {
+        let args = if name.starts_with("WSA") {
+            vec![2, 1, 6, 0, 0, 1]
+        } else {
+            vec![2, 1, 6]
+        };
+        assert_eq!(
+            startup_dll_call(&mut m, &mut cpu, &mut r, "ws2_32.dll", name, &args),
+            u64::MAX
+        );
+        assert_eq!(
+            startup_call(&mut m, &mut cpu, &mut r, "GetLastError", &[]),
+            10047
+        );
+        assert!(!wire::x64::runtime::import_supported("kernel32.dll", name));
+    }
+    m.write(out, &[0xaa; 16]).unwrap();
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "ws2_32.dll",
+            "WSASocketW",
+            &[u64::MAX, u64::MAX, u64::MAX, out, 0, 0]
+        ),
+        u64::MAX
+    );
+    assert_eq!(
+        startup_call(&mut m, &mut cpu, &mut r, "GetLastError", &[]),
+        10045
+    );
+    assert_eq!(m.read_int(out, 8).unwrap(), 0xaaaaaaaaaaaaaaaa);
+    let event = startup_dll_call(
+        &mut m,
+        &mut cpu,
+        &mut r,
+        "ws2_32.dll",
+        "WSACreateEvent",
+        &[],
+    );
+    assert_ne!(event, 0);
+    assert_ne!(event, u64::MAX);
+    assert_eq!(
+        startup_call(&mut m, &mut cpu, &mut r, "WaitForSingleObject", &[event, 0]),
+        258
+    );
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "ws2_32.dll",
+            "WSACloseEvent",
+            &[event]
+        ),
+        1
+    );
+}
+#[test]
+fn win64_ip_addresses_use_windows_families_network_bytes_and_checked_full_width_outputs() {
+    let (mut m, mut cpu, mut r) = startup();
+    let source = STACK + 0x100;
+    let address = STACK + 0x200;
+    let output = STACK + 0x300;
+    for (text, family, expected) in [
+        ("127.2.3.255", 2, vec![127, 2, 3, 255]),
+        (
+            "::1",
+            23,
+            vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+        ),
+        (
+            "2001:db8::12",
+            23,
+            vec![0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12],
+        ),
+        (
+            "::ffff:192.0.2.10",
+            23,
+            vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 0, 2, 10],
+        ),
+        (
+            "::192.0.2.10",
+            23,
+            vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 192, 0, 2, 10],
+        ),
+    ] {
+        m.write(source, format!("{text}\0").as_bytes()).unwrap();
+        startup_call(&mut m, &mut cpu, &mut r, "SetLastError", &[0xdeadbeef]);
+        assert_eq!(
+            startup_dll_call(
+                &mut m,
+                &mut cpu,
+                &mut r,
+                "ws2_32.dll",
+                "inet_pton",
+                &[0xabcd00000000 | family, source, address]
+            ),
+            1
+        );
+        let mut bytes = vec![0; expected.len()];
+        m.read(address, &mut bytes).unwrap();
+        assert_eq!(bytes, expected);
+        assert_eq!(
+            startup_dll_call(
+                &mut m,
+                &mut cpu,
+                &mut r,
+                "ws2_32.dll",
+                "inet_ntop",
+                &[family, address, output, 0x100000100]
+            ),
+            output
+        );
+        let mut rendered = vec![0; text.len() + 1];
+        m.read(output, &mut rendered).unwrap();
+        assert_eq!(rendered, format!("{text}\0").as_bytes());
+        assert_eq!(
+            startup_call(&mut m, &mut cpu, &mut r, "GetLastError", &[]),
+            0xdeadbeef
+        );
+        let wide: Vec<_> = text
+            .encode_utf16()
+            .chain([0])
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        m.write(source, &wide).unwrap();
+        assert_eq!(
+            startup_dll_call(
+                &mut m,
+                &mut cpu,
+                &mut r,
+                "ws2_32.dll",
+                "InetPtonW",
+                &[family, source, address]
+            ),
+            1
+        );
+        assert_eq!(
+            startup_dll_call(
+                &mut m,
+                &mut cpu,
+                &mut r,
+                "ws2_32.dll",
+                "InetNtopW",
+                &[family, address, output, text.len() as u64 + 1]
+            ),
+            output
+        );
+        let mut rendered = vec![0; wide.len()];
+        m.read(output, &mut rendered).unwrap();
+        assert_eq!(rendered, wide);
+    }
+    for (family, text) in [
+        (2, "127.0.0.256"),
+        (2, "127.1"),
+        (2, "01.2.3.4"),
+        (23, "fe80::1%2"),
+        (23, "1::2::3"),
+        (2, "\u{fffd}"),
+    ] {
+        m.write(address, &[0xaa; 16]).unwrap();
+        m.write(source, format!("{text}\0").as_bytes()).unwrap();
+        startup_call(&mut m, &mut cpu, &mut r, "SetLastError", &[42]);
+        assert_eq!(
+            startup_dll_call(
+                &mut m,
+                &mut cpu,
+                &mut r,
+                "ws2_32.dll",
+                "inet_pton",
+                &[family, source, address]
+            ),
+            0
+        );
+        assert_eq!(
+            startup_call(&mut m, &mut cpu, &mut r, "GetLastError", &[]),
+            42
+        );
+        let mut bytes = [0; 16];
+        m.read(address, &mut bytes).unwrap();
+        assert_eq!(bytes, [0xaa; 16]);
+    }
+    m.write(source, &[0, 0xd8, 0, 0]).unwrap();
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "ws2_32.dll",
+            "InetPtonW",
+            &[2, source, address]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(&mut m, &mut cpu, &mut r, "GetLastError", &[]),
+        10022
+    );
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "ws2_32.dll",
+            "inet_pton",
+            &[30, source, address]
+        ),
+        u32::MAX as u64
+    );
+    assert_eq!(
+        startup_call(&mut m, &mut cpu, &mut r, "GetLastError", &[]),
+        10047
+    );
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "ws2_32.dll",
+            "inet_pton",
+            &[30, 0, address]
+        ),
+        u32::MAX as u64
+    );
+    assert_eq!(
+        startup_call(&mut m, &mut cpu, &mut r, "GetLastError", &[]),
+        10014
+    );
+    m.write(address, &[127, 0, 0, 1]).unwrap();
+    m.write(output, &[0xaa; 32]).unwrap();
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "ws2_32.dll",
+            "inet_ntop",
+            &[2, address, output, 9]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(&mut m, &mut cpu, &mut r, "GetLastError", &[]),
+        0xc000000d
+    );
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "ws2_32.dll",
+            "InetNtopW",
+            &[2, address, output, 9]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(&mut m, &mut cpu, &mut r, "GetLastError", &[]),
+        87
+    );
+    let mut bytes = [0; 32];
+    m.read(output, &mut bytes).unwrap();
+    assert_eq!(bytes, [0xaa; 32]);
+    // Overlapping source/destination is staged; a cross-page destination fault
+    // commits neither partial bytes nor the API return/CPU state.
+    m.write(source, b"127.0.0.1\0").unwrap();
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "ws2_32.dll",
+            "inet_pton",
+            &[2, source, source]
+        ),
+        1
+    );
+    assert_eq!(m.read_int(source, 4).unwrap(), 0x0100007f);
+    m.write(source, b"2001:db8::12\0").unwrap();
+    let tail = STACK + 8192 - 8;
+    m.write(tail, &[0xaa; 8]).unwrap();
+    cpu.regs[1] = 23;
+    cpu.regs[2] = source;
+    cpu.regs[8] = tail;
+    let before = cpu.clone();
+    let calls = r.api_calls;
+    assert!(r
+        .dispatch("ws2_32.dll", "inet_pton", &mut cpu, &mut m)
+        .is_err());
+    assert_eq!(cpu.regs, before.regs);
+    assert_eq!(cpu.rip, before.rip);
+    assert_eq!(r.api_calls, calls);
+    assert_eq!(m.read_int(tail, 8).unwrap(), 0xaaaaaaaaaaaaaaaa);
+    for (name, input, expected) in [
+        ("#8", 0xabcdef0112345678, 0x78563412),
+        ("#14", 0x78563412, 0x12345678),
+        ("#9", 0xabcdef0112345678, 0x7856),
+        ("#15", 0x7856, 0x5678),
+    ] {
+        assert_eq!(
+            startup_dll_call(&mut m, &mut cpu, &mut r, "ws2_32.dll", name, &[input]),
+            expected
+        );
+        assert!(!wire::x64::runtime::import_supported("kernel32.dll", name));
+    }
+    m.write(source, b"ws2_32.dll\0").unwrap();
+    let module = startup_call(&mut m, &mut cpu, &mut r, "LoadLibraryA", &[source]);
+    assert_ne!(module, 0);
+    for (symbol, canonical) in [(source, "inet_pton"), (8, "htonl")] {
+        m.write(source, b"inet_pton\0").unwrap();
+        let gateway = startup_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "GetProcAddress",
+            &[module, symbol],
+        );
+        assert_eq!(r.gateways[&gateway], format!("ws2_32.dll!{canonical}"));
+        assert!(!wire::x64::runtime::import_supported(
+            "kernelbase.dll",
+            canonical
+        ));
+    }
+}
+#[test]
+fn win64_winsock_events_are_owned_manual_reset_objects_and_waits_keep_pointer_width() {
+    let (mut m, mut cpu, mut r) = startup();
+    let out = STACK + 0x100;
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "ws2_32.dll",
+            "WSACreateEvent",
+            &[]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "ws2_32.dll",
+            "WSAGetLastError",
+            &[]
+        ),
+        10093
+    );
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "ws2_32.dll",
+            "WSAStartup",
+            &[0x202, out]
+        ),
+        0
+    );
+    let e = startup_dll_call(
+        &mut m,
+        &mut cpu,
+        &mut r,
+        "ws2_32.dll",
+        "WSACreateEvent",
+        &[],
+    );
+    assert_ne!(e, 0);
+    m.write_int(out, 8, e).unwrap();
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "ws2_32.dll",
+            "WSAWaitForMultipleEvents",
+            &[1, out, 0, 0, 0]
+        ),
+        258
+    );
+    assert_eq!(
+        startup_dll_call(&mut m, &mut cpu, &mut r, "ws2_32.dll", "WSASetEvent", &[e]),
+        1
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            startup_dll_call(
+                &mut m,
+                &mut cpu,
+                &mut r,
+                "ws2_32.dll",
+                "WSAWaitForMultipleEvents",
+                &[1, out, 1, 0, 0]
+            ),
+            0
+        );
+    }
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "ws2_32.dll",
+            "WSAResetEvent",
+            &[e]
+        ),
+        1
+    );
+    assert_eq!(
+        startup_call(&mut m, &mut cpu, &mut r, "WaitForSingleObject", &[e, 0]),
+        258
+    );
+    assert_eq!(startup_call(&mut m, &mut cpu, &mut r, "SetEvent", &[e]), 1);
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "ws2_32.dll",
+            "WSAWaitForMultipleEvents",
+            &[0xdeadbeef00000001, out, 0, 0, 0]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "ws2_32.dll",
+            "WSAWaitForMultipleEvents",
+            &[0, out, 0, 0, 0]
+        ),
+        u32::MAX as u64
+    );
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "ws2_32.dll",
+            "WSAGetLastError",
+            &[]
+        ),
+        10022
+    );
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "ws2_32.dll",
+            "WSACloseEvent",
+            &[e]
+        ),
+        1
+    );
+    assert_eq!(
+        startup_dll_call(&mut m, &mut cpu, &mut r, "ws2_32.dll", "WSASetEvent", &[e]),
+        0
+    );
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "ws2_32.dll",
+            "WSAGetLastError",
+            &[]
+        ),
+        6
+    );
+    assert!(!wire::x64::runtime::import_supported(
+        "kernel32.dll",
+        "WSACreateEvent"
+    ));
+}
+#[test]
+fn win64_winhttp_proxy_profile_and_absent_transport_preserve_fault_outputs() {
+    let (mut m, mut cpu, mut r) = startup();
+    let out = STACK + 0x100;
+    m.write(out, &[0xaa; 32]).unwrap();
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "winhttp.dll",
+            "WinHttpGetIEProxyConfigForCurrentUser",
+            &[out]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(&mut m, &mut cpu, &mut r, "GetLastError", &[]),
+        2
+    );
+    let mut content = [0; 32];
+    m.read(out, &mut content).unwrap();
+    assert_eq!(content, [0xaa; 32]);
+    cpu.regs[1] = STACK + 8176;
+    let before = cpu.clone();
+    let api = r.api_calls;
+    assert!(r
+        .dispatch(
+            "winhttp.dll",
+            "WinHttpGetIEProxyConfigForCurrentUser",
+            &mut cpu,
+            &mut m
+        )
+        .is_err());
+    assert_eq!(cpu.regs, before.regs);
+    assert_eq!(cpu.rip, before.rip);
+    assert_eq!(r.api_calls, api);
+    assert_eq!(
+        startup_call(&mut m, &mut cpu, &mut r, "GetLastError", &[]),
+        2
+    );
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "winhttp.dll",
+            "WinHttpGetDefaultProxyConfiguration",
+            &[out]
+        ),
+        1
+    );
+    m.read(out, &mut content).unwrap();
+    assert_eq!(&content[..4], &1u32.to_le_bytes());
+    assert_eq!(&content[4..24], &[0; 20]);
+    assert_eq!(&content[24..], &[0xaa; 8]);
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "winhttp.dll",
+            "WinHttpOpen",
+            &[0, 1, 0, 0, 0]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(&mut m, &mut cpu, &mut r, "GetLastError", &[]),
+        50
+    );
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "winhttp.dll",
+            "WinHttpCloseHandle",
+            &[0]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(&mut m, &mut cpu, &mut r, "GetLastError", &[]),
+        6
+    );
+    m.write(out, b"winhttp.dll\0").unwrap();
+    let module = startup_call(&mut m, &mut cpu, &mut r, "LoadLibraryA", &[out]);
+    m.write(out, b"WinHttpGetIEProxyConfigForCurrentUser\0")
+        .unwrap();
+    let gateway = startup_call(&mut m, &mut cpu, &mut r, "GetProcAddress", &[module, out]);
+    assert_eq!(
+        r.gateways[&gateway],
+        "winhttp.dll!WinHttpGetIEProxyConfigForCurrentUser"
+    );
+    assert!(!wire::x64::runtime::import_supported(
+        "kernel32.dll",
+        "WinHttpOpen"
+    ));
+}
+#[test]
+fn win64_bstr_ordinals_byte_lengths_alias_reallocation_and_faults_preserve_owned_data() {
+    let (mut m, mut cpu, mut r) = startup();
+    let source = STACK + 0x100;
+    let output = STACK + 0x180;
+    m.write(source, &[0x41, 0, 0, 0, 0, 0xd8, 0, 0]).unwrap();
+    let p = startup_dll_call(
+        &mut m,
+        &mut cpu,
+        &mut r,
+        "oleaut32.dll",
+        "#4",
+        &[source, 0xabcdefff00000003],
+    );
+    assert!(p > u32::MAX as u64);
+    assert_eq!(m.read_int(p - 4, 4).unwrap(), 6);
+    assert_eq!(
+        startup_dll_call(&mut m, &mut cpu, &mut r, "oleaut32.dll", "#7", &[p]),
+        3
+    );
+    assert_eq!(
+        startup_dll_call(&mut m, &mut cpu, &mut r, "oleaut32.dll", "#149", &[p]),
+        6
+    );
+    let mut content = [0; 8];
+    m.read(p, &mut content).unwrap();
+    assert_eq!(content, [0x41, 0, 0, 0, 0, 0xd8, 0, 0]);
+    m.write_int(output, 8, p).unwrap();
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "oleaut32.dll",
+            "#5",
+            &[output, p + 2, 2]
+        ),
+        1
+    );
+    let next = m.read_int(output, 8).unwrap();
+    assert!(m.read_int(p, 2).is_err());
+    let mut content = [0; 6];
+    m.read(next, &mut content).unwrap();
+    assert_eq!(content, [0, 0, 0, 0xd8, 0, 0]);
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "oleaut32.dll",
+            "SysReAllocStringLen",
+            &[output, 0, 4]
+        ),
+        1
+    );
+    let expanded = m.read_int(output, 8).unwrap();
+    let mut content = [0; 10];
+    m.read(expanded, &mut content).unwrap();
+    assert_eq!(content, [0, 0, 0, 0xd8, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "oleaut32.dll",
+            "SysReAllocStringLen",
+            &[output, source, u32::MAX as u64]
+        ),
+        0
+    );
+    assert_eq!(m.read_int(output, 8).unwrap(), expanded);
+    let before = cpu.clone();
+    let api = r.api_calls;
+    cpu.regs[1] = output;
+    cpu.regs[2] = STACK + 8190;
+    cpu.regs[8] = 3;
+    let fault_cpu = cpu.clone();
+    assert!(r
+        .dispatch("oleaut32.dll", "SysReAllocStringLen", &mut cpu, &mut m)
+        .is_err());
+    assert_eq!(cpu.regs, fault_cpu.regs);
+    assert_eq!(cpu.rip, fault_cpu.rip);
+    assert_eq!(r.api_calls, api);
+    assert_eq!(m.read_int(output, 8).unwrap(), expanded);
+    assert_eq!(m.read_int(expanded - 4, 4).unwrap(), 8);
+    cpu = before;
+    m.write(source, b"abc").unwrap();
+    let bytes = startup_dll_call(
+        &mut m,
+        &mut cpu,
+        &mut r,
+        "oleaut32.dll",
+        "#150",
+        &[source, 3],
+    );
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "oleaut32.dll",
+            "SysStringLen",
+            &[bytes]
+        ),
+        1
+    );
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "oleaut32.dll",
+            "SysStringByteLen",
+            &[bytes]
+        ),
+        3
+    );
+    let mut content = [0; 5];
+    m.read(bytes, &mut content).unwrap();
+    assert_eq!(content, *b"abc\0\0");
+    assert_eq!(
+        startup_dll_call(&mut m, &mut cpu, &mut r, "oleaut32.dll", "#3", &[output, 0]),
+        1
+    );
+    assert_eq!(m.read_int(output, 8).unwrap(), 0);
+    assert!(m.read_int(expanded, 2).is_err());
+    startup_dll_call(&mut m, &mut cpu, &mut r, "oleaut32.dll", "#6", &[bytes]);
+    assert!(m.read_int(bytes, 1).is_err());
+    assert_eq!(
+        startup_dll_call(&mut m, &mut cpu, &mut r, "oleaut32.dll", "#2", &[0]),
+        0
+    );
+    assert_eq!(
+        startup_dll_call(
+            &mut m,
+            &mut cpu,
+            &mut r,
+            "oleaut32.dll",
+            "SysFreeString",
+            &[0]
+        ),
+        0
+    );
+    m.write(source, b"oleaut32.dll\0").unwrap();
+    let module = startup_call(&mut m, &mut cpu, &mut r, "LoadLibraryA", &[source]);
+    let gateway = startup_call(&mut m, &mut cpu, &mut r, "GetProcAddress", &[module, 2]);
+    assert_eq!(r.gateways[&gateway], "oleaut32.dll!SysAllocString");
+    assert!(!wire::x64::runtime::import_supported(
+        "kernel32.dll",
+        "SysAllocString"
+    ));
+    assert!(wire::x64::runtime::import_supported("oleaut32.dll", "#150"));
+}
 fn put16(b: &mut [u8], at: usize, n: u16) {
     b[at..at + 2].copy_from_slice(&n.to_le_bytes());
 }
@@ -2196,11 +3029,16 @@ fn amd64_window_position_executes_mutable_win64_layout_and_nested_default_messag
     call(
         &mut main,
         create,
-        &[0, DATA, DATA, 0, 10, 20, 640, 480, 0, 0, BASE, 0],
+        &[8, DATA, DATA, 0, 10, 20, 640, 480, 0, 0, BASE, 0],
         false,
     );
     main.extend([0x48, 0x89, 0xc3]); // RBX = HWND.
-    call(&mut main, position, &[0, 0, 20, 40, 700, 600, 0x44], true);
+    call(
+        &mut main,
+        position,
+        &[0, u64::MAX - 1, 20, 40, 700, 600, 0x140],
+        true,
+    );
     main.extend([0x48, 0x83, 0xc4, 0x68, 0xc3]);
     p.memory.write(BASE + 0x1000, &main).unwrap();
     p.cpu = original;
@@ -2235,6 +3073,7 @@ fn amd64_window_position_executes_mutable_win64_layout_and_nested_default_messag
     assert!(p.memory.read_int(buffer, 1).is_err());
     let window = p.runtime.window_info()[0].clone();
     assert!(window.visible);
+    assert!(!window.topmost);
     assert_eq!((window.width, window.height), (800, 600));
     assert_eq!(
         startup_dll_call(
@@ -2253,6 +3092,145 @@ fn amd64_window_position_executes_mutable_win64_layout_and_nested_default_messag
             expected
         );
     }
+    p.memory.write_int(DATA + 0x200, 4, 44).unwrap();
+    assert_eq!(
+        startup_dll_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "user32.dll",
+            "GetWindowPlacement",
+            &[window.handle, DATA + 0x200]
+        ),
+        1
+    );
+    assert_eq!(p.memory.read_int(DATA + 0x208, 4).unwrap(), 1);
+    assert_eq!(p.memory.read_int(DATA + 0x20c, 8).unwrap(), u64::MAX);
+    for (n, expected) in [30, 40, 830, 640].into_iter().enumerate() {
+        assert_eq!(
+            p.memory.read_int(DATA + 0x21c + n as u64 * 4, 4).unwrap(),
+            expected
+        );
+    }
+    p.memory.write_int(DATA + 0x200, 4, 48).unwrap();
+    assert_eq!(
+        startup_dll_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "user32.dll",
+            "GetWindowPlacement",
+            &[window.handle, DATA + 0x200]
+        ),
+        0
+    );
+    assert_eq!(p.memory.read_int(DATA + 0x200, 4).unwrap(), 48);
+    assert_eq!(
+        startup_dll_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "dwmapi.dll",
+            "DwmGetWindowAttribute",
+            &[window.handle, 9, DATA + 0x200, 16]
+        ),
+        0
+    );
+    assert_eq!(p.memory.read_int(DATA + 0x200, 4).unwrap(), 30);
+    assert_eq!(p.memory.read_int(DATA + 0x20c, 4).unwrap(), 640);
+    assert_eq!(
+        startup_dll_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "dwmapi.dll",
+            "DwmGetWindowAttribute",
+            &[window.handle, 9, DATA + 0x200, 12]
+        ),
+        0x80070057
+    );
+    assert_eq!(p.memory.read_int(DATA + 0x200, 4).unwrap(), 30);
+    assert_eq!(
+        startup_dll_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "dwmapi.dll",
+            "DwmIsCompositionEnabled",
+            &[DATA + 0x200]
+        ),
+        0
+    );
+    assert_eq!(p.memory.read_int(DATA + 0x200, 4).unwrap(), 0);
+    for (n, value) in [50u32, 60, 70, 80].into_iter().enumerate() {
+        p.memory
+            .write_int(DATA + 0x300 + n as u64 * 4, 4, value as u64)
+            .unwrap();
+    }
+    assert_eq!(
+        startup_dll_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "user32.dll",
+            "ClipCursor",
+            &[DATA + 0x300]
+        ),
+        1
+    );
+    p.runtime
+        .queue_window_event(wire::x64::runtime::WindowEvent {
+            window: window.handle,
+            message: 0x200,
+            wparam: 0,
+            lparam: 100 << 16,
+        })
+        .unwrap();
+    let mouse = p
+        .runtime
+        .take_window_events()
+        .into_iter()
+        .find(|e| e.message == 0x200)
+        .unwrap();
+    assert_eq!(mouse.lparam, 20 | (39 << 16));
+    assert_eq!(
+        startup_dll_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "user32.dll",
+            "GetCursorPos",
+            &[DATA + 0x200]
+        ),
+        1
+    );
+    assert_eq!(p.memory.read_int(DATA + 0x200, 8).unwrap(), 50 | (79 << 32));
+    assert_eq!(
+        startup_dll_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "user32.dll",
+            "ClipCursor",
+            &[0]
+        ),
+        1
+    );
+    assert_eq!(
+        startup_dll_call(
+            &mut p.memory,
+            &mut p.cpu,
+            &mut p.runtime,
+            "user32.dll",
+            "GetClipCursor",
+            &[DATA + 0x200]
+        ),
+        1
+    );
+    assert_eq!(
+        p.memory.read_int(DATA + 0x208, 8).unwrap(),
+        1024 | (768 << 32)
+    );
     assert_eq!(
         startup_dll_call(
             &mut p.memory,

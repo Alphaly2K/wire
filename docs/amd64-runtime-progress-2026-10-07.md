@@ -1,6 +1,6 @@
 # AMD64 / Unity / Mono 启动推进（2026-10-08 接续）
 
-这是接续 `bb74137` 的窗口/图形初始化检查点。普通 `wire run` 仍拒绝 AMD64；
+这是接续 `b48b1f7` 的窗口/图形初始化检查点。普通 `wire run` 仍拒绝 AMD64；
 实际启动使用 `wire probe64 --startup`。解释器是主路径，所有高地址访问仍经过 checked guest memory，
 没有把 guest 机器码交给宿主 CPU，也没有引入 QEMU GPL 实现。
 
@@ -19,59 +19,52 @@ Unity内嵌VS/PS执行64×64离屏Draw，4096个RGBA8像素读回逐通道比较
 
 ## 当前真实结果
 
-AliceToPapa隔离副本最新推进到 **1,803,222,221 条退休指令、1,807,236,071 work、3,851,692 次已完成/接受API**
-（`linked-pass-125.txt`，全程汇总`api-pass-125.tsv`）。从13条EXE入口开始已实际执行UnityPlayer的TLS/DllMain、EXE入口，
-动态加载Mono的TLS/DllMain及合作worker；异常链仍执行真实guest handler与同帧RtlUnwindEx。
-此前curl/SSPI、显示器、HKCU、资源图标、类注册、WNDPROC、DC与目录枚举均已越过。
-本轮`CreateDXGIFactory2`、真实Apple M4 adapter枚举/Desc/引用、D3D12明确失败后的
-D3D11回退及实验性device/context、真实纹理创建/copy/update通过，
-COM音频设备缺少factory时真实失败，Unity进入自己的无音频回退；等待定时器线程已实际运行。
-暂停线程的真实CPU快照与APC/alertable wait已接通。pass111实际进入MonoManager ReloadAssembly，
-托管System.IO因动态导入SetThreadErrorMode缺失报异常；线程错误模式、动态导出与代码页查询已补齐。
-pass115查明每个小HeapAlloc占一整页，导致512MiB提交额度耗尽，随后Mono错误路径栈溢出。
-小堆块已改为64KiB slab，pass116未再遇提交额度耗尽；在1.3B work时提交249MiB。
-Mono程序集加载和domain重置实际完成，PhysX后端完成选择；pass116的x87 FLD边界已补齐，
-pass117继续到 `ole32.dll!CoCreateGuid`；随后已接入GUID、HSTRING/WinRT、mouse pointer和raw input查询/真实失败回退。
-pass123停在线程26的`hid.dll!HidD_GetHidGuid`；最新pass125已越过该设备发现组，仍未到正式窗口。
-Windows.Gaming.Input.Gamepad缺少注册类时返回REGDB_E_CLASSNOTREG，Unity实际继续自己的回退，未伪造设备。
-按批量清单成组接入HID/SetupAPI后，pass124已实际完成GetHidGuid、GetClassDevsA、
-EnumDeviceInterfaces的空枚举和DestroyDeviceInfoList，继续到RegisterDeviceNotificationW。
-通知注册/注销及窗口销毁清理也已接入，pass125实际完成注册及后续输入初始化，
-目前停在 **`wire.dxgi!Adapter.EnumOutputs`** 未实现边界。
-没有忽略INT3、认证失败或guest对窗口的隐藏状态。
+AliceToPapa隔离副本的 **pass142 已实际执行335次guest GPU Draw、112次DXGI Present**。
+窗口由guest自己改为 `visible=true`、客户区1024×720，HWND=`0x7ffd00630000`，
+标题 `AliceToPapaADV_1-0-0`。不再停在隐藏bootstrap窗口，也没有强制显示guest隐藏窗口。
+最新退休指令2,282,797,097、work2,287,546,940、已完成API4,472,765，
+日志为 `wire-out/games64/alice/linked-pass-142.txt` 与 `api-pass-142.tsv`。
+这证明Win64窗口、实际guest Draw和公开Vulkan WSI提交路径已经越过；
+用户已实际观察到 **Unity logo动画**。pass137–142保存的是最后一次成功Present，
+该时刻为深色背景；单帧捕获不能否定之前的动画，也不足以验收游戏标题画面、输入或持续可玩。
 
-游戏实际写出的 `Player.log` 包含：
+pass126–132逐步补齐DXGI虚拟output/modes、GetWindowPlacement/DWM、NOTOPMOST定位、
+虚拟ClipCursor、windowed swapchain、UNORM/sRGB同族后缓冲view、typeless深度纹理/DSV。
+pass133已实际到达渲染线程第一次 `DrawIndexed(6,0,0)`；pass134记录完整绑定状态。
+独立实现的Win64 InputLayout解析32字节input元素与ISGN/ISG1，
+按semantic/index消解APPEND偏移并保存真实属性；未使用的额外元素不生成attribute。
+随后guest VS/PS、VB/IB、CBV/SRV/sampler、viewport/scissor、blend/depth/stencil/raster状态
+接到owned Vulkan资源的真实Draw，保留render target内容并等待实际GPU完成。
+没有把固定64×64离屏诊断pipeline冒充guest绘制，也未将unknown Draw返回空成功。
 
-```text
-Mono path[0] = 'C:/AliceToPapaADV_1-0-0_Data/Managed'
-Mono config path = 'C:/MonoBleedingEdge/etc'
-Input System module state changed to: Initialized.
-- Loaded All Assemblies, in 23.206 seconds
-- Finished resetting the current domain, in  0.491 seconds
-[Physics::Module] Name: PhysX
-```
+pass135曾停在 `oleaut32.dll!#2`（SysAllocString）；BSTR分配、长度、字节长度、释放、
+重分配及对应ordinal/动态导出已经成组接入，并通过高地址、embedded NUL、未配对UTF16、
+奇数字节长度、alias重分配、OOM长度及checked fault回归；实际pass137起已执行分配与释放。
+随后补齐消息extra/time/position元数据、WinHTTP隔离proxy profile与无传输时的真实失败、
+Winsock owned手动复位event与合作等待；pass139已经越过这些边界，停在 `inet_pton`。
+地址解析/格式化及16/32位字节序转换已成组接入；pass140实际执行IPv4/IPv6解析后，
+曾停在socket ordinal23。隔离profile无网络transport，socket/WSASocketA/W已接入真实能力失败，
+返回完整64位INVALID_SOCKET；pass141证明guest自行处理失败并继续。
+修正CriticalSectionEx低位flags后，pass142又前进约2.9亿退休指令，
+目前停在 `user32.dll!GetKeyboardLayout`；线程6的网络尝试没有继续阻止主线程推进。
+原始游戏目录保持只读，运行与Player.log只写在 `wire-out/games64/alice/runtime/`。
 
-当前证据还不足以验收托管游戏入口、正式窗口、D3D11/DXGI Present 或持续可玩。
-实际 guest 窗口为 HWND=`0x7ffd00630000`、客户区314×211、标题 `AliceToPapaADV_1-0-0`，
-但 `visible=false`；这是引擎的隐藏初始化窗口，不是已经显示的游戏界面。
-`--window` 已实际验证 AppKit 主线程初始化并到达同一 D3D11 边界（pass89），按真实 visible 标志呈现，
-不会把隐藏窗口强制显示来充当正式窗口证据。
-启动指令数是兼容进度，不是性能收益。此前按用户要求暂停功能扩展，接入AMD64定长标量IR并复测；
-首次执行后缓存IR，未覆盖的操作缓存解码记录回退。尚无64位安装期AOT。
-测量范围和结果见 [AMD64性能记录](performance-amd64-ir-2026-10-08.md)。
-本轮完整性能复测仍到CoCreateGuid：before为20.69亿退休指令/536.798秒，
-最终IR为13.61亿/54.766秒，整体MIPS 3.85→24.86；程序集加载183.887→18.898秒。
-真实计时器使线程轮询和指令/API量不同，时间差不能当作同指令序列的纯IR提速。
-这两份Player.log已分别保存到 `wire-out/perf-amd64-2026-10-08/alice-full/`；
-这是到CoCreateGuid的历史性能对照；之后恢复运行时推进，不能把新增实际路径和诊断统计的耗时与该对照直接比较。
-最新仍无正式窗口。本轮完整release303项通过、5项ignored。
-既有 PE32 / Metal 路径不受这条诊断路线替换。
+CPU解释器/IR仍为主路径，没有guest CPU JIT。此前Mono的TLS/DllMain、合作线程、
+真实异常handler/RtlUnwindEx、程序集合加载/domain重置、PhysX后端选择与输入初始化已经通过。
+HID/SetupAPI隔离设备枚举为空，WinRT Gamepad无注册类时真实失败，未伪造设备。
+实验性D3D11仍不是完整FL10_0符合性；GS→compute仅完成独立验证，guest GS/SO尚未接入。
 
-本次另外开发批量API扫描，198个PE约18秒，包含普通/延迟导入、CLR P/Invoke、forwarder和运行轨迹，
-已生成四个游戏按DLL分组的清单。`probe64 --api-trace PATH`默认关闭，开启时记录全程调用/查询/分派故障，
-避免最近调用环形缓冲区丢失动态导入证据。结果、复跑及证据边界见
-[API清单记录](api-inventory-2026-10-08.md)。HID/SetupAPI和通知组已通过实际路径，
-下一批按真实COM轨迹处理DXGI output/交换链接口，不再只补一个调用后重放。
+此前AMD64性能AB的终点是CoCreateGuid：before为20.69亿退休指令/536.798秒，
+最终IR为13.61亿/54.766秒，整体MIPS3.85→24.86；程序集加载183.887→18.898秒。
+真实计时器导致轮询指令/API量不同，不能把时间差当作同指令序列的纯IR收益。
+此后新增路径、API统计、GPU同步和帧捕获均改变测量范围，本轮不报告性能AB收益。
+详细历史对照见 [AMD64性能记录](performance-amd64-ir-2026-10-08.md)。
+
+`probe64 --capture-frame PATH.ppm`可保存最近一次成功Present的实际guest后缓冲；
+这是显式诊断，会启用CPU读回并改变时序，正常Present没有CPU读回。
+捕获失败只报告诊断错误，不将已成功提交的GPU帧伪装为失败。
+批量API扫描与全程TSV仍可用于查明后续库函数和COM调用，见
+[API清单记录](api-inventory-2026-10-08.md)。
 
 | 重放 | 退休指令 | 已完成 API | 最后边界 |
 | --- | ---: | ---: | --- |
@@ -122,6 +115,23 @@ Input System module state changed to: Initialized.
 | pass-123 | 1,808,121,280 | 3,854,319 | 消息队列/全程API汇总接入；同一HID边界 |
 | pass-124 | 1,800,454,041 | 3,846,116 | HID/SetupAPI通过；`RegisterDeviceNotificationW` |
 | pass-125 | 1,803,222,221 | 3,851,692 | 设备通知/输入初始化通过；DXGI `Adapter.EnumOutputs` |
+| pass-126 | 1,802,941,080 | 3,851,383 | DXGI output通过；`GetWindowPlacement` |
+| pass-127 | 1,801,776,303 | 3,850,039 | window placement通过；`DwmGetWindowAttribute` |
+| pass-128 | 1,803,768,779 | 3,852,365 | DWM通过；NOTOPMOST错误引出`DialogBoxParamW` |
+| pass-129 | 1,803,057,348 | 3,851,375 | NOTOPMOST定位修复；`ClipCursor` |
+| pass-130 | 1,805,201,332 | 3,853,964 | 虚拟ClipCursor/交换链接入；sRGB RTV view |
+| pass-131 | 1,802,705,854 | 3,851,136 | sRGB同族view通过；typeless深度纹理 |
+| pass-132 | 1,952,994,572 | 4,143,003 | depth/stencil通过；`CreateInputLayout` |
+| pass-133 | 1,949,486,129 | 4,139,093 | InputLayout通过；第一次`DrawIndexed(6,0,0)` |
+| pass-134 | 1,948,175,213 | 4,137,707 | 第一次Draw真实绑定状态诊断 |
+| pass-135 | 1,986,709,001 | 4,209,632 | 269 Draw / 90 Present；BSTR ordinal2 |
+| pass-136 | 1,957,428,392 | 4,148,895 | 宿主输入分支；`GetMessageExtraInfo` |
+| pass-137 | 1,991,623,926 | 4,221,045 | 326 Draw / 109 Present；WinHTTP proxy查询 |
+| pass-138 | 1,990,475,570 | 4,217,608 | 338 Draw / 113 Present；`WSACreateEvent` |
+| pass-139 | 1,993,710,950 | 4,220,625 | 332 Draw / 111 Present；`inet_pton` |
+| pass-140 | 1,990,805,404 | 4,217,882 | 地址转换通过；338 Draw / 113 Present；socket ordinal23 |
+| pass-141 | 1,993,384,119 | 4,220,631 | socket真实失败回退；332 Draw / 111 Present；CriticalSectionEx flags=1 |
+| pass-142 | 2,282,797,097 | 4,472,765 | critical section修复通过；335 Draw / 112 Present；`GetKeyboardLayout` |
 
 指令与 API 计数受真实时间/线程调度影响，上表不构成相同路径的性能 AB 对照。
 
@@ -154,29 +164,23 @@ Win64窗口定位已准备并通过独立回归：SetWindowPos/MoveWindow使用4
 56字节NCCALCSIZE_PARAMS，HWND/lppos/LPARAM保持64位；WM_WINDOWPOSCHANGING可修改位置/尺寸，
 必要时实际调用guest WM_NCCALCSIZE后提交客户区，WM_WINDOWPOSCHANGED调用默认WNDPROC时
 按真实client变动派发WM_MOVE/WM_SIZE，不由定位API强制替guest处理这些消息。
-SWP_SHOWWINDOW/HIDEWINDOW改变真实guest visible标志；暂仅支持NOZORDER的同步定位，
+SWP_SHOWWINDOW/HIDEWINDOW改变真实guest visible标志；支持NOZORDER和HWND_NOTOPMOST的同步定位，
 异步/z-order等未接通的请求返回ERROR_NOT_SUPPORTED，未声称宿主已实现这些效果。
 MoveWindow当前没有Win64 GDI invalid region，bRepaint尚无后端区域刷新；图形仍由后续Present推进。
 默认消息规则沿用固定Hangover LGPL参考，出处/著作权保留在源码。
 独立guest测试每个work暂停/恢复，验证callback修改x/cx、嵌套default通知、64位临时buffer释放、
 visible/RECT/客户区及未支持flags不改变窗口。
 
-## 距离正式窗口的剩余工作
+## 首帧之后的剩余工作
 
-当前仍处于引擎/运行时初始化；input 初始化日志不证明托管游戏入口已完成。
-Win64 USER32类/初始窗口、64位 WNDPROC / WPARAM / LPARAM 回调与可选 AppKit 桥接已经建立；
-真实游戏已通过DXGI factory/adapter和实验性D3D11 device/context、初始化资源，尚未请求显示当前隐藏窗口。
-接下来仍需补齐运行时实际边界、交换链、guest Draw和Present，以及所需状态/能力的真实实现。
-实际请求adapter=`0x40aab5000`、driver type=UNKNOWN、flags=`0x20`（BGRA_SUPPORT）、SDK=7，
-feature-level数组为11_1 / 11_0 / 10_1 / 10_0，没有9_x回退。
-本机MoltenVK原生geometryShader=false，而10_x及以上需要geometry；
-目前guest bridge明确采用实验性10_0兼容子集，已接通真实native device及资源，
-并不宣称全套feature-level规范符合性；独立geometry→compute已验证，完整guest GS/SO与Draw仍待接入。
-不能将创建成功、独立资源/Draw探针当作完整10_0或实际游戏Present，详见图形设计文档。
-既有 PE32 D3D9/Metal 能力可复用，但当前没有接通这条64位图形执行/像素路径。
-Win64 MSG、消息等待和宿主输入→guest消息分发已实现并通过独立回归；
-游戏实际消息循环、托管入口和可交互仍待验收，没有忽略后续未知API。
-目前无法可靠给出剩余小时数或完成百分比；不是只差最后一个 API。
+正式可见窗口与guest Draw/Present已经通过。当前继续检查真实帧内容及游戏托管初始化，
+补齐实际出现的运行时/图形边界，验收标题画面和输入响应。
+windowed discard/sequential交换链走public VK_EXT_metal_surface/VK_KHR_swapchain；
+flip、exclusive、waitable frame latency、多RT、多viewport、guest GS/HS/DS/SO、
+push-data、descriptor数组、缺失shader资源、非零depth bias等当前仍明确拒绝。
+不能把GPU提交次数或Unity logo动画等同于完整可玩或全部D3D11支持。
+实际游戏请求feature level11_1/11_0/10_1/10_0，设备仍明确使用实验性10_0子集；
+MoltenVK缺少原生GS，独立GS→compute验证不是guest GS支持证明。
 
 ## 已实现的运行时范围
 
@@ -195,11 +199,30 @@ Win64 MSG、消息等待和宿主输入→guest消息分发已实现并通过独
   DispatchMessage执行已有guest WNDPROC并保留返回值；checked输出fault不消费消息。
   AppKit Unicode在TranslateMessage时生成字符，键盘异步状态和取出消息后的状态分离。
   WM_TIMER procedure、WaitMessage/MsgWait、QS高位flags、完整鼠标捕获仍未实现。
+- Get/SetMessageExtraInfo、GetMessageTime、GetMessagePos按线程保存完整pointer-width extra、
+  DWORD时间与有符号坐标pack；成功取出消息才更新元数据，checked输出fault不消费/不更新。
+  当前宿主及posted输入没有extra tag，取出时记录0，不从guest消息指针推测tag。
+- BSTR使用owned guest allocation、4B字节长度前缀与双零terminator；支持embedded NUL、
+  未配对UTF16、ByteLen奇数长度、alias重分配，OOM保留旧串。ordinal2–7/149/150与动态导出一致。
+- WinHTTP隔离profile没有IE配置，查询真实返回FILE_NOT_FOUND并保留输出；system proxy明确为direct。
+  没有HTTP transport，WinHttpOpen返回NOT_SUPPORTED，不发放假HINTERNET；无效session返回INVALID_HANDLE。
+- Winsock事件组共用owned kernel event与合作调度器；手动复位信号可跨Win32/WSA入口等待和修改，
+  DWORD参数截断但handle数组与指针保持64位，alertable/APC与deadline规则沿用真实线程等待。
+  地址转换使用Windows AF_INET=2/AF_INET6=23与网络字节序，A/W、短buffer、错误码及checked store独立实现。
+  `htons/htonl/ntohs/ntohl`及ordinal8/9/14/15保持guest小端语义，不依赖宿主AF常量或字节序。
+  格式错误时地址输出保留，不复现Windows部分解析对失败输出的未定义修改；尚无socket/网络传输后端。
+  socket/WSASocketA/W在没有网络provider的profile返回WSAEAFNOSUPPORT与64位INVALID_SOCKET，
+  未初始化返回WSANOTINITIALISED；custom protocol/duplicate info返回WSAEOPNOTSUPP，不发放socket句柄。
+- pass141已经由guest处理socket失败并继续，随后触发InitializeCriticalSectionEx的flags=1。
+  静态核对UnityPlayer唯一对应IAT call（`0x181ab9f5a`）：R15D=12、LEA R8D,[R15-11]，实际参数为1。
+  根据固定Wine 10.0的同步profile，修正低24位无效果标志被错误拒绝的问题；
+  NO_DEBUG_INFO高位继续接受，动态spin/static-pool/force-debug等尚未实现的高位功能仍明确拒绝。
+  锁仍使用真实合作线程owner/递归/阻塞规则，不把EnterCriticalSection改为空成功。
 - raw input设备/注册查询真实为空，Win64设备项16字节/header24字节；无后端的有效注册返回
   ERROR_NOT_SUPPORTED，空注册的合法REMOVE可成功；未知raw句柄返回INVALID_HANDLE。
   IsMouseInPointerEnabled为false，启用promotion返回不支持，不假报WM_POINTER能力。
 - 实验性D3D11 device/context、owned Vulkan资源、shader编译、状态描述符与真实query；
-  生命周期及GPU数据/clear像素已验证，当前不是完整FL10_0或guest Draw/Present。
+  生命周期及GPU数据/clear像素已验证，当前guest VS/PS Draw/Present已接通，仍不是完整FL10_0。
 - 等待定时器接入合作调度，单次/周期、手动/自动复位、命名共享、重设与取消保留真实信号语义；
   timer APC、系统唤醒与非NULL SECURITY_ATTRIBUTES仍不支持。
 - GetThreadContext读取暂停guest线程的真实CPU上下文，按请求写控制/整数/浮点组；
@@ -211,8 +234,8 @@ Win64 MSG、消息等待和宿主输入→guest消息分发已实现并通过独
   IUnknown身份与parent引用，最后Release回收owned页；protected readonly页不允许guest
   VirtualFree/HeapFree或VirtualProtect升级。adapter信息/UUID派生process-local LUID来自实际设备，
   DESC/DESC1明确序列化304/312字节，QI与枚举fault不改变引用或留下对象。
-  private byte data有界、短buffer语义与window association已实现；输出/通知/交换链和private
-  IUnknown回调引用仍明确未实现，不报告D3D能力。没有后端时不会发放假adapter。
+  private byte data有界、短buffer语义与window association已实现；虚拟output与windowed交换链已接入。
+  DXGI状态通知和private IUnknown回调引用仍未实现。没有后端时不会发放假adapter。
 - D3D12 CreateDevice/GetDebugInterface真实返回UNSUPPORTED/NO_INTERFACE；named、ordinal101/102、
   GetProcAddress与delay-load provider一致。NULL ppDevice探测同样失败，非NULL输出checked后置NULL。
   此服务仅让引擎得到实际能力失败并正常回退，不等于D3D12支持。
@@ -289,7 +312,7 @@ Win64 MSG、消息等待和宿主输入→guest消息分发已实现并通过独
   NT全部wildcard规则、case-sensitive/filter-directory/其它Ex选项或完整reparse服务。
 - probe64新增可选`--window`，native UI ID通过表映射到完整64位HWND，不截断guest句柄。
   只呈现已完成创建且由guest设为visible的窗口；主线程AppKit轮询保留native事件到有界guest事件队列。
-  事件已转成Win64 MSG；所有线程等待且有presenter时定期泵主线程UI，尚无64位Present像素上传。
+  事件已转成Win64 MSG；所有线程等待且有presenter时定期泵主线程UI，Present使用真实GPU WSI提交。
 - ntdll 是隐式常驻 provider。版本查询/判断使用明确的 Windows 10.0.19045 workstation profile，
   RtlGetVersion / RtlVerifyVersionInfo、GetVersion / GetVersionEx A/W、VerifyVersionInfoW 和
   VerSetConditionMask 保留 NTSTATUS/Win32 错误区别与层级比较，而不是总返回满足。
@@ -380,14 +403,23 @@ EXE / Unity / Mono 的 SHA-256 仍与 [恢复样本记录](x86-64-sample-2026-10
 cargo build --release
 cd wire-out/games64/alice/runtime
 ../../../../target/release/wire probe64 AliceToPapaADV_1-0-0.exe \
-  --max-instr 200000000 --startup --window \
+  --max-instr 3500000000 --startup --window \
+  --api-trace /Users/alphaly/Projects/wire/wire-out/games64/alice/api-next.tsv \
+  --capture-frame /Users/alphaly/Projects/wire/wire-out/games64/alice/guest-present-next.ppm \
   --graphics-backend /Users/alphaly/Projects/wire/wire-out/libwire_graphics.dylib \
   --moltenvk /private/tmp/wire-moltenvk-1.4.2/MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib
 ```
 
-下一步按COM轨迹从实际DXGI output边界成组补图形接口，再接交换链/guest Draw和Present；
-不以 LoadLibrary 成功、错误退出0或空窗口当作游戏跑通。
-最新完整release回归通过303项：21 unit、37 differential、9 FPU、26 IR、1 Wasm、109 Win32、100 AMD64，5项ignored。
+下一步按API清单成组核对USER32键盘布局/输入语言查询，再检查Unity logo之后的
+托管初始化、实际API/COM阻塞与游戏标题画面；
+不以LoadLibrary成功、GPU帧数或空背景当作游戏跑通。
+最新完整release回归313项通过：25 unit、37 differential、9 FPU、26 IR、1 Wasm、109 Win32、106 AMD64，6项ignored。
+本轮新增WSA事件与IP转换回归，覆盖manual-reset生命周期、Win32/WSA共用等待、64位指针/句柄、
+Windows地址族与网络字节、A/W错误码、动态named/ordinal导出、短buffer及checked故障不提前提交；
+无network provider的创建失败另覆盖64位INVALID_SOCKET、startup优先级及event仍可正常使用。
+CriticalSectionEx回归覆盖guest实际的flags=1、低位组合、DWORD截断、递归owner/释放、
+不支持的高位功能及跨页输出fault，不提前改变CPU、输出或完成调用统计。
+日志为 `/private/tmp/wire-present-final-{all-tests,clippy}.txt`；Clippy all-targets `-D warnings`通过。
 Python扫描器5项原创fixture回归通过。API汇总、设备发现/通知的故障原子性、生命周期与DLL发现均有独立覆盖。
 最终Clippy all-targets、format、diff whitespace检查通过。
 此前图形检查点新增4项覆盖COM身份/引用/parent、Win64 Desc布局/高指针、readonly保护、故障原子性、
@@ -397,8 +429,9 @@ private data短buffer、D3D12 named/ordinal/动态查找与真实失败。GS新�
 本轮保持默认ignored，未修改PE32 Metal实现。
 日志：`/private/tmp/wire-native-graphics-all-tests.txt`、`wire-native-graphics-rust-tests.txt`、
 `wire-native-graphics-clippy.txt`。Clippy release all-targets `-D warnings`、format、diff whitespace检查通过。
-本次日志改为`/private/tmp/wire-geometry-{all-tests,native-rust-tests,clippy}.txt`；
-GS证据在`wire-out/geometry-probe-2026-10-08/`。
+GS检查点日志为`/private/tmp/wire-geometry-{all-tests,native-rust-tests,clippy}.txt`；
+GS证据在`wire-out/geometry-probe-2026-10-08/`。当前标准图形后端的3项native GPU ignored回归
+另行通过，swapchain/InputLayout/depth FLOAT参数回归亦单独通过；见图形设计文档的探针记录。
 默认cargo build / Wire.app没有捆绑第三方GPU二进制；backend构建与验证详见图形设计文档。
 旧文档的13条入口/无 Win64 runtime 是历史状态。
 

@@ -2,6 +2,7 @@
 // dxbc-spirv is linked separately under its MIT license; no upstream source copied here.
 // SPDX-License-Identifier: LGPL-2.1-only
 #define VK_NO_PROTOTYPES
+#define VK_USE_PLATFORM_METAL_EXT
 #include <vulkan/vulkan.h>
 #include "native_graphics.h"
 #include "native_geometry.h"
@@ -13,6 +14,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <cmath>
 #include <limits>
 #include <map>
 #include <memory>
@@ -26,6 +28,8 @@ static_assert(sizeof(WireShaderInfo) == 40, "host shader ABI (64-bit host only)"
 static_assert(sizeof(WireGeometryIo) == 32, "geometry I/O ABI");
 static_assert(sizeof(WireGeometryInfo) == 64, "geometry ABI (64-bit host only)");
 static_assert(sizeof(WireBufferBinding) == 16, "buffer binding ABI (64-bit host only)");
+static_assert(sizeof(WireDraw)==1040 && offsetof(WireDraw,viewport)==620,"draw ABI");
+static_assert(sizeof(WireDrawBinding)==80 && sizeof(WireVertexAttribute)==24,"draw binding ABI");
 
 namespace {
 using namespace dxbc_spv;
@@ -60,6 +64,9 @@ struct Context {
   PFN_vkDestroyDevice destroy_device = nullptr;
   PFN_vkDeviceWaitIdle wait_idle = nullptr;
   PFN_vkGetDeviceProcAddr get_device = nullptr;
+  PFN_vkGetInstanceProcAddr get_instance = nullptr;
+  bool presentation = false;
+  VkPhysicalDeviceFeatures features = {};
   PFN_vkGetPhysicalDeviceFormatProperties format_properties = nullptr;
   ~Context() {
     if (device && wait_idle) wait_idle(device);
@@ -71,6 +78,9 @@ struct Context {
     auto p = reinterpret_cast<T>(get_device(device, name));
     if (!p) throw std::runtime_error(std::string("missing ") + name);
     return p;
+  }
+  template<class T> T instance_fn(const char *name) const {
+    return symbol<T>(get_instance, instance, name);
   }
 };
 bool extension(const std::vector<VkExtensionProperties>& extensions, const char *name) {
@@ -84,6 +94,7 @@ std::unique_ptr<Context> open_gpu(const char *path, WireGpuInfo& info) {
   if (!c->library) throw std::runtime_error(dlerror());
   auto get = reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(c->library, "vkGetInstanceProcAddr"));
   if (!get) throw std::runtime_error("missing vkGetInstanceProcAddr");
+  c->get_instance = get;
   auto version_fn = symbol<PFN_vkEnumerateInstanceVersion>(get, nullptr, "vkEnumerateInstanceVersion");
   uint32_t version = 0, count = 0;
   check(version_fn(&version), "instance version");
@@ -100,7 +111,11 @@ std::unique_ptr<Context> open_gpu(const char *path, WireGpuInfo& info) {
   VkInstanceCreateInfo ci = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
   ci.pApplicationInfo = &app;
   ci.flags = portable ? VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR : 0;
-  ci.enabledExtensionCount = portable ? 1 : 0; ci.ppEnabledExtensionNames = portable ? &portability : nullptr;
+  std::vector<const char*> instance_extensions;
+  if(portable) instance_extensions.push_back(portability);
+  bool surface = extension(extensions,VK_KHR_SURFACE_EXTENSION_NAME) && extension(extensions,VK_EXT_METAL_SURFACE_EXTENSION_NAME);
+  if(surface) {instance_extensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);instance_extensions.push_back(VK_EXT_METAL_SURFACE_EXTENSION_NAME);}
+  ci.enabledExtensionCount = uint32_t(instance_extensions.size()); ci.ppEnabledExtensionNames = instance_extensions.data();
   auto create = symbol<PFN_vkCreateInstance>(get, nullptr, "vkCreateInstance");
   check(create(&ci, nullptr, &c->instance), "create instance");
   c->destroy_instance = symbol<PFN_vkDestroyInstance>(get, c->instance, "vkDestroyInstance");
@@ -152,13 +167,22 @@ std::unique_ptr<Context> open_gpu(const char *path, WireGpuInfo& info) {
   core.shaderClipDistance = features.features.shaderClipDistance;
   core.shaderInt64 = features.features.shaderInt64;
   core.multiViewport = features.features.multiViewport;
+  core.depthClamp = features.features.depthClamp;
+  core.depthBiasClamp = features.features.depthBiasClamp;
+  core.fillModeNonSolid = features.features.fillModeNonSolid;
+  core.samplerAnisotropy = features.features.samplerAnisotropy;
+  c->features = core;
   float priority = 1;
   VkDeviceQueueCreateInfo q = { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };
   q.queueFamilyIndex = family; q.queueCount = 1; q.pQueuePriorities = &priority;
   VkDeviceCreateInfo d = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &enabled };
   d.pEnabledFeatures = &core;
   d.queueCreateInfoCount = 1; d.pQueueCreateInfos = &q;
-  d.enabledExtensionCount = has_subset ? 1 : 0; d.ppEnabledExtensionNames = has_subset ? &subset : nullptr;
+  std::vector<const char*> device_extensions;
+  if(has_subset)device_extensions.push_back(subset);
+  c->presentation=surface && extension(extensions,VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+  if(c->presentation)device_extensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+  d.enabledExtensionCount = uint32_t(device_extensions.size()); d.ppEnabledExtensionNames = device_extensions.data();
   check(symbol<PFN_vkCreateDevice>(get, c->instance, "vkCreateDevice")(c->physical, &d, nullptr, &c->device), "create device");
   c->get_device = symbol<PFN_vkGetDeviceProcAddr>(get, c->instance, "vkGetDeviceProcAddr");
   c->destroy_device = c->fn<PFN_vkDestroyDevice>("vkDestroyDevice");
@@ -195,10 +219,19 @@ VkFormat dxgi_format(uint32_t f) {
     case 3: return VK_FORMAT_R32G32B32A32_UINT;
     case 4: return VK_FORMAT_R32G32B32A32_SINT;
     case 6: return VK_FORMAT_R32G32B32_SFLOAT;
+    case 7:return VK_FORMAT_R32G32B32_UINT;
+    case 8:return VK_FORMAT_R32G32B32_SINT;
     case 10: return VK_FORMAT_R16G16B16A16_SFLOAT;
     case 11: return VK_FORMAT_R16G16B16A16_UNORM;
+    case 12:return VK_FORMAT_R16G16B16A16_UINT;
+    case 13:return VK_FORMAT_R16G16B16A16_SNORM;
+    case 14:return VK_FORMAT_R16G16B16A16_SINT;
     case 16: return VK_FORMAT_R32G32_SFLOAT;
+    case 17:return VK_FORMAT_R32G32_UINT;
+    case 18:return VK_FORMAT_R32G32_SINT;
+    case 19:case 20:case 21:case 22:return VK_FORMAT_D32_SFLOAT_S8_UINT;
     case 24: return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+    case 25:return VK_FORMAT_A2B10G10R10_UINT_PACK32;
     case 26: return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
     case 28: return VK_FORMAT_R8G8B8A8_UNORM;
     case 29: return VK_FORMAT_R8G8B8A8_SRGB;
@@ -207,16 +240,24 @@ VkFormat dxgi_format(uint32_t f) {
     case 32: return VK_FORMAT_R8G8B8A8_SINT;
     case 34: return VK_FORMAT_R16G16_SFLOAT;
     case 35: return VK_FORMAT_R16G16_UNORM;
+    case 36:return VK_FORMAT_R16G16_UINT;
+    case 37:return VK_FORMAT_R16G16_SNORM;
+    case 38:return VK_FORMAT_R16G16_SINT;
     case 40: return VK_FORMAT_D32_SFLOAT;
     case 41: return VK_FORMAT_R32_SFLOAT;
     case 42: return VK_FORMAT_R32_UINT;
     case 43: return VK_FORMAT_R32_SINT;
     case 45: return VK_FORMAT_D24_UNORM_S8_UINT;
     case 49: return VK_FORMAT_R8G8_UNORM;
+    case 50:return VK_FORMAT_R8G8_UINT;
+    case 51:return VK_FORMAT_R8G8_SNORM;
+    case 52:return VK_FORMAT_R8G8_SINT;
     case 54: return VK_FORMAT_R16_SFLOAT;
     case 55: return VK_FORMAT_D16_UNORM;
     case 56: return VK_FORMAT_R16_UNORM;
     case 57: return VK_FORMAT_R16_UINT;
+    case 58:return VK_FORMAT_R16_SNORM;
+    case 59:return VK_FORMAT_R16_SINT;
     case 61: return VK_FORMAT_R8_UNORM;
     case 62: return VK_FORMAT_R8_UINT;
     case 63: return VK_FORMAT_R8_SNORM;
@@ -485,9 +526,22 @@ struct PipelineScope {
 VkShaderStageFlagBits vk_stage(uint32_t stage) {
   return stage == 1 ? VK_SHADER_STAGE_VERTEX_BIT : stage == 2 ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_COMPUTE_BIT;
 }
+struct GraphicsConfig {
+  VkRenderPass pass;
+  std::vector<VkVertexInputBindingDescription> bindings;
+  VkViewport viewport;
+  VkRect2D scissor;
+  VkPipelineRasterizationStateCreateInfo raster;
+  VkPipelineDepthStencilStateCreateInfo depth;
+  VkPipelineColorBlendAttachmentState blend;
+  std::array<float,4> blend_factor;
+  uint32_t sample_mask;
+  bool alpha_to_coverage;
+};
 void build_pipeline(Context& c, PipelineScope& p, Shader *vertex, Shader *pixel, Shader *compute,
                     const std::vector<VkVertexInputAttributeDescription> *vertex_attributes = nullptr,
-                    uint32_t vertex_stride = 48, VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) {
+                    uint32_t vertex_stride = 48, VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+                    const GraphicsConfig *graphics = nullptr) {
   for (auto s : {vertex, pixel, compute})
     if (s && s->owner != &c) throw std::runtime_error("shader belongs to another GPU");
   if ((compute && (vertex || pixel)) || (!compute && (!vertex || !pixel))) throw std::runtime_error("invalid pipeline stage combination");
@@ -545,7 +599,8 @@ void build_pipeline(Context& c, PipelineScope& p, Shader *vertex, Shader *pixel,
   subpass.colorAttachmentCount = 1; subpass.pColorAttachments = &color;
   VkRenderPassCreateInfo rp = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
   rp.attachmentCount = 1; rp.pAttachments = &attachment; rp.subpassCount = 1; rp.pSubpasses = &subpass;
-  check(c.fn<PFN_vkCreateRenderPass>("vkCreateRenderPass")(c.device, &rp, nullptr, &p.pass), "render pass");
+  if(graphics)p.pass=graphics->pass;
+  else check(c.fn<PFN_vkCreateRenderPass>("vkCreateRenderPass")(c.device, &rp, nullptr, &p.pass), "render pass");
   // Pipeline compilation only. Dummy vertex layout covers the sample's input
   // locations, and no draw/vertex read is executed by this operation.
   std::array<VkVertexInputAttributeDescription, 3> attributes;
@@ -555,22 +610,28 @@ void build_pipeline(Context& c, PipelineScope& p, Shader *vertex, Shader *pixel,
   vi.vertexBindingDescriptionCount = 1; vi.pVertexBindingDescriptions = &binding;
   vi.vertexAttributeDescriptionCount = vertex_attributes ? uint32_t(vertex_attributes->size()) : 3;
   vi.pVertexAttributeDescriptions = vertex_attributes ? vertex_attributes->data() : attributes.data();
+  if(graphics) {vi.vertexBindingDescriptionCount=uint32_t(graphics->bindings.size());vi.pVertexBindingDescriptions=graphics->bindings.data();}
   VkPipelineInputAssemblyStateCreateInfo ia = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
   ia.topology = topology;
+  ia.primitiveRestartEnable=graphics && (topology==VK_PRIMITIVE_TOPOLOGY_LINE_STRIP || topology==VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP);
   VkViewport viewport = {0,0,64,64,0,1}; VkRect2D scissor = {{0,0},{64,64}};
   VkPipelineViewportStateCreateInfo vs = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
   vs.viewportCount = 1; vs.pViewports = &viewport; vs.scissorCount = 1; vs.pScissors = &scissor;
+  if(graphics) {vs.pViewports=&graphics->viewport;vs.pScissors=&graphics->scissor;}
   VkPipelineRasterizationStateCreateInfo rs = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
   rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE; rs.lineWidth = 1;
   VkPipelineMultisampleStateCreateInfo ms = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
   ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  if(graphics) {ms.pSampleMask=&graphics->sample_mask;ms.alphaToCoverageEnable=graphics->alpha_to_coverage;}
   VkPipelineColorBlendAttachmentState ba = {}; ba.colorWriteMask = 15;
   VkPipelineColorBlendStateCreateInfo bs = { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
   bs.attachmentCount = 1; bs.pAttachments = &ba;
+  if(graphics) {bs.pAttachments=&graphics->blend;std::copy(graphics->blend_factor.begin(),graphics->blend_factor.end(),bs.blendConstants);}
   VkGraphicsPipelineCreateInfo gi = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
   gi.stageCount = uint32_t(stages.size()); gi.pStages = stages.data(); gi.pVertexInputState = &vi;
   gi.pInputAssemblyState = &ia; gi.pViewportState = &vs; gi.pRasterizationState = &rs;
   gi.pMultisampleState = &ms; gi.pColorBlendState = &bs; gi.layout = p.layout; gi.renderPass = p.pass;
+  if(graphics) {gi.pRasterizationState=&graphics->raster;gi.pDepthStencilState=&graphics->depth;}
   check(c.fn<PFN_vkCreateGraphicsPipelines>("vkCreateGraphicsPipelines")(c.device, VK_NULL_HANDLE, 1, &gi, nullptr, &p.pipeline), "graphics pipeline");
 }
 // Bounded offscreen exercise of the same translated shaders, descriptor ABI
@@ -681,6 +742,8 @@ std::unique_ptr<Buffer> create_buffer(Context& c, const uint8_t *data, size_t si
   return b;
 }
 #include "native_resources.h"
+#include "native_present.h"
+#include "native_draw.h"
 void blit_rgba64(Context& c, Shader *vertex, Shader *pixel, const uint8_t *source, size_t size,
                  uint8_t *output, size_t capacity) {
   constexpr uint32_t side = 64;
@@ -1103,6 +1166,15 @@ void *wire_gpu_texture_create(void *gpu,const WireTextureDesc *desc,char *error,
   catch(const std::exception& e){error_text(error,capacity,e.what());return nullptr;}
 }
 void wire_gpu_texture_free(void *texture){delete static_cast<Texture*>(texture);}
+void *wire_gpu_surface_create(void *gpu,const void *layer,char *error,size_t capacity) {
+  try {if(!gpu || !layer)throw std::runtime_error("missing GPU/layer");return create_surface(*static_cast<Context*>(gpu),layer).release();}
+  catch(const std::exception& e){error_text(error,capacity,e.what());return nullptr;}
+}
+void wire_gpu_surface_free(void *surface){delete static_cast<Surface*>(surface);}
+int wire_gpu_surface_present(void *surface,void *texture,uint32_t width,uint32_t height,uint32_t interval,char *error,size_t capacity) {
+  try {if(!surface || !texture)throw std::runtime_error("missing surface/texture");present_texture(*static_cast<Surface*>(surface),*static_cast<Texture*>(texture),width,height,interval);return 1;}
+  catch(const std::exception& e){error_text(error,capacity,e.what());return 0;}
+}
 int wire_gpu_texture_write(void *texture,uint32_t subresource,const uint8_t *data,size_t size,char *error,size_t capacity) {
   try {if(!texture)throw std::runtime_error("missing texture");texture_write(*static_cast<Texture*>(texture),subresource,data,size);return 1;}
   catch(const std::exception& e){error_text(error,capacity,e.what());return 0;}
@@ -1118,6 +1190,10 @@ void *wire_gpu_image_view_create(void *texture,const WireImageViewDesc *desc,cha
 void wire_gpu_image_view_free(void *view){delete static_cast<ImageView*>(view);}
 int wire_gpu_image_view_clear(void *view,const float *rgba,char *error,size_t capacity) {
   try {if(!view)throw std::runtime_error("missing image view");clear_image_view(*static_cast<ImageView*>(view),rgba);return 1;}
+  catch(const std::exception& e){error_text(error,capacity,e.what());return 0;}
+}
+int wire_gpu_image_view_clear_depth(void *view,uint32_t flags,float depth,uint32_t stencil,char *error,size_t capacity) {
+  try {if(!view)throw std::runtime_error("missing depth view");clear_depth_view(*static_cast<ImageView*>(view),flags,depth,stencil);return 1;}
   catch(const std::exception& e){error_text(error,capacity,e.what());return 0;}
 }
 void *wire_gpu_buffer_view_create(void *buffer,uint32_t format,size_t offset,size_t size,char *error,size_t capacity) {
@@ -1137,13 +1213,20 @@ uint32_t wire_gpu_format_support(void *gpu, uint32_t format) {
   if (p.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) result |= 0x20 | 0x100 | 0x200 | 0x1000;
   if (p.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) result |= 0x20 | 0x4000;
   if (p.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT) result |= 0x8000;
-  if (p.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) result |= 0x20 | 0x10000;
+  if (p.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) {
+    result |= 0x20;
+    if(format==20 || format==40 || format==45 || format==55)result|=0x10000;
+  }
   if (p.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT) result |= 3;
   if (format == 42 || format == 57) result |= 5;
   if (format == 28 || format == 87) result |= 0x80000;
   return result;
 }
 uint32_t wire_gpu_abi() { return 1; }
+int wire_gpu_draw(void *gpu,const WireDraw *description,char *error,size_t capacity) {
+  try {if(!gpu || !description)throw std::runtime_error("missing draw device/description");draw(*static_cast<Context*>(gpu),*description);return 1;}
+  catch(const std::exception& e){error_text(error,capacity,e.what());return 0;}
+}
 void *wire_gpu_open(const char *library, WireGpuInfo *info, char *error, size_t capacity) {
   try { if (!info) throw std::runtime_error("missing info output"); WireGpuInfo value;
     auto c = open_gpu(library, value); *info = value; return c.release();

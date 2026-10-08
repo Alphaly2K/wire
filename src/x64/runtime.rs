@@ -10,6 +10,7 @@ use std::{
 };
 mod address;
 mod apc;
+mod automation;
 mod command;
 mod devices;
 mod display;
@@ -42,6 +43,7 @@ pub(crate) enum WindowStep {
     Returned(u64),
 }
 mod version;
+mod winhttp;
 mod winrt;
 
 pub const TEB: u64 = 0x7ffd00000000;
@@ -59,6 +61,7 @@ pub struct WindowInfo {
     pub width: u32,
     pub height: u32,
     pub visible: bool,
+    pub topmost: bool,
 }
 #[derive(Debug, Clone, Copy)]
 pub struct WindowEvent {
@@ -101,6 +104,7 @@ pub struct Runtime64 {
     environment: BTreeMap<String, (String, String)>,
     local_blocks: std::collections::BTreeSet<u64>,
     task_blocks: std::collections::BTreeSet<u64>,
+    bstrings: BTreeMap<u64, (u64, usize)>,
     hstrings: winrt::Strings,
     devices: devices::Devices,
     rng_handles: std::collections::BTreeSet<u64>,
@@ -170,6 +174,11 @@ pub enum Control {
         base: u64,
         args: Vec<u64>,
     },
+    Present {
+        dll: String,
+        function: String,
+        args: Vec<u64>,
+    },
     Exited(u32),
     Raise {
         dll: String,
@@ -200,8 +209,17 @@ fn com_export(dll: &str, name: &str) -> bool {
 /// Whether a Win64 import has a dispatch route and known ABI. This does not
 /// certify every argument, COM method or optional backend capability.
 pub fn import_supported(dll: &str, name: &str) -> bool {
-    let name = dxgi::symbol(dll, sockets::symbol(dll, name));
+    let name = automation::symbol(dll, dxgi::symbol(dll, sockets::symbol(dll, name)));
     if import_arity(name).is_none() {
+        return false;
+    }
+    if automation::arity(name).is_some() && !automation::export(dll, name) {
+        return false;
+    }
+    if winhttp::arity(name).is_some() && !winhttp::export(dll, name) {
+        return false;
+    }
+    if sockets::is_call(name) && !dll.eq_ignore_ascii_case("ws2_32.dll") {
         return false;
     }
     if devices::arity(name).is_some() && !devices::export(dll, name) {
@@ -242,6 +260,8 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
                 )))
         && !(dll.eq_ignore_ascii_case("psapi.dll") && modules::is_query(name))
         && !(dll.eq_ignore_ascii_case("imm32.dll") && user::ime_arity(name).is_some())
+        && !(dll.eq_ignore_ascii_case("dwmapi.dll")
+            && matches!(name, "DwmGetWindowAttribute" | "DwmIsCompositionEnabled"))
         && !(dll.eq_ignore_ascii_case("gdi32.dll") && user::gdi_arity(name).is_some())
         && !(dll.eq_ignore_ascii_case("advapi32.dll") && tracing::is_call(name))
         && !(dll.eq_ignore_ascii_case("advapi32.dll") && registry::arity(name).is_some())
@@ -272,6 +292,8 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
         && !devices::export(dll, name)
         && !winrt::export(dll, name)
         && !com_export(dll, name)
+        && !automation::export(dll, name)
+        && !winhttp::export(dll, name)
     {
         return false;
     }
@@ -279,6 +301,8 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
 }
 fn kernel_export(name: &str) -> bool {
     if devices::arity(name).is_some()
+        || automation::arity(name).is_some()
+        || winhttp::arity(name).is_some()
         || winrt::arity(name).is_some()
         || guid::arity(name).is_some()
         || user::arity(name).is_some()
@@ -326,6 +350,9 @@ fn kernel_export(name: &str) -> bool {
 }
 fn import_arity(name: &str) -> Option<usize> {
     Some(match name {
+        name if automation::arity(name).is_some() => automation::arity(name).unwrap(),
+        name if winhttp::arity(name).is_some() => winhttp::arity(name).unwrap(),
+        name if sockets::arity(name).is_some() => sockets::arity(name).unwrap(),
         name if devices::arity(name).is_some() => devices::arity(name).unwrap(),
         name if winrt::arity(name).is_some() => winrt::arity(name).unwrap(),
         name if guid::arity(name).is_some() => guid::arity(name).unwrap(),
@@ -349,9 +376,6 @@ fn import_arity(name: &str) -> Option<usize> {
         "GetDllDirectoryW" | "GetDllDirectoryA" => 2,
         "WaitOnAddress" => 4,
         "WakeByAddressSingle" | "WakeByAddressAll" => 1,
-        "WSAStartup" => 2,
-        "WSASetLastError" => 1,
-        "WSACleanup" | "WSAGetLastError" => 0,
         "InitializeCriticalSection" | "TryEnterCriticalSection" => 1,
         "SetCriticalSectionSpinCount" => 2,
         "AddVectoredExceptionHandler" => 2,
@@ -638,6 +662,7 @@ impl Runtime64 {
             next_module: TEB + 0x20000,
             allocations: BTreeMap::new(),
             guest_heap: Default::default(),
+            bstrings: BTreeMap::new(),
             tls: [None; 64],
             fls: [None; 128],
             modules: BTreeMap::new(),
@@ -840,6 +865,9 @@ impl Runtime64 {
                 | "hid.dll"
                 | "setupapi.dll"
                 | "secur32.dll"
+                | "ws2_32.dll"
+                | "oleaut32.dll"
+                | "winhttp.dll"
                 | "dxgi.dll"
                 | "d3d12.dll"
                 | "d3d11.dll"
@@ -1019,7 +1047,7 @@ impl Runtime64 {
         self.modules.insert(handle, (name.to_ascii_lowercase(), 1));
     }
     pub fn register(&mut self, dll: &str, name: &str) -> u64 {
-        let name = dxgi::symbol(dll, sockets::symbol(dll, name));
+        let name = automation::symbol(dll, dxgi::symbol(dll, sockets::symbol(dll, name)));
         let export = format!("{dll}!{name}");
         if let Some((&address, _)) = self.gateways.iter().find(|(_, value)| **value == export) {
             return address;
@@ -1189,14 +1217,22 @@ impl Runtime64 {
         cpu: &mut Cpu64,
         mem: &mut Memory,
     ) -> Result<Control, String> {
-        let name = dxgi::symbol(dll, sockets::symbol(dll, name));
+        let name = automation::symbol(dll, dxgi::symbol(dll, sockets::symbol(dll, name)));
         if !import_supported(dll, name) {
             return Err(format!("unimplemented Win64 import: {dll}!{name}"));
         }
         let arity = import_arity(name)
             .ok_or_else(|| format!("unimplemented Win64 import: {dll}!{name}"))?;
         let mut args = cpu.arguments(mem, arity)?;
+        if name == "D3D.Context.ClearDepthStencilView" {
+            // Win64's fourth positional argument is FLOAT in XMM3, not R9.
+            args[3] = u32::from_le_bytes(cpu.xmm[3][..4].try_into().unwrap()) as u64;
+            args[4] &= 0xff;
+        }
         let dwords: &[usize] = match name {
+            name if automation::arity(name).is_some() => automation::dwords(name),
+            name if winhttp::arity(name).is_some() => winhttp::dwords(name),
+            name if sockets::arity(name).is_some() => sockets::dwords(name),
             name if devices::arity(name).is_some() => devices::dwords(name),
             name if winrt::arity(name).is_some() => winrt::dwords(name),
             "StringFromGUID2" => &[2],
@@ -1345,7 +1381,20 @@ impl Runtime64 {
             mem.write_int(iat, 8, cpu.rip)?;
             self.delay_hooks.remove(&cpu.rip);
         }
+        if matches!(name, "SwapChain.Present" | "SwapChain.Present1")
+            && self.dxgi_present_needed(mem, name, &args)?
+        {
+            // Keep the CPU at the call until public native presentation succeeds.
+            // Native submission failures must not be recorded as guest S_OK.
+            return Ok(Control::Present {
+                dll: dll.into(),
+                function: name.into(),
+                args,
+            });
+        }
         let ret = match name {
+            name if automation::arity(name).is_some() => self.automation_call(mem, name, &args)?,
+            name if winhttp::arity(name).is_some() => self.winhttp_call(mem, name, &args)?,
             name if devices::arity(name).is_some() => self.device_call(mem, name, &args)?,
             name if user::message_arity(name).is_some() => {
                 match self.message_call(mem, name, &args)? {
@@ -1447,7 +1496,7 @@ impl Runtime64 {
                 self.wake_address(args[0], name == "WakeByAddressAll");
                 0
             }
-            "WSAStartup" | "WSACleanup" | "WSAGetLastError" | "WSASetLastError" => {
+            name if sockets::is_call(name) && name != "WSAWaitForMultipleEvents" => {
                 self.winsock_call(mem, name, &args)?
             }
             "AddVectoredExceptionHandler" => {
@@ -3651,11 +3700,21 @@ impl Runtime64 {
             "WaitForSingleObject"
             | "WaitForSingleObjectEx"
             | "WaitForMultipleObjects"
-            | "WaitForMultipleObjectsEx" => {
-                let multiple = name.starts_with("WaitForMultiple");
+            | "WaitForMultipleObjectsEx"
+            | "WSAWaitForMultipleEvents" => {
+                let winsock = name == "WSAWaitForMultipleEvents";
+                if winsock && self.winsock_refs == 0 {
+                    self.set_error(mem, 10093)?;
+                    returned.regs[0] = u32::MAX as u64;
+                    *cpu = returned;
+                    self.api_calls += 1;
+                    self.record(dll, name, &args, u32::MAX as u64);
+                    return Ok(Control::Returned);
+                }
+                let multiple = winsock || name.starts_with("WaitForMultiple");
                 let (handles, all, timeout) = if multiple {
                     if args[0] == 0 || args[0] > 64 {
-                        self.set_error(mem, 87)?;
+                        self.set_error(mem, if winsock { 10022 } else { 87 })?;
                         returned.regs[0] = u32::MAX as u64;
                         *cpu = returned;
                         self.api_calls += 1;
@@ -3673,7 +3732,8 @@ impl Runtime64 {
                 } else {
                     (vec![args[0]], false, args[1])
                 };
-                let alertable = name.ends_with("Ex") && args[if multiple { 4 } else { 2 }] != 0;
+                let alertable =
+                    (winsock || name.ends_with("Ex")) && args[if multiple { 4 } else { 2 }] != 0;
                 if alertable && self.wait_objects(&handles, all, false).is_ok() {
                     if let Some(control) =
                         self.deliver_apcs(mem, dll, name, &args, &returned, cpu)?
@@ -4716,6 +4776,8 @@ impl Runtime64 {
                             sockets::ordinal(&symbol).unwrap_or(&symbol).to_owned()
                         } else if module.eq_ignore_ascii_case("d3d12.dll") {
                             dxgi::symbol(module, &symbol).to_owned()
+                        } else if module.eq_ignore_ascii_case("oleaut32.dll") {
+                            automation::symbol(module, &symbol).to_owned()
                         } else {
                             return Err("Win64 native ordinal lookup is not implemented".into());
                         }
@@ -4767,7 +4829,14 @@ impl Runtime64 {
                         || (provider == "user32.dll" && user::arity(&function).is_some())
                         || (provider == "imm32.dll" && user::ime_arity(&function).is_some())
                         || (provider == "gdi32.dll" && user::gdi_arity(&function).is_some())
+                        || (provider == "dwmapi.dll"
+                            && matches!(
+                                function.as_str(),
+                                "DwmGetWindowAttribute" | "DwmIsCompositionEnabled"
+                            ))
                         || (provider == "advapi32.dll" && registry::arity(&function).is_some())
+                        || automation::export(&provider, &function)
+                        || winhttp::export(&provider, &function)
                         || (matches!(provider.as_str(), "kernel32.dll" | "kernelbase.dll")
                             && matches!(
                                 function.as_str(),
@@ -4914,8 +4983,14 @@ impl Runtime64 {
             "InitializeCriticalSection"
             | "InitializeCriticalSectionAndSpinCount"
             | "InitializeCriticalSectionEx" => {
-                if arity == 3 && args[2] & !0x01000000 != 0 {
-                    return Err("unsupported Win64 critical section flags".into());
+                // Windows 10's initialization ignores the low 24 flag bits;
+                // Unity's resolver actually passes 1. NO_DEBUG_INFO is the
+                // only high-bit capability in this cooperative implementation.
+                if arity == 3 && args[2] & 0xfe000000 != 0 {
+                    return Err(format!(
+                        "unsupported Win64 critical section flags {:#x}",
+                        args[2]
+                    ));
                 }
                 let mut section = [0; 40];
                 // No debug object; cooperative ownership and recursion are real.
@@ -5003,7 +5078,7 @@ impl Runtime64 {
         self.inventory_record("completed", dll, name);
         self.trace_note(format!("{dll}!{name} args={args:x?} -> {ret:#x}"));
     }
-    fn trace_note(&mut self, message: String) {
+    pub(super) fn trace_note(&mut self, message: String) {
         if self.trace.len() == 4096 {
             self.trace.pop_front();
         }

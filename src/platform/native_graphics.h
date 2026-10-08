@@ -45,6 +45,12 @@ typedef struct WireBufferBinding {
 typedef struct WireTextureDesc { uint32_t width,height,mips,layers,format,bind; } WireTextureDesc;
 WIRE_GPU_EXPORT void *wire_gpu_texture_create(void *gpu, const WireTextureDesc *desc, char *error, size_t capacity);
 WIRE_GPU_EXPORT void wire_gpu_texture_free(void *texture);
+/* Public VK_EXT_metal_surface / VK_KHR_swapchain, no CPU readback.
+   The caller retains CAMetalLayer and GPU until after surface destruction. */
+WIRE_GPU_EXPORT void *wire_gpu_surface_create(void *gpu, const void *metal_layer, char *error, size_t capacity);
+WIRE_GPU_EXPORT void wire_gpu_surface_free(void *surface);
+WIRE_GPU_EXPORT int wire_gpu_surface_present(void *surface, void *texture,
+    uint32_t width, uint32_t height, uint32_t interval, char *error, size_t capacity);
 typedef struct WireTextureCopy {uint32_t dst_sub,src_sub,x,y,left,top,right,bottom;} WireTextureCopy;
 WIRE_GPU_EXPORT int wire_gpu_texture_copy(void *dst,void *src,const WireTextureCopy *region,char *error,size_t capacity);
 WIRE_GPU_EXPORT int wire_gpu_texture_write(void *texture, uint32_t subresource, const uint8_t *data,
@@ -52,9 +58,31 @@ WIRE_GPU_EXPORT int wire_gpu_texture_write(void *texture, uint32_t subresource, 
 WIRE_GPU_EXPORT int wire_gpu_texture_read(void *texture, uint32_t subresource, uint8_t *data,
     size_t size, char *error, size_t capacity);
 typedef struct WireImageViewDesc {uint32_t format,mip,mips,layer,layers,kind;} WireImageViewDesc;
+/* Checked host descriptions for guest draws. Resource pointers are owned native
+   objects, never values read from the guest. Only reflected bindings are sent. */
+typedef struct WireVertexBuffer {void *buffer;uint32_t stride,offset;} WireVertexBuffer;
+typedef struct WireVertexAttribute {uint32_t location,format,slot,offset,input_class,step;} WireVertexAttribute;
+typedef struct WireDrawBinding {
+  uint32_t set,binding,kind,reserved;void *resource;
+  uint32_t sampler[13];
+} WireDrawBinding; /* kind: 0=CBV, 1=image SRV, 2=buffer SRV, 3=sampler */
+typedef struct WireDraw {
+  void *vertex,*pixel,*target,*depth,*index;
+  WireVertexBuffer vertices[32];
+  const WireVertexAttribute *attributes;size_t attribute_count;
+  const WireDrawBinding *bindings;size_t binding_count;
+  uint32_t topology,index_format,index_offset,indexed,count,first;
+  int32_t base_vertex;
+  uint32_t instances,first_instance;
+  float viewport[6];int32_t scissor[4];
+  uint32_t blend[66],depth_state[13],raster[10];
+  float blend_factor[4];uint32_t sample_mask,stencil_ref;
+} WireDraw;
+WIRE_GPU_EXPORT int wire_gpu_draw(void *gpu,const WireDraw *draw,char *error,size_t capacity);
 WIRE_GPU_EXPORT void *wire_gpu_image_view_create(void *texture,const WireImageViewDesc *desc,char *error,size_t capacity);
 WIRE_GPU_EXPORT void wire_gpu_image_view_free(void *view);
 WIRE_GPU_EXPORT int wire_gpu_image_view_clear(void *view,const float *rgba,char *error,size_t capacity);
+WIRE_GPU_EXPORT int wire_gpu_image_view_clear_depth(void *view,uint32_t flags,float depth,uint32_t stencil,char *error,size_t capacity);
 /* Owned host buffers: usage bit 1=CBV, 2=storage, 4=vertex, 8=index.
    Calls are serialized, and every submitted operation waits for completion.
    Buffer handles retain their context in the Rust owner. Initial data is copied. */

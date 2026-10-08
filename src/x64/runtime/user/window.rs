@@ -58,6 +58,7 @@ pub(in crate::x64::runtime) fn arity(name: &str) -> Option<usize> {
         | "GetWindowLongPtrA"
         | "GetWindowLongPtrW"
         | "GetWindowRect"
+        | "GetWindowPlacement"
         | "GetClientRect"
         | "SetWindowTextA"
         | "SetWindowTextW"
@@ -126,10 +127,14 @@ impl Runtime64 {
                 width: (w.client[2] - w.client[0]).max(0) as u32,
                 height: (w.client[3] - w.client[1]).max(0) as u32,
                 visible: w.style & 0x10000000 != 0,
+                topmost: w.ex_style & 8 != 0,
             })
             .collect()
     }
-    pub fn queue_window_event(&mut self, event: super::super::WindowEvent) -> Result<(), String> {
+    pub fn queue_window_event(
+        &mut self,
+        mut event: super::super::WindowEvent,
+    ) -> Result<(), String> {
         if !self.user.windows.contains_key(&event.window) {
             return Ok(());
         }
@@ -137,6 +142,31 @@ impl Runtime64 {
             return Err("Win64 native window event capacity exceeded".into());
         }
         let time = self.start.elapsed().as_millis() as u32;
+        if (0x200..=0x20e).contains(&event.message) {
+            let w = &self.user.windows[&event.window];
+            let screen = matches!(event.message, 0x20a | 0x20e);
+            let input = [
+                event.lparam as u16 as i16 as i32,
+                (event.lparam >> 16) as u16 as i16 as i32,
+            ];
+            let point = std::array::from_fn(|n| {
+                let p = if screen {
+                    input[n]
+                } else {
+                    w.client[n].wrapping_add(input[n])
+                };
+                p.clamp(self.user.cursor_clip[n], self.user.cursor_clip[n + 2] - 1)
+            });
+            self.user.cursor_pos = point;
+            let local: [i32; 2] = std::array::from_fn(|n| {
+                if screen {
+                    point[n]
+                } else {
+                    point[n].wrapping_sub(w.client[n])
+                }
+            });
+            event.lparam = (local[0] as u16 as u64) | ((local[1] as u16 as u64) << 16);
+        }
         if !self.user.keyboard.host64([
             event.window,
             event.message as u64,
@@ -145,13 +175,6 @@ impl Runtime64 {
             time as u64,
         ]) {
             return Ok(());
-        }
-        if (0x200..=0x20e).contains(&event.message) {
-            let w = &self.user.windows[&event.window];
-            self.user.cursor_pos = [
-                w.client[0].wrapping_add(event.lparam as u16 as i16 as i32),
-                w.client[1].wrapping_add((event.lparam >> 16) as u16 as i16 as i32),
-            ];
         }
         self.user.events.push_back(super::message::Message {
             event,
@@ -606,6 +629,29 @@ impl Runtime64 {
             }
             "GetWindowRect" => {
                 write_rect(mem, args[1], w.rect)?;
+                Ok(1)
+            }
+            "GetWindowPlacement" => {
+                // WINDOWPLACEMENT contains only DWORD/POINT/RECT fields: 44
+                // bytes on both ABIs. Our desktop work-area origin is (0,0).
+                if args[1] == 0 || mem.read_int(args[1], 4)? != 44 {
+                    self.set_error(mem, 87)?;
+                    return Ok(0);
+                }
+                mem.check(args[1], 44, WRITE)?;
+                // Minimized/maximized restore geometry is not modeled yet.
+                if w.style & 0x21000000 != 0 {
+                    self.set_error(mem, 50)?;
+                    return Ok(0);
+                }
+                let mut bytes = [0; 44];
+                bytes[..4].copy_from_slice(&44u32.to_le_bytes());
+                bytes[8..12].copy_from_slice(&1u32.to_le_bytes()); // SW_SHOWNORMAL.
+                bytes[12..28].fill(0xff); // No min/max position has been assigned.
+                for (i, value) in w.rect.iter().enumerate() {
+                    bytes[28 + i * 4..32 + i * 4].copy_from_slice(&value.to_le_bytes());
+                }
+                mem.write(args[1], &bytes)?;
                 Ok(1)
             }
             "ClientToScreen" | "ScreenToClient" => {

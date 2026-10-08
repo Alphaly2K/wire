@@ -45,8 +45,9 @@ impl Runtime64 {
         } else {
             args[6] as u32
         };
-        // Native z-order/asynchronous transitions are not connected yet.
-        if flags & !0x7ff != 0 || flags & 4 == 0 {
+        // The presenter can remove topmost status using public NSWindow levels.
+        // Relative z-order and asynchronous transitions remain unsupported.
+        if flags & !0x7ff != 0 || (flags & 4 == 0 && args[1] != u64::MAX - 1) {
             self.set_error(mem, 50)?;
             return Ok(WindowResult::Value(0));
         }
@@ -114,7 +115,10 @@ impl Runtime64 {
         }
         let buffer = position.buffer;
         let mut flags = mem.read_int(buffer + 32, 4)? as u32;
-        if mem.read_int(buffer, 8)? != position.window || flags & !0x7ff != 0 || flags & 4 == 0 {
+        if mem.read_int(buffer, 8)? != position.window
+            || flags & !0x7ff != 0
+            || (flags & 4 == 0 && mem.read_int(buffer + 8, 8)? != u64::MAX - 1)
+        {
             return Err("WNDPROC returned unsupported WINDOWPOS flags or changed its HWND".into());
         }
         if position.stage == 0 {
@@ -188,6 +192,9 @@ impl Runtime64 {
         let w = self.user.windows.get_mut(&position.window).unwrap();
         w.rect = position.new_rect;
         w.client = client;
+        if flags & 4 == 0 {
+            w.ex_style &= !8;
+        }
         if flags & 0x40 != 0 {
             w.style |= 0x10000000;
         }

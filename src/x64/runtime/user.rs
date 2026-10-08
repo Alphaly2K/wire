@@ -57,6 +57,8 @@ pub(super) struct User {
     pub(super) events: std::collections::VecDeque<message::Message>,
     pub(super) keyboard: crate::keyboard::Keyboard,
     cursor_pos: [i32; 2],
+    cursor_clip: [i32; 4],
+    message_state: BTreeMap<u64, [u64; 3]>,
 }
 impl Default for User {
     fn default() -> Self {
@@ -77,6 +79,13 @@ impl Default for User {
             events: std::collections::VecDeque::new(),
             keyboard: Default::default(),
             cursor_pos: [0; 2],
+            cursor_clip: [
+                0,
+                0,
+                super::display::WIDTH as i32,
+                super::display::HEIGHT as i32,
+            ],
+            message_state: BTreeMap::new(),
         }
     }
 }
@@ -110,6 +119,9 @@ pub(super) fn arity(name: &str) -> Option<usize> {
         | "RegisterClassExW"
         | "EnableMouseInPointer" => 1,
         "GetCursor" | "IsMouseInPointerEnabled" => 0,
+        "ClipCursor" | "GetClipCursor" | "GetCursorPos" => 1,
+        "DwmGetWindowAttribute" => 4,
+        "DwmIsCompositionEnabled" => 1,
         "AdjustWindowRect" => 3,
         "AdjustWindowRectEx" => 4,
         "AdjustWindowRectExForDpi" => 5,
@@ -135,6 +147,7 @@ pub(super) fn dwords(name: &str) -> &'static [usize] {
     }
     match name {
         "GetDeviceCaps" => &[1],
+        "DwmGetWindowAttribute" => &[1, 3],
         "ImmAssociateContextEx" => &[2],
         "ShowCursor" | "EnableMouseInPointer" => &[0],
         "LoadImageA" | "LoadImageW" => &[2, 3, 4, 5],
@@ -208,6 +221,76 @@ impl Runtime64 {
             return self.window_query(mem, name, args);
         }
         match name {
+            "GetClipCursor" => {
+                write_rect(mem, args[0], self.user.cursor_clip)?;
+                Ok(1)
+            }
+            "GetCursorPos" => {
+                mem.write(
+                    args[0],
+                    &self
+                        .user
+                        .cursor_pos
+                        .into_iter()
+                        .flat_map(i32::to_le_bytes)
+                        .collect::<Vec<_>>(),
+                )?;
+                Ok(1)
+            }
+            "ClipCursor" => {
+                let screen = [
+                    0,
+                    0,
+                    super::display::WIDTH as i32,
+                    super::display::HEIGHT as i32,
+                ];
+                let mut clip = if args[0] == 0 {
+                    screen
+                } else {
+                    rectangle(mem, args[0])?
+                };
+                clip[0] = clip[0].max(screen[0]);
+                clip[1] = clip[1].max(screen[1]);
+                clip[2] = clip[2].min(screen[2]);
+                clip[3] = clip[3].min(screen[3]);
+                if clip[0] >= clip[2] || clip[1] >= clip[3] {
+                    self.set_error(mem, 87)?;
+                    return Ok(0);
+                }
+                self.user.cursor_clip = clip;
+                for n in 0..2 {
+                    self.user.cursor_pos[n] =
+                        self.user.cursor_pos[n].clamp(clip[n], clip[n + 2] - 1);
+                }
+                // Constrain the virtual desktop pointer, never the host desktop.
+                Ok(1)
+            }
+            "DwmIsCompositionEnabled" => {
+                if args[0] == 0 {
+                    return Ok(0x80070057);
+                }
+                mem.write_int(args[0], 4, 0)?; // Guest desktop has no DWM compositor.
+                Ok(0)
+            }
+            "DwmGetWindowAttribute" => {
+                let Some(w) = self.user.windows.get(&args[0]) else {
+                    return Ok(0x80070006);
+                };
+                if args[2] == 0 {
+                    return Ok(0x80070057);
+                }
+                match (args[1], args[3]) {
+                    (9, 16) => {
+                        write_rect(mem, args[2], w.rect)?;
+                        Ok(0)
+                    } // Extended frame bounds.
+                    (14, 4) => {
+                        mem.write_int(args[2], 4, 0)?;
+                        Ok(0)
+                    } // No cloaking service.
+                    _ => Ok(0x80070057),
+                }
+            }
             "LoadIconA" | "LoadIconW" | "LoadCursorA" | "LoadCursorW" | "LoadImageA"
             | "LoadImageW" => {
                 let load_image = name.starts_with("LoadImage");

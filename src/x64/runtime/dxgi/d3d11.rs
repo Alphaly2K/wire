@@ -1,6 +1,8 @@
 //! Experimental D3D11-to-native-Vulkan bridge. This is a compatibility subset,
 //! not a certified full feature-level implementation. Unsupported operations fail.
 use super::*;
+mod draw;
+mod layout;
 pub(in crate::x64::runtime) fn export(name: &str) -> bool {
     matches!(name, "D3D11CreateDevice" | "D3D11CreateDeviceAndSwapChain")
 }
@@ -91,6 +93,12 @@ pub(super) enum NativeView {
     Buffer(crate::gpu::BufferView),
 }
 impl NativeView {
+    fn clear_depth(&self, flags: u32, depth: f32, stencil: u32) -> Result<(), String> {
+        match self {
+            Self::Image(v) => v.clear_depth(flags, depth, stencil),
+            Self::Buffer(_) => Err("depth clear needs image view".into()),
+        }
+    }
     fn clear(&self, color: [f32; 4]) -> Result<(), String> {
         match self {
             Self::Image(v) => v.clear(color),
@@ -316,9 +324,9 @@ pub(super) fn supports(kind: Kind, iid: &Guid) -> bool {
 fn texture_layout(format: u32, width: u32, height: u32) -> (u32, u32) {
     let (block, bytes) = match format {
         2..=4 => (1, 16),
-        6 => (1, 12),
-        10 | 11 | 16 => (1, 8),
-        49 | 54..=57 => (1, 2),
+        6..=8 => (1, 12),
+        10..=14 | 16..=20 => (1, 8),
+        49..=52 | 54..=59 => (1, 2),
         61..=64 => (1, 1),
         71 | 72 | 80 => (4, 8),
         74 | 75 | 77 | 78 | 83 => (4, 16),
@@ -520,6 +528,7 @@ impl Runtime64 {
         }
         let method = name.rsplit('.').next().unwrap();
         match method {
+            "CreateInputLayout" => self.create_input_layout(mem, a),
             "QueryInterface" => {
                 if a[1] == 0 || a[2] == 0 {
                     return Ok(INVALID_ARG);
@@ -647,9 +656,9 @@ impl Runtime64 {
                     } else {
                         match d[0] {
                             2..=4 => 16,
-                            6 => 12,
-                            10 | 11 | 16 => 8,
-                            49 | 54..=57 => 2,
+                            6..=8 => 12,
+                            10..=14 | 16..=18 => 8,
+                            49..=52 | 54..=59 => 2,
                             61..=64 => 1,
                             _ => 4,
                         }
@@ -855,6 +864,18 @@ impl Runtime64 {
                 native.clear(color)?;
                 Ok(0)
             }
+            "ClearDepthStencilView" => {
+                let Some(Resource::View { native, .. }) = self.graphics.resources.get(&a[1]) else {
+                    return Err("depth clear needs DSV".into());
+                };
+                if self.graphics.objects[&a[1]].kind != Kind::Dsv
+                    || self.graphics.objects[&a[1]].parent != owner
+                {
+                    return Err("depth clear view/device mismatch".into());
+                }
+                native.clear_depth(a[2] as u32, f32::from_bits(a[3] as u32), a[4] as u8 as u32)?;
+                Ok(0)
+            }
             "CreateTexture3D" => {
                 if a[1] == 0 {
                     return Ok(INVALID_ARG);
@@ -998,22 +1019,12 @@ impl Runtime64 {
                 if d[2] > 32 - d[0].max(d[1]).leading_zeros() {
                     return Ok(INVALID_ARG);
                 }
-                let (block, bytes) = match d[4] {
-                    2..=4 => (1, 16),
-                    6 => (1, 12),
-                    10 | 11 | 16 => (1, 8),
-                    49 | 54..=57 => (1, 2),
-                    61..=64 => (1, 1),
-                    71 | 72 | 80 => (4, 8),
-                    74 | 75 | 77 | 78 | 83 => (4, 16),
-                    _ => (1, 4),
-                };
                 let mut initial = Vec::new();
                 let mut total = 0;
                 for layer in 0..d[3] {
                     for mip in 0..d[2] {
-                        let row = (d[0] >> mip).max(1).div_ceil(block) * bytes;
-                        let rows = (d[1] >> mip).max(1).div_ceil(block);
+                        let (row, rows) =
+                            texture_layout(d[4], (d[0] >> mip).max(1), (d[1] >> mip).max(1));
                         total += row as usize * rows as usize;
                         if total > 128 * 1024 * 1024 {
                             return Ok(OUT_OF_MEMORY);
@@ -2199,6 +2210,9 @@ impl Runtime64 {
             }
             "GetPrivateData" | "SetPrivateData" | "SetPrivateDataInterface" => {
                 self.dxgi_call(mem, &format!("Object.{method}"), a)
+            }
+            "Draw" | "DrawIndexed" | "DrawInstanced" | "DrawIndexedInstanced" => {
+                self.d3d_draw(method, a)
             }
             _ => Err(format!(
                 "unimplemented Win64 D3D11 method: {name}; args={a:x?}"

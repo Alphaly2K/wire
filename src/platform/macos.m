@@ -1,5 +1,6 @@
 // Public AppKit/CoreGraphics CPU frame presenter. No executable guest code.
 #import <AppKit/AppKit.h>
+#import <QuartzCore/CAMetalLayer.h>
 #include <stdint.h>
 #include <pthread.h>
 
@@ -14,7 +15,8 @@ static void queue(uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp) {
 @interface WireView : NSView <NSWindowDelegate>
 @property uint32_t hwnd;
 @property unsigned logicalWidth, logicalHeight;
-@property CGImageRef image;
+@property(nonatomic) CGImageRef image;
+@property CAMetalLayer *gpuLayer;
 @end
 @implementation WireView
 - (BOOL)isFlipped { return YES; }
@@ -27,6 +29,7 @@ static void queue(uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp) {
 - (void)dealloc { if(_image) CGImageRelease(_image); }
 - (void)drawRect:(NSRect)dirty {
     (void)dirty;
+    if(_gpuLayer) return;
     [[NSColor blackColor] setFill]; NSRectFill(self.bounds);
     if(!_image) return;
     CGContextRef context=NSGraphicsContext.currentContext.CGContext;
@@ -109,6 +112,9 @@ void wire_ui_window(uint32_t hwnd,const char *title,unsigned width,unsigned heig
 void wire_ui_remove(uint32_t hwnd) {
     @autoreleasepool {NSWindow *w=windows[@(hwnd)];w.delegate=nil;[w close];[windows removeObjectForKey:@(hwnd)];}
 }
+void wire_ui_window_topmost(uint32_t hwnd,int topmost) {
+    @autoreleasepool {windows[@(hwnd)].level=topmost?NSFloatingWindowLevel:NSNormalWindowLevel;}
+}
 int wire_ui_frame(uint32_t hwnd,const unsigned char *rgba,unsigned width,unsigned height) {
     @autoreleasepool {
         NSWindow *w=windows[@(hwnd)];if(!w) return 0;
@@ -116,11 +122,31 @@ int wire_ui_frame(uint32_t hwnd,const unsigned char *rgba,unsigned width,unsigne
         if(!data) return 0;
         CGDataProviderRef provider=CGDataProviderCreateWithCFData(data);
         CGColorSpaceRef color=CGColorSpaceCreateDeviceRGB();
-        CGImageRef image=CGImageCreate(width,height,8,32,width*4,color,kCGImageAlphaNoneSkipLast,provider,NULL,false,kCGRenderingIntentDefault);
+        CGImageRef image=CGImageCreate(width,height,8,32,width*4,color,(CGBitmapInfo)kCGImageAlphaNoneSkipLast,provider,NULL,false,kCGRenderingIntentDefault);
         if(image) ((WireView *)w.contentView).image=image;
         if(image) CGImageRelease(image);CGColorSpaceRelease(color);CGDataProviderRelease(provider);CFRelease(data);
         return image!=NULL;
     }
+}
+// Retained public CAMetalLayer. Its owner must release it after destroying the
+// Vulkan surface; removing an NSWindow cannot invalidate an outstanding surface.
+void *wire_ui_metal_layer(uint32_t hwnd) {
+    if(!NSThread.isMainThread) return NULL;
+    @autoreleasepool {
+        NSWindow *w=windows[@(hwnd)];if(!w || !w.visible) return NULL;
+        WireView *view=(WireView *)w.contentView;
+        if(!view.gpuLayer) {
+            CAMetalLayer *layer=[CAMetalLayer layer];
+            layer.opaque=YES;layer.framebufferOnly=NO;
+            layer.contentsScale=w.backingScaleFactor;
+            view.wantsLayer=YES;view.layer=layer;view.gpuLayer=layer;
+        }
+        view.gpuLayer.drawableSize=CGSizeMake(view.logicalWidth,view.logicalHeight);
+        return (__bridge_retained void *)view.gpuLayer;
+    }
+}
+void wire_ui_release_metal_layer(void *layer) {
+    if(layer) {CFRelease(layer);}
 }
 int wire_ui_poll(WireEvent *out) {
     @autoreleasepool {

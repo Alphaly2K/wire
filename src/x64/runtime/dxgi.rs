@@ -6,6 +6,8 @@ use crate::gpu::{AdapterInfo, NativeGraphics};
 use std::collections::BTreeMap;
 mod abi;
 mod d3d11;
+mod output;
+mod swapchain;
 
 pub(super) const DLL: &str = "wire.dxgi";
 const INVALID: u64 = 0x887a0001;
@@ -154,11 +156,19 @@ pub(super) fn arity(name: &str) -> Option<usize> {
             .iter()
             .chain(FACTORY)
             .chain(ADAPTER)
+            .chain(output::METHODS)
+            .chain(swapchain::METHODS)
             .find(|(n, _)| *n == name)
             .map(|(_, a)| *a),
     }
 }
 pub(super) fn dwords(name: &str) -> &'static [usize] {
+    if name.starts_with("SwapChain.") {
+        return swapchain::dwords(name);
+    }
+    if name.starts_with("Output.") {
+        return output::dwords(name);
+    }
     if d3d11::arity(name).is_some() {
         return d3d11::dwords(name);
     }
@@ -175,6 +185,8 @@ pub(super) fn dwords(name: &str) -> &'static [usize] {
 enum Kind {
     Factory,
     Adapter,
+    Output,
+    SwapChain,
     Device,
     Context,
     DxgiDevice,
@@ -207,6 +219,9 @@ pub(super) struct Graphics {
     queries: BTreeMap<u64, d3d11::Query>,
     contexts: BTreeMap<u64, d3d11::Context>,
     resources: BTreeMap<u64, d3d11::Resource>,
+    swapchains: BTreeMap<u64, swapchain::SwapChain>,
+    presented: u64,
+    drawn: u64,
     #[cfg(test)]
     fixture: Option<AdapterInfo>,
 }
@@ -260,10 +275,16 @@ fn read_guid(mem: &Memory, address: u64) -> Result<Guid, String> {
 }
 fn supports(kind: Kind, iid: &Guid) -> bool {
     *iid == UNKNOWN
-        || (*iid == OBJECT && matches!(kind, Kind::Factory | Kind::Adapter | Kind::DxgiDevice))
+        || (*iid == OBJECT
+            && matches!(
+                kind,
+                Kind::Factory | Kind::Adapter | Kind::Output | Kind::DxgiDevice | Kind::SwapChain
+            ))
         || match kind {
             Kind::Factory => FACTORIES.contains(iid),
             Kind::Adapter => ADAPTERS.contains(iid),
+            Kind::Output => output::IIDS.contains(iid),
+            Kind::SwapChain => swapchain::IIDS.contains(iid),
             _ => d3d11::supports(kind, iid),
         }
 }
@@ -283,6 +304,16 @@ impl Runtime64 {
         let methods: Vec<_> = match kind {
             Kind::Factory => COMMON.iter().chain(FACTORY).map(|(n, _)| *n).collect(),
             Kind::Adapter => COMMON.iter().chain(ADAPTER).map(|(n, _)| *n).collect(),
+            Kind::Output => COMMON
+                .iter()
+                .chain(output::METHODS)
+                .map(|(n, _)| *n)
+                .collect(),
+            Kind::SwapChain => COMMON
+                .iter()
+                .chain(swapchain::METHODS)
+                .map(|(n, _)| *n)
+                .collect(),
             _ => d3d11::methods(kind),
         };
         for name in methods {
@@ -349,6 +380,10 @@ impl Runtime64 {
         self.graphics.objects.remove(&address);
         self.graphics.devices.remove(&address);
         self.graphics.queries.remove(&address);
+        if let Some(chain) = self.graphics.swapchains.remove(&address) {
+            self.dxgi_release(mem, chain.buffer)?;
+            self.dxgi_release(mem, chain.device)?;
+        }
         if let Some(d3d11::Resource::Buffer {
             mapped: Some((p, size, _)),
             ..
@@ -483,10 +518,32 @@ impl Runtime64 {
         }
         if (name.starts_with("Factory.") && kind != Kind::Factory)
             || (name.starts_with("Adapter.") && kind != Kind::Adapter)
+            || (name.starts_with("Output.") && kind != Kind::Output)
+            || (name.starts_with("SwapChain.") && kind != Kind::SwapChain)
         {
             return Err("DXGI method/object mismatch".into());
         }
+        if name.starts_with("Output.") {
+            return self.output_call(mem, name, a);
+        }
+        if name.starts_with("SwapChain.") {
+            return self.swapchain_call(mem, name, a);
+        }
         match name {
+            "Factory.CreateSwapChain" | "Factory.CreateSwapChainForHwnd" => {
+                self.create_swapchain(mem, name, a)
+            }
+            "Adapter.EnumOutputs" => {
+                if a[2] == 0 {
+                    return Ok(INVALID_ARG);
+                }
+                mem.check(a[2], 8, WRITE)?;
+                if a[1] != 0 {
+                    mem.write_int(a[2], 8, 0)?;
+                    return Ok(NOT_FOUND);
+                }
+                self.dxgi_output(mem, a[0], a[2])
+            }
             "Object.QueryInterface" | "Object.GetParent" => {
                 if a[1] == 0 || a[2] == 0 {
                     return Ok(INVALID_ARG);
@@ -726,6 +783,566 @@ mod tests {
             0
         );
         m.read_int(DATA + 32, 8).unwrap()
+    }
+    #[test]
+    #[ignore = "requires explicitly provided native Vulkan backend"]
+    fn native_swapchain_backbuffer_fault_resize_lifetime_and_deferred_present() {
+        let (mut r, mut m) = setup();
+        let backend = std::env::var("WIRE_NATIVE_GRAPHICS").unwrap();
+        let moltenvk = std::env::var("WIRE_MOLTENVK").unwrap();
+        r.graphics.fixture = None;
+        r.attach_graphics(
+            NativeGraphics::load(
+                std::path::Path::new(&backend),
+                std::path::Path::new(&moltenvk),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        r.enable_scheduler();
+        let procedure = r.register("user32.dll", "DefWindowProcW");
+        m.write(
+            DATA + 512,
+            &"SwapProbe\0"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        m.write(DATA + 640, &[0; 80]).unwrap();
+        m.write_int(DATA + 640, 4, 80).unwrap();
+        m.write_int(DATA + 648, 8, procedure).unwrap();
+        m.write_int(DATA + 664, 8, 0x140000000).unwrap();
+        m.write_int(DATA + 704, 8, DATA + 512).unwrap();
+        assert_ne!(
+            r.user_call(&mut m, "RegisterClassExW", &[DATA + 640])
+                .unwrap(),
+            0
+        );
+        let returned = Cpu64::new(0x140001234, STACK + 128);
+        let super::super::user::WindowResult::Callback {
+            parameters,
+            call: mut window_call,
+            release,
+            ..
+        } = r
+            .window_start(
+                &mut m,
+                "CreateWindowExW",
+                &[
+                    0,
+                    DATA + 512,
+                    0,
+                    0x10000000,
+                    0,
+                    0,
+                    128,
+                    96,
+                    0,
+                    0,
+                    0x140000000,
+                    0,
+                ],
+                &returned,
+            )
+            .unwrap()
+        else {
+            panic!("creation callback expected")
+        };
+        let mut args = parameters;
+        let window = loop {
+            let value = r.user_call(&mut m, "DefWindowProcW", &args).unwrap();
+            match r.window_resume(&mut m, &mut window_call, value).unwrap() {
+                super::super::WindowStep::Next(_, next) => args = next,
+                super::super::WindowStep::Returned(window) => break window,
+            }
+        };
+        r.release_callback_buffers(&mut m, &release).unwrap();
+        let f = factory(&mut r, &mut m);
+        call(&mut r, &mut m, "Factory.EnumAdapters", &[f, 0, DATA + 32]).unwrap();
+        let adapter = m.read_int(DATA + 32, 8).unwrap();
+        m.write_int(DATA + 64, 4, 0xa000).unwrap();
+        assert_eq!(
+            call(
+                &mut r,
+                &mut m,
+                "D3D11CreateDevice",
+                &[adapter, 0, 0, 0, DATA + 64, 1, 7, DATA + 40, 0, 0]
+            )
+            .unwrap(),
+            0
+        );
+        let device = m.read_int(DATA + 40, 8).unwrap();
+        let mut desc = [0u8; 72];
+        for (offset, value) in [
+            (0, 64u32),
+            (4, 32),
+            (12, 1),
+            (16, 28),
+            (28, 1),
+            (36, 0x30),
+            (40, 1),
+            (56, 1),
+            (64, 2),
+        ] {
+            desc[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        desc[48..56].copy_from_slice(&window.to_le_bytes());
+        m.write(DATA + 128, &desc).unwrap();
+        let objects = r.graphics.objects.len();
+        let device_refs = r.graphics.objects[&device].refs;
+        assert!(call(
+            &mut r,
+            &mut m,
+            "Factory.CreateSwapChain",
+            &[f, device, DATA + 128, DATA + 2 * PAGE - 4]
+        )
+        .is_err());
+        assert_eq!(r.graphics.objects.len(), objects);
+        assert_eq!(r.graphics.objects[&device].refs, device_refs);
+        assert_eq!(
+            call(
+                &mut r,
+                &mut m,
+                "Factory.CreateSwapChain",
+                &[f, device, DATA + 128, DATA + 48]
+            )
+            .unwrap(),
+            0
+        );
+        let chain = m.read_int(DATA + 48, 8).unwrap();
+        call(&mut r, &mut m, "SwapChain.GetDesc", &[chain, DATA + 256]).unwrap();
+        let mut actual = [0; 72];
+        m.read(DATA + 256, &mut actual).unwrap();
+        assert_eq!(actual, desc);
+        m.write(
+            DATA + 96,
+            &guid(
+                0x6f15aaf2,
+                0xd208,
+                0x4e89,
+                [0x9a, 0xb4, 0x48, 0x95, 0x35, 0xd3, 0x4f, 0x9c],
+            ),
+        )
+        .unwrap();
+        let buffer = r.graphics.swapchains[&chain].buffer;
+        assert!(call(
+            &mut r,
+            &mut m,
+            "SwapChain.GetBuffer",
+            &[chain, 0, DATA + 96, DATA + 2 * PAGE - 4]
+        )
+        .is_err());
+        assert_eq!(r.graphics.objects[&buffer].refs, 1);
+        assert_eq!(
+            call(
+                &mut r,
+                &mut m,
+                "SwapChain.GetBuffer",
+                &[chain, 0, DATA + 96, DATA + 56]
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(m.read_int(DATA + 56, 8).unwrap(), buffer);
+        assert_eq!(
+            call(
+                &mut r,
+                &mut m,
+                "SwapChain.ResizeBuffers",
+                &[chain, 0, 96, 48, 0, 2]
+            )
+            .unwrap(),
+            INVALID
+        );
+        call(&mut r, &mut m, "D3D.Child.Release", &[buffer]).unwrap();
+        call(
+            &mut r,
+            &mut m,
+            "D3D.Device.CreateRenderTargetView",
+            &[device, buffer, 0, DATA + 56],
+        )
+        .unwrap();
+        let view = m.read_int(DATA + 56, 8).unwrap();
+        assert_eq!(
+            call(
+                &mut r,
+                &mut m,
+                "SwapChain.ResizeBuffers",
+                &[chain, 0, 96, 48, 0, 2]
+            )
+            .unwrap(),
+            INVALID
+        );
+        call(&mut r, &mut m, "D3D.Child.Release", &[view]).unwrap();
+        assert_eq!(
+            call(
+                &mut r,
+                &mut m,
+                "SwapChain.ResizeBuffers",
+                &[chain, 0, 96, 48, 0, 2]
+            )
+            .unwrap(),
+            0
+        );
+        assert!(m.read_int(buffer, 8).is_err());
+        let (_, texture, _) = r.graphics_frame(chain).unwrap();
+        assert_eq!((texture.desc().width, texture.desc().height), (96, 48));
+        // No submission has occurred: TEST does not increment counters, and a
+        // real Present defers the CPU return/API completion to the native bridge.
+        assert_eq!(
+            call(&mut r, &mut m, "SwapChain.Present", &[chain, 0, 1]).unwrap(),
+            0
+        );
+        let mut cpu = Cpu64::new(0x7ffe00000000, STACK);
+        cpu.regs[1] = chain;
+        m.write_int(STACK, 8, 0x140001234).unwrap();
+        let before = (cpu.rip, cpu.regs, r.api_calls);
+        assert!(matches!(
+            r.dispatch(DLL, "SwapChain.Present", &mut cpu, &mut m)
+                .unwrap(),
+            Control::Present { .. }
+        ));
+        assert_eq!((cpu.rip, cpu.regs, r.api_calls), before);
+        call(
+            &mut r,
+            &mut m,
+            "SwapChain.GetLastPresentCount",
+            &[chain, DATA + 64],
+        )
+        .unwrap();
+        assert_eq!(m.read_int(DATA + 64, 4).unwrap(), 0);
+        // Exercise the mixed integer/FLOAT Win64 clear ABI against real GPU data.
+        // XMM3 holds depth while R9 deliberately contains unrelated integer bits.
+        let td = [8u32, 4, 1, 1, 19, 1, 0, 0, 0x40, 0, 0];
+        m.write(
+            DATA + 1024,
+            &td.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert_eq!(
+            call(
+                &mut r,
+                &mut m,
+                "D3D.Device.CreateTexture2D",
+                &[device, DATA + 1024, 0, DATA + 72]
+            )
+            .unwrap(),
+            0
+        );
+        let depth = m.read_int(DATA + 72, 8).unwrap();
+        m.write(
+            DATA + 1088,
+            &[20u32, 3, 0, 0, 0, 0]
+                .iter()
+                .flat_map(|x| x.to_le_bytes())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert_eq!(
+            call(
+                &mut r,
+                &mut m,
+                "D3D.Device.CreateDepthStencilView",
+                &[device, depth, DATA + 1088, DATA + 80]
+            )
+            .unwrap(),
+            0
+        );
+        let dsv = m.read_int(DATA + 80, 8).unwrap();
+        call(
+            &mut r,
+            &mut m,
+            "D3D.Device.GetImmediateContext",
+            &[device, DATA + 88],
+        )
+        .unwrap();
+        let context = m.read_int(DATA + 88, 8).unwrap();
+        // Signature-only DXBC is valid for layouts; no executable shader chunk
+        // is needed. HRESULT errors clear ppLayout, checked faults do not.
+        let mut signature = vec![0u8; 85];
+        signature[..4].copy_from_slice(b"DXBC");
+        for (at, value) in [
+            (20, 1u32),
+            (24, 85),
+            (28, 1),
+            (32, 36),
+            (40, 41),
+            (44, 1),
+            (48, 8),
+            (52, 32),
+            (64, 3),
+            (68, 0),
+        ] {
+            signature[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        signature[36..40].copy_from_slice(b"ISGN");
+        signature[72] = 15;
+        signature[76..].copy_from_slice(b"POSITION\0");
+        m.write(DATA + 1152, &signature).unwrap();
+        m.write(DATA + 1280, b"position\0").unwrap();
+        m.write(DATA + 1312, &[0; 32]).unwrap();
+        m.write_int(DATA + 1312, 8, DATA + 1280).unwrap();
+        m.write_int(DATA + 1324, 4, 2).unwrap();
+        m.write_int(DATA + 1332, 4, u32::MAX as u64).unwrap();
+        let args = [device, DATA + 1312, 1, DATA + 1152, 85, DATA + 96];
+        assert_eq!(
+            call(&mut r, &mut m, "D3D.Device.CreateInputLayout", &args).unwrap(),
+            0
+        );
+        let layout = m.read_int(DATA + 96, 8).unwrap();
+        let Some(d3d11::Resource::State(attributes)) = r.graphics.resources.get(&layout) else {
+            panic!("input layout expected")
+        };
+        assert_eq!(
+            *attributes,
+            [0u32, 2, 0, 0, 0, 0]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>()
+        );
+        call(&mut r, &mut m, "D3D.Child.Release", &[layout]).unwrap();
+        m.write_int(DATA + 96, 8, 0xabababababababab).unwrap();
+        let mut fault = args;
+        fault[3] = DATA + 2 * PAGE - 4;
+        let objects = r.graphics.objects.len();
+        let references = r.graphics.objects[&device].refs;
+        assert!(call(&mut r, &mut m, "D3D.Device.CreateInputLayout", &fault).is_err());
+        assert_eq!(m.read_int(DATA + 96, 8).unwrap(), 0xabababababababab);
+        assert_eq!(r.graphics.objects.len(), objects);
+        assert_eq!(r.graphics.objects[&device].refs, references);
+        m.write_int(DATA + 1312, 8, 0).unwrap();
+        assert_eq!(
+            call(&mut r, &mut m, "D3D.Device.CreateInputLayout", &args).unwrap(),
+            INVALID_ARG
+        );
+        assert_eq!(m.read_int(DATA + 96, 8).unwrap(), 0);
+        cpu = Cpu64::new(0x7ffe00000000, STACK);
+        cpu.regs[1] = context;
+        cpu.regs[2] = dsv;
+        cpu.regs[8] = 3;
+        cpu.regs[9] = 0xdeadbeef;
+        cpu.xmm[3][..4].copy_from_slice(&0.625f32.to_le_bytes());
+        m.write_int(STACK + 40, 8, 0x123456789abcde5b).unwrap();
+        assert_eq!(
+            r.dispatch(DLL, "D3D.Context.ClearDepthStencilView", &mut cpu, &mut m)
+                .unwrap(),
+            Control::Returned
+        );
+        let Some(d3d11::Resource::Texture { native, .. }) = r.graphics.resources.get(&depth) else {
+            panic!("depth texture expected")
+        };
+        let pixel = [0x00, 0x00, 0x20, 0x3f, 0x5b, 0, 0, 0];
+        assert_eq!(native.read(0, 8 * 4 * 8).unwrap(), pixel.repeat(32));
+        call(&mut r, &mut m, "D3D.Child.Release", &[dsv]).unwrap();
+        call(&mut r, &mut m, "D3D.Child.Release", &[depth]).unwrap();
+        call(&mut r, &mut m, "D3D.Context.Release", &[context]).unwrap();
+        call(&mut r, &mut m, "Object.Release", &[chain]).unwrap();
+        call(&mut r, &mut m, "D3D.Device.Release", &[device]).unwrap();
+        call(&mut r, &mut m, "Object.Release", &[adapter]).unwrap();
+        call(&mut r, &mut m, "Object.Release", &[f]).unwrap();
+        assert!(r.graphics.objects.is_empty());
+        assert!(r.graphics.resources.is_empty());
+        // A native texture clone still owns its GPU after guest COM destruction.
+        assert_eq!(texture.read(0, 96 * 48 * 4).unwrap().len(), 96 * 48 * 4);
+    }
+    #[test]
+    fn virtual_output_identity_win64_desc_and_parent_lifetime_match_display_profile() {
+        let (mut r, mut m) = setup();
+        let f = factory(&mut r, &mut m);
+        call(&mut r, &mut m, "Factory.EnumAdapters1", &[f, 0, DATA + 32]).unwrap();
+        let adapter = m.read_int(DATA + 32, 8).unwrap();
+        let refs = r.graphics.objects[&adapter].refs;
+        m.write_int(DATA + 2 * PAGE - 4, 4, 0xaaaaaaaa).unwrap();
+        assert!(call(
+            &mut r,
+            &mut m,
+            "Adapter.EnumOutputs",
+            &[adapter, 0, DATA + 2 * PAGE - 4]
+        )
+        .is_err());
+        assert_eq!(r.graphics.objects[&adapter].refs, refs);
+        assert!(!r.graphics.objects.values().any(|o| o.kind == Kind::Output));
+        assert_eq!(
+            call(
+                &mut r,
+                &mut m,
+                "Adapter.EnumOutputs",
+                &[adapter, 0, DATA + 32]
+            )
+            .unwrap(),
+            0
+        );
+        let output = m.read_int(DATA + 32, 8).unwrap();
+        assert!(output > u32::MAX as u64);
+        assert_eq!(r.graphics.objects[&adapter].refs, refs + 1);
+        let table = m.read_int(output, 8).unwrap();
+        let method = m.read_int(table + 19 * 8, 8).unwrap();
+        assert_eq!(r.gateways[&method], "wire.dxgi!Output.GetDisplayModeList1");
+        assert!(m.write_int(table, 8, 0).is_err());
+        call(
+            &mut r,
+            &mut m,
+            "Adapter.EnumOutputs",
+            &[adapter, 0, DATA + 32],
+        )
+        .unwrap();
+        assert_eq!(m.read_int(DATA + 32, 8).unwrap(), output);
+        assert_eq!(r.graphics.objects[&output].refs, 2);
+        call(&mut r, &mut m, "Output.GetDesc", &[output, DATA + 128]).unwrap();
+        assert_eq!(m.read_int(DATA + 128 + 72, 4).unwrap(), 1024);
+        assert_eq!(m.read_int(DATA + 128 + 76, 4).unwrap(), 768);
+        assert_eq!(m.read_int(DATA + 128 + 80, 4).unwrap(), 1);
+        assert_eq!(m.read_int(DATA + 128 + 84, 4).unwrap(), 1);
+        assert_eq!(
+            m.read_int(DATA + 128 + 88, 8).unwrap(),
+            crate::x64::runtime::display::MONITOR
+        );
+        let mut name = [0u8; 64];
+        m.read(DATA + 128, &mut name).unwrap();
+        let units: Vec<_> = name
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| u16::from_le_bytes(*b))
+            .take_while(|&u| u != 0)
+            .collect();
+        assert_eq!(String::from_utf16(&units).unwrap(), "\\\\.\\DISPLAY1");
+        m.write(DATA + 64, &output::IIDS[1]).unwrap();
+        call(
+            &mut r,
+            &mut m,
+            "Object.QueryInterface",
+            &[output, DATA + 64, DATA + 32],
+        )
+        .unwrap();
+        assert_eq!(m.read_int(DATA + 32, 8).unwrap(), output);
+        call(&mut r, &mut m, "Object.Release", &[output]).unwrap();
+        call(&mut r, &mut m, "Object.Release", &[output]).unwrap();
+        call(&mut r, &mut m, "Object.Release", &[output]).unwrap();
+        assert!(!r.graphics.objects.contains_key(&output));
+        assert!(m.read_int(output, 8).is_err());
+        assert_eq!(r.graphics.objects[&adapter].refs, refs);
+        assert_eq!(
+            call(
+                &mut r,
+                &mut m,
+                "Adapter.EnumOutputs",
+                &[adapter, 1, DATA + 32]
+            )
+            .unwrap(),
+            NOT_FOUND
+        );
+        assert_eq!(m.read_int(DATA + 32, 8).unwrap(), 0);
+    }
+    #[test]
+    fn virtual_output_mode_queries_preflight_counts_arrays_and_matching_before_writes() {
+        let (mut r, mut m) = setup();
+        let f = factory(&mut r, &mut m);
+        call(&mut r, &mut m, "Factory.EnumAdapters1", &[f, 0, DATA + 32]).unwrap();
+        let adapter = m.read_int(DATA + 32, 8).unwrap();
+        call(
+            &mut r,
+            &mut m,
+            "Adapter.EnumOutputs",
+            &[adapter, 0, DATA + 32],
+        )
+        .unwrap();
+        let output = m.read_int(DATA + 32, 8).unwrap();
+        for (name, size) in [
+            ("Output.GetDisplayModeList", 28),
+            ("Output.GetDisplayModeList1", 32),
+        ] {
+            m.write_int(DATA + 64, 4, 0).unwrap();
+            assert_eq!(
+                call(&mut r, &mut m, name, &[output, 28, 0, DATA + 64, 0]).unwrap(),
+                0
+            );
+            assert_eq!(m.read_int(DATA + 64, 4).unwrap(), 1);
+            m.write(DATA + 128, &[0xaa; 32]).unwrap();
+            m.write_int(DATA + 64, 4, 0).unwrap();
+            assert_eq!(
+                call(
+                    &mut r,
+                    &mut m,
+                    name,
+                    &[output, 28, 0, DATA + 64, DATA + 128]
+                )
+                .unwrap(),
+                MORE_DATA
+            );
+            assert_eq!(m.read_int(DATA + 128, 8).unwrap(), 0xaaaaaaaaaaaaaaaa);
+            m.write_int(DATA + 64, 4, 1).unwrap();
+            assert!(call(
+                &mut r,
+                &mut m,
+                name,
+                &[output, 28, 0, DATA + 64, DATA + 2 * PAGE - 4]
+            )
+            .is_err());
+            assert_eq!(m.read_int(DATA + 64, 4).unwrap(), 1);
+            call(
+                &mut r,
+                &mut m,
+                name,
+                &[output, 87, 0, DATA + 64, DATA + 128],
+            )
+            .unwrap();
+            let mut bytes = vec![0; size];
+            m.read(DATA + 128, &mut bytes).unwrap();
+            let actual: Vec<_> = bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| u32::from_le_bytes(*b))
+                .collect();
+            let mut expected = vec![1024, 768, 60, 1, 87, 1, 0];
+            if size == 32 {
+                expected.push(0);
+            }
+            assert_eq!(actual, expected);
+        }
+        m.write(DATA + 128, &[0; 32]).unwrap();
+        m.write_int(DATA + 128 + 16, 4, 28).unwrap();
+        assert_eq!(
+            call(
+                &mut r,
+                &mut m,
+                "Output.FindClosestMatchingMode1",
+                &[output, DATA + 128, DATA + 128, 0]
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(m.read_int(DATA + 128, 4).unwrap(), 1024);
+        m.write_int(DATA + 128 + 28, 4, 1).unwrap();
+        m.write(DATA + 256, &[0x55; 32]).unwrap();
+        assert_eq!(
+            call(
+                &mut r,
+                &mut m,
+                "Output.FindClosestMatchingMode1",
+                &[output, DATA + 128, DATA + 256, 0]
+            )
+            .unwrap(),
+            NOT_FOUND
+        );
+        assert_eq!(m.read_int(DATA + 256, 8).unwrap(), 0x5555555555555555);
+        assert_eq!(
+            call(
+                &mut r,
+                &mut m,
+                "Output.DuplicateOutput",
+                &[output, 0, DATA + 32]
+            )
+            .unwrap(),
+            UNSUPPORTED
+        );
+        assert_eq!(m.read_int(DATA + 32, 8).unwrap(), 0);
+        assert_eq!(
+            call(&mut r, &mut m, "Output.WaitForVBlank", &[output]).unwrap(),
+            UNSUPPORTED
+        );
     }
     #[test]
     fn experimental_d3d11_device_context_query_identity_and_faults_keep_real_references() {
@@ -1051,10 +1668,9 @@ mod tests {
             .unwrap(),
             NOT_FOUND
         );
-        assert!(
-            call(&mut r, &mut m, "Factory.CreateSwapChain", &[f, 0, 0, 0])
-                .unwrap_err()
-                .contains("unimplemented")
+        assert_eq!(
+            call(&mut r, &mut m, "Factory.CreateSwapChain", &[f, 0, 0, 0]).unwrap(),
+            INVALID_ARG
         );
         m.write(DATA, &FACTORIES[4]).unwrap();
         assert_eq!(
