@@ -272,3 +272,24 @@ signature count/instance/return/params iterator，以及type kind/byref，共74�
 最新完整M2 noexec `checks=479 denied=0`。字段匹配扩大了候选源码与样本的ABI证据，
 但还没验证所有generic/inflated method、custom modifiers、metadata/vtable生命周期或
 Unity allocator/TLS callbacks；full metadata ABI与M3/game admission继续为false。
+
+## 后续：预编译闭包委托入口与生命周期
+
+四个固定ARM64入口位于Rust binary text，精确Int32→Int32签名；注册前核对delegate Invoke
+的参数/返回kind及byref。每个entry独立持有strong v2 handle，实际执行用
+mono_runtime_invoke(Invoke, delegate)，不调用GetFunctionPointerForDelegate来生成
+trampoline。pool lookup只clone retained entry，进入Mono前释放registry lock。
+
+四个真实C#闭包各自保留可变counter，临时factory stack退出后GC仍存活；负数输入的
+ArgumentOutOfRangeException通过独立status记录，随后仍可正确调用。一个闭包真实重入
+native入口并调用另一个闭包；另一个在自己的活跃callback里retire自身并触发GC，
+in-flight Arc仍保留root，返回后入口拒绝再次调用。所有entry退休后weak targets均清空。
+
+槽位是one-use，容量4耗尽明确报错，甚至撤销后也不复用地址，从而不让迟到的旧function
+pointer意外调用新对象。没有owner的调用也拒绝且不访问VM。完整M2 guard
+`checks=495 denied=0`，Clippy clean。这仍是限定签名fixture，不是通用Unity委托/PInvoke
+封送或生产token dispatcher；fixed pool的生产容量与多种签名还需按实际绑定建表。
+
+当前受检Mint许可358/613：包含精确reference cells和登记的Int32[]，其他reference/
+array/helper、virtual/delegate/calli仍按scope原规则拒绝。以上委托测试在正常native IL
+路径中执行，不能把它当作扩大受检unsafe-IL permit的证据。

@@ -101,6 +101,21 @@ public static class GuestBridge {
     public sealed class MetadataInstance {
         public double Echo(float value, ref long count) { return value + count; }
     }
+    [MethodImpl(MethodImplOptions.InternalCall)]
+    private static extern int GuestDelegateNested(int value);
+    [MethodImpl(MethodImplOptions.InternalCall)]
+    private static extern int GuestDelegateRetire(int slot);
+    public static object NewScalarDelegate(int seed) {
+        int counter = seed;
+        return new Func<int, int>(value => {
+            if (value < 0) throw new ArgumentOutOfRangeException("value");
+            counter += value;
+            if (seed == 300 && value == 9) return GuestDelegateNested(counter);
+            if (seed == 400 && value == 11 && GuestDelegateRetire(3) != 1)
+                throw new InvalidOperationException("delegate owner failed retirement");
+            return counter;
+        });
+    }
     private static int domainCounter;
     public static int DomainCounter(int delta) { domainCounter += delta; return domainCounter; }
     public static int DomainRaise() { throw new ArgumentException("domain-owned exception"); }

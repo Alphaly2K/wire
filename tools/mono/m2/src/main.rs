@@ -52,6 +52,7 @@ mod abi;
 mod arrays;
 mod checked;
 mod concurrency;
+mod delegates;
 mod domains;
 mod gc;
 mod layout;
@@ -146,6 +147,14 @@ impl Mono {
             add_icall(
                 c"GuestBridge::QueuedCallback".as_ptr(),
                 scheduler::queued_callback as *const () as Object,
+            );
+            add_icall(
+                c"GuestBridge::GuestDelegateNested".as_ptr(),
+                delegates::nested_callback as *const () as Object,
+            );
+            add_icall(
+                c"GuestBridge::GuestDelegateRetire".as_ptr(),
+                delegates::retire_callback as *const () as Object,
             );
             let assembly = open(domain, filename.as_ptr());
             assert!(!assembly.is_null());
@@ -595,6 +604,7 @@ fn main() {
     shared_array_probe(&mono, &mut *guest);
     concurrency::run(&mono);
     scheduler::run(&mono);
+    delegates::run(&mono);
     domains::run(&mono, &args[3]);
     if let Some(blocks) = args.get(5) {
         checked::run(&mono, &mut *guest, blocks);

@@ -76,7 +76,7 @@ def main():
         command.append(args.managed_inventory.resolve())
     records.append(execute(command, guarded, root, "run-guest-bridge"))
     content = (root / "run-guest-bridge.log").read_text()
-    for marker in ("PASS original PE", "PASS typed PE/IL ABI", "PASS shared pinned Mono array", "PASS two attached Mono threads", "PASS queued owner-thread Mono callbacks", "PASS native Mono child-domain lifecycle", "PASS scoped guest", "WIRE_NOEXEC_GUARD checks="):
+    for marker in ("PASS original PE", "PASS typed PE/IL ABI", "PASS shared pinned Mono array", "PASS two attached Mono threads", "PASS queued owner-thread Mono callbacks", "PASS one-use static Mono delegate callbacks", "PASS native Mono child-domain lifecycle", "PASS scoped guest", "WIRE_NOEXEC_GUARD checks="):
         if marker not in content:
             raise RuntimeError(f"Missing bridge evidence: {marker}")
     if args.checked_memory and "PASS checked scope rejects preexisting unchecked method transform" not in content:
@@ -133,6 +133,9 @@ def main():
               "production_guest_thread_scheduler_integrated": False,
               "native_child_domain_reset_unload_verified": True,
               "bridge_domain_generation_verified": True,
+              "static_int32_delegate_pool_lifecycle_verified": True,
+              "static_delegate_slots_reused": False,
+              "generic_production_delegate_dispatch_integrated": False,
               "production_unity_domain_lifecycle_integrated": False,
               "fixed_signature_cross_arch_float_struct_exception_verified": True,
               "unsafe_il_checked": False,
