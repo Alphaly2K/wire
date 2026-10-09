@@ -293,3 +293,26 @@ pointer意外调用新对象。没有owner的调用也拒绝且不访问VM。完
 当前受检Mint许可358/613：包含精确reference cells和登记的Int32[]，其他reference/
 array/helper、virtual/delegate/calli仍按scope原规则拒绝。以上委托测试在正常native IL
 路径中执行，不能把它当作扩大受检unsafe-IL permit的证据。
+
+## 后续：Mono-created threads 的 process-owned Windows 服务队列
+
+服务TLS有owner时直接执行，没有owner时通过进程级容量4队列请求固定owner。同一owner持有
+同一个Runtime64、Memory、GuestFs和文件句柄表。队列仅接受owned Send + static参数/结果；
+路径在caller复制为String，ref attributes/full-path输出在caller返回后写入，句柄只传数值。
+MonoIO的byte[]类型、signed范围和pin在caller核对/持有，write复制为owned Vec，read返回Vec
+后在caller复制回array。任何native/managed原始pointer均不进入队列。
+
+等待send/reply全程使用真实native stack marker进入Mono公开GC-safe API，返回后再触碰输出。
+SetLastError在caller写errno，由Mono wrapper保存为caller TLS；不沿用owner线程错误。
+SetThreadErrorMode仍限定local Scope：生产线程上下文未接入前，remote调用返回50，避免
+意外修改owner的thread error mode。该queue仍是fixture，不是已经接入游戏Process的scheduler。
+
+真实托管Thread.Start创建两个worker（不设置Rust Services TLS），复用一个FileStream跨线程
+seek/read，验证cwd/VFS、不同ManagedThreadId、不同错误2/87、失败ref output保持sentinel，
+反射MonoIO.Read无效句柄6且byte[]不变。owner处理36个job，期间6次强制GC；输出checksum正确。
+另12个预先保留route的attached callers覆盖队列pending/closed send/reply取消：所有owned capture
+均析构，任何service job都未执行；迟到任务没有borrowed stack/buffer可访问。撤销后cached
+P/Invoke/MonoIO仍返回50。完整M2 noexec guard checks=538、denied=0，Clippy clean。
+
+这证明Mono自己创建的线程可访问同一个服务owner，尚未完成production Process64/TLS/
+execution token、async I/O或任意native pointer验证，M3和游戏native backend继续false。

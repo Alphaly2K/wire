@@ -135,6 +135,56 @@ public static class NativeServicesProbe {
         Check(Marshal.GetLastWin32Error() == (id == 1 ? 2 : 87), "LastError leaked between native Mono threads");
         return 1;
     }
+    public static int ManagedThreadStreams() {
+        Check(Directory.GetCurrentDirectory() == "C:\\", "queued cwd");
+        byte[] expected = File.ReadAllBytes("C:\\present.txt");
+        Check(expected.Length == 26, "queued expected bytes");
+        Exception failure = null;
+        int[] totals = new int[2];
+        int[] identities = new int[2];
+        object errorLock = new object();
+        using (FileStream shared = File.OpenRead("C:\\present.txt")) {
+            System.Threading.Thread[] workers = new System.Threading.Thread[2];
+            for (int worker = 0; worker < 2; worker++) {
+                int id = worker;
+                workers[worker] = new System.Threading.Thread(() => {
+                    try {
+                        identities[id] = System.Threading.Thread.CurrentThread.ManagedThreadId;
+                        Check(Directory.GetCurrentDirectory() == "C:\\" && File.Exists("C:\\present.txt"), "queued worker VFS");
+                        AttributeData data = new AttributeData();
+                        data.SizeLow = 0x12345678;
+                        Check(!GetFileAttributesExW(id == 0 ? "C:\\missing.txt" : "C:\\present.txt", id == 0 ? 0 : 7, ref data), "queued error query");
+                        Check(Marshal.GetLastWin32Error() == (id == 0 ? 2 : 87) && data.SizeLow == 0x12345678, "queued LastError/no partial output");
+                        byte[] actual = new byte[13];
+                        lock (shared) {
+                            shared.Seek(id * 13, SeekOrigin.Begin);
+                            Check(shared.Read(actual, 0, 13) == 13, "cross-thread shared handle read");
+                        }
+                        for (int i = 0; i < 13; i++) {
+                            Check(actual[i] == expected[id * 13 + i], "queued byte mismatch");
+                            totals[id] += actual[i];
+                        }
+                        byte[] sentinel = new byte[] { 31, 32, 33, 34 };
+                        Type monoIO = typeof(File).Assembly.GetType("System.IO.MonoIO", true);
+                        System.Reflection.MethodInfo read = monoIO.GetMethod("Read", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic, null,
+                            new Type[] { typeof(IntPtr), typeof(byte[]), typeof(int), typeof(int), typeof(File).Assembly.GetType("System.IO.MonoIOError").MakeByRefType() }, null);
+                        object[] arguments = new object[] { new IntPtr(0xdead), sentinel, 1, 2, null };
+                        Check((int)read.Invoke(null, arguments) == -1 && Convert.ToInt32(arguments[4]) == 6, "queued invalid handle error");
+                        Check(sentinel[0] == 31 && sentinel[1] == 32 && sentinel[2] == 33 && sentinel[3] == 34, "queued invalid handle partial write");
+                        GC.Collect();
+                    } catch (Exception error) { lock (errorLock) { failure = error; } }
+                });
+                workers[worker].Start();
+            }
+            foreach (System.Threading.Thread worker in workers) Check(worker.Join(10000), "queued worker join timeout");
+        }
+        if (failure != null) throw new Exception("managed-created service thread: " + failure.Message);
+        Check(identities[0] != identities[1], "queued worker identities alias");
+        int first = 0, second = 0;
+        for (int i = 0; i < 13; i++) { first += expected[i]; second += expected[13 + i]; }
+        Check(totals[0] == first && totals[1] == second, "queued checksums");
+        return 1;
+    }
     public static int NoOwner() {
         AttributeData data = new AttributeData();
         Check(!GetFileAttributesExW("C:\\present.txt", 0, ref data), "ownerless entry used filesystem");

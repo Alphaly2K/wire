@@ -8,6 +8,7 @@ use wire::{
     x64::runtime::{Runtime64, TEB},
 };
 
+mod broker;
 mod io;
 
 const SCRATCH: u64 = 0x51000000;
@@ -59,20 +60,11 @@ unsafe extern "C" fn path_separator() -> i32 {
     b';' as i32
 }
 unsafe extern "C" fn current_directory(error: *mut i32) -> Object {
-    let result = std::panic::catch_unwind(|| {
-        SERVICES.with(|slot| {
-            let state = slot.get();
-            if state.is_null() {
-                None
-            } else {
-                Some(unsafe { &(*state).filesystem }.cwd())
-            }
-        })
-    });
-    let Ok(Some(path)) = result else {
+    let path: Option<String> = with_services(|services| Ok(Some(services.filesystem.cwd())));
+    let Some(path) = path else {
         if !error.is_null() {
             unsafe {
-                error.write_unaligned(50);
+                error.write_unaligned(*libc::__error());
             }
         }
         return ptr::null_mut();
@@ -549,10 +541,7 @@ impl Services {
         self.calls += 1;
         Ok(cpu.regs[0])
     }
-    fn attributes(&mut self, path: &str, level: i32, output: *mut u8) -> Result<i32, u32> {
-        if output.is_null() {
-            return Err(87);
-        }
+    fn attributes(&mut self, path: &str, level: i32) -> Result<(i32, [u8; 36]), u32> {
         if level != 0 {
             return Err(87);
         }
@@ -575,18 +564,17 @@ impl Services {
         self.memory
             .read(SCRATCH + 65536, &mut data)
             .map_err(|_| 998u32)?;
-        // Only admitted trusted marshaling wrappers reach this entry; their
-        // ref struct retains valid native storage for these exact 36 bytes.
-        unsafe { ptr::copy_nonoverlapping(data.as_ptr(), output, data.len()) };
-        Ok(value)
+        Ok((value, data))
     }
 }
-fn with_services<T: Default>(f: impl FnOnce(&mut Services) -> Result<T, u32>) -> T {
+fn with_services<T: Default + Send + 'static>(
+    f: impl FnOnce(&mut Services) -> Result<T, u32> + Send + 'static,
+) -> T {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         SERVICES.with(|slot| {
             let state = slot.get();
             if state.is_null() {
-                Err(50)
+                broker::request(f)
             } else {
                 f(unsafe { &mut *state })
             }
@@ -618,27 +606,54 @@ unsafe fn wide(pointer: *const u16) -> Result<String, u32> {
     }
     Err(206)
 }
+fn local_error<T: Default>(error: u32) -> T {
+    unsafe {
+        *libc::__error() = error as i32;
+    }
+    T::default()
+}
+unsafe fn attributes_owned(name: Result<String, u32>, level: i32, output: *mut u8) -> i32 {
+    if output.is_null() {
+        return local_error(87);
+    }
+    let name = match name {
+        Ok(name) => name,
+        Err(error) => return local_error(error),
+    };
+    let result: Option<(i32, [u8; 36])> =
+        with_services(move |services| services.attributes(&name, level).map(Some));
+    let Some((value, data)) = result else {
+        return 0;
+    };
+    // Copy only on the calling Mono thread after leaving the queue's GC-safe wait.
+    unsafe {
+        ptr::copy_nonoverlapping(data.as_ptr(), output, data.len());
+    }
+    value
+}
 unsafe extern "C" fn attributes_wide(path: *const u16, level: i32, output: *mut u8) -> i32 {
-    with_services(|services| services.attributes(&unsafe { wide(path) }?, level, output))
+    unsafe { attributes_owned(wide(path), level, output) }
 }
 unsafe extern "C" fn attributes_utf8(path: *const c_char, level: i32, output: *mut u8) -> i32 {
-    with_services(|services| {
-        if path.is_null() {
-            return Err(87);
-        }
-        let name = unsafe { CStr::from_ptr(path) }
+    let name = if path.is_null() {
+        Err(87)
+    } else {
+        unsafe { CStr::from_ptr(path) }
             .to_str()
-            .map_err(|_| 123u32)?;
-        services.attributes(name, level, output)
-    })
+            .map(str::to_owned)
+            .map_err(|_| 123u32)
+    };
+    unsafe { attributes_owned(name, level, output) }
 }
 unsafe extern "C" fn set_thread_error_mode(mode: u32, previous: *mut u32) -> i32 {
-    with_services(|services| {
-        let at = if previous.is_null() {
-            0
-        } else {
-            SCRATCH + 65536
-        };
+    // Thread contexts are not yet integrated into the process broker. This
+    // entry is still local-scope only, rather than changing the owner thread.
+    if SERVICES.with(|slot| slot.get().is_null()) {
+        return local_error(50);
+    }
+    let has_previous = !previous.is_null();
+    let result: Option<(i32, u32)> = with_services(move |services| {
+        let at = if has_previous { SCRATCH + 65536 } else { 0 };
         let value = services.call("SetThreadErrorMode", &[mode as u64, at])? as i32;
         if value == 0 {
             return Err(services
@@ -646,20 +661,36 @@ unsafe extern "C" fn set_thread_error_mode(mode: u32, previous: *mut u32) -> i32
                 .read_int(TEB + 0x68, 4)
                 .map_err(|_| 998u32)? as u32);
         }
-        if !previous.is_null() {
-            let value = services.memory.read_int(at, 4).map_err(|_| 998u32)? as u32;
-            unsafe {
-                previous.write_unaligned(value);
-            }
+        let old = if has_previous {
+            services.memory.read_int(at, 4).map_err(|_| 998u32)? as u32
+        } else {
+            0
+        };
+        Ok(Some((value, old)))
+    });
+    let Some((value, old)) = result else {
+        return 0;
+    };
+    if has_previous {
+        unsafe {
+            previous.write_unaligned(old);
         }
-        Ok(value)
-    })
+    }
+    value
 }
 unsafe extern "C" fn set_error_mode(mode: i32) -> i32 {
-    with_services(|services| {
+    with_services(move |services| {
         services
             .call("SetErrorMode", &[mode as u32 as u64])
             .map(|x| x as i32)
+    })
+}
+fn full_path_owned(name: String) -> Option<Vec<u16>> {
+    with_services(move |services| {
+        let full = services
+            .filesystem
+            .guest_path(&services.filesystem.resolve(&name)?);
+        Ok(Some(full.encode_utf16().collect()))
     })
 }
 unsafe extern "C" fn full_path_wide(
@@ -668,63 +699,62 @@ unsafe extern "C" fn full_path_wide(
     output: *mut u16,
     file_part: Object,
 ) -> i32 {
-    with_services(|services| {
-        if !file_part.is_null() || !(0..=32768).contains(&capacity) {
-            return Err(87);
-        }
-        let name = unsafe { wide(path) }?;
-        let full = services
-            .filesystem
-            .guest_path(&services.filesystem.resolve(&name)?);
-        let units: Vec<u16> = full.encode_utf16().collect();
-        if capacity as usize <= units.len() {
-            return Ok((units.len() + 1) as i32);
-        }
-        if output.is_null() {
-            return Err(87);
-        }
-        unsafe {
-            ptr::copy_nonoverlapping(units.as_ptr(), output, units.len());
-            output.add(units.len()).write(0);
-        }
-        Ok(units.len() as i32)
-    })
+    if !file_part.is_null() || !(0..=32768).contains(&capacity) {
+        return local_error(87);
+    }
+    let name = match unsafe { wide(path) } {
+        Ok(name) => name,
+        Err(error) => return local_error(error),
+    };
+    let Some(units) = full_path_owned(name) else {
+        return 0;
+    };
+    if capacity as usize <= units.len() {
+        return (units.len() + 1) as i32;
+    }
+    if output.is_null() {
+        return local_error(87);
+    }
+    unsafe {
+        ptr::copy_nonoverlapping(units.as_ptr(), output, units.len());
+        output.add(units.len()).write(0);
+    }
+    units.len() as i32
 }
-
 unsafe extern "C" fn full_path_builder_wide(
     path: *const u16,
     capacity: i32,
     output: *mut u16,
     file_part: *mut Object,
 ) -> i32 {
-    with_services(|services| {
-        if !(0..=32768).contains(&capacity) {
-            return Err(87);
+    if !(0..=32768).contains(&capacity) {
+        return local_error(87);
+    }
+    let name = match unsafe { wide(path) } {
+        Ok(name) => name,
+        Err(error) => return local_error(error),
+    };
+    let Some(units) = full_path_owned(name) else {
+        return 0;
+    };
+    if capacity as usize <= units.len() {
+        return (units.len() + 1) as i32;
+    }
+    if output.is_null() {
+        return local_error(87);
+    }
+    unsafe {
+        ptr::copy_nonoverlapping(units.as_ptr(), output, units.len());
+        output.add(units.len()).write(0);
+        if !file_part.is_null() {
+            let index = units
+                .iter()
+                .rposition(|&unit| unit == b'\\' as u16)
+                .map_or(0, |index| index + 1);
+            file_part.write(output.add(index).cast());
         }
-        let name = unsafe { wide(path) }?;
-        let full = services
-            .filesystem
-            .guest_path(&services.filesystem.resolve(&name)?);
-        let units: Vec<u16> = full.encode_utf16().collect();
-        if capacity as usize <= units.len() {
-            return Ok((units.len() + 1) as i32);
-        }
-        if output.is_null() {
-            return Err(87);
-        }
-        unsafe {
-            ptr::copy_nonoverlapping(units.as_ptr(), output, units.len());
-            output.add(units.len()).write(0);
-            if !file_part.is_null() {
-                let index = units
-                    .iter()
-                    .rposition(|&unit| unit == b'\\' as u16)
-                    .map_or(0, |index| index + 1);
-                file_part.write(output.add(index).cast());
-            }
-        }
-        Ok(units.len() as i32)
-    })
+    }
+    units.len() as i32
 }
 
 pub fn run(mono: &Mono, assembly: &str, root: &std::path::Path) {
@@ -984,6 +1014,7 @@ pub fn run(mono: &Mono, assembly: &str, root: &std::path::Path) {
             .into_iter()
             .map(|worker| worker.join().unwrap())
             .sum::<u64>();
+    let calls = calls + broker::run(mono, class, filesystem);
     // Cached static P/Invoke entries cannot outlive their service token: this
     // call returns a checked error and performs no host filesystem access.
     let method = unsafe { (mono.method)(class, c"NoOwner".as_ptr(), 0) };

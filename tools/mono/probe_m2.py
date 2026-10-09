@@ -96,7 +96,7 @@ def main():
     if args.native_services and "PASS typed native Windows services" not in content:
         raise RuntimeError("Missing native service evidence")
     if args.native_services:
-        for marker in ("PASS BDWGC interpreter roots", "NATIVE_SERVICE_RESULT ManagedStreams=1", "NATIVE_SERVICE_RESULT ManagedQueries=1"):
+        for marker in ("PASS BDWGC interpreter roots", "NATIVE_SERVICE_RESULT ManagedStreams=1", "NATIVE_SERVICE_RESULT ManagedQueries=1", "PASS process-owned native Windows service queue", "PASS native service queue cancellation"):
             if marker not in content:
                 raise RuntimeError(f"Missing native service regression evidence: {marker}")
     guard = re.search(r"WIRE_NOEXEC_GUARD checks=(\d+) denied=(\d+)", content)
@@ -152,6 +152,10 @@ def main():
               "platform_contract": platform_contract,
               "trusted_classlib_native_services_verified": args.native_services,
               "trusted_classlib_filestream_verified": args.native_services,
+              "mono_created_thread_process_service_queue_verified": args.native_services,
+              "process_service_owned_queue_cancellation_verified": args.native_services,
+              "service_queue_raw_pointer_parameters": False,
+              "production_process_service_owner_integrated": False,
               "bdwgc_interp_roots_patch_sha256": sha256(HERE / "patches/0012-bdwgc-interpreter-stack-roots.patch"),
               "class_profile_patch_sha256": sha256(HERE / "patches/0013-immutable-class-profile-fields.patch"),
               "msvc_class_abi_patch_sha256": sha256(HERE / "patches/0014-opt-in-msvc-class-bitfield-abi.patch"),

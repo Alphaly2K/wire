@@ -2,17 +2,18 @@
 //! managed byte arrays are pinned only across the bounded service operation.
 use super::*;
 const OUTPUT: u64 = SCRATCH + 65536;
-fn result<T: Copy>(
+fn result<T: Copy + Send + 'static>(
     error: *mut i32,
     failure: T,
-    operation: impl FnOnce(&mut Services) -> Result<T, u32>,
+    operation: impl FnOnce(&mut Services) -> Result<T, u32> + Send + 'static,
 ) -> T {
-    let value = with_services(|services| {
-        if error.is_null() {
-            return Err(87);
+    if error.is_null() {
+        unsafe {
+            *libc::__error() = 87;
         }
-        operation(services).map(Some)
-    });
+        return failure;
+    }
+    let value = with_services(move |services| operation(services).map(Some));
     let status = if value.is_some() {
         0
     } else {
@@ -57,8 +58,18 @@ pub(super) unsafe extern "C" fn open(
     options: i32,
     error: *mut i32,
 ) -> Object {
-    result(error, usize::MAX as Object, |services| {
-        let name = unsafe { wide(path) }?;
+    let name = match unsafe { wide(path) } {
+        Ok(name) => name,
+        Err(status) => {
+            if !error.is_null() {
+                unsafe {
+                    error.write_unaligned(status as i32);
+                }
+            }
+            return usize::MAX as Object;
+        }
+    };
+    result(error, u64::MAX, move |services| {
         let access = match access {
             1 => 0x80000000,
             2 => 0x40000000,
@@ -97,26 +108,27 @@ pub(super) unsafe extern "C" fn open(
                 return Err(error);
             }
         }
-        Ok(handle as Object)
-    })
+        Ok(handle)
+    }) as Object
 }
 pub(super) unsafe extern "C" fn close(handle: Object, error: *mut i32) -> i32 {
-    result(error, 0, |services| {
-        services
-            .boolean_call("CloseHandle", &[handle as u64])
-            .map(|()| 1)
+    let handle = handle as u64;
+    result(error, 0, move |services| {
+        services.boolean_call("CloseHandle", &[handle]).map(|()| 1)
     })
 }
 pub(super) unsafe extern "C" fn flush(handle: Object, error: *mut i32) -> i32 {
-    result(error, 0, |services| {
+    let handle = handle as u64;
+    result(error, 0, move |services| {
         services
-            .boolean_call("FlushFileBuffers", &[handle as u64])
+            .boolean_call("FlushFileBuffers", &[handle])
             .map(|()| 1)
     })
 }
 pub(super) unsafe extern "C" fn file_type(handle: Object, error: *mut i32) -> i32 {
-    result(error, 0, |services| {
-        let kind = services.call("GetFileType", &[handle as u64])? as i32;
+    let handle = handle as u64;
+    result(error, 0, move |services| {
+        let kind = services.call("GetFileType", &[handle])? as i32;
         if kind == 0 {
             Err(services.last_error())
         } else {
@@ -125,8 +137,9 @@ pub(super) unsafe extern "C" fn file_type(handle: Object, error: *mut i32) -> i3
     })
 }
 pub(super) unsafe extern "C" fn length(handle: Object, error: *mut i32) -> i64 {
-    result(error, -1, |services| {
-        services.boolean_call("GetFileSizeEx", &[handle as u64, OUTPUT])?;
+    let handle = handle as u64;
+    result(error, -1, move |services| {
+        services.boolean_call("GetFileSizeEx", &[handle, OUTPUT])?;
         Ok(services.memory.read_int(OUTPUT, 8).map_err(|_| 998u32)? as i64)
     })
 }
@@ -136,10 +149,11 @@ pub(super) unsafe extern "C" fn seek(
     origin: i32,
     error: *mut i32,
 ) -> i64 {
-    result(error, -1, |services| {
+    let handle = handle as u64;
+    result(error, -1, move |services| {
         services.boolean_call(
             "SetFilePointerEx",
-            &[handle as u64, offset as u64, OUTPUT, origin as u32 as u64],
+            &[handle, offset as u64, OUTPUT, origin as u32 as u64],
         )?;
         Ok(services.memory.read_int(OUTPUT, 8).map_err(|_| 998u32)? as i64)
     })
@@ -200,33 +214,60 @@ unsafe fn transfer(
     }
     let data = unsafe { (api.array_addr)(array, 1, offset as usize) }.cast::<u8>();
     let length = (count as usize).min(65536);
-    result(error, -1, |services| {
+    if error.is_null() {
+        unsafe {
+            *libc::__error() = 87;
+        }
+        return -1;
+    }
+    let handle = handle as u64;
+    let input = if writing {
+        unsafe { std::slice::from_raw_parts(data, length) }.to_vec()
+    } else {
+        Vec::new()
+    };
+    let reply: Option<(i32, Vec<u8>)> = with_services(move |services| {
         if writing {
-            services
-                .memory
-                .write(SCRATCH, unsafe { std::slice::from_raw_parts(data, length) })
-                .map_err(|_| 998u32)?;
+            services.memory.write(SCRATCH, &input).map_err(|_| 998u32)?;
         }
         services.boolean_call(
             if writing { "WriteFile" } else { "ReadFile" },
-            &[handle as u64, SCRATCH, length as u64, OUTPUT, 0],
+            &[handle, SCRATCH, length as u64, OUTPUT, 0],
         )?;
         let transferred = services.memory.read_int(OUTPUT, 4).map_err(|_| 998u32)? as usize;
         if transferred > length {
             return Err(998);
         }
+        let mut bytes = if writing {
+            Vec::new()
+        } else {
+            vec![0; transferred]
+        };
         if !writing {
-            let mut bytes = vec![0; transferred];
             services
                 .memory
                 .read(SCRATCH, &mut bytes)
                 .map_err(|_| 998u32)?;
-            unsafe {
-                ptr::copy_nonoverlapping(bytes.as_ptr(), data, transferred);
-            }
         }
-        Ok(transferred as i32)
-    })
+        Ok(Some((transferred as i32, bytes)))
+    });
+    let Some((transferred, bytes)) = reply else {
+        unsafe {
+            error.write_unaligned(*libc::__error());
+        }
+        return -1;
+    };
+    // The caller retains the byte[] pin for the entire wait and copy. No
+    // managed/native pointer enters the owner queue, even for read/ref output.
+    if !writing {
+        unsafe {
+            ptr::copy_nonoverlapping(bytes.as_ptr(), data, bytes.len());
+        }
+    }
+    unsafe {
+        error.write_unaligned(0);
+    }
+    transferred
 }
 pub(super) unsafe extern "C" fn read(
     handle: Object,
