@@ -191,3 +191,69 @@ feature all-target Clippy `-D warnings` clean。Mono 19-patch stack/dylib 未变
 owner-thread guest reentry。不能把未知 guest target 直接交给 native mono_add_internal_call。
 随后是 profiler GC callbacks、UnityTLS、managed image/assembly loading；完整 ABI、生产
 roots、Windows services/scheduler 仍需逐项验证。不要反复从孤立 fixture 重新开始。
+
+## 继续推进进展（独立 worktree，主代码未合并）
+
+实施路径仍为`/Users/alphaly/.codex/worktrees/native-mono-shared-memory/wire`，分支
+`codex/native-mono-shared-memory`。新增提交：b67d9ea（真实bindings/profiler）、7a3a062
+（UnityTLS/image）、e8f2aba（typed metadata），随后rooted string提交已在该分支完成。
+
+真实Unity已经完成10824注册entry核对、82个image/assembly循环、5643 metadata查询，
+53B输入native string创建/stack交接/强制GC保活和退休。最新证据位于worktree
+`wire-out/native-mono-unity-strings-probe-01`，guard178/0、无original Mono attach。
+首次pending invoke确认System.Type.GetType(String)，正在继续reflection对象桥接。
+完整game Admission仍false，未宣称完整游戏原生执行/加速。主checkout代码未改；
+浮点和翻译缓存未改，其他agent可继续其工作。下一位接手应使用该分支及其最新handoff，
+不要从本主checkout旧provider或孤立fixture重新开始。
+
+## 真实绑定及 GC/shutdown 已接入（本轮）
+
+最新实现仍在本独立分支；实际 10,824 注册名/PC 与 original trace 逐项匹配，两个真实
+CoreModule Boolean InternalCall 完成 native Mono → 固定 ARM64 adapter → Win64解释器往返。
+其他10,822项仍deferred，完整game Admission false。legacy/new profiler NULL handle均已处理；
+真实GC8回调/0xfe1、cleanup再GC8回调及shutdown1次已实测，guard89/0。
+证据 `wire-out/native-mono-unity-profiler-probe-04`；详情
+`docs/native-mono-unity-bindings-profiler-2026-10-09.md`。继续UnityTLS及managed image加载。
+用户最新要求不碰其他agent的浮点/翻译缓存代码；本轮没有涉及这些实现。
+
+## UnityTLS / 82 native image cycles 已实测（继续中）
+
+`native-mono-unity-images-probe-01`完成实际82 open/load/close/get-image；native refs退休，
+原始Mono未执行，guard178/0。UnityTLS两个struct/ref叶入口有真实表函数指针对照；其他31项
+typed fail-stop，网络未实现。新边界pre-images/images；后者止于首个class query前。
+当前feature完整Rust394通过/7 ignored，feature Clippy clean，默认回归正在运行。
+详见 `docs/native-mono-unity-images-2026-10-09.md`。继续typed metadata，不碰浮点/翻译缓存。
+
+## Typed metadata 已推进至string构造（继续中）
+
+`native-mono-unity-metadata-probe-05`实际5643 query/955 typed handles/687 owned names，guard176/0。
+82次真实image生命周期及GC/TLS/cleanup仍通过，当前domain身份已核对，NULL stack roots可清。
+止于mono_string_new_len，args rootToken + UTF8源53B。详情
+`docs/native-mono-unity-metadata-2026-10-09.md`。Class userdata只映射8B owned scalar shadow，
+不写native userdata，不准入依赖此字段的managed callbacks/完整metadata ABI。
+下一步继续string强根和受检视图及stack-reference；default365/feature394是上一images阶段
+完整验证，不代表后续对象代码。仍不碰浮点/翻译缓存；用户授权持续自己测修提交、不push。
+
+## Rooted string 已完成，继续首个 managed invoke
+
+`native-mono-unity-strings-probe-01`：真实53B输入string经native GC验证身份/payload，guard178/0。
+首次invoke为System.Type.GetType(String)，不是先前推测的Assembly.LoadFrom。该阶段仍stop-before。
+详见`docs/native-mono-unity-strings-2026-10-09.md`。继续reflection object/typed managed invoke。
+metadata完整feature回归395 passed / 7 ignored；string targeted11与all-target Clippy通过。
+
+## 真实 managed GetType 已执行，继续 classlib 初始化
+
+`native-mono-unity-managed-types-probe-03`：1次native GetType，RuntimeType/string强制GC
+验证通过，17546 metadata queries/1926 handles，guard176/0。下一invoke是CoreModule
+ClassLibraryInitializer.InitAssemblyRedirections static void()，owned IL/依赖已查明。
+详见`docs/native-mono-unity-managed-types-2026-10-09.md`，不要停在这个小里程碑。
+
+## Classlib redirections 已执行，继续 UnityLogWriter
+
+`native-mono-unity-classlib-probe-02` 实际执行 InitAssemblyRedirections static void()。
+20-patch 独立 runtime 修复 no-JIT remoting field wrapper 的缺失 IL，六套 native fixture/
+五条 noexec 路由、完整feature397/7ignored、Clippy和build5tests通过，guard176/0。
+详情 `docs/native-mono-unity-classlib-2026-10-09.md`。新 runtime/support pair 与旧 pair
+严格分开；旧19-patch源码与marker已恢复核对，旧dylib未变。
+下一真实invoke是 ClassLibraryInitializer.Init（0x060022fe）→ UnityLogWriter.Init。
+完整game backend仍false，持续推进，不碰浮点/翻译缓存。
