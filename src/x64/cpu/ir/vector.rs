@@ -112,6 +112,9 @@ pub(super) fn lower(i: &Instruction, mut ir: ScalarIr) -> Option<ScalarIr> {
     if op == SCALAR_MOVE && vector(ir.dst) && vector(ir.src) {
         ir.aux |= PRESERVE_HIGH;
     }
+    if ir.register_safe() {
+        ir.addressing |= REGISTER_ONLY;
+    }
     Some(ir)
 }
 
@@ -128,11 +131,11 @@ impl ScalarIr {
         &self,
         cpu: &Cpu64,
         r: u8,
-        mem: &Memory,
+        mem: &impl IrMemory,
     ) -> Result<[u8; 16], String> {
         let mut value = [0; 16];
         if r == MEMORY {
-            mem.read(self.address(cpu), &mut value[..SIZE])?;
+            mem.read_bytes(self.address(cpu), &mut value[..SIZE])?;
         } else if r >= XMM {
             value[..SIZE].copy_from_slice(&cpu.xmm[(r - XMM) as usize][..SIZE]);
         } else {
@@ -143,7 +146,19 @@ impl ScalarIr {
     }
 
     #[inline(never)]
-    pub(super) fn execute_vector(&self, cpu: &mut Cpu64, mem: &mut Memory) -> Result<(), String> {
+    pub(super) fn execute_vector_checked(
+        &self,
+        cpu: &mut Cpu64,
+        mem: &mut Memory,
+    ) -> Result<(), String> {
+        self.execute_vector(cpu, mem)
+    }
+    #[inline(always)]
+    pub(super) fn execute_vector(
+        &self,
+        cpu: &mut Cpu64,
+        mem: &mut impl IrMemory,
+    ) -> Result<(), String> {
         let op = self.opcode >> 2;
         let width = 1usize << (self.opcode & 3);
         if self.aux & ALIGNED != 0
@@ -201,7 +216,7 @@ impl ScalarIr {
         };
         // This is the only write and the last fallible action.
         if self.dst == MEMORY {
-            mem.write(self.address(cpu), &value[..size])?;
+            mem.write_bytes(self.address(cpu), &value[..size])?;
         } else if self.dst >= XMM {
             cpu.xmm[(self.dst - XMM) as usize] = value;
         } else {

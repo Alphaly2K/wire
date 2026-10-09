@@ -1593,3 +1593,57 @@ fn pe32_scalar_fp_preserves_lazy_flags_and_comi_discards_them_only_after_success
         }
     }
 }
+
+#[test]
+fn pe32_mixed_runs_preserve_all_entries_budgets_and_flags() {
+    use iced_x86::{Decoder, DecoderOptions};
+    let code = [
+        0x01, 0xd8, 0x66, 0x0f, 0xd4, 0xf9, 0x41, 0x66, 0x0f, 0x64, 0xd7, 0x66, 0x0f, 0x7e, 0xfa,
+        0x0f, 0x92, 0xc0, 0x66, 0x0f, 0xef, 0xf6, 0x0f, 0xba, 0xeb, 3, 0x11, 0xd9, 0xcc,
+    ];
+    let mut decoder = Decoder::with_ip(32, &code, CODE as u64, DecoderOptions::NONE);
+    let mut entries = Vec::new();
+    while decoder.can_decode() {
+        entries.push(decoder.decode().ip() as u32);
+    }
+    for entry in entries {
+        for budget in 0..=12 {
+            for seed in [0u32, 0x7fffffff, u32::MAX] {
+                let mut states = Vec::new();
+                for installed in [false, true] {
+                    let (mut cpu, mut mem) = machine(&code, installed);
+                    cpu.eip = entry;
+                    cpu.regs[0] = seed;
+                    cpu.regs[1] = seed;
+                    cpu.regs[3] = seed;
+                    cpu.eflags = 2 | FLAGS;
+                    for (n, x) in cpu.xmm.iter_mut().enumerate() {
+                        *x = seed
+                            .rotate_left(n as u32)
+                            .to_le_bytes()
+                            .repeat(4)
+                            .try_into()
+                            .unwrap();
+                    }
+                    let outcome = run(&mut cpu, &mut mem, budget);
+                    states.push((
+                        outcome.to_string_for_test(),
+                        cpu.regs,
+                        cpu.xmm,
+                        cpu.eip,
+                        cpu.effective_eflags(),
+                        cpu.mxcsr,
+                        cpu.instr_count,
+                    ));
+                    if installed && entry == CODE && budget >= 8 {
+                        assert!(cpu.ir_scalar_runs > 0);
+                    }
+                }
+                assert_eq!(
+                    states[0], states[1],
+                    "entry={entry:x} budget={budget} seed={seed:x}"
+                );
+            }
+        }
+    }
+}

@@ -18,6 +18,13 @@ const REGISTER_ONLY: u8 = 128;
 trait IrMemory {
     const REGISTER_ONLY: bool = false;
     fn read_int(&self, address: u64, size: usize) -> Result<u64, String>;
+    fn read_bytes(&self, _: u64, _: &mut [u8]) -> Result<(), String> {
+        unreachable!("register segment byte read")
+    }
+    fn write_bytes(&mut self, _: u64, _: &[u8]) -> Result<(), String> {
+        unreachable!("register segment byte write")
+    }
+
     fn write_int(&mut self, address: u64, size: usize, value: u64) -> Result<(), String>;
     fn modify_int(
         &mut self,
@@ -30,6 +37,12 @@ trait IrMemory {
     }
 }
 impl IrMemory for Memory {
+    fn read_bytes(&self, address: u64, out: &mut [u8]) -> Result<(), String> {
+        Memory::read(self, address, out)
+    }
+    fn write_bytes(&mut self, address: u64, bytes: &[u8]) -> Result<(), String> {
+        Memory::write(self, address, bytes)
+    }
     fn read_int(&self, address: u64, size: usize) -> Result<u64, String> {
         Memory::read_int(self, address, size)
     }
@@ -142,7 +155,7 @@ impl ScalarIr {
             if self.opcode >> 2 >= fp::FIRST {
                 self.execute_fp(cpu, mem)?;
             } else {
-                self.execute_vector(cpu, mem)
+                self.execute_vector_checked(cpu, mem)
                     .map_err(|e| format!("{:#x} vector IR opcode {}: {e}", cpu.rip, self.opcode))?;
             }
             cpu.rip = cpu.rip.wrapping_add(self.len as u64);
@@ -343,14 +356,14 @@ impl ScalarIr {
 
     fn register_safe(&self) -> bool {
         let op = self.opcode >> 2;
-        self.is_scalar()
+        (self.is_scalar() || (VECTOR_FIRST..STRING).contains(&op))
             && self.dst != MEMORY
             && (self.src != MEMORY || op == LEA)
             && !matches!(op, PUSH | POP | CALL | RETURN)
     }
     #[inline(always)]
     pub(crate) fn register_only(&self) -> bool {
-        self.is_scalar() && self.addressing & REGISTER_ONLY != 0
+        self.addressing & REGISTER_ONLY != 0
     }
     pub(crate) fn without_segment(mut self) -> Self {
         self.addressing &= !REGISTER_ONLY;

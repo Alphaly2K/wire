@@ -63,9 +63,14 @@ impl RegisterSegment {
         self.instructions.len() as u64
     }
     pub(crate) fn execute(&self, cpu: &mut Cpu64) {
+        // Verifier: no admitted operation reads RIP, and only the final
+        // instruction can branch. Absolute RIP-relative operands were fixed
+        // during lowering. A split budget uses single-instruction execution.
+        cpu.rip = cpu.rip.wrapping_add(self.bytes);
         for (n, ir) in self.instructions.iter().enumerate() {
-            cpu.rip = cpu.rip.wrapping_add(ir.len as u64);
-            let result = if self.update_flags & (1 << n) != 0 {
+            let result = if !ir.is_scalar() {
+                ir.execute_vector(cpu, &mut RegisterMemory)
+            } else if self.update_flags & (1 << n) != 0 {
                 ir.execute::<_, true>(cpu, &mut RegisterMemory)
             } else {
                 ir.execute::<_, false>(cpu, &mut RegisterMemory)
@@ -109,6 +114,16 @@ mod tests {
     fn every_budget_entry_and_flag_dependency_matches_single_transactional_execution() {
         const PC: u64 = 0x140000000;
         let programs: Vec<Vec<u8>> = vec![
+            // Mixed high-XMM, fixed lanes, scalar transfers and FLAGS readers.
+            vec![
+                0x66, 0x45, 0x0f, 0xd4, 0xc1, 0x48, 0x01, 0xd8, 0x66, 0x45, 0x0f, 0x64, 0xd1, 0x66,
+                0x49, 0x0f, 0x7e, 0xc2, 0x49, 0xff, 0xc1, 0x0f, 0x92, 0xc0, 0x66, 0x45, 0x0f, 0xef,
+                0xc0, 0x66, 0x4d, 0x0f, 0x6e, 0xd2, 0x48, 0x11, 0xd9,
+            ],
+            vec![
+                0x66, 0x0f, 0x6f, 0xc1, 0x66, 0x0f, 0xfb, 0xc0, 0x0f, 0x28, 0xc8, 0x48, 0x85, 0xc0,
+                0x75, 0xf0,
+            ],
             // ADC consumes ADD's carry; later CMP overwrites XOR/ADC flags.
             vec![
                 0x48, 0x01, 0xd8, 0x48, 0x11, 0xd9, 0x49, 0x89, 0xc2, 0x4c, 0x31, 0xd1, 0x48, 0x8d,
@@ -168,6 +183,15 @@ mod tests {
                                 .rotate_left(n as u32 * 3);
                         }
                         fast.regs[1] = seed;
+                        for (n, value) in fast.xmm.iter_mut().enumerate() {
+                            *value = seed
+                                .wrapping_mul(0x123456789abcdef)
+                                .rotate_left(n as u32)
+                                .to_le_bytes()
+                                .repeat(2)
+                                .try_into()
+                                .unwrap();
+                        }
                         let mut slow = fast.clone();
                         let mut left = budget;
                         // Install the entry without executing it; lowering ahead

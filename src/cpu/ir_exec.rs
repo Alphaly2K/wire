@@ -235,7 +235,20 @@ impl Cpu {
                     // budget ends inside, use normal per-guest dispatch instead.
                     for index in r.index..r.index + scalar_len {
                         r.hot = self.ir_cache.as_ref().unwrap().scalar_hot(index);
-                        self.execute_scalar(r.hot, true);
+                        if r.hot.inst.opcode() == 134 {
+                            let descriptor = self
+                                .ir_cache
+                                .as_ref()
+                                .unwrap()
+                                .simd(r.hot.inst.aux as usize);
+                            let pc = self.eip;
+                            self.eip = r.hot.next_ip;
+                            descriptor
+                                .execute(self, mem, pc)
+                                .expect("verified register SSE cannot fault");
+                        } else {
+                            self.execute_scalar(r.hot, true);
+                        }
                     }
                     executed = scalar_len as u64;
                     self.ir_scalar_runs += 1;

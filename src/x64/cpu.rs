@@ -349,10 +349,10 @@ impl Cpu64 {
         allowed: impl FnMut(u64, u64) -> bool,
     ) -> Result<bool, String> {
         if let Some(ir) = mem.cached_ir(self.rip)? {
+            if ir.register_only() && mem.try_register_segment(self, remaining, allowed) {
+                return Ok(true);
+            }
             if ir.is_scalar() {
-                if ir.register_only() && mem.try_register_segment(self, remaining, allowed) {
-                    return Ok(true);
-                }
                 ir.step_scalar(self, mem)?;
                 mem.record_execution(true);
             } else {

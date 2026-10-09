@@ -198,6 +198,54 @@ impl Descriptor {
         }
         Ok(b)
     }
+    pub(crate) fn register_safe(&self) -> bool {
+        self.dst != MEMORY
+            && self.src != MEMORY
+            && self.dst != super::ESP as u8
+            && matches!(
+                self.m,
+                M::Movups
+                    | M::Movaps
+                    | M::Movupd
+                    | M::Movapd
+                    | M::Movdqu
+                    | M::Movdqa
+                    | M::Movss
+                    | M::Movsd
+                    | M::Movd
+                    | M::Movq
+                    | M::Pand
+                    | M::Pandn
+                    | M::Por
+                    | M::Pxor
+                    | M::Andps
+                    | M::Andnps
+                    | M::Orps
+                    | M::Xorps
+                    | M::Andpd
+                    | M::Andnpd
+                    | M::Orpd
+                    | M::Xorpd
+                    | M::Paddb
+                    | M::Paddw
+                    | M::Paddd
+                    | M::Paddq
+                    | M::Psubb
+                    | M::Psubw
+                    | M::Psubd
+                    | M::Psubq
+                    | M::Pcmpeqb
+                    | M::Pcmpeqw
+                    | M::Pcmpeqd
+                    | M::Pcmpgtb
+                    | M::Pcmpgtw
+                    | M::Pcmpgtd
+                    | M::Bt
+                    | M::Bts
+                    | M::Btr
+                    | M::Btc
+            )
+    }
     pub(crate) fn execute(self, cpu: &mut Cpu, mem: &GuestMem, pc: u32) -> Result<(), CpuError> {
         let result = self.execute_inner(cpu, mem, pc);
         if result.is_err() {

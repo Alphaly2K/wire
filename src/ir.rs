@@ -781,10 +781,14 @@ impl Cache {
         // eight accepted, contiguous, nonfaulting scalar operations within one
         // guest page; only the last may branch. No instruction in a run can
         // write code, change protection, switch threads or change callback ESP.
+        let member = |hot: compact::Hot| {
+            compact::scalar_member(hot.inst)
+                || hot.inst.opcode() == 134 && cache.simd[hot.inst.aux as usize].register_safe()
+        };
         for index in (0..cache.hot.len()).rev() {
             let r = &cache.records[index];
             let hot = cache.hot[index];
-            if !compact::scalar_member(hot.inst)
+            if !member(hot)
                 || matches!(hot.inst.opcode(), compact::JCC_BASE..=compact::JMP_I32)
                 || cache.slots[(r.ip() - base) as usize] != index as u32 + 1
                 || hot.next_slot() != index as u32 + 2
@@ -792,7 +796,7 @@ impl Cache {
                 continue;
             }
             let next = cache.hot[index + 1];
-            if !compact::scalar_member(next.inst) {
+            if !member(next) {
                 continue;
             }
             let len = (1 + next.scalar_len()).min(8);
