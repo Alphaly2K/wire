@@ -79,6 +79,7 @@ const IMUL: u8 = 27;
 const EXTEND_ACC: u8 = 28;
 const BSWAP: u8 = 29;
 const BIT_SCAN: u8 = 30;
+const BIT_TEST: u8 = 31;
 const VECTOR_FIRST: u8 = 32;
 const STRING: u8 = 43;
 
@@ -204,6 +205,15 @@ impl ScalarIr {
             }
             M::Cbw | M::Cwde | M::Cdqe | M::Cwd | M::Cdq | M::Cqo => EXTEND_ACC,
             M::Bswap => BSWAP,
+            M::Bt | M::Bts | M::Btr | M::Btc => {
+                ir.aux = match m {
+                    M::Bt => 0,
+                    M::Bts => 1,
+                    M::Btr => 2,
+                    _ => 3,
+                };
+                BIT_TEST
+            }
             M::Bsf | M::Bsr => {
                 ir.aux = (m == M::Bsr) as u8;
                 BIT_SCAN
@@ -233,7 +243,8 @@ impl ScalarIr {
             && (!matches!(
                 op,
                 ADD | ADC | SUB | SBB | AND | OR | XOR | INC | DEC | NEG | NOT
-            ) || i.op0_kind() != OpKind::Memory)
+            ) && !(op == BIT_TEST && ir.aux != 0)
+                || i.op0_kind() != OpKind::Memory)
             || (i.has_rep_prefix() || i.has_repne_prefix()) && !matches!(m, M::Ret | M::Pause)
         {
             return None; // The checked fallback reports invalid/unsupported prefixes.
@@ -256,6 +267,9 @@ impl ScalarIr {
             _ => Cpu64::width(i, 0).ok()?,
         };
         ir.opcode = (op << 2) | Self::type_code(bits)?;
+        if op == BIT_TEST && !matches!(bits, 16 | 32 | 64) {
+            return None;
+        }
         if op == BSWAP && !matches!(bits, 32 | 64) {
             return None; // Preserve the checked fallback's invalid-width error.
         }
@@ -311,6 +325,7 @@ impl ScalarIr {
                 | SET
                 | POP
                 | SHIFT
+                | BIT_TEST
         ) && ir.dst == CONSTANT
             || matches!(
                 op,
@@ -577,6 +592,45 @@ impl ScalarIr {
                     }
                 }
                 self.write(cpu, result, bits, mem)?;
+            }
+            BIT_TEST => {
+                let offset = self.read(cpu, self.src, bits, mem)?;
+                let bit = offset as u32 & (bits - 1);
+                let update = |a: u64| match self.aux {
+                    1 => a | (1u64 << bit),
+                    2 => a & !(1u64 << bit),
+                    3 => a ^ (1u64 << bit),
+                    _ => a,
+                };
+                if self.dst == MEMORY {
+                    let mut address = self.address(cpu);
+                    if self.src != CONSTANT {
+                        let signed = super::signed(offset, bits) as i64;
+                        address = address.wrapping_add(
+                            (signed.div_euclid(bits as i64) * (bits / 8) as i64) as u64,
+                        );
+                    }
+                    let mut carry = 0;
+                    if self.aux == 0 {
+                        carry = (mem.read_int(address, (bits / 8) as usize)? >> bit) & 1;
+                    } else {
+                        mem.modify_int(address, (bits / 8) as usize, |a| {
+                            carry = (a >> bit) & 1;
+                            update(a)
+                        })?;
+                    }
+                    if UPDATE_FLAGS {
+                        cpu.rflags = (cpu.rflags & !CF) | carry;
+                    }
+                } else {
+                    let a = self.read(cpu, self.dst, bits, mem)?;
+                    if self.aux != 0 {
+                        self.write(cpu, update(a), bits, mem)?;
+                    }
+                    if UPDATE_FLAGS {
+                        cpu.rflags = (cpu.rflags & !CF) | ((a >> bit) & 1);
+                    }
+                }
             }
             SHIFT | IMUL | EXTEND_ACC | BSWAP | BIT_SCAN => {
                 if T::REGISTER_ONLY {

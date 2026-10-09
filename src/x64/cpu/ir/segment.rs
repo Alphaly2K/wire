@@ -94,6 +94,7 @@ impl ScalarIr {
             INC | DEC => ARITHMETIC & !CF,
             IMUL => CF | OF,
             BIT_SCAN => super::super::ZF,
+            BIT_TEST => CF,
             _ => 0,
         };
         (reads, writes)
