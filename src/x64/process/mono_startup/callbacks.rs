@@ -13,15 +13,15 @@ const RETURN: u64 = 0x6ffd00100000;
 const WORK_LIMIT: u64 = 2_000_000;
 #[derive(Clone, Copy, Default)]
 pub(super) struct Stats {
-    pub(super) calls: [usize; 5],
+    pub(super) calls: [usize; 7],
     pub(super) gc_events: u32,
 }
 struct Owner<'a> {
     memory: RefCell<&'a mut Memory>,
     runtime: RefCell<&'a mut Runtime64>,
-    targets: [u64; 5],
+    targets: [u64; 7],
     depth: Cell<usize>,
-    calls: Cell<[usize; 5]>,
+    calls: Cell<[usize; 7]>,
     gc_events: Cell<u32>,
 }
 impl Drop for Owner<'_> {
@@ -42,7 +42,7 @@ impl Drop for Scope {
 pub(super) fn with_owner<T>(
     memory: &mut Memory,
     runtime: &mut Runtime64,
-    targets: [u64; 5],
+    targets: [u64; 7],
     operation: impl FnOnce() -> T,
 ) -> Result<(T, Stats), String> {
     if runtime.active_thread() != 1 {
@@ -61,7 +61,7 @@ pub(super) fn with_owner<T>(
         runtime: RefCell::new(runtime),
         targets,
         depth: Cell::new(0),
-        calls: Cell::new([0; 5]),
+        calls: Cell::new([0; 7]),
         gc_events: Cell::new(0),
     };
     // Only the TLS pointer erases the lifetime. Scope clears it before this
@@ -143,6 +143,50 @@ pub(super) fn reference(slot: usize, args: &[u64]) -> Result<u64, String> {
         execute(owner, slot, args)
     })
 }
+pub(super) fn payload(
+    slot: usize,
+    initial: &[u8; 16],
+    trailing: &[u64],
+    hidden_return: bool,
+) -> Result<[u8; 16], String> {
+    OWNER.with(|pointer| {
+        if pointer.get().is_null() {
+            return Err("native payload callback has no same-thread owner".into());
+        }
+        if trailing.len() > 3 {
+            return Err("native payload callback arity exceeded".into());
+        }
+        let owner = unsafe { &*pointer.get() };
+        let address = 0x6ffc00000000 + owner.depth.get() as u64 * 4096;
+        owner.memory.borrow_mut().map(
+            address,
+            4096,
+            super::super::super::memory::READ | super::super::super::memory::WRITE,
+        )?;
+        struct Payload<'a, 'b>(&'a Owner<'b>, u64);
+        impl Drop for Payload<'_, '_> {
+            fn drop(&mut self) {
+                if let Err(error) = self.0.memory.borrow_mut().unmap(self.1, 4096) {
+                    eprintln!("native callback payload cleanup: {error}");
+                    std::process::abort();
+                }
+            }
+        }
+        let _payload = Payload(owner, address);
+        owner.memory.borrow_mut().write(address, initial)?;
+        let mut arguments = vec![address];
+        arguments.extend_from_slice(trailing);
+        let value = execute(owner, slot, &arguments)?;
+        if hidden_return && value != address {
+            return Err("Win64 payload hidden-sret did not return its owned slot".into());
+        }
+        let mut bytes = [0; 16];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = owner.memory.borrow().read_int(address + index as u64, 1)? as u8;
+        }
+        Ok(bytes)
+    })
+}
 fn scalar(slot: usize, args: &[u64]) -> u64 {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         OWNER.with(|pointer| {
@@ -202,6 +246,59 @@ mod tests {
     use super::super::super::super::memory::{EXECUTE, READ, WRITE};
     use super::*;
     #[test]
+    fn hidden_return_and_ref_payloads_are_owned_and_retired_on_success_and_rejection() {
+        let mut memory = Memory::default();
+        memory.map(0x1000, 4096, READ | WRITE | EXECUTE).unwrap();
+        memory
+            .map(super::super::super::STACK, 65536, READ | WRITE)
+            .unwrap();
+        // Authored 16B Win64 hidden-sret: two integer stores and RAX=RCX.
+        memory
+            .write(
+                0x1000,
+                &[
+                    0x48, 0xb8, 1, 2, 3, 4, 5, 6, 7, 8, 0x48, 0x89, 0x01, 0x48, 0x89, 0x41, 8,
+                    0x48, 0x89, 0xc8, 0xc3,
+                ],
+            )
+            .unwrap();
+        // Authored ref leaf: overwrite DWORD at +4 from EDX.
+        memory.write(0x1100, &[0x89, 0x51, 4, 0xc3]).unwrap();
+        let mut runtime = Runtime64::new(
+            &mut memory,
+            0x140000000,
+            super::super::super::STACK,
+            65536,
+            "test",
+        )
+        .unwrap();
+        let (result, stats) = with_owner(
+            &mut memory,
+            &mut runtime,
+            [0, 0, 0, 0, 0, 0x1000, 0x1100],
+            || -> Result<[u8; 16], String> {
+                let value = payload(5, &[0; 16], &[], true)?;
+                payload(6, &value, &[0xdeadbeef], false)
+            },
+        )
+        .unwrap();
+        let mut expected = [1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8];
+        expected[4..8].copy_from_slice(&0xdeadbeefu32.to_le_bytes());
+        assert_eq!(result.unwrap(), expected);
+        assert_eq!(stats.calls[5..], [1, 1]);
+        assert!(memory.read_int(0x6ffc00000000, 8).is_err());
+        let (result, _) = with_owner(
+            &mut memory,
+            &mut runtime,
+            [0, 0, 0, 0, 0, 0x1100, 0],
+            || payload(5, &[0; 16], &[], true),
+        )
+        .unwrap();
+        assert!(result.is_err());
+        assert!(memory.read_int(0x6ffc00000000, 8).is_err());
+        assert!(memory.read_int(STACK_BASE, 8).is_err());
+    }
+    #[test]
     fn compiled_adapters_reenter_checked_cpu_without_changing_guest_owner_and_remove_scope() {
         let mut memory = Memory::default();
         memory.map(0x1000, 4096, READ | WRITE | EXECUTE).unwrap();
@@ -227,14 +324,14 @@ mod tests {
         )
         .unwrap();
         let (value, calls) =
-            with_owner(&mut memory, &mut runtime, [0x1000; 5], || scalar(0, &[35])).unwrap();
+            with_owner(&mut memory, &mut runtime, [0x1000; 7], || scalar(0, &[35])).unwrap();
         assert_eq!(value, 42);
-        assert_eq!(calls.calls, [1, 0, 0, 0, 0]);
+        assert_eq!(calls.calls, [1, 0, 0, 0, 0, 0, 0]);
         assert_eq!(runtime.active_thread(), 1);
         assert!(OWNER.with(|slot| slot.get().is_null()));
         assert!(memory.read_int(STACK_BASE, 8).is_err());
         let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = with_owner(&mut memory, &mut runtime, [0x1000; 5], || {
+            let _ = with_owner(&mut memory, &mut runtime, [0x1000; 7], || {
                 panic!("authored owner-scope unwind");
             });
         }));
@@ -242,7 +339,7 @@ mod tests {
         assert!(OWNER.with(|slot| slot.get().is_null()));
         assert!(memory.read_int(STACK_BASE, 8).is_err());
         let (value, stats) =
-            with_owner(&mut memory, &mut runtime, [0x1000; 5], || scalar(0, &[35])).unwrap();
+            with_owner(&mut memory, &mut runtime, [0x1000; 7], || scalar(0, &[35])).unwrap();
         assert_eq!(value, 42);
         assert_eq!(stats.calls[0], 1);
     }

@@ -19,10 +19,14 @@ def main():
     parser.add_argument('--output', type=Path, default=REPO / 'wire-out/native-mono-unity-startup-probe')
     parser.add_argument('--registration-reference', type=Path, default=REPO / 'wire-out/native-mono-unity-callback-trace/summary/registered-internal-calls.tsv', help='frozen original Unity registration trace')
     parser.add_argument('--wire', type=Path, default=REPO / 'target/release/wire')
+    parser.add_argument('--graphics-backend', type=Path, help='existing native graphics backend')
+    parser.add_argument('--moltenvk', type=Path, help='existing MoltenVK paired with graphics backend')
     parser.add_argument('--max-instr', type=int, default=30000000, help='bounded guest work budget')
     parser.add_argument('--skip-etw', action='store_true', help='explicit diagnostic platform divergence')
-    parser.add_argument('--boundary', choices=('root', 'main-thread', 'pre-bindings', 'bindings', 'profiler'), default='root', help='finite diagnostic initialization boundary')
+    parser.add_argument('--boundary', choices=('root', 'main-thread', 'pre-bindings', 'bindings', 'profiler', 'pre-images', 'images'), default='root', help='finite diagnostic initialization boundary')
     args = parser.parse_args()
+    if bool(args.graphics_backend) != bool(args.moltenvk):
+        parser.error("--graphics-backend and --moltenvk must be paired")
     output = args.output.resolve()
     if not output.is_relative_to(REPO / 'wire-out'):
         parser.error('output must be under the worktree ignored wire-out directory')
@@ -49,6 +53,11 @@ def main():
              'original_mono': game.parent / 'MonoBleedingEdge/EmbedRuntime/mono-2.0-bdwgc.dll',
              'corelib': managed / 'mscorlib.dll', 'native_mono': library,
              'precompiled_corelib_support': support, 'noexec_guard': guard, 'wire': executable}
+    if args.graphics_backend:
+        for name, path in [('graphics_backend', args.graphics_backend.resolve()), ('moltenvk', args.moltenvk.resolve())]:
+            frozen = output / (name + '.dylib')
+            shutil.copy2(path, frozen)
+            paths[name] = frozen
     inputs = {name: {'path': str(path), 'sha256': sha256(path)} for name, path in paths.items()}
     (output / 'inputs.json').write_text(json.dumps(inputs, indent=2) + '\n')
     env = os.environ.copy()
@@ -56,7 +65,7 @@ def main():
         if key.startswith('MONO_') or key in ('DYLD_INSERT_LIBRARIES', 'DYLD_LIBRARY_PATH'):
             env.pop(key)
     env.update(DYLD_INSERT_LIBRARIES=str(guard), MONO_THREADS_SUSPEND='preemptive')
-    if args.boundary in ('bindings', 'profiler'):
+    if args.boundary in ('bindings', 'profiler', 'pre-images', 'images'):
         reference = args.registration_reference.resolve()
         shutil.copy2(reference, output / 'registration-reference.tsv')
         inputs['registration_reference'] = {'path': str(reference), 'sha256': sha256(reference)}
@@ -64,6 +73,8 @@ def main():
     command = [str(executable), 'probe64', str(clone / game.name), '--startup',
                '--max-instr', str(args.max_instr), '--native-mono-startup-probe', str(library),
                '--api-trace', str(output / 'api.tsv')]
+    if args.graphics_backend:
+        command.extend(['--graphics-backend', str(paths['graphics_backend']), '--moltenvk', str(paths['moltenvk'])])
     if args.skip_etw:
         command.append('--native-mono-probe-skip-etw')
     command.extend(['--native-mono-probe-boundary', args.boundary])
@@ -81,7 +92,7 @@ def main():
         match = re.search(r'^' + re.escape(name) + r'=(\d+)$', content, re.M)
         return int(match[1]) if match else 0
     registry_match = None
-    if args.boundary in ('bindings', 'profiler') and (output / 'api.tsv.mono-bindings.tsv').exists():
+    if args.boundary in ('bindings', 'profiler', 'pre-images', 'images') and (output / 'api.tsv.mono-bindings.tsv').exists():
         with (output / 'registration-reference.tsv').open() as stream:
             original = {bytes.fromhex(row['name_bytes_hex']): int(row['guest_target'], 16) for row in csv.DictReader(stream, delimiter='\t')}
         with (output / 'api.tsv.mono-bindings.tsv').open() as stream:
@@ -95,6 +106,14 @@ def main():
         'actual_unity_scalar_callbacks_verified': count_marker('actual-unity-scalar-callbacks-verified'),
         'actual_gc_event_mask': count_marker('actual-gc-event-mask'), 'actual_shutdown_callbacks': count_marker('actual-shutdown-callbacks'),
         'original_registration_table_matches': registry_match,
+        'native_pre_images_ready': 'native-pre-images-ready=true' in content,
+        'actual_unitytls_leaf_verified': 'actual-unitytls-leaf-verified=true' in content,
+        'native_images_ready': 'native-images-ready=true' in content,
+        'native_images_opened': count_marker('native-images-opened'),
+        'native_assemblies_loaded': count_marker('native-assemblies-loaded'),
+        'guest_image_refs_closed': count_marker('guest-image-refs-closed'),
+        'native_assembly_image_getters': count_marker('native-assembly-image-getters'),
+        'native_image_registry_retired': 'native-image-registry-retired=true' in content,
         'full_game_backend': False, 'original_mono_attach_observed': original_attach,
         'etw_explicitly_disabled': args.skip_etw, 'native_guard':
         {'checks': int(guard_result[1]), 'denied': int(guard_result[2])} if guard_result else None,
@@ -105,11 +124,15 @@ def main():
         raise RuntimeError('native startup provider executed original Mono attach')
     if root_ready and (not guard_result or int(guard_result[1]) == 0 or int(guard_result[2]) != 0):
         raise RuntimeError('native root run lacks successful noexec guard evidence')
-    if args.boundary in ('bindings', 'profiler') and (registry_match is not True or evidence['actual_unity_scalar_callbacks_verified'] != 2 or evidence['native_scalar_adapters'] != 2):
+    if args.boundary in ('bindings', 'profiler', 'pre-images', 'images') and (registry_match is not True or evidence['actual_unity_scalar_callbacks_verified'] != 2 or evidence['native_scalar_adapters'] != 2):
         raise RuntimeError('actual Unity bindings/callback verification incomplete or registry differs from original')
-    if args.boundary == 'profiler' and (not evidence['native_profiler_ready'] or evidence['actual_gc_event_mask'] & 4065 != 4065 or evidence['actual_shutdown_callbacks'] != 1):
+    if args.boundary in ('profiler', 'pre-images', 'images') and (not evidence['native_profiler_ready'] or evidence['actual_gc_event_mask'] & 4065 != 4065 or evidence['actual_shutdown_callbacks'] != 1):
         raise RuntimeError('actual native GC/shutdown evidence incomplete')
-    if result.returncode != 0 or not root_ready or (args.boundary != 'root' and not evidence['native_main_thread_ready']) or (args.boundary in ('pre-bindings','bindings','profiler') and not evidence['native_pre_bindings_ready']) or (args.boundary in ('bindings','profiler') and not evidence['native_bindings_ready']):
+    if args.boundary in ('pre-images', 'images') and (not evidence['native_pre_images_ready'] or not evidence['actual_unitytls_leaf_verified']):
+        raise RuntimeError('actual UnityTLS/managed-image boundary evidence incomplete')
+    if args.boundary == 'images' and (not evidence['native_images_ready'] or not evidence['native_image_registry_retired'] or [evidence[key] for key in ('native_images_opened', 'native_assemblies_loaded', 'guest_image_refs_closed', 'native_assembly_image_getters')] != [82, 82, 82, 82]):
+        raise RuntimeError('actual native image/assembly cycles incomplete')
+    if result.returncode != 0 or not root_ready or (args.boundary != 'root' and not evidence['native_main_thread_ready']) or (args.boundary in ('pre-bindings','bindings','profiler','pre-images','images') and not evidence['native_pre_bindings_ready']) or (args.boundary in ('bindings','profiler','pre-images','images') and not evidence['native_bindings_ready']):
         raise SystemExit(1)
 
 

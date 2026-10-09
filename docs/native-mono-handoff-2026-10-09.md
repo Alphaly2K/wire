@@ -147,3 +147,11 @@ CoreModule Boolean InternalCall 完成 native Mono → 固定 ARM64 adapter → 
 证据 `wire-out/native-mono-unity-profiler-probe-04`；详情
 `docs/native-mono-unity-bindings-profiler-2026-10-09.md`。继续UnityTLS及managed image加载。
 用户最新要求不碰其他agent的浮点/翻译缓存代码；本轮没有涉及这些实现。
+
+## UnityTLS / 82 native image cycles 已实测（继续中）
+
+`native-mono-unity-images-probe-01`完成实际82 open/load/close/get-image；native refs退休，
+原始Mono未执行，guard178/0。UnityTLS两个struct/ref叶入口有真实表函数指针对照；其他31项
+typed fail-stop，网络未实现。新边界pre-images/images；后者止于首个class query前。
+当前feature完整Rust394通过/7 ignored，feature Clippy clean，默认回归正在运行。
+详见 `docs/native-mono-unity-images-2026-10-09.md`。继续typed metadata，不碰浮点/翻译缓存。

@@ -26,6 +26,8 @@ static USED: AtomicBool = AtomicBool::new(false);
 type Object = *mut c_void;
 mod bindings;
 mod callbacks;
+mod images;
+mod unitytls;
 macro_rules! symbol {
     ($library:expr, $name:literal, $ty:ty) => {{
         let pointer = unsafe { libc::dlsym($library, concat!($name, "\0").as_ptr().cast()) };
@@ -161,6 +163,14 @@ pub(super) struct Probe {
     legacy_installed: bool,
     gc_events_verified: u32,
     shutdown_callbacks: usize,
+    pre_images: bool,
+    pre_images_ready: bool,
+    tls_table: Option<unitytls::Table>,
+    tls_leaf_verified: bool,
+    images: bool,
+    images_ready: bool,
+    image_registry: images::Registry,
+    image_api: Option<images::Api>,
     registry: bindings::Registry,
     stopped: bool,
     skip_etw: bool,
@@ -259,15 +269,17 @@ impl Probe {
         skip_etw: bool,
         boundary: &str,
     ) -> Result<Self, String> {
-        let (main_thread, pre_bindings, bindings, profiler) = match boundary {
-            "root" => (false, false, false, false),
-            "main-thread" => (true, false, false, false),
-            "pre-bindings" => (true, true, false, false),
-            "bindings" => (true, true, true, false),
-            "profiler" => (true, true, true, true),
+        let (main_thread, pre_bindings, bindings, profiler, pre_images, images) = match boundary {
+            "root" => (false, false, false, false, false, false),
+            "main-thread" => (true, false, false, false, false, false),
+            "pre-bindings" => (true, true, false, false, false, false),
+            "bindings" => (true, true, true, false, false, false),
+            "profiler" => (true, true, true, true, false, false),
+            "pre-images" => (true, true, true, true, true, false),
+            "images" => (true, true, true, true, true, true),
             _ => {
                 return Err(
-                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings or profiler".into(),
+                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings, profiler, pre-images or images".into(),
                 )
             }
         };
@@ -304,6 +316,14 @@ impl Probe {
             legacy_installed: false,
             gc_events_verified: 0,
             shutdown_callbacks: 0,
+            pre_images,
+            pre_images_ready: false,
+            tls_table: None,
+            tls_leaf_verified: false,
+            images,
+            images_ready: false,
+            image_registry: images::Registry::default(),
+            image_api: None,
             registry: bindings::Registry::default(),
             stopped: false,
             skip_etw,
@@ -738,6 +758,31 @@ impl Probe {
                 self.profiler_targets[1] = a[0];
                 self.profiler_targets[2] = a[1];
             }
+            "mono_unity_install_unitytls_interface" => {
+                if !self.pre_images || self.tls_table.is_some() {
+                    return Err("UnityTLS install outside pre-images boundary".into());
+                }
+                let table = unitytls::Table::from_guest(memory, a[0])?;
+                let install = symbol!(
+                    lib,
+                    "mono_unity_install_unitytls_interface",
+                    unsafe extern "C" fn(*const c_void)
+                );
+                unsafe {
+                    install(table.pointer());
+                }
+                self.tls_table = Some(table);
+                self.events.push("installed owned native UnityTLS header + 33 fixed typed adapters; only error-state leaves executable, other entries fail-stop on activation".into());
+            }
+            "mono_profiler_set_events" => {
+                if !self.legacy_installed || a[0] != 0x100 {
+                    return Err("legacy profiler event flags outside actual GC-only profile".into());
+                }
+                let set = symbol!(lib, "mono_profiler_set_events", unsafe extern "C" fn(i32));
+                unsafe {
+                    set(a[0] as i32);
+                }
+            }
             "mono_add_internal_call" if self.pre_bindings_ready && self.bindings => {
                 let name = string(memory, a[0])?;
                 let native_name = name.clone();
@@ -766,10 +811,13 @@ impl Probe {
         }
         Ok(ready)
     }
-    fn callback_targets(&self) -> [u64; 5] {
-        let mut targets = [0; 5];
+    fn callback_targets(&self) -> [u64; 7] {
+        let mut targets = [0; 7];
         targets[..2].copy_from_slice(&self.registry.scalar_targets);
-        targets[2..].copy_from_slice(&self.profiler_targets);
+        targets[2..5].copy_from_slice(&self.profiler_targets);
+        if let Some(table) = &self.tls_table {
+            targets[5..].copy_from_slice(&table.leaf_targets());
+        }
         targets
     }
     pub(super) fn stop_before(&mut self, function: &str) -> Result<bool, String> {
@@ -788,9 +836,139 @@ impl Probe {
                 "actual legacy profiler registration complete; stop before UnityTLS installation"
                     .into(),
             );
+            return Ok(!self.pre_images);
+        }
+        if self.pre_images && function == "mono_image_open_from_data_with_name" {
+            if self.tls_table.is_none() {
+                return Err(
+                    "managed image boundary reached without owned UnityTLS interface".into(),
+                );
+            }
+            self.pre_images_ready = true;
+            self.events.push(
+                "actual Unity reached managed-image loading; stop before reading first image"
+                    .into(),
+            );
+            return Ok(!self.images);
+        }
+        if self.images && function == "mono_class_from_name" && self.image_registry.completed() > 0
+        {
+            self.images_ready = true;
+            self.events.push("actual Unity completed native image/assembly ownership cycles; stop before first class metadata query".into());
             return Ok(true);
         }
         Ok(false)
+    }
+    pub(super) fn handles_image(&self, function: &str) -> bool {
+        self.images && images::handles(function)
+    }
+    pub(super) fn dispatch_image(
+        &mut self,
+        function: &str,
+        cpu: &mut Cpu64,
+        memory: &mut Memory,
+        runtime: &mut Runtime64,
+        fs: &GuestFs,
+    ) -> Result<bool, String> {
+        if self.stopped || !self.images || !images::handles(function) {
+            return Err("managed image call outside live typed provider".into());
+        }
+        let native = self
+            .native
+            .as_ref()
+            .ok_or("managed image call has no native runtime")?;
+        if native.closed || native.owner != thread::current().id() {
+            return Err("managed image call on closed/foreign native owner".into());
+        }
+        let api = match self.image_api {
+            Some(api) => api,
+            None => {
+                let api = images::Api::load(native.library)?;
+                self.image_api = Some(api);
+                api
+            }
+        };
+        let a = [cpu.regs[1], cpu.regs[2], cpu.regs[8], cpu.regs[9]];
+        let rsp = cpu.regs[4];
+        memory.read_int(rsp, 8)?;
+        rsp.checked_add(8).ok_or("image return slot overflow")?;
+        let mut output_status = None;
+        let result = match function {
+            "mono_image_open_from_data_with_name" => {
+                let len = a[1] as u32 as usize;
+                if len == 0
+                    || len > 64 * 1024 * 1024
+                    || a[2] as u32 != 1
+                    || memory.read_int(rsp.checked_add(40).ok_or("image stack overflow")?, 8)?
+                        as u32
+                        != 0
+                {
+                    return Err("managed image needs bounded copy and non-refonly input".into());
+                }
+                memory.check(a[3], 4, super::super::memory::WRITE)?;
+                let name = string(
+                    memory,
+                    memory.read_int(rsp.checked_add(48).ok_or("image name stack overflow")?, 8)?,
+                )?;
+                let host = host_path(fs, &name)?;
+                let mut bytes = vec![0; len];
+                memory.read(a[0], &mut bytes)?;
+                let disk = std::fs::read(Path::new(host.to_str().map_err(|e| e.to_string())?))
+                    .map_err(|e| format!("managed image source: {e}"))?;
+                if bytes != disk {
+                    return Err("managed image bytes differ from resolved immutable source".into());
+                }
+                let hash = format!("{:x}", Sha256::digest(&bytes));
+                let targets = self.callback_targets();
+                let (value, _) = callbacks::with_owner(memory, runtime, targets, || {
+                    self.image_registry.open(api, bytes, host, hash)
+                })?;
+                let (token, status) = value?;
+                output_status = Some((a[3], status));
+                token
+            }
+            "mono_assembly_load_from_full" => {
+                if a[3] as u32 != 0 {
+                    return Err("refonly assembly load not admitted".into());
+                }
+                memory.check(a[2], 4, super::super::memory::WRITE)?;
+                let name = host_path(fs, &string(memory, a[1])?)?;
+                let targets = self.callback_targets();
+                let (value, _) = callbacks::with_owner(memory, runtime, targets, || {
+                    self.image_registry.load_assembly(api, a[0], name)
+                })?;
+                let (token, status) = value?;
+                output_status = Some((a[2], status));
+                token
+            }
+            "mono_image_close" => {
+                let targets = self.callback_targets();
+                let (value, _) = callbacks::with_owner(memory, runtime, targets, || {
+                    self.image_registry.close(api, a[0])
+                })?;
+                value?;
+                0
+            }
+            "mono_assembly_get_image" => {
+                let targets = self.callback_targets();
+                let (value, _) = callbacks::with_owner(memory, runtime, targets, || {
+                    self.image_registry.assembly_image(api, a[0])
+                })?;
+                value?
+            }
+            _ => return Err("untyped managed image operation".into()),
+        };
+        if let Some((address, status)) = output_status {
+            memory.write_int(address, 4, status as u32 as u64)?;
+        }
+        cpu.return_integer(memory, result)?;
+        self.events.push(format!(
+            "actual typed managed image boundary {function} -> {result:#x}"
+        ));
+        Ok(false)
+    }
+    pub(super) fn images_tsv(&self) -> String {
+        self.image_registry.tsv()
     }
     pub(super) fn validate_scalar_callbacks(
         &mut self,
@@ -1015,6 +1193,41 @@ impl Probe {
         self.events.push(format!("actual native BDWGC collection -> compiled GC adapter -> original Unity Win64 callback: {} calls, event mask {:#x}; no guest pointer passed to native profiler", stats.calls[3], stats.gc_events));
         Ok(())
     }
+    pub(super) fn validate_unitytls(
+        &mut self,
+        memory: &mut Memory,
+        runtime: &mut Runtime64,
+    ) -> Result<(), String> {
+        let Some(table) = self.tls_table.as_ref() else {
+            return Ok(());
+        };
+        let native = self
+            .native
+            .as_ref()
+            .ok_or("UnityTLS verification has no runtime")?;
+        let get = symbol!(
+            native.library,
+            "mono_unity_get_unitytls_interface",
+            unsafe extern "C" fn() -> *const c_void
+        );
+        if unsafe { get() } != table.pointer() {
+            return Err("native UnityTLS getter did not retain owned table".into());
+        }
+        let (result, stats) =
+            callbacks::with_owner(memory, runtime, self.callback_targets(), || unsafe {
+                table.validate_leaf()
+            })?;
+        result?;
+        if stats.calls[5..] != [2, 6] {
+            return Err("UnityTLS actual adapter/reference counts differ".into());
+        }
+        self.tls_leaf_verified = true;
+        self.events.push("native UnityTLS interface create16B hidden-sret and ref error-state match original Win64 callbacks; no networking admitted".into());
+        Ok(())
+    }
+    pub(super) fn unitytls_tsv(&self) -> Option<String> {
+        self.tls_table.as_ref().map(|table| table.tsv())
+    }
     pub(super) fn finish_owned(
         &mut self,
         memory: &mut Memory,
@@ -1045,8 +1258,21 @@ impl Probe {
             return Ok(());
         }
         self.stopped = true;
+        if let Some(api) = self.image_api {
+            self.image_registry.retire(api);
+        }
         if let Some(native) = &mut self.native {
             native.cleanup()?;
+            if self.tls_table.is_some() {
+                let clear = symbol!(
+                    native.library,
+                    "mono_unity_install_unitytls_interface",
+                    unsafe extern "C" fn(*const c_void)
+                );
+                unsafe {
+                    clear(ptr::null());
+                }
+            }
         }
         self.events
             .push("native startup probe closed on owner thread; guest resume prohibited".into());
@@ -1054,7 +1280,7 @@ impl Probe {
     }
     pub(super) fn report(&self) -> String {
         format!(
-            "native-root-ready={}\nnative-main-thread-ready={}\nnative-pre-bindings-ready={}\nnative-bindings-ready={}\nprovider-bindings={}\nnative-scalar-adapters={}\nactual-unity-scalar-callbacks-verified={}\nnative-profiler-ready={}\nactual-gc-event-mask={}\nactual-shutdown-callbacks={}\nfull-game-admission=false\n{}\n",
+            "native-root-ready={}\nnative-main-thread-ready={}\nnative-pre-bindings-ready={}\nnative-bindings-ready={}\nprovider-bindings={}\nnative-scalar-adapters={}\nactual-unity-scalar-callbacks-verified={}\nnative-profiler-ready={}\nactual-gc-event-mask={}\nactual-shutdown-callbacks={}\nnative-pre-images-ready={}\nactual-unitytls-leaf-verified={}\nnative-images-ready={}\nfull-game-admission=false\n{}{}\n",
             self.root_ready,
             self.main_thread_ready,
             self.pre_bindings_ready,
@@ -1065,6 +1291,10 @@ impl Probe {
             self.profiler_ready,
             self.gc_events_verified,
             self.shutdown_callbacks,
+            self.pre_images_ready,
+            self.tls_leaf_verified,
+            self.images_ready,
+            self.image_registry.report(),
             self.events.join("\n")
         )
     }
@@ -1074,7 +1304,9 @@ impl Probe {
             || (self.main_thread_ready && !self.pre_bindings)
             || (self.pre_bindings_ready && !self.bindings)
             || (self.bindings_ready && !self.profiler)
-            || self.profiler_ready
+            || (self.profiler_ready && !self.pre_images)
+            || (self.pre_images_ready && !self.images)
+            || self.images_ready
     }
 }
 fn store_thread_token(
@@ -1198,6 +1430,14 @@ mod tests {
             legacy_installed: false,
             gc_events_verified: 0,
             shutdown_callbacks: 0,
+            pre_images: false,
+            pre_images_ready: false,
+            tls_table: None,
+            tls_leaf_verified: false,
+            images: false,
+            images_ready: false,
+            image_registry: images::Registry::default(),
+            image_api: None,
             registry: bindings::Registry::default(),
             stopped: false,
             skip_etw: false,

@@ -469,6 +469,20 @@ impl Process64 {
             .map(|probe| probe.bindings_tsv())
     }
     #[cfg(feature = "native-mono-backend")]
+    pub fn native_mono_images_tsv(&self) -> Option<String> {
+        self.loader
+            .mono_startup
+            .as_ref()
+            .map(|probe| probe.images_tsv())
+    }
+    #[cfg(feature = "native-mono-backend")]
+    pub fn native_mono_unitytls_tsv(&self) -> Option<String> {
+        self.loader
+            .mono_startup
+            .as_ref()
+            .and_then(|probe| probe.unitytls_tsv())
+    }
+    #[cfg(feature = "native-mono-backend")]
     pub fn finish_native_mono_startup_probe(&mut self) -> Result<(), String> {
         if let Some(probe) = self.loader.mono_startup.as_mut() {
             probe.finish_owned(&mut self.memory, &mut self.runtime)?;
@@ -969,6 +983,7 @@ impl Process64 {
                             probe.validate_scalar_callbacks(&mut self.memory, &mut self.runtime)?;
                             probe
                                 .validate_profiler_callbacks(&mut self.memory, &mut self.runtime)?;
+                            probe.validate_unitytls(&mut self.memory, &mut self.runtime)?;
                             return Ok(Outcome::NativeMonoRootReady);
                         }
                         let fs = self.runtime.filesystem()?;
@@ -978,12 +993,21 @@ impl Process64 {
                             self.cpu.regs[8],
                             self.cpu.regs[9],
                         ];
-                        let ready = probe
-                            .dispatch(function, &mut self.cpu, &mut self.memory, &fs)
-                            .map_err(|error| {
-                                self.runtime.inventory_failure(dll, function);
-                                format!("{name}: {error}")
-                            })?;
+                        let ready = (if probe.handles_image(function) {
+                            probe.dispatch_image(
+                                function,
+                                &mut self.cpu,
+                                &mut self.memory,
+                                &mut self.runtime,
+                                &fs,
+                            )
+                        } else {
+                            probe.dispatch(function, &mut self.cpu, &mut self.memory, &fs)
+                        })
+                        .map_err(|error| {
+                            self.runtime.inventory_failure(dll, function);
+                            format!("{name}: {error}")
+                        })?;
                         self.cpu.work += 1;
                         self.runtime
                             .complete_call(dll, function, &args, self.cpu.regs[0]);
