@@ -69,3 +69,12 @@ AB/BA对照；结果用于配置比较，不能替代真实游戏性能报告。
 `--native-services`一起使用。所有native ABI准入仍为0；声明清单不是调用覆盖率。
 prepare通过锁定archive验证整套patch的精确prefix，可重复处理覆盖早期hunk的后续patch，
 不会丢弃未知source编辑。工具回归：`python3 -m unittest discover -s tools/mono -p test_build.py`。
+
+## Real Unity finite startup provider
+
+`probe_startup.py` drives the exact AliceToPapaADV UnityPlayer through native
+Mono root/main-thread/domain configuration in a fresh APFS clone. Build wire
+with `native-mono-backend`. Use `--boundary root|main-thread|pre-bindings`;
+Windows ETW is rejected unless explicitly disabled with `--skip-etw`. This
+provider is separate from complete-game Admission and stops before general
+objects/InternalCalls. See `docs/native-mono-unity-startup-provider-2026-10-09.md`.

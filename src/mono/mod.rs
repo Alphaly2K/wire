@@ -1,6 +1,8 @@
 //! Native Mono backend lifecycle contracts. This optional module does not load
-//! a runtime or enable a native game profile. The original backend remains the
-//! default until the independent memory/ABI/service admission is complete.
+//! a runtime or enable a native game profile. The independent finite startup
+//! diagnostic provider lives under x64::process; it does not satisfy Admission.
+//! The original backend remains the default until memory/ABI/service admission
+//! is complete.
 mod buffers;
 mod roots;
 mod session;

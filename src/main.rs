@@ -13,7 +13,7 @@ fn main() -> ExitCode {
         eprintln!("wire — Watari-Is-a-Runtime-Environment (M2 spike)");
         eprintln!("usage:");
         eprintln!("  wire imports <program.exe>");
-        eprintln!("  wire probe64 <program.exe> [--max-instr N] [--startup] [--dll] [--window] [--cpu-stats] [--api-trace PATH] [--mono-trace PATH] [--guest-arg VALUE] [--graphics-backend PATH --moltenvk PATH] (experimental AMD64 diagnostic)");
+        eprintln!("  wire probe64 <program.exe> [--max-instr N] [--startup] [--dll] [--window] [--cpu-stats] [--api-trace PATH] [--mono-trace PATH] [--native-mono-startup-probe DYLIB] [--native-mono-probe-skip-etw] [--native-mono-probe-boundary root|main-thread|pre-bindings] [--guest-arg VALUE] [--graphics-backend PATH --moltenvk PATH] (experimental AMD64 diagnostic)");
         eprintln!("  wire prepare <program.exe> [--out program.wir]");
         eprintln!(
             "  wire run <program.exe> [--ir program.wir] [--op-stats] [--max-instr N] [--log-dir DIR] [--cwd DIR] [--trace-cpu] [--present|--headless] [--software-render] [--capture-frames DIR] [--stop-after-presents N]"
@@ -580,6 +580,9 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
         let mut cache_layout = wire::x64::memory::TranslationCacheLayout::default();
         let mut api_trace = None;
         let mut mono_trace = None;
+        let mut native_mono_probe = None;
+        let mut native_mono_skip_etw = false;
+        let mut native_mono_boundary = None;
         let mut capture_frame = None;
         let mut graphics_backend = None;
         let mut moltenvk = None;
@@ -620,6 +623,14 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
                     api_trace = Some(opt.next().ok_or("--api-trace needs a path")?.as_str());
                     startup = true;
                 }
+                "--native-mono-startup-probe" => {
+                    native_mono_probe = Some(opt.next().ok_or("--native-mono-startup-probe needs a dylib path")?.as_str());
+                    startup = true;
+                }
+                "--native-mono-probe-skip-etw" => native_mono_skip_etw = true,
+                "--native-mono-probe-boundary" => {
+                    native_mono_boundary = Some(opt.next().ok_or("--native-mono-probe-boundary needs root, main-thread or pre-bindings")?.as_str());
+                }
                 "--mono-trace" => {
                     mono_trace = Some(opt.next().ok_or("--mono-trace needs a path")?.as_str());
                     startup = true;
@@ -646,11 +657,19 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
                 }
                 _ => {
                     return Err(
-                        "usage: wire probe64 <exe> [--max-instr N] [--startup] [--dll] [--window] [--cpu-stats] [--api-trace PATH] [--mono-trace PATH] [--capture-frame PPM] [--guest-arg VALUE] [--graphics-backend PATH --moltenvk PATH]"
+                        "usage: wire probe64 <exe> [--max-instr N] [--startup] [--dll] [--window] [--cpu-stats] [--api-trace PATH] [--mono-trace PATH] [--native-mono-startup-probe DYLIB] [--native-mono-probe-skip-etw] [--native-mono-probe-boundary root|main-thread|pre-bindings] [--capture-frame PPM] [--guest-arg VALUE] [--graphics-backend PATH --moltenvk PATH]"
                             .into(),
                     )
                 }
             }
+        }
+        if (native_mono_skip_etw || native_mono_boundary.is_some()) && native_mono_probe.is_none() {
+            return Err("native Mono probe options require --native-mono-startup-probe".into());
+        }
+        if native_mono_probe.is_some() && (dll_attach || mono_trace.is_some()) {
+            return Err(
+                "native root probe requires an EXE and cannot trace original Mono execution".into(),
+            );
         }
         let graphics = match (graphics_backend, moltenvk) {
             (Some(backend), Some(moltenvk)) => Some(wire::gpu::NativeGraphics::load(
@@ -672,6 +691,9 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
                 graphics,
                 api_trace,
                 mono_trace,
+                native_mono_probe,
+                native_mono_skip_etw,
+                native_mono_boundary.unwrap_or("root"),
                 capture_frame,
                 &guest_args,
             );
@@ -813,11 +835,31 @@ fn run_startup64(
     graphics: Option<wire::gpu::NativeGraphics>,
     api_trace: Option<&str>,
     mono_trace: Option<&str>,
+    native_mono_probe: Option<&str>,
+    native_mono_skip_etw: bool,
+    native_mono_boundary: &str,
     capture_frame: Option<&str>,
     guest_args: &[String],
 ) -> Result<(), String> {
     use wire::x64::process::{Outcome, Process64};
-    let mut process = Process64::load(Path::new(path), dll_attach)?;
+    let mut process = if let Some(library) = native_mono_probe {
+        #[cfg(feature = "native-mono-backend")]
+        {
+            Process64::load_native_mono_startup_probe(
+                Path::new(path),
+                Path::new(library),
+                native_mono_skip_etw,
+                native_mono_boundary,
+            )?
+        }
+        #[cfg(not(feature = "native-mono-backend"))]
+        {
+            let _ = (library, native_mono_skip_etw, native_mono_boundary);
+            return Err("native root probe requires the native-mono-backend build feature".into());
+        }
+    } else {
+        Process64::load(Path::new(path), dll_attach)?
+    };
     process
         .runtime
         .append_guest_arguments(&mut process.memory, guest_args)?;
@@ -883,6 +925,16 @@ fn run_startup64(
             break result;
         }
     };
+    #[cfg(feature = "native-mono-backend")]
+    if native_mono_probe.is_some() {
+        process.finish_native_mono_startup_probe()?;
+        println!(
+            "{}",
+            process
+                .native_mono_startup_report()
+                .ok_or("missing native startup report")?
+        );
+    }
     report_execution64(start, &process.cpu, &process.memory);
     if let Some(path) = api_trace {
         std::fs::write(
@@ -944,6 +996,11 @@ fn run_startup64(
         process.runtime.graphics_presents()
     );
     match outcome? {
+        #[cfg(feature = "native-mono-backend")]
+        Outcome::NativeMonoRootReady => {
+            println!("native Mono root domain initialized from real Unity startup; probe stopped at its configured initialization boundary; full game backend disabled");
+            Ok(())
+        }
         Outcome::Returned(value) => {
             println!(
                 "entry returned RAX={value:#x}; retired={}",

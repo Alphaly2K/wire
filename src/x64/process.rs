@@ -10,6 +10,8 @@ use std::{
     path::Path,
 };
 mod exception;
+#[cfg(feature = "native-mono-backend")]
+mod mono_startup;
 mod mono_trace;
 const STACK: u64 = 0x7ff000000000;
 const RETURN: u64 = 0x7ffe10000000;
@@ -67,6 +69,8 @@ struct Modules {
     ranges: Vec<(u64, u64)>,
     pending: Vec<Image>,
     mono_trace: Option<mono_trace::MonoTrace>,
+    #[cfg(feature = "native-mono-backend")]
+    mono_startup: Option<mono_startup::Probe>,
 }
 fn provider(name: &str) -> bool {
     crate::modules::native_module(name)
@@ -138,6 +142,28 @@ impl Modules {
                     .checked_add(size.div_ceil(65536) * 65536)
                     .filter(|&a| a + size < 1 << 47)
                     .ok_or("AMD64 module address space exhausted")?;
+            }
+        }
+        #[cfg(feature = "native-mono-backend")]
+        if name == "mono-2.0-bdwgc.dll" {
+            if let Some(probe) = self.mono_startup.as_mut() {
+                if main {
+                    return Err("native root probe cannot use Mono as the main image".into());
+                }
+                let mut exports = pe.exports(&bytes, base)?;
+                probe.replace(&bytes, &mut exports, runtime)?;
+                mem.reserve_runtime(base, size)?;
+                mem.reserve_runtime(0x6ffe00000000, PAGE)?;
+                self.ranges.push((base, base + size));
+                self.exports.insert(name.clone(), exports);
+                let registered = Exports64 {
+                    names: self.exports[&name].names.clone(),
+                    ordinals: self.exports[&name].ordinals.clone(),
+                };
+                runtime.register_module(&name, base, registered);
+                runtime.register_module_path(base, fs.guest_path(path));
+                runtime.register_image(base, pe.size_of_image, 0);
+                return Ok(base);
             }
         }
         self.ranges.push((base, base + size));
@@ -225,9 +251,29 @@ pub enum Outcome {
     Returned(u64),
     Exited(u32),
     Budget,
+    #[cfg(feature = "native-mono-backend")]
+    NativeMonoRootReady,
 }
 impl Process64 {
     pub fn load(path: &Path, dll_only: bool) -> Result<Self, String> {
+        Self::load_inner(path, dll_only, Modules::default())
+    }
+    #[cfg(feature = "native-mono-backend")]
+    pub fn load_native_mono_startup_probe(
+        path: &Path,
+        library: &Path,
+        skip_etw: bool,
+        boundary: &str,
+    ) -> Result<Self, String> {
+        let path = path.canonicalize().map_err(|e| e.to_string())?;
+        let probe = mono_startup::Probe::new(&path, library, skip_etw, boundary)?;
+        let loaded = Modules {
+            mono_startup: Some(probe),
+            ..Modules::default()
+        };
+        Self::load_inner(&path, false, loaded)
+    }
+    fn load_inner(path: &Path, dll_only: bool, mut loaded: Modules) -> Result<Self, String> {
         let path = path.canonicalize().map_err(|e| e.to_string())?;
         let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
         let pe = Pe64::parse(&bytes)?;
@@ -262,7 +308,6 @@ impl Process64 {
         runtime.install_gateways(Default::default());
         let fs = crate::fs::GuestFs::new(path.parent().ok_or("missing game directory")?)
             .map_err(|e| e.to_string())?;
-        let mut loaded = Modules::default();
         let main_base = loaded.load(&path, true, &fs, &mut memory, &mut runtime, (0, None))?;
         runtime.set_main_base(&mut memory, main_base)?;
         let mut calls = VecDeque::new();
@@ -397,6 +442,20 @@ impl Process64 {
                 trace.register(name, exports)?;
             }
             self.loader.mono_trace = Some(trace);
+        }
+        Ok(())
+    }
+    #[cfg(feature = "native-mono-backend")]
+    pub fn native_mono_startup_report(&self) -> Option<String> {
+        self.loader
+            .mono_startup
+            .as_ref()
+            .map(|probe| probe.report())
+    }
+    #[cfg(feature = "native-mono-backend")]
+    pub fn finish_native_mono_startup_probe(&mut self) -> Result<(), String> {
+        if let Some(probe) = self.loader.mono_startup.as_mut() {
+            probe.finish()?;
         }
         Ok(())
     }
@@ -722,6 +781,25 @@ impl Process64 {
         Ok(())
     }
     pub fn run(&mut self, budget: u64) -> Result<Outcome, String> {
+        let result = self.run_inner(budget);
+        #[cfg(feature = "native-mono-backend")]
+        if !matches!(result, Ok(Outcome::Budget)) {
+            if let Some(probe) = self.loader.mono_startup.as_mut() {
+                probe.finish()?;
+            }
+        }
+        result
+    }
+    fn run_inner(&mut self, budget: u64) -> Result<Outcome, String> {
+        #[cfg(feature = "native-mono-backend")]
+        if self
+            .loader
+            .mono_startup
+            .as_ref()
+            .is_some_and(|probe| probe.stopped())
+        {
+            return Err("native Mono startup probe cannot resume after cleanup".into());
+        }
         // The caller may have suspended the active context between slices.
         // Within this cooperative loop only a native gateway can change its
         // suspension state; ordinary guest instructions cannot do so.
@@ -863,6 +941,36 @@ impl Process64 {
                 }
                 let (dll, function) = (&*binding.dll, &*binding.original_function);
                 let name = &binding.export;
+                #[cfg(feature = "native-mono-backend")]
+                if dll == "mono-2.0-bdwgc.dll" {
+                    if let Some(probe) = self.loader.mono_startup.as_mut() {
+                        if self.runtime.active_thread() != 1 {
+                            return Err(
+                                "native root probe requires guest main-thread ownership".into()
+                            );
+                        }
+                        let fs = self.runtime.filesystem()?;
+                        let args = [
+                            self.cpu.regs[1],
+                            self.cpu.regs[2],
+                            self.cpu.regs[8],
+                            self.cpu.regs[9],
+                        ];
+                        let ready = probe
+                            .dispatch(function, &mut self.cpu, &mut self.memory, &fs)
+                            .map_err(|error| {
+                                self.runtime.inventory_failure(dll, function);
+                                format!("{name}: {error}")
+                            })?;
+                        self.cpu.work += 1;
+                        self.runtime
+                            .complete_call(dll, function, &args, self.cpu.regs[0]);
+                        if ready {
+                            return Ok(Outcome::NativeMonoRootReady);
+                        }
+                        continue;
+                    }
+                }
                 let control = self
                     .runtime
                     .dispatch_bound(&binding, &mut self.cpu, &mut self.memory)
