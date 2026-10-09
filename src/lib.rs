@@ -23,6 +23,7 @@ pub mod pe;
 pub mod platform;
 pub mod resource;
 pub mod seh;
+mod simd;
 pub mod system;
 pub mod thread;
 pub mod user32;

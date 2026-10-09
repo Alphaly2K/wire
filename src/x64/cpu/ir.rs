@@ -2,6 +2,7 @@
 //! lowered from guest instructions, never host executable code or a Rust ABI
 //! serialization. PE32's persisted .wir format is deliberately separate.
 use super::{mask, reg, Cpu64, Instruction, Memory, OpKind, CF, M, OF, R};
+mod fp;
 mod segment;
 mod string;
 mod vector;
@@ -122,7 +123,7 @@ fn condition(m: M) -> Option<u8> {
 
 impl ScalarIr {
     #[inline(always)]
-    pub(super) fn is_scalar(&self) -> bool {
+    pub(crate) fn is_scalar(&self) -> bool {
         self.opcode & 128 == 0
     }
     #[inline(always)]
@@ -136,8 +137,12 @@ impl ScalarIr {
             if self.opcode >> 2 == STRING {
                 return self.execute_string_bounded(cpu, mem, limit);
             }
-            self.execute_vector(cpu, mem)
-                .map_err(|e| format!("{:#x} vector IR opcode {}: {e}", cpu.rip, self.opcode))?;
+            if self.opcode >> 2 >= fp::FIRST {
+                self.execute_fp(cpu, mem)?;
+            } else {
+                self.execute_vector(cpu, mem)
+                    .map_err(|e| format!("{:#x} vector IR opcode {}: {e}", cpu.rip, self.opcode))?;
+            }
             cpu.rip = cpu.rip.wrapping_add(self.len as u64);
             cpu.retired += 1;
             cpu.work += 1;
@@ -162,6 +167,9 @@ impl ScalarIr {
         let m = i.mnemonic();
         if string::supports(i) {
             return string::lower(i, ir);
+        }
+        if fp::supports(m) {
+            return fp::lower(i, ir);
         }
         if vector::supports(m) {
             return vector::lower(i, ir);
