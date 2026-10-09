@@ -49,3 +49,13 @@ boundary is `mono_error_init`, preceding `mono_unity_custom_attrs_construct`.
 because the stack-root barrier initially lacked attribute identities; it has no
 successful final GC validation and is not completion evidence. This phase does
 not enable the full-game backend or demonstrate a whole-game speed improvement.
+
+## Interpreter integration
+
+Merge `21db3ab` incorporates main `cafe7e8` with the completed FP/SIMD and bounded
+translation reuse optimizations. Runtime code merged without conflicts. Full
+feature Rust regression and all-target Clippy pass (logs:
+`native-mono-integrated-feature-tests.log`, `native-mono-integrated-clippy.log`).
+`native-mono-unity-attributes-integrated-01` independently passes the same actual
+attribute boundary and GC/resource lifecycle, guard 231/0. Its timing is a finite
+functional probe, not an AB/BA performance comparison.
