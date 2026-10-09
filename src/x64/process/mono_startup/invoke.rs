@@ -349,6 +349,16 @@ pub(super) fn validate_classlib_init(
             b"ClearManagedDescriptors".as_slice(),
             0x06000057,
         ),
+        6 => (
+            c"SubsystemManager",
+            b"ClearSubsystems".as_slice(),
+            0x0600003c,
+        ),
+        7 => (
+            c"SubsystemManager",
+            b"StaticConstructScriptingClassMap".as_slice(),
+            0x0600003d,
+        ),
         _ => return Err("managed startup step outside exact static void sequence".into()),
     };
     let namespace = if step == 5 {
@@ -357,6 +367,12 @@ pub(super) fn validate_classlib_init(
         c"UnityEngine"
     };
     let expected = unsafe { find(image, namespace.as_ptr(), class_name.as_ptr()) };
+    let flags = sym!(
+        "mono_method_get_flags",
+        unsafe extern "C" fn(Object, *mut u32) -> u32
+    );
+    let mut implementation = 0;
+    let method_flags = unsafe { flags(method, &mut implementation) };
     let text = unsafe { name(method) };
     let sig = unsafe { signature(method) };
     if expected.is_null()
@@ -368,6 +384,8 @@ pub(super) fn validate_classlib_init(
         || unsafe { CStr::from_ptr(text) }.to_bytes() != expected_name
         || unsafe { generic(method) } != 0
         || unsafe { inflated(method) } != 0
+        || method_flags & 0x10 == 0
+        || (implementation & 0x1000 != 0) != (step == 7)
         || unsafe { count(sig) } != u32::from(step == 3)
         || unsafe { instance(sig) } != 0
     {
@@ -675,7 +693,11 @@ pub(super) fn verify_project_folder(
     Ok(())
 }
 
-pub(super) fn verify_subsystems(library: Object, image: Object) -> Result<(), String> {
+pub(super) fn verify_subsystems(
+    library: Object,
+    image: Object,
+    manager: bool,
+) -> Result<(), String> {
     macro_rules! sym {
         ($name:literal,$ty:ty) => {{
             let p = unsafe { libc::dlsym(library, concat!($name, "\0").as_ptr().cast()) };
@@ -730,8 +752,18 @@ pub(super) fn verify_subsystems(library: Object, image: Object) -> Result<(), St
     let class = unsafe {
         find(
             image,
-            c"UnityEngine.SubsystemsImplementation".as_ptr(),
-            c"SubsystemDescriptorStore".as_ptr(),
+            if manager {
+                c"UnityEngine"
+            } else {
+                c"UnityEngine.SubsystemsImplementation"
+            }
+            .as_ptr(),
+            if manager {
+                c"SubsystemManager"
+            } else {
+                c"SubsystemDescriptorStore"
+            }
+            .as_ptr(),
         )
     };
     if class.is_null() {
@@ -742,11 +774,20 @@ pub(super) fn verify_subsystems(library: Object, image: Object) -> Result<(), St
         return Err("subsystem descriptor static storage absent".into());
     }
     for cycle in 0..2 {
-        for name in [
-            c"s_IntegratedDescriptors",
-            c"s_StandaloneDescriptors",
-            c"s_DeprecatedDescriptors",
-        ] {
+        let fields = if manager {
+            [
+                c"s_IntegratedSubsystems",
+                c"s_StandaloneSubsystems",
+                c"s_DeprecatedSubsystems",
+            ]
+        } else {
+            [
+                c"s_IntegratedDescriptors",
+                c"s_StandaloneDescriptors",
+                c"s_DeprecatedDescriptors",
+            ]
+        };
+        for name in fields {
             let f = unsafe { field(class, name.as_ptr()) };
             if f.is_null() || unsafe { flags(f) } & 0x10 == 0 {
                 return Err("subsystem descriptor list field mismatch".into());

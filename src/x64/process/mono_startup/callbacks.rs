@@ -16,6 +16,8 @@ const STACK_SLICE: u64 = STACK_BYTES / 8;
 pub(super) struct Stats {
     pub(super) calls: [usize; 7],
     pub(super) gc_events: u32,
+    pub(super) mono_reentries: usize,
+    pub(super) managed_reentries: usize,
 }
 struct Owner<'a> {
     memory: RefCell<&'a mut Memory>,
@@ -24,6 +26,9 @@ struct Owner<'a> {
     depth: Cell<usize>,
     calls: Cell<[usize; 7]>,
     gc_events: Cell<u32>,
+    mono_reentries: Cell<usize>,
+    managed_reentries: Cell<usize>,
+    metadata: Option<RefCell<super::reentry::Metadata<'a>>>,
 }
 impl Drop for Owner<'_> {
     fn drop(&mut self) {
@@ -46,6 +51,24 @@ pub(super) fn with_owner<T>(
     targets: [u64; 7],
     operation: impl FnOnce() -> T,
 ) -> Result<(T, Stats), String> {
+    with_routes(memory, runtime, targets, None, operation)
+}
+pub(super) fn with_metadata_owner<'a, T>(
+    memory: &'a mut Memory,
+    runtime: &'a mut Runtime64,
+    targets: [u64; 7],
+    metadata: super::reentry::Metadata<'a>,
+    operation: impl FnOnce() -> T,
+) -> Result<(T, Stats), String> {
+    with_routes(memory, runtime, targets, Some(metadata), operation)
+}
+fn with_routes<'a, T>(
+    memory: &'a mut Memory,
+    runtime: &'a mut Runtime64,
+    targets: [u64; 7],
+    metadata: Option<super::reentry::Metadata<'a>>,
+    operation: impl FnOnce() -> T,
+) -> Result<(T, Stats), String> {
     if runtime.active_thread() != 1 {
         return Err("native callback owner must be guest main thread".into());
     }
@@ -64,6 +87,9 @@ pub(super) fn with_owner<T>(
         depth: Cell::new(0),
         calls: Cell::new([0; 7]),
         gc_events: Cell::new(0),
+        mono_reentries: Cell::new(0),
+        managed_reentries: Cell::new(0),
+        metadata: metadata.map(RefCell::new),
     };
     // Only the TLS pointer erases the lifetime. Scope clears it before this
     // stack owner and its exclusive Memory/Runtime borrows can be released.
@@ -74,6 +100,8 @@ pub(super) fn with_owner<T>(
     let stats = Stats {
         calls: owner.calls.get(),
         gc_events: owner.gc_events.get(),
+        mono_reentries: owner.mono_reentries.get(),
+        managed_reentries: owner.managed_reentries.get(),
     };
     Ok((result, stats))
 }
@@ -170,10 +198,50 @@ fn execute_guest(owner: &Owner<'_>, target: u64, args: &[u64]) -> Result<u64, St
         let binding = owner.runtime.borrow().gateways.binding(&cpu.rip);
         if let Some(binding) = binding {
             if binding.dll.as_ref() == "mono-2.0-bdwgc.dll" {
-                return Err(format!(
-                    "nested Mono gateway requires typed reentry: {}",
-                    binding.original_function
-                ));
+                let route = owner.metadata.as_ref().ok_or_else(|| {
+                    format!(
+                        "nested Mono gateway requires typed reentry: {}",
+                        binding.original_function
+                    )
+                })?;
+                if binding.original_function.as_ref() == "mono_runtime_invoke" {
+                    let prepared = route
+                        .try_borrow_mut()
+                        .map_err(|_| "nested invoke metadata is already borrowed")?
+                        .prepare_invoke(&cpu, &owner.memory.borrow())?;
+                    // Both temporary RefCell borrows above end before native IL.
+                    prepared.execute()?;
+                    if prepared.exception_slot != 0 {
+                        owner
+                            .memory
+                            .borrow_mut()
+                            .write_int(prepared.exception_slot, 8, 0)?;
+                    }
+                    cpu.return_integer(&owner.memory.borrow(), 0)?;
+                    owner
+                        .managed_reentries
+                        .set(owner.managed_reentries.get() + 1);
+                } else {
+                    route
+                        .try_borrow_mut()
+                        .map_err(|_| "nested metadata route is already borrowed")?
+                        .dispatch(
+                            &binding.original_function,
+                            &mut cpu,
+                            &mut owner.memory.borrow_mut(),
+                            (stack_top - STACK_SLICE, stack_top),
+                        )
+                        .map_err(|error| {
+                            format!(
+                                "{error}; args={:x?}; rsp={:#x}",
+                                [cpu.regs[1], cpu.regs[2], cpu.regs[8], cpu.regs[9]],
+                                cpu.regs[4]
+                            )
+                        })?;
+                }
+                owner.mono_reentries.set(owner.mono_reentries.get() + 1);
+                cpu.work += 1;
+                continue;
             }
             let control = owner.runtime.borrow_mut().dispatch_bound(
                 &binding,
@@ -231,6 +299,15 @@ pub(super) fn log_span(target: u64, units: Option<&[u16]>) -> Result<(), String>
             .borrow_mut()
             .write_int(address + 8, 4, units_len as u64)?;
         execute_guest(owner, target, &[address])?;
+        Ok(())
+    })
+}
+pub(super) fn guest_noargs(target: u64) -> Result<(), String> {
+    OWNER.with(|slot| {
+        if slot.get().is_null() {
+            return Err("no-argument guest callback has no owner".into());
+        }
+        execute_guest(unsafe { &*slot.get() }, target, &[])?;
         Ok(())
     })
 }
@@ -479,6 +556,73 @@ mod tests {
             ],
             original_bounds
         );
+    }
+    #[test]
+    fn nested_guest_metadata_gateway_keeps_identity_and_restores_owner_on_rejection() {
+        let mut memory = Memory::default();
+        memory.map(0x1000, 4096, READ | WRITE | EXECUTE).unwrap();
+        memory
+            .map(super::super::super::STACK, 65536, READ | WRITE)
+            .unwrap();
+        let mut runtime = Runtime64::new(
+            &mut memory,
+            0x140000000,
+            super::super::super::STACK,
+            65536,
+            "nested-test",
+        )
+        .unwrap();
+        let set = runtime.register("mono-2.0-bdwgc.dll", "mono_class_set_userdata");
+        let get = runtime.register("mono-2.0-bdwgc.dll", "mono_class_get_userdata");
+        let mut registry = super::super::metadata::Registry::default();
+        let mut images = super::super::images::Registry::default();
+        let mut native = [0u64; 32];
+        let token = registry
+            .wrap(
+                &mut memory,
+                super::super::metadata::Value::Handle(
+                    native.as_mut_ptr().cast(),
+                    super::super::metadata::Kind::Class,
+                ),
+            )
+            .unwrap();
+        let mut code = vec![0x48, 0xb9]; // movabs rcx, existing class token
+        code.extend_from_slice(&token.to_le_bytes());
+        code.extend_from_slice(&[0x48, 0xba]); // movabs rdx, guest embedding value
+        code.extend_from_slice(&0x778899u64.to_le_bytes());
+        code.extend_from_slice(&[0x48, 0xb8]);
+        code.extend_from_slice(&set.to_le_bytes());
+        code.extend_from_slice(&[0x48, 0x83, 0xec, 0x28, 0xff, 0xd0, 0x48, 0x83, 0xc4, 0x28]);
+        code.extend_from_slice(&[0x48, 0xb9]);
+        code.extend_from_slice(&token.to_le_bytes());
+        code.extend_from_slice(&[0x48, 0xb8]);
+        code.extend_from_slice(&get.to_le_bytes());
+        code.extend_from_slice(&[0xff, 0xe0]); // tail call getter, return to owner sentinel
+        memory.write(0x1000, &code).unwrap();
+        let (rejected, _) =
+            with_owner(&mut memory, &mut runtime, [0x1000; 7], || reference(0, &[])).unwrap();
+        assert!(rejected.unwrap_err().contains("requires typed reentry"));
+        assert_eq!(memory.read_int(token + 232, 8).unwrap(), 0);
+        let (result, stats) = with_metadata_owner(
+            &mut memory,
+            &mut runtime,
+            [0x1000; 7],
+            super::super::reentry::Metadata {
+                library: ptr::null_mut(),
+                domain: ptr::null_mut(),
+                metadata: &mut registry,
+                images: &mut images,
+            },
+            || reference(0, &[]),
+        )
+        .unwrap();
+        assert_eq!(result.unwrap(), 0x778899);
+        assert_eq!(stats.mono_reentries, 2);
+        assert_eq!(native[29], 0);
+        assert!(OWNER.with(|slot| slot.get().is_null()));
+        assert!(memory.read_int(STACK_BASE, 8).is_err());
+        registry.retire(&mut memory).unwrap();
+        assert!(memory.read_int(token + 232, 8).is_err());
     }
     #[test]
     fn compiled_adapters_reenter_checked_cpu_without_changing_guest_owner_and_remove_scope() {

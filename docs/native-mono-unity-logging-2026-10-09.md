@@ -116,3 +116,28 @@ token 0x0600003c，static void()。其 .cctor 创建三个 List 后调用 Intern
 StaticConstructScriptingClassMap，固定原始 target 0x180135070。需要同 owner 下受检
 嵌套 Mono metadata reentry；现有 callback 执行器遇到 nested Mono gateway 会拒绝，
 不能绕过 .cctor 或伪造 map 已构建。继续实现这一契约，不影响浮点/IR/cache 工作。
+
+## 实际子系统 map 和嵌套托管执行已通过
+
+`native-mono-unity-subsystem-map-probe-04` exit 0，guard 232/0，7 个顶层 startup steps。
+SubsystemManager.ClearSubsystems 的 .cctor 实际反调原始 target 0x180135070，native
+map 在其中调用 12 次 Mono gateway，包含两次 exact static void() 托管方法：
+ClearManagedDescriptors / ClearSubsystems。三个 descriptor List 与三个 subsystem List
+的实际类型、Count=0 和静态 roots 在强制 GC 前后验证通过，map callback count=1。
+原始 Mono DLL 未 attach，585 arrays/handles、7 RuntimeTypes、12 strings 的 GC 与退出
+生命周期仍通过。GUIStyle.EmptyManagedCache（IMGUIModule token 0x0600039c）是下一停点。
+
+新增 `reentry.rs` 与 `subsystems.rs`。同一个 scoped Owner 借用原 provider 的 metadata/image
+registries，API 接口继续 opaque token / checked Memory。不是第二个 provider 或 VM。
+NULL root 清除只接受当前 callback stack 的 aligned slot；非空 object/reference、heap 目的、
+未对齐或栈外目标拒绝。nested domain_get 核对唯一 native domain 身份。
+
+嵌套 managed invoke 分准备/执行：准备校验 exact method/image/signature 及 guest exception
+slot，随后释放 Memory/registry RefCell 借用，再运行 native IL。因此同一 Owner 的 GC 和
+后续 guest callback 可重入。仅准入两个确证的子系统 static void 方法；未知方法记录
+resolved IL 后拒绝。没有通用对象/异常/byref 或任意 managed invoke 的准入。
+
+19 项定向通过，Clippy clean；新增原创 Win64 指令测试经过真正的 nested Mono gateway，
+验证 existing token/userdata identity、native class 不被写入、default route 拒绝和 Scope/stack
+撤销。NULL root 用例核对拒绝后的输出保持。probe-01/02/03 的 fail-stop 是回调准入诊断，
+未跑终点 GC/guard 退出，不能据此声称通过。继续 IMGUI cache 真实初始化，不在此停下。

@@ -40,8 +40,10 @@ mod invoke;
 mod logging;
 mod metadata;
 mod objects;
+mod reentry;
 mod reflection;
 mod services;
+mod subsystems;
 mod unitytls;
 macro_rules! symbol {
     ($library:expr, $name:literal, $ty:ty) => {{
@@ -227,6 +229,8 @@ pub(super) struct Probe {
     logging_ready: bool,
     exceptions: bool,
     exceptions_ready: bool,
+    subsystem_map: bool,
+    subsystem_map_ready: bool,
     subsystems: bool,
     subsystems_ready: bool,
     synchronization: bool,
@@ -341,16 +345,26 @@ impl Probe {
         skip_etw: bool,
         boundary: &str,
     ) -> Result<Self, String> {
-        let subsystems = boundary == "subsystems";
-        let synchronization = matches!(boundary, "synchronization" | "subsystems");
-        let exceptions = matches!(boundary, "exceptions" | "synchronization" | "subsystems");
+        let subsystem_map = boundary == "subsystem-map";
+        let subsystems = matches!(boundary, "subsystems" | "subsystem-map");
+        let synchronization =
+            matches!(boundary, "synchronization" | "subsystems" | "subsystem-map");
+        let exceptions = matches!(
+            boundary,
+            "exceptions" | "synchronization" | "subsystems" | "subsystem-map"
+        );
         let logging = matches!(
             boundary,
-            "logging" | "exceptions" | "synchronization" | "subsystems"
+            "logging" | "exceptions" | "synchronization" | "subsystems" | "subsystem-map"
         );
         let classlib = matches!(
             boundary,
-            "classlib" | "logging" | "exceptions" | "synchronization" | "subsystems"
+            "classlib"
+                | "logging"
+                | "exceptions"
+                | "synchronization"
+                | "subsystems"
+                | "subsystem-map"
         );
         let managed_types = matches!(
             boundary,
@@ -360,6 +374,7 @@ impl Probe {
                 | "exceptions"
                 | "synchronization"
                 | "subsystems"
+                | "subsystem-map"
         );
         let strings = matches!(
             boundary,
@@ -370,6 +385,7 @@ impl Probe {
                 | "exceptions"
                 | "synchronization"
                 | "subsystems"
+                | "subsystem-map"
         );
         let (main_thread, pre_bindings, bindings, profiler, pre_images, images, metadata) = match boundary {
             "root" => (false, false, false, false, false, false, false),
@@ -379,10 +395,10 @@ impl Probe {
             "profiler" => (true, true, true, true, false, false, false),
             "pre-images" => (true, true, true, true, true, false, false),
             "images" => (true, true, true, true, true, true, false),
-            "metadata" | "strings" | "managed-types" | "classlib" | "logging" | "exceptions" | "synchronization" | "subsystems" => (true, true, true, true, true, true, true),
+            "metadata" | "strings" | "managed-types" | "classlib" | "logging" | "exceptions" | "synchronization" | "subsystems" | "subsystem-map" => (true, true, true, true, true, true, true),
             _ => {
                 return Err(
-                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings, profiler, pre-images, images, metadata, strings, managed-types, classlib, logging, exceptions, synchronization or subsystems".into(),
+                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings, profiler, pre-images, images, metadata, strings, managed-types, classlib, logging, exceptions, synchronization, subsystems or subsystem-map".into(),
                 )
             }
         };
@@ -460,6 +476,8 @@ impl Probe {
             logging_ready: false,
             exceptions,
             exceptions_ready: false,
+            subsystem_map,
+            subsystem_map_ready: false,
             subsystems,
             subsystems_ready: false,
             synchronization,
@@ -1042,14 +1060,17 @@ impl Probe {
                 self.logging_ready = self.logging && self.classlib_invokes >= 2;
                 self.exceptions_ready = self.exceptions && self.classlib_invokes >= 3;
                 self.synchronization_ready = self.synchronization && self.classlib_invokes >= 5;
-                self.subsystems_ready = self.subsystems && self.classlib_invokes == 6;
+                self.subsystems_ready = self.subsystems && self.classlib_invokes >= 6;
+                self.subsystem_map_ready = self.subsystem_map && self.classlib_invokes == 7;
                 return Ok(true);
             }
         }
         Ok(false)
     }
     fn startup_limit(&self) -> usize {
-        if self.subsystems {
+        if self.subsystem_map {
+            7
+        } else if self.subsystems {
             6
         } else if self.synchronization {
             5
@@ -1261,6 +1282,7 @@ impl Probe {
             return Err("managed invoke has closed/foreign owner".into());
         }
         let library = native.library;
+        let native_domain = native.domain;
         let a = [cpu.regs[1], cpu.regs[2], cpu.regs[8], cpu.regs[9]];
         memory.read_int(cpu.regs[4], 8)?;
         cpu.regs[4]
@@ -1288,7 +1310,7 @@ impl Probe {
                 .native(a[0], metadata::Kind::Method)?;
             let image = self
                 .image_registry
-                .unique_native_image(if self.classlib_invokes == 5 {
+                .unique_native_image(if self.classlib_invokes >= 5 {
                     SUBSYSTEMS_MODULE
                 } else {
                     CORE_MODULE
@@ -1298,81 +1320,119 @@ impl Probe {
                 "mono_runtime_invoke",
                 unsafe extern "C" fn(Object, Object, *mut Object, *mut Object) -> Object
             );
-            let (result, _) =
-                callbacks::with_owner(memory, runtime, self.callback_targets(), || {
-                    if let Err(error) = invoke::validate_classlib_init(
-                        library,
-                        method,
-                        image,
-                        self.classlib_invokes,
-                    ) {
-                        eprintln!(
-                            "NATIVE_MONO_REJECTED_INVOKE: {}",
-                            self.metadata_registry.describe_method(library, a[0])?
-                        );
-                        for (label, _, listing) in invoke::owned_bodies(library, method)? {
-                            eprintln!("NATIVE_MONO_REJECTED_IL {label}:\n{listing}");
-                        }
-                        return Err(error);
-                    }
-                    if logging_init {
-                        services::install(library)?;
-                        logging::install(
-                            library,
-                            image,
-                            self.registry.exact_target(logging::NAME, logging::TARGET)?,
-                        )?;
-                    }
-                    let mut args = [if let Some(token) = argument {
-                        if token == 0 {
-                            ptr::null_mut()
-                        } else {
-                            self.object_registry.native_string(
-                                self.object_api.ok_or("project folder before string API")?,
-                                token,
-                            )?
-                        }
-                    } else {
-                        ptr::null_mut()
-                    }];
-                    let mut exception = ptr::null_mut();
+            let step = self.classlib_invokes;
+            let targets = self.callback_targets();
+            let (arguments, _) = callbacks::with_owner(memory, runtime, targets, || {
+                if let Err(error) =
+                    invoke::validate_classlib_init(library, method, image, self.classlib_invokes)
+                {
                     eprintln!(
-                        "NATIVE_MONO_MANAGED_INVOKE_BEGIN: startup step={} static void({})",
-                        self.classlib_invokes,
-                        if project_folder { "String" } else { "" }
+                        "NATIVE_MONO_REJECTED_INVOKE: {}",
+                        self.metadata_registry.describe_method(library, a[0])?
                     );
-                    let parameters = if project_folder {
-                        args.as_mut_ptr()
-                    } else {
+                    for (label, _, listing) in invoke::owned_bodies(library, method)? {
+                        eprintln!("NATIVE_MONO_REJECTED_IL {label}:\n{listing}");
+                    }
+                    return Err(error);
+                }
+                if logging_init {
+                    services::install(library)?;
+                    logging::install(
+                        library,
+                        image,
+                        self.registry.exact_target(logging::NAME, logging::TARGET)?,
+                    )?;
+                }
+                if step == 6 {
+                    subsystems::install(
+                        library,
+                        image,
+                        self.registry
+                            .exact_target(subsystems::NAME, subsystems::TARGET)?,
+                    )?;
+                }
+                Ok::<_, String>([if let Some(token) = argument {
+                    if token == 0 {
                         ptr::null_mut()
-                    };
-                    let result =
-                        unsafe { call(method, ptr::null_mut(), parameters, &mut exception) };
-                    if !exception.is_null() {
-                        return Err(
-                            "native classlib init raised an unadmitted managed exception".into(),
-                        );
+                    } else {
+                        self.object_registry.native_string(
+                            self.object_api.ok_or("project folder before string API")?,
+                            token,
+                        )?
                     }
-                    if !result.is_null() {
-                        return Err(
-                            "void native assembly redirection init returned an object".into()
-                        );
-                    }
-                    if logging_init {
-                        logging::verify(library, image)?;
-                    }
-                    if project_folder {
-                        invoke::verify_project_folder(library, image, args[0])?;
-                    }
-                    if self.classlib_invokes == 4 {
-                        invoke::verify_synchronization(library, image)?;
-                    }
-                    if self.classlib_invokes == 5 {
-                        invoke::verify_subsystems(library, image)?;
-                    }
-                    Ok::<_, String>(())
-                })?;
+                } else {
+                    ptr::null_mut()
+                }])
+            })?;
+            let mut args = arguments?;
+            // No provider registry borrow spans the native invoke. The optional
+            // nested route owns only metadata/image registry borrows, while the
+            // prepared method and argument pointers are stable rooted identities.
+            let operation = || {
+                let mut exception = ptr::null_mut();
+                eprintln!(
+                    "NATIVE_MONO_MANAGED_INVOKE_BEGIN: startup step={step} static void({})",
+                    if project_folder { "String" } else { "" }
+                );
+                let parameters = if project_folder {
+                    args.as_mut_ptr()
+                } else {
+                    ptr::null_mut()
+                };
+                let result = unsafe { call(method, ptr::null_mut(), parameters, &mut exception) };
+                if !exception.is_null() {
+                    return Err(
+                        "native startup invoke raised an unadmitted managed exception".into(),
+                    );
+                }
+                if !result.is_null() {
+                    return Err("void native startup invoke returned an object".into());
+                }
+                if logging_init {
+                    logging::verify(library, image)?;
+                }
+                if project_folder {
+                    invoke::verify_project_folder(library, image, args[0])?;
+                }
+                if step == 4 {
+                    invoke::verify_synchronization(library, image)?;
+                }
+                if step == 5 {
+                    invoke::verify_subsystems(library, image, false)?;
+                }
+                if step == 6 {
+                    subsystems::verify()?;
+                    invoke::verify_subsystems(library, image, true)?;
+                }
+                Ok::<_, String>(())
+            };
+            let (result, stats) = if step == 6 {
+                callbacks::with_metadata_owner(
+                    memory,
+                    runtime,
+                    targets,
+                    reentry::Metadata {
+                        library,
+                        domain: native_domain,
+                        metadata: &mut self.metadata_registry,
+                        images: &mut self.image_registry,
+                    },
+                    operation,
+                )?
+            } else {
+                callbacks::with_owner(memory, runtime, targets, operation)?
+            };
             result?;
+            if step == 6 {
+                eprintln!(
+                    "NATIVE_MONO_SUBSYSTEM_MAP_REENTRIES: {} managed-invokes={}",
+                    stats.mono_reentries, stats.managed_reentries
+                );
+                self.events.push(format!(
+                    "actual subsystem scripting map nested Mono reentries={} managed-invokes={}",
+                    stats.mono_reentries, stats.managed_reentries
+                ));
+            }
             if a[3] != 0 {
                 memory.write_int(a[3], 8, 0)?;
             }
@@ -2158,7 +2218,7 @@ impl Probe {
     }
     pub(super) fn report(&self) -> String {
         format!(
-            "native-root-ready={}\nnative-main-thread-ready={}\nnative-pre-bindings-ready={}\nnative-bindings-ready={}\nprovider-bindings={}\nnative-scalar-adapters={}\nactual-unity-scalar-callbacks-verified={}\nnative-profiler-ready={}\nactual-gc-event-mask={}\nactual-shutdown-callbacks={}\nnative-pre-images-ready={}\nactual-unitytls-leaf-verified={}\nnative-images-ready={}\nnative-metadata-ready={}\nnative-strings-ready={}\nnative-managed-types-ready={}\nnative-managed-type-invokes={}\nnative-classlib-ready={}\nnative-classlib-invokes={}\nnative-logging-ready={}\nnative-exceptions-ready={}\nnative-synchronization-ready={}\nnative-subsystems-ready={}\nfull-game-admission=false\n{}{}{}{}{}{}{}\n",
+            "native-root-ready={}\nnative-main-thread-ready={}\nnative-pre-bindings-ready={}\nnative-bindings-ready={}\nprovider-bindings={}\nnative-scalar-adapters={}\nactual-unity-scalar-callbacks-verified={}\nnative-profiler-ready={}\nactual-gc-event-mask={}\nactual-shutdown-callbacks={}\nnative-pre-images-ready={}\nactual-unitytls-leaf-verified={}\nnative-images-ready={}\nnative-metadata-ready={}\nnative-strings-ready={}\nnative-managed-types-ready={}\nnative-managed-type-invokes={}\nnative-classlib-ready={}\nnative-classlib-invokes={}\nnative-logging-ready={}\nnative-exceptions-ready={}\nnative-synchronization-ready={}\nnative-subsystems-ready={}\nnative-subsystem-map-ready={}\nfull-game-admission=false\n{}{}{}{}{}{}{}\n",
             self.root_ready,
             self.main_thread_ready,
             self.pre_bindings_ready,
@@ -2182,6 +2242,7 @@ impl Probe {
             self.exceptions_ready,
             self.synchronization_ready,
             self.subsystems_ready,
+            self.subsystem_map_ready,
             self.handle_registry.report(),
             self.array_registry.report(),
             self.reflection_registry.report(),
@@ -2207,7 +2268,8 @@ impl Probe {
             || (self.logging_ready && !self.exceptions)
             || (self.exceptions_ready && !self.synchronization)
             || (self.synchronization_ready && !self.subsystems)
-            || self.subsystems_ready
+            || (self.subsystems_ready && !self.subsystem_map)
+            || self.subsystem_map_ready
     }
 }
 fn store_stack_token(
@@ -2365,6 +2427,8 @@ mod tests {
             logging_ready: false,
             exceptions: false,
             exceptions_ready: false,
+            subsystem_map: false,
+            subsystem_map_ready: false,
             subsystems: false,
             subsystems_ready: false,
             synchronization: false,
