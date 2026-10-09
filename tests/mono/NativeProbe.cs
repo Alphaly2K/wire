@@ -1,3 +1,4 @@
+using System.Globalization;
 // Original fixture; compiled locally with the installed Unity compiler.
 using System;
 using System.Reflection;
@@ -69,6 +70,50 @@ public static class NativeProbe {
         public event EventHandler Changed;
         public void Fire() { EventHandler callback = Changed; if (callback != null) callback(this, EventArgs.Empty); }
     }
+    private sealed class RootPayload {
+        public byte[] Bytes;
+        public int Marker;
+        public RootPayload(int marker) { Bytes = new byte[1024]; Bytes[511] = (byte)marker; Marker = marker; }
+    }
+    private struct RootPair { public RootPayload First, Last; }
+    private static RootPair staticPair;
+    private static RootPayload[] staticPayloads;
+    [ThreadStatic] private static RootPayload threadPayload;
+    private static class GenericRoots<T> { public static RootPair Pair; }
+    public static int StaticRoots() {
+        staticPayloads = new RootPayload[1024];
+        for (int i = 0; i < staticPayloads.Length; i++) staticPayloads[i] = new RootPayload(i);
+        staticPair = new RootPair { First = new RootPayload(1701), Last = new RootPayload(1702) };
+        threadPayload = new RootPayload(1703);
+        GenericRoots<string>.Pair = new RootPair { First = new RootPayload(1704), Last = new RootPayload(1705) };
+        for (int cycle = 0; cycle < 32; cycle++) {
+            // Allocation pressure starts incremental steps between stores/reads.
+            for (int i = 0; i < 2048; i++) { byte[] garbage = new byte[1024]; garbage[511] = (byte)i; }
+            GC.Collect(); GC.WaitForPendingFinalizers();
+            for (int i = 0; i < staticPayloads.Length; i++)
+                if (staticPayloads[i].Marker != i || staticPayloads[i].Bytes[511] != (byte)i) return 71;
+            if (staticPair.First.Marker != 1701 || staticPair.Last.Marker != 1702) return 72;
+            if (threadPayload.Marker != 1703) return 73;
+            if (GenericRoots<string>.Pair.First.Marker != 1704 || GenericRoots<string>.Pair.Last.Marker != 1705) return 74;
+        }
+        staticPayloads = null; staticPair = default(RootPair); threadPayload = null;
+        GenericRoots<string>.Pair = default(RootPair);
+        return 0;
+    }
+
+    public static int Collation() {
+        CultureInfo[] cultures = { CultureInfo.InvariantCulture, new CultureInfo("en-US"), new CultureInfo("ja-JP") };
+        for (int cycle = 0; cycle < 8; cycle++) {
+            foreach (CultureInfo culture in cultures) {
+                if (culture.CompareInfo.Compare("abc", "abd") >= 0) return 61;
+                if (!culture.CompareInfo.IsPrefix("prefix-value", "prefix")) return 62;
+                if (culture.CompareInfo.Compare("same", "same") != 0) return 63;
+            }
+            GC.Collect(); GC.WaitForPendingFinalizers();
+        }
+        return 0;
+    }
+
     public static int Remoting() {
         RemotingFields value = new RemotingFields();
         object first = new object(), second = new object();

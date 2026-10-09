@@ -1,0 +1,49 @@
+--- a/mono/mini/interp/interp.c
++++ b/mono/mini/interp/interp.c
+@@ -6022,13 +6022,19 @@
+ 		MINT_IN_CASE(MINT_STSFLD_I8) STSFLD(gint64, gint64); MINT_IN_BREAK;
+ 		MINT_IN_CASE(MINT_STSFLD_R4) STSFLD(float, float); MINT_IN_BREAK;
+ 		MINT_IN_CASE(MINT_STSFLD_R8) STSFLD(double, double); MINT_IN_BREAK;
+-		MINT_IN_CASE(MINT_STSFLD_O) STSFLD(gpointer, gpointer); MINT_IN_BREAK;
++		MINT_IN_CASE(MINT_STSFLD_O) {
++			MonoVTable *vtable = (MonoVTable*) frame->imethod->data_items [ip [2]];
++			INIT_VTABLE (vtable);
++			mono_gc_wbarrier_generic_store_internal (frame->imethod->data_items [ip [3]], LOCAL_VAR (ip [1], MonoObject*));
++			ip += 4;
++			MINT_IN_BREAK;
++		}
+ 
+ 		MINT_IN_CASE(MINT_STSFLD_VT) {
+ 			MonoVTable *vtable = (MonoVTable*) frame->imethod->data_items [ip [2]];
+ 			INIT_VTABLE (vtable);
+ 			gpointer addr = frame->imethod->data_items [ip [3]];
+-			memcpy (addr, locals + ip [1], ip [4]);
++			mono_gc_wbarrier_range_copy (addr, locals + ip [1], ip [4]);
+ 			ip += 5;
+ 			MINT_IN_BREAK;
+ 		}
+@@ -6049,7 +6055,14 @@
+ 		MINT_IN_CASE(MINT_STTSFLD_I8) STTSFLD(gint64, gint64); MINT_IN_BREAK;
+ 		MINT_IN_CASE(MINT_STTSFLD_R4) STTSFLD(float, float); MINT_IN_BREAK;
+ 		MINT_IN_CASE(MINT_STTSFLD_R8) STTSFLD(double, double); MINT_IN_BREAK;
+-		MINT_IN_CASE(MINT_STTSFLD_O) STTSFLD(gpointer, gpointer); MINT_IN_BREAK;
++		MINT_IN_CASE(MINT_STTSFLD_O) {
++			MonoInternalThread *thread = mono_thread_internal_current ();
++			guint32 offset = READ32 (ip + 2);
++			gpointer addr = ((char*)thread->static_data [offset & 0x3f]) + (offset >> 6);
++			mono_gc_wbarrier_generic_store_internal (addr, LOCAL_VAR (ip [1], MonoObject*));
++			ip += 4;
++			MINT_IN_BREAK;
++		}
+ 
+ 		MINT_IN_CASE(MINT_STSSFLD) {
+ 			guint32 offset = READ32(ip + 3);
+@@ -6062,7 +6075,7 @@
+ 		MINT_IN_CASE(MINT_STSSFLD_VT) {
+ 			guint32 offset = READ32(ip + 2);
+ 			gpointer addr = mono_get_special_static_data (offset);
+-			memcpy (addr, locals + ip [1], ip [4]);
++			mono_gc_wbarrier_range_copy (addr, locals + ip [1], ip [4]);
+ 			ip += 5;
+ 			MINT_IN_BREAK;
+ 		}

@@ -86,7 +86,7 @@ def compile_fixtures(root, sdk, support_builder=None, classlib_input=None):
     (output / "build-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
 
-def run_probes(root, cases):
+def run_probes(root, cases, incremental=False):
     output = root / "probe"
     env = os.environ.copy()
     env.pop("MONO_ENV_OPTIONS", None)
@@ -94,18 +94,23 @@ def run_probes(root, cases):
                DYLD_INSERT_LIBRARIES=str(output / "noexec_guard.dylib"),
                MONO_PATH=str(output / "classlib/mono/4.5"),
                MONO_THREADS_SUSPEND="preemptive")
+    if incremental:
+        env["WIRE_MONO_UNITY_GC_PROFILE"] = "1"
+    else:
+        env.pop("WIRE_MONO_UNITY_GC_PROFILE", None)
     records = []
+    suffix = "-incremental" if incremental else ""
     for route in ("mmap", "jit", "mprotect", "vm_protect", "mach_vm_protect"):
         records.append(execute([output / "guard_selftest", route], env, output,
                                "guard-" + route, expected=86))
     for case in cases:
         records.append(execute([output / "embed_probe", output / "classlib",
                                 output / "NativeProbe.exe", case, "interp"],
-                               env, output, "run-" + case))
-        content = (output / ("run-" + case + ".log")).read_text()
+                               env, output, "run-" + case + suffix))
+        content = (output / ("run-" + case + suffix + ".log")).read_text()
         if f"PASS {case}" not in content or "WIRE_NOEXEC_GUARD checks=" not in content:
             raise RuntimeError(f"Missing runtime/guard evidence: {case}")
-    (output / "results.json").write_text(json.dumps(records, indent=2) + "\n")
+    (output / ("results" + suffix + ".json")).write_text(json.dumps(records, indent=2) + "\n")
 
 
 def main():
@@ -113,7 +118,8 @@ def main():
     parser.add_argument("stage", choices=("compile", "run", "all"))
     parser.add_argument("--output", type=Path, default=REPO / "wire-out/native-mono-m1")
     parser.add_argument("--sdk", type=Path, default=DEFAULT_SDK)
-    parser.add_argument("--cases", nargs="+", choices=("core", "interop", "threads", "gc", "layout", "remoting"), default=["core", "interop", "threads", "gc", "layout", "remoting"])
+    parser.add_argument("--cases", nargs="+", choices=("core", "interop", "threads", "gc", "layout", "remoting", "collation", "static-roots"), default=["core", "interop", "threads", "gc", "layout", "remoting", "collation", "static-roots"])
+    parser.add_argument("--incremental", action="store_true", help="initialize with the real Unity --gc-params=incremental=3 profile")
     parser.add_argument("--support-builder", type=Path, help="existing read-only development AOT tool input")
     parser.add_argument("--classlib-input", type=Path, help="existing read-only managed class libraries (copied to ignored output)")
     args = parser.parse_args()
@@ -123,7 +129,7 @@ def main():
     if args.stage in ("compile", "all"):
         compile_fixtures(root, args.sdk.resolve(), args.support_builder.resolve() if args.support_builder else None, args.classlib_input.resolve() if args.classlib_input else None)
     if args.stage in ("run", "all"):
-        run_probes(root, args.cases)
+        run_probes(root, args.cases, args.incremental)
 
 
 if __name__ == "__main__":

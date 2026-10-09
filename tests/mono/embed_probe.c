@@ -109,10 +109,14 @@ static void run_native_thread(void *(*entry)(void *)) {
 }
 
 int main(int argc, char **argv) {
-    require(argc == 5, "usage: embed_probe classlib-root fixture.exe core|interop|threads|gc|layout interp|interp-only");
+    require(argc == 5, "usage: embed_probe classlib-root fixture.exe core|interop|threads|gc|layout|remoting|collation|static-roots interp|interp-only");
     mono_set_dirs(argv[1], argv[1]);
     mono_config_parse(NULL);
     mono_jit_set_aot_mode(strcmp(argv[4], "interp-only") == 0 ? MONO_AOT_MODE_INTERP_ONLY : MONO_AOT_MODE_INTERP);
+    if (getenv("WIRE_MONO_UNITY_GC_PROFILE")) {
+        char *options[] = { "--gc-params=incremental=3" };
+        mono_jit_parse_options(1, options);
+    }
     domain = mono_jit_init_version("wire-native-mono-probe", "v4.0.30319");
     require(domain != NULL, "domain");
     thread_identity = mono_thread_current();
@@ -125,7 +129,11 @@ int main(int argc, char **argv) {
     require(fixture != NULL, "fixture class");
     reenter = mono_class_get_method_from_name(fixture, "Reenter", 1);
     require(reenter != NULL, "nested target");
-    if (strcmp(argv[3], "core") == 0) {
+    if (strcmp(argv[3], "static-roots") == 0) {
+        require(invoke_int("StaticRoots", NULL) == 0, "static/thread/generic reference roots under allocation pressure");
+    } else if (strcmp(argv[3], "collation") == 0) {
+        require(invoke_int("Collation", NULL) == 0, "real corelib invariant/en-US/ja-JP collation across GC");
+    } else if (strcmp(argv[3], "core") == 0) {
         require(invoke_int("Core", NULL) == 0, "core IL checksum, generics, reflection, delegate, GC");
         MonoMethod *method = mono_class_get_method_from_name(fixture, "ThrowBoundary", 0);
         MonoObject *exception = NULL;
