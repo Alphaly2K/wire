@@ -24,6 +24,7 @@ const EXE: &str = "94cccae89918110514672a6ec249a1252ffaeb28c0ae8d8633a9352988738
 const UNITY: &str = "a2022611884470ddab23927a3eb7bbaef3924c18972d30ba7b5330a8fd25bcc4";
 const CORELIB_SUPPORT: &str = "b10bb3e59af90e92e240424ac88b1f96eb27906c3fa099958713d93801b4b078";
 const CORE_MODULE: &str = "7de56d1259f25d8b0cfdc9f4c77030056886bb9ac119854d3155bd87a54c0af7";
+const IMGUI_MODULE: &str = "577712fb19f217f2e9dcc870e6cf430d4a5836c5c4a745ae89466877dfbb9745";
 const SUBSYSTEMS_MODULE: &str = "f25824d57c5f394b514df03bab7ace58d9e6eb8b55f52c5895404cb591eacf49";
 const CORELIB: &str = "6c76e06e6d44cf0f39bf59e6a90770968b70093ad4c1572dfbc5e46e431c5fbf";
 const ROOT_TOKEN: u64 = 0x6ffe00000000;
@@ -229,6 +230,8 @@ pub(super) struct Probe {
     logging_ready: bool,
     exceptions: bool,
     exceptions_ready: bool,
+    imgui: bool,
+    imgui_ready: bool,
     subsystem_map: bool,
     subsystem_map_ready: bool,
     subsystems: bool,
@@ -345,17 +348,25 @@ impl Probe {
         skip_etw: bool,
         boundary: &str,
     ) -> Result<Self, String> {
-        let subsystem_map = boundary == "subsystem-map";
-        let subsystems = matches!(boundary, "subsystems" | "subsystem-map");
-        let synchronization =
-            matches!(boundary, "synchronization" | "subsystems" | "subsystem-map");
+        let imgui = boundary == "imgui-cache";
+        let subsystem_map = matches!(boundary, "subsystem-map" | "imgui-cache");
+        let subsystems = matches!(boundary, "subsystems" | "subsystem-map" | "imgui-cache");
+        let synchronization = matches!(
+            boundary,
+            "synchronization" | "subsystems" | "subsystem-map" | "imgui-cache"
+        );
         let exceptions = matches!(
             boundary,
-            "exceptions" | "synchronization" | "subsystems" | "subsystem-map"
+            "exceptions" | "synchronization" | "subsystems" | "subsystem-map" | "imgui-cache"
         );
         let logging = matches!(
             boundary,
-            "logging" | "exceptions" | "synchronization" | "subsystems" | "subsystem-map"
+            "logging"
+                | "exceptions"
+                | "synchronization"
+                | "subsystems"
+                | "subsystem-map"
+                | "imgui-cache"
         );
         let classlib = matches!(
             boundary,
@@ -365,6 +376,7 @@ impl Probe {
                 | "synchronization"
                 | "subsystems"
                 | "subsystem-map"
+                | "imgui-cache"
         );
         let managed_types = matches!(
             boundary,
@@ -375,6 +387,7 @@ impl Probe {
                 | "synchronization"
                 | "subsystems"
                 | "subsystem-map"
+                | "imgui-cache"
         );
         let strings = matches!(
             boundary,
@@ -386,6 +399,7 @@ impl Probe {
                 | "synchronization"
                 | "subsystems"
                 | "subsystem-map"
+                | "imgui-cache"
         );
         let (main_thread, pre_bindings, bindings, profiler, pre_images, images, metadata) = match boundary {
             "root" => (false, false, false, false, false, false, false),
@@ -395,10 +409,10 @@ impl Probe {
             "profiler" => (true, true, true, true, false, false, false),
             "pre-images" => (true, true, true, true, true, false, false),
             "images" => (true, true, true, true, true, true, false),
-            "metadata" | "strings" | "managed-types" | "classlib" | "logging" | "exceptions" | "synchronization" | "subsystems" | "subsystem-map" => (true, true, true, true, true, true, true),
+            "metadata" | "strings" | "managed-types" | "classlib" | "logging" | "exceptions" | "synchronization" | "subsystems" | "subsystem-map" | "imgui-cache" => (true, true, true, true, true, true, true),
             _ => {
                 return Err(
-                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings, profiler, pre-images, images, metadata, strings, managed-types, classlib, logging, exceptions, synchronization, subsystems or subsystem-map".into(),
+                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings, profiler, pre-images, images, metadata, strings, managed-types, classlib, logging, exceptions, synchronization, subsystems, subsystem-map or imgui-cache".into(),
                 )
             }
         };
@@ -476,6 +490,8 @@ impl Probe {
             logging_ready: false,
             exceptions,
             exceptions_ready: false,
+            imgui,
+            imgui_ready: false,
             subsystem_map,
             subsystem_map_ready: false,
             subsystems,
@@ -1061,14 +1077,17 @@ impl Probe {
                 self.exceptions_ready = self.exceptions && self.classlib_invokes >= 3;
                 self.synchronization_ready = self.synchronization && self.classlib_invokes >= 5;
                 self.subsystems_ready = self.subsystems && self.classlib_invokes >= 6;
-                self.subsystem_map_ready = self.subsystem_map && self.classlib_invokes == 7;
+                self.subsystem_map_ready = self.subsystem_map && self.classlib_invokes >= 7;
+                self.imgui_ready = self.imgui && self.classlib_invokes == 8;
                 return Ok(true);
             }
         }
         Ok(false)
     }
     fn startup_limit(&self) -> usize {
-        if self.subsystem_map {
+        if self.imgui {
+            8
+        } else if self.subsystem_map {
             7
         } else if self.subsystems {
             6
@@ -1310,7 +1329,9 @@ impl Probe {
                 .native(a[0], metadata::Kind::Method)?;
             let image = self
                 .image_registry
-                .unique_native_image(if self.classlib_invokes >= 5 {
+                .unique_native_image(if self.classlib_invokes == 7 {
+                    IMGUI_MODULE
+                } else if self.classlib_invokes >= 5 {
                     SUBSYSTEMS_MODULE
                 } else {
                     CORE_MODULE
@@ -1399,6 +1420,9 @@ impl Probe {
                 }
                 if step == 5 {
                     invoke::verify_subsystems(library, image, false)?;
+                }
+                if step == 7 {
+                    invoke::verify_imgui(library, image)?;
                 }
                 if step == 6 {
                     subsystems::verify()?;
@@ -2218,7 +2242,7 @@ impl Probe {
     }
     pub(super) fn report(&self) -> String {
         format!(
-            "native-root-ready={}\nnative-main-thread-ready={}\nnative-pre-bindings-ready={}\nnative-bindings-ready={}\nprovider-bindings={}\nnative-scalar-adapters={}\nactual-unity-scalar-callbacks-verified={}\nnative-profiler-ready={}\nactual-gc-event-mask={}\nactual-shutdown-callbacks={}\nnative-pre-images-ready={}\nactual-unitytls-leaf-verified={}\nnative-images-ready={}\nnative-metadata-ready={}\nnative-strings-ready={}\nnative-managed-types-ready={}\nnative-managed-type-invokes={}\nnative-classlib-ready={}\nnative-classlib-invokes={}\nnative-logging-ready={}\nnative-exceptions-ready={}\nnative-synchronization-ready={}\nnative-subsystems-ready={}\nnative-subsystem-map-ready={}\nfull-game-admission=false\n{}{}{}{}{}{}{}\n",
+            "native-root-ready={}\nnative-main-thread-ready={}\nnative-pre-bindings-ready={}\nnative-bindings-ready={}\nprovider-bindings={}\nnative-scalar-adapters={}\nactual-unity-scalar-callbacks-verified={}\nnative-profiler-ready={}\nactual-gc-event-mask={}\nactual-shutdown-callbacks={}\nnative-pre-images-ready={}\nactual-unitytls-leaf-verified={}\nnative-images-ready={}\nnative-metadata-ready={}\nnative-strings-ready={}\nnative-managed-types-ready={}\nnative-managed-type-invokes={}\nnative-classlib-ready={}\nnative-classlib-invokes={}\nnative-logging-ready={}\nnative-exceptions-ready={}\nnative-synchronization-ready={}\nnative-subsystems-ready={}\nnative-subsystem-map-ready={}\nnative-imgui-ready={}\nfull-game-admission=false\n{}{}{}{}{}{}{}\n",
             self.root_ready,
             self.main_thread_ready,
             self.pre_bindings_ready,
@@ -2243,6 +2267,7 @@ impl Probe {
             self.synchronization_ready,
             self.subsystems_ready,
             self.subsystem_map_ready,
+            self.imgui_ready,
             self.handle_registry.report(),
             self.array_registry.report(),
             self.reflection_registry.report(),
@@ -2269,7 +2294,8 @@ impl Probe {
             || (self.exceptions_ready && !self.synchronization)
             || (self.synchronization_ready && !self.subsystems)
             || (self.subsystems_ready && !self.subsystem_map)
-            || self.subsystem_map_ready
+            || (self.subsystem_map_ready && !self.imgui)
+            || self.imgui_ready
     }
 }
 fn store_stack_token(
@@ -2427,6 +2453,8 @@ mod tests {
             logging_ready: false,
             exceptions: false,
             exceptions_ready: false,
+            imgui: false,
+            imgui_ready: false,
             subsystem_map: false,
             subsystem_map_ready: false,
             subsystems: false,

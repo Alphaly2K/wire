@@ -141,3 +141,15 @@ resolved IL 后拒绝。没有通用对象/异常/byref 或任意 managed invoke
 验证 existing token/userdata identity、native class 不被写入、default route 拒绝和 Scope/stack
 撤销。NULL root 用例核对拒绝后的输出保持。probe-01/02/03 的 fail-stop 是回调准入诊断，
 未跑终点 GC/guard 退出，不能据此声称通过。继续 IMGUI cache 真实初始化，不在此停下。
+
+## IMGUI cache 边界已通过
+
+`native-mono-unity-imgui-cache-probe-01` exit 0，8 次顶层启动 invoke。GUIStyle.EmptyManagedCache
+实际执行 IMGUITextHandle.EmptyManagedCache，初始化并清空真实 Dictionary<int,IMGUITextHandle>
+和 LinkedList<TextHandleTuple>；精确 static field/type/Count=0 与强制 GC 前后验证通过。
+GUIStyle.showKeyboardFocus 的 Boolean=true 证明 .cctor 已执行。集合验证与 subsystem Lists
+共享实现。19 项定向回归和 Clippy 通过；完整 backend/Admission 仍 false。
+
+下一 API 为 mono_custom_attrs_from_class。已审计源码：unchecked 查询会丢弃 MonoError，
+get_attr 对错误 assert。因此下一阶段需要 checked attrs 包装和真正 rooted attribute objects，
+不能用 NULL 伪装不存在属性、跳过构造或把 native fields/object headers 直接发布到 guest。

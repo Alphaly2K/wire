@@ -34,7 +34,7 @@ pub(super) fn install(library: Object, image: Object, target: u64) -> Result<(),
     if method.is_null() {
         return Err("subsystem map method absent".into());
     }
-    invoke::validate_classlib_init(library, method, image, 7)?;
+    invoke::validate_classlib_init(library, method, image, invoke::SUBSYSTEM_MAP_ICALL_STEP)?;
     TARGET_PC
         .set(target)
         .map_err(|_| "subsystem map adapter already installed")?;

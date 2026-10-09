@@ -2,6 +2,7 @@
 //! inferred from this one static reference signature.
 use super::{c_char, Object};
 use std::{ffi::CStr, ptr};
+pub(super) const SUBSYSTEM_MAP_ICALL_STEP: usize = usize::MAX;
 pub(super) fn validate_get_type(library: Object, method: Object) -> Result<(), String> {
     macro_rules! sym {
         ($name:literal,$ty:ty) => {{
@@ -354,11 +355,12 @@ pub(super) fn validate_classlib_init(
             b"ClearSubsystems".as_slice(),
             0x0600003c,
         ),
-        7 => (
+        SUBSYSTEM_MAP_ICALL_STEP => (
             c"SubsystemManager",
             b"StaticConstructScriptingClassMap".as_slice(),
             0x0600003d,
         ),
+        7 => (c"GUIStyle", b"EmptyManagedCache".as_slice(), 0x0600039c),
         _ => return Err("managed startup step outside exact static void sequence".into()),
     };
     let namespace = if step == 5 {
@@ -385,7 +387,7 @@ pub(super) fn validate_classlib_init(
         || unsafe { generic(method) } != 0
         || unsafe { inflated(method) } != 0
         || method_flags & 0x10 == 0
-        || (implementation & 0x1000 != 0) != (step == 7)
+        || (implementation & 0x1000 != 0) != (step == SUBSYSTEM_MAP_ICALL_STEP)
         || unsafe { count(sig) } != u32::from(step == 3)
         || unsafe { instance(sig) } != 0
     {
@@ -698,6 +700,38 @@ pub(super) fn verify_subsystems(
     image: Object,
     manager: bool,
 ) -> Result<(), String> {
+    let (namespace, class, fields) = if manager {
+        (
+            c"UnityEngine",
+            c"SubsystemManager",
+            [
+                c"s_IntegratedSubsystems",
+                c"s_StandaloneSubsystems",
+                c"s_DeprecatedSubsystems",
+            ],
+        )
+    } else {
+        (
+            c"UnityEngine.SubsystemsImplementation",
+            c"SubsystemDescriptorStore",
+            [
+                c"s_IntegratedDescriptors",
+                c"s_StandaloneDescriptors",
+                c"s_DeprecatedDescriptors",
+            ],
+        )
+    };
+    verify_static_collections(library, image, namespace, class, &fields)?;
+    eprintln!("NATIVE_MONO_SUBSYSTEMS_VERIFIED: real-generic-lists=3 counts=0 static-roots-gc-stable=true");
+    Ok(())
+}
+fn verify_static_collections(
+    library: Object,
+    image: Object,
+    namespace: &CStr,
+    class_name: &CStr,
+    fields: &[&CStr],
+) -> Result<(), String> {
     macro_rules! sym {
         ($name:literal,$ty:ty) => {{
             let p = unsafe { libc::dlsym(library, concat!($name, "\0").as_ptr().cast()) };
@@ -749,23 +783,7 @@ pub(super) fn verify_subsystems(
     let int_class = sym!("mono_get_int32_class", unsafe extern "C" fn() -> Object);
     let collect = sym!("mono_gc_collect", unsafe extern "C" fn(i32));
     let generation = sym!("mono_gc_max_generation", unsafe extern "C" fn() -> i32);
-    let class = unsafe {
-        find(
-            image,
-            if manager {
-                c"UnityEngine"
-            } else {
-                c"UnityEngine.SubsystemsImplementation"
-            }
-            .as_ptr(),
-            if manager {
-                c"SubsystemManager"
-            } else {
-                c"SubsystemDescriptorStore"
-            }
-            .as_ptr(),
-        )
-    };
+    let class = unsafe { find(image, namespace.as_ptr(), class_name.as_ptr()) };
     if class.is_null() {
         return Err("subsystem descriptor store absent".into());
     }
@@ -774,19 +792,6 @@ pub(super) fn verify_subsystems(
         return Err("subsystem descriptor static storage absent".into());
     }
     for cycle in 0..2 {
-        let fields = if manager {
-            [
-                c"s_IntegratedSubsystems",
-                c"s_StandaloneSubsystems",
-                c"s_DeprecatedSubsystems",
-            ]
-        } else {
-            [
-                c"s_IntegratedDescriptors",
-                c"s_StandaloneDescriptors",
-                c"s_DeprecatedDescriptors",
-            ]
-        };
         for name in fields {
             let f = unsafe { field(class, name.as_ptr()) };
             if f.is_null() || unsafe { flags(f) } & 0x10 == 0 {
@@ -823,6 +828,72 @@ pub(super) fn verify_subsystems(
             }
         }
     }
-    eprintln!("NATIVE_MONO_SUBSYSTEMS_VERIFIED: real-generic-lists=3 counts=0 static-roots-gc-stable=true");
+
+    Ok(())
+}
+
+pub(super) fn verify_imgui(library: Object, image: Object) -> Result<(), String> {
+    verify_static_collections(
+        library,
+        image,
+        c"UnityEngine",
+        c"IMGUITextHandle",
+        &[c"textHandles", c"textHandlesTuple"],
+    )?;
+    macro_rules! sym {
+        ($name:literal,$ty:ty) => {{
+            let p = unsafe { libc::dlsym(library, concat!($name, "\0").as_ptr().cast()) };
+            if p.is_null() {
+                return Err(concat!("missing IMGUI verification symbol: ", $name).into());
+            }
+            unsafe { std::mem::transmute::<Object, $ty>(p) }
+        }};
+    }
+    let find = sym!(
+        "mono_class_from_name",
+        unsafe extern "C" fn(Object, *const c_char, *const c_char) -> Object
+    );
+    let field = sym!(
+        "mono_class_get_field_from_name",
+        unsafe extern "C" fn(Object, *const c_char) -> Object
+    );
+    let field_type = sym!(
+        "mono_field_get_type",
+        unsafe extern "C" fn(Object) -> Object
+    );
+    let kind = sym!("mono_type_get_type", unsafe extern "C" fn(Object) -> u32);
+    let flags = sym!("mono_field_get_flags", unsafe extern "C" fn(Object) -> u32);
+    let vtable = sym!(
+        "mono_class_vtable",
+        unsafe extern "C" fn(Object, Object) -> Object
+    );
+    let domain = sym!("mono_domain_get", unsafe extern "C" fn() -> Object);
+    let get = sym!(
+        "mono_field_static_get_value",
+        unsafe extern "C" fn(Object, Object, Object)
+    );
+    let class = unsafe { find(image, c"UnityEngine".as_ptr(), c"GUIStyle".as_ptr()) };
+    if class.is_null() {
+        return Err("GUIStyle absent".into());
+    }
+    let field = unsafe { field(class, c"showKeyboardFocus".as_ptr()) };
+    if field.is_null()
+        || unsafe { kind(field_type(field)) } != 2
+        || unsafe { flags(field) } & 0x10 == 0
+    {
+        return Err("GUIStyle focus static Boolean mismatch".into());
+    }
+    let storage = unsafe { vtable(domain(), class) };
+    if storage.is_null() {
+        return Err("GUIStyle storage absent".into());
+    }
+    let mut focus = 0u8;
+    unsafe {
+        get(storage, field, (&mut focus as *mut u8).cast());
+    }
+    if focus != 1 {
+        return Err("GUIStyle actual class initializer did not set focus".into());
+    }
+    eprintln!("NATIVE_MONO_IMGUI_CACHE_VERIFIED: real-dictionary-and-linked-list=2 counts=0 gc-stable=true focus=true");
     Ok(())
 }
