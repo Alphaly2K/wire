@@ -60,6 +60,7 @@ mod layout;
 mod metadata;
 mod perf;
 mod refs;
+mod roots;
 mod scheduler;
 mod services;
 
@@ -607,6 +608,7 @@ fn main() {
     scheduler::run(&mono);
     delegates::run(&mono);
     domains::run(&mono, &args[3]);
+    roots::run(&mono);
     if let Some(blocks) = args.get(5) {
         checked::run(&mono, &mut *guest, blocks);
         buffers::run(&mono, &mut *guest);
