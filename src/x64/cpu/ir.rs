@@ -2,21 +2,30 @@
 //! lowered from guest instructions, never host executable code or a Rust ABI
 //! serialization. PE32's persisted .wir format is deliberately separate.
 use super::{mask, reg, Cpu64, Instruction, Memory, OpKind, CF, M, OF, R};
+mod fp;
 mod segment;
 mod string;
 mod vector;
-pub(crate) use segment::RegisterSegment;
+pub(crate) use segment::{CheckedSegment, RegisterSegment};
 
 const MEMORY: u8 = 254;
 const CONSTANT: u8 = 255;
 const NO_REGISTER: u8 = 255;
 const ADDRESS32: u8 = 4;
 const GS: u8 = 8;
+const CHECKED_SEGMENT: u8 = 64;
 const REGISTER_ONLY: u8 = 128;
 
 trait IrMemory {
     const REGISTER_ONLY: bool = false;
     fn read_int(&self, address: u64, size: usize) -> Result<u64, String>;
+    fn read_bytes(&self, _: u64, _: &mut [u8]) -> Result<(), String> {
+        unreachable!("register segment byte read")
+    }
+    fn write_bytes(&mut self, _: u64, _: &[u8]) -> Result<(), String> {
+        unreachable!("register segment byte write")
+    }
+
     fn write_int(&mut self, address: u64, size: usize, value: u64) -> Result<(), String>;
     fn modify_int(
         &mut self,
@@ -29,6 +38,12 @@ trait IrMemory {
     }
 }
 impl IrMemory for Memory {
+    fn read_bytes(&self, address: u64, out: &mut [u8]) -> Result<(), String> {
+        Memory::read(self, address, out)
+    }
+    fn write_bytes(&mut self, address: u64, bytes: &[u8]) -> Result<(), String> {
+        Memory::write(self, address, bytes)
+    }
     fn read_int(&self, address: u64, size: usize) -> Result<u64, String> {
         Memory::read_int(self, address, size)
     }
@@ -78,6 +93,7 @@ const IMUL: u8 = 27;
 const EXTEND_ACC: u8 = 28;
 const BSWAP: u8 = 29;
 const BIT_SCAN: u8 = 30;
+const BIT_TEST: u8 = 31;
 const VECTOR_FIRST: u8 = 32;
 const STRING: u8 = 43;
 
@@ -122,7 +138,7 @@ fn condition(m: M) -> Option<u8> {
 
 impl ScalarIr {
     #[inline(always)]
-    pub(super) fn is_scalar(&self) -> bool {
+    pub(crate) fn is_scalar(&self) -> bool {
         self.opcode & 128 == 0
     }
     #[inline(always)]
@@ -133,11 +149,16 @@ impl ScalarIr {
         limit: u64,
     ) -> Result<u64, String> {
         if self.opcode & 128 != 0 {
+            mem.diagnostic_operands(self.dst == MEMORY || self.src == MEMORY);
             if self.opcode >> 2 == STRING {
                 return self.execute_string_bounded(cpu, mem, limit);
             }
-            self.execute_vector(cpu, mem)
-                .map_err(|e| format!("{:#x} vector IR opcode {}: {e}", cpu.rip, self.opcode))?;
+            if self.opcode >> 2 >= fp::FIRST {
+                self.execute_fp(cpu, mem)?;
+            } else {
+                self.execute_vector_checked(cpu, mem)
+                    .map_err(|e| format!("{:#x} vector IR opcode {}: {e}", cpu.rip, self.opcode))?;
+            }
             cpu.rip = cpu.rip.wrapping_add(self.len as u64);
             cpu.retired += 1;
             cpu.work += 1;
@@ -162,6 +183,9 @@ impl ScalarIr {
         let m = i.mnemonic();
         if string::supports(i) {
             return string::lower(i, ir);
+        }
+        if fp::supports(m) {
+            return fp::lower(i, ir);
         }
         if vector::supports(m) {
             return vector::lower(i, ir);
@@ -196,6 +220,15 @@ impl ScalarIr {
             }
             M::Cbw | M::Cwde | M::Cdqe | M::Cwd | M::Cdq | M::Cqo => EXTEND_ACC,
             M::Bswap => BSWAP,
+            M::Bt | M::Bts | M::Btr | M::Btc => {
+                ir.aux = match m {
+                    M::Bt => 0,
+                    M::Bts => 1,
+                    M::Btr => 2,
+                    _ => 3,
+                };
+                BIT_TEST
+            }
             M::Bsf | M::Bsr => {
                 ir.aux = (m == M::Bsr) as u8;
                 BIT_SCAN
@@ -225,7 +258,8 @@ impl ScalarIr {
             && (!matches!(
                 op,
                 ADD | ADC | SUB | SBB | AND | OR | XOR | INC | DEC | NEG | NOT
-            ) || i.op0_kind() != OpKind::Memory)
+            ) && !(op == BIT_TEST && ir.aux != 0)
+                || i.op0_kind() != OpKind::Memory)
             || (i.has_rep_prefix() || i.has_repne_prefix()) && !matches!(m, M::Ret | M::Pause)
         {
             return None; // The checked fallback reports invalid/unsupported prefixes.
@@ -248,6 +282,9 @@ impl ScalarIr {
             _ => Cpu64::width(i, 0).ok()?,
         };
         ir.opcode = (op << 2) | Self::type_code(bits)?;
+        if op == BIT_TEST && !matches!(bits, 16 | 32 | 64) {
+            return None;
+        }
         if op == BSWAP && !matches!(bits, 32 | 64) {
             return None; // Preserve the checked fallback's invalid-width error.
         }
@@ -303,6 +340,7 @@ impl ScalarIr {
                 | SET
                 | POP
                 | SHIFT
+                | BIT_TEST
         ) && ir.dst == CONSTANT
             || matches!(
                 op,
@@ -314,25 +352,67 @@ impl ScalarIr {
         if ir.register_safe() {
             ir.addressing |= REGISTER_ONLY;
         }
+        if ir.checked_member() {
+            ir.addressing |= CHECKED_SEGMENT;
+        }
         Some(ir)
     }
 
     fn register_safe(&self) -> bool {
         let op = self.opcode >> 2;
-        self.is_scalar()
+        (self.is_scalar() || (VECTOR_FIRST..STRING).contains(&op))
             && self.dst != MEMORY
             && (self.src != MEMORY || op == LEA)
             && !matches!(op, PUSH | POP | CALL | RETURN)
     }
     #[inline(always)]
     pub(crate) fn register_only(&self) -> bool {
-        self.is_scalar() && self.addressing & REGISTER_ONLY != 0
+        self.addressing & REGISTER_ONLY != 0
     }
     pub(crate) fn without_segment(mut self) -> Self {
         self.addressing &= !REGISTER_ONLY;
         self
     }
 
+    #[inline(always)]
+    pub(crate) fn checked_segment(&self) -> bool {
+        self.addressing & CHECKED_SEGMENT != 0
+    }
+    pub(crate) fn without_checked_segment(mut self) -> Self {
+        self.addressing &= !CHECKED_SEGMENT;
+        self
+    }
+    fn checked_member(&self) -> bool {
+        matches!(
+            self.opcode >> 2,
+            NOP | MOV
+                | LEA
+                | ADD
+                | ADC
+                | SUB
+                | SBB
+                | CMP
+                | AND
+                | OR
+                | XOR
+                | TEST
+                | INC
+                | DEC
+                | NEG
+                | NOT
+                | CMOV
+                | SET
+                | BRANCH
+        ) || self.opcode >> 2 == JUMP && self.dst != MEMORY
+    }
+    // Inspect only this instruction's access. Permissions and guard effects
+    // remain in the ordinary checked executor, in guest execution order.
+    fn checked_access(&self, cpu: &Cpu64, mem: &Memory) -> bool {
+        if self.opcode >> 2 == LEA || self.dst != MEMORY && self.src != MEMORY {
+            return true;
+        }
+        mem.owned_noncode_access(self.address(cpu), 1usize << (self.opcode & 3))
+    }
     fn type_code(bits: u32) -> Option<u8> {
         Some(match bits {
             8 => 0,
@@ -486,6 +566,7 @@ impl ScalarIr {
     }
     #[inline(always)]
     pub(super) fn step_scalar(&self, cpu: &mut Cpu64, mem: &mut Memory) -> Result<(), String> {
+        mem.diagnostic_operands(self.dst == MEMORY || self.src == MEMORY);
         // A scalar opcode can only write its explicit destination and RSP.
         // Memory/constant selectors still produce an in-range, untouched GPR.
         // Save both before execution: POP RSP can alias them, and POP [RSP]
@@ -569,6 +650,45 @@ impl ScalarIr {
                     }
                 }
                 self.write(cpu, result, bits, mem)?;
+            }
+            BIT_TEST => {
+                let offset = self.read(cpu, self.src, bits, mem)?;
+                let bit = offset as u32 & (bits - 1);
+                let update = |a: u64| match self.aux {
+                    1 => a | (1u64 << bit),
+                    2 => a & !(1u64 << bit),
+                    3 => a ^ (1u64 << bit),
+                    _ => a,
+                };
+                if self.dst == MEMORY {
+                    let mut address = self.address(cpu);
+                    if self.src != CONSTANT {
+                        let signed = super::signed(offset, bits) as i64;
+                        address = address.wrapping_add(
+                            (signed.div_euclid(bits as i64) * (bits / 8) as i64) as u64,
+                        );
+                    }
+                    let mut carry = 0;
+                    if self.aux == 0 {
+                        carry = (mem.read_int(address, (bits / 8) as usize)? >> bit) & 1;
+                    } else {
+                        mem.modify_int(address, (bits / 8) as usize, |a| {
+                            carry = (a >> bit) & 1;
+                            update(a)
+                        })?;
+                    }
+                    if UPDATE_FLAGS {
+                        cpu.rflags = (cpu.rflags & !CF) | carry;
+                    }
+                } else {
+                    let a = self.read(cpu, self.dst, bits, mem)?;
+                    if self.aux != 0 {
+                        self.write(cpu, update(a), bits, mem)?;
+                    }
+                    if UPDATE_FLAGS {
+                        cpu.rflags = (cpu.rflags & !CF) | ((a >> bit) & 1);
+                    }
+                }
             }
             SHIFT | IMUL | EXTEND_ACC | BSWAP | BIT_SCAN => {
                 if T::REGISTER_ONLY {

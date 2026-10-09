@@ -469,3 +469,116 @@ fn register_segments_stop_before_next_page_guard_and_revalidate_changed_link_tar
     assert_eq!(fast.retired, 32);
     assert_eq!(fast.work, 32);
 }
+
+#[test]
+fn typed_bit_tests_keep_signed_offsets_immediate_masks_and_fault_commit_boundaries() {
+    use unicorn_engine::unicorn_const::{Arch, Mode, Prot};
+    use unicorn_engine::{RegisterX86 as U, Unicorn};
+    for bits in [16u32, 32, 64] {
+        for kind in 0..4 {
+            for memory in [false, true] {
+                for immediate in [false, true] {
+                    for locked in [false, true] {
+                        if locked && (!memory || kind == 0) {
+                            continue;
+                        }
+                        let mut code = Vec::new();
+                        if locked {
+                            code.push(0xf0);
+                        }
+                        if bits == 16 {
+                            code.push(0x66);
+                        }
+                        if bits == 64 {
+                            code.push(0x48);
+                        }
+                        if immediate {
+                            code.extend([
+                                0x0f,
+                                0xba,
+                                if memory { 0x23 } else { 0xe0 } | (kind << 3),
+                                0xff,
+                            ]);
+                        } else {
+                            code.extend([
+                                0x0f,
+                                [0xa3, 0xab, 0xb3, 0xbb][kind as usize],
+                                if memory { 0x0b } else { 0xc8 },
+                            ]);
+                        }
+                        let mut mem = Memory::default();
+                        mem.map(CODE, 4096, READ | WRITE | EXECUTE).unwrap();
+                        mem.map(DATA, 8192, READ | WRITE).unwrap();
+                        mem.write(CODE, &code).unwrap();
+                        mem.enable_execution_stats();
+                        let mut uc = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+                        uc.mem_map(CODE, 4096, Prot::ALL).unwrap();
+                        uc.mem_map(DATA, 8192, Prot::ALL).unwrap();
+                        uc.mem_write(CODE, &code).unwrap();
+                        for offset in [-129i64, -65, -33, -17, -1, 0, 15, 16, 31, 32, 63, 64, 129] {
+                            let data: Vec<u8> =
+                                (0..8192).map(|n| ((n * 13 + 7) ^ (n >> 3)) as u8).collect();
+                            mem.write(DATA, &data).unwrap();
+                            uc.mem_write(DATA, &data).unwrap();
+                            let mut cpu = Cpu64::new(CODE, DATA + 8192);
+                            cpu.regs[0] = 0xa5f00f5a88776655;
+                            cpu.regs[1] = offset as u64;
+                            cpu.regs[3] = DATA + 4096;
+                            cpu.rflags = 0xad7;
+                            for (r, v) in [
+                                (U::RAX, cpu.regs[0]),
+                                (U::RCX, cpu.regs[1]),
+                                (U::RBX, cpu.regs[3]),
+                                (U::RFLAGS, cpu.rflags),
+                            ] {
+                                uc.reg_write(r, v).unwrap();
+                            }
+                            uc.emu_start(CODE, CODE + code.len() as u64, 0, 1).unwrap();
+                            cpu.step(&mut mem).unwrap();
+                            assert_eq!(
+                                cpu.regs[0],
+                                uc.reg_read(U::RAX).unwrap(),
+                                "code={code:x?} offset={offset}"
+                            );
+                            assert_eq!(
+                                cpu.rflags & 1,
+                                uc.reg_read(U::RFLAGS).unwrap() & 1,
+                                "code={code:x?} offset={offset}"
+                            );
+                            assert_eq!(cpu.rflags & !1, 0xad7 & !1);
+                            let mut actual = vec![0; 8192];
+                            mem.read(DATA, &mut actual).unwrap();
+                            let reference = uc.mem_read_as_vec(DATA, 8192).unwrap();
+                            assert_eq!(actual, reference, "code={code:x?} offset={offset}");
+                        }
+                        assert_eq!(mem.execution_stats().unwrap().fallback_steps, 0);
+                        if memory {
+                            for protection in [0x02, 0x104, 0x01] {
+                                mem.virtual_protect(DATA, 8192, protection).unwrap();
+                                let mut cpu = Cpu64::new(CODE, 0);
+                                cpu.regs[3] = DATA + 4096;
+                                cpu.regs[1] = 0;
+                                cpu.rflags = 0xad7;
+                                let before = cpu.clone();
+                                let result = cpu.step(&mut mem);
+                                if kind == 0 && protection == 0x02 {
+                                    assert!(result.is_ok());
+                                } else {
+                                    assert!(result.is_err());
+                                    assert_eq!(cpu, before);
+                                }
+                                mem.virtual_protect(DATA, 8192, 0x04).unwrap();
+                            }
+                            let mut cpu = Cpu64::new(CODE, 0);
+                            cpu.regs[3] = DATA + 8191;
+                            cpu.regs[1] = 0;
+                            let before = cpu.clone();
+                            assert!(cpu.step(&mut mem).is_err());
+                            assert_eq!(cpu, before);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -45,6 +45,7 @@ impl fmt::Display for MemFault {
 impl std::error::Error for MemFault {}
 
 pub struct GuestMem {
+    pub(crate) raw_simd: std::cell::OnceCell<crate::cpu::simd_ir::RawCache>,
     pub base: *mut u8,
     backed: Vec<u64>,           // 1 bit per host page; not guest commitment
     protection: Vec<Cell<u16>>, // 0 = uncommitted, otherwise Windows PAGE_*
@@ -92,6 +93,7 @@ impl GuestMem {
             return Err(std::io::Error::other("unsupported host page size"));
         }
         Ok(GuestMem {
+            raw_simd: std::cell::OnceCell::new(),
             base: p as *mut u8,
             backed: vec![0u64; (SPACE_SIZE as usize / host_page) / 64],
             protection: vec![Cell::new(0); SPACE_SIZE as usize / GUEST_PAGE as usize],

@@ -649,6 +649,7 @@ pub(crate) struct Hit {
 /// Address lookup is dense within the image span, avoiding hashing per step.
 /// Writes to any watched code page conservatively disable its IR records.
 pub struct Cache {
+    simd: Vec<crate::cpu::simd_ir::Descriptor>,
     base: u32,
     slots: Vec<u32>,
     records: Vec<Record>,
@@ -669,6 +670,7 @@ impl Cache {
     pub fn bind(image: Image, mem: &GuestMem) -> Result<Self, String> {
         let Some(first) = image.records.first() else {
             return Ok(Self {
+                simd: Vec::new(),
                 base: 0,
                 slots: Vec::new(),
                 records: Vec::new(),
@@ -686,7 +688,11 @@ impl Cache {
         if span > 64 * 1024 * 1024 {
             return Err("IR span exceeds 64 MiB cache limit".into());
         }
+        for record in &image.records {
+            record.validate()?;
+        }
         let mut cache = Self {
+            simd: Vec::new(),
             base,
             slots: vec![0; span as usize],
             native_targets: vec![None; image.records.len()],
@@ -714,7 +720,17 @@ impl Cache {
         for (index, r) in cache.records.iter().enumerate() {
             r.validate()?;
             if r.op() == Op::Fallback {
-                continue;
+                let Some(descriptor) = crate::cpu::simd_ir::Descriptor::lower(
+                    &r.raw()[..(r.next_ip() - r.ip()) as usize],
+                    r.ip(),
+                ) else {
+                    continue;
+                };
+                cache.hot[index].inst = compact::Inst {
+                    bits: 134,
+                    aux: cache.simd.len() as u32,
+                };
+                cache.simd.push(descriptor);
             }
             let len = (r.next_ip() - r.ip()) as usize;
             let mut raw = [0; 16];
@@ -765,10 +781,14 @@ impl Cache {
         // eight accepted, contiguous, nonfaulting scalar operations within one
         // guest page; only the last may branch. No instruction in a run can
         // write code, change protection, switch threads or change callback ESP.
+        let member = |hot: compact::Hot| {
+            compact::scalar_member(hot.inst)
+                || hot.inst.opcode() == 134 && cache.simd[hot.inst.aux as usize].register_safe()
+        };
         for index in (0..cache.hot.len()).rev() {
             let r = &cache.records[index];
             let hot = cache.hot[index];
-            if !compact::scalar_member(hot.inst)
+            if !member(hot)
                 || matches!(hot.inst.opcode(), compact::JCC_BASE..=compact::JMP_I32)
                 || cache.slots[(r.ip() - base) as usize] != index as u32 + 1
                 || hot.next_slot() != index as u32 + 2
@@ -776,13 +796,19 @@ impl Cache {
                 continue;
             }
             let next = cache.hot[index + 1];
-            if !compact::scalar_member(next.inst) {
+            if !member(next) {
                 continue;
             }
             let len = (1 + next.scalar_len()).min(8);
             let end = cache.hot[index + len - 1].next_ip - 1;
             if r.ip() / crate::mem::GUEST_PAGE == end / crate::mem::GUEST_PAGE {
+                let mixed = cache.hot[index..index + len]
+                    .iter()
+                    .any(|h| h.inst.opcode() == 134);
                 cache.hot[index].set_scalar_len(len);
+                if mixed {
+                    cache.hot[index].set_mixed_run();
+                }
             }
         }
         Ok(cache)
@@ -831,6 +857,9 @@ impl Cache {
                 0
             },
         })
+    }
+    pub(crate) fn simd(&self, index: usize) -> crate::cpu::simd_ir::Descriptor {
+        self.simd[index]
     }
     pub(crate) fn predecoded(&self, index: usize, mem: &GuestMem) -> Record {
         let mut r = self.records[index];

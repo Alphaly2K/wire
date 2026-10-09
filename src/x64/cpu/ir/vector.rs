@@ -112,11 +112,14 @@ pub(super) fn lower(i: &Instruction, mut ir: ScalarIr) -> Option<ScalarIr> {
     if op == SCALAR_MOVE && vector(ir.dst) && vector(ir.src) {
         ir.aux |= PRESERVE_HIGH;
     }
+    if ir.register_safe() {
+        ir.addressing |= REGISTER_ONLY;
+    }
     Some(ir)
 }
 
 impl ScalarIr {
-    fn vector_operand(&mut self, i: &Instruction, op: u32) -> Option<u8> {
+    pub(super) fn vector_operand(&mut self, i: &Instruction, op: u32) -> Option<u8> {
         if i.op_kind(op) == OpKind::Register && (R::XMM0..=R::XMM15).contains(&i.op_register(op)) {
             Some(XMM + (i.op_register(op) as u32 - R::XMM0 as u32) as u8)
         } else {
@@ -124,27 +127,38 @@ impl ScalarIr {
         }
     }
 
-    fn vector_read_typed(
+    pub(super) fn vector_read_typed<const SIZE: usize>(
         &self,
         cpu: &Cpu64,
         r: u8,
-        size: usize,
-        mem: &Memory,
+        mem: &impl IrMemory,
     ) -> Result<[u8; 16], String> {
         let mut value = [0; 16];
         if r == MEMORY {
-            mem.read(self.address(cpu), &mut value[..size])?;
+            mem.read_bytes(self.address(cpu), &mut value[..SIZE])?;
         } else if r >= XMM {
-            value[..size].copy_from_slice(&cpu.xmm[(r - XMM) as usize][..size]);
+            value[..SIZE].copy_from_slice(&cpu.xmm[(r - XMM) as usize][..SIZE]);
         } else {
-            value[..size]
-                .copy_from_slice(&self.read(cpu, r, (size * 8) as u32, mem)?.to_le_bytes()[..size]);
+            value[..SIZE]
+                .copy_from_slice(&self.read(cpu, r, (SIZE * 8) as u32, mem)?.to_le_bytes()[..SIZE]);
         }
         Ok(value)
     }
 
     #[inline(never)]
-    pub(super) fn execute_vector(&self, cpu: &mut Cpu64, mem: &mut Memory) -> Result<(), String> {
+    pub(super) fn execute_vector_checked(
+        &self,
+        cpu: &mut Cpu64,
+        mem: &mut Memory,
+    ) -> Result<(), String> {
+        self.execute_vector(cpu, mem)
+    }
+    #[inline(always)]
+    pub(super) fn execute_vector(
+        &self,
+        cpu: &mut Cpu64,
+        mem: &mut impl IrMemory,
+    ) -> Result<(), String> {
         let op = self.opcode >> 2;
         let width = 1usize << (self.opcode & 3);
         if self.aux & ALIGNED != 0
@@ -165,13 +179,23 @@ impl ScalarIr {
         } else {
             16
         };
-        let b = self.vector_read_typed(cpu, self.src, size, mem)?;
+        let b = match size {
+            4 => self.vector_read_typed::<4>(cpu, self.src, mem)?,
+            8 => self.vector_read_typed::<8>(cpu, self.src, mem)?,
+            16 => self.vector_read_typed::<16>(cpu, self.src, mem)?,
+            _ => unreachable!(),
+        };
         let value = match op {
             MOVE | TRANSFER => b,
             SCALAR_MOVE => {
                 let mut value = b;
                 if self.aux & PRESERVE_HIGH != 0 {
-                    value[size..].copy_from_slice(&cpu.xmm[(self.dst - XMM) as usize][size..]);
+                    let old = &cpu.xmm[(self.dst - XMM) as usize];
+                    if size == 4 {
+                        value[4..].copy_from_slice(&old[4..]);
+                    } else {
+                        value[8..].copy_from_slice(&old[8..]);
+                    }
                 }
                 value
             }
@@ -184,45 +208,15 @@ impl ScalarIr {
                     _ => a[n] ^ b[n],
                 })
             }
-            PADD | PSUB | EQUAL | GREATER => {
-                let a = cpu.xmm[(self.dst - XMM) as usize];
-                let mut value = [0; 16];
-                for n in (0..16).step_by(width) {
-                    let mut av = [0; 8];
-                    let mut bv = [0; 8];
-                    av[..width].copy_from_slice(&a[n..n + width]);
-                    bv[..width].copy_from_slice(&b[n..n + width]);
-                    let a = u64::from_le_bytes(av);
-                    let b = u64::from_le_bytes(bv);
-                    let result = match op {
-                        PADD => a.wrapping_add(b),
-                        PSUB => a.wrapping_sub(b),
-                        EQUAL => {
-                            if a == b {
-                                u64::MAX
-                            } else {
-                                0
-                            }
-                        }
-                        _ => {
-                            if super::super::signed(a, (width * 8) as u32)
-                                > super::super::signed(b, (width * 8) as u32)
-                            {
-                                u64::MAX
-                            } else {
-                                0
-                            }
-                        }
-                    };
-                    value[n..n + width].copy_from_slice(&result.to_le_bytes()[..width]);
-                }
-                value
-            }
+            PADD => crate::simd::packed::<0>(cpu.xmm[(self.dst - XMM) as usize], b, width),
+            PSUB => crate::simd::packed::<1>(cpu.xmm[(self.dst - XMM) as usize], b, width),
+            EQUAL => crate::simd::packed::<2>(cpu.xmm[(self.dst - XMM) as usize], b, width),
+            GREATER => crate::simd::packed::<3>(cpu.xmm[(self.dst - XMM) as usize], b, width),
             _ => unreachable!(),
         };
         // This is the only write and the last fallible action.
         if self.dst == MEMORY {
-            mem.write(self.address(cpu), &value[..size])?;
+            mem.write_bytes(self.address(cpu), &value[..size])?;
         } else if self.dst >= XMM {
             cpu.xmm[(self.dst - XMM) as usize] = value;
         } else {
