@@ -24,7 +24,8 @@ pub enum TranslationCacheLayout {
 // Experiments use separate frozen builds. The chosen direct layout uses a
 // constant mask without associative probing or runtime layout branches.
 pub(super) const BUILD_DIAGNOSTICS_V2: bool = option_env!("WIRE_X64_DIAGNOSTICS_V2").is_some();
-pub(crate) const BUILD_CHECKED_SEGMENTS: bool = option_env!("WIRE_X64_CHECKED_SEGMENTS").is_some();
+pub(crate) const BUILD_CHECKED_SEGMENTS: bool =
+    option_env!("WIRE_X64_NO_CHECKED_SEGMENTS").is_none();
 const BUILD_REUSE: bool = option_env!("WIRE_X64_NO_REUSE").is_none();
 const REUSE_SLOTS: usize = if option_env!("WIRE_X64_REUSE_16K").is_some() {
     16384
@@ -90,8 +91,13 @@ struct SavedTranslation {
 // Negative build results are encoded by the existing IR admission bits.
 // None therefore needs no separate Unbuilt/Single/NoChecked discriminant.
 // A common owner keeps each RefCell entry at its original pointer-sized payload.
-type SegmentState = Option<std::sync::Arc<super::cpu::ir::Segment>>;
-const _: () = assert!(std::mem::size_of::<SegmentState>() == std::mem::size_of::<usize>());
+enum SegmentState {
+    Unbuilt,
+    Single,
+    Ready(Box<super::cpu::ir::RegisterSegment>),
+    Checked(std::sync::Arc<super::cpu::ir::CheckedSegment>),
+    NoChecked,
+}
 impl TranslationCache {
     fn reuse_hash(mut pc: u64) -> usize {
         pc = (pc ^ (pc >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
@@ -127,7 +133,7 @@ impl TranslationCache {
             ir: entry.ir.get(),
             instruction: self.instructions[slot].get(),
             generations: (g, g2),
-            segment: self.segments[slot].replace(None),
+            segment: self.segments[slot].replace(SegmentState::Unbuilt),
             link: self.links[slot].get(),
         };
         let index = Self::reuse_hash(saved.pc);
@@ -553,7 +559,7 @@ impl Memory {
             let pc = cpu.rip;
             let source_identity = cache.generations[slot].get().2;
             let mut state = cache.segments[slot].borrow_mut();
-            if state.is_none() {
+            if matches!(*state, SegmentState::Unbuilt) {
                 let base = pc & !(PAGE - 1);
                 let page = &self.pages[&base];
                 if BUILD_DIAGNOSTICS_V2 {
@@ -564,8 +570,8 @@ impl Memory {
                 }
                 *state =
                     super::cpu::ir::RegisterSegment::lower(&page.data[(pc - base) as usize..], pc)
-                        .map(|s| std::sync::Arc::new(super::cpu::ir::Segment::Register(s)));
-                if state.is_none() {
+                        .map_or(SegmentState::Single, |s| SegmentState::Ready(Box::new(s)));
+                if matches!(*state, SegmentState::Single) {
                     // One-time negative caching retains the ordinary scalar hit
                     // cost for an isolated register operation in a memory loop.
                     let entry = &cache.slots[slot];
@@ -577,10 +583,7 @@ impl Memory {
                     );
                 }
             }
-            if let Some(owner) = &*state {
-                let super::cpu::ir::Segment::Register(segment) = owner.as_ref() else {
-                    break;
-                };
+            if let SegmentState::Ready(segment) = &*state {
                 if segment.work() <= left && allowed(pc, pc + segment.bytes) {
                     segment.execute(cpu);
                     if BUILD_DIAGNOSTICS_V2 {
@@ -684,13 +687,15 @@ impl Memory {
             };
             let cache = self.decoded.get().unwrap();
             let mut state = cache.segments[slot].borrow_mut();
-            if state.is_none() {
+            if matches!(*state, SegmentState::Unbuilt | SegmentState::Single) {
                 let base = pc & !(PAGE - 1);
                 let page = &self.pages[&base];
                 *state =
                     super::cpu::ir::CheckedSegment::lower(&page.data[(pc - base) as usize..], pc)
-                        .map(|s| std::sync::Arc::new(super::cpu::ir::Segment::Checked(s)));
-                if state.is_none() {
+                        .map_or(SegmentState::NoChecked, |s| {
+                            SegmentState::Checked(std::sync::Arc::new(s))
+                        });
+                if matches!(*state, SegmentState::NoChecked) {
                     let entry = &cache.slots[slot];
                     entry.ir.set(
                         entry
@@ -701,15 +706,10 @@ impl Memory {
                 }
             }
             match &*state {
-                Some(s) if matches!(s.as_ref(), super::cpu::ir::Segment::Checked(_)) => {
-                    std::sync::Arc::clone(s)
-                }
+                SegmentState::Checked(s) => std::sync::Arc::clone(s),
                 _ => return Ok(false),
             }
         }; // Release cache/page borrows before the checked writes.
-        let super::cpu::ir::Segment::Checked(segment) = segment.as_ref() else {
-            unreachable!()
-        };
         if !allowed(pc, pc + segment.bytes) {
             return Ok(false);
         }
@@ -758,7 +758,7 @@ impl Memory {
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             segments: (0..BUILD_SLOTS)
-                .map(|_| RefCell::new(None))
+                .map(|_| RefCell::new(SegmentState::Unbuilt))
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             links: (0..BUILD_SLOTS)
@@ -783,7 +783,7 @@ impl Memory {
         entry.pc.set(instruction.ip());
         entry.validation_epoch.set(self.decode_epoch);
         cache.generations[slot].set((generation, second_generation, identity));
-        *cache.segments[slot].borrow_mut() = None;
+        *cache.segments[slot].borrow_mut() = SegmentState::Unbuilt;
         cache.links[slot].set((u64::MAX, usize::MAX, 0));
         cache.instructions[slot].set(instruction);
         let ir = super::cpu::ir::ScalarIr::lower(&instruction);
