@@ -24,6 +24,7 @@ struct Owner<'a> {
     runtime: RefCell<&'a mut Runtime64>,
     targets: [u64; 7],
     depth: Cell<usize>,
+    stack_mapped: Cell<bool>,
     calls: Cell<[usize; 7]>,
     gc_events: Cell<u32>,
     mono_reentries: Cell<usize>,
@@ -32,9 +33,11 @@ struct Owner<'a> {
 }
 impl Drop for Owner<'_> {
     fn drop(&mut self) {
-        if let Err(error) = self.memory.get_mut().unmap(STACK_BASE, STACK_BYTES) {
-            eprintln!("NATIVE_MONO_CALLBACK_STACK_REJECT: {error}");
-            std::process::abort();
+        if self.stack_mapped.get() {
+            if let Err(error) = self.memory.get_mut().unmap(STACK_BASE, STACK_BYTES) {
+                eprintln!("NATIVE_MONO_CALLBACK_STACK_REJECT: {error}");
+                std::process::abort();
+            }
         }
     }
 }
@@ -75,16 +78,12 @@ fn with_routes<'a, T>(
     if OWNER.with(|slot| !slot.get().is_null()) {
         return Err("native callback owner scope already installed".into());
     }
-    memory.map(
-        STACK_BASE,
-        STACK_BYTES,
-        super::super::super::memory::READ | super::super::super::memory::WRITE,
-    )?;
     let owner = Owner {
         memory: RefCell::new(memory),
         runtime: RefCell::new(runtime),
         targets,
         depth: Cell::new(0),
+        stack_mapped: Cell::new(false),
         calls: Cell::new([0; 7]),
         gc_events: Cell::new(0),
         mono_reentries: Cell::new(0),
@@ -147,6 +146,21 @@ fn execute_guest(owner: &Owner<'_>, target: u64, args: &[u64]) -> Result<u64, St
     let depth = owner.depth.get();
     if depth >= 8 {
         return Err("native callback nesting capacity exceeded".into());
+    }
+    // Most native metadata leaves never reenter guest code. Allocate the
+    // full checked stack only at the first actual callback; keep it scoped
+    // to this same owner for GC and nested callbacks, then revoke on Drop.
+    if !owner.stack_mapped.get() {
+        owner
+            .memory
+            .try_borrow_mut()
+            .map_err(|_| "callback stack memory is already borrowed")?
+            .map(
+                STACK_BASE,
+                STACK_BYTES,
+                super::super::super::memory::READ | super::super::super::memory::WRITE,
+            )?;
+        owner.stack_mapped.set(true);
     }
     owner.depth.set(depth + 1);
     struct Depth<'a>(&'a Cell<usize>, usize);
@@ -423,6 +437,49 @@ fn reject_profiler(reason: &str) -> ! {
 mod tests {
     use super::super::super::super::memory::{EXECUTE, READ, WRITE};
     use super::*;
+    #[test]
+    fn leaf_owner_allocates_no_stack_and_lazy_callback_collision_preserves_existing_memory() {
+        let mut memory = Memory::default();
+        memory.map(0x1000, 4096, READ | WRITE | EXECUTE).unwrap();
+        memory.write(0x1000, &[0xb8, 42, 0, 0, 0, 0xc3]).unwrap();
+        memory
+            .map(super::super::super::STACK, 65536, READ | WRITE)
+            .unwrap();
+        let mut runtime = Runtime64::new(
+            &mut memory,
+            0x140000000,
+            super::super::super::STACK,
+            65536,
+            "test",
+        )
+        .unwrap();
+        let (_, stats) = with_owner(&mut memory, &mut runtime, [0x1000; 7], || {
+            with_service(|memory, _| {
+                assert!(memory.read_int(STACK_BASE, 8).is_err());
+                Ok(())
+            })
+            .unwrap();
+        })
+        .unwrap();
+        assert_eq!(stats.calls, [0; 7]);
+        memory.map(STACK_BASE, 4096, READ | WRITE).unwrap();
+        memory.write_int(STACK_BASE, 8, 77).unwrap();
+        let (value, _) = with_owner(&mut memory, &mut runtime, [0x1000; 7], || 11).unwrap();
+        assert_eq!(value, 11);
+        assert_eq!(memory.read_int(STACK_BASE, 8).unwrap(), 77);
+        let (failed, _) =
+            with_owner(&mut memory, &mut runtime, [0x1000; 7], || reference(0, &[])).unwrap();
+        assert!(failed.is_err());
+        assert_eq!(memory.read_int(STACK_BASE, 8).unwrap(), 77);
+        assert!(memory.read_int(STACK_BASE + STACK_BYTES - 8, 8).is_err());
+        assert!(OWNER.with(|slot| slot.get().is_null()));
+        memory.unmap(STACK_BASE, 4096).unwrap();
+        let (value, stats) =
+            with_owner(&mut memory, &mut runtime, [0x1000; 7], || reference(0, &[])).unwrap();
+        assert_eq!(value.unwrap(), 42);
+        assert_eq!(stats.calls[0], 1);
+        assert!(memory.read_int(STACK_BASE, 8).is_err());
+    }
     #[test]
     fn hidden_return_and_ref_payloads_are_owned_and_retired_on_success_and_rejection() {
         let mut memory = Memory::default();

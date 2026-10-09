@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import resource
 import shutil
 import subprocess
 import time
@@ -87,7 +88,9 @@ def main():
         'full_game_backend': False, 'timing_is_performance_comparison': False}, indent=2) + '\n')
     start = time.monotonic()
     with (output / 'startup.log').open('w') as stream:
+        usage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
         result = subprocess.run(command, cwd=clone, env=env, stdout=stream, stderr=subprocess.STDOUT, timeout=180)
+        usage_after = resource.getrusage(resource.RUSAGE_CHILDREN)
     content = (output / 'startup.log').read_text()
     original_attach = bool(re.search(r'^(?:entry stage:|TLS process attach:).*mono-2\.0-bdwgc\.dll', content, re.M))
     guard_result = re.search(r'WIRE_NOEXEC_GUARD checks=(\d+) denied=(\d+)', content)
@@ -104,6 +107,8 @@ def main():
         current = {row['name'].encode(): int(row['guest_target'], 16) for row in rows}
         registry_match = len(rows) == len(original) == 10824 and current == original and all(row['full_game_abi_admitted'] == '0' for row in rows)
     evidence = {'returncode': result.returncode, 'elapsed_seconds': time.monotonic() - start,
+        'cpu_user_seconds': usage_after.ru_utime - usage_before.ru_utime,
+        'cpu_system_seconds': usage_after.ru_stime - usage_before.ru_stime,
         'pending_boundary': (re.findall(r'^pending boundary ([^:]+):', content, re.M) or [None])[-1],
         'native_root_ready': root_ready, 'native_main_thread_ready': 'native-main-thread-ready=true' in content,
         'native_pre_bindings_ready': 'native-pre-bindings-ready=true' in content, 'native_bindings_ready': 'native-bindings-ready=true' in content, 'boundary': args.boundary, 'native_profiler_ready': 'native-profiler-ready=true' in content,

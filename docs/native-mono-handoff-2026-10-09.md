@@ -1,15 +1,16 @@
 # 原生 Mono 持续推进交接（2026-10-09）
 
-用户已授权自主决策、自己测试修复和本地提交，继续推进原生Mono计划；不push。另一个agent
-先前处理SSE，故本任务一直使用独立worktree。用户后来告知SSE完成，已将main更新
-合入Mono工作分支并补齐shared RMW接入；主checkout核心代码仍保持原运行路径。
-主checkout仅新增本文，方便后续任务找到成果。
+用户已授权自主决策、自己测试修复和本地提交，继续推进原生 Mono 计划；不 push。
+此前为避开其他 agent 使用独立 worktree，导致主目录一度只有文档。累计实现已经合入
+main（包括 acc3d3a），后续已验证代码提交也立即合流。完整游戏 native backend/Admission
+仍为 false；以下旧章节保留历史状态，不能把其中“主代码未合并”当作当前状态。
 
-## 唯一工作区
+## 当前工作区与历史记录
 
 - Worktree：`/Users/alphaly/.codex/worktrees/native-mono-shared-memory/wire`
 - 分支：`codex/native-mono-shared-memory`
-- 当前实施提交：`05f5bfd`（后续文档提交只更新交接）
+- 主目录：`/Users/alphaly/Projects/wire`（与实施分支同步已验证代码）
+- 当前已合入实现：`acc3d3a`；后续代码与性能证据见本文末尾。
 - 实施计划输入：主checkout `wire-out/unity-native-mono-plan-2026-10-09/plan.md`
 
 已有阶段提交：
@@ -276,3 +277,23 @@ clean；后续方法真实 probe/16 项定向另测。没有改浮点操作/翻�
 `docs/native-mono-unity-logging-2026-10-09.md`。下一 actual invoke 是 SubsystemsModule
 SubsystemDescriptorStore.ClearManagedDescriptors（0x06000057），static void()，已有
 owned IL。继续自己测修提交，不因这个小里程碑停下；完整游戏 backend/Admission 仍 false。
+
+
+## 最新：完整 metadata 扫描及回调栈性能修复
+
+`8720a8d` / `acc3d3a` 已合入 main：真实 Attribute[]、MonoError status、readonly
+strong handle cells、parsed assembly lookup、metadata reverse index 与紧凑字符串池。
+完整启动诊断完成 1,204,030 metadata queries / 25,096 handles / 130 image cycles，
+38 parse/lookup/free，967 attribute objects / 2,821 field reads / 7 arrays；
+下一真实边界为 `mono_object_new`，尚未启用完整游戏原生执行。
+
+本轮修复 `callbacks::with_owner` 每个叶查询都 map/unmap 1MiB 栈的热点。栈仍为完整
+1MiB，首次真正 guest callback 才分配，嵌套/GC 回调复用，owner Drop 撤销。
+完整 release feature 回归 425 passed / 7 ignored，Clippy clean。三对冻结 AB/BA
+同输入/同初始化计数/同停点，CPU 中位数 53.300444 → 5.179268 秒（10.29×），wall
+54.634801 → 6.370785 秒。仅为有限启动阶段，不是整款游戏加速或 FPS。
+
+结果：实施 worktree `wire-out/native-mono-startup-lazy-stack-perf/results.json`；
+profile 与全部样本/hash 见 `docs/native-mono-startup-performance-2026-10-09.md`。
+接下来精确识别 `mono_object_new` 的 class，再接受检分配、立即 strong root 与构造函数，
+不把未知对象/未实现 InternalCall 假装成功。其他 agent 工作已完成，可修改相关实现。

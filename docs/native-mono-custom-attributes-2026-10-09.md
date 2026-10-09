@@ -123,3 +123,16 @@ handle cells and cleanup verify. Next boundary is `mono_object_new`, after
 240616019 guest work; this is still finite startup, not playable game admission.
 24 targeted startup tests and Clippy pass. Probe-01 hit the old string capacity;
 probe-02 exhausted its 200M work budget. Neither ran final GC validation.
+
+
+## Callback owner allocation hot spot
+
+The validated implementation is merged into main. The finite startup probe now
+allocates its full 1MiB callback stack only on an actual guest callback, reuses it
+for nested/GC entries, and revokes it on owner exit. Leaf queries allocate no
+stack. Existing mappings survive both leaf scopes and rejected callback collisions.
+Full release feature regression: 425 passed / 7 ignored; Clippy clean.
+Three frozen AB/BA pairs preserve all external hashes and initialization counts;
+median CPU is 53.300444 → 5.179268 seconds, median wall 54.634801 → 6.370785.
+This is finite initialization ending at mono_object_new, not whole-game startup.
+See `native-mono-startup-performance-2026-10-09.md` for every sample and hashes.
