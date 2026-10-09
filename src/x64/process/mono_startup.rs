@@ -23,6 +23,8 @@ const INCREMENTAL_SUPPORT: &str =
 const ATTRIBUTES_CANDIDATE: &str =
     "94a8252dfb4bf7aa3584be4b1888afd128431cc7ea70b7bd6773fc299cab0a5e";
 const ATTRIBUTES_SUPPORT: &str = "7cd421d0e370b09a865848a59e47aa2b1362fd9ff484804fe3b2c1b4a5bc8029";
+const OBJECTS_CANDIDATE: &str = "c152197b7cf1623a3d40a51a36e1e44d888b77f337b1378bb979598d2fad2eb0";
+const OBJECTS_SUPPORT: &str = "34705bafc092d1e644b2c7e0873340b398d1a81dd3e51c31af37a9ba0a29cea9";
 const EXE: &str = "94cccae89918110514672a6ec249a1252ffaeb28c0ae8d8633a9352988738f12";
 const UNITY: &str = "a2022611884470ddab23927a3eb7bbaef3924c18972d30ba7b5330a8fd25bcc4";
 const CORELIB_SUPPORT: &str = "b10bb3e59af90e92e240424ac88b1f96eb27906c3fa099958713d93801b4b078";
@@ -42,6 +44,7 @@ mod callbacks;
 mod errors;
 mod handles;
 mod images;
+mod instances;
 mod invoke;
 mod logging;
 mod metadata;
@@ -236,6 +239,10 @@ pub(super) struct Probe {
     logging_ready: bool,
     exceptions: bool,
     exceptions_ready: bool,
+    ordinary_objects: bool,
+    ordinary_objects_ready: bool,
+    instance_api: Option<instances::Api>,
+    instance_registry: instances::Registry,
     assembly_lookup: bool,
     assembly_lookup_ready: bool,
     name_api: Option<names::Api>,
@@ -294,6 +301,7 @@ fn runtime_profile(path: &Path) -> Result<(&'static str, &'static str), String> 
         REMOTING_CANDIDATE => Ok((REMOTING_CANDIDATE, REMOTING_SUPPORT)),
         INCREMENTAL_CANDIDATE => Ok((INCREMENTAL_CANDIDATE, INCREMENTAL_SUPPORT)),
         ATTRIBUTES_CANDIDATE => Ok((ATTRIBUTES_CANDIDATE, ATTRIBUTES_SUPPORT)),
+        OBJECTS_CANDIDATE => Ok((OBJECTS_CANDIDATE, OBJECTS_SUPPORT)),
         _ => Err("native Mono diagnostic runtime fingerprint mismatch".into()),
     }
 }
@@ -366,19 +374,26 @@ impl Probe {
         skip_etw: bool,
         boundary: &str,
     ) -> Result<Self, String> {
-        let assembly_lookup = boundary == "assembly-lookup";
-        let attribute_arrays = matches!(boundary, "attribute-arrays" | "assembly-lookup");
+        let ordinary_objects = boundary == "objects";
+        let assembly_lookup = matches!(boundary, "assembly-lookup" | "objects");
+        let attribute_arrays =
+            matches!(boundary, "attribute-arrays" | "assembly-lookup" | "objects");
         let attributes = matches!(
             boundary,
-            "attributes" | "attribute-arrays" | "assembly-lookup"
+            "attributes" | "attribute-arrays" | "assembly-lookup" | "objects"
         );
         let imgui = matches!(
             boundary,
-            "imgui-cache" | "attributes" | "attribute-arrays" | "assembly-lookup"
+            "imgui-cache" | "attributes" | "attribute-arrays" | "assembly-lookup" | "objects"
         );
         let subsystem_map = matches!(
             boundary,
-            "subsystem-map" | "imgui-cache" | "attributes" | "attribute-arrays" | "assembly-lookup"
+            "subsystem-map"
+                | "imgui-cache"
+                | "attributes"
+                | "attribute-arrays"
+                | "assembly-lookup"
+                | "objects"
         );
         let subsystems = matches!(
             boundary,
@@ -388,6 +403,7 @@ impl Probe {
                 | "attributes"
                 | "attribute-arrays"
                 | "assembly-lookup"
+                | "objects"
         );
         let synchronization = matches!(
             boundary,
@@ -398,6 +414,7 @@ impl Probe {
                 | "attributes"
                 | "attribute-arrays"
                 | "assembly-lookup"
+                | "objects"
         );
         let exceptions = matches!(
             boundary,
@@ -409,6 +426,7 @@ impl Probe {
                 | "attributes"
                 | "attribute-arrays"
                 | "assembly-lookup"
+                | "objects"
         );
         let logging = matches!(
             boundary,
@@ -421,6 +439,7 @@ impl Probe {
                 | "attributes"
                 | "attribute-arrays"
                 | "assembly-lookup"
+                | "objects"
         );
         let classlib = matches!(
             boundary,
@@ -434,6 +453,7 @@ impl Probe {
                 | "attributes"
                 | "attribute-arrays"
                 | "assembly-lookup"
+                | "objects"
         );
         let managed_types = matches!(
             boundary,
@@ -448,6 +468,7 @@ impl Probe {
                 | "attributes"
                 | "attribute-arrays"
                 | "assembly-lookup"
+                | "objects"
         );
         let strings = matches!(
             boundary,
@@ -463,6 +484,7 @@ impl Probe {
                 | "attributes"
                 | "attribute-arrays"
                 | "assembly-lookup"
+                | "objects"
         );
         let (main_thread, pre_bindings, bindings, profiler, pre_images, images, metadata) = match boundary {
             "root" => (false, false, false, false, false, false, false),
@@ -472,10 +494,10 @@ impl Probe {
             "profiler" => (true, true, true, true, false, false, false),
             "pre-images" => (true, true, true, true, true, false, false),
             "images" => (true, true, true, true, true, true, false),
-            "metadata" | "strings" | "managed-types" | "classlib" | "logging" | "exceptions" | "synchronization" | "subsystems" | "subsystem-map" | "imgui-cache" | "attributes" | "attribute-arrays" | "assembly-lookup" => (true, true, true, true, true, true, true),
+            "metadata" | "strings" | "managed-types" | "classlib" | "logging" | "exceptions" | "synchronization" | "subsystems" | "subsystem-map" | "imgui-cache" | "attributes" | "attribute-arrays" | "assembly-lookup" | "objects" => (true, true, true, true, true, true, true),
             _ => {
                 return Err(
-                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings, profiler, pre-images, images, metadata, strings, managed-types, classlib, logging, exceptions, synchronization, subsystems, subsystem-map, imgui-cache, attributes, attribute-arrays or assembly-lookup".into(),
+                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings, profiler, pre-images, images, metadata, strings, managed-types, classlib, logging, exceptions, synchronization, subsystems, subsystem-map, imgui-cache, attributes, attribute-arrays or assembly-lookup or objects".into(),
                 )
             }
         };
@@ -492,20 +514,33 @@ impl Probe {
         if classlib
             && !matches!(
                 library_hash,
-                REMOTING_CANDIDATE | INCREMENTAL_CANDIDATE | ATTRIBUTES_CANDIDATE
+                REMOTING_CANDIDATE
+                    | INCREMENTAL_CANDIDATE
+                    | ATTRIBUTES_CANDIDATE
+                    | OBJECTS_CANDIDATE
             )
         {
             return Err(
                 "classlib diagnostic needs fingerprinted remoting field-wrapper runtime".into(),
             );
         }
-        if logging && !matches!(library_hash, INCREMENTAL_CANDIDATE | ATTRIBUTES_CANDIDATE) {
+        if logging
+            && !matches!(
+                library_hash,
+                INCREMENTAL_CANDIDATE | ATTRIBUTES_CANDIDATE | OBJECTS_CANDIDATE
+            )
+        {
             return Err(
                 "logging diagnostic requires verified incremental GC write-barrier runtime".into(),
             );
         }
-        if attributes && library_hash != ATTRIBUTES_CANDIDATE {
+        if attributes && !matches!(library_hash, ATTRIBUTES_CANDIDATE | OBJECTS_CANDIDATE) {
             return Err("attributes diagnostic requires checked attribute runtime".into());
+        }
+        if ordinary_objects && library_hash != OBJECTS_CANDIDATE {
+            return Err(
+                "ordinary object diagnostic requires checked rooted-allocation runtime".into(),
+            );
         }
         fingerprint(
             &root.join("AliceToPapaADV_1-0-0_Data/Managed/mscorlib.dll.dylib"),
@@ -561,6 +596,10 @@ impl Probe {
             logging_ready: false,
             exceptions,
             exceptions_ready: false,
+            ordinary_objects,
+            ordinary_objects_ready: false,
+            instance_api: None,
+            instance_registry: instances::Registry::default(),
             assembly_lookup,
             assembly_lookup_ready: false,
             name_api: None,
@@ -887,6 +926,17 @@ impl Probe {
                 result = ROOT_TOKEN;
             }
             "mono_thread_current" if self.root_ready && self.main_thread => {
+                if memory.read_int(
+                    cpu.gs_base
+                        .checked_add(0x48)
+                        .ok_or("guest TEB thread ID overflow")?,
+                    8,
+                )? != 1
+                {
+                    return Err(
+                        "native startup thread query requires guest main thread identity".into(),
+                    );
+                }
                 let current = symbol!(lib, "mono_thread_current", unsafe extern "C" fn() -> Object);
                 let strong = symbol!(
                     lib,
@@ -920,6 +970,7 @@ impl Probe {
                     || self.reflection_registry.contains(a[2])
                     || self.array_registry.contains(a[2])
                     || self.attribute_registry.contains(a[2])
+                    || self.instance_registry.contains(a[2])
                 {
                     a[2]
                 } else {
@@ -1133,6 +1184,9 @@ impl Probe {
             self.events.push("actual Unity completed native image/assembly ownership cycles; stop before first class metadata query".into());
             return Ok(!self.metadata);
         }
+        if self.ordinary_objects && self.main_thread_ready && function == "mono_thread_current" {
+            return Ok(false);
+        }
         if self.metadata
             && self.metadata_registry.count() > 0
             && !metadata::handles(function)
@@ -1167,6 +1221,8 @@ impl Probe {
                     && self.attribute_registry.arrays_ready()
                     && self.error_registry.ready();
                 self.assembly_lookup_ready = self.assembly_lookup && self.name_registry.ready();
+                self.ordinary_objects_ready =
+                    self.ordinary_objects && self.instance_registry.count() > 0;
                 return Ok(true);
             }
         }
@@ -1191,7 +1247,8 @@ impl Probe {
     }
     pub(super) fn handles_object(&self, function: &str) -> bool {
         self.strings
-            && ((self.assembly_lookup && names::handles(function))
+            && ((self.ordinary_objects && function == "mono_object_new")
+                || (self.assembly_lookup && names::handles(function))
                 || (self.attribute_arrays && errors::handles(function))
                 || (self.attributes
                     && attributes::handles(function)
@@ -1324,6 +1381,49 @@ impl Probe {
         cpu.regs[4]
             .checked_add(8)
             .ok_or("object return stack overflow")?;
+        if self.ordinary_objects
+            && (function == "mono_object_new"
+                || (function == "mono_object_get_class" && self.instance_registry.contains(a[0])))
+        {
+            let api = match self.instance_api {
+                Some(api) => api,
+                None => {
+                    let image = self.image_registry.unique_native_image(CORE_MODULE)?;
+                    let (api, _) =
+                        callbacks::with_owner(memory, runtime, self.callback_targets(), || {
+                            instances::Api::load(library, image)
+                        })?;
+                    let api = api?;
+                    self.instance_api = Some(api);
+                    api
+                }
+            };
+            let result = if function == "mono_object_new" {
+                if a[0] != ROOT_TOKEN || domain.is_null() {
+                    return Err("ordinary allocation requires owned root domain".into());
+                }
+                let class = self.metadata_registry.native(a[1], metadata::Kind::Class)?;
+                let (token, _) =
+                    callbacks::with_owner(memory, runtime, self.callback_targets(), || {
+                        self.instance_registry.allocate(api, domain, class)
+                    })?;
+                let token = token?;
+                self.instance_registry.publish(memory, token)?;
+                self.events.push(format!("actual checked object allocated and immediately strong-rooted: {token:#x}; constructor not invoked; no native header published"));
+                token
+            } else {
+                let (class, _) =
+                    callbacks::with_owner(memory, runtime, self.callback_targets(), || {
+                        self.instance_registry.class(api, a[0])
+                    })?;
+                self.metadata_registry.wrap(
+                    memory,
+                    metadata::Value::Handle(class?, metadata::Kind::Class),
+                )?
+            };
+            cpu.return_integer(memory, result)?;
+            return Ok(false);
+        }
         if self.assembly_lookup && names::handles(function) {
             let api = match self.name_api {
                 Some(api) => api,
@@ -1444,6 +1544,9 @@ impl Probe {
                     } else if self.reflection_registry.contains(a[0]) {
                         self.reflection_registry
                             .native(self.reflection_api.ok_or("RuntimeType API absent")?, a[0])?
+                    } else if self.instance_registry.contains(a[0]) {
+                        self.instance_registry
+                            .native(self.instance_api.ok_or("ordinary object API absent")?, a[0])?
                     } else if self.attribute_registry.contains(a[0]) {
                         self.attribute_registry
                             .native(self.attribute_api.ok_or("attribute API absent")?, a[0])?
@@ -1797,6 +1900,23 @@ impl Probe {
         memory: &mut Memory,
         runtime: &mut Runtime64,
     ) -> Result<(), String> {
+        if function == "mono_object_new" {
+            if cpu.regs[1] != ROOT_TOKEN {
+                return Err("pending object allocation has unknown domain".into());
+            }
+            let library = self
+                .native
+                .as_ref()
+                .ok_or("pending object has no runtime")?
+                .library;
+            let (description, _) =
+                callbacks::with_owner(memory, runtime, self.callback_targets(), || {
+                    self.metadata_registry.describe_class(library, cpu.regs[2])
+                })?;
+            self.events
+                .push(format!("pending typed object allocation: {}", description?));
+            return Ok(());
+        }
         if function != "mono_runtime_invoke" {
             return Ok(());
         }
@@ -2356,10 +2476,19 @@ impl Probe {
             "mono_gc_max_generation",
             unsafe extern "C" fn() -> i32
         );
-        let (_, stats) =
-            callbacks::with_owner(memory, runtime, self.callback_targets(), || unsafe {
-                collect(max());
+        let (collected, stats) =
+            callbacks::with_owner(memory, runtime, self.callback_targets(), || {
+                if let Some(api) = self.instance_api {
+                    callbacks::with_service(|memory, _| {
+                        self.instance_registry.sync_from_guest(api, memory)
+                    })?;
+                }
+                unsafe {
+                    collect(max());
+                }
+                Ok::<_, String>(())
             })?;
+        collected?;
         let required =
             (1 << 0) | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 8) | (1 << 9) | (1 << 10) | (1 << 11);
         if stats.calls[3] < 6 || stats.gc_events & required != required {
@@ -2394,6 +2523,13 @@ impl Probe {
             let (verified, _) =
                 callbacks::with_owner(memory, runtime, self.callback_targets(), || {
                     self.array_registry.verify(api)
+                })?;
+            verified?;
+        }
+        if let Some(api) = self.instance_api {
+            let (verified, _) =
+                callbacks::with_owner(memory, runtime, self.callback_targets(), || {
+                    self.instance_registry.verify(api)
                 })?;
             verified?;
         }
@@ -2454,6 +2590,7 @@ impl Probe {
             self.reflection_registry.retire_views(memory)?;
             self.array_registry.retire(memory)?;
             self.attribute_registry.retire_views(memory)?;
+            self.instance_registry.retire_views(memory)?;
             self.handle_registry.retire_views(memory)?;
             self.error_registry.retire();
             return result;
@@ -2466,6 +2603,7 @@ impl Probe {
         self.reflection_registry.retire_views(memory)?;
         self.array_registry.retire(memory)?;
         self.attribute_registry.retire_views(memory)?;
+        self.instance_registry.retire_views(memory)?;
         self.handle_registry.retire_views(memory)?;
         self.error_registry.retire();
         self.shutdown_callbacks += stats.calls[2];
@@ -2489,6 +2627,9 @@ impl Probe {
         self.stopped = true;
         if let Some(api) = self.handle_api {
             self.handle_registry.release(api);
+        }
+        if let Some(api) = self.instance_api {
+            self.instance_registry.release(api);
         }
         if let Some(api) = self.object_api {
             self.object_registry.release_roots(api);
@@ -2527,7 +2668,7 @@ impl Probe {
     }
     pub(super) fn report(&self) -> String {
         format!(
-            "native-root-ready={}\nnative-main-thread-ready={}\nnative-pre-bindings-ready={}\nnative-bindings-ready={}\nprovider-bindings={}\nnative-scalar-adapters={}\nactual-unity-scalar-callbacks-verified={}\nnative-profiler-ready={}\nactual-gc-event-mask={}\nactual-shutdown-callbacks={}\nnative-pre-images-ready={}\nactual-unitytls-leaf-verified={}\nnative-images-ready={}\nnative-metadata-ready={}\nnative-strings-ready={}\nnative-managed-types-ready={}\nnative-managed-type-invokes={}\nnative-classlib-ready={}\nnative-classlib-invokes={}\nnative-logging-ready={}\nnative-exceptions-ready={}\nnative-synchronization-ready={}\nnative-subsystems-ready={}\nnative-subsystem-map-ready={}\nnative-imgui-ready={}\nnative-attributes-ready={}\nnative-attribute-arrays-ready={}\nnative-assembly-lookup-ready={}\nfull-game-admission=false\n{}{}{}{}{}{}{}{}{}{}\n",
+            "native-root-ready={}\nnative-main-thread-ready={}\nnative-pre-bindings-ready={}\nnative-bindings-ready={}\nprovider-bindings={}\nnative-scalar-adapters={}\nactual-unity-scalar-callbacks-verified={}\nnative-profiler-ready={}\nactual-gc-event-mask={}\nactual-shutdown-callbacks={}\nnative-pre-images-ready={}\nactual-unitytls-leaf-verified={}\nnative-images-ready={}\nnative-metadata-ready={}\nnative-strings-ready={}\nnative-managed-types-ready={}\nnative-managed-type-invokes={}\nnative-classlib-ready={}\nnative-classlib-invokes={}\nnative-logging-ready={}\nnative-exceptions-ready={}\nnative-synchronization-ready={}\nnative-subsystems-ready={}\nnative-subsystem-map-ready={}\nnative-imgui-ready={}\nnative-attributes-ready={}\nnative-attribute-arrays-ready={}\nnative-assembly-lookup-ready={}\nnative-ordinary-objects-ready={}\nfull-game-admission=false\n{}{}{}{}{}{}{}{}{}{}{}\n",
             self.root_ready,
             self.main_thread_ready,
             self.pre_bindings_ready,
@@ -2556,6 +2697,8 @@ impl Probe {
             self.attributes_ready,
             self.attribute_arrays_ready,
             self.assembly_lookup_ready,
+            self.ordinary_objects_ready,
+            self.instance_registry.report(),
             self.name_registry.report(),
             self.error_registry.report(),
             self.attribute_registry.report(),
@@ -2747,6 +2890,10 @@ mod tests {
             logging_ready: false,
             exceptions: false,
             exceptions_ready: false,
+            ordinary_objects: false,
+            ordinary_objects_ready: false,
+            instance_api: None,
+            instance_registry: instances::Registry::default(),
             assembly_lookup: false,
             assembly_lookup_ready: false,
             name_api: None,

@@ -183,6 +183,65 @@ impl Registry {
             memory.read_int(token + 232, 8)
         }
     }
+    pub(super) fn describe_class(&self, lib: Object, token: u64) -> Result<String, String> {
+        let class = self.native(token, Kind::Class)?;
+        let name = sym!(
+            lib,
+            "mono_class_get_name",
+            unsafe extern "C" fn(Object) -> *const c_char
+        );
+        let namespace = sym!(
+            lib,
+            "mono_class_get_namespace",
+            unsafe extern "C" fn(Object) -> *const c_char
+        );
+        let image = sym!(
+            lib,
+            "mono_class_get_image",
+            unsafe extern "C" fn(Object) -> Object
+        );
+        let image_name = sym!(
+            lib,
+            "mono_image_get_name",
+            unsafe extern "C" fn(Object) -> *const c_char
+        );
+        let flags = sym!(
+            lib,
+            "mono_class_get_flags",
+            unsafe extern "C" fn(Object) -> u32
+        );
+        let type_token = sym!(
+            lib,
+            "mono_class_get_type_token",
+            unsafe extern "C" fn(Object) -> u32
+        );
+        let text = |p: *const c_char| -> Result<String, String> {
+            if p.is_null() {
+                return Err("pending class NULL name".into());
+            }
+            let mut bytes = Vec::new();
+            for i in 0..32768 {
+                let byte = unsafe { p.add(i).read() } as u8;
+                if byte == 0 {
+                    return String::from_utf8(bytes).map_err(|e| e.to_string());
+                }
+                bytes.push(byte);
+            }
+            Err("pending class unbounded name".into())
+        };
+        let native_image = unsafe { image(class) };
+        if native_image.is_null() {
+            return Err("pending class has no image".into());
+        }
+        Ok(format!(
+            "{}.{}; image={}; type-token={:#x}; flags={:#x}",
+            text(unsafe { namespace(class) })?,
+            text(unsafe { name(class) })?,
+            text(unsafe { image_name(native_image) })?,
+            unsafe { type_token(class) },
+            unsafe { flags(class) }
+        ))
+    }
     pub(super) fn describe_method(&self, lib: Object, token: u64) -> Result<String, String> {
         let method = self.native(token, Kind::Method)?;
         let name = sym!(

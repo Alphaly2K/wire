@@ -121,6 +121,45 @@ static void check_tag(MonoObject *object, MonoClass *tag, int expected, int togg
     mono_field_get_value(object, mono_class_get_field_from_name(tag, "Toggle"), &actual_toggle);
     require(number == expected && actual_toggle == toggle, "real attribute constructor and named field values");
 }
+extern MonoGCHandle wire_mono_object_new_rooted_checked(MonoDomain *, MonoClass *, uint16_t *);
+static void run_objects(MonoImage *image) {
+    MonoClass *klass = mono_class_from_name(image, "", "ProbeAllocated");
+    require(klass != NULL, "allocated class");
+    uint16_t status = 65535;
+    MonoGCHandle root = wire_mono_object_new_rooted_checked(domain, klass, &status);
+    require(root && status == 0, "checked allocation returns already strong-rooted object");
+    MonoObject *object = mono_gchandle_get_target_v2(root);
+    require(object && mono_object_get_class(object) == klass, "allocated type identity");
+    MonoClassField *number_field = mono_class_get_field_from_name(klass, "Number");
+    MonoClassField *text_field = mono_class_get_field_from_name(klass, "Text");
+    int number = -1;
+    MonoString *text = (MonoString *)1;
+    mono_field_get_value(object, number_field, &number);
+    mono_field_get_value(object, text_field, &text);
+    require(number == 0 && text == NULL, "allocation does not invoke instance constructor");
+    mono_gc_collect(mono_gc_max_generation());
+    require(mono_gchandle_get_target_v2(root) == object, "pre-constructor root survives GC");
+    MonoObject *exception = NULL;
+    MonoMethod *ctor = mono_class_get_method_from_name(klass, ".ctor", 0);
+    require(ctor != NULL, "allocated constructor");
+    require(mono_runtime_invoke(ctor, object, NULL, &exception) == NULL && !exception, "separate real instance constructor");
+    mono_gc_collect(mono_gc_max_generation());
+    object = mono_gchandle_get_target_v2(root);
+    require(object && mono_object_get_class(object) == klass, "constructed root survives GC");
+    mono_field_get_value(object, number_field, &number);
+    mono_field_get_value(object, text_field, &text);
+    require(number == 37 && text && mono_string_length(text) == 24, "constructor scalar and managed reference survive GC");
+    mono_gchandle_free_v2(root);
+    require(wire_mono_object_new_rooted_checked(NULL, klass, &status) == NULL && status != 0, "NULL domain rejected");
+    require(wire_mono_object_new_rooted_checked(domain, NULL, &status) == NULL && status != 0, "NULL class rejected");
+    require(wire_mono_object_new_rooted_checked(domain, klass, NULL) == NULL, "missing status rejected");
+    for (int index = 0; index < 3; index++) {
+        MonoClass *invalid = index == 2 ? mono_array_class_get(klass, 1) :
+            mono_class_from_name(image, "", index == 0 ? "ProbeAbstractAllocated" : "ProbeValueAllocated");
+        require(invalid && wire_mono_object_new_rooted_checked(domain, invalid, &status) == NULL && status != 0,
+                "abstract/value/array object shapes rejected with owned status");
+    }
+}
 static void run_attrs(MonoImage *image) {
     MonoClass *target = mono_class_from_name(image, "", "ProbeAttrTarget");
     MonoClass *tag = mono_class_from_name(image, "", "ProbeTagAttribute");
@@ -160,7 +199,7 @@ static void run_attrs(MonoImage *image) {
 }
 
 int main(int argc, char **argv) {
-    require(argc == 5, "usage: embed_probe classlib-root fixture.exe core|interop|threads|gc|layout|remoting|collation|static-roots|attrs interp|interp-only");
+    require(argc == 5, "usage: embed_probe classlib-root fixture.exe core|interop|threads|gc|layout|remoting|collation|static-roots|attrs|objects interp|interp-only");
     mono_set_dirs(argv[1], argv[1]);
     mono_config_parse(NULL);
     mono_jit_set_aot_mode(strcmp(argv[4], "interp-only") == 0 ? MONO_AOT_MODE_INTERP_ONLY : MONO_AOT_MODE_INTERP);
@@ -180,7 +219,9 @@ int main(int argc, char **argv) {
     require(fixture != NULL, "fixture class");
     reenter = mono_class_get_method_from_name(fixture, "Reenter", 1);
     require(reenter != NULL, "nested target");
-    if (strcmp(argv[3], "attrs") == 0) {
+    if (strcmp(argv[3], "objects") == 0) {
+        run_objects(mono_assembly_get_image(assembly));
+    } else if (strcmp(argv[3], "attrs") == 0) {
         run_attrs(mono_assembly_get_image(assembly));
     } else if (strcmp(argv[3], "static-roots") == 0) {
         require(invoke_int("StaticRoots", NULL) == 0, "static/thread/generic reference roots under allocation pressure");

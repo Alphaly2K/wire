@@ -297,3 +297,24 @@ strong handle cells、parsed assembly lookup、metadata reverse index 与紧凑�
 profile 与全部样本/hash 见 `docs/native-mono-startup-performance-2026-10-09.md`。
 接下来精确识别 `mono_object_new` 的 class，再接受检分配、立即 strong root 与构造函数，
 不把未知对象/未实现 InternalCall 假装成功。其他 agent 工作已完成，可修改相关实现。
+
+
+## 最新：普通对象已通过，继续实际 ColorCurves constructor
+
+新增 patch 0023 是 checked allocation → immediate native strong root；新 runtime
+为 `native-mono-objects-runtime`，full fresh build/audit 304/668/0，十套 native fixtures
+普通/incremental 均通过，5 noexec routes exit86。Runtime/support pair 和具体对象
+契约见 `docs/native-mono-unity-objects-2026-10-09.md`。新增 instances.rs 可直接在 main
+查看；所有已验证提交持续合流。完整 release feature428/7ignored，Clippy clean。
+
+实际 `native-mono-unity-objects-probe-04` exit0/guard231/0：ColorCurves 分配、
+guest C++ binding 写 m_CachedPtr +16、strong handles、真实 GC identity/scalar 验证与
+撤销通过。主线程查询已继续。下一个 invoke 明确是 instance void ColorCurves::.ctor
+（0x06000541）；不要再次从字符串/metadata fixture 重做。
+
+真实 owned IL 见 probe-04 log；monodis read-only dumps 为 wire-out
+`unity-urp-inspect.il` / `unity-render-core-inspect.il`。ctor 依赖 AnimationCurve
+Internal_Create_Injected(ref ManagedSpanWrapper)（0x18006c410）、Internal_Destroy
+（0x18006c2a0）和 ScriptableObject CreateScriptableObject（0x1800c1e30），需固定
+ARM64 typed adapters 与 same-owner guest reentry，不能把 host pointers交给 x64。
+继续推进；完整游戏 backend/Admission 仍 false。

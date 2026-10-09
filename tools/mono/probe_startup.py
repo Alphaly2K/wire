@@ -25,7 +25,7 @@ def main():
     parser.add_argument('--managed-trace', action='store_true', help='debug-only native managed call trace; timing is not a performance result')
     parser.add_argument('--max-instr', type=int, default=30000000, help='bounded guest work budget')
     parser.add_argument('--skip-etw', action='store_true', help='explicit diagnostic platform divergence')
-    parser.add_argument('--boundary', choices=('root', 'main-thread', 'pre-bindings', 'bindings', 'profiler', 'pre-images', 'images', 'metadata', 'strings', 'managed-types', 'classlib', 'logging', 'exceptions', 'synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup'), default='root', help='finite diagnostic initialization boundary')
+    parser.add_argument('--boundary', choices=('root', 'main-thread', 'pre-bindings', 'bindings', 'profiler', 'pre-images', 'images', 'metadata', 'strings', 'managed-types', 'classlib', 'logging', 'exceptions', 'synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup', 'objects'), default='root', help='finite diagnostic initialization boundary')
     args = parser.parse_args()
     if bool(args.graphics_backend) != bool(args.moltenvk):
         parser.error("--graphics-backend and --moltenvk must be paired")
@@ -70,7 +70,7 @@ def main():
     if args.managed_trace:
         env['WIRE_NATIVE_MONO_MANAGED_TRACE'] = '1'
     env.update(DYLD_INSERT_LIBRARIES=str(guard), MONO_THREADS_SUSPEND='preemptive')
-    if args.boundary in ('bindings', 'profiler', 'pre-images', 'images', 'metadata', 'strings', 'managed-types', 'classlib', 'logging', 'exceptions', 'synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup'):
+    if args.boundary in ('bindings', 'profiler', 'pre-images', 'images', 'metadata', 'strings', 'managed-types', 'classlib', 'logging', 'exceptions', 'synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup', 'objects'):
         reference = args.registration_reference.resolve()
         shutil.copy2(reference, output / 'registration-reference.tsv')
         inputs['registration_reference'] = {'path': str(reference), 'sha256': sha256(reference)}
@@ -99,7 +99,7 @@ def main():
         match = re.search(r'^' + re.escape(name) + r'=(\d+)$', content, re.M)
         return int(match[1]) if match else 0
     registry_match = None
-    if args.boundary in ('bindings', 'profiler', 'pre-images', 'images', 'metadata', 'strings', 'managed-types', 'classlib', 'logging', 'exceptions', 'synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup') and (output / 'api.tsv.mono-bindings.tsv').exists():
+    if args.boundary in ('bindings', 'profiler', 'pre-images', 'images', 'metadata', 'strings', 'managed-types', 'classlib', 'logging', 'exceptions', 'synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup', 'objects') and (output / 'api.tsv.mono-bindings.tsv').exists():
         with (output / 'registration-reference.tsv').open() as stream:
             original = {bytes.fromhex(row['name_bytes_hex']): int(row['guest_target'], 16) for row in csv.DictReader(stream, delimiter='\t')}
         with (output / 'api.tsv.mono-bindings.tsv').open() as stream:
@@ -135,6 +135,12 @@ def main():
         'native_array_gc_verifications': count_marker('native-array-gc-verifications'),
         'native_array_roots_released': 'native-array-roots-released=true' in content,
         'native_array_views_retired': 'native-array-views-retired=true' in content,
+        'native_ordinary_objects_ready': 'native-ordinary-objects-ready=true' in content,
+        'native_allocated_objects': count_marker('native-allocated-objects'),
+        'native_allocated_object_gc_verifications': count_marker('native-allocated-object-gc-verifications'),
+        'native_allocated_object_views_retired': 'native-allocated-object-views-retired=true' in content,
+        'native_unity_cached_pointer_syncs': count_marker('native-unity-cached-pointer-syncs'),
+        'native_allocated_object_roots_released': 'native-allocated-object-roots-released=true' in content,
         'native_assembly_lookup_ready': 'native-assembly-lookup-ready=true' in content,
         'native_assembly_name_parses': count_marker('native-assembly-name-parses'),
         'native_assembly_name_lookups': count_marker('native-assembly-name-lookups'),
@@ -183,11 +189,11 @@ def main():
         raise RuntimeError('native startup provider executed original Mono attach')
     if root_ready and (not guard_result or int(guard_result[1]) == 0 or int(guard_result[2]) != 0):
         raise RuntimeError('native root run lacks successful noexec guard evidence')
-    if args.boundary in ('bindings', 'profiler', 'pre-images', 'images', 'metadata', 'strings', 'managed-types', 'classlib', 'logging', 'exceptions', 'synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup') and (registry_match is not True or evidence['actual_unity_scalar_callbacks_verified'] != 2 or evidence['native_scalar_adapters'] != 2):
+    if args.boundary in ('bindings', 'profiler', 'pre-images', 'images', 'metadata', 'strings', 'managed-types', 'classlib', 'logging', 'exceptions', 'synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup', 'objects') and (registry_match is not True or evidence['actual_unity_scalar_callbacks_verified'] != 2 or evidence['native_scalar_adapters'] != 2):
         raise RuntimeError('actual Unity bindings/callback verification incomplete or registry differs from original')
-    if args.boundary in ('profiler', 'pre-images', 'images', 'metadata', 'strings', 'managed-types', 'classlib', 'logging', 'exceptions', 'synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup') and (not evidence['native_profiler_ready'] or evidence['actual_gc_event_mask'] & 4065 != 4065 or evidence['actual_shutdown_callbacks'] != 1):
+    if args.boundary in ('profiler', 'pre-images', 'images', 'metadata', 'strings', 'managed-types', 'classlib', 'logging', 'exceptions', 'synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup', 'objects') and (not evidence['native_profiler_ready'] or evidence['actual_gc_event_mask'] & 4065 != 4065 or evidence['actual_shutdown_callbacks'] != 1):
         raise RuntimeError('actual native GC/shutdown evidence incomplete')
-    if args.boundary in ('pre-images', 'images', 'metadata', 'strings', 'managed-types', 'classlib', 'logging', 'exceptions', 'synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup') and (not evidence['native_pre_images_ready'] or not evidence['actual_unitytls_leaf_verified']):
+    if args.boundary in ('pre-images', 'images', 'metadata', 'strings', 'managed-types', 'classlib', 'logging', 'exceptions', 'synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup', 'objects') and (not evidence['native_pre_images_ready'] or not evidence['actual_unitytls_leaf_verified']):
         raise RuntimeError('actual UnityTLS/managed-image boundary evidence incomplete')
     if args.boundary == 'images' and (not evidence['native_images_ready'] or not evidence['native_image_registry_retired'] or [evidence[key] for key in ('native_images_opened', 'native_assemblies_loaded', 'guest_image_refs_closed', 'native_assembly_image_getters')] != [82, 82, 82, 82]):
         raise RuntimeError('actual native image/assembly cycles incomplete')
@@ -199,30 +205,32 @@ def main():
         raise RuntimeError('actual managed type invoke/reflection GC evidence incomplete')
     if args.boundary == 'classlib' and (not evidence['native_classlib_ready'] or evidence['native_classlib_invokes'] != 1):
         raise RuntimeError('actual native classlib initialization evidence incomplete')
-    if args.boundary in ('logging', 'exceptions', 'synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup') and (not evidence['native_logging_ready'] or evidence['native_logging_routes_verified'] != 4):
+    if args.boundary in ('logging', 'exceptions', 'synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup', 'objects') and (not evidence['native_logging_ready'] or evidence['native_logging_routes_verified'] != 4):
         raise RuntimeError('native UnityLogWriter initialization evidence incomplete')
-    if args.boundary in ('exceptions', 'synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup') and not evidence['native_exceptions_ready']:
+    if args.boundary in ('exceptions', 'synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup', 'objects') and not evidence['native_exceptions_ready']:
         raise RuntimeError('actual Unity exception catcher registration incomplete')
-    if args.boundary in ('synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup') and (evidence['native_empty_arrays'] == 0 or evidence['native_array_gc_verifications'] < evidence['native_empty_arrays'] or not evidence['native_array_roots_released'] or not evidence['native_array_views_retired'] or evidence['native_external_strong_handles'] == 0 or not evidence['native_external_handles_released'] or not evidence['native_external_handle_views_retired']):
+    if args.boundary in ('synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup', 'objects') and (evidence['native_empty_arrays'] == 0 or evidence['native_array_gc_verifications'] < evidence['native_empty_arrays'] or not evidence['native_array_roots_released'] or not evidence['native_array_views_retired'] or evidence['native_external_strong_handles'] == 0 or not evidence['native_external_handles_released'] or not evidence['native_external_handle_views_retired']):
         raise RuntimeError('actual startup array/strong handle lifecycle verification incomplete')
-    if args.boundary in ('synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup') and not evidence['native_synchronization_ready']:
+    if args.boundary in ('synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup', 'objects') and not evidence['native_synchronization_ready']:
         raise RuntimeError(f"actual Unity synchronization context initialization incomplete; pending={evidence['pending_boundary']} steps={evidence['native_classlib_invokes']}")
-    if args.boundary in ('subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup') and not evidence['native_subsystems_ready']:
+    if args.boundary in ('subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup', 'objects') and not evidence['native_subsystems_ready']:
         raise RuntimeError('actual subsystem descriptor initialization incomplete')
-    if args.boundary in ('subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup') and (not evidence['native_subsystem_map_ready'] or 'NATIVE_MONO_SUBSYSTEM_MAP_VERIFIED:' not in content):
+    if args.boundary in ('subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup', 'objects') and (not evidence['native_subsystem_map_ready'] or 'NATIVE_MONO_SUBSYSTEM_MAP_VERIFIED:' not in content):
         raise RuntimeError('actual subsystem scripting map callback incomplete')
-    if args.boundary in ('imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup') and (not evidence['native_imgui_ready'] or 'NATIVE_MONO_IMGUI_CACHE_VERIFIED:' not in content):
+    if args.boundary in ('imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup', 'objects') and (not evidence['native_imgui_ready'] or 'NATIVE_MONO_IMGUI_CACHE_VERIFIED:' not in content):
         raise RuntimeError('actual IMGUI cache initialization incomplete')
-    if args.boundary in ('attributes', 'attribute-arrays', 'assembly-lookup') and (not evidence['native_attributes_ready'] or evidence['native_attribute_objects'] == 0 or evidence['native_attribute_field_reads'] == 0 or evidence['native_attribute_gc_verifications'] < evidence['native_attribute_objects'] or not evidence['native_attribute_resources_released']):
+    if args.boundary in ('attributes', 'attribute-arrays', 'assembly-lookup', 'objects') and (not evidence['native_attributes_ready'] or evidence['native_attribute_objects'] == 0 or evidence['native_attribute_field_reads'] == 0 or evidence['native_attribute_gc_verifications'] < evidence['native_attribute_objects'] or not evidence['native_attribute_resources_released']):
         raise RuntimeError('actual custom-attribute construction/field/GC lifecycle incomplete')
-    if args.boundary in ('attribute-arrays', 'assembly-lookup') and (not evidence['native_attribute_arrays_ready'] or evidence['native_attribute_arrays'] == 0 or evidence['native_attribute_array_gc_verifications'] < evidence['native_attribute_arrays'] or not evidence['native_attribute_array_views_retired'] or evidence['native_error_completions'] == 0 or evidence['native_error_observations'] == 0 or not evidence['native_error_snapshots_retired']):
+    if args.boundary in ('attribute-arrays', 'assembly-lookup', 'objects') and (not evidence['native_attribute_arrays_ready'] or evidence['native_attribute_arrays'] == 0 or evidence['native_attribute_array_gc_verifications'] < evidence['native_attribute_arrays'] or not evidence['native_attribute_array_views_retired'] or evidence['native_error_completions'] == 0 or evidence['native_error_observations'] == 0 or not evidence['native_error_snapshots_retired']):
         raise RuntimeError('actual attribute array/error snapshot/GC lifecycle incomplete')
-    if args.boundary == 'assembly-lookup' and (not evidence['native_assembly_lookup_ready'] or evidence['native_assembly_name_hits'] == 0 or evidence['native_assembly_name_frees'] == 0 or not evidence['native_assembly_names_retired']):
+    if args.boundary in ('assembly-lookup', 'objects') and (not evidence['native_assembly_lookup_ready'] or evidence['native_assembly_name_hits'] == 0 or evidence['native_assembly_name_frees'] == 0 or not evidence['native_assembly_names_retired']):
         raise RuntimeError('actual parsed assembly lookup lifecycle incomplete')
-    expected_steps = {'classlib': 1, 'logging': 2, 'exceptions': 3, 'synchronization': 5, 'subsystems': 6, 'subsystem-map': 7, 'imgui-cache': 8, 'attributes': 8, 'attribute-arrays': 8, 'assembly-lookup': 8}.get(args.boundary)
+    if args.boundary == 'objects' and (not evidence['native_ordinary_objects_ready'] or evidence['native_allocated_objects'] == 0 or evidence['native_allocated_object_gc_verifications'] < evidence['native_allocated_objects'] or not evidence['native_allocated_object_roots_released'] or not evidence['native_allocated_object_views_retired']):
+        raise RuntimeError('actual checked object allocation/GC/root lifecycle incomplete')
+    expected_steps = {'classlib': 1, 'logging': 2, 'exceptions': 3, 'synchronization': 5, 'subsystems': 6, 'subsystem-map': 7, 'imgui-cache': 8, 'attributes': 8, 'attribute-arrays': 8, 'assembly-lookup': 8, 'objects': 8}.get(args.boundary)
     if expected_steps is not None and evidence['native_classlib_invokes'] != expected_steps:
         raise RuntimeError('actual ordered managed startup steps incomplete')
-    if result.returncode != 0 or not root_ready or (args.boundary != 'root' and not evidence['native_main_thread_ready']) or (args.boundary in ('pre-bindings','bindings','profiler','pre-images','images','metadata','strings','managed-types','classlib','logging','exceptions','synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup') and not evidence['native_pre_bindings_ready']) or (args.boundary in ('bindings','profiler','pre-images','images','metadata','strings','managed-types','classlib','logging','exceptions','synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup') and not evidence['native_bindings_ready']):
+    if result.returncode != 0 or not root_ready or (args.boundary != 'root' and not evidence['native_main_thread_ready']) or (args.boundary in ('pre-bindings','bindings','profiler','pre-images','images','metadata','strings','managed-types','classlib','logging','exceptions','synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup', 'objects') and not evidence['native_pre_bindings_ready']) or (args.boundary in ('bindings','profiler','pre-images','images','metadata','strings','managed-types','classlib','logging','exceptions','synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup', 'objects') and not evidence['native_bindings_ready']):
         raise SystemExit(1)
 
 

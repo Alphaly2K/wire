@@ -192,3 +192,12 @@ public sealed class ProbeThrowAttribute : Attribute {
 }
 [ProbeThrow]
 public sealed class ProbeAttrThrowTarget { }
+
+// Object allocation must leave instance constructor side effects untouched.
+public sealed class ProbeAllocated {
+    public int Number;
+    public string Text;
+    public ProbeAllocated() { Number = 37; Text = "rooted after constructor"; }
+}
+public abstract class ProbeAbstractAllocated { }
+public struct ProbeValueAllocated { public int Number; }

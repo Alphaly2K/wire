@@ -1,0 +1,41 @@
+--- a/mono/metadata/object.c
++++ b/mono/metadata/object.c
+@@ -5913,6 +5913,38 @@
+ 	return result;
+ }
+ 
++
++/* Wire allocation boundary: return an already rooted object, never an
++ * unrooted pointer or MonoError private fields to the embedding bridge.
++ * Constructors remain a separate, method-qualified operation. */
++MONO_API gpointer
++wire_mono_object_new_rooted_checked (MonoDomain *domain, MonoClass *klass, guint16 *status)
++{
++    if (!status) return NULL;
++    *status = MONO_ERROR_ARGUMENT_NULL;
++    if (!domain || !klass) return NULL;
++    gpointer root = NULL;
++    MONO_ENTER_GC_UNSAFE;
++    ERROR_DECL (error);
++    if ((mono_class_get_flags (klass) & (TYPE_ATTRIBUTE_ABSTRACT | TYPE_ATTRIBUTE_INTERFACE)) ||
++        m_class_is_valuetype (klass) || m_class_get_rank (klass)) {
++        mono_error_set_argument (error, "klass", "Wire allocation requires a concrete reference class");
++    } else {
++        MonoObject *object = mono_object_new_checked (domain, klass, error);
++        if (is_ok (error) && object) {
++            root = mono_gchandle_new_internal (object, TRUE);
++            if (!root) mono_error_set_out_of_memory (error, "Wire strong root allocation failed");
++        } else if (is_ok (error)) {
++            mono_error_set_out_of_memory (error, "Wire checked object allocation returned NULL");
++        }
++    }
++    *status = mono_error_get_error_code (error);
++    mono_error_cleanup (error);
++    if (*status && root) { mono_gchandle_free_internal (root); root = NULL; }
++    MONO_EXIT_GC_UNSAFE;
++    return root;
++}
++
+ MonoObject *
+ ves_icall_object_new (MonoDomain *domain, MonoClass *klass)
+ {
