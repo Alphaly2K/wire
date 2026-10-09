@@ -26,5 +26,5 @@ string/object ABI或managed runtime-invoke。完整game Admission仍false，非�
 
 CLI边界新增metadata。已有images默认仍止于第一个class query之前。
 最新metadata targeted 10 tests及feature all-target Clippy（-D warnings）已通过，包含
-NULL/domain增量。完整feature回归继续进行；上一阶段default365/feature394各7 ignored
-已通过，不将上一阶段结果充当后续对象实现验证。
+NULL/domain增量。完整feature回归395 passed / 7 ignored，日志
+`wire-out/native-mono-metadata-feature-tests.log`。后续string实现独立验证。

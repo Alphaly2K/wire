@@ -132,6 +132,116 @@ impl Registry {
             }
         }
     }
+    pub(super) fn describe_method(&self, lib: Object, token: u64) -> Result<String, String> {
+        let method = self.native(token, Kind::Method)?;
+        let name = sym!(
+            lib,
+            "mono_method_get_name",
+            unsafe extern "C" fn(Object) -> *const c_char
+        );
+        let class = sym!(
+            lib,
+            "mono_method_get_class",
+            unsafe extern "C" fn(Object) -> Object
+        );
+        let class_name = sym!(
+            lib,
+            "mono_class_get_name",
+            unsafe extern "C" fn(Object) -> *const c_char
+        );
+        let namespace = sym!(
+            lib,
+            "mono_class_get_namespace",
+            unsafe extern "C" fn(Object) -> *const c_char
+        );
+        let signature = sym!(
+            lib,
+            "mono_method_signature",
+            unsafe extern "C" fn(Object) -> Object
+        );
+        let count = sym!(
+            lib,
+            "mono_signature_get_param_count",
+            unsafe extern "C" fn(Object) -> u32
+        );
+        let instance = sym!(
+            lib,
+            "mono_signature_is_instance",
+            unsafe extern "C" fn(Object) -> u32
+        );
+        let params = sym!(
+            lib,
+            "mono_signature_get_params",
+            unsafe extern "C" fn(Object, *mut Object) -> Object
+        );
+        let returns = sym!(
+            lib,
+            "mono_signature_get_return_type",
+            unsafe extern "C" fn(Object) -> Object
+        );
+        let type_kind = sym!(
+            lib,
+            "mono_type_get_type",
+            unsafe extern "C" fn(Object) -> u32
+        );
+        let byref = sym!(
+            lib,
+            "mono_type_is_byref",
+            unsafe extern "C" fn(Object) -> u32
+        );
+        let method_token = sym!(
+            lib,
+            "mono_method_get_token",
+            unsafe extern "C" fn(Object) -> u32
+        );
+        let cls = unsafe { class(method) };
+        let sig = unsafe { signature(method) };
+        if cls.is_null() || sig.is_null() || unsafe { count(sig) } > 16 {
+            return Err("pending method has invalid/unbounded signature".into());
+        }
+        let text = |p: *const c_char| -> Result<String, String> {
+            if p.is_null() {
+                return Err("pending method NULL name".into());
+            }
+            let mut bytes = Vec::new();
+            for i in 0..32768 {
+                let byte = unsafe { p.add(i).read() } as u8;
+                if byte == 0 {
+                    return String::from_utf8(bytes).map_err(|e| e.to_string());
+                }
+                bytes.push(byte);
+            }
+            Err("pending method unbounded name".into())
+        };
+        let mut iter = ptr::null_mut();
+        let mut types = Vec::new();
+        for _ in 0..unsafe { count(sig) } {
+            let ty = unsafe { params(sig, &mut iter) };
+            if ty.is_null() {
+                return Err("pending method missing param type".into());
+            }
+            types.push(format!(
+                "{:#x}/byref={}",
+                unsafe { type_kind(ty) },
+                unsafe { byref(ty) }
+            ));
+        }
+        let ret = unsafe { returns(sig) };
+        if ret.is_null() {
+            return Err("pending method missing return type".into());
+        }
+        Ok(format!(
+            "{}.{}::{}; method-token={:#x}; instance={}; params={:?}; return={:#x}/byref={}",
+            text(unsafe { namespace(cls) })?,
+            text(unsafe { class_name(cls) })?,
+            text(unsafe { name(method) })?,
+            unsafe { method_token(method) },
+            unsafe { instance(sig) },
+            types,
+            unsafe { type_kind(ret) },
+            unsafe { byref(ret) }
+        ))
+    }
     pub(super) fn query(
         &mut self,
         lib: Object,

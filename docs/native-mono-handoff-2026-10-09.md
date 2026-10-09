@@ -165,3 +165,10 @@ typed fail-stop，网络未实现。新边界pre-images/images；后者止于首
 不写native userdata，不准入依赖此字段的managed callbacks/完整metadata ABI。
 下一步继续string强根和受检视图及stack-reference；default365/feature394是上一images阶段
 完整验证，不代表后续对象代码。仍不碰浮点/翻译缓存；用户授权持续自己测修提交、不push。
+
+## Rooted string 已完成，继续首个 managed invoke
+
+`native-mono-unity-strings-probe-01`：真实53B输入string经native GC验证身份/payload，guard178/0。
+首次invoke为System.Type.GetType(String)，不是先前推测的Assembly.LoadFrom。该阶段仍stop-before。
+详见`docs/native-mono-unity-strings-2026-10-09.md`。继续reflection object/typed managed invoke。
+metadata完整feature回归395 passed / 7 ignored；string targeted11与all-target Clippy通过。

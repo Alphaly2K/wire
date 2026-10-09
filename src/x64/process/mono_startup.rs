@@ -28,6 +28,7 @@ mod bindings;
 mod callbacks;
 mod images;
 mod metadata;
+mod objects;
 mod unitytls;
 macro_rules! symbol {
     ($library:expr, $name:literal, $ty:ty) => {{
@@ -175,6 +176,10 @@ pub(super) struct Probe {
     metadata: bool,
     metadata_ready: bool,
     metadata_registry: metadata::Registry,
+    strings: bool,
+    strings_ready: bool,
+    object_registry: objects::Registry,
+    object_api: Option<objects::Api>,
     registry: bindings::Registry,
     stopped: bool,
     skip_etw: bool,
@@ -273,6 +278,7 @@ impl Probe {
         skip_etw: bool,
         boundary: &str,
     ) -> Result<Self, String> {
+        let strings = boundary == "strings";
         let (main_thread, pre_bindings, bindings, profiler, pre_images, images, metadata) = match boundary {
             "root" => (false, false, false, false, false, false, false),
             "main-thread" => (true, false, false, false, false, false, false),
@@ -281,10 +287,10 @@ impl Probe {
             "profiler" => (true, true, true, true, false, false, false),
             "pre-images" => (true, true, true, true, true, false, false),
             "images" => (true, true, true, true, true, true, false),
-            "metadata" => (true, true, true, true, true, true, true),
+            "metadata" | "strings" => (true, true, true, true, true, true, true),
             _ => {
                 return Err(
-                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings, profiler, pre-images, images or metadata".into(),
+                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings, profiler, pre-images, images, metadata or strings".into(),
                 )
             }
         };
@@ -332,6 +338,10 @@ impl Probe {
             metadata,
             metadata_ready: false,
             metadata_registry: metadata::Registry::default(),
+            strings,
+            strings_ready: false,
+            object_registry: objects::Registry::default(),
+            object_api: None,
             registry: bindings::Registry::default(),
             stopped: false,
             skip_etw,
@@ -664,8 +674,15 @@ impl Probe {
                 self.events.push("native thread object retained by v2 strong handle through complete diagnostic exposure; opaque guest token has no mapped object/header".into());
             }
             "mono_gc_wbarrier_set_field" if self.root_ready && self.main_thread => {
-                store_thread_token(memory, cpu, a, !native.thread_handle.is_null())?;
-                self.events.push(format!("diagnostic thread root token stored through checked guest stack slot {:#x}; raw guest destination never passed to native barrier", a[1]));
+                let owned = if (a[2] == THREAD_TOKEN && !native.thread_handle.is_null())
+                    || self.object_registry.contains(a[2])
+                {
+                    a[2]
+                } else {
+                    0
+                };
+                store_stack_token(memory, cpu, a, owned)?;
+                self.events.push(format!("diagnostic strong-rooted object token stored through checked guest stack slot {:#x}; raw guest destination never passed to native barrier", a[1]));
             }
             "mono_thread_set_main" if self.root_ready && self.main_thread => {
                 if a[0] != THREAD_TOKEN || native.thread_handle.is_null() {
@@ -880,8 +897,86 @@ impl Probe {
         {
             self.metadata_ready = true;
             self.events.push(format!("actual typed metadata queries complete; stop before next unadmitted operation {function}"));
-            return Ok(true);
+            if !self.strings {
+                return Ok(true);
+            }
+            if !self.handles_object(function) {
+                self.strings_ready = self.object_registry.count() > 0;
+                return Ok(true);
+            }
         }
+        Ok(false)
+    }
+    pub(super) fn handles_object(&self, function: &str) -> bool {
+        self.strings
+            && matches!(
+                function,
+                "mono_string_new_len" | "mono_string_length" | "mono_string_chars"
+            )
+    }
+    pub(super) fn dispatch_object(
+        &mut self,
+        function: &str,
+        cpu: &mut Cpu64,
+        memory: &mut Memory,
+        runtime: &mut Runtime64,
+    ) -> Result<bool, String> {
+        if self.stopped || !self.handles_object(function) {
+            return Err("object call outside live typed provider".into());
+        }
+        let native = self
+            .native
+            .as_ref()
+            .ok_or("object call has no native runtime")?;
+        if native.closed || native.owner != thread::current().id() {
+            return Err("object call has closed/foreign owner".into());
+        }
+        let library = native.library;
+        let domain = native.domain;
+        let a = [cpu.regs[1], cpu.regs[2], cpu.regs[8], cpu.regs[9]];
+        memory.read_int(cpu.regs[4], 8)?;
+        cpu.regs[4]
+            .checked_add(8)
+            .ok_or("object return stack overflow")?;
+        let api = match self.object_api {
+            Some(api) => api,
+            None => {
+                let api = objects::Api::load(library)?;
+                self.object_api = Some(api);
+                api
+            }
+        };
+        let targets = self.callback_targets();
+        let result = if function == "mono_string_new_len" {
+            if a[0] != ROOT_TOKEN || domain.is_null() || a[2] > 32768 {
+                return Err("string allocation requires owned root and bounded input".into());
+            }
+            let mut bytes = vec![0; a[2] as usize];
+            memory.read(a[1], &mut bytes)?;
+            let (token, _) = callbacks::with_owner(memory, runtime, targets, || {
+                let object =
+                    unsafe { (api.new_string)(domain, bytes.as_ptr().cast(), bytes.len() as u32) };
+                self.object_registry.root_string(api, object)
+            })?;
+            let token = token?;
+            self.object_registry.publish_string(memory, token)?;
+            token
+        } else {
+            let (native, _) = callbacks::with_owner(memory, runtime, targets, || {
+                self.object_registry.native_string(api, a[0])
+            })?;
+            native?;
+            if function == "mono_string_length" {
+                memory.read_int(a[0] + 16, 4)?
+            } else {
+                a[0] + 20
+            }
+        };
+        self.events.push(format!(
+            "actual owned string boundary {function} -> {result:#x}; bytes={}",
+            a[2]
+        ));
+        cpu.return_integer(memory, result)?;
         Ok(false)
     }
     pub(super) fn observe_stop(&mut self, function: &str, cpu: &Cpu64) {
@@ -890,6 +985,36 @@ impl Probe {
             [cpu.regs[1], cpu.regs[2], cpu.regs[8], cpu.regs[9]],
             cpu.regs[4]
         ));
+    }
+    pub(super) fn inspect_pending(
+        &mut self,
+        function: &str,
+        cpu: &Cpu64,
+        memory: &mut Memory,
+        runtime: &mut Runtime64,
+    ) -> Result<(), String> {
+        if function != "mono_runtime_invoke" {
+            return Ok(());
+        }
+        let library = self
+            .native
+            .as_ref()
+            .ok_or("pending invoke has no runtime")?
+            .library;
+        let (description, _) =
+            callbacks::with_owner(memory, runtime, self.callback_targets(), || {
+                self.metadata_registry.describe_method(library, cpu.regs[1])
+            })?;
+        self.events
+            .push(format!("pending typed invoke: {}", description?));
+        if cpu.regs[8] != 0 {
+            let token = memory.read_int(cpu.regs[8], 8)?;
+            self.events.push(format!(
+                "pending first managed parameter token={token:#x}; owned-string={}",
+                self.object_registry.contains(token)
+            ));
+        }
+        Ok(())
     }
     pub(super) fn handles_metadata(&self, function: &str) -> bool {
         self.metadata && metadata::handles(function)
@@ -1315,6 +1440,13 @@ impl Probe {
             ));
         }
         self.gc_events_verified |= stats.gc_events;
+        if let Some(api) = self.object_api {
+            let (verified, _) =
+                callbacks::with_owner(memory, runtime, self.callback_targets(), || {
+                    self.object_registry.verify(api)
+                })?;
+            verified?;
+        }
         self.events.push(format!("actual native BDWGC collection -> compiled GC adapter -> original Unity Win64 callback: {} calls, event mask {:#x}; no guest pointer passed to native profiler", stats.calls[3], stats.gc_events));
         Ok(())
     }
@@ -1361,12 +1493,14 @@ impl Probe {
         if !self.legacy_installed || self.stopped {
             let result = self.finish();
             self.metadata_registry.retire(memory)?;
+            self.object_registry.retire_views(memory)?;
             return result;
         }
         let targets = self.callback_targets();
         let (result, stats) = callbacks::with_owner(memory, runtime, targets, || self.finish())?;
         result?;
         self.metadata_registry.retire(memory)?;
+        self.object_registry.retire_views(memory)?;
         self.shutdown_callbacks += stats.calls[2];
         self.gc_events_verified |= stats.gc_events;
         if stats.calls[2] != 1 {
@@ -1386,6 +1520,9 @@ impl Probe {
             return Ok(());
         }
         self.stopped = true;
+        if let Some(api) = self.object_api {
+            self.object_registry.release_roots(api);
+        }
         if let Some(api) = self.image_api {
             self.image_registry.retire(api);
         }
@@ -1408,7 +1545,7 @@ impl Probe {
     }
     pub(super) fn report(&self) -> String {
         format!(
-            "native-root-ready={}\nnative-main-thread-ready={}\nnative-pre-bindings-ready={}\nnative-bindings-ready={}\nprovider-bindings={}\nnative-scalar-adapters={}\nactual-unity-scalar-callbacks-verified={}\nnative-profiler-ready={}\nactual-gc-event-mask={}\nactual-shutdown-callbacks={}\nnative-pre-images-ready={}\nactual-unitytls-leaf-verified={}\nnative-images-ready={}\nnative-metadata-ready={}\nfull-game-admission=false\n{}{}{}\n",
+            "native-root-ready={}\nnative-main-thread-ready={}\nnative-pre-bindings-ready={}\nnative-bindings-ready={}\nprovider-bindings={}\nnative-scalar-adapters={}\nactual-unity-scalar-callbacks-verified={}\nnative-profiler-ready={}\nactual-gc-event-mask={}\nactual-shutdown-callbacks={}\nnative-pre-images-ready={}\nactual-unitytls-leaf-verified={}\nnative-images-ready={}\nnative-metadata-ready={}\nnative-strings-ready={}\nfull-game-admission=false\n{}{}{}{}\n",
             self.root_ready,
             self.main_thread_ready,
             self.pre_bindings_ready,
@@ -1423,6 +1560,8 @@ impl Probe {
             self.tls_leaf_verified,
             self.images_ready,
             self.metadata_ready,
+            self.strings_ready,
+            self.object_registry.report(),
             self.image_registry.report(),
             self.metadata_registry.report(),
             self.events.join("\n")
@@ -1437,33 +1576,33 @@ impl Probe {
             || (self.profiler_ready && !self.pre_images)
             || (self.pre_images_ready && !self.images)
             || (self.images_ready && !self.metadata)
-            || self.metadata_ready
+            || (self.metadata_ready && !self.strings)
+            || self.strings_ready
     }
 }
-fn store_thread_token(
+fn store_stack_token(
     memory: &mut Memory,
     cpu: &Cpu64,
     a: [u64; 4],
-    rooted: bool,
+    owned: u64,
 ) -> Result<(), String> {
-    // This bounded diagnostic exposes only an opaque main-thread identity. It
-    // retains a real strong handle until cleanup, admits no interior byrefs,
-    // and never resumes into managed/object dereferences. Production roots and
-    // write barriers still require the independent complete-game admission.
+    // Registry-validated strong identities stay rooted through finite cleanup.
+    // This guest stack scalar write never crosses native FFI or admits heap
+    // destinations, arbitrary object references, or interior managed byrefs.
     let first = cpu.regs[4]
         .checked_add(40)
         .ok_or("startup stack overflow")?;
     let end = a[1].checked_add(8).ok_or("startup root slot overflow")?;
-    if !rooted
-        || a[0] != 0
-        || (a[2] != 0 && a[2] != THREAD_TOKEN)
+    if a[0] != 0
+        || (a[2] != 0 && a[2] != owned)
         || !a[1].is_multiple_of(8)
         || a[1] < first
         || a[1] < super::STACK
         || end > super::STACK + 64 * 1024 * 1024
     {
         return Err(
-            "startup barrier admits only an owned thread token in a live main-stack slot".into(),
+            "startup barrier admits only an owned strong-rooted token in a live main-stack slot"
+                .into(),
         );
     }
     memory.write_int(a[1], 8, a[2])
@@ -1523,25 +1662,27 @@ mod tests {
         let cpu = Cpu64::new(0, super::super::STACK + 8);
         let slot = super::super::STACK + 0x100;
         memory.write_int(slot, 8, 77).unwrap();
-        for (args, rooted) in [
-            ([0, slot, THREAD_TOKEN, 0], false),
-            ([1, slot, THREAD_TOKEN, 0], true),
-            ([0, slot, 0x1234, 0], true),
-            ([0, cpu.regs[4], THREAD_TOKEN, 0], true),
-            ([0, 0x1234, THREAD_TOKEN, 0], true),
-            ([0, u64::MAX - 7, THREAD_TOKEN, 0], true),
-            ([0, slot + 1, THREAD_TOKEN, 0], true),
+        for (args, owned) in [
+            ([0, slot, THREAD_TOKEN, 0], 0),
+            ([1, slot, THREAD_TOKEN, 0], THREAD_TOKEN),
+            ([0, slot, 0x1234, 0], THREAD_TOKEN),
+            ([0, cpu.regs[4], THREAD_TOKEN, 0], THREAD_TOKEN),
+            ([0, 0x1234, THREAD_TOKEN, 0], THREAD_TOKEN),
+            ([0, u64::MAX - 7, THREAD_TOKEN, 0], THREAD_TOKEN),
+            ([0, slot + 1, THREAD_TOKEN, 0], THREAD_TOKEN),
         ] {
-            assert!(store_thread_token(&mut memory, &cpu, args, rooted).is_err());
+            assert!(store_stack_token(&mut memory, &cpu, args, owned).is_err());
             assert_eq!(memory.read_int(slot, 8).unwrap(), 77);
         }
-        store_thread_token(&mut memory, &cpu, [0, slot, THREAD_TOKEN, 0], true).unwrap();
+        store_stack_token(&mut memory, &cpu, [0, slot, THREAD_TOKEN, 0], THREAD_TOKEN).unwrap();
         assert_eq!(memory.read_int(slot, 8).unwrap(), THREAD_TOKEN);
-        store_thread_token(&mut memory, &cpu, [0, slot, 0, 0], true).unwrap();
+        store_stack_token(&mut memory, &cpu, [0, slot, 0, 0], THREAD_TOKEN).unwrap();
         assert_eq!(memory.read_int(slot, 8).unwrap(), 0);
-        store_thread_token(&mut memory, &cpu, [0, slot, THREAD_TOKEN, 0], true).unwrap();
+        store_stack_token(&mut memory, &cpu, [0, slot, THREAD_TOKEN, 0], THREAD_TOKEN).unwrap();
         memory.protect(super::super::STACK, 4096, READ).unwrap();
-        assert!(store_thread_token(&mut memory, &cpu, [0, slot, THREAD_TOKEN, 0], true).is_err());
+        assert!(
+            store_stack_token(&mut memory, &cpu, [0, slot, THREAD_TOKEN, 0], THREAD_TOKEN).is_err()
+        );
         assert_eq!(memory.read_int(slot, 8).unwrap(), THREAD_TOKEN);
     }
     #[test]
@@ -1575,6 +1716,10 @@ mod tests {
             metadata: false,
             metadata_ready: false,
             metadata_registry: metadata::Registry::default(),
+            strings: false,
+            strings_ready: false,
+            object_registry: objects::Registry::default(),
+            object_api: None,
             registry: bindings::Registry::default(),
             stopped: false,
             skip_etw: false,
