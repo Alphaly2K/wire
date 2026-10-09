@@ -191,3 +191,17 @@ feature all-target Clippy `-D warnings` clean。Mono 19-patch stack/dylib 未变
 owner-thread guest reentry。不能把未知 guest target 直接交给 native mono_add_internal_call。
 随后是 profiler GC callbacks、UnityTLS、managed image/assembly loading；完整 ABI、生产
 roots、Windows services/scheduler 仍需逐项验证。不要反复从孤立 fixture 重新开始。
+
+## 继续推进进展（独立 worktree，主代码未合并）
+
+实施路径仍为`/Users/alphaly/.codex/worktrees/native-mono-shared-memory/wire`，分支
+`codex/native-mono-shared-memory`。新增提交：b67d9ea（真实bindings/profiler）、7a3a062
+（UnityTLS/image）、e8f2aba（typed metadata），随后rooted string提交已在该分支完成。
+
+真实Unity已经完成10824注册entry核对、82个image/assembly循环、5643 metadata查询，
+53B输入native string创建/stack交接/强制GC保活和退休。最新证据位于worktree
+`wire-out/native-mono-unity-strings-probe-01`，guard178/0、无original Mono attach。
+首次pending invoke确认System.Type.GetType(String)，正在继续reflection对象桥接。
+完整game Admission仍false，未宣称完整游戏原生执行/加速。主checkout代码未改；
+浮点和翻译缓存未改，其他agent可继续其工作。下一位接手应使用该分支及其最新handoff，
+不要从本主checkout旧provider或孤立fixture重新开始。
