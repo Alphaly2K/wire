@@ -13,6 +13,7 @@ pub(crate) enum Segment {
 pub(crate) struct RegisterSegment {
     instructions: Box<[ScalarIr]>,
     update_flags: u16,
+    mixed: bool,
     pub(crate) bytes: u64,
 }
 struct RegisterMemory;
@@ -57,9 +58,11 @@ impl RegisterSegment {
             needed = (needed & !writes) | reads;
         }
         let bytes = instructions.iter().map(|ir| ir.len as u64).sum();
+        let mixed = instructions.iter().any(|ir| !ir.is_scalar());
         Some(Self {
             instructions: instructions.into(),
             update_flags,
+            mixed,
             bytes,
         })
     }
@@ -71,6 +74,24 @@ impl RegisterSegment {
         // instruction can branch. Absolute RIP-relative operands were fixed
         // during lowering. A split budget uses single-instruction execution.
         cpu.rip = cpu.rip.wrapping_add(self.bytes);
+        if self.mixed {
+            self.execute_mixed(cpu);
+        } else {
+            // Cold lowering proves this loop contains only scalar operations.
+            // Keep vector dispatch out of ordinary integer/shift throughput.
+            for (n, ir) in self.instructions.iter().enumerate() {
+                let result = if self.update_flags & (1 << n) != 0 {
+                    ir.execute::<_, true>(cpu, &mut RegisterMemory)
+                } else {
+                    ir.execute::<_, false>(cpu, &mut RegisterMemory)
+                };
+                result.expect("verified register instruction cannot fault");
+            }
+        }
+        cpu.retired += self.work();
+        cpu.work += self.work();
+    }
+    fn execute_mixed(&self, cpu: &mut Cpu64) {
         for (n, ir) in self.instructions.iter().enumerate() {
             let result = if !ir.is_scalar() {
                 ir.execute_vector(cpu, &mut RegisterMemory)
@@ -79,12 +100,9 @@ impl RegisterSegment {
             } else {
                 ir.execute::<_, false>(cpu, &mut RegisterMemory)
             };
-            // The verifier excludes stack/memory/fallback operations. The
-            // original executor is reused, avoiding a second ISA definition.
+            // Same verified handlers and FLAGS masks as the scalar loop.
             result.expect("verified register instruction cannot fault");
         }
-        cpu.retired += self.work();
-        cpu.work += self.work();
     }
 }
 /// A short checked sequence commits each original instruction independently.
