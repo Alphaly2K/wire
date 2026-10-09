@@ -24,6 +24,7 @@ pub enum TranslationCacheLayout {
 // Experiments use separate frozen builds. The chosen direct layout uses a
 // constant mask without associative probing or runtime layout branches.
 pub(super) const BUILD_DIAGNOSTICS_V2: bool = option_env!("WIRE_X64_DIAGNOSTICS_V2").is_some();
+pub(crate) const BUILD_CHECKED_SEGMENTS: bool = option_env!("WIRE_X64_CHECKED_SEGMENTS").is_some();
 const BUILD_REUSE: bool = option_env!("WIRE_X64_NO_REUSE").is_none();
 const REUSE_SLOTS: usize = if option_env!("WIRE_X64_REUSE_16K").is_some() {
     16384

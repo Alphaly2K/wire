@@ -353,7 +353,10 @@ impl Cpu64 {
                 if mem.try_register_segment(self, remaining, allowed) {
                     return Ok(true);
                 }
-            } else if ir.checked_segment() && mem.try_checked_segment(self, remaining, allowed)? {
+            } else if super::memory::BUILD_CHECKED_SEGMENTS
+                && ir.checked_segment()
+                && mem.try_checked_segment(self, remaining, allowed)?
+            {
                 return Ok(true);
             }
             if ir.is_scalar() {

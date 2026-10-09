@@ -414,8 +414,9 @@ mod tests {
             }
             assert_eq!(fast, slow);
             if destination != DATA + 8 {
-                assert_eq!(fast.work, 2);
-                assert_eq!(fast.rip, PC + 7);
+                let grouped = crate::x64::memory::BUILD_CHECKED_SEGMENTS;
+                assert_eq!(fast.work, if grouped { 2 } else { 1 });
+                assert_eq!(fast.rip, PC + if grouped { 7 } else { 3 });
             }
         }
         let mut m = Memory::default();
@@ -446,14 +447,20 @@ mod tests {
         let mut cpu = Cpu64::new(PC, 0);
         cpu.regs[7] = DATA;
         cpu.decode(&m).unwrap();
-        cpu.step_bounded(&mut m, 4).unwrap();
+        let run_four = |cpu: &mut Cpu64, m: &mut Memory| {
+            let end = cpu.work + 4;
+            while cpu.work < end {
+                cpu.step_bounded(m, end - cpu.work).unwrap();
+            }
+        };
+        run_four(&mut cpu, &mut m);
         assert_eq!(cpu.work, 4);
         cpu.rip = PC;
         m.virtual_protect(PC, PAGE, 0x140).unwrap();
         let before = cpu.clone();
         assert!(cpu.step_bounded(&mut m, 4).unwrap_err().contains("guard"));
         assert_eq!(cpu, before);
-        cpu.step_bounded(&mut m, 4).unwrap();
+        run_four(&mut cpu, &mut m);
         assert_eq!(cpu.work, 8);
         m.write(PC + 3, &[0x0f, 0x0b]).unwrap();
         cpu.rip = PC;
