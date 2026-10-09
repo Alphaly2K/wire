@@ -512,8 +512,9 @@ impl Cpu {
 
 // Owned by the address space, so using one Cpu with a different GuestMem can
 // never reuse coincident page version numbers from the previous memory.
+type RawEntry = Option<(u32, u64, u64, Descriptor)>;
 pub(crate) struct RawCache {
-    entries: Box<[std::cell::Cell<Option<(u32, u64, u64, Descriptor)>>]>,
+    entries: Box<[std::cell::Cell<RawEntry>]>,
 }
 impl Default for RawCache {
     fn default() -> Self {

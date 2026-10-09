@@ -89,7 +89,7 @@ struct SavedTranslation {
 // Negative build results are encoded by the existing IR admission bits.
 // None therefore needs no separate Unbuilt/Single/NoChecked discriminant.
 // A common owner keeps each RefCell entry at its original pointer-sized payload.
-type SegmentState = Option<std::rc::Rc<super::cpu::ir::Segment>>;
+type SegmentState = Option<std::sync::Arc<super::cpu::ir::Segment>>;
 const _: () = assert!(std::mem::size_of::<SegmentState>() == std::mem::size_of::<usize>());
 impl TranslationCache {
     fn reuse_hash(mut pc: u64) -> usize {
@@ -563,7 +563,7 @@ impl Memory {
                 }
                 *state =
                     super::cpu::ir::RegisterSegment::lower(&page.data[(pc - base) as usize..], pc)
-                        .map(|s| std::rc::Rc::new(super::cpu::ir::Segment::Register(s)));
+                        .map(|s| std::sync::Arc::new(super::cpu::ir::Segment::Register(s)));
                 if state.is_none() {
                     // One-time negative caching retains the ordinary scalar hit
                     // cost for an isolated register operation in a memory loop.
@@ -688,7 +688,7 @@ impl Memory {
                 let page = &self.pages[&base];
                 *state =
                     super::cpu::ir::CheckedSegment::lower(&page.data[(pc - base) as usize..], pc)
-                        .map(|s| std::rc::Rc::new(super::cpu::ir::Segment::Checked(s)));
+                        .map(|s| std::sync::Arc::new(super::cpu::ir::Segment::Checked(s)));
                 if state.is_none() {
                     let entry = &cache.slots[slot];
                     entry.ir.set(
@@ -701,7 +701,7 @@ impl Memory {
             }
             match &*state {
                 Some(s) if matches!(s.as_ref(), super::cpu::ir::Segment::Checked(_)) => {
-                    std::rc::Rc::clone(s)
+                    std::sync::Arc::clone(s)
                 }
                 _ => return Ok(false),
             }
