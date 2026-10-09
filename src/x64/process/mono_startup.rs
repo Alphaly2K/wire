@@ -20,6 +20,9 @@ const INCREMENTAL_CANDIDATE: &str =
     "c89ab8c9cc00a045e998cb9bc528f2959f478729136390a0d07e54b8e8b69bda";
 const INCREMENTAL_SUPPORT: &str =
     "edd2730c016afafc55e3dbad617fcaff6332474a9fde6808205de8edb7e53c8e";
+const ATTRIBUTES_CANDIDATE: &str =
+    "94a8252dfb4bf7aa3584be4b1888afd128431cc7ea70b7bd6773fc299cab0a5e";
+const ATTRIBUTES_SUPPORT: &str = "7cd421d0e370b09a865848a59e47aa2b1362fd9ff484804fe3b2c1b4a5bc8029";
 const EXE: &str = "94cccae89918110514672a6ec249a1252ffaeb28c0ae8d8633a9352988738f12";
 const UNITY: &str = "a2022611884470ddab23927a3eb7bbaef3924c18972d30ba7b5330a8fd25bcc4";
 const CORELIB_SUPPORT: &str = "b10bb3e59af90e92e240424ac88b1f96eb27906c3fa099958713d93801b4b078";
@@ -33,6 +36,7 @@ const THREAD_TOKEN: u64 = ROOT_TOKEN + 32;
 static USED: AtomicBool = AtomicBool::new(false);
 type Object = *mut c_void;
 mod arrays;
+mod attributes;
 mod bindings;
 mod callbacks;
 mod handles;
@@ -230,6 +234,10 @@ pub(super) struct Probe {
     logging_ready: bool,
     exceptions: bool,
     exceptions_ready: bool,
+    attributes: bool,
+    attributes_ready: bool,
+    attribute_api: Option<attributes::Api>,
+    attribute_registry: attributes::Registry,
     imgui: bool,
     imgui_ready: bool,
     subsystem_map: bool,
@@ -276,6 +284,7 @@ fn runtime_profile(path: &Path) -> Result<(&'static str, &'static str), String> 
         CANDIDATE => Ok((CANDIDATE, CORELIB_SUPPORT)),
         REMOTING_CANDIDATE => Ok((REMOTING_CANDIDATE, REMOTING_SUPPORT)),
         INCREMENTAL_CANDIDATE => Ok((INCREMENTAL_CANDIDATE, INCREMENTAL_SUPPORT)),
+        ATTRIBUTES_CANDIDATE => Ok((ATTRIBUTES_CANDIDATE, ATTRIBUTES_SUPPORT)),
         _ => Err("native Mono diagnostic runtime fingerprint mismatch".into()),
     }
 }
@@ -348,16 +357,25 @@ impl Probe {
         skip_etw: bool,
         boundary: &str,
     ) -> Result<Self, String> {
-        let imgui = boundary == "imgui-cache";
-        let subsystem_map = matches!(boundary, "subsystem-map" | "imgui-cache");
-        let subsystems = matches!(boundary, "subsystems" | "subsystem-map" | "imgui-cache");
+        let attributes = boundary == "attributes";
+        let imgui = matches!(boundary, "imgui-cache" | "attributes");
+        let subsystem_map = matches!(boundary, "subsystem-map" | "imgui-cache" | "attributes");
+        let subsystems = matches!(
+            boundary,
+            "subsystems" | "subsystem-map" | "imgui-cache" | "attributes"
+        );
         let synchronization = matches!(
             boundary,
-            "synchronization" | "subsystems" | "subsystem-map" | "imgui-cache"
+            "synchronization" | "subsystems" | "subsystem-map" | "imgui-cache" | "attributes"
         );
         let exceptions = matches!(
             boundary,
-            "exceptions" | "synchronization" | "subsystems" | "subsystem-map" | "imgui-cache"
+            "exceptions"
+                | "synchronization"
+                | "subsystems"
+                | "subsystem-map"
+                | "imgui-cache"
+                | "attributes"
         );
         let logging = matches!(
             boundary,
@@ -367,6 +385,7 @@ impl Probe {
                 | "subsystems"
                 | "subsystem-map"
                 | "imgui-cache"
+                | "attributes"
         );
         let classlib = matches!(
             boundary,
@@ -377,6 +396,7 @@ impl Probe {
                 | "subsystems"
                 | "subsystem-map"
                 | "imgui-cache"
+                | "attributes"
         );
         let managed_types = matches!(
             boundary,
@@ -388,6 +408,7 @@ impl Probe {
                 | "subsystems"
                 | "subsystem-map"
                 | "imgui-cache"
+                | "attributes"
         );
         let strings = matches!(
             boundary,
@@ -400,6 +421,7 @@ impl Probe {
                 | "subsystems"
                 | "subsystem-map"
                 | "imgui-cache"
+                | "attributes"
         );
         let (main_thread, pre_bindings, bindings, profiler, pre_images, images, metadata) = match boundary {
             "root" => (false, false, false, false, false, false, false),
@@ -409,10 +431,10 @@ impl Probe {
             "profiler" => (true, true, true, true, false, false, false),
             "pre-images" => (true, true, true, true, true, false, false),
             "images" => (true, true, true, true, true, true, false),
-            "metadata" | "strings" | "managed-types" | "classlib" | "logging" | "exceptions" | "synchronization" | "subsystems" | "subsystem-map" | "imgui-cache" => (true, true, true, true, true, true, true),
+            "metadata" | "strings" | "managed-types" | "classlib" | "logging" | "exceptions" | "synchronization" | "subsystems" | "subsystem-map" | "imgui-cache" | "attributes" => (true, true, true, true, true, true, true),
             _ => {
                 return Err(
-                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings, profiler, pre-images, images, metadata, strings, managed-types, classlib, logging, exceptions, synchronization, subsystems, subsystem-map or imgui-cache".into(),
+                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings, profiler, pre-images, images, metadata, strings, managed-types, classlib, logging, exceptions, synchronization, subsystems, subsystem-map, imgui-cache or attributes".into(),
                 )
             }
         };
@@ -426,15 +448,23 @@ impl Probe {
         )?;
         let library = library.canonicalize().map_err(|e| e.to_string())?;
         let (library_hash, support_hash) = runtime_profile(&library)?;
-        if classlib && !matches!(library_hash, REMOTING_CANDIDATE | INCREMENTAL_CANDIDATE) {
+        if classlib
+            && !matches!(
+                library_hash,
+                REMOTING_CANDIDATE | INCREMENTAL_CANDIDATE | ATTRIBUTES_CANDIDATE
+            )
+        {
             return Err(
                 "classlib diagnostic needs fingerprinted remoting field-wrapper runtime".into(),
             );
         }
-        if logging && library_hash != INCREMENTAL_CANDIDATE {
+        if logging && !matches!(library_hash, INCREMENTAL_CANDIDATE | ATTRIBUTES_CANDIDATE) {
             return Err(
                 "logging diagnostic requires verified incremental GC write-barrier runtime".into(),
             );
+        }
+        if attributes && library_hash != ATTRIBUTES_CANDIDATE {
+            return Err("attributes diagnostic requires checked attribute runtime".into());
         }
         fingerprint(
             &root.join("AliceToPapaADV_1-0-0_Data/Managed/mscorlib.dll.dylib"),
@@ -490,6 +520,10 @@ impl Probe {
             logging_ready: false,
             exceptions,
             exceptions_ready: false,
+            attributes,
+            attributes_ready: false,
+            attribute_api: None,
+            attribute_registry: attributes::Registry::default(),
             imgui,
             imgui_ready: false,
             subsystem_map,
@@ -837,6 +871,7 @@ impl Probe {
                     || self.object_registry.contains(a[2])
                     || self.reflection_registry.contains(a[2])
                     || self.array_registry.contains(a[2])
+                    || self.attribute_registry.contains(a[2])
                 {
                     a[2]
                 } else {
@@ -1078,7 +1113,8 @@ impl Probe {
                 self.synchronization_ready = self.synchronization && self.classlib_invokes >= 5;
                 self.subsystems_ready = self.subsystems && self.classlib_invokes >= 6;
                 self.subsystem_map_ready = self.subsystem_map && self.classlib_invokes >= 7;
-                self.imgui_ready = self.imgui && self.classlib_invokes == 8;
+                self.imgui_ready = self.imgui && self.classlib_invokes >= 8;
+                self.attributes_ready = self.attributes && self.attribute_registry.ready();
                 return Ok(true);
             }
         }
@@ -1103,10 +1139,12 @@ impl Probe {
     }
     pub(super) fn handles_object(&self, function: &str) -> bool {
         self.strings
-            && (matches!(
-                function,
-                "mono_string_new_len" | "mono_string_length" | "mono_string_chars"
-            ) || (self.managed_types && function == "mono_reflection_type_get_type")
+            && ((self.attributes && attributes::handles(function))
+                || matches!(
+                    function,
+                    "mono_string_new_len" | "mono_string_length" | "mono_string_chars"
+                )
+                || (self.managed_types && function == "mono_reflection_type_get_type")
                 || (self.synchronization
                     && matches!(
                         function,
@@ -1116,6 +1154,83 @@ impl Probe {
                             | "mono_gchandle_get_target_v2"
                             | "mono_gchandle_free_v2"
                     )))
+    }
+    fn dispatch_attributes(
+        &mut self,
+        function: &str,
+        cpu: &mut Cpu64,
+        memory: &mut Memory,
+        runtime: &mut Runtime64,
+        library: Object,
+    ) -> Result<bool, String> {
+        let api = match self.attribute_api {
+            Some(api) => api,
+            None => {
+                let api = attributes::Api::load(library)?;
+                self.attribute_api = Some(api);
+                api
+            }
+        };
+        let a = [cpu.regs[1], cpu.regs[2], cpu.regs[8], cpu.regs[9]];
+        let targets = self.callback_targets();
+        let result = match function {
+            "mono_custom_attrs_from_class" | "mono_custom_attrs_from_field" => {
+                let class = self.metadata_registry.native(a[0], metadata::Kind::Class)?;
+                let field = if function == "mono_custom_attrs_from_field" {
+                    Some(self.metadata_registry.native(a[1], metadata::Kind::Field)?)
+                } else {
+                    None
+                };
+                let (value, _) = callbacks::with_owner(memory, runtime, targets, || {
+                    self.attribute_registry.query(api, class, field)
+                })?;
+                value?
+            }
+            "mono_custom_attrs_has_attr" | "mono_custom_attrs_get_attr" => {
+                let class = self.metadata_registry.native(a[1], metadata::Kind::Class)?;
+                let (value, _) = callbacks::with_owner(memory, runtime, targets, || {
+                    if function == "mono_custom_attrs_has_attr" {
+                        self.attribute_registry.has(api, a[0], class)
+                    } else {
+                        self.attribute_registry.get(api, a[0], class)
+                    }
+                })?;
+                value?
+            }
+            "mono_custom_attrs_free" => {
+                let (value, _) = callbacks::with_owner(memory, runtime, targets, || {
+                    self.attribute_registry.free(api, a[0])
+                })?;
+                value?;
+                0
+            }
+            "mono_object_get_class" => {
+                let (class, _) = callbacks::with_owner(memory, runtime, targets, || {
+                    self.attribute_registry.class(api, a[0])
+                })?;
+                self.metadata_registry.wrap(
+                    memory,
+                    metadata::Value::Handle(class?, metadata::Kind::Class),
+                )?
+            }
+            "mono_field_get_value" => {
+                let field = self.metadata_registry.native(a[1], metadata::Kind::Field)?;
+                let (width, _) =
+                    callbacks::with_owner(memory, runtime, targets, || api.field_width(field))?;
+                memory.check(a[2], width?, super::super::memory::WRITE)?;
+                let (bytes, _) = callbacks::with_owner(memory, runtime, targets, || {
+                    self.attribute_registry.read_field(api, a[0], field)
+                })?;
+                memory.write(a[2], &bytes?)?;
+                0
+            }
+            _ => return Err("unadmitted custom-attribute operation".into()),
+        };
+        self.events.push(format!(
+            "actual checked custom-attribute operation {function}: result={result:#x}"
+        ));
+        cpu.return_integer(memory, result)?;
+        Ok(false)
     }
     pub(super) fn dispatch_object(
         &mut self,
@@ -1141,6 +1256,9 @@ impl Probe {
         cpu.regs[4]
             .checked_add(8)
             .ok_or("object return stack overflow")?;
+        if self.attributes && attributes::handles(function) {
+            return self.dispatch_attributes(function, cpu, memory, runtime, library);
+        }
         if function == "mono_unity_loader_get_last_error_and_error_prepare_exception" {
             // Locked original PE at RVA 0x270b90 is xor eax,eax; ret. The
             // pinned Unity Mono source exports the same no-argument NULL leaf.
@@ -1185,6 +1303,9 @@ impl Probe {
                     } else if self.reflection_registry.contains(a[0]) {
                         self.reflection_registry
                             .native(self.reflection_api.ok_or("RuntimeType API absent")?, a[0])?
+                    } else if self.attribute_registry.contains(a[0]) {
+                        self.attribute_registry
+                            .native(self.attribute_api.ok_or("attribute API absent")?, a[0])?
                     } else {
                         return Err(
                             "external strong root requires a live owned managed object token"
@@ -2131,6 +2252,13 @@ impl Probe {
                 })?;
             verified?;
         }
+        if let Some(api) = self.attribute_api {
+            let (verified, _) =
+                callbacks::with_owner(memory, runtime, self.callback_targets(), || {
+                    self.attribute_registry.verify(api)
+                })?;
+            verified?;
+        }
         self.events.push(format!("actual native BDWGC collection -> compiled GC adapter -> original Unity Win64 callback: {} calls, event mask {:#x}; no guest pointer passed to native profiler", stats.calls[3], stats.gc_events));
         Ok(())
     }
@@ -2220,6 +2348,9 @@ impl Probe {
         if let Some(api) = self.array_api {
             self.array_registry.release(api);
         }
+        if let Some(api) = self.attribute_api {
+            self.attribute_registry.release(api);
+        }
         if let Some(api) = self.image_api {
             self.image_registry.retire(api);
         }
@@ -2242,7 +2373,7 @@ impl Probe {
     }
     pub(super) fn report(&self) -> String {
         format!(
-            "native-root-ready={}\nnative-main-thread-ready={}\nnative-pre-bindings-ready={}\nnative-bindings-ready={}\nprovider-bindings={}\nnative-scalar-adapters={}\nactual-unity-scalar-callbacks-verified={}\nnative-profiler-ready={}\nactual-gc-event-mask={}\nactual-shutdown-callbacks={}\nnative-pre-images-ready={}\nactual-unitytls-leaf-verified={}\nnative-images-ready={}\nnative-metadata-ready={}\nnative-strings-ready={}\nnative-managed-types-ready={}\nnative-managed-type-invokes={}\nnative-classlib-ready={}\nnative-classlib-invokes={}\nnative-logging-ready={}\nnative-exceptions-ready={}\nnative-synchronization-ready={}\nnative-subsystems-ready={}\nnative-subsystem-map-ready={}\nnative-imgui-ready={}\nfull-game-admission=false\n{}{}{}{}{}{}{}\n",
+            "native-root-ready={}\nnative-main-thread-ready={}\nnative-pre-bindings-ready={}\nnative-bindings-ready={}\nprovider-bindings={}\nnative-scalar-adapters={}\nactual-unity-scalar-callbacks-verified={}\nnative-profiler-ready={}\nactual-gc-event-mask={}\nactual-shutdown-callbacks={}\nnative-pre-images-ready={}\nactual-unitytls-leaf-verified={}\nnative-images-ready={}\nnative-metadata-ready={}\nnative-strings-ready={}\nnative-managed-types-ready={}\nnative-managed-type-invokes={}\nnative-classlib-ready={}\nnative-classlib-invokes={}\nnative-logging-ready={}\nnative-exceptions-ready={}\nnative-synchronization-ready={}\nnative-subsystems-ready={}\nnative-subsystem-map-ready={}\nnative-imgui-ready={}\nnative-attributes-ready={}\nfull-game-admission=false\n{}{}{}{}{}{}{}{}\n",
             self.root_ready,
             self.main_thread_ready,
             self.pre_bindings_ready,
@@ -2268,6 +2399,8 @@ impl Probe {
             self.subsystems_ready,
             self.subsystem_map_ready,
             self.imgui_ready,
+            self.attributes_ready,
+            self.attribute_registry.report(),
             self.handle_registry.report(),
             self.array_registry.report(),
             self.reflection_registry.report(),
@@ -2295,7 +2428,8 @@ impl Probe {
             || (self.synchronization_ready && !self.subsystems)
             || (self.subsystems_ready && !self.subsystem_map)
             || (self.subsystem_map_ready && !self.imgui)
-            || self.imgui_ready
+            || (self.imgui_ready && !self.attributes)
+            || self.attributes_ready
     }
 }
 fn store_stack_token(
@@ -2453,6 +2587,10 @@ mod tests {
             logging_ready: false,
             exceptions: false,
             exceptions_ready: false,
+            attributes: false,
+            attributes_ready: false,
+            attribute_api: None,
+            attribute_registry: attributes::Registry::default(),
             imgui: false,
             imgui_ready: false,
             subsystem_map: false,
