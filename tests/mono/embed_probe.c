@@ -131,6 +131,8 @@ int main(int argc, char **argv) {
         MonoObject *exception = NULL;
         mono_runtime_invoke(method, NULL, NULL, &exception);
         require(exception != NULL, "exception returned to embedding caller");
+    } else if (strcmp(argv[3], "remoting") == 0) {
+        require(invoke_int("Remoting", NULL) == 0, "MarshalByRefObject field/ref CAS and AppDomain event lifecycle");
     } else if (strcmp(argv[3], "interop") == 0) {
         require(invoke_int("Interop", NULL) == 0, "float, struct, ref/out, callback, exception reentry");
         require(boundary_exceptions == 1, "one nested exception");

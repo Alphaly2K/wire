@@ -179,3 +179,13 @@ metadata完整feature回归395 passed / 7 ignored；string targeted11与all-targ
 验证通过，17546 metadata queries/1926 handles，guard176/0。下一invoke是CoreModule
 ClassLibraryInitializer.InitAssemblyRedirections static void()，owned IL/依赖已查明。
 详见`docs/native-mono-unity-managed-types-2026-10-09.md`，不要停在这个小里程碑。
+
+## Classlib redirections 已执行，继续 UnityLogWriter
+
+`native-mono-unity-classlib-probe-02` 实际执行 InitAssemblyRedirections static void()。
+20-patch 独立 runtime 修复 no-JIT remoting field wrapper 的缺失 IL，六套 native fixture/
+五条 noexec 路由、完整feature397/7ignored、Clippy和build5tests通过，guard176/0。
+详情 `docs/native-mono-unity-classlib-2026-10-09.md`。新 runtime/support pair 与旧 pair
+严格分开；旧19-patch源码与marker已恢复核对，旧dylib未变。
+下一真实invoke是 ClassLibraryInitializer.Init（0x060022fe）→ UnityLogWriter.Init。
+完整game backend仍false，持续推进，不碰浮点/翻译缓存。

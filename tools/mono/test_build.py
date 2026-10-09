@@ -5,7 +5,7 @@ from pathlib import Path
 import tarfile
 import tempfile
 import unittest
-from build import apply_patch_stack
+from build import apply_patch_stack, prepare, build_runtime
 
 
 class PatchStackTests(unittest.TestCase):
@@ -55,6 +55,30 @@ class PatchStackTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "exact locked patch prefix"):
             self.apply(self.patches)
         self.assertEqual((self.mono / "runtime.c").read_bytes(), self.expected)
+
+
+class OutputIsolationTests(unittest.TestCase):
+    def test_prepare_rejects_shared_source_symlink_before_download_or_source_mutation(self):
+        with tempfile.TemporaryDirectory(prefix="wire-mono-output-test-") as temporary:
+            root = Path(temporary) / "output"; root.mkdir()
+            original = Path(temporary) / "original"; original.mkdir()
+            sentinel = original / "runtime.c"; sentinel.write_text("original source\n")
+            (root / "sources").symlink_to(original, target_is_directory=True)
+            with self.assertRaisesRegex(RuntimeError, "physical clone"):
+                prepare(root, {})
+            self.assertEqual(sentinel.read_text(), "original source\n")
+            self.assertFalse((root / "archives").exists())
+
+    def test_runtime_rejects_shared_build_symlink_before_reading_config_or_building(self):
+        with tempfile.TemporaryDirectory(prefix="wire-mono-output-test-") as temporary:
+            root = Path(temporary) / "output"; root.mkdir()
+            original = Path(temporary) / "build-original"; original.mkdir()
+            sentinel = original / "Makefile"; sentinel.write_text("original build\n")
+            (root / "build-runtime").symlink_to(original, target_is_directory=True)
+            with self.assertRaisesRegex(RuntimeError, "physical clone"):
+                build_runtime(root, {}, "runtime", 1)
+            self.assertEqual(sentinel.read_text(), "original build\n")
+            self.assertFalse((root / "runtime-configuration.json").exists())
 
 
 if __name__ == "__main__":

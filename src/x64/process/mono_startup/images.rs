@@ -62,6 +62,19 @@ pub(super) struct Registry {
     retired: bool,
 }
 impl Registry {
+    pub(super) fn unique_native_image(&self, hash: &str) -> Result<Object, String> {
+        if self.retired {
+            return Err("image lookup after retirement".into());
+        }
+        let mut matches = self.images.values().filter(|image| image.hash == hash);
+        let image = matches
+            .next()
+            .ok_or("missing fingerprinted image identity")?;
+        if matches.next().is_some() {
+            return Err("ambiguous fingerprinted image identity".into());
+        }
+        Ok(image.native)
+    }
     pub(super) fn open(
         &mut self,
         api: Api,

@@ -263,3 +263,90 @@ pub(super) fn owned_bodies(
     }
     Ok(result)
 }
+
+pub(super) fn validate_redirections(
+    library: Object,
+    method: Object,
+    image: Object,
+) -> Result<(), String> {
+    macro_rules! sym {
+        ($name:literal,$ty:ty) => {{
+            let p = unsafe { libc::dlsym(library, concat!($name, "\0").as_ptr().cast()) };
+            if p.is_null() {
+                return Err(concat!("missing classlib signature symbol: ", $name).into());
+            }
+            unsafe { std::mem::transmute::<Object, $ty>(p) }
+        }};
+    }
+    let find = sym!(
+        "mono_class_from_name",
+        unsafe extern "C" fn(Object, *const c_char, *const c_char) -> Object
+    );
+    let class = sym!(
+        "mono_method_get_class",
+        unsafe extern "C" fn(Object) -> Object
+    );
+    let class_image = sym!(
+        "mono_class_get_image",
+        unsafe extern "C" fn(Object) -> Object
+    );
+    let name = sym!(
+        "mono_method_get_name",
+        unsafe extern "C" fn(Object) -> *const c_char
+    );
+    let token = sym!("mono_method_get_token", unsafe extern "C" fn(Object) -> u32);
+    let signature = sym!(
+        "mono_method_signature",
+        unsafe extern "C" fn(Object) -> Object
+    );
+    let count = sym!(
+        "mono_signature_get_param_count",
+        unsafe extern "C" fn(Object) -> u32
+    );
+    let instance = sym!(
+        "mono_signature_is_instance",
+        unsafe extern "C" fn(Object) -> u32
+    );
+    let returns = sym!(
+        "mono_signature_get_return_type",
+        unsafe extern "C" fn(Object) -> Object
+    );
+    let kind = sym!("mono_type_get_type", unsafe extern "C" fn(Object) -> u32);
+    let byref = sym!("mono_type_is_byref", unsafe extern "C" fn(Object) -> u32);
+    let generic = sym!(
+        "unity_mono_method_is_generic",
+        unsafe extern "C" fn(Object) -> u32
+    );
+    let inflated = sym!(
+        "unity_mono_method_is_inflated",
+        unsafe extern "C" fn(Object) -> u32
+    );
+    let expected = unsafe {
+        find(
+            image,
+            c"UnityEngine".as_ptr(),
+            c"ClassLibraryInitializer".as_ptr(),
+        )
+    };
+    let text = unsafe { name(method) };
+    let sig = unsafe { signature(method) };
+    if expected.is_null()
+        || text.is_null()
+        || sig.is_null()
+        || unsafe { class(method) } != expected
+        || unsafe { class_image(expected) } != image
+        || unsafe { token(method) } != 0x060022ff
+        || unsafe { CStr::from_ptr(text) }.to_bytes() != b"InitAssemblyRedirections"
+        || unsafe { generic(method) } != 0
+        || unsafe { inflated(method) } != 0
+        || unsafe { count(sig) } != 0
+        || unsafe { instance(sig) } != 0
+    {
+        return Err("managed init outside locked CoreModule ClassLibraryInitializer.InitAssemblyRedirections()".into());
+    }
+    let ret = unsafe { returns(sig) };
+    if ret.is_null() || unsafe { kind(ret) } != 1 || unsafe { byref(ret) } != 0 {
+        return Err("assembly redirection init must return void".into());
+    }
+    Ok(())
+}

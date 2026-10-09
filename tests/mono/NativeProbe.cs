@@ -63,6 +63,44 @@ public static class NativeProbe {
         return 0;
     }
 
+    private sealed class RemotingFields : MarshalByRefObject {
+        public object Payload;
+        public int Number;
+        public event EventHandler Changed;
+        public void Fire() { EventHandler callback = Changed; if (callback != null) callback(this, EventArgs.Empty); }
+    }
+    public static int Remoting() {
+        RemotingFields value = new RemotingFields();
+        object first = new object(), second = new object();
+        value.Payload = first;
+        if (Interlocked.CompareExchange(ref value.Payload, second, first) != first || value.Payload != second) return 41;
+        if (Interlocked.CompareExchange(ref value.Payload, first, first) != second || value.Payload != second) return 42;
+        value.Number = 17;
+        if (Interlocked.CompareExchange(ref value.Number, 23, 17) != 17 || value.Number != 23) return 43;
+        int fired = 0;
+        EventHandler handler = (sender, args) => fired++;
+        value.Changed += handler; value.Changed += handler;
+        value.Fire(); if (fired != 2) return 44;
+        value.Changed -= handler; GC.Collect();
+        value.Fire(); if (fired != 3 || value.Payload != second) return 45;
+        value.Changed -= handler; value.Fire(); if (fired != 3) return 46;
+        AppDomain domain = AppDomain.CurrentDomain;
+        FieldInfo field = typeof(AppDomain).GetField("AssemblyResolve", BindingFlags.Instance | BindingFlags.NonPublic);
+        if (field == null) return 47;
+        Delegate original = (Delegate)field.GetValue(domain);
+        int baseline = original == null ? 0 : original.GetInvocationList().Length;
+        ResolveEventHandler resolve = (sender, args) => null;
+        domain.AssemblyResolve += resolve; domain.AssemblyResolve += resolve;
+        Delegate combined = (Delegate)field.GetValue(domain);
+        if (combined == null || combined.GetInvocationList().Length != baseline + 2) return 48;
+        domain.AssemblyResolve -= resolve; GC.Collect();
+        combined = (Delegate)field.GetValue(domain);
+        if (combined == null || combined.GetInvocationList().Length != baseline + 1) return 49;
+        domain.AssemblyResolve -= resolve;
+        if (!Object.ReferenceEquals(field.GetValue(domain), original)) return 50;
+        return 0;
+    }
+
     public static int Interop() {
         if (HostScale(1.5, 4) != 6.0) return 11;
         ProbePair pair = new ProbePair { X = 2.5, Y = 31 };

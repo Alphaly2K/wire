@@ -1,0 +1,38 @@
+--- a/mono/metadata/remoting.c
++++ b/mono/metadata/remoting.c
+@@ -254,7 +254,7 @@
+ 	return mono_type_from_handle (handle);
+ }
+ 
+-#ifndef DISABLE_JIT
++#if !defined (DISABLE_JIT) || !defined (DISABLE_INTERPRETER)
+ static int
+ mono_mb_emit_proxy_check (MonoMethodBuilder *mb, int branch_code)
+ {
+@@ -1507,7 +1507,7 @@
+ 	sig->params [3] = int_type;
+ 	sig->ret = m_class_get_byval_arg (klass);
+ 
+-#ifndef DISABLE_JIT
++#if !defined (DISABLE_JIT) || !defined (DISABLE_INTERPRETER)
+ 	mono_mb_emit_ldarg (mb, 0);
+ 	pos0 = mono_mb_emit_proxy_check (mb, CEE_BNE_UN);
+ 
+@@ -1669,7 +1669,7 @@
+ 	sig->params [3] = int_type;
+ 	sig->ret = int_type;
+ 
+-#ifndef DISABLE_JIT
++#if !defined (DISABLE_JIT) || !defined (DISABLE_INTERPRETER)
+ 	/* if typeof (this) != transparent_proxy goto pos0 */
+ 	mono_mb_emit_ldarg (mb, 0);
+ 	pos0 = mono_mb_emit_proxy_check (mb, CEE_BNE_UN);
+@@ -1815,7 +1815,7 @@
+ 	sig->params [4] = m_class_get_byval_arg (klass);
+ 	sig->ret = void_type;
+ 
+-#ifndef DISABLE_JIT
++#if !defined (DISABLE_JIT) || !defined (DISABLE_INTERPRETER)
+ 	mono_mb_emit_ldarg (mb, 0);
+ 	pos = mono_mb_emit_proxy_check (mb, CEE_BNE_UN);
+ 

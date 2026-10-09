@@ -113,7 +113,7 @@ def main():
     parser.add_argument("stage", choices=("compile", "run", "all"))
     parser.add_argument("--output", type=Path, default=REPO / "wire-out/native-mono-m1")
     parser.add_argument("--sdk", type=Path, default=DEFAULT_SDK)
-    parser.add_argument("--cases", nargs="+", choices=("core", "interop", "threads", "gc", "layout"), default=["core", "interop", "threads", "gc", "layout"])
+    parser.add_argument("--cases", nargs="+", choices=("core", "interop", "threads", "gc", "layout", "remoting"), default=["core", "interop", "threads", "gc", "layout", "remoting"])
     parser.add_argument("--support-builder", type=Path, help="existing read-only development AOT tool input")
     parser.add_argument("--classlib-input", type=Path, help="existing read-only managed class libraries (copied to ignored output)")
     args = parser.parse_args()

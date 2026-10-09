@@ -104,9 +104,16 @@ def apply_patch_stack(mono, archive, directory, patches):
     print(f"Validated patch stack: {installed} existing, {len(patches) - installed} applied", flush=True)
 
 
+def require_owned_output(root, path):
+    if not path.resolve().is_relative_to(root.resolve()):
+        raise RuntimeError(f"Writable Mono output aliases an input outside its output root: {path}; create a physical clone first")
+
+
 def prepare(root, env):
     archives = root / "archives"
     sources = root / "sources"
+    for path in [archives, sources, *[sources / item["directory"] for item in LOCK["sources"] + LOCK["build_tools"]]]:
+        require_owned_output(root, path)
     archives.mkdir(parents=True, exist_ok=True)
     sources.mkdir(exist_ok=True)
     for item in LOCK["sources"] + LOCK["build_tools"]:
@@ -171,6 +178,8 @@ def autogen(root, env):
 
 def build_runtime(root, env, mode, jobs, msvc_class_abi=False):
     mono = root / "sources" / LOCK["sources"][0]["directory"]
+    require_owned_output(root, mono)
+    require_owned_output(root, root / ("build-" + mode))
     marker = mono / ".wire-patches.json"
     patches = {p.name: digest(p) for p in sorted((HERE / "patches").glob("*.patch"))}
     if not marker.exists():
