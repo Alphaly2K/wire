@@ -1348,3 +1348,210 @@ fn sib_fs_high_bytes_extensions_and_control_flow_match_direct_interpretation() {
     assert_eq!(cpu.eflags, ir.eflags);
     assert!(ir.ir_steps >= 10);
 }
+
+#[test]
+fn pe32_runtime_scalar_sse_matches_amd64_exact_state_and_preserves_persisted_ir() {
+    use wire::x64::{
+        cpu::Cpu64,
+        memory::{Memory, EXECUTE, READ, WRITE},
+    };
+    let mut codes = Vec::new();
+    for prefix in [0xf2, 0xf3] {
+        for op in [
+            0x58, 0x59, 0x5c, 0x5e, 0x5d, 0x5f, 0x5a, 0x51, 0x2a, 0x2c, 0x2d,
+        ] {
+            for operand in [0xc1, 0x03] {
+                codes.push(vec![prefix, 0x0f, op, operand]);
+            }
+        }
+    }
+    for prefix in [None, Some(0x66)] {
+        for op in [0x2e, 0x2f] {
+            let mut c = prefix.into_iter().collect::<Vec<_>>();
+            c.extend([0x0f, op, 0xc1]);
+            codes.push(c);
+        }
+    }
+    let values = [
+        0u64,
+        1,
+        0x80000001,
+        0x3f800001,
+        0x7f812345,
+        0x7fc12345,
+        0x7f7fffff,
+        0x3ff0000000000001,
+        0x7ff0123456789abc,
+        0x7ff8123456789abc,
+        0x7fefffffffffffff,
+    ];
+    for code in codes {
+        let mut m64 = Memory::default();
+        m64.map(CODE as u64, 4096, READ | WRITE | EXECUTE).unwrap();
+        m64.map(DATA as u64, 4096, READ | WRITE).unwrap();
+        m64.write(CODE as u64, &code).unwrap();
+        for installed in [false, true] {
+            let (mut cpu, mut mem) = machine(&code, installed);
+            for round in 0..4 {
+                for controls in [0, 0x40, 0x8000, 0x8040] {
+                    for masks in [0, 0x1f80] {
+                        for seed in 0..values.len() {
+                            cpu.eip = CODE;
+                            cpu.eflags = 0xad7;
+                            cpu.mxcsr = masks | controls | (round << 13) | 0x20;
+                            cpu.regs[1] = values[(seed + 3) % values.len()] as u32;
+                            cpu.regs[3] = DATA;
+                            cpu.xmm = [[0xa5; 16]; 8];
+                            cpu.xmm[0][..8].copy_from_slice(&values[seed].to_le_bytes());
+                            cpu.xmm[1][..8]
+                                .copy_from_slice(&values[(seed + 3) % values.len()].to_le_bytes());
+                            mem.write_u64(DATA, values[(seed + 3) % values.len()])
+                                .unwrap();
+                            m64.write_int(DATA as u64, 8, values[(seed + 3) % values.len()])
+                                .unwrap();
+                            let mut reference = Cpu64::new(CODE as u64, 0);
+                            reference.regs[..8].copy_from_slice(&cpu.regs.map(|x| x as u64));
+                            reference.xmm[..8].copy_from_slice(&cpu.xmm);
+                            reference.mxcsr = cpu.mxcsr;
+                            reference.rflags = cpu.eflags as u64;
+                            let a = cpu.step(&mut mem);
+                            let b = reference.step(&mut m64);
+                            assert_eq!(
+                                a.is_ok(),
+                                b.is_ok(),
+                                "{code:x?} installed={installed} seed={seed}"
+                            );
+                            assert_eq!(
+                                cpu.regs,
+                                reference.regs[..8]
+                                    .iter()
+                                    .map(|&x| x as u32)
+                                    .collect::<Vec<_>>()
+                                    .as_slice()
+                            );
+                            assert_eq!(cpu.xmm, reference.xmm[..8]);
+                            assert_eq!(cpu.mxcsr, reference.mxcsr);
+                            assert_eq!(cpu.effective_eflags() as u64, reference.rflags);
+                            assert_eq!(cpu.eip as u64, reference.rip);
+                        }
+                    }
+                }
+            }
+            if installed {
+                assert!(cpu.ir_steps > 0);
+                assert_eq!(cpu.ir_fallbacks, 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn pe32_runtime_sse_bit_tests_keep_raw_and_cached_memory_faults_and_invalidation() {
+    for code in [
+        vec![0x66, 0x0f, 0xd4, 0xc1],
+        vec![0x66, 0x0f, 0x64, 0xc1],
+        vec![0x66, 0x0f, 0x76, 0xc1],
+        vec![0x0f, 0xab, 0x0b],
+        vec![0xf0, 0x0f, 0xbb, 0x0b],
+        vec![0x0f, 0xba, 0x23, 255],
+    ] {
+        let mut results = Vec::new();
+        for installed in [false, true] {
+            let (mut cpu, mut mem) = machine(&code, installed);
+            cpu.xmm[0] = [0x80; 16];
+            cpu.xmm[1] = [0x7f; 16];
+            cpu.regs[1] = u32::MAX;
+            cpu.regs[3] = DATA + 32;
+            cpu.eflags = 0xad7;
+            mem.write_u32(DATA + 28, 0x12345678).unwrap();
+            mem.write_u32(DATA + 32, 0x87654321).unwrap();
+            cpu.step(&mut mem).unwrap();
+            results.push((
+                cpu.regs,
+                cpu.xmm,
+                cpu.eip,
+                cpu.effective_eflags(),
+                mem.read_u32(DATA + 28).unwrap(),
+                mem.read_u32(DATA + 32).unwrap(),
+            ));
+            if installed {
+                assert_eq!(cpu.ir_fallbacks, 0);
+            }
+            mem.write_u8(CODE, 0x90).unwrap();
+            cpu.eip = CODE;
+            cpu.step(&mut mem).unwrap();
+            assert_eq!(cpu.eip, CODE + 1);
+        }
+        assert_eq!(results[0], results[1], "{code:x?}");
+    }
+    for installed in [false, true] {
+        for code in [vec![0x0f, 0xab, 0x0b], vec![0xf3, 0x0f, 0x58, 0x03]] {
+            let (mut cpu, mut mem) = machine(&code, installed);
+            cpu.regs[3] = DATA;
+            cpu.eflags = 0xad7;
+            cpu.mxcsr = 0;
+            cpu.xmm[0] = [0xa5; 16];
+            mem.virtual_protect(DATA, 0x10000, wire::mem::PAGE_NOACCESS)
+                .unwrap();
+            let before = cpu.save_ctx();
+            assert!(cpu.step(&mut mem).is_err());
+            let after = cpu.save_ctx();
+            assert_eq!(after.regs, before.regs);
+            assert_eq!(after.xmm, before.xmm);
+            assert_eq!(after.eflags, before.eflags);
+            assert_eq!(after.mxcsr, before.mxcsr);
+            assert_eq!(after.eip, before.eip);
+        }
+    }
+}
+
+#[test]
+fn pe32_raw_descriptor_cache_is_owned_by_memory_and_rechecks_guards_and_bytes() {
+    let add = [0x66, 0x0f, 0xd4, 0xc1];
+    let sub = [0x66, 0x0f, 0xfb, 0xc1];
+    let (mut cpu, mut first) = machine(&add, false);
+    let (_, mut second) = machine(&sub, false);
+    let reset = |cpu: &mut Cpu| {
+        cpu.eip = CODE;
+        cpu.xmm[0] = [0; 16];
+        cpu.xmm[1] = [0; 16];
+        cpu.xmm[0][..8].copy_from_slice(&1u64.to_le_bytes());
+        cpu.xmm[1][..8].copy_from_slice(&3u64.to_le_bytes());
+    };
+    reset(&mut cpu);
+    cpu.step(&mut first).unwrap();
+    assert_eq!(u64::from_le_bytes(cpu.xmm[0][..8].try_into().unwrap()), 4);
+    reset(&mut cpu);
+    cpu.step(&mut second).unwrap();
+    assert_eq!(
+        u64::from_le_bytes(cpu.xmm[0][..8].try_into().unwrap()),
+        u64::MAX - 1
+    );
+    first.write_u8(CODE + 2, 0xfb).unwrap();
+    reset(&mut cpu);
+    cpu.step(&mut first).unwrap();
+    assert_eq!(
+        u64::from_le_bytes(cpu.xmm[0][..8].try_into().unwrap()),
+        u64::MAX - 1
+    );
+    first
+        .virtual_protect(
+            CODE,
+            0x10000,
+            wire::mem::PAGE_EXECUTE_READWRITE | wire::mem::PAGE_GUARD,
+        )
+        .unwrap();
+    reset(&mut cpu);
+    let before = cpu.save_ctx();
+    assert!(cpu.step(&mut first).is_err());
+    assert_eq!(cpu.eip, before.eip);
+    assert_eq!(cpu.xmm, before.xmm);
+    cpu.step(&mut first).unwrap();
+    first.set_dep_enabled(true);
+    first
+        .virtual_protect(CODE, 0x10000, wire::mem::PAGE_READWRITE)
+        .unwrap();
+    reset(&mut cpu);
+    assert!(cpu.step(&mut first).is_err());
+    assert_eq!(cpu.eip, CODE);
+}

@@ -17,6 +17,7 @@ use std::time::Instant;
 mod fpu;
 mod ir_exec;
 mod mmx;
+pub(crate) mod simd_ir;
 pub use fpu::Fpu;
 use ir_exec::PendingFlags;
 
@@ -1614,6 +1615,32 @@ impl Cpu {
         if self.profile_opcodes {
             *self.op_stats.entry(0x100 | op as u32).or_insert(0) += 1;
             *self.raw_op_stats.entry(0x100 | op as u32).or_insert(0) += 1;
+        }
+        let descriptor_candidate = matches!(
+            op,
+            0x10 | 0x11
+                | 0x28
+                | 0x29
+                | 0x6e
+                | 0x7e
+                | 0x6f
+                | 0x7f
+                | 0xd6
+                | 0xa3
+                | 0xab
+                | 0xb3
+                | 0xbb
+                | 0xba
+        ) || op66
+            && matches!(op,0x64..=0x66|0x74..=0x76|0xd4|0xdb|0xdf|0xeb|0xef|0xf8..=0xfe)
+            || !op66
+                && rep.is_some()
+                && matches!(op, 0x2a | 0x2c | 0x2d | 0x51 | 0x58..=0x5f | 0xc2)
+            || rep.is_none() && matches!(op, 0x2e | 0x2f);
+        if descriptor_candidate {
+            if let Some(result) = self.try_raw_simd(mem, eip0) {
+                return result;
+            }
         }
         if !op66 && rep.is_none() && mmx::is_opcode(op) {
             return self.mmx(mem, seg, op, eip0);

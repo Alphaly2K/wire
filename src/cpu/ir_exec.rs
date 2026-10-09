@@ -242,6 +242,15 @@ impl Cpu {
                     self.ir_scalar_steps += executed;
                     op = r.hot.inst.opcode();
                     Ok(())
+                } else if op == 134 {
+                    let descriptor = self
+                        .ir_cache
+                        .as_ref()
+                        .unwrap()
+                        .simd(r.hot.inst.aux as usize);
+                    let pc = self.eip;
+                    self.eip = r.hot.next_ip;
+                    descriptor.execute(self, mem, pc)
                 } else if op != 0 {
                     if self.profile_opcodes {
                         self.compact_op_stats[op as usize] += 1;
@@ -544,7 +553,7 @@ impl Cpu {
         );
         result
     }
-    fn ir_address(&self, o: Operand, segment: bool) -> u32 {
+    pub(super) fn ir_address(&self, o: Operand, segment: bool) -> u32 {
         let base = if o.base() == 15 {
             0
         } else {
