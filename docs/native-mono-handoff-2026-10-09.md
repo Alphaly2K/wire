@@ -257,3 +257,22 @@ ClassLibraryInitializer.InitAssemblyRedirections static void()，owned IL/依赖
 严格分开；旧19-patch源码与marker已恢复核对，旧dylib未变。
 下一真实invoke是 ClassLibraryInitializer.Init（0x060022fe）→ UnityLogWriter.Init。
 完整game backend仍false，持续推进，不碰浮点/翻译缓存。
+
+## Unity 日志、增量 GC 与同步上下文已实测（继续中）
+
+实施分支新增 ae456bf：修复 native Mono interpreter 静态引用/引用结构体漏 write barrier。
+真实 collation 普通 GC 通过而 Unity incremental=3 失败的根因已定位，新 21-patch runtime
+8 套 fixtures 在普通/增量配置均通过，5 条 noexec 反向路由仍拒绝。旧 runtime 未修改。
+
+`native-mono-unity-synchronization-probe-10` exit 0，guard 231/0，原始 Mono attach 未发生。
+实际日志 null/empty/Unicode/Console 4 路、异常注册、项目路径 String 初始化、同步上下文
+5 步均执行；Current/Awaitable/managed thread ID 1 的共享身份与 GC 后 TLS 验证通过。
+130 image cycles、43623 metadata queries、585 empty arrays/strong handles、7 RuntimeTypes/
+12 strings 全部相关 GC/cleanup 验证。class userdata getter/setter 共用 guest scalar cell，
+不把 guest cache pointer 写入 native MonoClass。feature 全量 401 passed/7 ignored、Clippy
+clean；后续方法真实 probe/16 项定向另测。没有改浮点操作/翻译缓存。
+
+证据与限制见实施 worktree `docs/native-mono-incremental-gc-2026-10-09.md` 和
+`docs/native-mono-unity-logging-2026-10-09.md`。下一 actual invoke 是 SubsystemsModule
+SubsystemDescriptorStore.ClearManagedDescriptors（0x06000057），static void()，已有
+owned IL。继续自己测修提交，不因这个小里程碑停下；完整游戏 backend/Admission 仍 false。
