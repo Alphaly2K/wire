@@ -346,13 +346,14 @@ impl Cpu64 {
         &mut self,
         mem: &mut Memory,
         remaining: u64,
-        mut allowed: impl FnMut(u64, u64) -> bool,
+        allowed: impl FnMut(u64, u64) -> bool,
     ) -> Result<bool, String> {
         if let Some(ir) = mem.cached_ir(self.rip)? {
-            if ir.register_only() && mem.try_register_segment(self, remaining, &mut allowed) {
-                return Ok(true);
-            }
-            if ir.checked_segment() && mem.try_checked_segment(self, remaining, allowed)? {
+            if ir.register_only() {
+                if mem.try_register_segment(self, remaining, allowed) {
+                    return Ok(true);
+                }
+            } else if ir.checked_segment() && mem.try_checked_segment(self, remaining, allowed)? {
                 return Ok(true);
             }
             if ir.is_scalar() {
