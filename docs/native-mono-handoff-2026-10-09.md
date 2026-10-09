@@ -137,3 +137,13 @@ feature all-target Clippy `-D warnings` clean。Mono 19-patch stack/dylib 未变
 owner-thread guest reentry。不能把未知 guest target 直接交给 native mono_add_internal_call。
 随后是 profiler GC callbacks、UnityTLS、managed image/assembly loading；完整 ABI、生产
 roots、Windows services/scheduler 仍需逐项验证。不要反复从孤立 fixture 重新开始。
+
+## 真实绑定及 GC/shutdown 已接入（本轮）
+
+最新实现仍在本独立分支；实际 10,824 注册名/PC 与 original trace 逐项匹配，两个真实
+CoreModule Boolean InternalCall 完成 native Mono → 固定 ARM64 adapter → Win64解释器往返。
+其他10,822项仍deferred，完整game Admission false。legacy/new profiler NULL handle均已处理；
+真实GC8回调/0xfe1、cleanup再GC8回调及shutdown1次已实测，guard89/0。
+证据 `wire-out/native-mono-unity-profiler-probe-04`；详情
+`docs/native-mono-unity-bindings-profiler-2026-10-09.md`。继续UnityTLS及managed image加载。
+用户最新要求不碰其他agent的浮点/翻译缓存代码；本轮没有涉及这些实现。

@@ -17,12 +17,15 @@ const CANDIDATE: &str = "2cfdc2552a60ac42729bf73ef3eeb7e6b2f25031835f6a8e639ec3f
 const EXE: &str = "94cccae89918110514672a6ec249a1252ffaeb28c0ae8d8633a9352988738f12";
 const UNITY: &str = "a2022611884470ddab23927a3eb7bbaef3924c18972d30ba7b5330a8fd25bcc4";
 const CORELIB_SUPPORT: &str = "b10bb3e59af90e92e240424ac88b1f96eb27906c3fa099958713d93801b4b078";
+const CORE_MODULE: &str = "7de56d1259f25d8b0cfdc9f4c77030056886bb9ac119854d3155bd87a54c0af7";
 const CORELIB: &str = "6c76e06e6d44cf0f39bf59e6a90770968b70093ad4c1572dfbc5e46e431c5fbf";
 const ROOT_TOKEN: u64 = 0x6ffe00000000;
 const PROFILER_TOKEN: u64 = ROOT_TOKEN + 16;
 const THREAD_TOKEN: u64 = ROOT_TOKEN + 32;
 static USED: AtomicBool = AtomicBool::new(false);
 type Object = *mut c_void;
+mod bindings;
+mod callbacks;
 macro_rules! symbol {
     ($library:expr, $name:literal, $ty:ty) => {{
         let pointer = unsafe { libc::dlsym($library, concat!($name, "\0").as_ptr().cast()) };
@@ -39,6 +42,7 @@ struct Native {
     owner: ThreadId,
     domain: Object,
     profiler: Object,
+    extra_profilers: Vec<Object>,
     thread_handle: Object,
     closed: bool,
     _owner_only: PhantomData<Rc<()>>,
@@ -84,6 +88,7 @@ impl Native {
             owner: thread::current().id(),
             domain: ptr::null_mut(),
             profiler: ptr::null_mut(),
+            extra_profilers: Vec::new(),
             thread_handle: ptr::null_mut(),
             closed: false,
             _owner_only: PhantomData,
@@ -117,6 +122,7 @@ impl Native {
                 }
                 self.domain = ptr::null_mut();
                 self.profiler = ptr::null_mut();
+                self.extra_profilers.clear();
             }
         }
         Ok(())
@@ -146,6 +152,16 @@ pub(super) struct Probe {
     main_thread_ready: bool,
     pre_bindings: bool,
     pre_bindings_ready: bool,
+    bindings: bool,
+    bindings_ready: bool,
+    scalar_callbacks_verified: usize,
+    profiler: bool,
+    profiler_ready: bool,
+    profiler_targets: [u64; 3],
+    legacy_installed: bool,
+    gc_events_verified: u32,
+    shutdown_callbacks: usize,
+    registry: bindings::Registry,
     stopped: bool,
     skip_etw: bool,
     plugin_registered: bool,
@@ -243,13 +259,15 @@ impl Probe {
         skip_etw: bool,
         boundary: &str,
     ) -> Result<Self, String> {
-        let (main_thread, pre_bindings) = match boundary {
-            "root" => (false, false),
-            "main-thread" => (true, false),
-            "pre-bindings" => (true, true),
+        let (main_thread, pre_bindings, bindings, profiler) = match boundary {
+            "root" => (false, false, false, false),
+            "main-thread" => (true, false, false, false),
+            "pre-bindings" => (true, true, false, false),
+            "bindings" => (true, true, true, false),
+            "profiler" => (true, true, true, true),
             _ => {
                 return Err(
-                    "native Mono startup boundary must be root, main-thread or pre-bindings".into(),
+                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings or profiler".into(),
                 )
             }
         };
@@ -277,6 +295,16 @@ impl Probe {
             main_thread_ready: false,
             pre_bindings,
             pre_bindings_ready: false,
+            bindings,
+            bindings_ready: false,
+            scalar_callbacks_verified: 0,
+            profiler,
+            profiler_ready: false,
+            profiler_targets: [0; 3],
+            legacy_installed: false,
+            gc_events_verified: 0,
+            shutdown_callbacks: 0,
+            registry: bindings::Registry::default(),
             stopped: false,
             skip_etw,
             plugin_registered: false,
@@ -494,19 +522,30 @@ impl Probe {
                 result = unsafe { f() } as u32 as u64;
             }
             "mono_profiler_create" => {
-                if a[0] != 0 || !native.profiler.is_null() {
-                    return Err("startup profiler only admits one NULL payload".into());
+                if a[0] != 0
+                    || (!native.profiler.is_null()
+                        && (!self.legacy_installed || native.extra_profilers.len() >= 7))
+                {
+                    return Err(
+                        "startup profiler needs an owned bounded NULL-payload handle".into(),
+                    );
                 }
                 let f = symbol!(
                     lib,
                     "mono_profiler_create",
                     unsafe extern "C" fn(Object) -> Object
                 );
-                native.profiler = unsafe { f(ptr::null_mut()) };
-                if native.profiler.is_null() {
+                let handle = unsafe { f(ptr::null_mut()) };
+                if handle.is_null() {
                     return Err("native startup profiler creation failed".into());
                 }
-                result = PROFILER_TOKEN;
+                if native.profiler.is_null() {
+                    native.profiler = handle;
+                    result = PROFILER_TOKEN;
+                } else {
+                    native.extra_profilers.push(handle);
+                    result = PROFILER_TOKEN + native.extra_profilers.len() as u64 * 256;
+                }
             }
             "mono_profiler_set_coverage_filter_callback" => {
                 if a[0] != PROFILER_TOKEN || native.profiler.is_null() || a[1] != 0 {
@@ -658,7 +697,61 @@ impl Probe {
                     f(0);
                 }
                 self.pre_bindings_ready = true;
-                ready = true;
+                ready = !self.bindings;
+            }
+            "mono_profiler_install" => {
+                if !self.profiler || self.legacy_installed || a[0] != 0 || a[1] != 0x18005fee0 {
+                    return Err("legacy profiler context/shutdown target not admitted".into());
+                }
+                memory.check(a[1], 1, super::super::memory::EXECUTE)?;
+                if memory.read_int(a[1], 1)? != 0xc2 || memory.read_int(a[1] + 1, 2)? != 0 {
+                    return Err("legacy shutdown target is not exact RET 0".into());
+                }
+                let install = symbol!(
+                    lib,
+                    "mono_profiler_install",
+                    unsafe extern "C" fn(Object, unsafe extern "C" fn(Object))
+                );
+                unsafe {
+                    install(ptr::null_mut(), callbacks::profiler_shutdown);
+                }
+                self.profiler_targets[0] = a[1];
+                self.legacy_installed = true;
+            }
+            "mono_profiler_install_gc" => {
+                if !self.legacy_installed || a[0] != 0x180789b60 || a[1] != 0x18005fee0 {
+                    return Err("legacy GC/resize targets not admitted".into());
+                }
+                memory.check(a[0], 1, super::super::memory::EXECUTE)?;
+                memory.check(a[1], 1, super::super::memory::EXECUTE)?;
+                let install = symbol!(
+                    lib,
+                    "mono_profiler_install_gc",
+                    unsafe extern "C" fn(
+                        unsafe extern "C" fn(Object, i32, i32),
+                        unsafe extern "C" fn(Object, i64),
+                    )
+                );
+                unsafe {
+                    install(callbacks::profiler_gc, callbacks::profiler_resize);
+                }
+                self.profiler_targets[1] = a[0];
+                self.profiler_targets[2] = a[1];
+            }
+            "mono_add_internal_call" if self.pre_bindings_ready && self.bindings => {
+                let name = string(memory, a[0])?;
+                let native_name = name.clone();
+                if let Some(slot) = self.registry.register(memory, name, a[1])? {
+                    let add = symbol!(
+                        lib,
+                        "mono_add_internal_call",
+                        unsafe extern "C" fn(*const c_char, *const c_void)
+                    );
+                    unsafe {
+                        add(native_name.as_ptr(), callbacks::adapter(slot));
+                    }
+                    self.events.push(format!("fixed scalar adapter registered: {native_name:?}; guest PC is private to provider"));
+                }
             }
             _ => {
                 return Err(format!(
@@ -667,9 +760,285 @@ impl Probe {
             }
         }
         cpu.return_integer(memory, result)?;
-        self.events
-            .push(format!("guest startup boundary {function} -> {result:#x}"));
+        if function != "mono_add_internal_call" {
+            self.events
+                .push(format!("guest startup boundary {function} -> {result:#x}"));
+        }
         Ok(ready)
+    }
+    fn callback_targets(&self) -> [u64; 5] {
+        let mut targets = [0; 5];
+        targets[..2].copy_from_slice(&self.registry.scalar_targets);
+        targets[2..].copy_from_slice(&self.profiler_targets);
+        targets
+    }
+    pub(super) fn stop_before(&mut self, function: &str) -> Result<bool, String> {
+        if self.bindings && function == "mono_profiler_install" {
+            self.registry.seal()?;
+            self.bindings_ready = true;
+            self.events.push(format!("provider registered {} actual InternalCall names; 2 fixed scalar adapters; other entries deferred", self.registry.len()));
+            return Ok(!self.profiler);
+        }
+        if self.profiler && function == "mono_unity_install_unitytls_interface" {
+            if !self.legacy_installed || self.profiler_targets.contains(&0) {
+                return Err("legacy profiler callback registration incomplete".into());
+            }
+            self.profiler_ready = true;
+            self.events.push(
+                "actual legacy profiler registration complete; stop before UnityTLS installation"
+                    .into(),
+            );
+            return Ok(true);
+        }
+        Ok(false)
+    }
+    pub(super) fn validate_scalar_callbacks(
+        &mut self,
+        memory: &mut Memory,
+        runtime: &mut Runtime64,
+    ) -> Result<(), String> {
+        if !self.bindings_ready {
+            return Err("scalar verification needs a sealed actual registry".into());
+        }
+        let native = self
+            .native
+            .as_ref()
+            .ok_or("scalar verification has no native runtime")?;
+        if native.closed || native.owner != thread::current().id() {
+            return Err("scalar verification runtime is closed/foreign".into());
+        }
+        let lib = native.library;
+        let fs = runtime.filesystem()?;
+        let path = fs
+            .resolve("C:\\AliceToPapaADV_1-0-0_Data\\Managed\\UnityEngine.CoreModule.dll")
+            .map_err(|e| format!("CoreModule path: {e}"))?;
+        fingerprint(
+            &path,
+            CORE_MODULE,
+            "UnityEngine.CoreModule before scalar execution",
+        )?;
+        let path = CString::new(path.as_os_str().as_encoded_bytes()).map_err(|e| e.to_string())?;
+        let open = symbol!(
+            lib,
+            "mono_domain_assembly_open",
+            unsafe extern "C" fn(Object, *const c_char) -> Object
+        );
+        let image = symbol!(
+            lib,
+            "mono_assembly_get_image",
+            unsafe extern "C" fn(Object) -> Object
+        );
+        let class = symbol!(
+            lib,
+            "mono_class_from_name",
+            unsafe extern "C" fn(Object, *const c_char, *const c_char) -> Object
+        );
+        let method = symbol!(
+            lib,
+            "mono_class_get_method_from_name",
+            unsafe extern "C" fn(Object, *const c_char, i32) -> Object
+        );
+        let flags = symbol!(
+            lib,
+            "mono_method_get_flags",
+            unsafe extern "C" fn(Object, *mut u32) -> u32
+        );
+        let signature = symbol!(
+            lib,
+            "mono_method_signature",
+            unsafe extern "C" fn(Object) -> Object
+        );
+        let count = symbol!(
+            lib,
+            "mono_signature_get_param_count",
+            unsafe extern "C" fn(Object) -> u32
+        );
+        let returns = symbol!(
+            lib,
+            "mono_signature_get_return_type",
+            unsafe extern "C" fn(Object) -> Object
+        );
+        let instance = symbol!(
+            lib,
+            "mono_signature_is_instance",
+            unsafe extern "C" fn(Object) -> i32
+        );
+        let kind = symbol!(
+            lib,
+            "mono_type_get_type",
+            unsafe extern "C" fn(Object) -> i32
+        );
+        let byref = symbol!(
+            lib,
+            "mono_type_is_byref",
+            unsafe extern "C" fn(Object) -> i32
+        );
+        let invoke = symbol!(
+            lib,
+            "mono_runtime_invoke",
+            unsafe extern "C" fn(Object, Object, *mut Object, *mut Object) -> Object
+        );
+        let unbox = symbol!(
+            lib,
+            "mono_object_unbox",
+            unsafe extern "C" fn(Object) -> Object
+        );
+        let (result, stats) = callbacks::with_owner(
+            memory,
+            runtime,
+            self.callback_targets(),
+            || -> Result<usize, String> {
+                let assembly = unsafe { open(native.domain, path.as_ptr()) };
+                if assembly.is_null() {
+                    return Err("native Unity CoreModule metadata load failed".into());
+                }
+                let image = unsafe { image(assembly) };
+                if image.is_null() {
+                    return Err("native Unity CoreModule has no image".into());
+                }
+                let mut methods = [ptr::null_mut(); 2];
+                for (slot, name) in bindings::SCALAR_NAMES.iter().enumerate() {
+                    let (type_name, method_name) =
+                        name.split_once("::").ok_or("invalid scalar name")?;
+                    let (namespace, type_name) =
+                        type_name.rsplit_once('.').ok_or("invalid scalar type")?;
+                    let namespace = CString::new(namespace).map_err(|e| e.to_string())?;
+                    let type_name = CString::new(type_name).map_err(|e| e.to_string())?;
+                    let class = unsafe { class(image, namespace.as_ptr(), type_name.as_ptr()) };
+                    if class.is_null()
+                        || !unsafe { method(class, c".cctor".as_ptr(), -1) }.is_null()
+                    {
+                        return Err(
+                            "scalar diagnostic class missing or initializer not admitted".into(),
+                        );
+                    }
+                    let name = CString::new(method_name).map_err(|e| e.to_string())?;
+                    let argc = 0;
+                    let m = unsafe { method(class, name.as_ptr(), argc as i32) };
+                    if m.is_null() {
+                        return Err(format!("scalar method missing: {name:?}"));
+                    }
+                    let mut implementation = 0;
+                    let method_flags = unsafe { flags(m, &mut implementation) };
+                    let sig = unsafe { signature(m) };
+                    if sig.is_null()
+                        || method_flags & 0x10 == 0
+                        || implementation & 0x1000 == 0
+                        || unsafe { instance(sig) } != 0
+                        || unsafe { count(sig) } != argc
+                    {
+                        return Err(format!(
+                            "scalar static InternalCall signature mismatch: {name:?}"
+                        ));
+                    }
+                    let ret = unsafe { returns(sig) };
+                    let expected = 2; // BOOLEAN.
+                    if ret.is_null()
+                        || unsafe { kind(ret) } != expected
+                        || unsafe { byref(ret) } != 0
+                    {
+                        return Err("scalar return type/byref mismatch".into());
+                    }
+                    methods[slot] = m;
+                }
+                let mut verified = 0;
+                for (slot, m) in methods.into_iter().enumerate() {
+                    let reference = callbacks::reference(slot, &[])?;
+                    let mut exception = ptr::null_mut();
+                    let result =
+                        unsafe { invoke(m, ptr::null_mut(), ptr::null_mut(), &mut exception) };
+                    if !exception.is_null() {
+                        return Err(format!(
+                            "actual Unity scalar invocation threw at slot {slot}"
+                        ));
+                    }
+                    if slot < 2 {
+                        if result.is_null() {
+                            return Err("actual Unity bool invocation did not box result".into());
+                        }
+                        let data = unsafe { unbox(result) };
+                        if data.is_null()
+                            || unsafe { data.cast::<u8>().read() } != u8::from(reference as u8 != 0)
+                        {
+                            return Err(
+                                "actual Unity bool result differs from original Win64 reference"
+                                    .into(),
+                            );
+                        }
+                    } else if !result.is_null() {
+                        return Err("actual Unity void invocation returned a value".into());
+                    }
+                    verified += 1;
+                }
+                Ok(verified)
+            },
+        )?;
+        let verified = result?;
+        if stats.calls[..2] != [2, 2] || verified != 2 {
+            return Err("actual Unity scalar callback/reference counts mismatch".into());
+        }
+        self.scalar_callbacks_verified = verified;
+        self.events.push("actual native Unity CoreModule -> 2 fixed ARM64 scalar adapters -> original Win64 targets verified against 2 reference calls; checked Boolean signatures, same-thread only; full game admission remains closed".into());
+        Ok(())
+    }
+    pub(super) fn validate_profiler_callbacks(
+        &mut self,
+        memory: &mut Memory,
+        runtime: &mut Runtime64,
+    ) -> Result<(), String> {
+        if !self.profiler_ready {
+            return Ok(());
+        }
+        let native = self
+            .native
+            .as_ref()
+            .ok_or("profiler probe has no runtime")?;
+        let collect = symbol!(native.library, "mono_gc_collect", unsafe extern "C" fn(i32));
+        let max = symbol!(
+            native.library,
+            "mono_gc_max_generation",
+            unsafe extern "C" fn() -> i32
+        );
+        let (_, stats) =
+            callbacks::with_owner(memory, runtime, self.callback_targets(), || unsafe {
+                collect(max());
+            })?;
+        let required =
+            (1 << 0) | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 8) | (1 << 9) | (1 << 10) | (1 << 11);
+        if stats.calls[3] < 6 || stats.gc_events & required != required {
+            return Err(format!(
+                "actual native GC profiler cycle incomplete: calls={}, events={:#x}",
+                stats.calls[3], stats.gc_events
+            ));
+        }
+        self.gc_events_verified |= stats.gc_events;
+        self.events.push(format!("actual native BDWGC collection -> compiled GC adapter -> original Unity Win64 callback: {} calls, event mask {:#x}; no guest pointer passed to native profiler", stats.calls[3], stats.gc_events));
+        Ok(())
+    }
+    pub(super) fn finish_owned(
+        &mut self,
+        memory: &mut Memory,
+        runtime: &mut Runtime64,
+    ) -> Result<(), String> {
+        if !self.legacy_installed || self.stopped {
+            return self.finish();
+        }
+        let targets = self.callback_targets();
+        let (result, stats) = callbacks::with_owner(memory, runtime, targets, || self.finish())?;
+        result?;
+        self.shutdown_callbacks += stats.calls[2];
+        self.gc_events_verified |= stats.gc_events;
+        if stats.calls[2] != 1 {
+            return Err("native cleanup did not invoke exact legacy shutdown callback once".into());
+        }
+        self.events.push(format!(
+            "owner-scoped native cleanup interpreted legacy shutdown {} time; GC callbacks={}",
+            stats.calls[2], stats.calls[3]
+        ));
+        Ok(())
+    }
+    pub(super) fn bindings_tsv(&self) -> String {
+        self.registry.tsv()
     }
     pub(super) fn finish(&mut self) -> Result<(), String> {
         if self.stopped {
@@ -685,10 +1054,17 @@ impl Probe {
     }
     pub(super) fn report(&self) -> String {
         format!(
-            "native-root-ready={}\nnative-main-thread-ready={}\nnative-pre-bindings-ready={}\nfull-game-admission=false\n{}\n",
+            "native-root-ready={}\nnative-main-thread-ready={}\nnative-pre-bindings-ready={}\nnative-bindings-ready={}\nprovider-bindings={}\nnative-scalar-adapters={}\nactual-unity-scalar-callbacks-verified={}\nnative-profiler-ready={}\nactual-gc-event-mask={}\nactual-shutdown-callbacks={}\nfull-game-admission=false\n{}\n",
             self.root_ready,
             self.main_thread_ready,
             self.pre_bindings_ready,
+            self.bindings_ready,
+            self.registry.len(),
+            self.registry.scalar_targets.iter().filter(|target| **target != 0).count(),
+            self.scalar_callbacks_verified,
+            self.profiler_ready,
+            self.gc_events_verified,
+            self.shutdown_callbacks,
             self.events.join("\n")
         )
     }
@@ -696,7 +1072,9 @@ impl Probe {
         self.stopped
             || (self.root_ready && !self.main_thread)
             || (self.main_thread_ready && !self.pre_bindings)
-            || self.pre_bindings_ready
+            || (self.pre_bindings_ready && !self.bindings)
+            || (self.bindings_ready && !self.profiler)
+            || self.profiler_ready
     }
 }
 fn store_thread_token(
@@ -811,6 +1189,16 @@ mod tests {
             main_thread_ready: false,
             pre_bindings: false,
             pre_bindings_ready: false,
+            bindings: false,
+            bindings_ready: false,
+            scalar_callbacks_verified: 0,
+            profiler: false,
+            profiler_ready: false,
+            profiler_targets: [0; 3],
+            legacy_installed: false,
+            gc_events_verified: 0,
+            shutdown_callbacks: 0,
+            registry: bindings::Registry::default(),
             stopped: false,
             skip_etw: false,
             plugin_registered: false,

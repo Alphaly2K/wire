@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Drive actual Unity into the exact-sample finite native Mono startup provider."""
 import argparse
+import csv
 import json
 import os
 from pathlib import Path
@@ -16,9 +17,11 @@ def main():
     parser.add_argument('--game', type=Path, required=True, help='read-only original EXE')
     parser.add_argument('--runtime-output', type=Path, default=REPO / 'wire-out/native-mono-game-classlib')
     parser.add_argument('--output', type=Path, default=REPO / 'wire-out/native-mono-unity-startup-probe')
+    parser.add_argument('--registration-reference', type=Path, default=REPO / 'wire-out/native-mono-unity-callback-trace/summary/registered-internal-calls.tsv', help='frozen original Unity registration trace')
     parser.add_argument('--wire', type=Path, default=REPO / 'target/release/wire')
+    parser.add_argument('--max-instr', type=int, default=30000000, help='bounded guest work budget')
     parser.add_argument('--skip-etw', action='store_true', help='explicit diagnostic platform divergence')
-    parser.add_argument('--boundary', choices=('root', 'main-thread', 'pre-bindings'), default='root', help='finite diagnostic initialization boundary')
+    parser.add_argument('--boundary', choices=('root', 'main-thread', 'pre-bindings', 'bindings', 'profiler'), default='root', help='finite diagnostic initialization boundary')
     args = parser.parse_args()
     output = args.output.resolve()
     if not output.is_relative_to(REPO / 'wire-out'):
@@ -53,8 +56,13 @@ def main():
         if key.startswith('MONO_') or key in ('DYLD_INSERT_LIBRARIES', 'DYLD_LIBRARY_PATH'):
             env.pop(key)
     env.update(DYLD_INSERT_LIBRARIES=str(guard), MONO_THREADS_SUSPEND='preemptive')
+    if args.boundary in ('bindings', 'profiler'):
+        reference = args.registration_reference.resolve()
+        shutil.copy2(reference, output / 'registration-reference.tsv')
+        inputs['registration_reference'] = {'path': str(reference), 'sha256': sha256(reference)}
+        (output / 'inputs.json').write_text(json.dumps(inputs, indent=2) + '\n')
     command = [str(executable), 'probe64', str(clone / game.name), '--startup',
-               '--max-instr', '10000000', '--native-mono-startup-probe', str(library),
+               '--max-instr', str(args.max_instr), '--native-mono-startup-probe', str(library),
                '--api-trace', str(output / 'api.tsv')]
     if args.skip_etw:
         command.append('--native-mono-probe-skip-etw')
@@ -69,9 +77,24 @@ def main():
     original_attach = bool(re.search(r'^(?:entry stage:|TLS process attach:).*mono-2\.0-bdwgc\.dll', content, re.M))
     guard_result = re.search(r'WIRE_NOEXEC_GUARD checks=(\d+) denied=(\d+)', content)
     root_ready = 'native-root-ready=true' in content
+    def count_marker(name):
+        match = re.search(r'^' + re.escape(name) + r'=(\d+)$', content, re.M)
+        return int(match[1]) if match else 0
+    registry_match = None
+    if args.boundary in ('bindings', 'profiler') and (output / 'api.tsv.mono-bindings.tsv').exists():
+        with (output / 'registration-reference.tsv').open() as stream:
+            original = {bytes.fromhex(row['name_bytes_hex']): int(row['guest_target'], 16) for row in csv.DictReader(stream, delimiter='\t')}
+        with (output / 'api.tsv.mono-bindings.tsv').open() as stream:
+            rows = list(csv.DictReader(stream, delimiter='\t'))
+        current = {row['name'].encode(): int(row['guest_target'], 16) for row in rows}
+        registry_match = len(rows) == len(original) == 10824 and current == original and all(row['full_game_abi_admitted'] == '0' for row in rows)
     evidence = {'returncode': result.returncode, 'elapsed_seconds': time.monotonic() - start,
         'native_root_ready': root_ready, 'native_main_thread_ready': 'native-main-thread-ready=true' in content,
-        'native_pre_bindings_ready': 'native-pre-bindings-ready=true' in content, 'boundary': args.boundary,
+        'native_pre_bindings_ready': 'native-pre-bindings-ready=true' in content, 'native_bindings_ready': 'native-bindings-ready=true' in content, 'boundary': args.boundary, 'native_profiler_ready': 'native-profiler-ready=true' in content,
+        'provider_bindings': count_marker('provider-bindings'), 'native_scalar_adapters': count_marker('native-scalar-adapters'),
+        'actual_unity_scalar_callbacks_verified': count_marker('actual-unity-scalar-callbacks-verified'),
+        'actual_gc_event_mask': count_marker('actual-gc-event-mask'), 'actual_shutdown_callbacks': count_marker('actual-shutdown-callbacks'),
+        'original_registration_table_matches': registry_match,
         'full_game_backend': False, 'original_mono_attach_observed': original_attach,
         'etw_explicitly_disabled': args.skip_etw, 'native_guard':
         {'checks': int(guard_result[1]), 'denied': int(guard_result[2])} if guard_result else None,
@@ -82,7 +105,11 @@ def main():
         raise RuntimeError('native startup provider executed original Mono attach')
     if root_ready and (not guard_result or int(guard_result[1]) == 0 or int(guard_result[2]) != 0):
         raise RuntimeError('native root run lacks successful noexec guard evidence')
-    if result.returncode != 0 or not root_ready or (args.boundary != 'root' and not evidence['native_main_thread_ready']) or (args.boundary == 'pre-bindings' and not evidence['native_pre_bindings_ready']):
+    if args.boundary in ('bindings', 'profiler') and (registry_match is not True or evidence['actual_unity_scalar_callbacks_verified'] != 2 or evidence['native_scalar_adapters'] != 2):
+        raise RuntimeError('actual Unity bindings/callback verification incomplete or registry differs from original')
+    if args.boundary == 'profiler' and (not evidence['native_profiler_ready'] or evidence['actual_gc_event_mask'] & 4065 != 4065 or evidence['actual_shutdown_callbacks'] != 1):
+        raise RuntimeError('actual native GC/shutdown evidence incomplete')
+    if result.returncode != 0 or not root_ready or (args.boundary != 'root' and not evidence['native_main_thread_ready']) or (args.boundary in ('pre-bindings','bindings','profiler') and not evidence['native_pre_bindings_ready']) or (args.boundary in ('bindings','profiler') and not evidence['native_bindings_ready']):
         raise SystemExit(1)
 
 

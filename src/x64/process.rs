@@ -254,6 +254,15 @@ pub enum Outcome {
     #[cfg(feature = "native-mono-backend")]
     NativeMonoRootReady,
 }
+#[cfg(feature = "native-mono-backend")]
+impl Drop for Process64 {
+    fn drop(&mut self) {
+        if let Err(error) = self.finish_native_mono_startup_probe() {
+            eprintln!("native Mono process owner cleanup failed: {error}");
+            std::process::abort();
+        }
+    }
+}
 impl Process64 {
     pub fn load(path: &Path, dll_only: bool) -> Result<Self, String> {
         Self::load_inner(path, dll_only, Modules::default())
@@ -453,9 +462,16 @@ impl Process64 {
             .map(|probe| probe.report())
     }
     #[cfg(feature = "native-mono-backend")]
+    pub fn native_mono_bindings_tsv(&self) -> Option<String> {
+        self.loader
+            .mono_startup
+            .as_ref()
+            .map(|probe| probe.bindings_tsv())
+    }
+    #[cfg(feature = "native-mono-backend")]
     pub fn finish_native_mono_startup_probe(&mut self) -> Result<(), String> {
         if let Some(probe) = self.loader.mono_startup.as_mut() {
-            probe.finish()?;
+            probe.finish_owned(&mut self.memory, &mut self.runtime)?;
         }
         Ok(())
     }
@@ -785,7 +801,7 @@ impl Process64 {
         #[cfg(feature = "native-mono-backend")]
         if !matches!(result, Ok(Outcome::Budget)) {
             if let Some(probe) = self.loader.mono_startup.as_mut() {
-                probe.finish()?;
+                probe.finish_owned(&mut self.memory, &mut self.runtime)?;
             }
         }
         result
@@ -948,6 +964,12 @@ impl Process64 {
                             return Err(
                                 "native root probe requires guest main-thread ownership".into()
                             );
+                        }
+                        if probe.stop_before(function)? {
+                            probe.validate_scalar_callbacks(&mut self.memory, &mut self.runtime)?;
+                            probe
+                                .validate_profiler_callbacks(&mut self.memory, &mut self.runtime)?;
+                            return Ok(Outcome::NativeMonoRootReady);
                         }
                         let fs = self.runtime.filesystem()?;
                         let args = [
