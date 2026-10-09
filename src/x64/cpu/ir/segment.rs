@@ -139,7 +139,17 @@ impl ScalarIr {
         let op = self.opcode >> 2;
         let reads = match op {
             ADC | SBB => CF,
-            BRANCH | CMOV | SET => ARITHMETIC,
+            BRANCH | CMOV | SET => match self.aux >> 1 {
+                0 => OF,
+                1 => CF,
+                2 => super::super::ZF,
+                3 => CF | super::super::ZF,
+                4 => super::super::SF,
+                5 => super::super::PF,
+                6 => super::super::SF | OF,
+                7 => super::super::ZF | super::super::SF | OF,
+                _ => unreachable!("verified condition"),
+            },
             // Count zero and multi-bit shifts preserve some flags. Keep their
             // whole prior recipe live rather than guessing at a runtime count.
             SHIFT => ARITHMETIC,
@@ -164,7 +174,7 @@ mod tests {
     #[test]
     fn every_budget_entry_and_flag_dependency_matches_single_transactional_execution() {
         const PC: u64 = 0x140000000;
-        let programs: Vec<Vec<u8>> = vec![
+        let mut programs: Vec<Vec<u8>> = vec![
             // Mixed high-XMM, fixed lanes, scalar transfers and FLAGS readers.
             vec![
                 0x66, 0x45, 0x0f, 0xd4, 0xc1, 0x48, 0x01, 0xd8, 0x66, 0x45, 0x0f, 0x64, 0xd1, 0x66,
@@ -205,6 +215,30 @@ mod tests {
                 code
             },
         ];
+        for cc in 0..16 {
+            // All condition masks, partial writers and subsequent carry reads.
+            programs.push(vec![
+                0x48,
+                0x39,
+                0xd8,
+                0x0f,
+                0x90 + cc,
+                0xc2,
+                0x48,
+                0xff,
+                0xc1,
+                0x48,
+                0x0f,
+                0x40 + cc,
+                0xc3,
+                0x48,
+                0x11,
+                0xd9,
+                0x48,
+                0x85,
+                0xc0,
+            ]);
+        }
         for code in programs {
             // These programs only mutate registers. Reuse the checked memory
             // across seeds/budgets so large-cache builds do not repeatedly
