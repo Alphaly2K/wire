@@ -24,6 +24,7 @@ const EXE: &str = "94cccae89918110514672a6ec249a1252ffaeb28c0ae8d8633a9352988738
 const UNITY: &str = "a2022611884470ddab23927a3eb7bbaef3924c18972d30ba7b5330a8fd25bcc4";
 const CORELIB_SUPPORT: &str = "b10bb3e59af90e92e240424ac88b1f96eb27906c3fa099958713d93801b4b078";
 const CORE_MODULE: &str = "7de56d1259f25d8b0cfdc9f4c77030056886bb9ac119854d3155bd87a54c0af7";
+const SUBSYSTEMS_MODULE: &str = "f25824d57c5f394b514df03bab7ace58d9e6eb8b55f52c5895404cb591eacf49";
 const CORELIB: &str = "6c76e06e6d44cf0f39bf59e6a90770968b70093ad4c1572dfbc5e46e431c5fbf";
 const ROOT_TOKEN: u64 = 0x6ffe00000000;
 const PROFILER_TOKEN: u64 = ROOT_TOKEN + 16;
@@ -226,6 +227,8 @@ pub(super) struct Probe {
     logging_ready: bool,
     exceptions: bool,
     exceptions_ready: bool,
+    subsystems: bool,
+    subsystems_ready: bool,
     synchronization: bool,
     synchronization_ready: bool,
     classlib: bool,
@@ -338,20 +341,35 @@ impl Probe {
         skip_etw: bool,
         boundary: &str,
     ) -> Result<Self, String> {
-        let synchronization = boundary == "synchronization";
-        let exceptions = matches!(boundary, "exceptions" | "synchronization");
-        let logging = matches!(boundary, "logging" | "exceptions" | "synchronization");
+        let subsystems = boundary == "subsystems";
+        let synchronization = matches!(boundary, "synchronization" | "subsystems");
+        let exceptions = matches!(boundary, "exceptions" | "synchronization" | "subsystems");
+        let logging = matches!(
+            boundary,
+            "logging" | "exceptions" | "synchronization" | "subsystems"
+        );
         let classlib = matches!(
             boundary,
-            "classlib" | "logging" | "exceptions" | "synchronization"
+            "classlib" | "logging" | "exceptions" | "synchronization" | "subsystems"
         );
         let managed_types = matches!(
             boundary,
-            "managed-types" | "classlib" | "logging" | "exceptions" | "synchronization"
+            "managed-types"
+                | "classlib"
+                | "logging"
+                | "exceptions"
+                | "synchronization"
+                | "subsystems"
         );
         let strings = matches!(
             boundary,
-            "strings" | "managed-types" | "classlib" | "logging" | "exceptions" | "synchronization"
+            "strings"
+                | "managed-types"
+                | "classlib"
+                | "logging"
+                | "exceptions"
+                | "synchronization"
+                | "subsystems"
         );
         let (main_thread, pre_bindings, bindings, profiler, pre_images, images, metadata) = match boundary {
             "root" => (false, false, false, false, false, false, false),
@@ -361,10 +379,10 @@ impl Probe {
             "profiler" => (true, true, true, true, false, false, false),
             "pre-images" => (true, true, true, true, true, false, false),
             "images" => (true, true, true, true, true, true, false),
-            "metadata" | "strings" | "managed-types" | "classlib" | "logging" | "exceptions" | "synchronization" => (true, true, true, true, true, true, true),
+            "metadata" | "strings" | "managed-types" | "classlib" | "logging" | "exceptions" | "synchronization" | "subsystems" => (true, true, true, true, true, true, true),
             _ => {
                 return Err(
-                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings, profiler, pre-images, images, metadata, strings, managed-types, classlib, logging, exceptions or synchronization".into(),
+                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings, profiler, pre-images, images, metadata, strings, managed-types, classlib, logging, exceptions, synchronization or subsystems".into(),
                 )
             }
         };
@@ -442,6 +460,8 @@ impl Probe {
             logging_ready: false,
             exceptions,
             exceptions_ready: false,
+            subsystems,
+            subsystems_ready: false,
             synchronization,
             synchronization_ready: false,
             classlib,
@@ -1021,14 +1041,17 @@ impl Probe {
                 self.classlib_ready = self.classlib && self.classlib_invokes > 0;
                 self.logging_ready = self.logging && self.classlib_invokes >= 2;
                 self.exceptions_ready = self.exceptions && self.classlib_invokes >= 3;
-                self.synchronization_ready = self.synchronization && self.classlib_invokes == 5;
+                self.synchronization_ready = self.synchronization && self.classlib_invokes >= 5;
+                self.subsystems_ready = self.subsystems && self.classlib_invokes == 6;
                 return Ok(true);
             }
         }
         Ok(false)
     }
     fn startup_limit(&self) -> usize {
-        if self.synchronization {
+        if self.subsystems {
+            6
+        } else if self.synchronization {
             5
         } else if self.exceptions {
             3
@@ -1263,7 +1286,13 @@ impl Probe {
             let method = self
                 .metadata_registry
                 .native(a[0], metadata::Kind::Method)?;
-            let image = self.image_registry.unique_native_image(CORE_MODULE)?;
+            let image = self
+                .image_registry
+                .unique_native_image(if self.classlib_invokes == 5 {
+                    SUBSYSTEMS_MODULE
+                } else {
+                    CORE_MODULE
+                })?;
             let call = symbol!(
                 library,
                 "mono_runtime_invoke",
@@ -1338,6 +1367,9 @@ impl Probe {
                     if self.classlib_invokes == 4 {
                         invoke::verify_synchronization(library, image)?;
                     }
+                    if self.classlib_invokes == 5 {
+                        invoke::verify_subsystems(library, image)?;
+                    }
                     Ok::<_, String>(())
                 })?;
             result?;
@@ -1345,7 +1377,7 @@ impl Probe {
                 memory.write_int(a[3], 8, 0)?;
             }
             self.classlib_invokes += 1;
-            self.events.push(format!("actual native CoreModule startup step={} executed; typed static void({}); guest object identity resolved through owned roots", self.classlib_invokes - 1, if project_folder { "String" } else { "" }));
+            self.events.push(format!("actual native Unity startup step={} executed; typed static void({}); guest object identity resolved through owned roots", self.classlib_invokes - 1, if project_folder { "String" } else { "" }));
             cpu.return_integer(memory, 0)?;
             return Ok(false);
         }
@@ -1514,6 +1546,52 @@ impl Probe {
             })?;
             self.metadata_registry.note_query();
             metadata::Value::Scalar(result?)
+        } else if matches!(
+            function,
+            "mono_image_get_name" | "mono_image_get_table_rows"
+        ) {
+            let image = self.image_registry.native_image(a[0])?;
+            let (result, _) = callbacks::with_owner(
+                memory,
+                runtime,
+                targets,
+                || -> Result<metadata::Value, String> {
+                    if function == "mono_image_get_name" {
+                        let get = symbol!(
+                            library,
+                            "mono_image_get_name",
+                            unsafe extern "C" fn(Object) -> *const c_char
+                        );
+                        let p = unsafe { get(image) };
+                        if p.is_null() {
+                            return Err("native image name absent".into());
+                        }
+                        let mut bytes = Vec::new();
+                        for i in 0..32768 {
+                            let b = unsafe { p.add(i).read() } as u8;
+                            if b == 0 {
+                                return Ok(metadata::Value::Text(
+                                    CString::new(bytes).map_err(|e| e.to_string())?,
+                                ));
+                            }
+                            bytes.push(b);
+                        }
+                        Err("native image name exceeds bound".into())
+                    } else {
+                        let table = a[1] as u32 as i32;
+                        let get = symbol!(
+                            library,
+                            "mono_image_get_table_rows",
+                            unsafe extern "C" fn(Object, i32) -> i32
+                        );
+                        Ok(metadata::Value::Scalar(
+                            unsafe { get(image, table) } as u32 as u64
+                        ))
+                    }
+                },
+            )?;
+            self.metadata_registry.note_query();
+            result?
         } else if function == "mono_class_get_image" {
             let class = self.metadata_registry.native(a[0], metadata::Kind::Class)?;
             let get = symbol!(
@@ -2080,7 +2158,7 @@ impl Probe {
     }
     pub(super) fn report(&self) -> String {
         format!(
-            "native-root-ready={}\nnative-main-thread-ready={}\nnative-pre-bindings-ready={}\nnative-bindings-ready={}\nprovider-bindings={}\nnative-scalar-adapters={}\nactual-unity-scalar-callbacks-verified={}\nnative-profiler-ready={}\nactual-gc-event-mask={}\nactual-shutdown-callbacks={}\nnative-pre-images-ready={}\nactual-unitytls-leaf-verified={}\nnative-images-ready={}\nnative-metadata-ready={}\nnative-strings-ready={}\nnative-managed-types-ready={}\nnative-managed-type-invokes={}\nnative-classlib-ready={}\nnative-classlib-invokes={}\nnative-logging-ready={}\nnative-exceptions-ready={}\nnative-synchronization-ready={}\nfull-game-admission=false\n{}{}{}{}{}{}{}\n",
+            "native-root-ready={}\nnative-main-thread-ready={}\nnative-pre-bindings-ready={}\nnative-bindings-ready={}\nprovider-bindings={}\nnative-scalar-adapters={}\nactual-unity-scalar-callbacks-verified={}\nnative-profiler-ready={}\nactual-gc-event-mask={}\nactual-shutdown-callbacks={}\nnative-pre-images-ready={}\nactual-unitytls-leaf-verified={}\nnative-images-ready={}\nnative-metadata-ready={}\nnative-strings-ready={}\nnative-managed-types-ready={}\nnative-managed-type-invokes={}\nnative-classlib-ready={}\nnative-classlib-invokes={}\nnative-logging-ready={}\nnative-exceptions-ready={}\nnative-synchronization-ready={}\nnative-subsystems-ready={}\nfull-game-admission=false\n{}{}{}{}{}{}{}\n",
             self.root_ready,
             self.main_thread_ready,
             self.pre_bindings_ready,
@@ -2103,6 +2181,7 @@ impl Probe {
             self.logging_ready,
             self.exceptions_ready,
             self.synchronization_ready,
+            self.subsystems_ready,
             self.handle_registry.report(),
             self.array_registry.report(),
             self.reflection_registry.report(),
@@ -2127,7 +2206,8 @@ impl Probe {
             || (self.classlib_ready && !self.logging)
             || (self.logging_ready && !self.exceptions)
             || (self.exceptions_ready && !self.synchronization)
-            || self.synchronization_ready
+            || (self.synchronization_ready && !self.subsystems)
+            || self.subsystems_ready
     }
 }
 fn store_stack_token(
@@ -2285,6 +2365,8 @@ mod tests {
             logging_ready: false,
             exceptions: false,
             exceptions_ready: false,
+            subsystems: false,
+            subsystems_ready: false,
             synchronization: false,
             synchronization_ready: false,
             classlib: false,

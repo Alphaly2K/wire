@@ -13,7 +13,7 @@ fn main() -> ExitCode {
         eprintln!("wire — Watari-Is-a-Runtime-Environment (M2 spike)");
         eprintln!("usage:");
         eprintln!("  wire imports <program.exe>");
-        eprintln!("  wire probe64 <program.exe> [--max-instr N] [--startup] [--dll] [--window] [--cpu-stats] [--api-trace PATH] [--mono-trace PATH] [--native-mono-startup-probe DYLIB] [--native-mono-probe-skip-etw] [--native-mono-probe-boundary root|main-thread|pre-bindings|bindings|profiler|pre-images|images|metadata|strings|managed-types|classlib|logging|exceptions|synchronization] [--guest-arg VALUE] [--graphics-backend PATH --moltenvk PATH] (experimental AMD64 diagnostic)");
+        eprintln!("  wire probe64 <program.exe> [--max-instr N] [--startup] [--dll] [--window] [--cpu-stats] [--api-trace PATH] [--mono-trace PATH] [--native-mono-startup-probe DYLIB] [--native-mono-probe-skip-etw] [--native-mono-probe-boundary root|main-thread|pre-bindings|bindings|profiler|pre-images|images|metadata|strings|managed-types|classlib|logging|exceptions|synchronization|subsystems] [--guest-arg VALUE] [--graphics-backend PATH --moltenvk PATH] (experimental AMD64 diagnostic)");
         eprintln!("  wire prepare <program.exe> [--out program.wir]");
         eprintln!(
             "  wire run <program.exe> [--ir program.wir] [--op-stats] [--max-instr N] [--log-dir DIR] [--cwd DIR] [--trace-cpu] [--present|--headless] [--software-render] [--capture-frames DIR] [--stop-after-presents N]"
@@ -657,7 +657,7 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
                 }
                 _ => {
                     return Err(
-                        "usage: wire probe64 <exe> [--max-instr N] [--startup] [--dll] [--window] [--cpu-stats] [--api-trace PATH] [--mono-trace PATH] [--native-mono-startup-probe DYLIB] [--native-mono-probe-skip-etw] [--native-mono-probe-boundary root|main-thread|pre-bindings|bindings|profiler|pre-images|images|metadata|strings|managed-types|classlib|logging|exceptions|synchronization] [--capture-frame PPM] [--guest-arg VALUE] [--graphics-backend PATH --moltenvk PATH]"
+                        "usage: wire probe64 <exe> [--max-instr N] [--startup] [--dll] [--window] [--cpu-stats] [--api-trace PATH] [--mono-trace PATH] [--native-mono-startup-probe DYLIB] [--native-mono-probe-skip-etw] [--native-mono-probe-boundary root|main-thread|pre-bindings|bindings|profiler|pre-images|images|metadata|strings|managed-types|classlib|logging|exceptions|synchronization|subsystems] [--capture-frame PPM] [--guest-arg VALUE] [--graphics-backend PATH --moltenvk PATH]"
                             .into(),
                     )
                 }

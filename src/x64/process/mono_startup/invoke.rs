@@ -344,9 +344,19 @@ pub(super) fn validate_classlib_init(
             b"InitializeSynchronizationContext".as_slice(),
             0x0600257f,
         ),
+        5 => (
+            c"SubsystemDescriptorStore",
+            b"ClearManagedDescriptors".as_slice(),
+            0x06000057,
+        ),
         _ => return Err("managed startup step outside exact static void sequence".into()),
     };
-    let expected = unsafe { find(image, c"UnityEngine".as_ptr(), class_name.as_ptr()) };
+    let namespace = if step == 5 {
+        c"UnityEngine.SubsystemsImplementation"
+    } else {
+        c"UnityEngine"
+    };
+    let expected = unsafe { find(image, namespace.as_ptr(), class_name.as_ptr()) };
     let text = unsafe { name(method) };
     let sig = unsafe { signature(method) };
     if expected.is_null()
@@ -361,9 +371,7 @@ pub(super) fn validate_classlib_init(
         || unsafe { count(sig) } != u32::from(step == 3)
         || unsafe { instance(sig) } != 0
     {
-        return Err(
-            "managed init outside locked ordered CoreModule ClassLibraryInitializer methods".into(),
-        );
+        return Err("managed init outside locked ordered Unity startup methods".into());
     }
     if step == 3 {
         let params = sym!(
@@ -664,5 +672,116 @@ pub(super) fn verify_project_folder(
         }
     }
     eprintln!("NATIVE_MONO_PROJECT_FOLDER_VERIFIED: normalized=true static-root-gc-stable=true");
+    Ok(())
+}
+
+pub(super) fn verify_subsystems(library: Object, image: Object) -> Result<(), String> {
+    macro_rules! sym {
+        ($name:literal,$ty:ty) => {{
+            let p = unsafe { libc::dlsym(library, concat!($name, "\0").as_ptr().cast()) };
+            if p.is_null() {
+                return Err(concat!("missing subsystem verification symbol: ", $name).into());
+            }
+            unsafe { std::mem::transmute::<Object, $ty>(p) }
+        }};
+    }
+    let find = sym!(
+        "mono_class_from_name",
+        unsafe extern "C" fn(Object, *const c_char, *const c_char) -> Object
+    );
+    let field = sym!(
+        "mono_class_get_field_from_name",
+        unsafe extern "C" fn(Object, *const c_char) -> Object
+    );
+    let field_type = sym!(
+        "mono_field_get_type",
+        unsafe extern "C" fn(Object) -> Object
+    );
+    let field_class = sym!(
+        "mono_class_from_mono_type",
+        unsafe extern "C" fn(Object) -> Object
+    );
+    let flags = sym!("mono_field_get_flags", unsafe extern "C" fn(Object) -> u32);
+    let get = sym!(
+        "mono_field_static_get_value",
+        unsafe extern "C" fn(Object, Object, Object)
+    );
+    let vtable = sym!(
+        "mono_class_vtable",
+        unsafe extern "C" fn(Object, Object) -> Object
+    );
+    let domain = sym!("mono_domain_get", unsafe extern "C" fn() -> Object);
+    let object_class = sym!(
+        "mono_object_get_class",
+        unsafe extern "C" fn(Object) -> Object
+    );
+    let method = sym!(
+        "mono_class_get_method_from_name",
+        unsafe extern "C" fn(Object, *const c_char, i32) -> Object
+    );
+    let invoke = sym!(
+        "mono_runtime_invoke",
+        unsafe extern "C" fn(Object, Object, *mut Object, *mut Object) -> Object
+    );
+    let unbox = sym!("mono_object_unbox", unsafe extern "C" fn(Object) -> Object);
+    let int_class = sym!("mono_get_int32_class", unsafe extern "C" fn() -> Object);
+    let collect = sym!("mono_gc_collect", unsafe extern "C" fn(i32));
+    let generation = sym!("mono_gc_max_generation", unsafe extern "C" fn() -> i32);
+    let class = unsafe {
+        find(
+            image,
+            c"UnityEngine.SubsystemsImplementation".as_ptr(),
+            c"SubsystemDescriptorStore".as_ptr(),
+        )
+    };
+    if class.is_null() {
+        return Err("subsystem descriptor store absent".into());
+    }
+    let storage = unsafe { vtable(domain(), class) };
+    if storage.is_null() {
+        return Err("subsystem descriptor static storage absent".into());
+    }
+    for cycle in 0..2 {
+        for name in [
+            c"s_IntegratedDescriptors",
+            c"s_StandaloneDescriptors",
+            c"s_DeprecatedDescriptors",
+        ] {
+            let f = unsafe { field(class, name.as_ptr()) };
+            if f.is_null() || unsafe { flags(f) } & 0x10 == 0 {
+                return Err("subsystem descriptor list field mismatch".into());
+            }
+            let expected = unsafe { field_class(field_type(f)) };
+            let mut list: Object = ptr::null_mut();
+            unsafe {
+                get(storage, f, (&mut list as *mut Object).cast());
+            }
+            if expected.is_null() || list.is_null() || unsafe { object_class(list) } != expected {
+                return Err("subsystem list static root/type mismatch".into());
+            }
+            let count = unsafe { method(expected, c"get_Count".as_ptr(), 0) };
+            if count.is_null() {
+                return Err("subsystem list Count absent".into());
+            }
+            let mut exception = ptr::null_mut();
+            let boxed = unsafe { invoke(count, list, ptr::null_mut(), &mut exception) };
+            if !exception.is_null()
+                || boxed.is_null()
+                || unsafe { object_class(boxed) } != unsafe { int_class() }
+            {
+                return Err("subsystem list Count failed".into());
+            }
+            let value = unsafe { unbox(boxed) };
+            if value.is_null() || unsafe { value.cast::<i32>().read_unaligned() } != 0 {
+                return Err("startup subsystem lists not empty".into());
+            }
+        }
+        if cycle == 0 {
+            unsafe {
+                collect(generation());
+            }
+        }
+    }
+    eprintln!("NATIVE_MONO_SUBSYSTEMS_VERIFIED: real-generic-lists=3 counts=0 static-roots-gc-stable=true");
     Ok(())
 }

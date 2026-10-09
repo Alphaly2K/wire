@@ -102,3 +102,17 @@ List<IntegratedSubsystemDescriptor> 清空和 descriptor native ptr 归零；下
 image 指纹和 exact signature 继续。完整游戏 backend/Admission 仍 false。
 新增代码最近定向 16 项通过、Clippy clean；全量 401/7 是数组/handle 阶段的完整回归，
 后续启动方法另以真实隔离 probe 和定向回归验证。本次没有修改 CPU/浮点/IR/翻译缓存。
+
+## 子系统描述符边界
+
+`native-mono-unity-subsystems-probe-01` exit 0，6 次实际 managed startup invoke，
+ClearManagedDescriptors 已执行。三个真实 List<T> 的类型/静态字段/count=0 在强制 GC
+前后验证通过。新的 subsystems boundary 验收该步骤和所有先前生命周期，16 项定向
+回归和 all-target Clippy 通过。按原始启动 trace 批量补齐 image 名称/table rows 与
+abstract/interface/generic/inflated/failure 的 native metadata scalar 查询。
+
+下一实际方法是同一锁定 SubsystemsModule 的 SubsystemManager.ClearSubsystems，
+token 0x0600003c，static void()。其 .cctor 创建三个 List 后调用 InternalCall
+StaticConstructScriptingClassMap，固定原始 target 0x180135070。需要同 owner 下受检
+嵌套 Mono metadata reentry；现有 callback 执行器遇到 nested Mono gateway 会拒绝，
+不能绕过 .cctor 或伪造 map 已构建。继续实现这一契约，不影响浮点/IR/cache 工作。
