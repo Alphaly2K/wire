@@ -6,7 +6,7 @@ mod fp;
 mod segment;
 mod string;
 mod vector;
-pub(crate) use segment::Segment;
+pub(crate) use segment::{CheckedSegment, RegisterSegment, Segment};
 
 const MEMORY: u8 = 254;
 const CONSTANT: u8 = 255;
