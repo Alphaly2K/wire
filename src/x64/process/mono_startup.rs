@@ -16,6 +16,10 @@ const ORIGINAL: &str = "86a5a4de6bcd74a637d63c96d822dc989d4ffaed6ef1c15c0e6e1f52
 const CANDIDATE: &str = "2cfdc2552a60ac42729bf73ef3eeb7e6b2f25031835f6a8e639ec3fa61ad11e7";
 const REMOTING_CANDIDATE: &str = "17f7859533bdeb5e636fc4e19a3aa1ac55502dbf089c6ede7c2b506ecdd4dcda";
 const REMOTING_SUPPORT: &str = "a916d6f9c9199b524a65ebd93bdea328e31b248c415051a2d2a8609664580d6c";
+const INCREMENTAL_CANDIDATE: &str =
+    "c89ab8c9cc00a045e998cb9bc528f2959f478729136390a0d07e54b8e8b69bda";
+const INCREMENTAL_SUPPORT: &str =
+    "edd2730c016afafc55e3dbad617fcaff6332474a9fde6808205de8edb7e53c8e";
 const EXE: &str = "94cccae89918110514672a6ec249a1252ffaeb28c0ae8d8633a9352988738f12";
 const UNITY: &str = "a2022611884470ddab23927a3eb7bbaef3924c18972d30ba7b5330a8fd25bcc4";
 const CORELIB_SUPPORT: &str = "b10bb3e59af90e92e240424ac88b1f96eb27906c3fa099958713d93801b4b078";
@@ -26,13 +30,17 @@ const PROFILER_TOKEN: u64 = ROOT_TOKEN + 16;
 const THREAD_TOKEN: u64 = ROOT_TOKEN + 32;
 static USED: AtomicBool = AtomicBool::new(false);
 type Object = *mut c_void;
+mod arrays;
 mod bindings;
 mod callbacks;
+mod handles;
 mod images;
 mod invoke;
+mod logging;
 mod metadata;
 mod objects;
 mod reflection;
+mod services;
 mod unitytls;
 macro_rules! symbol {
     ($library:expr, $name:literal, $ty:ty) => {{
@@ -161,8 +169,13 @@ impl Drop for Native {
 // Only the finite initialization sequence is admitted to native execution. Plugin activation
 // needs the owner scheduler and typed guest reentry, not a fake NULL result.
 // Fail-stop also prevents Mono's native-library fallback after callback failure.
-unsafe extern "C" fn unsupported_plugin(_: *const c_char, _: *mut i32) -> *const c_char {
-    eprintln!("NATIVE_MONO_STARTUP_REJECT: plugin callback activated before typed guest reentry is admitted");
+unsafe extern "C" fn unsupported_plugin(scope: *const c_char, _: *mut i32) -> *const c_char {
+    let name = if scope.is_null() {
+        "NULL".into()
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(scope) }.to_string_lossy()
+    };
+    eprintln!("NATIVE_MONO_STARTUP_REJECT: plugin callback scope={name:?} activated before typed guest reentry is admitted");
     std::process::abort();
 }
 pub(super) struct Probe {
@@ -204,7 +217,17 @@ pub(super) struct Probe {
     get_type_method: u64,
     managed_type_invokes: usize,
     reflection_registry: reflection::Registry,
+    handle_api: Option<handles::Api>,
+    handle_registry: handles::Registry,
+    array_api: Option<arrays::Api>,
+    array_registry: arrays::Registry,
     reflection_api: Option<reflection::Api>,
+    logging: bool,
+    logging_ready: bool,
+    exceptions: bool,
+    exceptions_ready: bool,
+    synchronization: bool,
+    synchronization_ready: bool,
     classlib: bool,
     classlib_ready: bool,
     classlib_invokes: usize,
@@ -242,6 +265,7 @@ fn runtime_profile(path: &Path) -> Result<(&'static str, &'static str), String> 
     match format!("{:x}", Sha256::digest(bytes)).as_str() {
         CANDIDATE => Ok((CANDIDATE, CORELIB_SUPPORT)),
         REMOTING_CANDIDATE => Ok((REMOTING_CANDIDATE, REMOTING_SUPPORT)),
+        INCREMENTAL_CANDIDATE => Ok((INCREMENTAL_CANDIDATE, INCREMENTAL_SUPPORT)),
         _ => Err("native Mono diagnostic runtime fingerprint mismatch".into()),
     }
 }
@@ -314,9 +338,21 @@ impl Probe {
         skip_etw: bool,
         boundary: &str,
     ) -> Result<Self, String> {
-        let classlib = boundary == "classlib";
-        let managed_types = matches!(boundary, "managed-types" | "classlib");
-        let strings = matches!(boundary, "strings" | "managed-types" | "classlib");
+        let synchronization = boundary == "synchronization";
+        let exceptions = matches!(boundary, "exceptions" | "synchronization");
+        let logging = matches!(boundary, "logging" | "exceptions" | "synchronization");
+        let classlib = matches!(
+            boundary,
+            "classlib" | "logging" | "exceptions" | "synchronization"
+        );
+        let managed_types = matches!(
+            boundary,
+            "managed-types" | "classlib" | "logging" | "exceptions" | "synchronization"
+        );
+        let strings = matches!(
+            boundary,
+            "strings" | "managed-types" | "classlib" | "logging" | "exceptions" | "synchronization"
+        );
         let (main_thread, pre_bindings, bindings, profiler, pre_images, images, metadata) = match boundary {
             "root" => (false, false, false, false, false, false, false),
             "main-thread" => (true, false, false, false, false, false, false),
@@ -325,10 +361,10 @@ impl Probe {
             "profiler" => (true, true, true, true, false, false, false),
             "pre-images" => (true, true, true, true, true, false, false),
             "images" => (true, true, true, true, true, true, false),
-            "metadata" | "strings" | "managed-types" | "classlib" => (true, true, true, true, true, true, true),
+            "metadata" | "strings" | "managed-types" | "classlib" | "logging" | "exceptions" | "synchronization" => (true, true, true, true, true, true, true),
             _ => {
                 return Err(
-                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings, profiler, pre-images, images, metadata, strings, managed-types or classlib".into(),
+                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings, profiler, pre-images, images, metadata, strings, managed-types, classlib, logging, exceptions or synchronization".into(),
                 )
             }
         };
@@ -342,9 +378,14 @@ impl Probe {
         )?;
         let library = library.canonicalize().map_err(|e| e.to_string())?;
         let (library_hash, support_hash) = runtime_profile(&library)?;
-        if classlib && library_hash != REMOTING_CANDIDATE {
+        if classlib && !matches!(library_hash, REMOTING_CANDIDATE | INCREMENTAL_CANDIDATE) {
             return Err(
                 "classlib diagnostic needs fingerprinted remoting field-wrapper runtime".into(),
+            );
+        }
+        if logging && library_hash != INCREMENTAL_CANDIDATE {
+            return Err(
+                "logging diagnostic requires verified incremental GC write-barrier runtime".into(),
             );
         }
         fingerprint(
@@ -392,7 +433,17 @@ impl Probe {
             get_type_method: 0,
             managed_type_invokes: 0,
             reflection_registry: reflection::Registry::default(),
+            handle_api: None,
+            handle_registry: handles::Registry::default(),
+            array_api: None,
+            array_registry: arrays::Registry::default(),
             reflection_api: None,
+            logging,
+            logging_ready: false,
+            exceptions,
+            exceptions_ready: false,
+            synchronization,
+            synchronization_ready: false,
             classlib,
             classlib_ready: false,
             classlib_invokes: 0,
@@ -731,6 +782,7 @@ impl Probe {
                 let owned = if (a[2] == THREAD_TOKEN && !native.thread_handle.is_null())
                     || self.object_registry.contains(a[2])
                     || self.reflection_registry.contains(a[2])
+                    || self.array_registry.contains(a[2])
                 {
                     a[2]
                 } else {
@@ -961,23 +1013,46 @@ impl Probe {
                     && function == "mono_runtime_invoke"
                     && (self.get_type_method == 0
                         || self.get_type_method == cpu.regs[1]
-                        || (self.classlib && self.classlib_invokes == 0))
+                        || (self.classlib && self.classlib_invokes < self.startup_limit()))
                 {
                     return Ok(false);
                 }
                 self.managed_types_ready = self.managed_types && self.managed_type_invokes > 0;
                 self.classlib_ready = self.classlib && self.classlib_invokes > 0;
+                self.logging_ready = self.logging && self.classlib_invokes >= 2;
+                self.exceptions_ready = self.exceptions && self.classlib_invokes >= 3;
+                self.synchronization_ready = self.synchronization && self.classlib_invokes == 5;
                 return Ok(true);
             }
         }
         Ok(false)
+    }
+    fn startup_limit(&self) -> usize {
+        if self.synchronization {
+            5
+        } else if self.exceptions {
+            3
+        } else if self.logging {
+            2
+        } else {
+            1
+        }
     }
     pub(super) fn handles_object(&self, function: &str) -> bool {
         self.strings
             && (matches!(
                 function,
                 "mono_string_new_len" | "mono_string_length" | "mono_string_chars"
-            ) || (self.managed_types && function == "mono_reflection_type_get_type"))
+            ) || (self.managed_types && function == "mono_reflection_type_get_type")
+                || (self.synchronization
+                    && matches!(
+                        function,
+                        "mono_array_new"
+                            | "mono_unity_loader_get_last_error_and_error_prepare_exception"
+                            | "mono_gchandle_new_v2"
+                            | "mono_gchandle_get_target_v2"
+                            | "mono_gchandle_free_v2"
+                    )))
     }
     pub(super) fn dispatch_object(
         &mut self,
@@ -1003,6 +1078,91 @@ impl Probe {
         cpu.regs[4]
             .checked_add(8)
             .ok_or("object return stack overflow")?;
+        if function == "mono_unity_loader_get_last_error_and_error_prepare_exception" {
+            // Locked original PE at RVA 0x270b90 is xor eax,eax; ret. The
+            // pinned Unity Mono source exports the same no-argument NULL leaf.
+            // A future non-NULL exception is not admitted by this contract.
+            let get = symbol!(
+                library,
+                "mono_unity_loader_get_last_error_and_error_prepare_exception",
+                unsafe extern "C" fn() -> Object
+            );
+            let (result, _) =
+                callbacks::with_owner(memory, runtime, self.callback_targets(), || unsafe {
+                    get()
+                })?;
+            if !result.is_null() {
+                return Err("loader-error leaf returned an unadmitted managed exception".into());
+            }
+            self.events.push("exact original/native loader-error NULL leaf forwarded; original x64 bytes 33c0c3 at RVA 0x270b90".into());
+            cpu.return_integer(memory, 0)?;
+            return Ok(false);
+        }
+        if matches!(
+            function,
+            "mono_gchandle_new_v2" | "mono_gchandle_get_target_v2" | "mono_gchandle_free_v2"
+        ) {
+            let api = match self.handle_api {
+                Some(api) => api,
+                None => {
+                    let api = handles::Api::load(library)?;
+                    self.handle_api = Some(api);
+                    api
+                }
+            };
+            let targets = self.callback_targets();
+            let (result, _) = callbacks::with_owner(memory, runtime, targets, || match function {
+                "mono_gchandle_new_v2" => {
+                    let object = if self.array_registry.contains(a[0]) {
+                        self.array_registry
+                            .native(self.array_api.ok_or("empty array API absent")?, a[0])?
+                    } else if self.object_registry.contains(a[0]) {
+                        self.object_registry
+                            .native_string(self.object_api.ok_or("String API absent")?, a[0])?
+                    } else if self.reflection_registry.contains(a[0]) {
+                        self.reflection_registry
+                            .native(self.reflection_api.ok_or("RuntimeType API absent")?, a[0])?
+                    } else {
+                        return Err(
+                            "external strong root requires a live owned managed object token"
+                                .into(),
+                        );
+                    };
+                    self.handle_registry.new_handle(api, object, a[0], a[1])
+                }
+                "mono_gchandle_get_target_v2" => self.handle_registry.target(api, a[0]),
+                _ => self.handle_registry.free(api, a[0]).map(|()| 0),
+            })?;
+            cpu.return_integer(memory, result?)?;
+            return Ok(false);
+        }
+        if function == "mono_array_new" {
+            if a[0] != ROOT_TOKEN || domain.is_null() || a[2] != 0 {
+                return Err(
+                    "startup arrays admit only real zero-length SZ arrays in the owned root domain"
+                        .into(),
+                );
+            }
+            let element = self.metadata_registry.native(a[1], metadata::Kind::Class)?;
+            let api = match self.array_api {
+                Some(api) => api,
+                None => {
+                    let api = arrays::Api::load(library)?;
+                    self.array_api = Some(api);
+                    api
+                }
+            };
+            let targets = self.callback_targets();
+            let (result, _) = callbacks::with_owner(memory, runtime, targets, || {
+                let object = unsafe { (api.new)(domain, element, 0) };
+                self.array_registry.root_empty(api, object, element)
+            })?;
+            let token = result?;
+            self.array_registry.publish(memory, token)?;
+            self.events.push(format!("actual Mono empty SZ array allocated, strong-rooted and published with only immutable bounds/length cells: {token:#x}"));
+            cpu.return_integer(memory, token)?;
+            return Ok(false);
+        }
         if function == "mono_reflection_type_get_type" {
             let api = self
                 .reflection_api
@@ -1084,8 +1244,18 @@ impl Probe {
             .checked_add(8)
             .ok_or("invoke return stack overflow")?;
         if self.classlib && self.get_type_method != 0 && a[0] != self.get_type_method {
-            if self.classlib_invokes != 0 || a[1] != 0 {
-                return Err("assembly redirection init outside one static diagnostic call".into());
+            let logging_init = self.logging && self.classlib_invokes == 1;
+            let project_folder = self.classlib_invokes == 3;
+            let argument = if project_folder {
+                if a[2] == 0 || !a[2].is_multiple_of(8) {
+                    return Err("project folder requires an owned parameter array".into());
+                }
+                Some(memory.read_int(a[2], 8)?)
+            } else {
+                None
+            };
+            if self.classlib_invokes >= self.startup_limit() || a[1] != 0 {
+                return Err("classlib init outside ordered static diagnostic calls".into());
             }
             if a[3] != 0 {
                 memory.check(a[3], 8, super::super::memory::WRITE)?;
@@ -1099,33 +1269,83 @@ impl Probe {
                 "mono_runtime_invoke",
                 unsafe extern "C" fn(Object, Object, *mut Object, *mut Object) -> Object
             );
-            let (result, _) = callbacks::with_owner(
-                memory,
-                runtime,
-                self.callback_targets(),
-                || {
-                    invoke::validate_redirections(library, method, image)?;
+            let (result, _) =
+                callbacks::with_owner(memory, runtime, self.callback_targets(), || {
+                    if let Err(error) = invoke::validate_classlib_init(
+                        library,
+                        method,
+                        image,
+                        self.classlib_invokes,
+                    ) {
+                        eprintln!(
+                            "NATIVE_MONO_REJECTED_INVOKE: {}",
+                            self.metadata_registry.describe_method(library, a[0])?
+                        );
+                        for (label, _, listing) in invoke::owned_bodies(library, method)? {
+                            eprintln!("NATIVE_MONO_REJECTED_IL {label}:\n{listing}");
+                        }
+                        return Err(error);
+                    }
+                    if logging_init {
+                        services::install(library)?;
+                        logging::install(
+                            library,
+                            image,
+                            self.registry.exact_target(logging::NAME, logging::TARGET)?,
+                        )?;
+                    }
+                    let mut args = [if let Some(token) = argument {
+                        if token == 0 {
+                            ptr::null_mut()
+                        } else {
+                            self.object_registry.native_string(
+                                self.object_api.ok_or("project folder before string API")?,
+                                token,
+                            )?
+                        }
+                    } else {
+                        ptr::null_mut()
+                    }];
                     let mut exception = ptr::null_mut();
-                    eprintln!("NATIVE_MONO_MANAGED_INVOKE_BEGIN: ClassLibraryInitializer.InitAssemblyRedirections void()");
+                    eprintln!(
+                        "NATIVE_MONO_MANAGED_INVOKE_BEGIN: startup step={} static void({})",
+                        self.classlib_invokes,
+                        if project_folder { "String" } else { "" }
+                    );
+                    let parameters = if project_folder {
+                        args.as_mut_ptr()
+                    } else {
+                        ptr::null_mut()
+                    };
                     let result =
-                        unsafe { call(method, ptr::null_mut(), ptr::null_mut(), &mut exception) };
+                        unsafe { call(method, ptr::null_mut(), parameters, &mut exception) };
                     if !exception.is_null() {
-                        return Err("native assembly redirection init raised an unadmitted managed exception".into());
+                        return Err(
+                            "native classlib init raised an unadmitted managed exception".into(),
+                        );
                     }
                     if !result.is_null() {
                         return Err(
                             "void native assembly redirection init returned an object".into()
                         );
                     }
+                    if logging_init {
+                        logging::verify(library, image)?;
+                    }
+                    if project_folder {
+                        invoke::verify_project_folder(library, image, args[0])?;
+                    }
+                    if self.classlib_invokes == 4 {
+                        invoke::verify_synchronization(library, image)?;
+                    }
                     Ok::<_, String>(())
-                },
-            )?;
+                })?;
             result?;
             if a[3] != 0 {
                 memory.write_int(a[3], 8, 0)?;
             }
             self.classlib_invokes += 1;
-            self.events.push("actual native CoreModule ClassLibraryInitializer.InitAssemblyRedirections executed; no guest pointers or managed argument copies for void()".into());
+            self.events.push(format!("actual native CoreModule startup step={} executed; typed static void({}); guest object identity resolved through owned roots", self.classlib_invokes - 1, if project_folder { "String" } else { "" }));
             cpu.return_integer(memory, 0)?;
             return Ok(false);
         }
@@ -1264,7 +1484,16 @@ impl Probe {
             .ok_or("metadata return stack overflow")?;
         let targets = self.callback_targets();
         let mut iterator_output = None;
-        let value = if function == "mono_get_corlib" {
+        let value = if matches!(
+            function,
+            "mono_class_get_userdata" | "mono_class_set_userdata"
+        ) {
+            metadata::Value::Scalar(self.metadata_registry.userdata(
+                memory,
+                a[0],
+                (function == "mono_class_set_userdata").then_some(a[1]),
+            )?)
+        } else if function == "mono_get_corlib" {
             let get = symbol!(library, "mono_get_corlib", unsafe extern "C" fn() -> Object);
             let api = match self.image_api {
                 Some(api) => api,
@@ -1285,6 +1514,53 @@ impl Probe {
             })?;
             self.metadata_registry.note_query();
             metadata::Value::Scalar(result?)
+        } else if function == "mono_class_get_image" {
+            let class = self.metadata_registry.native(a[0], metadata::Kind::Class)?;
+            let get = symbol!(
+                library,
+                "mono_class_get_image",
+                unsafe extern "C" fn(Object) -> Object
+            );
+            let (result, _) = callbacks::with_owner(memory, runtime, targets, || {
+                self.image_registry.borrow_registered(unsafe { get(class) })
+            })?;
+            self.metadata_registry.note_query();
+            metadata::Value::Scalar(result?)
+        } else if matches!(
+            function,
+            "mono_class_get_field_from_name" | "mono_class_get_method_from_name"
+        ) {
+            let class = self.metadata_registry.native(a[0], metadata::Kind::Class)?;
+            let name = string(memory, a[1])?;
+            let (result, _) = callbacks::with_owner(memory, runtime, targets, || {
+                if function == "mono_class_get_field_from_name" {
+                    let get = symbol!(
+                        library,
+                        "mono_class_get_field_from_name",
+                        unsafe extern "C" fn(Object, *const c_char) -> Object
+                    );
+                    Ok::<_, String>(metadata::Value::Handle(
+                        unsafe { get(class, name.as_ptr()) },
+                        metadata::Kind::Field,
+                    ))
+                } else {
+                    let argc = a[2] as u32 as i32;
+                    if !(-1..=16).contains(&argc) {
+                        return Err("method lookup arity outside bounded contract".into());
+                    }
+                    let get = symbol!(
+                        library,
+                        "mono_class_get_method_from_name",
+                        unsafe extern "C" fn(Object, *const c_char, i32) -> Object
+                    );
+                    Ok(metadata::Value::Handle(
+                        unsafe { get(class, name.as_ptr(), argc) },
+                        metadata::Kind::Method,
+                    ))
+                }
+            })?;
+            self.metadata_registry.note_query();
+            result?
         } else if function == "mono_class_from_name" {
             let image = self.image_registry.native_image(a[0])?;
             let namespace = string(memory, a[1])?;
@@ -1296,7 +1572,11 @@ impl Probe {
             result?
         } else if matches!(
             function,
-            "mono_class_get_methods" | "mono_class_get_nested_types" | "mono_signature_get_params"
+            "mono_class_get_methods"
+                | "mono_class_get_fields"
+                | "mono_class_get_nested_types"
+                | "mono_class_get_interfaces"
+                | "mono_signature_get_params"
         ) {
             memory.check(
                 a[1],
@@ -1313,7 +1593,8 @@ impl Probe {
             value
         } else {
             let (result, _) = callbacks::with_owner(memory, runtime, targets, || {
-                self.metadata_registry.query(library, function, a[0], a[1])
+                self.metadata_registry
+                    .query(library, function, a[0], a[1], a[2])
             })?;
             result?
         };
@@ -1674,6 +1955,20 @@ impl Probe {
                 })?;
             verified?;
         }
+        if let Some(api) = self.handle_api {
+            let (verified, _) =
+                callbacks::with_owner(memory, runtime, self.callback_targets(), || {
+                    self.handle_registry.verify(api)
+                })?;
+            verified?;
+        }
+        if let Some(api) = self.array_api {
+            let (verified, _) =
+                callbacks::with_owner(memory, runtime, self.callback_targets(), || {
+                    self.array_registry.verify(api)
+                })?;
+            verified?;
+        }
         self.events.push(format!("actual native BDWGC collection -> compiled GC adapter -> original Unity Win64 callback: {} calls, event mask {:#x}; no guest pointer passed to native profiler", stats.calls[3], stats.gc_events));
         Ok(())
     }
@@ -1722,6 +2017,7 @@ impl Probe {
             self.metadata_registry.retire(memory)?;
             self.object_registry.retire_views(memory)?;
             self.reflection_registry.retire_views(memory)?;
+            self.array_registry.retire(memory)?;
             return result;
         }
         let targets = self.callback_targets();
@@ -1730,6 +2026,7 @@ impl Probe {
         self.metadata_registry.retire(memory)?;
         self.object_registry.retire_views(memory)?;
         self.reflection_registry.retire_views(memory)?;
+        self.array_registry.retire(memory)?;
         self.shutdown_callbacks += stats.calls[2];
         self.gc_events_verified |= stats.gc_events;
         if stats.calls[2] != 1 {
@@ -1749,11 +2046,17 @@ impl Probe {
             return Ok(());
         }
         self.stopped = true;
+        if let Some(api) = self.handle_api {
+            self.handle_registry.release(api);
+        }
         if let Some(api) = self.object_api {
             self.object_registry.release_roots(api);
         }
         if let Some(api) = self.reflection_api {
             self.reflection_registry.release_roots(api);
+        }
+        if let Some(api) = self.array_api {
+            self.array_registry.release(api);
         }
         if let Some(api) = self.image_api {
             self.image_registry.retire(api);
@@ -1777,7 +2080,7 @@ impl Probe {
     }
     pub(super) fn report(&self) -> String {
         format!(
-            "native-root-ready={}\nnative-main-thread-ready={}\nnative-pre-bindings-ready={}\nnative-bindings-ready={}\nprovider-bindings={}\nnative-scalar-adapters={}\nactual-unity-scalar-callbacks-verified={}\nnative-profiler-ready={}\nactual-gc-event-mask={}\nactual-shutdown-callbacks={}\nnative-pre-images-ready={}\nactual-unitytls-leaf-verified={}\nnative-images-ready={}\nnative-metadata-ready={}\nnative-strings-ready={}\nnative-managed-types-ready={}\nnative-managed-type-invokes={}\nnative-classlib-ready={}\nnative-classlib-invokes={}\nfull-game-admission=false\n{}{}{}{}{}\n",
+            "native-root-ready={}\nnative-main-thread-ready={}\nnative-pre-bindings-ready={}\nnative-bindings-ready={}\nprovider-bindings={}\nnative-scalar-adapters={}\nactual-unity-scalar-callbacks-verified={}\nnative-profiler-ready={}\nactual-gc-event-mask={}\nactual-shutdown-callbacks={}\nnative-pre-images-ready={}\nactual-unitytls-leaf-verified={}\nnative-images-ready={}\nnative-metadata-ready={}\nnative-strings-ready={}\nnative-managed-types-ready={}\nnative-managed-type-invokes={}\nnative-classlib-ready={}\nnative-classlib-invokes={}\nnative-logging-ready={}\nnative-exceptions-ready={}\nnative-synchronization-ready={}\nfull-game-admission=false\n{}{}{}{}{}{}{}\n",
             self.root_ready,
             self.main_thread_ready,
             self.pre_bindings_ready,
@@ -1797,6 +2100,11 @@ impl Probe {
             self.managed_type_invokes,
             self.classlib_ready,
             self.classlib_invokes,
+            self.logging_ready,
+            self.exceptions_ready,
+            self.synchronization_ready,
+            self.handle_registry.report(),
+            self.array_registry.report(),
             self.reflection_registry.report(),
             self.object_registry.report(),
             self.image_registry.report(),
@@ -1816,7 +2124,10 @@ impl Probe {
             || (self.metadata_ready && !self.strings)
             || (self.strings_ready && !self.managed_types)
             || (self.managed_types_ready && !self.classlib)
-            || self.classlib_ready
+            || (self.classlib_ready && !self.logging)
+            || (self.logging_ready && !self.exceptions)
+            || (self.exceptions_ready && !self.synchronization)
+            || self.synchronization_ready
     }
 }
 fn store_stack_token(
@@ -1965,7 +2276,17 @@ mod tests {
             get_type_method: 0,
             managed_type_invokes: 0,
             reflection_registry: reflection::Registry::default(),
+            handle_api: None,
+            handle_registry: handles::Registry::default(),
+            array_api: None,
+            array_registry: arrays::Registry::default(),
             reflection_api: None,
+            logging: false,
+            logging_ready: false,
+            exceptions: false,
+            exceptions_ready: false,
+            synchronization: false,
+            synchronization_ready: false,
             classlib: false,
             classlib_ready: false,
             classlib_invokes: 0,

@@ -6,10 +6,34 @@ use std::{collections::BTreeMap, ptr};
 const HANDLE_BASE: u64 = 0x6ffe40000000;
 const STRING_BASE: u64 = 0x6ffe50000000;
 const ITER_BASE: u64 = 0x6ffe60000000;
+const CORE_CLASSES: &[&str] = &[
+    "mono_get_object_class",
+    "mono_get_byte_class",
+    "mono_get_void_class",
+    "mono_get_boolean_class",
+    "mono_get_sbyte_class",
+    "mono_get_int16_class",
+    "mono_get_uint16_class",
+    "mono_get_int32_class",
+    "mono_get_uint32_class",
+    "mono_get_intptr_class",
+    "mono_get_uintptr_class",
+    "mono_get_int64_class",
+    "mono_get_uint64_class",
+    "mono_get_single_class",
+    "mono_get_double_class",
+    "mono_get_char_class",
+    "mono_get_string_class",
+    "mono_get_enum_class",
+    "mono_get_array_class",
+    "mono_get_thread_class",
+    "mono_get_exception_class",
+];
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Kind {
     Class,
     Method,
+    Field,
     Signature,
     Type,
 }
@@ -132,6 +156,27 @@ impl Registry {
             }
         }
     }
+    /// Unity's embedding cache is guest-owned opaque data. Keep exported
+    /// get/set coherent with the checked +232 cell; never install a guest
+    /// address into the native MonoClass.
+    pub(super) fn userdata(
+        &mut self,
+        memory: &mut Memory,
+        token: u64,
+        value: Option<u64>,
+    ) -> Result<u64, String> {
+        self.native(token, Kind::Class)?;
+        if self.handles[&token].userdata.is_none() {
+            return Err("class has no owned userdata cell".into());
+        }
+        self.queries += 1;
+        if let Some(value) = value {
+            memory.write_int(token + 232, 8, value)?;
+            Ok(0)
+        } else {
+            memory.read_int(token + 232, 8)
+        }
+    }
     pub(super) fn describe_method(&self, lib: Object, token: u64) -> Result<String, String> {
         let method = self.native(token, Kind::Method)?;
         let name = sym!(
@@ -248,9 +293,73 @@ impl Registry {
         function: &str,
         a: u64,
         b: u64,
+        c: u64,
     ) -> Result<Value, String> {
         self.queries += 1;
+        if CORE_CLASSES.contains(&function) {
+            let get = sym!(lib, function, unsafe extern "C" fn() -> Object);
+            return Ok(Value::Handle(unsafe { get() }, Kind::Class));
+        }
         match function {
+            "mono_field_get_type" | "mono_field_get_parent" => {
+                let field = self.native(a, Kind::Field)?;
+                let get = sym!(lib, function, unsafe extern "C" fn(Object) -> Object);
+                Ok(Value::Handle(
+                    unsafe { get(field) },
+                    if function == "mono_field_get_type" {
+                        Kind::Type
+                    } else {
+                        Kind::Class
+                    },
+                ))
+            }
+            "mono_field_get_flags" | "mono_field_get_offset" => {
+                let field = self.native(a, Kind::Field)?;
+                let get = sym!(lib, function, unsafe extern "C" fn(Object) -> u32);
+                Ok(Value::Scalar(unsafe { get(field) } as u64))
+            }
+            "mono_array_class_get" | "mono_bounded_array_class_get" => {
+                let element = self.native(a, Kind::Class)?;
+                if !(1..=32).contains(&b) || (function == "mono_bounded_array_class_get" && c > 1) {
+                    return Err("array metadata rank/bounded flag outside checked contract".into());
+                }
+                let class = if function == "mono_array_class_get" {
+                    let get = sym!(lib, function, unsafe extern "C" fn(Object, u32) -> Object);
+                    unsafe { get(element, b as u32) }
+                } else {
+                    let get = sym!(
+                        lib,
+                        function,
+                        unsafe extern "C" fn(Object, u32, i32) -> Object
+                    );
+                    unsafe { get(element, b as u32, c as i32) }
+                };
+                Ok(Value::Handle(class, Kind::Class))
+            }
+            "mono_class_is_assignable_from" | "mono_class_is_subclass_of" => {
+                let left = self.native(a, Kind::Class)?;
+                let right = self.native(b, Kind::Class)?;
+                let result = if function == "mono_class_is_assignable_from" {
+                    let compare = sym!(lib, function, unsafe extern "C" fn(Object, Object) -> i32);
+                    unsafe { compare(left, right) }
+                } else {
+                    if c > 1 {
+                        return Err("subclass interface flag outside checked contract".into());
+                    }
+                    let compare = sym!(
+                        lib,
+                        function,
+                        unsafe extern "C" fn(Object, Object, i32) -> i32
+                    );
+                    unsafe { compare(left, right, c as i32) }
+                };
+                Ok(Value::Scalar(result as u32 as u64))
+            }
+            "mono_class_enum_basetype" => {
+                let class = self.native(a, Kind::Class)?;
+                let get = sym!(lib, function, unsafe extern "C" fn(Object) -> Object);
+                Ok(Value::Handle(unsafe { get(class) }, Kind::Type))
+            }
             "mono_metadata_type_equal" => {
                 let left = self.native(a, Kind::Type)?;
                 let right = self.native(b, Kind::Type)?;
@@ -260,10 +369,18 @@ impl Registry {
             "mono_type_get_class"
             | "mono_class_from_mono_type"
             | "mono_method_get_class"
-            | "mono_class_get_parent" => {
+            | "mono_class_get_parent"
+            | "mono_class_get_element_class"
+            | "mono_class_get_nesting_type"
+            | "mono_ptr_class_get" => {
                 let kind = if function.starts_with("mono_method") {
                     Kind::Method
-                } else if function == "mono_class_get_parent" {
+                } else if matches!(
+                    function,
+                    "mono_class_get_parent"
+                        | "mono_class_get_element_class"
+                        | "mono_class_get_nesting_type"
+                ) {
                     Kind::Class
                 } else {
                     Kind::Type
@@ -284,7 +401,10 @@ impl Registry {
             | "mono_class_is_enum"
             | "mono_class_get_rank"
             | "mono_class_num_fields"
-            | "mono_class_num_methods" => {
+            | "mono_class_num_methods"
+            | "mono_class_get_type_token"
+            | "mono_class_instance_size"
+            | "mono_class_array_element_size" => {
                 let kind = if function.starts_with("mono_type") {
                     Kind::Type
                 } else {
@@ -304,11 +424,14 @@ impl Registry {
                 let f = sym!(lib, function, unsafe extern "C" fn(Object) -> Object);
                 Ok(Value::Handle(unsafe { f(native) }, Kind::Signature))
             }
-            "mono_class_get_name" | "mono_class_get_namespace" | "mono_method_get_name" => {
-                let kind = if function != "mono_method_get_name" {
-                    Kind::Class
-                } else {
-                    Kind::Method
+            "mono_class_get_name"
+            | "mono_class_get_namespace"
+            | "mono_method_get_name"
+            | "mono_field_get_name" => {
+                let kind = match function {
+                    "mono_method_get_name" => Kind::Method,
+                    "mono_field_get_name" => Kind::Field,
+                    _ => Kind::Class,
                 };
                 let native = self.native(a, kind)?;
                 let f = sym!(lib, function, unsafe extern "C" fn(Object) -> *const c_char);
@@ -373,8 +496,13 @@ impl Registry {
         self.queries += 1;
         let (parent_kind, result_kind) = if function == "mono_signature_get_params" {
             (Kind::Signature, Kind::Type)
-        } else if function == "mono_class_get_nested_types" {
+        } else if matches!(
+            function,
+            "mono_class_get_nested_types" | "mono_class_get_interfaces"
+        ) {
             (Kind::Class, Kind::Class)
+        } else if function == "mono_class_get_fields" {
+            (Kind::Class, Kind::Field)
         } else {
             (Kind::Class, Kind::Method)
         };
@@ -444,37 +572,61 @@ impl Registry {
     }
 }
 pub(super) fn handles(function: &str) -> bool {
-    matches!(
-        function,
-        "mono_get_corlib"
-            | "mono_class_from_name"
-            | "mono_class_get_methods"
-            | "mono_method_get_name"
-            | "unity_mono_method_is_inflated"
-            | "unity_mono_method_is_generic"
-            | "mono_method_signature"
-            | "mono_class_get_nested_types"
-            | "mono_class_get_name"
-            | "mono_class_get_namespace"
-            | "mono_class_get_type"
-            | "mono_signature_get_param_count"
-            | "mono_signature_get_params"
-            | "mono_signature_is_instance"
-            | "mono_metadata_type_equal"
-            | "mono_type_get_class"
-            | "mono_class_from_mono_type"
-            | "mono_method_get_class"
-            | "mono_class_get_parent"
-            | "mono_signature_get_return_type"
-            | "mono_type_get_type"
-            | "mono_type_is_byref"
-            | "mono_class_get_flags"
-            | "mono_class_is_valuetype"
-            | "mono_class_is_enum"
-            | "mono_class_get_rank"
-            | "mono_class_num_fields"
-            | "mono_class_num_methods"
-    )
+    CORE_CLASSES.contains(&function)
+        || matches!(
+            function,
+            "mono_get_corlib"
+                | "mono_class_from_name"
+                | "mono_class_get_image"
+                | "mono_class_get_userdata"
+                | "mono_class_set_userdata"
+                | "mono_class_get_methods"
+                | "mono_method_get_name"
+                | "unity_mono_method_is_inflated"
+                | "unity_mono_method_is_generic"
+                | "mono_method_signature"
+                | "mono_class_get_nested_types"
+                | "mono_class_get_name"
+                | "mono_class_get_namespace"
+                | "mono_class_get_type"
+                | "mono_signature_get_param_count"
+                | "mono_signature_get_params"
+                | "mono_signature_is_instance"
+                | "mono_metadata_type_equal"
+                | "mono_type_get_class"
+                | "mono_class_from_mono_type"
+                | "mono_method_get_class"
+                | "mono_class_get_parent"
+                | "mono_signature_get_return_type"
+                | "mono_type_get_type"
+                | "mono_type_is_byref"
+                | "mono_class_get_flags"
+                | "mono_class_is_valuetype"
+                | "mono_class_is_enum"
+                | "mono_class_get_rank"
+                | "mono_class_num_fields"
+                | "mono_class_num_methods"
+                | "mono_class_get_interfaces"
+                | "mono_class_get_element_class"
+                | "mono_class_get_nesting_type"
+                | "mono_ptr_class_get"
+                | "mono_array_class_get"
+                | "mono_bounded_array_class_get"
+                | "mono_class_is_subclass_of"
+                | "mono_class_is_assignable_from"
+                | "mono_class_enum_basetype"
+                | "mono_class_get_type_token"
+                | "mono_class_instance_size"
+                | "mono_class_array_element_size"
+                | "mono_class_get_fields"
+                | "mono_class_get_field_from_name"
+                | "mono_class_get_method_from_name"
+                | "mono_field_get_name"
+                | "mono_field_get_flags"
+                | "mono_field_get_offset"
+                | "mono_field_get_type"
+                | "mono_field_get_parent"
+        )
 }
 
 #[cfg(test)]
@@ -493,6 +645,19 @@ mod tests {
             .unwrap();
         memory.write_int(token + 232, 8, 0x12345).unwrap();
         assert_eq!(memory.read_int(token + 232, 8).unwrap(), 0x12345);
+        assert_eq!(
+            registry.userdata(&mut memory, token, None).unwrap(),
+            0x12345
+        );
+        registry
+            .userdata(&mut memory, token, Some(0xabcdef))
+            .unwrap();
+        assert_eq!(memory.read_int(token + 232, 8).unwrap(), 0xabcdef);
+        assert_eq!(
+            registry.userdata(&mut memory, token, None).unwrap(),
+            0xabcdef
+        );
+        assert!(registry.userdata(&mut memory, token + 1, Some(0)).is_err());
         assert_eq!(native[29], 0);
         assert!(memory.read_int(token + 231, 1).is_err());
         assert!(memory.read_int(token + 240, 1).is_err());

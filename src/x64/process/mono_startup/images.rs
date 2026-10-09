@@ -270,6 +270,20 @@ impl Registry {
         );
         Ok(token)
     }
+    pub(super) fn borrow_registered(&mut self, native: Object) -> Result<u64, String> {
+        if self.retired || native.is_null() {
+            return Err("class image has no live native registry".into());
+        }
+        let (token, entry) = self
+            .images
+            .iter_mut()
+            .find(|(_, entry)| entry.native == native)
+            .ok_or("class image is not a verified registered input")?;
+        // Each entry retains its provider-owned addref until retire. Reuse that
+        // exact identity instead of inventing an image or another user ref.
+        entry.borrowed = true;
+        Ok(*token)
+    }
     pub(super) fn native_image(&self, token: u64) -> Result<Object, String> {
         if self.retired {
             return Err("metadata image registry retired".into());
@@ -388,6 +402,9 @@ mod tests {
         assert_eq!(REFERENCES.with(Cell::get), 2);
         assert!(registry.close(api, image).is_err());
         assert_eq!(registry.assembly_image(api, assembly).unwrap(), image);
+        assert_eq!(registry.borrow_registered(IMAGE as Object).unwrap(), image);
+        assert_eq!(REFERENCES.with(Cell::get), 2);
+        assert!(registry.borrow_registered((IMAGE + 1) as Object).is_err());
         assert!(registry.assembly_image(api, ASSEMBLY as u64).is_err());
         registry.retire(api);
         // Domain retains the assembly image. Only the provider's independent
@@ -397,5 +414,6 @@ mod tests {
         assert_eq!(REFERENCES.with(Cell::get), 1);
         assert!(registry.assembly_image(api, assembly).is_err());
         assert!(registry.close(api, image).is_err());
+        assert!(registry.borrow_registered(IMAGE as Object).is_err());
     }
 }

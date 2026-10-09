@@ -48,6 +48,13 @@ impl Registry {
         self.entries.insert(name, target);
         Ok(scalar)
     }
+    pub(super) fn exact_target(&self, name: &str, target: u64) -> Result<u64, String> {
+        let name = CString::new(name).map_err(|e| e.to_string())?;
+        if !self.sealed || self.entries.get(&name) != Some(&target) {
+            return Err("unregistered or mismatched exact Unity callback target".into());
+        }
+        Ok(target)
+    }
     pub(super) fn len(&self) -> usize {
         self.entries.len()
     }

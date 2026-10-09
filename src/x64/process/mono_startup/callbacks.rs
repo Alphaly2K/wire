@@ -11,6 +11,7 @@ const STACK_BASE: u64 = 0x6ffd00000000;
 const STACK_BYTES: u64 = 1024 * 1024;
 const RETURN: u64 = 0x6ffd00100000;
 const WORK_LIMIT: u64 = 2_000_000;
+const STACK_SLICE: u64 = STACK_BYTES / 8;
 #[derive(Clone, Copy, Default)]
 pub(super) struct Stats {
     pub(super) calls: [usize; 7],
@@ -76,6 +77,27 @@ pub(super) fn with_owner<T>(
     };
     Ok((result, stats))
 }
+// Native classlib services borrow the existing guest process only for a bounded
+// synchronous operation. No managed/native pointer is passed into this closure.
+pub(super) fn with_service<T>(
+    operation: impl FnOnce(&mut Memory, &mut Runtime64) -> Result<T, String>,
+) -> Result<T, String> {
+    OWNER.with(|slot| {
+        if slot.get().is_null() {
+            return Err("native service has no live same-thread guest owner".into());
+        }
+        let owner = unsafe { &*slot.get() };
+        let mut memory = owner
+            .memory
+            .try_borrow_mut()
+            .map_err(|_| "native service memory is already borrowed")?;
+        let mut runtime = owner
+            .runtime
+            .try_borrow_mut()
+            .map_err(|_| "native service runtime is already borrowed")?;
+        operation(&mut memory, &mut runtime)
+    })
+}
 fn execute(owner: &Owner<'_>, slot: usize, args: &[u64]) -> Result<u64, String> {
     let target = *owner
         .targets
@@ -83,6 +105,16 @@ fn execute(owner: &Owner<'_>, slot: usize, args: &[u64]) -> Result<u64, String> 
         .ok_or("callback slot outside table")?;
     if target == 0 || args.len() > 4 {
         return Err("native callback target/arity not admitted".into());
+    }
+    let value = execute_guest(owner, target, args)?;
+    let mut calls = owner.calls.get();
+    calls[slot] += 1;
+    owner.calls.set(calls);
+    Ok(value)
+}
+fn execute_guest(owner: &Owner<'_>, target: u64, args: &[u64]) -> Result<u64, String> {
+    if target == 0 || args.len() > 4 {
+        return Err("guest callback target/arity not admitted".into());
     }
     let depth = owner.depth.get();
     if depth >= 8 {
@@ -98,18 +130,41 @@ fn execute(owner: &Owner<'_>, slot: usize, args: &[u64]) -> Result<u64, String> 
     let _depth = Depth(&owner.depth, depth);
     // Win64 caller reserves 32B shadow space above the return slot.
     // Leave 64B for shadow/home saves and maintain callee RSP = 8 (mod 16).
-    let rsp = STACK_BASE + STACK_BYTES - 72 - depth as u64 * 65536;
+    let stack_top = STACK_BASE + STACK_BYTES - depth as u64 * STACK_SLICE;
+    let rsp = stack_top - 72;
+    let teb = owner.runtime.borrow().teb();
+    let previous = [
+        owner.memory.borrow().read_int(teb + 8, 8)?,
+        owner.memory.borrow().read_int(teb + 16, 8)?,
+    ];
+    struct StackBounds<'a, 'b>(&'a Owner<'b>, u64, [u64; 2]);
+    impl Drop for StackBounds<'_, '_> {
+        fn drop(&mut self) {
+            let mut memory = self.0.memory.borrow_mut();
+            if memory
+                .write_int(self.1 + 8, 8, self.2[0])
+                .and_then(|_| memory.write_int(self.1 + 16, 8, self.2[1]))
+                .is_err()
+            {
+                eprintln!("native callback TEB stack-bound restoration failed");
+                std::process::abort();
+            }
+        }
+    }
+    let _bounds = StackBounds(owner, teb, previous);
+    owner.memory.borrow_mut().write_int(teb + 8, 8, stack_top)?;
+    owner
+        .memory
+        .borrow_mut()
+        .write_int(teb + 16, 8, stack_top - STACK_SLICE)?;
     owner.memory.borrow_mut().write_int(rsp, 8, RETURN)?;
     let mut cpu = Cpu64::new(target, rsp);
-    cpu.gs_base = owner.runtime.borrow().teb();
+    cpu.gs_base = teb;
     for (index, value) in args.iter().enumerate() {
         cpu.regs[[1, 2, 8, 9][index]] = *value;
     }
     while cpu.work < WORK_LIMIT {
         if cpu.rip == RETURN {
-            let mut calls = owner.calls.get();
-            calls[slot] += 1;
-            owner.calls.set(calls);
             return Ok(cpu.regs[0]);
         }
         let binding = owner.runtime.borrow().gateways.binding(&cpu.rip);
@@ -132,6 +187,52 @@ fn execute(owner: &Owner<'_>, slot: usize, args: &[u64]) -> Result<u64, String> 
         }
     }
     Err("native callback work limit exceeded".into())
+}
+// Transfer only owned UTF16 and a guest-local span header. The native pinned
+// pointer never becomes a guest address. Null and Unity's empty sentinel differ.
+pub(super) fn log_span(target: u64, units: Option<&[u16]>) -> Result<(), String> {
+    OWNER.with(|pointer| {
+        if pointer.get().is_null() {
+            return Err("log span has no live same-thread owner".into());
+        }
+        let owner = unsafe { &*pointer.get() };
+        let units_len = units.map_or(0, <[u16]>::len);
+        if units_len > 65536 || owner.depth.get() >= 8 {
+            return Err("log span length/depth capacity exceeded".into());
+        }
+        let address = 0x6ffa00000000 + owner.depth.get() as u64 * 0x21000;
+        owner.memory.borrow_mut().map(
+            address,
+            0x21000,
+            super::super::super::memory::READ | super::super::super::memory::WRITE,
+        )?;
+        struct Buffer<'a, 'b>(&'a Owner<'b>, u64);
+        impl Drop for Buffer<'_, '_> {
+            fn drop(&mut self) {
+                if let Err(error) = self.0.memory.borrow_mut().unmap(self.1, 0x21000) {
+                    eprintln!("native logging payload cleanup: {error}");
+                    std::process::abort();
+                }
+            }
+        }
+        let _buffer = Buffer(owner, address);
+        let begin = match units {
+            None => 0,
+            Some([]) => 1,
+            Some(units) => {
+                let bytes: Vec<_> = units.iter().flat_map(|c| c.to_le_bytes()).collect();
+                owner.memory.borrow_mut().write(address + 16, &bytes)?;
+                address + 16
+            }
+        };
+        owner.memory.borrow_mut().write_int(address, 8, begin)?;
+        owner
+            .memory
+            .borrow_mut()
+            .write_int(address + 8, 4, units_len as u64)?;
+        execute_guest(owner, target, &[address])?;
+        Ok(())
+    })
 }
 pub(super) fn reference(slot: usize, args: &[u64]) -> Result<u64, String> {
     OWNER.with(|pointer| {
@@ -297,6 +398,87 @@ mod tests {
         assert!(result.is_err());
         assert!(memory.read_int(0x6ffc00000000, 8).is_err());
         assert!(memory.read_int(STACK_BASE, 8).is_err());
+    }
+    #[test]
+    fn log_span_owns_utf16_preserves_sentinels_and_revokes_faulted_payload() {
+        let mut memory = Memory::default();
+        memory.map(0x1000, 4096, READ | WRITE | EXECUTE).unwrap();
+        memory
+            .map(super::super::super::STACK, 65536, READ | WRITE)
+            .unwrap();
+        // Authored Win64: copy span begin/length and two UTF16 units to owned
+        // output. Skip data for null/empty; never execute native machine code.
+        memory
+            .write(
+                0x1000,
+                &[
+                    0x48, 0x8b, 0x01, 0x48, 0xa3, 0x00, 0x11, 0, 0, 0, 0, 0, 0, 0x8b, 0x41, 0x08,
+                    0xa3, 0x08, 0x11, 0, 0, 0, 0, 0, 0, 0x85, 0xc0, 0x74, 0x0f, 0x48, 0x8b, 0x01,
+                    0x8b, 0x00, 0xa3, 0x0c, 0x11, 0, 0, 0, 0, 0, 0, 0xc3, 0xc3,
+                ],
+            )
+            .unwrap();
+        let mut runtime = Runtime64::new(
+            &mut memory,
+            0x140000000,
+            super::super::super::STACK,
+            65536,
+            "test",
+        )
+        .unwrap();
+        let teb = runtime.teb();
+        let original_bounds = [
+            memory.read_int(teb + 8, 8).unwrap(),
+            memory.read_int(teb + 16, 8).unwrap(),
+        ];
+        // Read gs:[StackLimit] from real guest instructions inside the callback.
+        memory
+            .write(0x1200, &[0x65, 0x48, 0x8b, 0x04, 0x25, 0x10, 0, 0, 0, 0xc3])
+            .unwrap();
+        let (value, _) =
+            with_owner(&mut memory, &mut runtime, [0x1200; 7], || reference(0, &[])).unwrap();
+        assert_eq!(value.unwrap(), STACK_BASE + STACK_BYTES - STACK_SLICE);
+        assert_eq!(
+            [
+                memory.read_int(teb + 8, 8).unwrap(),
+                memory.read_int(teb + 16, 8).unwrap()
+            ],
+            original_bounds
+        );
+        assert!(log_span(0x1000, Some(&[65, 0x4e2d])).is_err());
+        for (units, sentinel) in [
+            (None, 0),
+            (Some(&[][..]), 1),
+            (Some(&[65, 0x4e2d][..]), 0x6ffa00000010),
+        ] {
+            let (value, _) = with_owner(&mut memory, &mut runtime, [0x1000; 7], || {
+                log_span(0x1000, units)
+            })
+            .unwrap();
+            value.unwrap();
+            assert_eq!(memory.read_int(0x1100, 8).unwrap(), sentinel);
+            assert_eq!(
+                memory.read_int(0x1108, 4).unwrap(),
+                units.map_or(0, <[u16]>::len) as u64
+            );
+            if sentinel > 1 {
+                assert_eq!(memory.read_int(0x110c, 4).unwrap(), 0x4e2d0041);
+            }
+            assert!(memory.read_int(0x6ffa00000000, 8).is_err());
+        }
+        let (value, _) = with_owner(&mut memory, &mut runtime, [0x1000; 7], || {
+            log_span(0x3000, Some(&[65, 66]))
+        })
+        .unwrap();
+        assert!(value.is_err());
+        assert!(memory.read_int(0x6ffa00000000, 8).is_err());
+        assert_eq!(
+            [
+                memory.read_int(teb + 8, 8).unwrap(),
+                memory.read_int(teb + 16, 8).unwrap()
+            ],
+            original_bounds
+        );
     }
     #[test]
     fn compiled_adapters_reenter_checked_cpu_without_changing_guest_owner_and_remove_scope() {

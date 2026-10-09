@@ -1,7 +1,8 @@
 # 原生 Mono 持续推进交接（2026-10-09）
 
 用户已授权自主决策、自己测试修复和本地提交，继续推进原生Mono计划；不push。另一个agent
-可能处理SSE，故本任务一直使用独立worktree，不改CPU/SSE/IR，不合并主分支代码。
+先前处理SSE，故本任务一直使用独立worktree。用户后来告知SSE完成，已将main更新
+合入Mono工作分支并补齐shared RMW接入；主checkout核心代码仍保持原运行路径。
 主checkout仅新增本文，方便后续任务找到成果。
 
 ## 唯一工作区
@@ -29,9 +30,20 @@
 | 99318f4 | one-use预编译委托入口池、真实闭包/嵌套/自我撤销GC与回收 |
 | 40c581d | 独立修复完整debug回归发现的registry then_some提前减法溢出 |
 | 3ce4834 | 默认关闭的M3单VM生命周期、活跃lease阻止cleanup、实际query预检 |
+| 73c8207 | Mono创建线程的process-owned服务队列、owned参数结果、取消/错误/GC回归 |
+| e52848c | 生命周期绑定的aligned共享byte buffer allocator、realloc/aliases/真实backing owner |
+| da87bb1 | 将已完成的main SSE/cache更新合入独立Mono分支 |
+| 8495b3c | 新RMW快路径接入shared regions，同lease受检read/update/write |
+| f540ba7 | guest exact/interior roots快照、真实handle事务回滚与持续attach下GC回收 |
+| d55bb1f | 批量提取289/293候选C签名、71实际定义和Unity callback表 |
+| b064c11 | 真实Unity启动入口/回调追踪、10824项实际InternalCall目标及allocator空实现修正 |
+
 
 具体实现、边界和复现命令在worktree的 `docs/native-mono-services-and-gc-2026-10-09.md`。
 新增M3状态/预检说明为该worktree的 `docs/native-mono-m3-lifecycle-2026-10-09.md`。
+新ownership/接口说明：`docs/native-mono-shared-buffers-2026-10-09.md`、
+`docs/native-mono-guest-roots-2026-10-09.md`、`docs/native-mono-c-api-contracts-2026-10-09.md`。
+真实启动输入、InternalCall targets和allocator修正见worktree `docs/native-mono-unity-entry-trace-2026-10-09.md`。
 历史M1/M2文档仍保留，不要把历史kernel32/Unix故障当作当前fixture状态。
 
 ## 当前已实测
@@ -64,10 +76,11 @@ scalar覆盖拒绝及数组readonly/byref/alias/bounds/guard/revoke/GC reclaim�
 个20000000迭代样本，checksum1523661319；中位数0.297357→0.138959秒，约2.14×。
 这是配置microbenchmark，没有真实游戏native backend加速数据。游戏后端、M3准入仍false。
 
-最新完整M2 guard `checks=495 denied=0`；M1 core/interop/threads/gc/layout通过，5个executable
+最新完整M2 guard `checks=538 denied=0`（checks随GC时序变化）；M1 core/interop/threads/gc/layout通过，5个executable
 memory反向用例以86拒绝；链接审计304对象/668依赖/0 unmatched。独立M2 Clippy clean。
-新增M3 feature完整Rust回归349项、默认336项通过，各7 ignored；Root feature Clippy clean。
-构建stack工具3项回归通过。registry一行debug bugfix单独提交，CPU/SSE/IR没有改动。
+最新main SSE基线及入口追踪上的feature完整Rust回归385项通过、7 ignored；all-target feature Clippy clean。
+本轮默认路径完整Rust365项通过、7 ignored；M2真实Mono/原始DLL/程序集inventory重新执行成功。
+构建stack工具3项回归通过。registry debug bugfix及shared RMW整合修复均单独提交。
 
 ## 保留的输出
 
@@ -85,18 +98,59 @@ memory反向用例以86拒绝；链接审计304对象/668依赖/0 unmatched。�
 不得拿旧results.json证明新的patch。prepare如今认可完整patch stack的精确source prefix，
 后续patch覆盖旧hunk仍可重复；未知source编辑保留并失败，不能reset它们。
 
-## 下一阶段
+## 当前新增实测与下一阶段
 
-继续general object/reference/array/helper和正式shared allocation，精确槽/Int32[]已完成其fixture。
-下一步先扩展native Windows服务的process owner：当前TLS Scope仍是fixture，需要使Mono自己
-创建的线程也能通过固定owner queue复用同一Runtime64 handles/VFS，参数转为owned data，
-queue不携带native/managed原始指针；等待持正确GC状态并保留caller的byte[] pin。
-再收敛正式guest execution token/Mono TLS/GC roots/scheduler；在actual binding清单上建立完整
-Win64↔ARM64参数/return/marshaling分类与gateway生命期，然后才接provider/loader及Unity
-VM初始化。不要因代码工作量大就宣布阻塞；确有外部输入或不可解决契约时记录证据。
+Mono自己的Thread.Start创建两个worker，通过容量4固定owner复用Runtime64 handles/GuestFs。
+36个job/6次等待期间GC、不同线程LastError2/87、失败输出sentinel和byte[]保持均通过。
+12个in-flight route撤销：pending/closed send/reply均返回50，所有owned captures释放、0job执行。
+queue不携带native/managed pointer，caller byte[]全程pin。SetThreadErrorMode remote仍拒绝50，
+避免错改owner上下文；production Process/TLS/execution token/async服务仍未接。
+
+共享buffer arena在真实checked IL中逐byte写/核对65537B，grow到131071B后尾部zero，alias互见；
+readonly/bounds/stale addresses fault、realloc失败保留旧数据、actual backing view阻止VM cleanup。
+它是engine/unsafe-IL bytes allocator，不是UnityAllocatorVTable整体替换，也不是general Mono heap。
+main新增modify_int快路径原先跳过shared，已接入单lease检查并通过定向回归。
+
+GuestRoots模块用v2强弱handles保留刚暴露对象；完整paused寄存器+明确stack/static/heap槽
+snapshot可收敛roots，exact及interior pointers均识别。失败range拒绝整份snapshot；新增root
+第二次获取失败时释放第一个新句柄、保留旧root，真实tracker无泄漏。三对象在creator始终
+attach时经过16次GC，live snapshot保活、空snapshot全部回收。必须接Process所有root sources
+与暂停点，缺源时不能使用synchronize丢root。registry actual owner阻止提前cleanup。
+
+C compiler清单：293实际query中289候选native C签名、71本轮实际函数定义；冻结406个transitive
+依赖。源码声明不证明原始Win64 ABI，所有game gateway准入0。两个allocator名字不同：
+旧unity_mono_install_memory_callbacks(MonoMemoryCallbacks*)与真实mono_unity_install_memory_callbacks
+(MonoAllocatorVTable*)不可混用。后者包含version/malloc/realloc/free/calloc。UnityTLS仍opaque、
+vprintf含异架构va_list，不能直接传guest pointer或宣称完整callback表已知。
+
+最新真实Unity启动诊断在worktree `wire-out/native-mono-unity-callback-trace`，命令/binary/hash/input/log
+及entries/api.tsv已冻结。原始x64 Mono运行2B work到Budget：可见1024×720窗口、290draw/97Present；
+不是native后端或已稳定可玩。246个PC活跃/6249665 raw entry hits/2408 samples；113个不同入口
+名称的sample返回PC落在UnityPlayer，含尾调用，不能当全部外部CALL次数或性能占比。
+
+实际mono_add_internal_call登记10824名称/10824guest目标，采集失败0；嵌套类型/与metadata的.
+表示统一后全部一一对应声明候选，ABI准入仍0。这些可用于下一步的真实typed Unity bindings。
+工具 `tools/mono/entry_trace_report.py` 根据实际export RVA验证Mono映射0x182940000/0xa42000，
+从log读取UnityPlayer映射，并输出各input hash、边界sample、注册target及声明候选清单。
+Memory::observe保留owned/shared guard/权限/撤销/失败输出语义；新回归覆盖入口别名、批处理
+段内部、动态模块、callback PC、取指故障、逐budget CPU一致及sample/binding容量。
+
+关键修正：精确原始DLL的mono_unity_install_memory_callbacks入口RVA0x270ba0为c2 00 00，
+直接返回，不读表；mono_set_allocator_vtable RVA0x74870仅检查version，不装callbacks。
+本轮四个allocator callback入口均0，plugin callback1；disassembly保留在诊断目录。
+该样本不用先做Unity allocator回调桥。Native candidate config undef ENABLE_OVERRIDABLE_ALLOCATORS，
+eglib g_mem_set_vtable也为空，但candidate Unity installer仍读version，不能直接声称同原始行为。
+未来该精确profile的Unity installer需保持立即返回、不额外解引用guest参数；其他版本不能照此忽略。
+一般managed heap ownership/engine buffers/GC/roots仍未解决。当前Mono patches仍19个，未重建dylib。
+
+下一轮优先实际Unity provider/根域初始化和typed callbacks收敛，避免只增加孤立fixture；还需
+一般managed objects/arrays/helpers、raw reference store ownership、全Process roots/safepoints、
+稳定native Mono TLS/guest execution owner、Unity allocator/TLS/log/plugin/liveness callbacks。
+完整ABI及生产services/scheduler未准入，native game backend/M3仍false，没有真实游戏加速数据。
+不得仅把Admission字段设true来接入；要以actual binding及真实参数/return/owner证据建立gateway。
 
 不以同时启用两个VM、按函数回退旧VM、禁用GC、假API成功、开放未知native pointer或生成
-宿主机器码绕过准入。大量未实现项仍是继续工作，不是已完成。保持独立分支并更新本文。
+宿主机器码绕过准入。大量未实现项仍是继续工作，不是已完成。继续在独立分支工作并更新本文。
 
 worktree写入需sandbox escalation，既有auto-review一直允许授权的本地开发。默认Git签名
 因pinentry交互失败，采用单次 `git -c commit.gpgsign=false commit ...`，不改全局配置。
@@ -137,6 +191,20 @@ feature all-target Clippy `-D warnings` clean。Mono 19-patch stack/dylib 未变
 owner-thread guest reentry。不能把未知 guest target 直接交给 native mono_add_internal_call。
 随后是 profiler GC callbacks、UnityTLS、managed image/assembly loading；完整 ABI、生产
 roots、Windows services/scheduler 仍需逐项验证。不要反复从孤立 fixture 重新开始。
+
+## 继续推进进展（独立 worktree，主代码未合并）
+
+实施路径仍为`/Users/alphaly/.codex/worktrees/native-mono-shared-memory/wire`，分支
+`codex/native-mono-shared-memory`。新增提交：b67d9ea（真实bindings/profiler）、7a3a062
+（UnityTLS/image）、e8f2aba（typed metadata），随后rooted string提交已在该分支完成。
+
+真实Unity已经完成10824注册entry核对、82个image/assembly循环、5643 metadata查询，
+53B输入native string创建/stack交接/强制GC保活和退休。最新证据位于worktree
+`wire-out/native-mono-unity-strings-probe-01`，guard178/0、无original Mono attach。
+首次pending invoke确认System.Type.GetType(String)，正在继续reflection对象桥接。
+完整game Admission仍false，未宣称完整游戏原生执行/加速。主checkout代码未改；
+浮点和翻译缓存未改，其他agent可继续其工作。下一位接手应使用该分支及其最新handoff，
+不要从本主checkout旧provider或孤立fixture重新开始。
 
 ## 真实绑定及 GC/shutdown 已接入（本轮）
 
@@ -189,3 +257,22 @@ ClassLibraryInitializer.InitAssemblyRedirections static void()，owned IL/依赖
 严格分开；旧19-patch源码与marker已恢复核对，旧dylib未变。
 下一真实invoke是 ClassLibraryInitializer.Init（0x060022fe）→ UnityLogWriter.Init。
 完整game backend仍false，持续推进，不碰浮点/翻译缓存。
+
+## Unity 日志、增量 GC 与同步上下文已实测（继续中）
+
+实施分支新增 ae456bf：修复 native Mono interpreter 静态引用/引用结构体漏 write barrier。
+真实 collation 普通 GC 通过而 Unity incremental=3 失败的根因已定位，新 21-patch runtime
+8 套 fixtures 在普通/增量配置均通过，5 条 noexec 反向路由仍拒绝。旧 runtime 未修改。
+
+`native-mono-unity-synchronization-probe-10` exit 0，guard 231/0，原始 Mono attach 未发生。
+实际日志 null/empty/Unicode/Console 4 路、异常注册、项目路径 String 初始化、同步上下文
+5 步均执行；Current/Awaitable/managed thread ID 1 的共享身份与 GC 后 TLS 验证通过。
+130 image cycles、43623 metadata queries、585 empty arrays/strong handles、7 RuntimeTypes/
+12 strings 全部相关 GC/cleanup 验证。class userdata getter/setter 共用 guest scalar cell，
+不把 guest cache pointer 写入 native MonoClass。feature 全量 401 passed/7 ignored、Clippy
+clean；后续方法真实 probe/16 项定向另测。没有改浮点操作/翻译缓存。
+
+证据与限制见实施 worktree `docs/native-mono-incremental-gc-2026-10-09.md` 和
+`docs/native-mono-unity-logging-2026-10-09.md`。下一 actual invoke 是 SubsystemsModule
+SubsystemDescriptorStore.ClearManagedDescriptors（0x06000057），static void()，已有
+owned IL。继续自己测修提交，不因这个小里程碑停下；完整游戏 backend/Admission 仍 false。
