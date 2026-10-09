@@ -8,7 +8,7 @@
 
 - Worktree：`/Users/alphaly/.codex/worktrees/native-mono-shared-memory/wire`
 - 分支：`codex/native-mono-shared-memory`
-- 当前提交：`3ce4834`（主checkout保留原运行路径）
+- 当前实施提交：`05f5bfd`（后续文档提交只更新交接）
 - 实施计划输入：主checkout `wire-out/unity-native-mono-plan-2026-10-09/plan.md`
 
 已有阶段提交：
@@ -100,3 +100,40 @@ VM初始化。不要因代码工作量大就宣布阻塞；确有外部输入或
 
 worktree写入需sandbox escalation，既有auto-review一直允许授权的本地开发。默认Git签名
 因pinentry交互失败，采用单次 `git -c commit.gpgsign=false commit ...`，不改全局配置。
+
+## 真实 Unity 原生有限初始化已接入（05f5bfd）
+
+本轮实现提交 `05f5bfd`，分支仍是 `codex/native-mono-shared-memory`。真实 UnityPlayer
+现可通过独立、默认关闭的 native startup provider 建立原生根域，继续完成主线程/两处栈
+reference 交接、域配置、embedding hostname 与异常策略；在 InternalCall 注册前清理并停止。
+原始 x64 Mono 只作为 fingerprint/export-table 输入，未映射其 PE 页或执行 TLS/DllMain。
+完整 game Admission/native backend 仍 false；不是正式游戏原生运行或已获得游戏加速。
+
+CLI `--native-mono-startup-probe DYLIB`，有限 boundary `root|main-thread|pre-bindings`。
+工具 `tools/mono/probe_startup.py --boundary pre-bindings --skip-etw` 新建 APFS clone，保存
+frozen wire、inputs/hash/command、log、api.tsv 和 results。原游戏/SDK 不写入。预编译
+corelib support 复制到 clone；运行时无 support 编译、无 JIT/trampoline 生成。
+
+原始样本 `mono_unity_install_memory_callbacks` 的 `RET 0` 必须保留 RAX，不读 guest 表。
+root/profiler/thread 返回不透明 unmapped token；主线程 v2 strong handle 留到诊断结束，
+只许可受检 main-stack slot 保存 thread token，不把 guest slot 传入 native write barrier。
+全部非 budget outcome/错误都会关闭 probe，先释放 handle 再 cleanup，关闭后禁止 resume。
+该有限 exposure 不代替生产 guest root sources/safepoints 或通用 object/reference 支持。
+
+实测 Unity 请求 `mono_profiler_load("etw")`，原始 Windows ETW initializer 有真实代码，
+candidate 没有；未显式 skip 时 exit 1/root 未建。显式 skip 仅用于诊断并记录平台差异，
+不得计作 profiler 兼容实现。plugin finder 是预编译拒绝入口：若激活即明确 fail-stop，
+不返回假值、不继续 native library fallback；本轮成功运行未激活，不证明后续不需要。
+
+最终输出为 worktree `wire-out/native-mono-unity-startup-final-{root,main-thread,pre-bindings}`，
+三个阶段均 exit 0，guard **85 checks / 0 denied**、无 original Mono attach。另有
+`native-mono-unity-startup-final-etw-rejection`，预期 exit 1，guard 60/0。有限 headless 段
+仅约 3.31M guest work，没有渲染；耗时不能同完整游戏启动比较。
+最终 Rust 回归 default **365 passed / 7 ignored**、feature **389 passed / 7 ignored**，
+feature all-target Clippy `-D warnings` clean。Mono 19-patch stack/dylib 未变。
+
+详细文档位于 worktree `docs/native-mono-unity-startup-provider-2026-10-09.md`。
+下一步接真实 10,824 注册 entry 的 typed registry/固定 ARM64 adapters，以及 production
+owner-thread guest reentry。不能把未知 guest target 直接交给 native mono_add_internal_call。
+随后是 profiler GC callbacks、UnityTLS、managed image/assembly loading；完整 ABI、生产
+roots、Windows services/scheduler 仍需逐项验证。不要反复从孤立 fixture 重新开始。
