@@ -6,6 +6,10 @@ use iced_x86::{Decoder, DecoderOptions};
 const ARITHMETIC: u64 =
     CF | super::super::PF | super::super::AF | super::super::ZF | super::super::SF | OF;
 
+pub(crate) enum Segment {
+    Register(RegisterSegment),
+    Checked(CheckedSegment),
+}
 pub(crate) struct RegisterSegment {
     instructions: Box<[ScalarIr]>,
     update_flags: u16,
