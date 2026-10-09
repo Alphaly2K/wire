@@ -850,6 +850,11 @@ impl Memory {
             return Err("invalid AMD64 scalar width".into());
         }
         Self::range(addr, size)?;
+        #[cfg(feature = "native-mono-memory")]
+        if !self.shared.is_empty() && self.shared_contains_range(addr, size)? {
+            return self.shared_modify_int(addr, size, update);
+        }
+
         let base = addr & !(PAGE - 1);
         let start = (addr - base) as usize;
         if option_env!("WIRE_X64_NO_RMW").is_some() || size > 4096 - start {

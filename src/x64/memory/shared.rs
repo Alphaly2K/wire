@@ -363,6 +363,31 @@ impl Memory {
             .read((address - mapping.base) as usize, output)?;
         Ok(true)
     }
+    pub(super) fn shared_contains_range(&self, address: u64, len: usize) -> Result<bool, String> {
+        Ok(self.shared_mapping(address, len)?.is_some())
+    }
+    pub(super) fn shared_modify_int(
+        &self,
+        address: u64,
+        size: usize,
+        update: impl FnOnce(u64) -> u64,
+    ) -> Result<(), String> {
+        let mapping = self
+            .shared_mapping(address, size)?
+            .ok_or("unmapped shared scalar update")?;
+        mapping.check(address, size, READ)?;
+        // Keep read/update/write in a single reentrant region lease. Native
+        // accesses cannot observe a split RMW or race its copied old value.
+        mapping.region.with_native(|pointer| {
+            let at = unsafe { pointer.as_ptr().add((address - mapping.base) as usize) };
+            let mut bytes = [0u8; 8];
+            unsafe { std::ptr::copy_nonoverlapping(at, bytes.as_mut_ptr(), size) };
+            let result = update(u64::from_le_bytes(bytes));
+            mapping.check(address, size, WRITE)?;
+            unsafe { std::ptr::copy_nonoverlapping(result.to_le_bytes().as_ptr(), at, size) };
+            Ok::<(), String>(())
+        })?
+    }
     pub(super) fn shared_write(&self, address: u64, bytes: &[u8]) -> Result<bool, String> {
         let Some(mapping) = self.shared_mapping(address, bytes.len())? else {
             return Ok(false);
@@ -376,5 +401,53 @@ impl Memory {
     pub(super) fn shared_merge(&mut self, other: &mut BTreeMap<u64, SharedMapping>) {
         self.shared_bytes += other.values().map(|m| m.region.len() as u64).sum::<u64>();
         self.shared.append(other);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn shared_rmw_preserves_alias_permissions_guards_and_native_lease() {
+        let mut memory = Memory::default();
+        let region = HostRegion::owned(8).unwrap();
+        memory
+            .map_shared_data(0x57000003, region.clone(), READ | WRITE, READ | WRITE)
+            .unwrap();
+        memory
+            .map_shared_data(0x57001003, region.clone(), READ | WRITE, READ | WRITE)
+            .unwrap();
+        memory.write_int(0x57000003, 8, 41).unwrap();
+        memory.modify_int(0x57001003, 8, |value| value + 1).unwrap();
+        assert_eq!(memory.read_int(0x57000003, 8).unwrap(), 42);
+        memory.protect_shared_data(0x57001003, READ, false).unwrap();
+        let mut called = false;
+        assert!(memory
+            .modify_int(0x57001003, 8, |_| {
+                called = true;
+                99
+            })
+            .is_err());
+        assert!(called);
+        assert_eq!(memory.read_int(0x57000003, 8).unwrap(), 42);
+        memory
+            .protect_shared_data(0x57001003, READ | WRITE, true)
+            .unwrap();
+        assert!(memory
+            .modify_int(0x57001003, 8, |_| panic!("guard must fail before update"))
+            .is_err());
+        memory.modify_int(0x57001003, 8, |value| value + 1).unwrap();
+        assert_eq!(memory.read_int(0x57000003, 8).unwrap(), 43);
+        assert!(memory
+            .modify_int(0x57001003 + 4, 8, |_| panic!(
+                "bounds must fail before update"
+            ))
+            .is_err());
+        region.revoke().unwrap();
+        assert!(memory
+            .modify_int(0x57000003, 8, |_| panic!(
+                "retired mapping must reject update"
+            ))
+            .is_err());
     }
 }
