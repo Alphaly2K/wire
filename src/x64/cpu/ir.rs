@@ -1,13 +1,49 @@
-//! Fixed 24-byte, typed scalar execution IR. This is host-independent data,
+//! Fixed 24-byte, typed integer/vector execution IR. This is host-independent data,
 //! lowered from guest instructions, never host executable code or a Rust ABI
 //! serialization. PE32's persisted .wir format is deliberately separate.
 use super::{mask, reg, Cpu64, Instruction, Memory, OpKind, CF, M, OF, R};
+mod segment;
+mod string;
+mod vector;
+pub(crate) use segment::RegisterSegment;
 
 const MEMORY: u8 = 254;
 const CONSTANT: u8 = 255;
 const NO_REGISTER: u8 = 255;
 const ADDRESS32: u8 = 4;
 const GS: u8 = 8;
+const REGISTER_ONLY: u8 = 128;
+
+trait IrMemory {
+    const REGISTER_ONLY: bool = false;
+    fn read_int(&self, address: u64, size: usize) -> Result<u64, String>;
+    fn write_int(&mut self, address: u64, size: usize, value: u64) -> Result<(), String>;
+    fn modify_int(
+        &mut self,
+        address: u64,
+        size: usize,
+        update: impl FnOnce(u64) -> u64,
+    ) -> Result<(), String> {
+        let value = self.read_int(address, size)?;
+        self.write_int(address, size, update(value))
+    }
+}
+impl IrMemory for Memory {
+    fn read_int(&self, address: u64, size: usize) -> Result<u64, String> {
+        Memory::read_int(self, address, size)
+    }
+    fn write_int(&mut self, address: u64, size: usize, value: u64) -> Result<(), String> {
+        Memory::write_int(self, address, size, value)
+    }
+    fn modify_int(
+        &mut self,
+        address: u64,
+        size: usize,
+        update: impl FnOnce(u64) -> u64,
+    ) -> Result<(), String> {
+        Memory::modify_int(self, address, size, update)
+    }
+}
 
 // The low two opcode bits encode I8/I16/I32/I64. Keep operations small and
 // fuse effective-address calculation with the scalar operation.
@@ -37,6 +73,13 @@ const PUSH: u8 = 22;
 const POP: u8 = 23;
 const CALL: u8 = 24;
 const RETURN: u8 = 25;
+const SHIFT: u8 = 26;
+const IMUL: u8 = 27;
+const EXTEND_ACC: u8 = 28;
+const BSWAP: u8 = 29;
+const BIT_SCAN: u8 = 30;
+const VECTOR_FIRST: u8 = 32;
+const STRING: u8 = 43;
 
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
@@ -52,6 +95,7 @@ pub(crate) struct ScalarIr {
     addressing: u8,
     aux: u8,
 }
+
 const _: () = assert!(std::mem::size_of::<ScalarIr>() == 24);
 
 fn condition(m: M) -> Option<u8> {
@@ -77,6 +121,31 @@ fn condition(m: M) -> Option<u8> {
 }
 
 impl ScalarIr {
+    #[inline(always)]
+    pub(super) fn is_scalar(&self) -> bool {
+        self.opcode & 128 == 0
+    }
+    #[inline(always)]
+    pub(super) fn step_bounded(
+        &self,
+        cpu: &mut Cpu64,
+        mem: &mut Memory,
+        limit: u64,
+    ) -> Result<u64, String> {
+        if self.opcode & 128 != 0 {
+            if self.opcode >> 2 == STRING {
+                return self.execute_string_bounded(cpu, mem, limit);
+            }
+            self.execute_vector(cpu, mem)
+                .map_err(|e| format!("{:#x} vector IR opcode {}: {e}", cpu.rip, self.opcode))?;
+            cpu.rip = cpu.rip.wrapping_add(self.len as u64);
+            cpu.retired += 1;
+            cpu.work += 1;
+        } else {
+            self.step_scalar(cpu, mem)?;
+        }
+        Ok(1)
+    }
     pub(crate) fn lower(i: &Instruction) -> Option<Self> {
         let mut ir = Self {
             immediate: 0,
@@ -91,6 +160,12 @@ impl ScalarIr {
             aux: 0,
         };
         let m = i.mnemonic();
+        if string::supports(i) {
+            return string::lower(i, ir);
+        }
+        if vector::supports(m) {
+            return vector::lower(i, ir);
+        }
         let op = match m {
             M::Nop | M::Endbr64 | M::Pause => NOP,
             M::Mov => MOV,
@@ -115,6 +190,26 @@ impl ScalarIr {
             M::Pop => POP,
             M::Call => CALL,
             M::Ret => RETURN,
+            M::Imul if matches!(i.op_count(), 2 | 3) => {
+                ir.aux = (i.op_count() == 3) as u8;
+                IMUL
+            }
+            M::Cbw | M::Cwde | M::Cdqe | M::Cwd | M::Cdq | M::Cqo => EXTEND_ACC,
+            M::Bswap => BSWAP,
+            M::Bsf | M::Bsr => {
+                ir.aux = (m == M::Bsr) as u8;
+                BIT_SCAN
+            }
+            M::Shl | M::Sal | M::Shr | M::Sar | M::Rol | M::Ror => {
+                ir.aux = match m {
+                    M::Shr => 1,
+                    M::Sar => 2,
+                    M::Rol => 3,
+                    M::Ror => 4,
+                    _ => 0,
+                };
+                SHIFT
+            }
             _ => {
                 ir.aux = condition(m)?;
                 if i.op0_kind() == OpKind::NearBranch64 {
@@ -145,10 +240,28 @@ impl ScalarIr {
                 }
             }
             LEA => (i.op0_register().size() * 8) as u32,
+            EXTEND_ACC => match m {
+                M::Cbw | M::Cwd => 16,
+                M::Cwde | M::Cdq => 32,
+                _ => 64,
+            },
             _ => Cpu64::width(i, 0).ok()?,
         };
         ir.opcode = (op << 2) | Self::type_code(bits)?;
+        if op == BSWAP && !matches!(bits, 32 | 64) {
+            return None; // Preserve the checked fallback's invalid-width error.
+        }
+        if op == EXTEND_ACC {
+            let high = matches!(m, M::Cwd | M::Cdq | M::Cqo);
+            ir.dst = if high { 2 } else { 0 };
+            ir.src = 0;
+            ir.aux =
+                Self::type_code(if high { bits } else { bits / 2 })? | if high { 4 } else { 0 };
+            ir.addressing |= REGISTER_ONLY;
+            return Some(ir);
+        }
         if op == NOP {
+            ir.addressing |= REGISTER_ONLY;
             return Some(ir);
         }
         if op == RETURN {
@@ -162,6 +275,9 @@ impl ScalarIr {
         ir.dst = ir.operand(i, 0)?;
         if i.op_count() > 1 {
             ir.src = ir.operand(i, 1)?;
+        }
+        if op == IMUL && i.op_count() == 3 && ir.operand(i, 2)? != CONSTANT {
+            return None;
         }
         if matches!(op, ZERO_EXTEND | SIGN_EXTEND) {
             ir.aux = Self::type_code(Cpu64::width(i, 1).ok()?)?;
@@ -186,12 +302,35 @@ impl ScalarIr {
                 | NOT
                 | SET
                 | POP
+                | SHIFT
         ) && ir.dst == CONSTANT
-            || matches!(op, LEA | CMOV | ZERO_EXTEND | SIGN_EXTEND) && ir.dst >= MEMORY
+            || matches!(
+                op,
+                LEA | CMOV | ZERO_EXTEND | SIGN_EXTEND | IMUL | BSWAP | BIT_SCAN
+            ) && ir.dst >= MEMORY
         {
             return None;
         }
+        if ir.register_safe() {
+            ir.addressing |= REGISTER_ONLY;
+        }
         Some(ir)
+    }
+
+    fn register_safe(&self) -> bool {
+        let op = self.opcode >> 2;
+        self.is_scalar()
+            && self.dst != MEMORY
+            && (self.src != MEMORY || op == LEA)
+            && !matches!(op, PUSH | POP | CALL | RETURN)
+    }
+    #[inline(always)]
+    pub(crate) fn register_only(&self) -> bool {
+        self.is_scalar() && self.addressing & REGISTER_ONLY != 0
+    }
+    pub(crate) fn without_segment(mut self) -> Self {
+        self.addressing &= !REGISTER_ONLY;
+        self
     }
 
     fn type_code(bits: u32) -> Option<u8> {
@@ -281,7 +420,13 @@ impl ScalarIr {
     }
 
     #[inline(always)]
-    fn read(&self, cpu: &Cpu64, operand: u8, bits: u32, mem: &Memory) -> Result<u64, String> {
+    fn read(
+        &self,
+        cpu: &Cpu64,
+        operand: u8,
+        bits: u32,
+        mem: &impl IrMemory,
+    ) -> Result<u64, String> {
         Ok(match operand {
             MEMORY => mem.read_int(self.address(cpu), (bits / 8) as usize)?,
             CONSTANT => self.immediate,
@@ -295,7 +440,7 @@ impl ScalarIr {
         cpu: &mut Cpu64,
         value: u64,
         bits: u32,
-        mem: &mut Memory,
+        mem: &mut impl IrMemory,
     ) -> Result<(), String> {
         if self.dst == MEMORY {
             mem.write_int(self.address(cpu), (bits / 8) as usize, value)
@@ -332,11 +477,15 @@ impl ScalarIr {
         yes ^ (self.aux & 1 != 0)
     }
 
-    /// No vector/x87 state is touched. Each opcode has at most one store,
+    /// Each opcode has at most one store,
     /// and that checked store is its last fallible effect. Scalar rollback
     /// therefore preserves the original step's architectural fault boundary.
     #[inline(always)]
     pub(super) fn step(&self, cpu: &mut Cpu64, mem: &mut Memory) -> Result<(), String> {
+        self.step_bounded(cpu, mem, 1).map(|_| ())
+    }
+    #[inline(always)]
+    pub(super) fn step_scalar(&self, cpu: &mut Cpu64, mem: &mut Memory) -> Result<(), String> {
         // A scalar opcode can only write its explicit destination and RSP.
         // Memory/constant selectors still produce an in-range, untouched GPR.
         // Save both before execution: POP RSP can alias them, and POP [RSP]
@@ -347,7 +496,7 @@ impl ScalarIr {
         let flags = cpu.rflags;
         let rip = cpu.rip;
         cpu.rip = rip.wrapping_add(self.len as u64);
-        if let Err(e) = self.execute(cpu, mem) {
+        if let Err(e) = self.execute::<_, true>(cpu, mem) {
             cpu.regs[dst] = dst_value;
             cpu.regs[4] = rsp;
             cpu.rflags = flags;
@@ -360,7 +509,11 @@ impl ScalarIr {
     }
 
     #[inline(always)]
-    fn execute(&self, cpu: &mut Cpu64, mem: &mut Memory) -> Result<(), String> {
+    fn execute<T: IrMemory, const UPDATE_FLAGS: bool>(
+        &self,
+        cpu: &mut Cpu64,
+        mem: &mut T,
+    ) -> Result<(), String> {
         let op = self.opcode >> 2;
         let bits = 8 << (self.opcode & 3);
         match op {
@@ -381,23 +534,19 @@ impl ScalarIr {
             }
             LEA => self.write(cpu, self.address(cpu), bits, mem)?,
             ADD | ADC | SUB | SBB | CMP | AND | OR | XOR | TEST => {
+                if self.dst == MEMORY && !matches!(op, CMP | TEST) {
+                    let address = self.address(cpu);
+                    // A lowered binary operation has at most one memory
+                    // operand; the source read here cannot fault or change state.
+                    let b = self.read(cpu, self.src, bits, mem)?;
+                    mem.modify_int(address, (bits / 8) as usize, |a| {
+                        Self::binary_result::<UPDATE_FLAGS>(cpu, op, bits, a, b)
+                    })?;
+                    return Ok(());
+                }
                 let a = self.read(cpu, self.dst, bits, mem)?;
                 let b = self.read(cpu, self.src, bits, mem)?;
-                let carry = matches!(op, ADC | SBB) && cpu.rflags & CF != 0;
-                let sub = matches!(op, SUB | SBB | CMP);
-                let result = match op {
-                    AND | TEST => a & b,
-                    OR => a | b,
-                    XOR => a ^ b,
-                    _ if sub => a.wrapping_sub(b).wrapping_sub(carry as u64),
-                    _ => a.wrapping_add(b).wrapping_add(carry as u64),
-                };
-                if matches!(op, AND | OR | XOR | TEST) {
-                    cpu.flags(result, 0, result, bits, false, false);
-                    cpu.rflags &= !(CF | OF | super::AF);
-                } else {
-                    cpu.flags(a, b, result, bits, sub, carry);
-                }
+                let result = Self::binary_result::<UPDATE_FLAGS>(cpu, op, bits, a, b);
                 if !matches!(op, CMP | TEST) {
                     self.write(cpu, result, bits, mem)?;
                 }
@@ -410,7 +559,7 @@ impl ScalarIr {
                     NEG => 0u64.wrapping_sub(a),
                     _ => !a,
                 };
-                if op != NOT {
+                if UPDATE_FLAGS && op != NOT {
                     let old_cf = cpu.rflags & CF;
                     if op == NEG {
                         cpu.flags(0, a, result, bits, true, false);
@@ -420,6 +569,13 @@ impl ScalarIr {
                     }
                 }
                 self.write(cpu, result, bits, mem)?;
+            }
+            SHIFT | IMUL | EXTEND_ACC | BSWAP | BIT_SCAN => {
+                if T::REGISTER_ONLY {
+                    self.execute_integer_extended::<_, UPDATE_FLAGS>(cpu, mem)?;
+                } else {
+                    self.execute_integer_extended_checked::<_, UPDATE_FLAGS>(cpu, mem)?;
+                }
             }
             JUMP => cpu.rip = self.read(cpu, self.dst, 64, mem)?,
             BRANCH => {
@@ -469,5 +625,328 @@ impl ScalarIr {
             _ => unreachable!(),
         }
         Ok(())
+    }
+    // Keep the old scalar dispatch compact while preserving one definition
+    // of each added integer operation for scalar and register-segment paths.
+    #[inline(never)]
+    fn execute_integer_extended_checked<T: IrMemory, const UPDATE_FLAGS: bool>(
+        &self,
+        cpu: &mut Cpu64,
+        mem: &mut T,
+    ) -> Result<(), String> {
+        self.execute_integer_extended::<_, UPDATE_FLAGS>(cpu, mem)
+    }
+    #[inline(always)]
+    fn execute_integer_extended<T: IrMemory, const UPDATE_FLAGS: bool>(
+        &self,
+        cpu: &mut Cpu64,
+        mem: &mut T,
+    ) -> Result<(), String> {
+        let op = self.opcode >> 2;
+        let bits = 8 << (self.opcode & 3);
+        match op {
+            SHIFT => {
+                let a = self.read(cpu, self.dst, bits, mem)?;
+                let count =
+                    (self.read(cpu, self.src, 8, mem)? & if bits == 64 { 63 } else { 31 }) as u32;
+                let mut result = a;
+                if count != 0 {
+                    let sign = 1u64 << (bits - 1);
+                    let (carry, overflow) = match self.aux {
+                        3 | 4 => {
+                            let n = count % bits;
+                            if n != 0 {
+                                result = if self.aux == 3 {
+                                    (a << n | a >> (bits - n)) & mask(bits)
+                                } else {
+                                    (a >> n | a << (bits - n)) & mask(bits)
+                                };
+                            }
+                            let c = if self.aux == 3 {
+                                result & 1 != 0
+                            } else {
+                                result & sign != 0
+                            };
+                            let o = if self.aux == 3 {
+                                (result & sign != 0) ^ c
+                            } else {
+                                (result & sign != 0) ^ (result & (sign >> 1) != 0)
+                            };
+                            (c, o)
+                        }
+                        0 => {
+                            result = if count >= bits {
+                                0
+                            } else {
+                                (a << count) & mask(bits)
+                            };
+                            let c = count <= bits && a & (1 << (bits - count)) != 0;
+                            (c, (result & sign != 0) ^ c)
+                        }
+                        1 => {
+                            result = if count >= bits { 0 } else { a >> count };
+                            (count <= bits && a & (1 << (count - 1)) != 0, a & sign != 0)
+                        }
+                        2 => {
+                            let negative = a & sign != 0;
+                            result = ((super::signed(a, bits) as i64 >> count.min(bits - 1))
+                                as u64)
+                                & mask(bits);
+                            let c = if count >= bits {
+                                negative
+                            } else {
+                                a & (1 << (count - 1)) != 0
+                            };
+                            (c, false)
+                        }
+                        _ => unreachable!(),
+                    };
+                    if UPDATE_FLAGS {
+                        cpu.rflags = (cpu.rflags & !CF) | carry as u64;
+                    }
+                    if UPDATE_FLAGS && count == 1 {
+                        cpu.rflags = (cpu.rflags & !OF) | if overflow { OF } else { 0 };
+                    }
+                    if UPDATE_FLAGS && self.aux < 3 {
+                        cpu.rflags = (cpu.rflags & !(super::SF | super::ZF | super::PF))
+                            | if result & sign != 0 { super::SF } else { 0 }
+                            | if result == 0 { super::ZF } else { 0 }
+                            | if (result as u8).count_ones().is_multiple_of(2) {
+                                super::PF
+                            } else {
+                                0
+                            };
+                    }
+                }
+                self.write(cpu, result, bits, mem)?;
+            }
+            IMUL => {
+                let a = self.read(
+                    cpu,
+                    if self.aux != 0 { self.src } else { self.dst },
+                    bits,
+                    mem,
+                )?;
+                let b = self.read(
+                    cpu,
+                    if self.aux != 0 { CONSTANT } else { self.src },
+                    bits,
+                    mem,
+                )?;
+                let product = super::signed(a, bits) * super::signed(b, bits);
+                let low = product as u64 & mask(bits);
+                let overflow = product != super::signed(low, bits);
+                if UPDATE_FLAGS {
+                    cpu.rflags = (cpu.rflags & !(CF | OF)) | if overflow { CF | OF } else { 0 };
+                }
+                self.write(cpu, low, bits, mem)?;
+            }
+            EXTEND_ACC => {
+                let value = super::signed(cpu.regs[0], 8 << (self.aux & 3));
+                self.write(
+                    cpu,
+                    if self.aux & 4 != 0 {
+                        if value < 0 {
+                            mask(bits)
+                        } else {
+                            0
+                        }
+                    } else {
+                        value as u64
+                    },
+                    bits,
+                    mem,
+                )?;
+            }
+            BSWAP => {
+                let value = self.read(cpu, self.dst, bits, mem)?;
+                self.write(
+                    cpu,
+                    if bits == 32 {
+                        (value as u32).swap_bytes() as u64
+                    } else {
+                        value.swap_bytes()
+                    },
+                    bits,
+                    mem,
+                )?;
+            }
+            BIT_SCAN => {
+                let value = self.read(cpu, self.src, bits, mem)?;
+                if UPDATE_FLAGS {
+                    cpu.rflags = (cpu.rflags & !super::ZF) | if value == 0 { super::ZF } else { 0 };
+                }
+                if value != 0 {
+                    self.write(
+                        cpu,
+                        if self.aux == 0 {
+                            value.trailing_zeros()
+                        } else {
+                            63 - value.leading_zeros()
+                        } as u64,
+                        bits,
+                        mem,
+                    )?;
+                }
+            }
+            _ => unreachable!(),
+        }
+        Ok(())
+    }
+    #[inline(always)]
+    fn binary_result<const UPDATE_FLAGS: bool>(
+        cpu: &mut Cpu64,
+        op: u8,
+        bits: u32,
+        a: u64,
+        b: u64,
+    ) -> u64 {
+        let carry = matches!(op, ADC | SBB) && cpu.rflags & CF != 0;
+        let sub = matches!(op, SUB | SBB | CMP);
+        let result = match op {
+            AND | TEST => a & b,
+            OR => a | b,
+            XOR => a ^ b,
+            _ if sub => a.wrapping_sub(b).wrapping_sub(carry as u64),
+            _ => a.wrapping_add(b).wrapping_add(carry as u64),
+        };
+        if UPDATE_FLAGS {
+            if matches!(op, AND | OR | XOR | TEST) {
+                cpu.flags(result, 0, result, bits, false, false);
+                cpu.rflags &= !(CF | OF | super::AF);
+            } else {
+                cpu.flags(a, b, result, bits, sub, carry);
+            }
+        }
+        result
+    }
+}
+
+#[cfg(test)]
+mod equivalence {
+    use super::*;
+    use crate::x64::memory::{EXECUTE, READ, WRITE};
+
+    #[test]
+    fn added_typed_operations_match_transactional_fallback_on_success_and_faults() {
+        const CODE: u64 = 0x140000000;
+        const DATA: u64 = 0x200000000;
+        let mut instructions: Vec<Vec<u8>> = vec![
+            vec![0x48, 0x01, 0x07],
+            vec![0x48, 0x11, 0x07],
+            vec![0x48, 0x29, 0x07],
+            vec![0x48, 0x19, 0x07],
+            vec![0x48, 0x21, 0x07],
+            vec![0x48, 0x09, 0x07],
+            vec![0x48, 0x31, 0x07],
+            vec![0x4d, 0x0f, 0xaf, 0xc1],
+            vec![0x45, 0x0f, 0xaf, 0xc1],
+            vec![0x66, 0x45, 0x0f, 0xaf, 0xc1],
+            vec![0x4c, 0x0f, 0xaf, 0x07],
+            vec![0x44, 0x0f, 0xaf, 0x07],
+            vec![0x66, 0x44, 0x0f, 0xaf, 0x07],
+            vec![0x4c, 0x6b, 0x07, 0x81],
+            vec![0x44, 0x69, 0x07, 1, 2, 3, 0x80],
+            vec![0x66, 0x98],
+            vec![0x98],
+            vec![0x48, 0x98],
+            vec![0x66, 0x99],
+            vec![0x99],
+            vec![0x48, 0x99],
+            vec![0x49, 0x0f, 0xc8],
+            vec![0x41, 0x0f, 0xc8],
+            vec![0x4c, 0x0f, 0xbc, 0x07],
+            vec![0x44, 0x0f, 0xbd, 0x07],
+            vec![0x48, 0xd3, 0xe0],
+            vec![0x66, 0xd3, 0xe8],
+            vec![0xd2, 0xfc],
+            vec![0x48, 0xd3, 0xc0],
+            vec![0x48, 0xd3, 0xc8],
+            vec![0x48, 0xd3, 0x27],
+            vec![0x48, 0xd3, 0x2f],
+            vec![0x48, 0xd3, 0x3f],
+            vec![0x48, 0xd3, 0x07],
+            vec![0x48, 0xd3, 0x0f],
+            vec![0x66, 0x4c, 0x0f, 0x6e, 0xc0],
+            vec![0x66, 0x4c, 0x0f, 0x7e, 0xc0],
+            vec![0x66, 0x44, 0x0f, 0x6e, 0x07],
+            vec![0x66, 0x44, 0x0f, 0x7e, 0x07],
+            vec![0xf3, 0x44, 0x0f, 0x10, 0xc1],
+            vec![0xf2, 0x44, 0x0f, 0x10, 0xc1],
+            vec![0xf3, 0x44, 0x0f, 0x10, 0x07],
+            vec![0xf2, 0x44, 0x0f, 0x10, 0x07],
+            vec![0xf3, 0x44, 0x0f, 0x11, 0x07],
+            vec![0xf2, 0x44, 0x0f, 0x11, 0x07],
+            vec![0xf3, 0x44, 0x0f, 0x6f, 0x07],
+            vec![0xf3, 0x44, 0x0f, 0x7f, 0x07],
+            vec![0x66, 0x44, 0x0f, 0x6f, 0x07],
+            vec![0x66, 0x44, 0x0f, 0x7f, 0x07],
+        ];
+        for op in [
+            0xdb, 0xdf, 0xeb, 0xef, 0xfc, 0xfd, 0xfe, 0xd4, 0xf8, 0xf9, 0xfa, 0xfb, 0x74, 0x75,
+            0x76, 0x64, 0x65, 0x66,
+        ] {
+            instructions.push(vec![0x66, 0x45, 0x0f, op, 0xc1]);
+            instructions.push(vec![0x66, 0x44, 0x0f, op, 0x07]);
+        }
+        for code in instructions {
+            for count in [0, 1, 8, 16, 31, 32, 63, 64, 255] {
+                for (offset, permissions) in [
+                    (0, READ | WRITE),
+                    (1, READ | WRITE),
+                    (4090, READ | WRITE),
+                    (0, READ),
+                    (4090, READ),
+                ] {
+                    let setup = || {
+                        let mut mem = Memory::default();
+                        mem.map(CODE, 4096, READ | WRITE | EXECUTE).unwrap();
+                        mem.write(CODE, &code).unwrap();
+                        mem.map(DATA, 8192, READ | WRITE).unwrap();
+                        mem.write(DATA, &[0xd5; 8192]).unwrap();
+                        mem.protect(DATA + 4096, 4096, permissions).unwrap();
+                        if offset == 0 {
+                            mem.protect(DATA, 4096, permissions).unwrap();
+                        }
+                        mem
+                    };
+                    let mut fast_mem = setup();
+                    let mut ref_mem = setup();
+                    let mut fast = Cpu64::new(CODE, DATA + 8192);
+                    fast.regs[0] = 0xdeadbeef87654321;
+                    fast.regs[1] = count;
+                    fast.regs[7] = DATA + offset;
+                    fast.rflags = 0xad7;
+                    fast.mxcsr = 0x9fc0;
+                    for (n, xmm) in fast.xmm.iter_mut().enumerate() {
+                        *xmm = std::array::from_fn(|j| (n * 37 + j * 19) as u8);
+                    }
+                    let mut reference = fast.clone();
+                    let i = fast.decode(&fast_mem).unwrap();
+                    let ir = ScalarIr::lower(&i).expect("fixture must lower");
+                    let result = ir.step(&mut fast, &mut fast_mem);
+                    let mut next = reference.clone();
+                    next.rip = i.next_ip();
+                    let mut xm = false;
+                    let reference_result = next.execute(&i, &mut ref_mem, &mut xm);
+                    if reference_result.is_ok() {
+                        next.retired += 1;
+                        next.work += 1;
+                        reference = next;
+                    }
+                    assert_eq!(
+                        result.is_ok(),
+                        reference_result.is_ok(),
+                        "{i:?} offset={offset}"
+                    );
+                    assert_eq!(fast, reference, "{i:?} count={count} offset={offset}");
+                    let mut actual = [0; 8192];
+                    let mut expected = [0; 8192];
+                    fast_mem.read(DATA, &mut actual).unwrap();
+                    ref_mem.read(DATA, &mut expected).unwrap();
+                    assert_eq!(actual, expected, "{i:?} offset={offset}");
+                }
+            }
+        }
     }
 }

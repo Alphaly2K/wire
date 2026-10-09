@@ -169,6 +169,7 @@ impl Modules {
                 .ok_or_else(|| format!("AMD64 export missing: {dll}!{:?}", function.name))
         })?;
         mem.merge(mapped)?;
+        mem.register_code_image(base, name.clone());
         runtime.register_module(&name, base, pe.exports(&bytes, base)?);
         runtime.register_module_path(base, fs.guest_path(path));
         runtime.register_image(
@@ -834,13 +835,17 @@ impl Process64 {
                 }
                 return Ok(Outcome::Returned(self.cpu.regs[0]));
             }
-            let gateway = self.runtime.gateways.get(&self.cpu.rip).cloned();
+            let gateway = self.runtime.gateways.binding(&self.cpu.rip);
             let native_call = gateway.is_some();
-            if let Some(name) = gateway {
-                let (dll, function) = name.split_once('!').ok_or("invalid AMD64 gateway")?;
+            if let Some(binding) = gateway {
+                if !binding.valid {
+                    return Err("invalid AMD64 gateway".into());
+                }
+                let (dll, function) = (&*binding.dll, &*binding.original_function);
+                let name = &binding.export;
                 let control = self
                     .runtime
-                    .dispatch(dll, function, &mut self.cpu, &mut self.memory)
+                    .dispatch_bound(&binding, &mut self.cpu, &mut self.memory)
                     .map_err(|error| {
                         self.runtime.inventory_failure(dll, function);
                         format!("{name}: {error}")
@@ -1021,7 +1026,8 @@ impl Process64 {
                 // Guest instructions cannot mutate host thread metadata or
                 // dispatch an API. Keep the outer scheduler/callback machinery
                 // outside this tight loop, with the same budget/UI/quantum
-                // boundaries and a gateway/sentinel check after every step.
+                // boundaries. Register segments also reject every interior
+                // gateway/sentinel before skipping these per-step checks.
                 let mut until = budget;
                 if self.presenter.is_some() {
                     until = until.min(self.next_ui_work);
@@ -1030,7 +1036,16 @@ impl Process64 {
                     until = until.min(self.quantum_start.saturating_add(10000));
                 }
                 loop {
-                    if !self.cpu.step_cached(&mut self.memory)? {
+                    if !self.cpu.step_cached_guarded(
+                        &mut self.memory,
+                        until.saturating_sub(self.cpu.work).max(1),
+                        |start, end| {
+                            !self.runtime.gateways.has_entry(start, end)
+                                && ![RETURN, CALLBACK_RETURN]
+                                    .into_iter()
+                                    .any(|pc| pc >= start && pc < end)
+                        },
+                    )? {
                         self.cpu.step_fallback(&mut self.memory)?;
                     }
                     if self.cpu.work >= until

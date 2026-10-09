@@ -5,7 +5,7 @@ use super::{
     memory::{Memory, PAGE, READ, WRITE},
 };
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 mod address;
@@ -36,7 +36,9 @@ mod threads;
 mod time;
 mod timers;
 mod token;
+mod trace;
 mod tracing;
+pub use trace::{Trace, TraceRecord};
 mod unwind;
 mod user;
 pub use gateways::Gateways;
@@ -129,7 +131,7 @@ pub struct Runtime64 {
     not_indexed: std::collections::BTreeSet<std::path::PathBuf>,
     pub api_calls: u64,
     /// Most recent calls, bounded independently of the full api_calls counter.
-    pub trace: VecDeque<String>,
+    pub trace: Trace,
     events: events::Events,
     pipes: pipes::Pipes,
     files: files::Files,
@@ -632,6 +634,183 @@ fn import_arity(name: &str) -> Option<usize> {
     })
 }
 
+fn normalize_symbol<'a>(dll: &str, name: &'a str) -> &'a str {
+    automation::symbol(dll, dxgi::symbol(dll, sockets::symbol(dll, name)))
+}
+fn import_dwords(name: &str) -> &'static [usize] {
+    match name {
+        name if identity::arity(name).is_some() => {
+            if name.contains("Ex") {
+                &[0]
+            } else {
+                &[]
+            }
+        }
+        name if automation::arity(name).is_some() => automation::dwords(name),
+        name if winhttp::arity(name).is_some() => winhttp::dwords(name),
+        name if sockets::arity(name).is_some() => sockets::dwords(name),
+        name if devices::arity(name).is_some() => devices::dwords(name),
+        name if winrt::arity(name).is_some() => winrt::dwords(name),
+        "StringFromGUID2" => &[2],
+        "GetCPInfoExA" | "GetCPInfoExW" => &[0, 1],
+        name if dxgi::arity(name).is_some() => dxgi::dwords(name),
+        "FindFirstFileExA" | "FindFirstFileExW" => &[1, 3, 5],
+        name if user::arity(name).is_some() => user::dwords(name),
+        name if registry::arity(name).is_some() => registry::dwords(name),
+        name if display::arity(name).is_some() => display::dwords(name),
+        name if sspi::arity(name).is_some() => sspi::dwords(name),
+        "GetSystemDirectoryA"
+        | "GetSystemDirectoryW"
+        | "GetWindowsDirectoryA"
+        | "GetWindowsDirectoryW"
+        | "GetSystemWindowsDirectoryA"
+        | "GetSystemWindowsDirectoryW" => &[1],
+        "RtlVerifyVersionInfo" | "VerifyVersionInfoW" | "VerSetConditionMask" => &[1],
+        "GetDllDirectoryW" | "GetDllDirectoryA" => &[0],
+        "WaitOnAddress" => &[3],
+        "WSASetLastError" => &[0],
+        "SetCriticalSectionSpinCount" => &[1],
+        "AddVectoredExceptionHandler" => &[0],
+        "RaiseException" => &[0, 1, 2],
+        "RtlAddFunctionTable" => &[1],
+        "RtlInstallFunctionTableCallback" => &[2],
+        "GetModuleHandleExA" | "GetModuleHandleExW" => &[0],
+        "EventWrite" => &[2],
+        "EventWriteTransfer" => &[4],
+        "EventSetInformation" => &[1, 3],
+        "FormatMessageA" | "FormatMessageW" => &[0, 2, 3, 5],
+        "K32EnumProcessModules" | "EnumProcessModules" => &[2],
+        "K32EnumProcessModulesEx" | "EnumProcessModulesEx" => &[2, 4],
+        "K32GetModuleInformation" | "GetModuleInformation" => &[3],
+        "K32GetModuleBaseNameA"
+        | "K32GetModuleBaseNameW"
+        | "GetModuleBaseNameA"
+        | "GetModuleBaseNameW"
+        | "K32GetModuleFileNameExA"
+        | "K32GetModuleFileNameExW"
+        | "GetModuleFileNameExA"
+        | "GetModuleFileNameExW" => &[3],
+        "GetSidSubAuthority" => &[1],
+        "CopySid" => &[0],
+        "LocalAlloc" | "GlobalAlloc" => &[0],
+        "LocalReAlloc" | "GlobalReAlloc" => &[2],
+        "OpenProcessToken" => &[1],
+        "OpenThreadToken" => &[1, 2],
+        "GetTokenInformation" => &[1, 3],
+        "MoveFileExW" | "MoveFileExA" => &[2],
+        "DuplicateHandle" => &[4, 5, 6],
+        "SetFileAttributesW" | "SetFileAttributesA" => &[1],
+        "SHGetKnownFolderPath" => &[1],
+        "GetDateFormatEx" | "GetTimeFormatEx" => &[1, 5],
+        "EnumSystemLocalesEx" => &[1],
+        "GetLocaleInfoEx" => &[1, 3],
+        "GetLocaleInfoW" => &[0, 1, 3],
+        "LCIDToLocaleName" => &[0, 2, 3],
+        "LocaleNameToLCID" | "GetUserDefaultLocaleName" | "GetSystemDefaultLocaleName" => &[1],
+        "CreateToolhelp32Snapshot" => &[0, 1],
+        "SystemParametersInfoA" | "SystemParametersInfoW" => &[0, 1, 3],
+        "GetSystemMetrics" => &[0],
+        "CreateThread" => &[4],
+        "Sleep" | "ExitThread" => &[0],
+        "SetThreadPriority" => &[1],
+        "CreateSemaphoreExW" | "CreateSemaphoreExA" => &[1, 2, 4, 5],
+        "CreateSemaphoreW" | "CreateSemaphoreA" => &[1, 2],
+        "OpenSemaphoreW" | "OpenSemaphoreA" => &[0, 1],
+        "ReleaseSemaphore" => &[1],
+        "GetLogicalProcessorInformationEx" => &[0],
+        "BCryptGenRandom" => &[2, 3],
+        "BCryptOpenAlgorithmProvider" => &[3],
+        "BCryptCloseAlgorithmProvider" => &[1],
+        "GetEnvironmentVariableW" | "GetEnvironmentVariableA" => &[2],
+        "CreateFileW" | "CreateFileA" => &[1, 2, 4, 5],
+        "SetFilePointerEx" => &[3],
+        "GetFileInformationByHandleEx" => &[1, 3],
+        "NtQueryDirectoryFile" => &[6, 7],
+        "CreateFileMappingW" | "CreateFileMappingA" => &[2, 3, 4],
+        "MapViewOfFile" | "MapViewOfFileEx" => &[1, 2, 3],
+        "GetCurrentDirectoryW" | "GetCurrentDirectoryA" => &[0],
+        "GetFileAttributesExW" | "GetFileAttributesExA" => &[1],
+        "RoInitialize" => &[0],
+        "CoInitializeEx" => &[1],
+        "CoCreateInstance" => &[2],
+        "timeBeginPeriod" | "timeEndPeriod" => &[0],
+        "timeGetDevCaps" => &[1],
+        name if timers::arity(name).is_some() => timers::dwords(name),
+        "SetErrorMode" | "SetThreadErrorMode" => &[0],
+        "InitializeProcThreadAttributeList" => &[1, 2],
+        "UpdateProcThreadAttribute" => &[1],
+        "CreateProcessW" => &[4, 5],
+        "CreatePipe" => &[3],
+        "SetHandleInformation" => &[1, 2],
+        "ReadFile" => &[2],
+        "CreateEventW" | "CreateEventA" => &[1, 2],
+        "CreateEventExW" | "CreateEventExA" => &[2, 3],
+        "OpenEventW" | "OpenEventA" => &[0, 1],
+        "WaitForSingleObject" => &[1],
+        "WaitForSingleObjectEx" => &[1, 2],
+        "SleepEx" => &[0, 1],
+        "WaitForMultipleObjects" => &[0, 2, 3],
+        "WaitForMultipleObjectsEx" => &[0, 2, 3, 4],
+        "VirtualAlloc" => &[2, 3],
+        "VirtualProtect" | "VirtualFree" => &[2],
+        "VirtualAllocEx" => &[3, 4],
+        "VirtualProtectEx" | "VirtualFreeEx" => &[3],
+        "SetLastError"
+        | "GetTempPathW"
+        | "GetTempPath2W"
+        | "IsProcessorFeaturePresent"
+        | "TlsGetValue"
+        | "TlsSetValue"
+        | "TlsFree"
+        | "FlsGetValue"
+        | "FlsSetValue"
+        | "FlsFree"
+        | "GetStdHandle"
+        | "SetStdHandle"
+        | "IsValidCodePage"
+        | "GetCPInfo"
+        | "ExitProcess" => &[0],
+        "HeapAlloc"
+        | "HeapFree"
+        | "HeapSize"
+        | "HeapReAlloc"
+        | "InitializeCriticalSectionAndSpinCount" => &[1],
+        "InitializeCriticalSectionEx" => &[1, 2],
+        "LoadLibraryExW" | "LoadLibraryExA" | "GetModuleFileNameW" | "GetModuleFileNameA"
+        | "WriteFile" | "WriteConsoleW" => &[2],
+        "MultiByteToWideChar" | "WideCharToMultiByte" => &[0, 1, 3, 5],
+        "LCMapStringW" => &[0, 1, 3, 5],
+        "LCMapStringEx" => &[1, 3, 5],
+        "GetStringTypeW" => &[0, 2],
+        "InitOnceBeginInitialize" | "InitOnceComplete" => &[1],
+        _ => &[],
+    }
+}
+fn import_groups(name: &str) -> u32 {
+    let predicates = [
+        automation::arity(name).is_some(),
+        winhttp::arity(name).is_some(),
+        devices::arity(name).is_some(),
+        user::message_arity(name).is_some(),
+        identity::arity(name).is_some(),
+        winrt::arity(name).is_some(),
+        guid::arity(name).is_some(),
+        dxgi::arity(name).is_some(),
+        find::arity(name).is_some(),
+        user::is_callback(name),
+        user::arity(name).is_some(),
+        registry::arity(name).is_some(),
+        display::arity(name).is_some(),
+        sspi::arity(name).is_some(),
+        sockets::is_call(name),
+        timers::arity(name).is_some(),
+    ];
+    predicates
+        .into_iter()
+        .enumerate()
+        .fold(0, |mask, (n, yes)| mask | ((yes as u32) << n))
+}
+
 impl Runtime64 {
     pub fn new(
         mem: &mut Memory,
@@ -728,7 +907,7 @@ impl Runtime64 {
             next_snapshot: 0x7fff1000,
             not_indexed: std::collections::BTreeSet::new(),
             api_calls: 0,
-            trace: VecDeque::new(),
+            trace: Trace::default(),
             events: events::Events::default(),
             pipes: pipes::Pipes::default(),
             files: files::Files::default(),
@@ -1238,165 +1417,54 @@ impl Runtime64 {
         cpu: &mut Cpu64,
         mem: &mut Memory,
     ) -> Result<Control, String> {
-        let name = automation::symbol(dll, dxgi::symbol(dll, sockets::symbol(dll, name)));
-        if !import_supported(dll, name) {
+        let binding = gateways::BoundImport::from_parts(dll, name);
+        self.dispatch_bound(&binding, cpu, mem)
+    }
+    pub fn dispatch_gateway(
+        &mut self,
+        cpu: &mut Cpu64,
+        mem: &mut Memory,
+    ) -> Result<Control, String> {
+        let binding = self
+            .gateways
+            .binding(&cpu.rip)
+            .ok_or("unregistered AMD64 gateway")?;
+        if !binding.valid {
+            return Err("invalid AMD64 gateway".into());
+        }
+        self.dispatch_bound(&binding, cpu, mem)
+    }
+    pub(crate) fn dispatch_bound(
+        &mut self,
+        binding: &gateways::BoundImport,
+        cpu: &mut Cpu64,
+        mem: &mut Memory,
+    ) -> Result<Control, String> {
+        let (dll, name) = (&*binding.dll, &*binding.name);
+        if !binding.supported {
             return Err(format!("unimplemented Win64 import: {dll}!{name}"));
         }
-        let arity = import_arity(name)
+        let arity = binding
+            .arity
             .ok_or_else(|| format!("unimplemented Win64 import: {dll}!{name}"))?;
-        let mut args = cpu.arguments(mem, arity)?;
+        if binding.hot != gateways::HotImport::General
+            && arity <= 4
+            && !self.delay_hooks.contains_key(&cpu.rip)
+        {
+            return self.dispatch_hot(binding, cpu, mem);
+        }
+        if arity > 16 {
+            return Err("AMD64 gateway argument limit".into());
+        }
+        let mut argument_buffer = [0; 16];
+        let args = &mut argument_buffer[..arity];
+        cpu.arguments_into(mem, args)?;
         if name == "D3D.Context.ClearDepthStencilView" {
             // Win64's fourth positional argument is FLOAT in XMM3, not R9.
             args[3] = u32::from_le_bytes(cpu.xmm[3][..4].try_into().unwrap()) as u64;
             args[4] &= 0xff;
         }
-        let dwords: &[usize] = match name {
-            name if identity::arity(name).is_some() => {
-                if name.contains("Ex") {
-                    &[0]
-                } else {
-                    &[]
-                }
-            }
-            name if automation::arity(name).is_some() => automation::dwords(name),
-            name if winhttp::arity(name).is_some() => winhttp::dwords(name),
-            name if sockets::arity(name).is_some() => sockets::dwords(name),
-            name if devices::arity(name).is_some() => devices::dwords(name),
-            name if winrt::arity(name).is_some() => winrt::dwords(name),
-            "StringFromGUID2" => &[2],
-            "GetCPInfoExA" | "GetCPInfoExW" => &[0, 1],
-            name if dxgi::arity(name).is_some() => dxgi::dwords(name),
-            "FindFirstFileExA" | "FindFirstFileExW" => &[1, 3, 5],
-            name if user::arity(name).is_some() => user::dwords(name),
-            name if registry::arity(name).is_some() => registry::dwords(name),
-            name if display::arity(name).is_some() => display::dwords(name),
-            name if sspi::arity(name).is_some() => sspi::dwords(name),
-            "GetSystemDirectoryA"
-            | "GetSystemDirectoryW"
-            | "GetWindowsDirectoryA"
-            | "GetWindowsDirectoryW"
-            | "GetSystemWindowsDirectoryA"
-            | "GetSystemWindowsDirectoryW" => &[1],
-            "RtlVerifyVersionInfo" | "VerifyVersionInfoW" | "VerSetConditionMask" => &[1],
-            "GetDllDirectoryW" | "GetDllDirectoryA" => &[0],
-            "WaitOnAddress" => &[3],
-            "WSASetLastError" => &[0],
-            "SetCriticalSectionSpinCount" => &[1],
-            "AddVectoredExceptionHandler" => &[0],
-            "RaiseException" => &[0, 1, 2],
-            "RtlAddFunctionTable" => &[1],
-            "RtlInstallFunctionTableCallback" => &[2],
-            "GetModuleHandleExA" | "GetModuleHandleExW" => &[0],
-            "EventWrite" => &[2],
-            "EventWriteTransfer" => &[4],
-            "EventSetInformation" => &[1, 3],
-            "FormatMessageA" | "FormatMessageW" => &[0, 2, 3, 5],
-            "K32EnumProcessModules" | "EnumProcessModules" => &[2],
-            "K32EnumProcessModulesEx" | "EnumProcessModulesEx" => &[2, 4],
-            "K32GetModuleInformation" | "GetModuleInformation" => &[3],
-            "K32GetModuleBaseNameA"
-            | "K32GetModuleBaseNameW"
-            | "GetModuleBaseNameA"
-            | "GetModuleBaseNameW"
-            | "K32GetModuleFileNameExA"
-            | "K32GetModuleFileNameExW"
-            | "GetModuleFileNameExA"
-            | "GetModuleFileNameExW" => &[3],
-            "GetSidSubAuthority" => &[1],
-            "CopySid" => &[0],
-            "LocalAlloc" | "GlobalAlloc" => &[0],
-            "LocalReAlloc" | "GlobalReAlloc" => &[2],
-            "OpenProcessToken" => &[1],
-            "OpenThreadToken" => &[1, 2],
-            "GetTokenInformation" => &[1, 3],
-            "MoveFileExW" | "MoveFileExA" => &[2],
-            "DuplicateHandle" => &[4, 5, 6],
-            "SetFileAttributesW" | "SetFileAttributesA" => &[1],
-            "SHGetKnownFolderPath" => &[1],
-            "GetDateFormatEx" | "GetTimeFormatEx" => &[1, 5],
-            "EnumSystemLocalesEx" => &[1],
-            "GetLocaleInfoEx" => &[1, 3],
-            "GetLocaleInfoW" => &[0, 1, 3],
-            "LCIDToLocaleName" => &[0, 2, 3],
-            "LocaleNameToLCID" | "GetUserDefaultLocaleName" | "GetSystemDefaultLocaleName" => &[1],
-            "CreateToolhelp32Snapshot" => &[0, 1],
-            "SystemParametersInfoA" | "SystemParametersInfoW" => &[0, 1, 3],
-            "GetSystemMetrics" => &[0],
-            "CreateThread" => &[4],
-            "Sleep" | "ExitThread" => &[0],
-            "SetThreadPriority" => &[1],
-            "CreateSemaphoreExW" | "CreateSemaphoreExA" => &[1, 2, 4, 5],
-            "CreateSemaphoreW" | "CreateSemaphoreA" => &[1, 2],
-            "OpenSemaphoreW" | "OpenSemaphoreA" => &[0, 1],
-            "ReleaseSemaphore" => &[1],
-            "GetLogicalProcessorInformationEx" => &[0],
-            "BCryptGenRandom" => &[2, 3],
-            "BCryptOpenAlgorithmProvider" => &[3],
-            "BCryptCloseAlgorithmProvider" => &[1],
-            "GetEnvironmentVariableW" | "GetEnvironmentVariableA" => &[2],
-            "CreateFileW" | "CreateFileA" => &[1, 2, 4, 5],
-            "SetFilePointerEx" => &[3],
-            "GetFileInformationByHandleEx" => &[1, 3],
-            "NtQueryDirectoryFile" => &[6, 7],
-            "CreateFileMappingW" | "CreateFileMappingA" => &[2, 3, 4],
-            "MapViewOfFile" | "MapViewOfFileEx" => &[1, 2, 3],
-            "GetCurrentDirectoryW" | "GetCurrentDirectoryA" => &[0],
-            "GetFileAttributesExW" | "GetFileAttributesExA" => &[1],
-            "RoInitialize" => &[0],
-            "CoInitializeEx" => &[1],
-            "CoCreateInstance" => &[2],
-            "timeBeginPeriod" | "timeEndPeriod" => &[0],
-            "timeGetDevCaps" => &[1],
-            name if timers::arity(name).is_some() => timers::dwords(name),
-            "SetErrorMode" | "SetThreadErrorMode" => &[0],
-            "InitializeProcThreadAttributeList" => &[1, 2],
-            "UpdateProcThreadAttribute" => &[1],
-            "CreateProcessW" => &[4, 5],
-            "CreatePipe" => &[3],
-            "SetHandleInformation" => &[1, 2],
-            "ReadFile" => &[2],
-            "CreateEventW" | "CreateEventA" => &[1, 2],
-            "CreateEventExW" | "CreateEventExA" => &[2, 3],
-            "OpenEventW" | "OpenEventA" => &[0, 1],
-            "WaitForSingleObject" => &[1],
-            "WaitForSingleObjectEx" => &[1, 2],
-            "SleepEx" => &[0, 1],
-            "WaitForMultipleObjects" => &[0, 2, 3],
-            "WaitForMultipleObjectsEx" => &[0, 2, 3, 4],
-            "VirtualAlloc" => &[2, 3],
-            "VirtualProtect" | "VirtualFree" => &[2],
-            "VirtualAllocEx" => &[3, 4],
-            "VirtualProtectEx" | "VirtualFreeEx" => &[3],
-            "SetLastError"
-            | "GetTempPathW"
-            | "GetTempPath2W"
-            | "IsProcessorFeaturePresent"
-            | "TlsGetValue"
-            | "TlsSetValue"
-            | "TlsFree"
-            | "FlsGetValue"
-            | "FlsSetValue"
-            | "FlsFree"
-            | "GetStdHandle"
-            | "SetStdHandle"
-            | "IsValidCodePage"
-            | "GetCPInfo"
-            | "ExitProcess" => &[0],
-            "HeapAlloc"
-            | "HeapFree"
-            | "HeapSize"
-            | "HeapReAlloc"
-            | "InitializeCriticalSectionAndSpinCount" => &[1],
-            "InitializeCriticalSectionEx" => &[1, 2],
-            "LoadLibraryExW" | "LoadLibraryExA" | "GetModuleFileNameW" | "GetModuleFileNameA"
-            | "WriteFile" | "WriteConsoleW" => &[2],
-            "MultiByteToWideChar" | "WideCharToMultiByte" => &[0, 1, 3, 5],
-            "LCMapStringW" => &[0, 1, 3, 5],
-            "LCMapStringEx" => &[1, 3, 5],
-            "GetStringTypeW" => &[0, 2],
-            "InitOnceBeginInitialize" | "InitOnceComplete" => &[1],
-            _ => &[],
-        };
+        let dwords = binding.dwords;
         for &index in dwords {
             args[index] = args[index] as u32 as u64;
         }
@@ -1411,33 +1479,31 @@ impl Runtime64 {
             self.delay_hooks.remove(&cpu.rip);
         }
         if matches!(name, "SwapChain.Present" | "SwapChain.Present1")
-            && self.dxgi_present_needed(mem, name, &args)?
+            && self.dxgi_present_needed(mem, name, args)?
         {
             // Keep the CPU at the call until public native presentation succeeds.
             // Native submission failures must not be recorded as guest S_OK.
             return Ok(Control::Present {
                 dll: dll.into(),
                 function: name.into(),
-                args,
+                args: args.to_vec(),
             });
         }
         let ret = match name {
-            name if automation::arity(name).is_some() => self.automation_call(mem, name, &args)?,
-            name if winhttp::arity(name).is_some() => self.winhttp_call(mem, name, &args)?,
-            name if devices::arity(name).is_some() => self.device_call(mem, name, &args)?,
-            name if user::message_arity(name).is_some() => {
-                match self.message_call(mem, name, &args)? {
-                    Some(value) => value,
-                    None => return Ok(Control::Blocked),
-                }
-            }
-            name if identity::arity(name).is_some() => self.identity_call(mem, name, &args)?,
-            name if winrt::arity(name).is_some() => self.winrt_call(mem, name, &args)?,
-            name if guid::arity(name).is_some() => self.guid_call(mem, name, &args)?,
-            name if dxgi::arity(name).is_some() => self.dxgi_call(mem, name, &args)?,
-            name if find::arity(name).is_some() => self.find_call(mem, name, &args)?,
-            name if user::is_callback(name) => {
-                match self.window_start(mem, name, &args, &returned)? {
+            _ if binding.groups & (1 << 0) != 0 => self.automation_call(mem, name, args)?,
+            _ if binding.groups & (1 << 1) != 0 => self.winhttp_call(mem, name, args)?,
+            _ if binding.groups & (1 << 2) != 0 => self.device_call(mem, name, args)?,
+            _ if binding.groups & (1 << 3) != 0 => match self.message_call(mem, name, args)? {
+                Some(value) => value,
+                None => return Ok(Control::Blocked),
+            },
+            _ if binding.groups & (1 << 4) != 0 => self.identity_call(mem, name, args)?,
+            _ if binding.groups & (1 << 5) != 0 => self.winrt_call(mem, name, args)?,
+            _ if binding.groups & (1 << 6) != 0 => self.guid_call(mem, name, args)?,
+            _ if binding.groups & (1 << 7) != 0 => self.dxgi_call(mem, name, args)?,
+            _ if binding.groups & (1 << 8) != 0 => self.find_call(mem, name, args)?,
+            _ if binding.groups & (1 << 9) != 0 => {
+                match self.window_start(mem, name, args, &returned)? {
                     user::WindowResult::Value(value) => value,
                     user::WindowResult::Callback {
                         target,
@@ -1458,10 +1524,10 @@ impl Runtime64 {
                     }
                 }
             }
-            name if user::arity(name).is_some() => self.user_call(mem, name, &args)?,
-            name if registry::arity(name).is_some() => self.registry_call(mem, name, &args)?,
+            _ if binding.groups & (1 << 10) != 0 => self.user_call(mem, name, args)?,
+            _ if binding.groups & (1 << 11) != 0 => self.registry_call(mem, name, args)?,
             "EnumDisplayMonitors" => {
-                let enumeration = self.enumerate_monitors(mem, &args, &returned)?;
+                let enumeration = self.enumerate_monitors(mem, args, &returned)?;
                 if enumeration.calls.is_empty() {
                     enumeration.result
                 } else {
@@ -1469,7 +1535,7 @@ impl Runtime64 {
                     *cpu = returned;
                     self.unblock();
                     self.api_calls += 1;
-                    self.record(dll, name, &args, enumeration.result);
+                    self.record(dll, name, args, enumeration.result);
                     return Ok(Control::Callbacks {
                         calls: enumeration.calls,
                         release: enumeration.release,
@@ -1479,8 +1545,8 @@ impl Runtime64 {
                     });
                 }
             }
-            name if display::arity(name).is_some() => self.display_call(mem, name, &args)?,
-            name if sspi::arity(name).is_some() => self.security_call(mem, name, &args)?,
+            _ if binding.groups & (1 << 12) != 0 => self.display_call(mem, name, args)?,
+            _ if binding.groups & (1 << 13) != 0 => self.security_call(mem, name, args)?,
             "GetSystemDirectoryA"
             | "GetSystemDirectoryW"
             | "GetWindowsDirectoryA"
@@ -1514,11 +1580,11 @@ impl Runtime64 {
             | "GetVersionExW"
             | "RtlVerifyVersionInfo"
             | "VerifyVersionInfoW"
-            | "VerSetConditionMask" => self.version_call(mem, name, &args)?,
+            | "VerSetConditionMask" => self.version_call(mem, name, args)?,
             "SetDllDirectoryW" | "SetDllDirectoryA" | "GetDllDirectoryW" | "GetDllDirectoryA" => {
-                self.dll_directory_call(mem, name, &args)?
+                self.dll_directory_call(mem, name, args)?
             }
-            "WaitOnAddress" => match self.wait_address(mem, &args)? {
+            "WaitOnAddress" => match self.wait_address(mem, args)? {
                 Some(value) => value,
                 None => return Ok(Control::Blocked),
             },
@@ -1526,8 +1592,8 @@ impl Runtime64 {
                 self.wake_address(args[0], name == "WakeByAddressAll");
                 0
             }
-            name if sockets::is_call(name) && name != "WSAWaitForMultipleEvents" => {
-                self.winsock_call(mem, name, &args)?
+            _ if binding.groups & (1 << 14) != 0 && name != "WSAWaitForMultipleEvents" => {
+                self.winsock_call(mem, name, args)?
             }
             "AddVectoredExceptionHandler" => {
                 if args[1] == 0 {
@@ -1578,17 +1644,17 @@ impl Runtime64 {
                 }
                 return Ok(Control::Raise {
                     dll: dll.into(),
-                    args,
+                    args: args.to_vec(),
                     caller: Box::new(returned),
                 });
             }
             "RtlUnwindEx" => {
                 return Ok(Control::Unwind {
                     dll: dll.into(),
-                    args,
+                    args: args.to_vec(),
                 })
             }
-            name if unwind::is_call(name) => match self.function_table_call(mem, name, &args)? {
+            name if unwind::is_call(name) => match self.function_table_call(mem, name, args)? {
                 unwind::Result64::Value(value) => value,
                 unwind::Result64::Callback {
                     target,
@@ -1602,16 +1668,16 @@ impl Runtime64 {
                         target,
                         context,
                         base,
-                        args,
+                        args: args.to_vec(),
                     });
                 }
             },
             "GetModuleHandleExA" | "GetModuleHandleExW" => {
-                self.module_handle_ex(mem, name, &args)?
+                self.module_handle_ex(mem, name, args)?
             }
-            name if tracing::is_call(name) => self.etw_call(mem, name, &args)?,
-            "FormatMessageA" | "FormatMessageW" => self.format_message(mem, name, &args)?,
-            name if modules::is_query(name) => self.module_query(mem, name, &args)?,
+            name if tracing::is_call(name) => self.etw_call(mem, name, args)?,
+            "FormatMessageA" | "FormatMessageW" => self.format_message(mem, name, args)?,
+            name if modules::is_query(name) => self.module_query(mem, name, args)?,
             "GetSidSubAuthority"
             | "GetSidSubAuthorityCount"
             | "GetSidIdentifierAuthority"
@@ -2148,7 +2214,7 @@ impl Runtime64 {
                         *cpu = returned;
                         self.unblock();
                         self.api_calls += 1;
-                        self.record(dll, name, &args, 0);
+                        self.record(dll, name, args, 0);
                         return Ok(Control::Returned);
                     }
                 }
@@ -2175,7 +2241,7 @@ impl Runtime64 {
                     }
                 }
             }
-            "GetDateFormatEx" | "GetTimeFormatEx" => self.format_calendar(mem, name, &args)?,
+            "GetDateFormatEx" | "GetTimeFormatEx" => self.format_calendar(mem, name, args)?,
             "GetUserDefaultLCID"
             | "GetSystemDefaultLCID"
             | "GetThreadLocale"
@@ -2314,7 +2380,7 @@ impl Runtime64 {
                         *cpu = returned;
                         self.unblock();
                         self.api_calls += 1;
-                        self.record(dll, name, &args, 1);
+                        self.record(dll, name, args, 1);
                         return Ok(Control::Callbacks {
                             calls,
                             release: vec![block],
@@ -2441,7 +2507,7 @@ impl Runtime64 {
                 83 => 2,
                 _ => 0,
             },
-            "CreateThread" => self.create_thread(mem, &args)?,
+            "CreateThread" => self.create_thread(mem, args)?,
             "GetThreadErrorMode" => self.threads.entries[&self.threads.active].error_mode as u64,
             "SetThreadErrorMode" => {
                 if args[0] & !0x8007 != 0 {
@@ -2463,11 +2529,11 @@ impl Runtime64 {
                     1
                 }
             }
-            "QueueUserAPC" => self.queue_apc(mem, &args)?,
+            "QueueUserAPC" => self.queue_apc(mem, args)?,
             "SleepEx" => {
                 if args[1] != 0 {
                     if let Some(control) =
-                        self.deliver_apcs(mem, dll, name, &args, &returned, cpu)?
+                        self.deliver_apcs(mem, dll, name, args, &returned, cpu)?
                     {
                         return Ok(control);
                     }
@@ -2491,7 +2557,7 @@ impl Runtime64 {
                     return Err("Win64 ExitThread requires a thread scheduler".into());
                 }
                 self.api_calls += 1;
-                self.record(dll, name, &args, args[0]);
+                self.record(dll, name, args, args[0]);
                 return Ok(Control::ThreadExited(args[0] as u32));
             }
             "Sleep" | "SwitchToThread" => {
@@ -2512,7 +2578,7 @@ impl Runtime64 {
                 if name == "SwitchToThread" {
                     return Ok(Control::SwitchThread(dll.into()));
                 }
-                self.record(dll, name, &args, 0);
+                self.record(dll, name, args, 0);
                 return Ok(Control::Yielded);
             }
             "ResumeThread"
@@ -2613,7 +2679,7 @@ impl Runtime64 {
                             self.api_calls += 1;
                             return Ok(Control::ThreadContext {
                                 dll: dll.into(),
-                                args,
+                                args: args.to_vec(),
                                 thread: id,
                                 flags,
                             });
@@ -2907,9 +2973,9 @@ impl Runtime64 {
                     }
                 }
             }
-            "NtQueryDirectoryFile" => self.nt_query_directory(mem, &args)?,
+            "NtQueryDirectoryFile" => self.nt_query_directory(mem, args)?,
             "GetFileInformationByHandleEx" if matches!(args[1], 14 | 15) => {
-                self.full_directory_info(mem, &args)?
+                self.full_directory_info(mem, args)?
             }
             "GetFileInformationByHandle" | "GetFileInformationByHandleEx" | "GetFileTime" => {
                 let result = (|| -> Result<Vec<u8>, u32> {
@@ -3400,7 +3466,7 @@ impl Runtime64 {
                     returned.regs[0] = 0;
                     *cpu = returned;
                     self.api_calls += 1;
-                    self.record(dll, name, &args, 0);
+                    self.record(dll, name, args, 0);
                     return Ok(Control::Returned);
                 }
                 let application = if args[0] != 0 {
@@ -3510,7 +3576,7 @@ impl Runtime64 {
                     returned.regs[0] = result;
                     *cpu = returned;
                     self.api_calls += 1;
-                    self.record(dll, name, &args, result);
+                    self.record(dll, name, args, result);
                     return Ok(Control::Returned);
                 }
                 if let Some(old) = self.std_flags(args[0]) {
@@ -3529,7 +3595,7 @@ impl Runtime64 {
                     returned.regs[0] = result;
                     *cpu = returned;
                     self.api_calls += 1;
-                    self.record(dll, name, &args, result);
+                    self.record(dll, name, args, result);
                     return Ok(Control::Returned);
                 }
                 if let Some(s) = self.snapshots.get_mut(&args[0]) {
@@ -3545,7 +3611,7 @@ impl Runtime64 {
                     returned.regs[0] = result;
                     *cpu = returned;
                     self.api_calls += 1;
-                    self.record(dll, name, &args, result);
+                    self.record(dll, name, args, result);
                     return Ok(Control::Returned);
                 }
                 if let Some(flags) = self.threads.handle_flags.get_mut(&args[0]) {
@@ -3554,14 +3620,14 @@ impl Runtime64 {
                         returned.regs[0] = 0;
                         *cpu = returned;
                         self.api_calls += 1;
-                        self.record(dll, name, &args, 0);
+                        self.record(dll, name, args, 0);
                         return Ok(Control::Returned);
                     }
                     *flags = *flags & !(args[1] as u32) | args[2] as u32 & args[1] as u32;
                     returned.regs[0] = 1;
                     *cpu = returned;
                     self.api_calls += 1;
-                    self.record(dll, name, &args, 1);
+                    self.record(dll, name, args, 1);
                     return Ok(Control::Returned);
                 }
                 if self.events.flags(args[0]).is_some() {
@@ -3609,7 +3675,7 @@ impl Runtime64 {
                     returned.regs[0] = result;
                     *cpu = returned;
                     self.api_calls += 1;
-                    self.record(dll, name, &args, result);
+                    self.record(dll, name, args, result);
                     return Ok(Control::Returned);
                 }
                 match self.pipes.read(args[0], count) {
@@ -3628,7 +3694,7 @@ impl Runtime64 {
                     }
                 }
             }
-            name if timers::arity(name).is_some() => self.timer_call(mem, name, &args)?,
+            _ if binding.groups & (1 << 15) != 0 => self.timer_call(mem, name, args)?,
             "CreateEventW" | "CreateEventA" | "CreateEventExW" | "CreateEventExA"
             | "OpenEventW" | "OpenEventA" => {
                 let extended = name.contains("Ex");
@@ -3760,7 +3826,7 @@ impl Runtime64 {
                     returned.regs[0] = u32::MAX as u64;
                     *cpu = returned;
                     self.api_calls += 1;
-                    self.record(dll, name, &args, u32::MAX as u64);
+                    self.record(dll, name, args, u32::MAX as u64);
                     return Ok(Control::Returned);
                 }
                 let multiple = winsock || name.starts_with("WaitForMultiple");
@@ -3770,7 +3836,7 @@ impl Runtime64 {
                         returned.regs[0] = u32::MAX as u64;
                         *cpu = returned;
                         self.api_calls += 1;
-                        self.record(dll, name, &args, u32::MAX as u64);
+                        self.record(dll, name, args, u32::MAX as u64);
                         return Ok(Control::Returned);
                     }
                     let mut handles = Vec::new();
@@ -3788,7 +3854,7 @@ impl Runtime64 {
                     (winsock || name.ends_with("Ex")) && args[if multiple { 4 } else { 2 }] != 0;
                 if alertable && self.wait_objects(&handles, all, false).is_ok() {
                     if let Some(control) =
-                        self.deliver_apcs(mem, dll, name, &args, &returned, cpu)?
+                        self.deliver_apcs(mem, dll, name, args, &returned, cpu)?
                     {
                         return Ok(control);
                     }
@@ -3927,7 +3993,7 @@ impl Runtime64 {
                 }
             },
             "SystemTimeToTzSpecificLocalTime" | "TzSpecificLocalTimeToSystemTime" => {
-                match self.convert_zone(mem, &args, name == "TzSpecificLocalTimeToSystemTime")? {
+                match self.convert_zone(mem, args, name == "TzSpecificLocalTimeToSystemTime")? {
                     Ok(output) => {
                         mem.write(args[2], &output)?;
                         1
@@ -4134,7 +4200,7 @@ impl Runtime64 {
                     returned.regs[0] = 0;
                     *cpu = returned;
                     self.api_calls += 1;
-                    self.record(dll, name, &args, 0);
+                    self.record(dll, name, args, 0);
                     return Ok(Control::Returned);
                 } else if shared {
                     (0, readers.checked_add(1).ok_or("SRW reader overflow")?)
@@ -4628,7 +4694,7 @@ impl Runtime64 {
                     returned.regs[0] = result;
                     *cpu = returned;
                     self.api_calls += 1;
-                    self.record(dll, name, &args, result);
+                    self.record(dll, name, args, result);
                     return Ok(Control::Returned);
                 }
                 if name == "WriteFile" && self.pipes.flags(args[0]).is_some() {
@@ -4659,7 +4725,7 @@ impl Runtime64 {
                     returned.regs[0] = value;
                     *cpu = returned;
                     self.api_calls += 1;
-                    self.record(dll, name, &args, value);
+                    self.record(dll, name, args, value);
                     return Ok(Control::Returned);
                 }
                 let index = self.std_index(args[0]).filter(|&i| i != 0);
@@ -4726,7 +4792,7 @@ impl Runtime64 {
                     returned.regs[0] = 0;
                     *cpu = returned;
                     self.api_calls += 1;
-                    self.record(dll, name, &args, 0);
+                    self.record(dll, name, args, 0);
                     return Ok(Control::Returned);
                 }
                 match self.native_module(&module, true) {
@@ -4759,7 +4825,7 @@ impl Runtime64 {
                                 path,
                                 dll: dll.into(),
                                 function: name.into(),
-                                args,
+                                args: args.to_vec(),
                             });
                         }
                         self.set_error(mem, path.unwrap_err())?;
@@ -4777,7 +4843,7 @@ impl Runtime64 {
                     returned.regs[0] = 1;
                     *cpu = returned;
                     self.api_calls += 1;
-                    self.record(dll, name, &args, 1);
+                    self.record(dll, name, args, 1);
                     return Ok(Control::Returned);
                 }
                 let Some((module, refs)) = self.modules.get_mut(&args[0]) else {
@@ -4841,7 +4907,7 @@ impl Runtime64 {
                         *cpu = returned;
                         self.unblock();
                         self.api_calls += 1;
-                        self.record(dll, name, &args, 0);
+                        self.record(dll, name, args, 0);
                         return Ok(Control::Returned);
                     };
                     let function = if args[1] <= 65535 {
@@ -5098,7 +5164,7 @@ impl Runtime64 {
                             returned.regs[0] = 0;
                             *cpu = returned;
                             self.api_calls += 1;
-                            self.record(dll, name, &args, 0);
+                            self.record(dll, name, args, 0);
                             return Ok(Control::Returned);
                         }
                         mem.check(args[0], 40, WRITE)?;
@@ -5133,11 +5199,11 @@ impl Runtime64 {
                 if args[0] != PROCESS_HEAP || args[1] & !9 != 0 {
                     return Err("unsupported Win64 heap/flags".into());
                 }
-                self.guest_heap_call(mem, name, &args)?
+                self.guest_heap_call(mem, name, args)?
             }
             "ExitProcess" => {
                 self.api_calls += 1;
-                self.record(dll, name, &args, args[0] as u32 as u64);
+                self.record(dll, name, args, args[0] as u32 as u64);
                 return Ok(Control::Exited(args[0] as u32));
             }
             _ => unreachable!(),
@@ -5146,12 +5212,88 @@ impl Runtime64 {
         *cpu = returned;
         self.unblock();
         self.api_calls += 1;
-        self.record(dll, name, &args, ret);
+        self.record(dll, name, args, ret);
+        Ok(Control::Returned)
+    }
+    fn dispatch_hot(
+        &mut self,
+        binding: &gateways::BoundImport,
+        cpu: &mut Cpu64,
+        mem: &mut Memory,
+    ) -> Result<Control, String> {
+        use gateways::HotImport as H;
+        let arity = binding.arity.unwrap();
+        let mut values = [0; 4];
+        for n in 0..arity {
+            values[n] = cpu.regs[[1, 2, 8, 9][n]];
+        }
+        for &n in binding.dwords {
+            values[n] = values[n] as u32 as u64;
+        }
+        let args = &values[..arity];
+        // Capture the frame before API writes: an output may alias the return
+        // address. No whole CPU copy or argument Vec is needed on this route.
+        let target = mem.read_int(cpu.regs[4], 8)?;
+        let rsp = cpu.regs[4].checked_add(8).ok_or("AMD64 return overflow")?;
+        let ret = match binding.hot {
+            H::ThreadId => self.threads.active,
+            H::ProcessId => PID,
+            H::ThreadHandle => u64::MAX - 1,
+            H::ProcessHandle => u64::MAX,
+            H::Counter => {
+                mem.write_int(args[0], 8, (self.start.elapsed().as_nanos() / 100) as u64)?;
+                1
+            }
+            H::Frequency => {
+                mem.write_int(args[0], 8, 10_000_000)?;
+                1
+            }
+            H::Tick64 => self.start.elapsed().as_millis() as u64,
+            H::Tick32 => self.start.elapsed().as_millis() as u32 as u64,
+            H::ErrorGet => mem.read_int(self.teb() + 0x68, 4)?,
+            H::ErrorSet => {
+                self.set_error(mem, args[0] as u32)?;
+                0
+            }
+            H::TlsGet | H::TlsSet | H::TlsFree => {
+                let index = args[0] as u32 as usize;
+                if index >= self.tls.len() || self.tls[index].is_none() {
+                    self.set_error(mem, 87)?;
+                    0
+                } else if binding.hot == H::TlsGet {
+                    let value = mem.read_int(self.teb() + 0x1480 + index as u64 * 8, 8)?;
+                    self.set_error(mem, 0)?;
+                    value
+                } else {
+                    let value = if binding.hot == H::TlsFree {
+                        0
+                    } else {
+                        args[1]
+                    };
+                    mem.write_int(self.teb() + 0x1480 + index as u64 * 8, 8, value)?;
+                    self.tls[index] = if binding.hot == H::TlsFree {
+                        None
+                    } else {
+                        Some(value)
+                    };
+                    1
+                }
+            }
+            H::General => unreachable!(),
+        };
+        cpu.regs[0] = ret;
+        cpu.regs[4] = rsp;
+        cpu.rip = target;
+        self.unblock();
+        self.api_calls += 1;
+        self.inventory_record("completed", &binding.dll, &binding.name);
+        self.trace
+            .call_bound(binding.trace_export.clone(), args, ret);
         Ok(Control::Returned)
     }
     fn record(&mut self, dll: &str, name: &str, args: &[u64], ret: u64) {
         self.inventory_record("completed", dll, name);
-        self.trace_note(format!("{dll}!{name} args={args:x?} -> {ret:#x}"));
+        self.trace.call(dll, name, args, ret);
     }
     pub(super) fn trace_note(&mut self, message: String) {
         if self.trace.len() == 4096 {

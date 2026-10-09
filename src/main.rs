@@ -576,6 +576,8 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
         let mut dll_attach = false;
         let mut window = false;
         let mut cpu_stats = false;
+        let mut cpu_diagnostics = false;
+        let mut cache_layout = wire::x64::memory::TranslationCacheLayout::default();
         let mut api_trace = None;
         let mut capture_frame = None;
         let mut graphics_backend = None;
@@ -598,6 +600,21 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
                 }
                 "--startup" => startup = true,
                 "--cpu-stats" => cpu_stats = true,
+                "--cpu-diagnostics" => {
+                    cpu_stats = true;
+                    cpu_diagnostics = true;
+                }
+                "--translation-cache" => {
+                    use wire::x64::memory::TranslationCacheLayout as L;
+                    cache_layout = match opt.next().map(String::as_str) {
+                        Some("direct16k") => L::Direct16K,
+                        Some("direct32k") => L::Direct32K,
+                        Some("direct64k") => L::Direct64K,
+                        Some("direct128k") => L::Direct128K,
+                        Some("fourway16k") => L::FourWay16K,
+                        _ => return Err("--translation-cache needs direct16k, direct32k, direct64k, direct128k or fourway16k".into()),
+                    };
+                }
                 "--api-trace" => {
                     api_trace = Some(opt.next().ok_or("--api-trace needs a path")?.as_str());
                     startup = true;
@@ -645,6 +662,8 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
                 dll_attach,
                 window,
                 cpu_stats,
+                cpu_diagnostics,
+                cache_layout,
                 graphics,
                 api_trace,
                 capture_frame,
@@ -690,6 +709,11 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
         if cpu_stats {
             mem.enable_execution_stats();
         }
+        mem.set_translation_cache_layout(cache_layout)?;
+        if cpu_diagnostics {
+            mem.enable_execution_diagnostics();
+            mem.register_code_image(pe.image_base, path.to_string());
+        }
         let mut cpu = wire::x64::cpu::Cpu64::new(pe.image_base + pe.entry_rva as u64, rsp);
         println!("experimental AMD64 CPU probe: base={:#x} RIP={:#x} RSP={rsp:#x}; startup services disabled", pe.image_base, cpu.rip);
         let start = std::time::Instant::now();
@@ -713,7 +737,18 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
                     "AMD64 import is unresolved; this diagnostic does not run the game".into(),
                 );
             }
-            if let Err(e) = cpu.step(&mut mem) {
+            if let Err(e) =
+                cpu.step_with_budget_guarded(&mut mem, limit - cpu.work, |start, end| {
+                    gateways
+                        .range((
+                            std::ops::Bound::Included(start),
+                            std::ops::Bound::Excluded(end),
+                        ))
+                        .next()
+                        .is_none()
+                        && !(RETURN >= start && RETURN < end)
+                })
+            {
                 report_execution64(start, &cpu, &mem);
                 println!(
                     "retired={}; RIP={:#x}; regs={:x?}",
@@ -755,6 +790,9 @@ fn report_execution64(
             stats.ir_steps, stats.fallback_steps, stats.translations, stats.invalidations
         );
     }
+    if let Some(report) = mem.execution_diagnostics_report() {
+        print!("{report}");
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -764,6 +802,8 @@ fn run_startup64(
     dll_attach: bool,
     window: bool,
     cpu_stats: bool,
+    cpu_diagnostics: bool,
+    cache_layout: wire::x64::memory::TranslationCacheLayout,
     graphics: Option<wire::gpu::NativeGraphics>,
     api_trace: Option<&str>,
     capture_frame: Option<&str>,
@@ -801,6 +841,10 @@ fn run_startup64(
     }
     if cpu_stats {
         process.memory.enable_execution_stats();
+    }
+    process.memory.set_translation_cache_layout(cache_layout)?;
+    if cpu_diagnostics {
+        process.memory.enable_execution_diagnostics();
     }
     let start = std::time::Instant::now();
     let outcome = loop {
