@@ -27,8 +27,10 @@ type Object = *mut c_void;
 mod bindings;
 mod callbacks;
 mod images;
+mod invoke;
 mod metadata;
 mod objects;
+mod reflection;
 mod unitytls;
 macro_rules! symbol {
     ($library:expr, $name:literal, $ty:ty) => {{
@@ -180,6 +182,12 @@ pub(super) struct Probe {
     strings_ready: bool,
     object_registry: objects::Registry,
     object_api: Option<objects::Api>,
+    managed_types: bool,
+    managed_types_ready: bool,
+    get_type_method: u64,
+    managed_type_invokes: usize,
+    reflection_registry: reflection::Registry,
+    reflection_api: Option<reflection::Api>,
     registry: bindings::Registry,
     stopped: bool,
     skip_etw: bool,
@@ -278,7 +286,8 @@ impl Probe {
         skip_etw: bool,
         boundary: &str,
     ) -> Result<Self, String> {
-        let strings = boundary == "strings";
+        let managed_types = boundary == "managed-types";
+        let strings = matches!(boundary, "strings" | "managed-types");
         let (main_thread, pre_bindings, bindings, profiler, pre_images, images, metadata) = match boundary {
             "root" => (false, false, false, false, false, false, false),
             "main-thread" => (true, false, false, false, false, false, false),
@@ -287,10 +296,10 @@ impl Probe {
             "profiler" => (true, true, true, true, false, false, false),
             "pre-images" => (true, true, true, true, true, false, false),
             "images" => (true, true, true, true, true, true, false),
-            "metadata" | "strings" => (true, true, true, true, true, true, true),
+            "metadata" | "strings" | "managed-types" => (true, true, true, true, true, true, true),
             _ => {
                 return Err(
-                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings, profiler, pre-images, images, metadata or strings".into(),
+                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings, profiler, pre-images, images, metadata, strings or managed-types".into(),
                 )
             }
         };
@@ -342,6 +351,12 @@ impl Probe {
             strings_ready: false,
             object_registry: objects::Registry::default(),
             object_api: None,
+            managed_types,
+            managed_types_ready: false,
+            get_type_method: 0,
+            managed_type_invokes: 0,
+            reflection_registry: reflection::Registry::default(),
+            reflection_api: None,
             registry: bindings::Registry::default(),
             stopped: false,
             skip_etw,
@@ -676,6 +691,7 @@ impl Probe {
             "mono_gc_wbarrier_set_field" if self.root_ready && self.main_thread => {
                 let owned = if (a[2] == THREAD_TOKEN && !native.thread_handle.is_null())
                     || self.object_registry.contains(a[2])
+                    || self.reflection_registry.contains(a[2])
                 {
                     a[2]
                 } else {
@@ -852,7 +868,7 @@ impl Probe {
         }
         targets
     }
-    pub(super) fn stop_before(&mut self, function: &str) -> Result<bool, String> {
+    pub(super) fn stop_before(&mut self, function: &str, cpu: &Cpu64) -> Result<bool, String> {
         if self.bindings && function == "mono_profiler_install" {
             self.registry.seal()?;
             self.bindings_ready = true;
@@ -902,6 +918,13 @@ impl Probe {
             }
             if !self.handles_object(function) {
                 self.strings_ready = self.object_registry.count() > 0;
+                if self.managed_types
+                    && function == "mono_runtime_invoke"
+                    && (self.get_type_method == 0 || self.get_type_method == cpu.regs[1])
+                {
+                    return Ok(false);
+                }
+                self.managed_types_ready = self.managed_types && self.managed_type_invokes > 0;
                 return Ok(true);
             }
         }
@@ -909,10 +932,10 @@ impl Probe {
     }
     pub(super) fn handles_object(&self, function: &str) -> bool {
         self.strings
-            && matches!(
+            && (matches!(
                 function,
                 "mono_string_new_len" | "mono_string_length" | "mono_string_chars"
-            )
+            ) || (self.managed_types && function == "mono_reflection_type_get_type"))
     }
     pub(super) fn dispatch_object(
         &mut self,
@@ -938,6 +961,20 @@ impl Probe {
         cpu.regs[4]
             .checked_add(8)
             .ok_or("object return stack overflow")?;
+        if function == "mono_reflection_type_get_type" {
+            let api = self
+                .reflection_api
+                .ok_or("reflection getter before any rooted RuntimeType")?;
+            let (ty, _) = callbacks::with_owner(memory, runtime, self.callback_targets(), || {
+                let native = self.reflection_registry.native(api, a[0])?;
+                Ok::<_, String>(unsafe { (api.get_type)(native) })
+            })?;
+            let token = self
+                .metadata_registry
+                .wrap(memory, metadata::Value::Handle(ty?, metadata::Kind::Type))?;
+            cpu.return_integer(memory, token)?;
+            return Ok(false);
+        }
         let api = match self.object_api {
             Some(api) => api,
             None => {
@@ -979,6 +1016,83 @@ impl Probe {
         cpu.return_integer(memory, result)?;
         Ok(false)
     }
+    pub(super) fn handles_invoke(&self, function: &str) -> bool {
+        self.managed_types && function == "mono_runtime_invoke"
+    }
+    pub(super) fn dispatch_invoke(
+        &mut self,
+        cpu: &mut Cpu64,
+        memory: &mut Memory,
+        runtime: &mut Runtime64,
+    ) -> Result<bool, String> {
+        if self.stopped || !self.managed_types {
+            return Err("managed invoke outside live diagnostic provider".into());
+        }
+        let native = self
+            .native
+            .as_ref()
+            .ok_or("managed invoke has no runtime")?;
+        if native.closed || native.owner != thread::current().id() {
+            return Err("managed invoke has closed/foreign owner".into());
+        }
+        let library = native.library;
+        let a = [cpu.regs[1], cpu.regs[2], cpu.regs[8], cpu.regs[9]];
+        memory.read_int(cpu.regs[4], 8)?;
+        cpu.regs[4]
+            .checked_add(8)
+            .ok_or("invoke return stack overflow")?;
+        if a[1] != 0 || a[2] == 0 || !a[2].is_multiple_of(8) {
+            return Err("GetType invoke requires static this and owned parameter array".into());
+        }
+        let argument = memory.read_int(a[2], 8)?;
+        if a[3] != 0 {
+            memory.check(a[3], 8, super::super::memory::WRITE)?;
+        }
+        let method = self
+            .metadata_registry
+            .native(a[0], metadata::Kind::Method)?;
+        let string_api = self
+            .object_api
+            .ok_or("managed invoke before rooted string")?;
+        let reflection_api = match self.reflection_api {
+            Some(api) => api,
+            None => {
+                let api = reflection::Api::load(library)?;
+                self.reflection_api = Some(api);
+                api
+            }
+        };
+        let call = symbol!(
+            library,
+            "mono_runtime_invoke",
+            unsafe extern "C" fn(Object, Object, *mut Object, *mut Object) -> Object
+        );
+        let (result, _) = callbacks::with_owner(memory, runtime, self.callback_targets(), || {
+            invoke::validate_get_type(library, method)?;
+            let string = self.object_registry.native_string(string_api, argument)?;
+            let mut args = [string];
+            let mut exception = ptr::null_mut();
+            let result =
+                unsafe { call(method, ptr::null_mut(), args.as_mut_ptr(), &mut exception) };
+            if !exception.is_null() {
+                return Err("native System.Type.GetType raised a managed exception; exception ABI not yet admitted".into());
+            }
+            self.reflection_registry.root_type(reflection_api, result)
+        })?;
+        let (object, ty) = result?;
+        let ty_token = self
+            .metadata_registry
+            .wrap(memory, metadata::Value::Handle(ty, metadata::Kind::Type))?;
+        self.reflection_registry.publish(memory, object, ty_token)?;
+        if a[3] != 0 {
+            memory.write_int(a[3], 8, 0)?;
+        }
+        self.get_type_method = a[0];
+        self.managed_type_invokes += 1;
+        self.events.push(format!("actual native System.Type.GetType(String) invoke -> rooted RuntimeType={object:#x}, typed metadata={ty_token:#x}"));
+        cpu.return_integer(memory, object)?;
+        Ok(false)
+    }
     pub(super) fn observe_stop(&mut self, function: &str, cpu: &Cpu64) {
         self.events.push(format!(
             "pending boundary {function}: args={:x?}; rsp={:#x}",
@@ -1007,6 +1121,24 @@ impl Probe {
             })?;
         self.events
             .push(format!("pending typed invoke: {}", description?));
+        let method = self
+            .metadata_registry
+            .native(cpu.regs[1], metadata::Kind::Method)?;
+        let (bodies, _) = callbacks::with_owner(memory, runtime, self.callback_targets(), || {
+            invoke::owned_bodies(library, method)
+        })?;
+        for (label, bytes, listing) in bodies? {
+            self.events
+                .push(format!("pending resolved IL {label}:\n{listing}"));
+            self.events.push(format!(
+                "pending owned IL {label}: {}",
+                bytes
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            ));
+        }
+
         if cpu.regs[8] != 0 {
             let token = memory.read_int(cpu.regs[8], 8)?;
             self.events.push(format!(
@@ -1447,6 +1579,13 @@ impl Probe {
                 })?;
             verified?;
         }
+        if let Some(api) = self.reflection_api {
+            let (verified, _) =
+                callbacks::with_owner(memory, runtime, self.callback_targets(), || {
+                    self.reflection_registry.verify(api)
+                })?;
+            verified?;
+        }
         self.events.push(format!("actual native BDWGC collection -> compiled GC adapter -> original Unity Win64 callback: {} calls, event mask {:#x}; no guest pointer passed to native profiler", stats.calls[3], stats.gc_events));
         Ok(())
     }
@@ -1494,6 +1633,7 @@ impl Probe {
             let result = self.finish();
             self.metadata_registry.retire(memory)?;
             self.object_registry.retire_views(memory)?;
+            self.reflection_registry.retire_views(memory)?;
             return result;
         }
         let targets = self.callback_targets();
@@ -1501,6 +1641,7 @@ impl Probe {
         result?;
         self.metadata_registry.retire(memory)?;
         self.object_registry.retire_views(memory)?;
+        self.reflection_registry.retire_views(memory)?;
         self.shutdown_callbacks += stats.calls[2];
         self.gc_events_verified |= stats.gc_events;
         if stats.calls[2] != 1 {
@@ -1522,6 +1663,9 @@ impl Probe {
         self.stopped = true;
         if let Some(api) = self.object_api {
             self.object_registry.release_roots(api);
+        }
+        if let Some(api) = self.reflection_api {
+            self.reflection_registry.release_roots(api);
         }
         if let Some(api) = self.image_api {
             self.image_registry.retire(api);
@@ -1545,7 +1689,7 @@ impl Probe {
     }
     pub(super) fn report(&self) -> String {
         format!(
-            "native-root-ready={}\nnative-main-thread-ready={}\nnative-pre-bindings-ready={}\nnative-bindings-ready={}\nprovider-bindings={}\nnative-scalar-adapters={}\nactual-unity-scalar-callbacks-verified={}\nnative-profiler-ready={}\nactual-gc-event-mask={}\nactual-shutdown-callbacks={}\nnative-pre-images-ready={}\nactual-unitytls-leaf-verified={}\nnative-images-ready={}\nnative-metadata-ready={}\nnative-strings-ready={}\nfull-game-admission=false\n{}{}{}{}\n",
+            "native-root-ready={}\nnative-main-thread-ready={}\nnative-pre-bindings-ready={}\nnative-bindings-ready={}\nprovider-bindings={}\nnative-scalar-adapters={}\nactual-unity-scalar-callbacks-verified={}\nnative-profiler-ready={}\nactual-gc-event-mask={}\nactual-shutdown-callbacks={}\nnative-pre-images-ready={}\nactual-unitytls-leaf-verified={}\nnative-images-ready={}\nnative-metadata-ready={}\nnative-strings-ready={}\nnative-managed-types-ready={}\nnative-managed-type-invokes={}\nfull-game-admission=false\n{}{}{}{}{}\n",
             self.root_ready,
             self.main_thread_ready,
             self.pre_bindings_ready,
@@ -1561,6 +1705,9 @@ impl Probe {
             self.images_ready,
             self.metadata_ready,
             self.strings_ready,
+            self.managed_types_ready,
+            self.managed_type_invokes,
+            self.reflection_registry.report(),
             self.object_registry.report(),
             self.image_registry.report(),
             self.metadata_registry.report(),
@@ -1577,7 +1724,8 @@ impl Probe {
             || (self.pre_images_ready && !self.images)
             || (self.images_ready && !self.metadata)
             || (self.metadata_ready && !self.strings)
-            || self.strings_ready
+            || (self.strings_ready && !self.managed_types)
+            || self.managed_types_ready
     }
 }
 fn store_stack_token(
@@ -1720,6 +1868,12 @@ mod tests {
             strings_ready: false,
             object_registry: objects::Registry::default(),
             object_api: None,
+            managed_types: false,
+            managed_types_ready: false,
+            get_type_method: 0,
+            managed_type_invokes: 0,
+            reflection_registry: reflection::Registry::default(),
+            reflection_api: None,
             registry: bindings::Registry::default(),
             stopped: false,
             skip_etw: false,

@@ -172,3 +172,10 @@ typed fail-stop，网络未实现。新边界pre-images/images；后者止于首
 首次invoke为System.Type.GetType(String)，不是先前推测的Assembly.LoadFrom。该阶段仍stop-before。
 详见`docs/native-mono-unity-strings-2026-10-09.md`。继续reflection object/typed managed invoke。
 metadata完整feature回归395 passed / 7 ignored；string targeted11与all-target Clippy通过。
+
+## 真实 managed GetType 已执行，继续 classlib 初始化
+
+`native-mono-unity-managed-types-probe-03`：1次native GetType，RuntimeType/string强制GC
+验证通过，17546 metadata queries/1926 handles，guard176/0。下一invoke是CoreModule
+ClassLibraryInitializer.InitAssemblyRedirections static void()，owned IL/依赖已查明。
+详见`docs/native-mono-unity-managed-types-2026-10-09.md`，不要停在这个小里程碑。

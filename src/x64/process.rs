@@ -979,7 +979,7 @@ impl Process64 {
                                 "native root probe requires guest main-thread ownership".into()
                             );
                         }
-                        if probe.stop_before(function)? {
+                        if probe.stop_before(function, &self.cpu)? {
                             probe.observe_stop(function, &self.cpu);
                             probe.inspect_pending(
                                 function,
@@ -1000,7 +1000,13 @@ impl Process64 {
                             self.cpu.regs[8],
                             self.cpu.regs[9],
                         ];
-                        let ready = (if probe.handles_object(function) {
+                        let ready = (if probe.handles_invoke(function) {
+                            probe.dispatch_invoke(
+                                &mut self.cpu,
+                                &mut self.memory,
+                                &mut self.runtime,
+                            )
+                        } else if probe.handles_object(function) {
                             probe.dispatch_object(
                                 function,
                                 &mut self.cpu,
