@@ -802,7 +802,13 @@ impl Cache {
             let len = (1 + next.scalar_len()).min(8);
             let end = cache.hot[index + len - 1].next_ip - 1;
             if r.ip() / crate::mem::GUEST_PAGE == end / crate::mem::GUEST_PAGE {
+                let mixed = cache.hot[index..index + len]
+                    .iter()
+                    .any(|h| h.inst.opcode() == 134);
                 cache.hot[index].set_scalar_len(len);
+                if mixed {
+                    cache.hot[index].set_mixed_run();
+                }
             }
         }
         Ok(cache)

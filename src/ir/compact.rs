@@ -320,12 +320,19 @@ impl Hot {
     pub fn next_slot(self) -> u32 {
         self.next_slot & 0x0fff_ffff
     }
+    pub fn mixed_run(self) -> bool {
+        self.next_slot & 0x8000_0000 != 0
+    }
+    pub fn set_mixed_run(&mut self) {
+        self.next_slot |= 0x8000_0000;
+    }
     pub fn scalar_len(self) -> usize {
-        (self.next_slot >> 28) as usize + 1
+        ((self.next_slot >> 28) & 7) as usize + 1
     }
     pub fn set_scalar_len(&mut self, len: usize) {
         debug_assert!((1..=8).contains(&len));
-        self.next_slot = self.next_slot() | (((len - 1) as u32) << 28);
+        self.next_slot =
+            (self.next_slot & 0x8000_0000) | self.next_slot() | (((len - 1) as u32) << 28);
     }
 }
 

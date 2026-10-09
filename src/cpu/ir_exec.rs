@@ -233,20 +233,11 @@ impl Cpu {
                     // No memory, host action, ESP write or intermediate branch
                     // can change code or expose an interior boundary. If the
                     // budget ends inside, use normal per-guest dispatch instead.
-                    for index in r.index..r.index + scalar_len {
-                        r.hot = self.ir_cache.as_ref().unwrap().scalar_hot(index);
-                        if r.hot.inst.opcode() == 134 {
-                            let descriptor = self
-                                .ir_cache
-                                .as_ref()
-                                .unwrap()
-                                .simd(r.hot.inst.aux as usize);
-                            let pc = self.eip;
-                            self.eip = r.hot.next_ip;
-                            descriptor
-                                .execute(self, mem, pc)
-                                .expect("verified register SSE cannot fault");
-                        } else {
+                    if r.hot.mixed_run() {
+                        r.hot = self.execute_mixed_run(mem, r.index, scalar_len);
+                    } else {
+                        for index in r.index..r.index + scalar_len {
+                            r.hot = self.ir_cache.as_ref().unwrap().scalar_hot(index);
                             self.execute_scalar(r.hot, true);
                         }
                     }
@@ -426,6 +417,26 @@ impl Cpu {
     }
     /// Register-only execution shared by ordinary dispatch and static runs.
     /// All FLAGS recipes remain complete, including at a branch or split.
+    // Preserve the original tight integer loop. The verified mixed path has
+    // a separate cold call boundary and reuses the same semantic operations.
+    #[inline(never)]
+    fn execute_mixed_run(&mut self, mem: &GuestMem, index: usize, len: usize) -> compact::Hot {
+        let mut last = self.ir_cache.as_ref().unwrap().scalar_hot(index);
+        for index in index..index + len {
+            last = self.ir_cache.as_ref().unwrap().scalar_hot(index);
+            if last.inst.opcode() == 134 {
+                let descriptor = self.ir_cache.as_ref().unwrap().simd(last.inst.aux as usize);
+                let pc = self.eip;
+                self.eip = last.next_ip;
+                descriptor
+                    .execute(self, mem, pc)
+                    .expect("verified register SSE cannot fault");
+            } else {
+                self.execute_scalar(last, true);
+            }
+        }
+        last
+    }
     #[inline(always)]
     fn execute_scalar(&mut self, hot: compact::Hot, lazy: bool) {
         use compact::*;
