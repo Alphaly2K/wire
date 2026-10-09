@@ -24,6 +24,12 @@ pub enum TranslationCacheLayout {
 // Experiments use separate frozen builds. The chosen direct layout uses a
 // constant mask without associative probing or runtime layout branches.
 pub(super) const BUILD_DIAGNOSTICS_V2: bool = option_env!("WIRE_X64_DIAGNOSTICS_V2").is_some();
+const BUILD_REUSE: bool = option_env!("WIRE_X64_NO_REUSE").is_none();
+const REUSE_SLOTS: usize = if option_env!("WIRE_X64_REUSE_16K").is_some() {
+    16384
+} else {
+    4096
+};
 const BUILD_FOUR_WAY: bool = option_env!("WIRE_X64_CACHE_FOUR_WAY").is_some();
 const BUILD_16K: bool = option_env!("WIRE_X64_CACHE_16K").is_some() || BUILD_FOUR_WAY;
 const BUILD_32K: bool = option_env!("WIRE_X64_CACHE_32K").is_some();
@@ -64,11 +70,21 @@ struct TranslationCache {
     // iced records are retained in a separate, equally bounded cold array.
     slots: Box<[TranslationSlot]>,
     instructions: Box<[Cell<iced_x86::Instruction>]>,
-    generations: Box<[Cell<(u64, u64)>]>, // Second 0 means a single-page instruction.
+    generations: Box<[Cell<(u64, u64, u64)>]>, // Second 0 means a single-page instruction.
     segments: Box<[RefCell<SegmentState>]>,
-    links: Box<[Cell<(u64, usize)>]>,
+    links: Box<[Cell<(u64, usize, u64)>]>,
+    reuse: OnceCell<RefCell<Box<[Option<SavedTranslation>]>>>,
     // Four-way set order, MRU in the low two bits; empty for direct layouts.
     order: Box<[Cell<u8>]>,
+}
+struct SavedTranslation {
+    pc: u64,
+    validation_epoch: u64,
+    ir: Option<super::cpu::ir::ScalarIr>,
+    instruction: iced_x86::Instruction,
+    generations: (u64, u64),
+    segment: SegmentState,
+    link: (u64, usize, u64),
 }
 enum SegmentState {
     Unbuilt,
@@ -76,6 +92,54 @@ enum SegmentState {
     Ready(Box<super::cpu::ir::RegisterSegment>),
 }
 impl TranslationCache {
+    fn reuse_hash(mut pc: u64) -> usize {
+        pc = (pc ^ (pc >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        pc = (pc ^ (pc >> 27)).wrapping_mul(0x94d049bb133111eb);
+        ((pc ^ (pc >> 31)) as usize) & (REUSE_SLOTS - 1)
+    }
+    fn advance_identity(&self, slot: usize) -> u64 {
+        let old = self.generations[slot].get().2;
+        if old == u64::MAX {
+            // Full wrap is a cold global link invalidation, never an ABA reuse.
+            for link in &self.links {
+                link.set((u64::MAX, usize::MAX, 0));
+            }
+            if let Some(reuse) = self.reuse.get() {
+                for entry in reuse.borrow_mut().iter_mut().flatten() {
+                    entry.link = (u64::MAX, usize::MAX, 0);
+                }
+            }
+            1
+        } else {
+            old + 1
+        }
+    }
+    fn save(&self, slot: usize) {
+        if !BUILD_REUSE || self.slots[slot].pc.get() == u64::MAX {
+            return;
+        }
+        let entry = &self.slots[slot];
+        let (g, g2, _) = self.generations[slot].get();
+        let saved = SavedTranslation {
+            pc: entry.pc.get(),
+            validation_epoch: entry.validation_epoch.get(),
+            ir: entry.ir.get(),
+            instruction: self.instructions[slot].get(),
+            generations: (g, g2),
+            segment: self.segments[slot].replace(SegmentState::Unbuilt),
+            link: self.links[slot].get(),
+        };
+        let index = Self::reuse_hash(saved.pc);
+        let reuse = self.reuse.get_or_init(|| {
+            RefCell::new(
+                (0..REUSE_SLOTS)
+                    .map(|_| None)
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            )
+        });
+        reuse.borrow_mut()[index] = Some(saved);
+    }
     fn hash(address: u64) -> usize {
         (address ^ (address >> 16) ^ (address >> 32)) as usize
     }
@@ -281,17 +345,22 @@ impl Memory {
     fn diagnostic_request(&self, kind: u8, address: u64, hit: bool) {
         if BUILD_DIAGNOSTICS_V2 {
             if let Some(d) = &self.diagnostics {
-                let base = address & !(PAGE - 1);
-                let generation = self.pages.peek(base).map_or(0, |p| p.generation);
-                let second = if d.borrow().crossing(address) {
-                    base.checked_add(PAGE)
-                        .and_then(|b| self.pages.peek(b))
-                        .map_or(0, |p| p.generation)
+                let mut d = d.borrow_mut();
+                let generations = if d.recording() {
+                    let base = address & !(PAGE - 1);
+                    let generation = self.pages.peek(base).map_or(0, |p| p.generation);
+                    let second = if d.crossing(address) {
+                        base.checked_add(PAGE)
+                            .and_then(|b| self.pages.peek(b))
+                            .map_or(0, |p| p.generation)
+                    } else {
+                        0
+                    };
+                    (generation, second)
                 } else {
-                    0
+                    (0, 0)
                 };
-                d.borrow_mut()
-                    .request(kind, address, hit, self.decode_epoch, (generation, second));
+                d.request(kind, address, hit, self.decode_epoch, generations);
             }
         }
     }
@@ -334,14 +403,66 @@ impl Memory {
     #[inline(always)]
     fn translation_lookup(&self, address: u64) -> Option<(usize, &TranslationSlot)> {
         let cache = self.decoded.get()?;
-        let slot = cache.find(address)?;
+        let Some(slot) = cache.find(address) else {
+            return self.reuse_translation(address, cache);
+        };
         let entry = &cache.slots[slot];
         if entry.validation_epoch.get() == self.decode_epoch
             || self.refresh_translation(address, slot, entry)
         {
             return Some((slot, entry));
         }
-        None
+        self.reuse_translation(address, cache)
+    }
+    #[inline(never)]
+    fn reuse_translation<'a>(
+        &self,
+        address: u64,
+        cache: &'a TranslationCache,
+    ) -> Option<(usize, &'a TranslationSlot)> {
+        if !BUILD_REUSE {
+            return None;
+        }
+        let reuse = cache.reuse.get()?;
+        let mut saved = {
+            let mut reuse = reuse.borrow_mut();
+            let entry = &mut reuse[TranslationCache::reuse_hash(address)];
+            if !entry.as_ref().is_some_and(|s| s.pc == address) {
+                return None;
+            }
+            entry.take().unwrap()
+        };
+        if saved.validation_epoch != self.decode_epoch {
+            let base = address & !(PAGE - 1);
+            if !self
+                .pages
+                .get(&base)
+                .is_some_and(|p| p.generation == saved.generations.0)
+                || saved.generations.1 != 0
+                    && !self
+                        .pages
+                        .get(&(base + PAGE))
+                        .is_some_and(|p| p.generation == saved.generations.1)
+            {
+                return None;
+            }
+        }
+        let slot = cache.replacement(address);
+        cache.save(slot);
+        let identity = cache.advance_identity(slot);
+        if cache.generations[slot].get().2 == u64::MAX {
+            saved.link = (u64::MAX, usize::MAX, 0);
+        }
+        let entry = &cache.slots[slot];
+        entry.pc.set(address);
+        entry.validation_epoch.set(self.decode_epoch);
+        entry.ir.set(saved.ir);
+        cache.instructions[slot].set(saved.instruction);
+        cache.generations[slot].set((saved.generations.0, saved.generations.1, identity));
+        *cache.segments[slot].borrow_mut() = saved.segment;
+        cache.links[slot].set(saved.link);
+        self.diagnostic_request(5, address, true);
+        Some((slot, entry))
     }
     #[inline(never)]
     fn refresh_translation(&self, address: u64, slot: usize, entry: &TranslationSlot) -> bool {
@@ -349,7 +470,7 @@ impl Memory {
         let Some(page) = self.pages.get(&base) else {
             return false;
         };
-        let (generation, second) = self.decoded.get().unwrap().generations[slot].get();
+        let (generation, second, _) = self.decoded.get().unwrap().generations[slot].get();
         if generation != page.generation {
             return false;
         }
@@ -429,6 +550,7 @@ impl Memory {
         let mut left = remaining;
         loop {
             let pc = cpu.rip;
+            let source_identity = cache.generations[slot].get().2;
             let mut state = cache.segments[slot].borrow_mut();
             if matches!(*state, SegmentState::Unbuilt) {
                 let base = pc & !(PAGE - 1);
@@ -476,16 +598,23 @@ impl Memory {
             {
                 break;
             }
-            let (linked_pc, linked_slot) = cache.links[slot].get();
-            if linked_pc == next && linked_slot == usize::MAX {
+            let (linked_pc, linked_slot, linked_identity) = cache.links[slot].get();
+            if linked_pc == next
+                && linked_slot == usize::MAX
+                && linked_identity == self.decode_epoch
+            {
                 self.diagnostic_segment(15);
-                self.diagnostic_request(3, next, false);
+                self.diagnostic_request(6, next, false);
                 break;
             }
             if linked_pc != next {
                 self.diagnostic_segment(14);
             }
-            let target = if linked_pc == next && cache.slots[linked_slot].pc.get() == next {
+            let target = if linked_pc == next
+                && linked_slot != usize::MAX
+                && cache.slots[linked_slot].pc.get() == next
+                && cache.generations[linked_slot].get().2 == linked_identity
+            {
                 let entry = &cache.slots[linked_slot];
                 (entry.validation_epoch.get() == self.decode_epoch
                     || self.refresh_translation(next, linked_slot, entry))
@@ -503,11 +632,19 @@ impl Memory {
             let Some((target, entry)) = target else {
                 break;
             };
+            // Promotion can evict the source into the victim store when both
+            // entrances collide. Never attach its link to the replacement PC.
+            let source_still_live = cache.slots[slot].pc.get() == pc
+                && cache.generations[slot].get().2 == source_identity;
             if !entry.ir.get().is_some_and(|ir| ir.register_only()) {
-                cache.links[slot].set((next, usize::MAX));
+                if source_still_live {
+                    cache.links[slot].set((next, usize::MAX, self.decode_epoch));
+                }
                 break;
             }
-            cache.links[slot].set((next, target));
+            if source_still_live {
+                cache.links[slot].set((next, target, cache.generations[target].get().2));
+            }
             slot = target;
         }
         let work = cpu.work - before;
@@ -544,7 +681,7 @@ impl Memory {
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             generations: (0..BUILD_SLOTS)
-                .map(|_| Cell::new((0, 0)))
+                .map(|_| Cell::new((0, 0, 0)))
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             segments: (0..BUILD_SLOTS)
@@ -552,9 +689,10 @@ impl Memory {
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             links: (0..BUILD_SLOTS)
-                .map(|_| Cell::new((u64::MAX, usize::MAX)))
+                .map(|_| Cell::new((u64::MAX, usize::MAX, 0)))
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
+            reuse: OnceCell::new(),
             order: if BUILD_FOUR_WAY {
                 (0..4096)
                     .map(|_| Cell::new(0b11100100))
@@ -567,11 +705,13 @@ impl Memory {
         let slot = cache.replacement(instruction.ip());
         let entry = &cache.slots[slot];
         self.diagnostic_request(4, entry.pc.get(), false);
+        cache.save(slot);
+        let identity = cache.advance_identity(slot);
         entry.pc.set(instruction.ip());
         entry.validation_epoch.set(self.decode_epoch);
-        cache.generations[slot].set((generation, second_generation));
+        cache.generations[slot].set((generation, second_generation, identity));
         *cache.segments[slot].borrow_mut() = SegmentState::Unbuilt;
-        cache.links[slot].set((u64::MAX, usize::MAX));
+        cache.links[slot].set((u64::MAX, usize::MAX, 0));
         cache.instructions[slot].set(instruction);
         let ir = super::cpu::ir::ScalarIr::lower(&instruction);
         entry.ir.set(ir);
@@ -1097,6 +1237,133 @@ mod generation_tests {
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod reuse_tests {
+    use super::*;
+    use crate::x64::cpu::Cpu64;
+    const PC: u64 = 0x140002000;
+    #[test]
+    fn twenty_colliding_entrances_reuse_translation_without_skipping_live_guards_or_changes() {
+        let other = PC + 0x20002;
+        let mut mem = Memory::default();
+        mem.map(PC, PAGE, READ | WRITE | EXECUTE).unwrap();
+        mem.map(other & !(PAGE - 1), PAGE, READ | WRITE | EXECUTE)
+            .unwrap();
+        for base in [PC, other] {
+            mem.write(base, &[0x48, 0x83, 0xc0, 1].repeat(10)).unwrap();
+        }
+        mem.enable_execution_stats();
+        let mut cpu = Cpu64::new(PC, 0);
+        for _ in 0..1000 {
+            for n in 0..10 {
+                for base in [PC, other] {
+                    cpu.rip = base + n * 4;
+                    cpu.step(&mut mem).unwrap();
+                }
+            }
+        }
+        assert_eq!(cpu.regs[0], 20000);
+        assert_eq!(cpu.retired, 20000);
+        if BUILD_REUSE {
+            assert_eq!(mem.execution_stats().unwrap().translations, 20);
+        }
+        mem.virtual_protect(PC, PAGE, 0x140).unwrap();
+        cpu.rip = PC;
+        let before = cpu.clone();
+        assert!(cpu.step(&mut mem).unwrap_err().contains("guard"));
+        assert_eq!(cpu, before);
+        cpu.step(&mut mem).unwrap();
+        mem.virtual_protect(PC, PAGE, 0x40).unwrap();
+        mem.write(PC + 3, &[2]).unwrap();
+        cpu.rip = PC;
+        let value = cpu.regs[0];
+        cpu.step(&mut mem).unwrap();
+        assert_eq!(cpu.regs[0], value + 2);
+        mem.unmap(PC, PAGE).unwrap();
+        mem.map(PC, PAGE, READ | WRITE | EXECUTE).unwrap();
+        mem.write(PC, &[0x48, 0x83, 0xc0, 3]).unwrap();
+        cpu.rip = PC;
+        let value = cpu.regs[0];
+        cpu.step(&mut mem).unwrap();
+        assert_eq!(cpu.regs[0], value + 3);
+    }
+    #[test]
+    fn victim_reuse_validates_second_code_page_and_retains_checked_fallback_descriptors() {
+        let a = PC + PAGE - 2;
+        let b = a + 0x20002;
+        let mut mem = Memory::default();
+        mem.map(PC, PAGE * 2, READ | WRITE | EXECUTE).unwrap();
+        mem.map(b & !(PAGE - 1), PAGE, READ | WRITE | EXECUTE)
+            .unwrap();
+        mem.write(a, &[0x48, 0x89, 0xd8]).unwrap();
+        mem.write(b, &[0x48, 0x89, 0xd8]).unwrap();
+        mem.enable_execution_stats();
+        let mut cpu = Cpu64::new(a, 0);
+        cpu.regs[3] = 17;
+        for _ in 0..10 {
+            for pc in [a, b] {
+                cpu.rip = pc;
+                cpu.step(&mut mem).unwrap();
+                assert_eq!(cpu.regs[0], 17);
+            }
+        }
+        if BUILD_REUSE {
+            assert_eq!(mem.execution_stats().unwrap().translations, 2);
+        }
+        mem.virtual_protect(PC + PAGE, PAGE, 0x140).unwrap();
+        cpu.rip = a;
+        let before = cpu.clone();
+        assert!(cpu.step(&mut mem).unwrap_err().contains("guard"));
+        assert_eq!(cpu, before);
+        mem.virtual_protect(PC + PAGE, PAGE, 0x40).unwrap();
+        mem.write(PC + PAGE, &[0xc8]).unwrap();
+        cpu.regs[1] = 29;
+        cpu.rip = a;
+        cpu.step(&mut mem).unwrap();
+        assert_eq!(cpu.regs[0], 29);
+        mem.write(a, &[0x0f, 0xa2]).unwrap();
+        mem.write(b, &[0x0f, 0xa2]).unwrap();
+        let before = mem.execution_stats().unwrap().translations;
+        for _ in 0..10 {
+            for pc in [a, b] {
+                cpu.rip = pc;
+                cpu.regs[0] = 0;
+                cpu.step(&mut mem).unwrap();
+                assert_eq!(cpu.regs[3], u32::from_le_bytes(*b"Wire") as u64);
+            }
+        }
+        if BUILD_REUSE {
+            assert_eq!(mem.execution_stats().unwrap().translations - before, 2);
+        }
+    }
+    #[test]
+    fn link_identity_wrap_clears_live_and_saved_handles() {
+        let mut mem = Memory::default();
+        mem.map(PC, PAGE, READ | WRITE | EXECUTE).unwrap();
+        mem.write(PC, &[0x90]).unwrap();
+        let cpu = Cpu64::new(PC, 0);
+        cpu.decode(&mem).unwrap();
+        let cache = mem.decoded.get().unwrap();
+        let slot = cache.find(PC).unwrap();
+        let (g, g2, _) = cache.generations[slot].get();
+        cache.generations[slot].set((g, g2, u64::MAX));
+        cache.links[slot].set((PC, slot, 1));
+        cache.save(slot);
+        assert_eq!(cache.advance_identity(slot), 1);
+        assert!(cache
+            .links
+            .iter()
+            .all(|l| l.get() == (u64::MAX, usize::MAX, 0)));
+        if let Some(reuse) = cache.reuse.get() {
+            assert!(reuse
+                .borrow()
+                .iter()
+                .flatten()
+                .all(|s| s.link == (u64::MAX, usize::MAX, 0)));
         }
     }
 }

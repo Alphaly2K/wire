@@ -155,14 +155,14 @@ mod tests {
 
 // Compile-time gated: the ordinary build eliminates callers and has no per-hit
 // telemetry branch, allocation, formatting, or refcell access.
-const WINDOW: u64 = 8192;
+const WINDOW: u64 = 262144;
 const STARTS: [u64; 4] = [0, 10_000_000, 100_000_000, 1_000_000_000];
 #[derive(Default)]
 struct V2 {
     requests: u64,
     events: Vec<(u64, u8, u64, u64, u64, u64)>,
-    lookups: [u64; 5],
-    hits: [u64; 5],
+    lookups: [u64; 7],
+    hits: [u64; 7],
     segments: [u64; 17],
     rejects: [u64; 12],
     attempts: u64,
@@ -174,6 +174,10 @@ struct V2 {
     operands: [u64; 2],
 }
 impl Diagnostics {
+    pub fn recording(&self) -> bool {
+        let n = self.v2.requests;
+        STARTS.iter().any(|&s| n >= s && n - s < WINDOW)
+    }
     pub fn crossing(&self, pc: u64) -> bool {
         self.history
             .get(&pc)
@@ -305,13 +309,15 @@ impl V2 {
             self.operands[0], self.operands[1]
         )
         .unwrap();
-        for kind in 0..5 {
+        for kind in 0..7 {
             writeln!(
                 out,
                 "AMD64 V2 lookups: kind={kind} requests={} hits={}",
                 self.lookups[kind], self.hits[kind]
             )
             .unwrap();
+        }
+        for kind in 0..5 {
             writeln!(
                 out,
                 "AMD64 V2 data: kind={kind} widths_cross_hit={:?} misses={}",
