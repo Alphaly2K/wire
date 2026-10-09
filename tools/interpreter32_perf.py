@@ -2,6 +2,7 @@
 """Frozen PE32 raw/static-IR comparisons with algebraic state and budget checks."""
 import argparse,json,os,re,statistics,struct,subprocess,time,sys
 from pathlib import Path
+sys.dont_write_bytecode=True
 from interpreter_perf import digest
 
 def pe32(code):

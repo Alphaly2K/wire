@@ -1555,3 +1555,41 @@ fn pe32_raw_descriptor_cache_is_owned_by_memory_and_rechecks_guards_and_bytes() 
     assert!(cpu.step(&mut first).is_err());
     assert_eq!(cpu.eip, CODE);
 }
+
+#[test]
+fn pe32_scalar_fp_preserves_lazy_flags_and_comi_discards_them_only_after_success() {
+    let code = [
+        0xb8, 0xff, 0xff, 0xff, 0xff, 0xb9, 1, 0, 0, 0, 0x01, 0xc8, 0xf3, 0x0f, 0x58, 0xc1, 0x0f,
+        0x2f, 0xc2, 0x0f, 0x92, 0xc2, 0x40, 0xcc,
+    ];
+    for budget in 0..=10 {
+        for mxcsr in [0, 0x1f80] {
+            for nan in [false, true] {
+                let mut states = Vec::new();
+                for installed in [false, true] {
+                    let (mut cpu, mut mem) = machine(&code, installed);
+                    cpu.mxcsr = mxcsr;
+                    cpu.xmm[0][..4].copy_from_slice(&1.0f32.to_le_bytes());
+                    cpu.xmm[1][..4].copy_from_slice(&0.0f32.to_le_bytes());
+                    cpu.xmm[2][..4].copy_from_slice(
+                        &(if nan { 0x7fc12345u32 } else { 2.0f32.to_bits() }).to_le_bytes(),
+                    );
+                    let outcome = run(&mut cpu, &mut mem, budget);
+                    states.push((
+                        std::mem::discriminant(&outcome),
+                        cpu.regs,
+                        cpu.xmm,
+                        cpu.eip,
+                        cpu.effective_eflags(),
+                        cpu.mxcsr,
+                        cpu.instr_count,
+                    ));
+                }
+                assert_eq!(
+                    states[0], states[1],
+                    "budget={budget} mxcsr={mxcsr:x} nan={nan}"
+                );
+            }
+        }
+    }
+}

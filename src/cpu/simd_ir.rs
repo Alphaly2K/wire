@@ -319,7 +319,7 @@ impl Descriptor {
             _ => {
                 let mut state = SimdState {
                     mxcsr: cpu.mxcsr,
-                    rflags: cpu.effective_eflags() as u64,
+                    rflags: cpu.eflags as u64,
                 };
                 let double = self.width == 8;
                 let read = |x: [u8; 16]| {
@@ -392,7 +392,9 @@ impl Descriptor {
                     mxcsr: cpu.mxcsr,
                 })?;
                 if matches!(m, M::Comiss | M::Comisd | M::Ucomiss | M::Ucomisd) {
-                    cpu.flush_flags();
+                    // COMI replaces every arithmetic flag, so previous lazy
+                    // recipes are dead only after successful arithmetic.
+                    cpu.pending_flags = None;
                     cpu.eflags = state.rflags as u32;
                     return Ok(());
                 }
