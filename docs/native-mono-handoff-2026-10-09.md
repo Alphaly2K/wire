@@ -9,7 +9,7 @@
 
 - Worktree：`/Users/alphaly/.codex/worktrees/native-mono-shared-memory/wire`
 - 分支：`codex/native-mono-shared-memory`
-- 当前提交：`d55bb1f`（主checkout保留原运行路径）
+- 当前提交：`b064c11`（主checkout保留原运行路径）
 - 实施计划输入：主checkout `wire-out/unity-native-mono-plan-2026-10-09/plan.md`
 
 已有阶段提交：
@@ -36,12 +36,14 @@
 | 8495b3c | 新RMW快路径接入shared regions，同lease受检read/update/write |
 | f540ba7 | guest exact/interior roots快照、真实handle事务回滚与持续attach下GC回收 |
 | d55bb1f | 批量提取289/293候选C签名、71实际定义和Unity callback表 |
+| b064c11 | 真实Unity启动入口/回调追踪、10824项实际InternalCall目标及allocator空实现修正 |
 
 
 具体实现、边界和复现命令在worktree的 `docs/native-mono-services-and-gc-2026-10-09.md`。
 新增M3状态/预检说明为该worktree的 `docs/native-mono-m3-lifecycle-2026-10-09.md`。
 新ownership/接口说明：`docs/native-mono-shared-buffers-2026-10-09.md`、
 `docs/native-mono-guest-roots-2026-10-09.md`、`docs/native-mono-c-api-contracts-2026-10-09.md`。
+真实启动输入、InternalCall targets和allocator修正见worktree `docs/native-mono-unity-entry-trace-2026-10-09.md`。
 历史M1/M2文档仍保留，不要把历史kernel32/Unix故障当作当前fixture状态。
 
 ## 当前已实测
@@ -74,10 +76,10 @@ scalar覆盖拒绝及数组readonly/byref/alias/bounds/guard/revoke/GC reclaim�
 个20000000迭代样本，checksum1523661319；中位数0.297357→0.138959秒，约2.14×。
 这是配置microbenchmark，没有真实游戏native backend加速数据。游戏后端、M3准入仍false。
 
-最新完整M2 guard `checks=540 denied=0`；M1 core/interop/threads/gc/layout通过，5个executable
+最新完整M2 guard `checks=538 denied=0`（checks随GC时序变化）；M1 core/interop/threads/gc/layout通过，5个executable
 memory反向用例以86拒绝；链接审计304对象/668依赖/0 unmatched。独立M2 Clippy clean。
-最新main SSE基线上的feature完整Rust回归377项通过、7 ignored；all-target feature Clippy clean。
-历史默认336项是合入main优化前的结果，不能当当前default基线；M2独立Clippy clean。
+最新main SSE基线及入口追踪上的feature完整Rust回归385项通过、7 ignored；all-target feature Clippy clean。
+本轮默认路径完整Rust365项通过、7 ignored；M2真实Mono/原始DLL/程序集inventory重新执行成功。
 构建stack工具3项回归通过。registry debug bugfix及shared RMW整合修复均单独提交。
 
 ## 保留的输出
@@ -121,7 +123,27 @@ C compiler清单：293实际query中289候选native C签名、71本轮实际函�
 (MonoAllocatorVTable*)不可混用。后者包含version/malloc/realloc/free/calloc。UnityTLS仍opaque、
 vprintf含异架构va_list，不能直接传guest pointer或宣称完整callback表已知。
 
-下一轮优先实际Unity provider/启动诊断和typed callbacks收敛，避免只增加孤立fixture；还需
+最新真实Unity启动诊断在worktree `wire-out/native-mono-unity-callback-trace`，命令/binary/hash/input/log
+及entries/api.tsv已冻结。原始x64 Mono运行2B work到Budget：可见1024×720窗口、290draw/97Present；
+不是native后端或已稳定可玩。246个PC活跃/6249665 raw entry hits/2408 samples；113个不同入口
+名称的sample返回PC落在UnityPlayer，含尾调用，不能当全部外部CALL次数或性能占比。
+
+实际mono_add_internal_call登记10824名称/10824guest目标，采集失败0；嵌套类型/与metadata的.
+表示统一后全部一一对应声明候选，ABI准入仍0。这些可用于下一步的真实typed Unity bindings。
+工具 `tools/mono/entry_trace_report.py` 根据实际export RVA验证Mono映射0x182940000/0xa42000，
+从log读取UnityPlayer映射，并输出各input hash、边界sample、注册target及声明候选清单。
+Memory::observe保留owned/shared guard/权限/撤销/失败输出语义；新回归覆盖入口别名、批处理
+段内部、动态模块、callback PC、取指故障、逐budget CPU一致及sample/binding容量。
+
+关键修正：精确原始DLL的mono_unity_install_memory_callbacks入口RVA0x270ba0为c2 00 00，
+直接返回，不读表；mono_set_allocator_vtable RVA0x74870仅检查version，不装callbacks。
+本轮四个allocator callback入口均0，plugin callback1；disassembly保留在诊断目录。
+该样本不用先做Unity allocator回调桥。Native candidate config undef ENABLE_OVERRIDABLE_ALLOCATORS，
+eglib g_mem_set_vtable也为空，但candidate Unity installer仍读version，不能直接声称同原始行为。
+未来该精确profile的Unity installer需保持立即返回、不额外解引用guest参数；其他版本不能照此忽略。
+一般managed heap ownership/engine buffers/GC/roots仍未解决。当前Mono patches仍19个，未重建dylib。
+
+下一轮优先实际Unity provider/根域初始化和typed callbacks收敛，避免只增加孤立fixture；还需
 一般managed objects/arrays/helpers、raw reference store ownership、全Process roots/safepoints、
 稳定native Mono TLS/guest execution owner、Unity allocator/TLS/log/plugin/liveness callbacks。
 完整ABI及生产services/scheduler未准入，native game backend/M3仍false，没有真实游戏加速数据。
