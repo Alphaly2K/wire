@@ -278,3 +278,47 @@ fn virtual_alloc_merge_and_query_respect_registered_intervals() {
     overlapping.map(BASE & !4095, 4096, READ).unwrap();
     assert!(memory.merge(overlapping).is_err());
 }
+
+#[test]
+fn shared_diagnostic_observation_does_not_consume_guards_or_expose_revoked_bytes() {
+    let region = HostRegion::owned(8192).unwrap();
+    let mut memory = Memory::default();
+    memory
+        .map_shared_data(BASE, region.clone(), READ | WRITE, READ | WRITE)
+        .unwrap();
+    memory.write(BASE, &vec![0x55; 8192]).unwrap();
+    memory
+        .protect_shared_data(BASE, READ | WRITE, true)
+        .unwrap();
+    let at = (BASE & !4095) + 4092;
+    let mut output = [0xcc; 8];
+    for _ in 0..2 {
+        assert!(memory
+            .observe(at, &mut output)
+            .unwrap_err()
+            .contains("guarded"));
+        assert_eq!(output, [0xcc; 8]);
+    }
+    for _ in 0..2 {
+        assert!(memory
+            .read(at, &mut output)
+            .unwrap_err()
+            .contains("guard-page"));
+        assert_eq!(output, [0xcc; 8]);
+    }
+    memory.observe(at, &mut output).unwrap();
+    assert_eq!(output, [0x55; 8]);
+    memory.protect_shared_data(BASE, 0, false).unwrap();
+    output = [0xcc; 8];
+    assert!(memory.observe(at, &mut output).is_err());
+    assert_eq!(output, [0xcc; 8]);
+    memory.protect_shared_data(BASE, READ, false).unwrap();
+    assert!(memory.observe(BASE + 8190, &mut output).is_err());
+    assert_eq!(output, [0xcc; 8]);
+    region.revoke().unwrap();
+    assert!(memory
+        .observe(at, &mut output)
+        .unwrap_err()
+        .contains("revoked"));
+    assert_eq!(output, [0xcc; 8]);
+}

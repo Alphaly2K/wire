@@ -363,6 +363,29 @@ impl Memory {
             .read((address - mapping.base) as usize, output)?;
         Ok(true)
     }
+    pub(super) fn shared_observe(&self, address: u64, output: &mut [u8]) -> Result<bool, String> {
+        let Some(mapping) = self.shared_mapping(address, output.len())? else {
+            return Ok(false);
+        };
+        for page in address / PAGE..=(address + output.len() as u64 - 1) / PAGE {
+            if mapping.guards[(page - mapping.base / PAGE) as usize].get() {
+                return Err(format!(
+                    "guarded AMD64 shared observation at {:#x}",
+                    page * PAGE
+                ));
+            }
+        }
+        if mapping.permissions & READ == 0 {
+            return Err(format!(
+                "unreadable AMD64 shared observation at {address:#x}"
+            ));
+        }
+        // read() obtains a single lease, rejects revoked storage, then copies.
+        mapping
+            .region
+            .read((address - mapping.base) as usize, output)?;
+        Ok(true)
+    }
     pub(super) fn shared_contains_range(&self, address: u64, len: usize) -> Result<bool, String> {
         Ok(self.shared_mapping(address, len)?.is_some())
     }

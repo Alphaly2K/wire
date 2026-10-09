@@ -705,6 +705,41 @@ impl Memory {
     pub fn read(&self, addr: u64, out: &mut [u8]) -> Result<(), String> {
         self.read_access(addr, out, READ)
     }
+    /// Diagnostic data read. Reject guarded/unreadable ranges without consuming
+    /// their faults, changing guest state, or partially changing the output.
+    /// Shared storage still uses its retained owner's execution lease.
+    pub fn observe(&self, addr: u64, out: &mut [u8]) -> Result<(), String> {
+        let range = Self::range(addr, out.len())?;
+        #[cfg(feature = "native-mono-memory")]
+        if !self.shared.is_empty() && self.shared_observe(addr, out)? {
+            return Ok(());
+        }
+        if out.is_empty() {
+            return Ok(());
+        }
+        for base in (addr & !(PAGE - 1)..=(range.end - 1) & !(PAGE - 1)).step_by(PAGE as usize) {
+            let page = self
+                .pages
+                .get(&base)
+                .ok_or_else(|| format!("unmapped AMD64 observation {addr:#x}"))?;
+            if page.protection.get() & crate::mem::PAGE_GUARD != 0 {
+                return Err(format!("guarded AMD64 observation at {base:#x}"));
+            }
+            if page.permissions & READ == 0 {
+                return Err(format!("unreadable AMD64 observation at {addr:#x}"));
+            }
+        }
+        let mut offset = 0;
+        while offset < out.len() {
+            let at = addr + offset as u64;
+            let start = (at & (PAGE - 1)) as usize;
+            let n = (4096 - start).min(out.len() - offset);
+            out[offset..offset + n]
+                .copy_from_slice(&self.pages[&(at & !(PAGE - 1))].data[start..start + n]);
+            offset += n;
+        }
+        Ok(())
+    }
     pub fn fetch(&self, addr: u64, out: &mut [u8]) -> Result<(), String> {
         self.read_access(addr, out, EXECUTE)
     }

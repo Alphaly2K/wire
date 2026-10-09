@@ -13,7 +13,7 @@ fn main() -> ExitCode {
         eprintln!("wire — Watari-Is-a-Runtime-Environment (M2 spike)");
         eprintln!("usage:");
         eprintln!("  wire imports <program.exe>");
-        eprintln!("  wire probe64 <program.exe> [--max-instr N] [--startup] [--dll] [--window] [--cpu-stats] [--api-trace PATH] [--guest-arg VALUE] [--graphics-backend PATH --moltenvk PATH] (experimental AMD64 diagnostic)");
+        eprintln!("  wire probe64 <program.exe> [--max-instr N] [--startup] [--dll] [--window] [--cpu-stats] [--api-trace PATH] [--mono-trace PATH] [--guest-arg VALUE] [--graphics-backend PATH --moltenvk PATH] (experimental AMD64 diagnostic)");
         eprintln!("  wire prepare <program.exe> [--out program.wir]");
         eprintln!(
             "  wire run <program.exe> [--ir program.wir] [--op-stats] [--max-instr N] [--log-dir DIR] [--cwd DIR] [--trace-cpu] [--present|--headless] [--software-render] [--capture-frames DIR] [--stop-after-presents N]"
@@ -579,6 +579,7 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
         let mut cpu_diagnostics = false;
         let mut cache_layout = wire::x64::memory::TranslationCacheLayout::default();
         let mut api_trace = None;
+        let mut mono_trace = None;
         let mut capture_frame = None;
         let mut graphics_backend = None;
         let mut moltenvk = None;
@@ -619,6 +620,10 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
                     api_trace = Some(opt.next().ok_or("--api-trace needs a path")?.as_str());
                     startup = true;
                 }
+                "--mono-trace" => {
+                    mono_trace = Some(opt.next().ok_or("--mono-trace needs a path")?.as_str());
+                    startup = true;
+                }
                 "--capture-frame" => {
                     capture_frame = Some(opt.next().ok_or("--capture-frame needs a PPM path")?.as_str());
                     window = true;
@@ -641,7 +646,7 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
                 }
                 _ => {
                     return Err(
-                        "usage: wire probe64 <exe> [--max-instr N] [--startup] [--dll] [--window] [--cpu-stats] [--api-trace PATH] [--capture-frame PPM] [--guest-arg VALUE] [--graphics-backend PATH --moltenvk PATH]"
+                        "usage: wire probe64 <exe> [--max-instr N] [--startup] [--dll] [--window] [--cpu-stats] [--api-trace PATH] [--mono-trace PATH] [--capture-frame PPM] [--guest-arg VALUE] [--graphics-backend PATH --moltenvk PATH]"
                             .into(),
                     )
                 }
@@ -666,6 +671,7 @@ fn cmd_probe64(path: &str, opts: &[String]) -> ExitCode {
                 cache_layout,
                 graphics,
                 api_trace,
+                mono_trace,
                 capture_frame,
                 &guest_args,
             );
@@ -806,6 +812,7 @@ fn run_startup64(
     cache_layout: wire::x64::memory::TranslationCacheLayout,
     graphics: Option<wire::gpu::NativeGraphics>,
     api_trace: Option<&str>,
+    mono_trace: Option<&str>,
     capture_frame: Option<&str>,
     guest_args: &[String],
 ) -> Result<(), String> {
@@ -816,6 +823,12 @@ fn run_startup64(
         .append_guest_arguments(&mut process.memory, guest_args)?;
     if api_trace.is_some() {
         process.runtime.enable_api_inventory();
+    }
+    if mono_trace.is_some() {
+        process.enable_mono_trace()?;
+        println!(
+            "diagnostic original Mono entry trace enabled; timing is not a performance comparison"
+        );
     }
     if let Some(graphics) = graphics {
         let info = graphics.adapter();
@@ -881,6 +894,14 @@ fn run_startup64(
         )
         .map_err(|e| format!("write Win64 API inventory: {e}"))?;
         println!("Win64 aggregate API inventory: {path}");
+    }
+    if let Some(path) = mono_trace {
+        std::fs::write(
+            path,
+            process.mono_trace_tsv().ok_or("missing Mono entry trace")?,
+        )
+        .map_err(|e| format!("write original Mono entry trace: {e}"))?;
+        println!("original Mono entry observations: {path}");
     }
     process.poll_window(true)?;
     if outcome.is_err() {

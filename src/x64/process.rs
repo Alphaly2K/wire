@@ -10,6 +10,7 @@ use std::{
     path::Path,
 };
 mod exception;
+mod mono_trace;
 const STACK: u64 = 0x7ff000000000;
 const RETURN: u64 = 0x7ffe10000000;
 const CALLBACK_RETURN: u64 = RETURN + 16;
@@ -65,6 +66,7 @@ struct Modules {
     exports: BTreeMap<String, Exports64>,
     ranges: Vec<(u64, u64)>,
     pending: Vec<Image>,
+    mono_trace: Option<mono_trace::MonoTrace>,
 }
 fn provider(name: &str) -> bool {
     crate::modules::native_module(name)
@@ -170,6 +172,9 @@ impl Modules {
         })?;
         mem.merge(mapped)?;
         mem.register_code_image(base, name.clone());
+        if let Some(trace) = self.mono_trace.as_mut() {
+            trace.register(&name, &self.exports[&name])?;
+        }
         runtime.register_module(&name, base, pe.exports(&bytes, base)?);
         runtime.register_module_path(base, fs.guest_path(path));
         runtime.register_image(
@@ -382,6 +387,21 @@ impl Process64 {
             self.cpu.regs[0] = 1;
         }
         Ok(())
+    }
+    /// Observe original guest Mono entries without replacing their VM or ABI.
+    /// Disabled by default. Bounded samples perturb timing, not permissions.
+    pub fn enable_mono_trace(&mut self) -> Result<(), String> {
+        if self.loader.mono_trace.is_none() {
+            let mut trace = mono_trace::MonoTrace::default();
+            for (name, exports) in &self.loader.exports {
+                trace.register(name, exports)?;
+            }
+            self.loader.mono_trace = Some(trace);
+        }
+        Ok(())
+    }
+    pub fn mono_trace_tsv(&self) -> Option<String> {
+        self.loader.mono_trace.as_ref().map(|trace| trace.tsv())
     }
     pub fn enable_window(&mut self) -> Result<(), String> {
         if self.presenter.is_none() {
@@ -1035,25 +1055,52 @@ impl Process64 {
                 if !self.contexts.is_empty() {
                     until = until.min(self.quantum_start.saturating_add(10000));
                 }
-                loop {
-                    if !self.cpu.step_cached_guarded(
-                        &mut self.memory,
-                        until.saturating_sub(self.cpu.work).max(1),
-                        |start, end| {
-                            !self.runtime.gateways.has_entry(start, end)
-                                && ![RETURN, CALLBACK_RETURN]
-                                    .into_iter()
-                                    .any(|pc| pc >= start && pc < end)
-                        },
-                    )? {
-                        self.cpu.step_fallback(&mut self.memory)?;
+                if let Some(trace) = self.loader.mono_trace.as_mut() {
+                    loop {
+                        trace.record(&self.cpu, &self.memory, self.runtime.active_thread());
+                        if !self.cpu.step_cached_guarded(
+                            &mut self.memory,
+                            until.saturating_sub(self.cpu.work).max(1),
+                            |start, end| {
+                                !trace.has_entry(start, end)
+                                    && !self.runtime.gateways.has_entry(start, end)
+                                    && ![RETURN, CALLBACK_RETURN]
+                                        .into_iter()
+                                        .any(|pc| pc >= start && pc < end)
+                            },
+                        )? {
+                            self.cpu.step_fallback(&mut self.memory)?;
+                        }
+                        if self.cpu.work >= until
+                            || self.cpu.rip == RETURN
+                            || self.cpu.rip == CALLBACK_RETURN
+                            || self.runtime.gateways.contains_key(&self.cpu.rip)
+                            || trace.contains(self.cpu.rip)
+                        {
+                            break;
+                        }
                     }
-                    if self.cpu.work >= until
-                        || self.cpu.rip == RETURN
-                        || self.cpu.rip == CALLBACK_RETURN
-                        || self.runtime.gateways.contains_key(&self.cpu.rip)
-                    {
-                        break;
+                } else {
+                    loop {
+                        if !self.cpu.step_cached_guarded(
+                            &mut self.memory,
+                            until.saturating_sub(self.cpu.work).max(1),
+                            |start, end| {
+                                !self.runtime.gateways.has_entry(start, end)
+                                    && ![RETURN, CALLBACK_RETURN]
+                                        .into_iter()
+                                        .any(|pc| pc >= start && pc < end)
+                            },
+                        )? {
+                            self.cpu.step_fallback(&mut self.memory)?;
+                        }
+                        if self.cpu.work >= until
+                            || self.cpu.rip == RETURN
+                            || self.cpu.rip == CALLBACK_RETURN
+                            || self.runtime.gateways.contains_key(&self.cpu.rip)
+                        {
+                            break;
+                        }
                     }
                 }
             }
