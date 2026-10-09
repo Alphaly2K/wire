@@ -53,6 +53,16 @@ impl Pages {
         ((page ^ (page >> 16) ^ (page >> 32)) as usize) & (CACHE_SLOTS - 1)
     }
 
+    pub(super) fn recent_hit(&self, address: u64) -> bool {
+        self.recent[Self::cache_slot(address)]
+            .get()
+            .is_some_and(|(at, _)| at == address)
+    }
+    pub(super) fn peek(&self, address: u64) -> Option<&Page> {
+        self.slots[*self.indices.get(&address)?]
+            .as_ref()
+            .map(|(_, page)| page)
+    }
     fn slot(&self, address: &u64) -> Option<usize> {
         let recent = &self.recent[Self::cache_slot(*address)];
         if let Some((at, index)) = recent.get() {

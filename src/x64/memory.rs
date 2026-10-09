@@ -23,6 +23,7 @@ pub enum TranslationCacheLayout {
 
 // Experiments use separate frozen builds. The chosen direct layout uses a
 // constant mask without associative probing or runtime layout branches.
+pub(super) const BUILD_DIAGNOSTICS_V2: bool = option_env!("WIRE_X64_DIAGNOSTICS_V2").is_some();
 const BUILD_FOUR_WAY: bool = option_env!("WIRE_X64_CACHE_FOUR_WAY").is_some();
 const BUILD_16K: bool = option_env!("WIRE_X64_CACHE_16K").is_some() || BUILD_FOUR_WAY;
 const BUILD_32K: bool = option_env!("WIRE_X64_CACHE_32K").is_some();
@@ -268,6 +269,70 @@ impl Memory {
     }
     #[inline(always)]
     fn translation(&self, address: u64) -> Option<(usize, &TranslationSlot)> {
+        self.translation_kind(address, 0)
+    }
+    #[inline(always)]
+    fn translation_kind(&self, address: u64, kind: u8) -> Option<(usize, &TranslationSlot)> {
+        let result = self.translation_lookup(address);
+        self.diagnostic_request(kind, address, result.is_some());
+        result
+    }
+    #[inline(always)]
+    fn diagnostic_request(&self, kind: u8, address: u64, hit: bool) {
+        if BUILD_DIAGNOSTICS_V2 {
+            if let Some(d) = &self.diagnostics {
+                let base = address & !(PAGE - 1);
+                let generation = self.pages.peek(base).map_or(0, |p| p.generation);
+                let second = if d.borrow().crossing(address) {
+                    base.checked_add(PAGE)
+                        .and_then(|b| self.pages.peek(b))
+                        .map_or(0, |p| p.generation)
+                } else {
+                    0
+                };
+                d.borrow_mut()
+                    .request(kind, address, hit, self.decode_epoch, (generation, second));
+            }
+        }
+    }
+    #[inline(always)]
+    pub(crate) fn diagnostic_operands(&self, memory: bool) {
+        if BUILD_DIAGNOSTICS_V2 {
+            if let Some(d) = &self.diagnostics {
+                d.borrow_mut().operands(memory);
+            }
+        }
+    }
+    #[inline(always)]
+    fn diagnostic_data(&self, kind: usize, addr: u64, width: usize) {
+        if BUILD_DIAGNOSTICS_V2 {
+            if let Some(d) = &self.diagnostics {
+                d.borrow_mut().data(
+                    kind,
+                    width,
+                    width as u64 > PAGE - (addr & (PAGE - 1)),
+                    self.pages.recent_hit(addr & !(PAGE - 1)),
+                );
+            }
+        }
+    }
+    #[inline(always)]
+    fn diagnostic_segment(&self, event: usize) {
+        if BUILD_DIAGNOSTICS_V2 {
+            if let Some(d) = &self.diagnostics {
+                let mut d = d.borrow_mut();
+                if event == 12 {
+                    d.segment_attempt();
+                } else if event >= 13 {
+                    d.link(event - 13);
+                } else {
+                    d.segment_reject(event);
+                }
+            }
+        }
+    }
+    #[inline(always)]
+    fn translation_lookup(&self, address: u64) -> Option<(usize, &TranslationSlot)> {
         let cache = self.decoded.get()?;
         let slot = cache.find(address)?;
         let entry = &cache.slots[slot];
@@ -334,7 +399,7 @@ impl Memory {
         &self,
         address: u64,
     ) -> Result<Option<iced_x86::Instruction>, String> {
-        let Some((slot, _)) = self.translation(address) else {
+        let Some((slot, _)) = self.translation_kind(address, 1) else {
             return Ok(None);
         };
         let instruction = self.decoded.get().unwrap().instructions[slot].get();
@@ -349,11 +414,13 @@ impl Memory {
         remaining: u64,
         mut allowed: impl FnMut(u64, u64) -> bool,
     ) -> bool {
+        self.diagnostic_segment(12);
         if option_env!("WIRE_X64_NO_SEGMENTS").is_some() || remaining < 2 {
+            self.diagnostic_segment(1);
             return false;
         }
         let pc = cpu.rip;
-        let Some((mut slot, _)) = self.translation(pc) else {
+        let Some((mut slot, _)) = self.translation_kind(pc, 2) else {
             return false;
         };
         let cache = self.decoded.get().unwrap();
@@ -366,6 +433,12 @@ impl Memory {
             if matches!(*state, SegmentState::Unbuilt) {
                 let base = pc & !(PAGE - 1);
                 let page = &self.pages[&base];
+                if BUILD_DIAGNOSTICS_V2 {
+                    if let Some(d) = &self.diagnostics {
+                        d.borrow_mut()
+                            .segment_build(&page.data[(pc - base) as usize..], pc);
+                    }
+                }
                 *state =
                     super::cpu::ir::RegisterSegment::lower(&page.data[(pc - base) as usize..], pc)
                         .map_or(SegmentState::Single, |s| SegmentState::Ready(Box::new(s)));
@@ -384,8 +457,14 @@ impl Memory {
             if let SegmentState::Ready(segment) = &*state {
                 if segment.work() <= left && allowed(pc, pc + segment.bytes) {
                     segment.execute(cpu);
+                    if BUILD_DIAGNOSTICS_V2 {
+                        if let Some(d) = &self.diagnostics {
+                            d.borrow_mut().segment_run(segment.work() as usize);
+                        }
+                    }
                     left -= segment.work();
                 } else {
+                    self.diagnostic_segment(if segment.work() > left { 1 } else { 2 });
                     break;
                 }
             } else {
@@ -399,7 +478,12 @@ impl Memory {
             }
             let (linked_pc, linked_slot) = cache.links[slot].get();
             if linked_pc == next && linked_slot == usize::MAX {
+                self.diagnostic_segment(15);
+                self.diagnostic_request(3, next, false);
                 break;
+            }
+            if linked_pc != next {
+                self.diagnostic_segment(14);
             }
             let target = if linked_pc == next && cache.slots[linked_slot].pc.get() == next {
                 let entry = &cache.slots[linked_slot];
@@ -407,8 +491,15 @@ impl Memory {
                     || self.refresh_translation(next, linked_slot, entry))
                 .then_some((linked_slot, entry))
             } else {
-                self.translation(next)
+                if linked_pc == next {
+                    self.diagnostic_segment(16);
+                }
+                self.translation_lookup(next)
             };
+            self.diagnostic_request(3, next, target.is_some());
+            if target.is_some() {
+                self.diagnostic_segment(13);
+            }
             let Some((target, entry)) = target else {
                 break;
             };
@@ -475,6 +566,7 @@ impl Memory {
         });
         let slot = cache.replacement(instruction.ip());
         let entry = &cache.slots[slot];
+        self.diagnostic_request(4, entry.pc.get(), false);
         entry.pc.set(instruction.ip());
         entry.validation_epoch.set(self.decode_epoch);
         cache.generations[slot].set((generation, second_generation));
@@ -673,6 +765,9 @@ impl Memory {
         self.read_access(addr, out, EXECUTE)
     }
     fn read_access(&self, addr: u64, out: &mut [u8], access: u8) -> Result<(), String> {
+        if access == READ {
+            self.diagnostic_data(0, addr, out.len());
+        }
         Self::range(addr, out.len())?;
         if out.is_empty() {
             return Ok(());
@@ -701,6 +796,7 @@ impl Memory {
         Ok(())
     }
     pub fn write(&mut self, addr: u64, bytes: &[u8]) -> Result<(), String> {
+        self.diagnostic_data(1, addr, bytes.len());
         Self::range(addr, bytes.len())?;
         if bytes.is_empty() {
             return Ok(());
@@ -768,6 +864,7 @@ impl Memory {
         let base = addr & !(PAGE - 1);
         let start = (addr - base) as usize;
         if size <= 4096 - start {
+            self.diagnostic_data(2, addr, size);
             let page = self
                 .pages
                 .get(&base)
@@ -805,6 +902,7 @@ impl Memory {
             let value = self.read_int(addr, size)?;
             return self.write_int(addr, size, update(value));
         }
+        self.diagnostic_data(4, addr, size);
         let page = self
             .pages
             .get_mut(&base)
@@ -848,6 +946,7 @@ impl Memory {
         let base = addr & !(PAGE - 1);
         let start = (addr - base) as usize;
         if size <= 4096 - start {
+            self.diagnostic_data(3, addr, size);
             let page = self
                 .pages
                 .get_mut(&base)

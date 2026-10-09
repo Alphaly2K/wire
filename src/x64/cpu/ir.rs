@@ -135,6 +135,7 @@ impl ScalarIr {
         limit: u64,
     ) -> Result<u64, String> {
         if self.opcode & 128 != 0 {
+            mem.diagnostic_operands(self.dst == MEMORY || self.src == MEMORY);
             if self.opcode >> 2 == STRING {
                 return self.execute_string_bounded(cpu, mem, limit);
             }
@@ -509,6 +510,7 @@ impl ScalarIr {
     }
     #[inline(always)]
     pub(super) fn step_scalar(&self, cpu: &mut Cpu64, mem: &mut Memory) -> Result<(), String> {
+        mem.diagnostic_operands(self.dst == MEMORY || self.src == MEMORY);
         // A scalar opcode can only write its explicit destination and RSP.
         // Memory/constant selectors still produce an in-range, untouched GPR.
         // Save both before execution: POP RSP can alias them, and POP [RSP]
