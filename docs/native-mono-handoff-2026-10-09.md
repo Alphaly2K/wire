@@ -155,3 +155,13 @@ CoreModule Boolean InternalCall 完成 native Mono → 固定 ARM64 adapter → 
 typed fail-stop，网络未实现。新边界pre-images/images；后者止于首个class query前。
 当前feature完整Rust394通过/7 ignored，feature Clippy clean，默认回归正在运行。
 详见 `docs/native-mono-unity-images-2026-10-09.md`。继续typed metadata，不碰浮点/翻译缓存。
+
+## Typed metadata 已推进至string构造（继续中）
+
+`native-mono-unity-metadata-probe-05`实际5643 query/955 typed handles/687 owned names，guard176/0。
+82次真实image生命周期及GC/TLS/cleanup仍通过，当前domain身份已核对，NULL stack roots可清。
+止于mono_string_new_len，args rootToken + UTF8源53B。详情
+`docs/native-mono-unity-metadata-2026-10-09.md`。Class userdata只映射8B owned scalar shadow，
+不写native userdata，不准入依赖此字段的managed callbacks/完整metadata ABI。
+下一步继续string强根和受检视图及stack-reference；default365/feature394是上一images阶段
+完整验证，不代表后续对象代码。仍不碰浮点/翻译缓存；用户授权持续自己测修提交、不push。

@@ -52,6 +52,6 @@ python3 tools/mono/probe_startup.py \
 ```
 
 当前feature完整Rust回归 **394 passed / 7 ignored**，feature全目标Clippy clean。
-默认完整回归仍在运行，结果记录到 `native-mono-images-default-tests.log`，不得提前声称通过。
+默认完整回归 **365 passed / 7 ignored**，记录到 `native-mono-images-default-tests.log`。
 下一步继续typed class/method/signature/type查询、iterator及已知userdata字段的严格边界，
 再连接managed对象/roots。不能把raw native metadata heap开放给guest读取。

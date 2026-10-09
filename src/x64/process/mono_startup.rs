@@ -27,6 +27,7 @@ type Object = *mut c_void;
 mod bindings;
 mod callbacks;
 mod images;
+mod metadata;
 mod unitytls;
 macro_rules! symbol {
     ($library:expr, $name:literal, $ty:ty) => {{
@@ -171,6 +172,9 @@ pub(super) struct Probe {
     images_ready: bool,
     image_registry: images::Registry,
     image_api: Option<images::Api>,
+    metadata: bool,
+    metadata_ready: bool,
+    metadata_registry: metadata::Registry,
     registry: bindings::Registry,
     stopped: bool,
     skip_etw: bool,
@@ -269,17 +273,18 @@ impl Probe {
         skip_etw: bool,
         boundary: &str,
     ) -> Result<Self, String> {
-        let (main_thread, pre_bindings, bindings, profiler, pre_images, images) = match boundary {
-            "root" => (false, false, false, false, false, false),
-            "main-thread" => (true, false, false, false, false, false),
-            "pre-bindings" => (true, true, false, false, false, false),
-            "bindings" => (true, true, true, false, false, false),
-            "profiler" => (true, true, true, true, false, false),
-            "pre-images" => (true, true, true, true, true, false),
-            "images" => (true, true, true, true, true, true),
+        let (main_thread, pre_bindings, bindings, profiler, pre_images, images, metadata) = match boundary {
+            "root" => (false, false, false, false, false, false, false),
+            "main-thread" => (true, false, false, false, false, false, false),
+            "pre-bindings" => (true, true, false, false, false, false, false),
+            "bindings" => (true, true, true, false, false, false, false),
+            "profiler" => (true, true, true, true, false, false, false),
+            "pre-images" => (true, true, true, true, true, false, false),
+            "images" => (true, true, true, true, true, true, false),
+            "metadata" => (true, true, true, true, true, true, true),
             _ => {
                 return Err(
-                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings, profiler, pre-images or images".into(),
+                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings, profiler, pre-images, images or metadata".into(),
                 )
             }
         };
@@ -324,6 +329,9 @@ impl Probe {
             images_ready: false,
             image_registry: images::Registry::default(),
             image_api: None,
+            metadata,
+            metadata_ready: false,
+            metadata_registry: metadata::Registry::default(),
             registry: bindings::Registry::default(),
             stopped: false,
             skip_etw,
@@ -620,6 +628,13 @@ impl Probe {
                     f(ptr::null());
                 }
             }
+            "mono_domain_get" if self.root_ready => {
+                let current = symbol!(lib, "mono_domain_get", unsafe extern "C" fn() -> Object);
+                if unsafe { current() } != native.domain {
+                    return Err("native current domain differs from owned root".into());
+                }
+                result = ROOT_TOKEN;
+            }
             "mono_thread_current" if self.root_ready && self.main_thread => {
                 let current = symbol!(lib, "mono_thread_current", unsafe extern "C" fn() -> Object);
                 let strong = symbol!(
@@ -855,7 +870,117 @@ impl Probe {
         {
             self.images_ready = true;
             self.events.push("actual Unity completed native image/assembly ownership cycles; stop before first class metadata query".into());
+            return Ok(!self.metadata);
+        }
+        if self.metadata
+            && self.metadata_registry.count() > 0
+            && !metadata::handles(function)
+            && !images::handles(function)
+            && !matches!(function, "mono_gc_wbarrier_set_field" | "mono_domain_get")
+        {
+            self.metadata_ready = true;
+            self.events.push(format!("actual typed metadata queries complete; stop before next unadmitted operation {function}"));
             return Ok(true);
+        }
+        Ok(false)
+    }
+    pub(super) fn observe_stop(&mut self, function: &str, cpu: &Cpu64) {
+        self.events.push(format!(
+            "pending boundary {function}: args={:x?}; rsp={:#x}",
+            [cpu.regs[1], cpu.regs[2], cpu.regs[8], cpu.regs[9]],
+            cpu.regs[4]
+        ));
+    }
+    pub(super) fn handles_metadata(&self, function: &str) -> bool {
+        self.metadata && metadata::handles(function)
+    }
+    pub(super) fn dispatch_metadata(
+        &mut self,
+        function: &str,
+        cpu: &mut Cpu64,
+        memory: &mut Memory,
+        runtime: &mut Runtime64,
+    ) -> Result<bool, String> {
+        if self.stopped || !self.handles_metadata(function) {
+            return Err("metadata call outside live typed provider".into());
+        }
+        let native = self
+            .native
+            .as_ref()
+            .ok_or("metadata query has no native runtime")?;
+        if native.closed || native.owner != thread::current().id() {
+            return Err("metadata query has closed/foreign owner".into());
+        }
+        let library = native.library;
+        let a = [cpu.regs[1], cpu.regs[2], cpu.regs[8], cpu.regs[9]];
+        memory.read_int(cpu.regs[4], 8)?;
+        cpu.regs[4]
+            .checked_add(8)
+            .ok_or("metadata return stack overflow")?;
+        let targets = self.callback_targets();
+        let mut iterator_output = None;
+        let value = if function == "mono_get_corlib" {
+            let get = symbol!(library, "mono_get_corlib", unsafe extern "C" fn() -> Object);
+            let api = match self.image_api {
+                Some(api) => api,
+                None => {
+                    let api = images::Api::load(library)?;
+                    self.image_api = Some(api);
+                    api
+                }
+            };
+            let (result, _) = callbacks::with_owner(memory, runtime, targets, || {
+                let image = unsafe { get() };
+                self.image_registry.borrowed_image(
+                    api,
+                    image,
+                    CString::new("mscorlib.dll").unwrap(),
+                    CORELIB.into(),
+                )
+            })?;
+            self.metadata_registry.note_query();
+            metadata::Value::Scalar(result?)
+        } else if function == "mono_class_from_name" {
+            let image = self.image_registry.native_image(a[0])?;
+            let namespace = string(memory, a[1])?;
+            let name = string(memory, a[2])?;
+            let (result, _) = callbacks::with_owner(memory, runtime, targets, || {
+                self.metadata_registry
+                    .class_from_name(library, image, namespace, name)
+            })?;
+            result?
+        } else if matches!(
+            function,
+            "mono_class_get_methods" | "mono_class_get_nested_types" | "mono_signature_get_params"
+        ) {
+            memory.check(
+                a[1],
+                8,
+                super::super::memory::READ | super::super::memory::WRITE,
+            )?;
+            let iterator = memory.read_int(a[1], 8)?;
+            let (result, _) = callbacks::with_owner(memory, runtime, targets, || {
+                self.metadata_registry
+                    .iterate(library, function, a[0], iterator)
+            })?;
+            let (value, token) = result?;
+            iterator_output = Some((a[1], token));
+            value
+        } else {
+            let (result, _) = callbacks::with_owner(memory, runtime, targets, || {
+                self.metadata_registry.query(library, function, a[0], a[1])
+            })?;
+            result?
+        };
+        let result = self.metadata_registry.wrap(memory, value)?;
+        if let Some((slot, token)) = iterator_output {
+            memory.write_int(slot, 8, token)?;
+        }
+        cpu.return_integer(memory, result)?;
+        if self.metadata_registry.count() <= 32 {
+            self.events.push(format!(
+                "actual typed metadata boundary {function} -> {result:#x}"
+            ));
         }
         Ok(false)
     }
@@ -1234,11 +1359,14 @@ impl Probe {
         runtime: &mut Runtime64,
     ) -> Result<(), String> {
         if !self.legacy_installed || self.stopped {
-            return self.finish();
+            let result = self.finish();
+            self.metadata_registry.retire(memory)?;
+            return result;
         }
         let targets = self.callback_targets();
         let (result, stats) = callbacks::with_owner(memory, runtime, targets, || self.finish())?;
         result?;
+        self.metadata_registry.retire(memory)?;
         self.shutdown_callbacks += stats.calls[2];
         self.gc_events_verified |= stats.gc_events;
         if stats.calls[2] != 1 {
@@ -1280,7 +1408,7 @@ impl Probe {
     }
     pub(super) fn report(&self) -> String {
         format!(
-            "native-root-ready={}\nnative-main-thread-ready={}\nnative-pre-bindings-ready={}\nnative-bindings-ready={}\nprovider-bindings={}\nnative-scalar-adapters={}\nactual-unity-scalar-callbacks-verified={}\nnative-profiler-ready={}\nactual-gc-event-mask={}\nactual-shutdown-callbacks={}\nnative-pre-images-ready={}\nactual-unitytls-leaf-verified={}\nnative-images-ready={}\nfull-game-admission=false\n{}{}\n",
+            "native-root-ready={}\nnative-main-thread-ready={}\nnative-pre-bindings-ready={}\nnative-bindings-ready={}\nprovider-bindings={}\nnative-scalar-adapters={}\nactual-unity-scalar-callbacks-verified={}\nnative-profiler-ready={}\nactual-gc-event-mask={}\nactual-shutdown-callbacks={}\nnative-pre-images-ready={}\nactual-unitytls-leaf-verified={}\nnative-images-ready={}\nnative-metadata-ready={}\nfull-game-admission=false\n{}{}{}\n",
             self.root_ready,
             self.main_thread_ready,
             self.pre_bindings_ready,
@@ -1294,7 +1422,9 @@ impl Probe {
             self.pre_images_ready,
             self.tls_leaf_verified,
             self.images_ready,
+            self.metadata_ready,
             self.image_registry.report(),
+            self.metadata_registry.report(),
             self.events.join("\n")
         )
     }
@@ -1306,7 +1436,8 @@ impl Probe {
             || (self.bindings_ready && !self.profiler)
             || (self.profiler_ready && !self.pre_images)
             || (self.pre_images_ready && !self.images)
-            || self.images_ready
+            || (self.images_ready && !self.metadata)
+            || self.metadata_ready
     }
 }
 fn store_thread_token(
@@ -1325,7 +1456,7 @@ fn store_thread_token(
     let end = a[1].checked_add(8).ok_or("startup root slot overflow")?;
     if !rooted
         || a[0] != 0
-        || a[2] != THREAD_TOKEN
+        || (a[2] != 0 && a[2] != THREAD_TOKEN)
         || !a[1].is_multiple_of(8)
         || a[1] < first
         || a[1] < super::STACK
@@ -1335,7 +1466,7 @@ fn store_thread_token(
             "startup barrier admits only an owned thread token in a live main-stack slot".into(),
         );
     }
-    memory.write_int(a[1], 8, THREAD_TOKEN)
+    memory.write_int(a[1], 8, a[2])
 }
 #[cfg(test)]
 mod tests {
@@ -1406,6 +1537,9 @@ mod tests {
         }
         store_thread_token(&mut memory, &cpu, [0, slot, THREAD_TOKEN, 0], true).unwrap();
         assert_eq!(memory.read_int(slot, 8).unwrap(), THREAD_TOKEN);
+        store_thread_token(&mut memory, &cpu, [0, slot, 0, 0], true).unwrap();
+        assert_eq!(memory.read_int(slot, 8).unwrap(), 0);
+        store_thread_token(&mut memory, &cpu, [0, slot, THREAD_TOKEN, 0], true).unwrap();
         memory.protect(super::super::STACK, 4096, READ).unwrap();
         assert!(store_thread_token(&mut memory, &cpu, [0, slot, THREAD_TOKEN, 0], true).is_err());
         assert_eq!(memory.read_int(slot, 8).unwrap(), THREAD_TOKEN);
@@ -1438,6 +1572,9 @@ mod tests {
             images_ready: false,
             image_registry: images::Registry::default(),
             image_api: None,
+            metadata: false,
+            metadata_ready: false,
+            metadata_registry: metadata::Registry::default(),
             registry: bindings::Registry::default(),
             stopped: false,
             skip_etw: false,

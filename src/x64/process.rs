@@ -980,6 +980,7 @@ impl Process64 {
                             );
                         }
                         if probe.stop_before(function)? {
+                            probe.observe_stop(function, &self.cpu);
                             probe.validate_scalar_callbacks(&mut self.memory, &mut self.runtime)?;
                             probe
                                 .validate_profiler_callbacks(&mut self.memory, &mut self.runtime)?;
@@ -993,7 +994,14 @@ impl Process64 {
                             self.cpu.regs[8],
                             self.cpu.regs[9],
                         ];
-                        let ready = (if probe.handles_image(function) {
+                        let ready = (if probe.handles_metadata(function) {
+                            probe.dispatch_metadata(
+                                function,
+                                &mut self.cpu,
+                                &mut self.memory,
+                                &mut self.runtime,
+                            )
+                        } else if probe.handles_image(function) {
                             probe.dispatch_image(
                                 function,
                                 &mut self.cpu,

@@ -220,6 +220,56 @@ impl Registry {
             entry.native = ptr::null_mut();
         }
     }
+    pub(super) fn borrowed_image(
+        &mut self,
+        api: Api,
+        native: Object,
+        name: CString,
+        hash: String,
+    ) -> Result<u64, String> {
+        if self.retired || native.is_null() {
+            return Err("borrowed native image has no live runtime owner".into());
+        }
+        if let Some((token, entry)) = self
+            .images
+            .iter_mut()
+            .find(|(_, entry)| entry.native == native)
+        {
+            entry.borrowed = true;
+            return Ok(*token);
+        }
+        if self.images.len() >= LIMIT {
+            return Err("borrowed image registry capacity exceeded".into());
+        }
+        unsafe {
+            (api.addref)(native);
+        }
+        let token = IMAGE_BASE + self.images.len() as u64 * 256;
+        self.images.insert(
+            token,
+            Image {
+                native,
+                name,
+                hash,
+                user_refs: 0,
+                borrowed: true,
+            },
+        );
+        Ok(token)
+    }
+    pub(super) fn native_image(&self, token: u64) -> Result<Object, String> {
+        if self.retired {
+            return Err("metadata image registry retired".into());
+        }
+        let entry = self
+            .images
+            .get(&token)
+            .ok_or("metadata query has unknown image")?;
+        if entry.native.is_null() || (entry.user_refs == 0 && !entry.borrowed) {
+            return Err("metadata query has no live image owner".into());
+        }
+        Ok(entry.native)
+    }
     pub(super) fn completed(&self) -> usize {
         self.getters
     }
