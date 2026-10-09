@@ -168,6 +168,8 @@ struct V2 {
     attempts: u64,
     builds: u64,
     segment_work: u64,
+    checked_segment_work: u64,
+    checked_segment_runs: u64,
     links: [u64; 4],     // valid, changed target, negative, stale slot/version
     data: [[u64; 8]; 5], // width 1/2/4/8/16/other/cross/page-cache-hit
     data_misses: [u64; 5],
@@ -209,6 +211,10 @@ impl Diagnostics {
         self.v2.segments[len] += 1;
         self.v2.segment_work += len as u64;
         self.v2.operands[0] += len as u64;
+    }
+    pub fn checked_segment_run(&mut self, len: usize) {
+        self.v2.checked_segment_work += len as u64;
+        self.v2.checked_segment_runs += 1;
     }
     pub fn link(&mut self, kind: usize) {
         self.v2.links[kind] += 1;
@@ -294,6 +300,12 @@ impl V2 {
             out,
             "AMD64 V2 segments: attempts={} builds={} work={} lengths={:?} stops={:?}",
             self.attempts, self.builds, self.segment_work, self.segments, self.rejects
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "AMD64 V2 checked segments: runs={} work={}",
+            self.checked_segment_runs, self.checked_segment_work
         )
         .unwrap();
         writeln!(out,"AMD64 V2 stop names: short,budget,observed-PC,page,unsupported,vector,memory,string,terminal,full,invalid,reserved").unwrap();

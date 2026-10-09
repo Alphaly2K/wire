@@ -90,6 +90,8 @@ enum SegmentState {
     Unbuilt,
     Single,
     Ready(Box<super::cpu::ir::RegisterSegment>),
+    Checked(std::rc::Rc<super::cpu::ir::CheckedSegment>),
+    NoChecked,
 }
 impl TranslationCache {
     fn reuse_hash(mut pc: u64) -> usize {
@@ -650,6 +652,72 @@ impl Memory {
         let work = cpu.work - before;
         self.record_executions(true, work);
         work != 0
+    }
+    // Shared backings have no owned Page. Former code pages remain excluded
+    // even while NX, so a successful store cannot invalidate this sequence.
+    pub(crate) fn owned_noncode_access(&self, address: u64, size: usize) -> bool {
+        size as u64 <= PAGE - (address & (PAGE - 1))
+            && self
+                .pages
+                .get(&(address & !(PAGE - 1)))
+                .is_some_and(|p| p.generation == 0)
+    }
+    #[inline(never)]
+    pub(crate) fn try_checked_segment(
+        &mut self,
+        cpu: &mut super::cpu::Cpu64,
+        remaining: u64,
+        mut allowed: impl FnMut(u64, u64) -> bool,
+    ) -> Result<bool, String> {
+        if option_env!("WIRE_X64_NO_SEGMENTS").is_some()
+            || option_env!("WIRE_X64_NO_CHECKED_SEGMENTS").is_some()
+            || remaining < 2
+        {
+            return Ok(false);
+        }
+        let pc = cpu.rip;
+        let segment = {
+            let Some((slot, _)) = self.translation_kind(pc, 2) else {
+                return Ok(false);
+            };
+            let cache = self.decoded.get().unwrap();
+            let mut state = cache.segments[slot].borrow_mut();
+            if matches!(*state, SegmentState::Unbuilt | SegmentState::Single) {
+                let base = pc & !(PAGE - 1);
+                let page = &self.pages[&base];
+                *state =
+                    super::cpu::ir::CheckedSegment::lower(&page.data[(pc - base) as usize..], pc)
+                        .map_or(SegmentState::NoChecked, |s| {
+                            SegmentState::Checked(std::rc::Rc::new(s))
+                        });
+                if matches!(*state, SegmentState::NoChecked) {
+                    let entry = &cache.slots[slot];
+                    entry.ir.set(
+                        entry
+                            .ir
+                            .get()
+                            .map(super::cpu::ir::ScalarIr::without_checked_segment),
+                    );
+                }
+            }
+            match &*state {
+                SegmentState::Checked(s) => std::rc::Rc::clone(s),
+                _ => return Ok(false),
+            }
+        }; // Release cache/page borrows before the checked writes.
+        if !allowed(pc, pc + segment.bytes) {
+            return Ok(false);
+        }
+        let before = cpu.work;
+        let result = segment.execute(cpu, self, remaining);
+        let work = cpu.work - before;
+        self.record_executions(true, work);
+        if BUILD_DIAGNOSTICS_V2 && work != 0 {
+            if let Some(d) = &self.diagnostics {
+                d.borrow_mut().checked_segment_run(work as usize);
+            }
+        }
+        result.map(|()| work != 0)
     }
     pub(crate) fn cache_instruction(&self, instruction: iced_x86::Instruction, bytes: &[u8]) {
         let base = instruction.ip() & !(PAGE - 1);

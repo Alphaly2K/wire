@@ -6,13 +6,14 @@ mod fp;
 mod segment;
 mod string;
 mod vector;
-pub(crate) use segment::RegisterSegment;
+pub(crate) use segment::{CheckedSegment, RegisterSegment};
 
 const MEMORY: u8 = 254;
 const CONSTANT: u8 = 255;
 const NO_REGISTER: u8 = 255;
 const ADDRESS32: u8 = 4;
 const GS: u8 = 8;
+const CHECKED_SEGMENT: u8 = 64;
 const REGISTER_ONLY: u8 = 128;
 
 trait IrMemory {
@@ -351,6 +352,9 @@ impl ScalarIr {
         if ir.register_safe() {
             ir.addressing |= REGISTER_ONLY;
         }
+        if ir.checked_member() {
+            ir.addressing |= CHECKED_SEGMENT;
+        }
         Some(ir)
     }
 
@@ -370,6 +374,45 @@ impl ScalarIr {
         self
     }
 
+    #[inline(always)]
+    pub(crate) fn checked_segment(&self) -> bool {
+        self.addressing & CHECKED_SEGMENT != 0
+    }
+    pub(crate) fn without_checked_segment(mut self) -> Self {
+        self.addressing &= !CHECKED_SEGMENT;
+        self
+    }
+    fn checked_member(&self) -> bool {
+        matches!(
+            self.opcode >> 2,
+            NOP | MOV
+                | LEA
+                | ADD
+                | ADC
+                | SUB
+                | SBB
+                | CMP
+                | AND
+                | OR
+                | XOR
+                | TEST
+                | INC
+                | DEC
+                | NEG
+                | NOT
+                | CMOV
+                | SET
+                | BRANCH
+        ) || self.opcode >> 2 == JUMP && self.dst != MEMORY
+    }
+    // Inspect only this instruction's access. Permissions and guard effects
+    // remain in the ordinary checked executor, in guest execution order.
+    fn checked_access(&self, cpu: &Cpu64, mem: &Memory) -> bool {
+        if self.opcode >> 2 == LEA || self.dst != MEMORY && self.src != MEMORY {
+            return true;
+        }
+        mem.owned_noncode_access(self.address(cpu), 1usize << (self.opcode & 3))
+    }
     fn type_code(bits: u32) -> Option<u8> {
         Some(match bits {
             8 => 0,
