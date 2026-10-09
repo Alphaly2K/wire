@@ -1,6 +1,7 @@
 //! External v2 strong GC handles. Guest tokens identify owned native handles;
 //! they never expose a Mono handle pointer or accept arbitrary object addresses.
-use super::Object;
+use super::super::super::memory::{shared::HostRegion, READ};
+use super::{Memory, Object};
 use std::{collections::BTreeMap, ptr};
 #[derive(Clone, Copy)]
 pub(super) struct Api {
@@ -36,12 +37,15 @@ struct Entry {
     native: Object,
     object: Object,
     token: u64,
+    view: HostRegion,
+    published: bool,
 }
 #[derive(Default)]
 pub(super) struct Registry {
     entries: BTreeMap<u64, Entry>,
     issued: usize,
     released: bool,
+    views_retired: bool,
 }
 impl Registry {
     pub(super) fn new_handle(
@@ -64,6 +68,19 @@ impl Registry {
             }
             return Err("external strong handle identity mismatch".into());
         }
+        let view = match HostRegion::owned(8) {
+            Ok(view) => view,
+            Err(error) => {
+                unsafe { (api.free)(native) };
+                return Err(error);
+            }
+        };
+        if let Err(error) =
+            view.with_native(|dest| unsafe { dest.as_ptr().cast::<u64>().write_unaligned(token) })
+        {
+            unsafe { (api.free)(native) };
+            return Err(error);
+        }
         let handle = 0x6ffea0000000 + self.issued as u64 * 16;
         self.issued += 1;
         self.entries.insert(
@@ -72,9 +89,54 @@ impl Registry {
                 native,
                 object,
                 token,
+                view,
+                published: false,
             },
         );
         Ok(handle)
+    }
+    pub(super) fn publish(&mut self, memory: &mut Memory, handle: u64) -> Result<(), String> {
+        if self.released || self.views_retired {
+            return Err("external handle publication after release".into());
+        }
+        let entry = self
+            .entries
+            .get_mut(&handle)
+            .ok_or("unknown external handle view")?;
+        if !entry.published {
+            memory.map_shared_data(handle, entry.view.clone(), READ, READ)?;
+            entry.published = true;
+        }
+        Ok(())
+    }
+    pub(super) fn retire_view(&mut self, memory: &mut Memory, handle: u64) -> Result<(), String> {
+        let entry = self
+            .entries
+            .get_mut(&handle)
+            .ok_or("unknown external handle view retirement")?;
+        if entry.published {
+            memory.unmap_shared_data(handle)?;
+            entry.published = false;
+        }
+        entry.view.revoke()?;
+        Ok(())
+    }
+    pub(super) fn retire_views(&mut self, memory: &mut Memory) -> Result<(), String> {
+        if self.views_retired {
+            return Ok(());
+        }
+        if !self.released && !self.entries.is_empty() {
+            return Err("external handle views retired before roots".into());
+        }
+        for (&handle, entry) in &mut self.entries {
+            if entry.published {
+                memory.unmap_shared_data(handle)?;
+                entry.published = false;
+            }
+            entry.view.revoke()?;
+        }
+        self.views_retired = true;
+        Ok(())
     }
     pub(super) fn target(&self, api: Api, handle: u64) -> Result<u64, String> {
         if self.released {
@@ -92,6 +154,13 @@ impl Registry {
     pub(super) fn free(&mut self, api: Api, handle: u64) -> Result<(), String> {
         if self.released {
             return Err("external handle freed after registry release".into());
+        }
+        if self
+            .entries
+            .get(&handle)
+            .is_some_and(|entry| entry.published)
+        {
+            return Err("external handle must revoke its object-token cell before free".into());
         }
         let entry = self
             .entries
@@ -113,18 +182,23 @@ impl Registry {
             }
             entry.native = ptr::null_mut();
         }
-        self.entries.clear();
     }
     pub(super) fn verify(&self, api: Api) -> Result<(), String> {
-        for &handle in self.entries.keys() {
+        for (&handle, entry) in &self.entries {
             self.target(api, handle)?;
+            let cell = entry.view.with_native(|pointer| unsafe {
+                pointer.as_ptr().cast::<u64>().read_unaligned()
+            })?;
+            if cell != entry.token {
+                return Err("external handle object-token cell changed".into());
+            }
         }
         Ok(())
     }
     pub(super) fn report(&self) -> String {
         format!(
-            "native-external-strong-handles={}\nnative-external-handles-released={}\n",
-            self.issued, self.released
+            "native-external-strong-handles={}\nnative-external-handles-released={}\nnative-external-handle-views-retired={}\n",
+            self.issued, self.released, self.views_retired
         )
     }
 }
@@ -152,17 +226,29 @@ mod tests {
             .new_handle(api, 0x33usize as Object, 0x77, 1)
             .unwrap();
         assert_ne!(handle, 0x33);
+        let mut memory = Memory::default();
+        registry.publish(&mut memory, handle).unwrap();
+        assert_eq!(memory.read_int(handle, 8).unwrap(), 0x77);
+        assert!(memory.read_int(handle + 8, 1).is_err());
+        assert!(memory.write_int(handle, 8, 0).is_err());
+        assert!(registry.free(api, handle).is_err());
         assert_eq!(registry.target(api, handle).unwrap(), 0x77);
         assert!(registry.target(api, 0x33).is_err());
+        registry.retire_view(&mut memory, handle).unwrap();
         registry.free(api, handle).unwrap();
+        assert!(memory.read_int(handle, 8).is_err());
         assert!(registry.free(api, handle).is_err());
         let next = registry
             .new_handle(api, 0x33usize as Object, 0x77, 0)
             .unwrap();
         assert_ne!(next, handle);
+        registry.publish(&mut memory, next).unwrap();
         registry.verify(api).unwrap();
         registry.release(api);
+        registry.retire_views(&mut memory).unwrap();
         registry.release(api);
+        registry.retire_views(&mut memory).unwrap();
+        assert!(memory.read_int(next, 8).is_err());
         assert_eq!(ROOTS.with(Cell::get), 0);
         assert!(registry.target(api, next).is_err());
         assert!(registry

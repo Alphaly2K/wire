@@ -54,8 +54,44 @@ not enable the full-game backend or demonstrate a whole-game speed improvement.
 
 Merge `21db3ab` incorporates main `cafe7e8` with the completed FP/SIMD and bounded
 translation reuse optimizations. Runtime code merged without conflicts. Full
-feature Rust regression and all-target Clippy pass (logs:
+feature Rust regression (420 passed, 7 ignored) and all-target Clippy pass (logs:
 `native-mono-integrated-feature-tests.log`, `native-mono-integrated-clippy.log`).
 `native-mono-unity-attributes-integrated-01` independently passes the same actual
 attribute boundary and GC/resource lifecycle, guard 231/0. Its timing is a finite
 functional probe, not an AB/BA performance comparison.
+
+## Attribute arrays and MonoError contract under development
+
+The locked original PE verifies `mono_error_init` at RVA 0x776d0 as
+`33c08901c3` (zero its 4B init word), `mono_error_ok` at 0x77820 as
+`33c06639010f94c0c3` (test the 16-bit error code), and
+`mono_error_get_error_code` at 0x77830 as `0fb701c3`. Source external layout is
+104B on Win64: code/flags init word, padding, and 12 hidden pointer fields.
+Only a status snapshot is exposed to the guest; native error storage is never
+passed to interpreted x64 code. Checked construction cleans native error
+resources and returns a uint16 status, preserving a real failure as nonzero.
+Guest init preserves the hidden bytes and writes the original 4B init word.
+Snapshot cleanup writes the original 0xffff sentinel. Unknown, modified, double
+cleaned, readonly, unaligned, non-stack and retired snapshots are rejected.
+
+Real Attribute[] results are rooted before element traversal. An owned readonly
+view contains only NULL bounds, checked length, and rooted opaque element tokens.
+No vtable, synchronization word or native element pointer crosses into the guest.
+Array and element identities are checked again after forced GC; views revoke only
+after roots release. This remains a bounded startup contract, not arbitrary arrays.
+
+`native-mono-unity-attribute-arrays-02` exits 0, guard 231/0: one actual
+Attribute[] array with five elements, 33 rooted attribute objects, 85 field reads,
+and 72858 metadata queries. The array and every element retain identity across
+forced GC; field byte snapshots match. One native construction status is observed
+by actual Unity `mono_error_ok`. Arrays, error snapshots, handle cells and roots
+retire on cleanup. Next pending boundary is `mono_assembly_name_parse`.
+
+Unity directly reads strong v2 handles in its C++ fast path, as documented by
+Mono's Boehm alloc_handle implementation. The bridge now publishes only an owned
+readonly 8B object-token cell at each aligned strong handle token; adjacent bytes
+fault. Explicit free first unmaps/revokes that cell. This does not expose native
+handle pointers or allow writes. 586 actual external handles are used here.
+The initial array probe stopped on that unmapped direct-read cell, and did not
+complete its final GC verification. 22 targeted Rust tests and all-target feature
+Clippy pass, including direct-cell readonly bounds and one-release/revocation.

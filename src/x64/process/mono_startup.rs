@@ -39,6 +39,7 @@ mod arrays;
 mod attributes;
 mod bindings;
 mod callbacks;
+mod errors;
 mod handles;
 mod images;
 mod invoke;
@@ -234,6 +235,9 @@ pub(super) struct Probe {
     logging_ready: bool,
     exceptions: bool,
     exceptions_ready: bool,
+    attribute_arrays: bool,
+    attribute_arrays_ready: bool,
+    error_registry: errors::Registry,
     attributes: bool,
     attributes_ready: bool,
     attribute_api: Option<attributes::Api>,
@@ -357,16 +361,25 @@ impl Probe {
         skip_etw: bool,
         boundary: &str,
     ) -> Result<Self, String> {
-        let attributes = boundary == "attributes";
-        let imgui = matches!(boundary, "imgui-cache" | "attributes");
-        let subsystem_map = matches!(boundary, "subsystem-map" | "imgui-cache" | "attributes");
+        let attribute_arrays = boundary == "attribute-arrays";
+        let attributes = matches!(boundary, "attributes" | "attribute-arrays");
+        let imgui = matches!(boundary, "imgui-cache" | "attributes" | "attribute-arrays");
+        let subsystem_map = matches!(
+            boundary,
+            "subsystem-map" | "imgui-cache" | "attributes" | "attribute-arrays"
+        );
         let subsystems = matches!(
             boundary,
-            "subsystems" | "subsystem-map" | "imgui-cache" | "attributes"
+            "subsystems" | "subsystem-map" | "imgui-cache" | "attributes" | "attribute-arrays"
         );
         let synchronization = matches!(
             boundary,
-            "synchronization" | "subsystems" | "subsystem-map" | "imgui-cache" | "attributes"
+            "synchronization"
+                | "subsystems"
+                | "subsystem-map"
+                | "imgui-cache"
+                | "attributes"
+                | "attribute-arrays"
         );
         let exceptions = matches!(
             boundary,
@@ -376,6 +389,7 @@ impl Probe {
                 | "subsystem-map"
                 | "imgui-cache"
                 | "attributes"
+                | "attribute-arrays"
         );
         let logging = matches!(
             boundary,
@@ -386,6 +400,7 @@ impl Probe {
                 | "subsystem-map"
                 | "imgui-cache"
                 | "attributes"
+                | "attribute-arrays"
         );
         let classlib = matches!(
             boundary,
@@ -397,6 +412,7 @@ impl Probe {
                 | "subsystem-map"
                 | "imgui-cache"
                 | "attributes"
+                | "attribute-arrays"
         );
         let managed_types = matches!(
             boundary,
@@ -409,6 +425,7 @@ impl Probe {
                 | "subsystem-map"
                 | "imgui-cache"
                 | "attributes"
+                | "attribute-arrays"
         );
         let strings = matches!(
             boundary,
@@ -422,6 +439,7 @@ impl Probe {
                 | "subsystem-map"
                 | "imgui-cache"
                 | "attributes"
+                | "attribute-arrays"
         );
         let (main_thread, pre_bindings, bindings, profiler, pre_images, images, metadata) = match boundary {
             "root" => (false, false, false, false, false, false, false),
@@ -431,10 +449,10 @@ impl Probe {
             "profiler" => (true, true, true, true, false, false, false),
             "pre-images" => (true, true, true, true, true, false, false),
             "images" => (true, true, true, true, true, true, false),
-            "metadata" | "strings" | "managed-types" | "classlib" | "logging" | "exceptions" | "synchronization" | "subsystems" | "subsystem-map" | "imgui-cache" | "attributes" => (true, true, true, true, true, true, true),
+            "metadata" | "strings" | "managed-types" | "classlib" | "logging" | "exceptions" | "synchronization" | "subsystems" | "subsystem-map" | "imgui-cache" | "attributes" | "attribute-arrays" => (true, true, true, true, true, true, true),
             _ => {
                 return Err(
-                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings, profiler, pre-images, images, metadata, strings, managed-types, classlib, logging, exceptions, synchronization, subsystems, subsystem-map, imgui-cache or attributes".into(),
+                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings, profiler, pre-images, images, metadata, strings, managed-types, classlib, logging, exceptions, synchronization, subsystems, subsystem-map, imgui-cache, attributes or attribute-arrays".into(),
                 )
             }
         };
@@ -520,6 +538,9 @@ impl Probe {
             logging_ready: false,
             exceptions,
             exceptions_ready: false,
+            attribute_arrays,
+            attribute_arrays_ready: false,
+            error_registry: errors::Registry::default(),
             attributes,
             attributes_ready: false,
             attribute_api: None,
@@ -1115,6 +1136,9 @@ impl Probe {
                 self.subsystem_map_ready = self.subsystem_map && self.classlib_invokes >= 7;
                 self.imgui_ready = self.imgui && self.classlib_invokes >= 8;
                 self.attributes_ready = self.attributes && self.attribute_registry.ready();
+                self.attribute_arrays_ready = self.attribute_arrays
+                    && self.attribute_registry.arrays_ready()
+                    && self.error_registry.ready();
                 return Ok(true);
             }
         }
@@ -1139,7 +1163,10 @@ impl Probe {
     }
     pub(super) fn handles_object(&self, function: &str) -> bool {
         self.strings
-            && ((self.attributes && attributes::handles(function))
+            && ((self.attribute_arrays && errors::handles(function))
+                || (self.attributes
+                    && attributes::handles(function)
+                    && (function != "mono_unity_custom_attrs_construct" || self.attribute_arrays))
                 || matches!(
                     function,
                     "mono_string_new_len" | "mono_string_length" | "mono_string_chars"
@@ -1174,6 +1201,18 @@ impl Probe {
         let a = [cpu.regs[1], cpu.regs[2], cpu.regs[8], cpu.regs[9]];
         let targets = self.callback_targets();
         let result = match function {
+            "mono_unity_custom_attrs_construct" => {
+                self.error_registry.prepare(memory, cpu, a[1])?;
+                let (result, _) = callbacks::with_owner(memory, runtime, targets, || {
+                    self.attribute_registry.construct(api, a[0])
+                })?;
+                let (token, status) = result?;
+                self.error_registry.complete(memory, cpu, a[1], status)?;
+                if token != 0 {
+                    self.attribute_registry.publish_array(memory, token)?;
+                }
+                token
+            }
             "mono_custom_attrs_from_class" | "mono_custom_attrs_from_field" => {
                 let class = self.metadata_registry.native(a[0], metadata::Kind::Class)?;
                 let field = if function == "mono_custom_attrs_from_field" {
@@ -1256,6 +1295,15 @@ impl Probe {
         cpu.regs[4]
             .checked_add(8)
             .ok_or("object return stack overflow")?;
+        if self.attribute_arrays && errors::handles(function) {
+            let result = if function == "mono_error_init" {
+                self.error_registry.init(memory, cpu, a[0])?
+            } else {
+                self.error_registry.query(memory, cpu, function, a[0])?
+            };
+            cpu.return_integer(memory, result)?;
+            return Ok(false);
+        }
         if self.attributes && attributes::handles(function) {
             return self.dispatch_attributes(function, cpu, memory, runtime, library);
         }
@@ -1291,6 +1339,9 @@ impl Probe {
                     api
                 }
             };
+            if function == "mono_gchandle_free_v2" {
+                self.handle_registry.retire_view(memory, a[0])?;
+            }
             let targets = self.callback_targets();
             let (result, _) = callbacks::with_owner(memory, runtime, targets, || match function {
                 "mono_gchandle_new_v2" => {
@@ -1317,7 +1368,11 @@ impl Probe {
                 "mono_gchandle_get_target_v2" => self.handle_registry.target(api, a[0]),
                 _ => self.handle_registry.free(api, a[0]).map(|()| 0),
             })?;
-            cpu.return_integer(memory, result?)?;
+            let result = result?;
+            if function == "mono_gchandle_new_v2" {
+                self.handle_registry.publish(memory, result)?;
+            }
+            cpu.return_integer(memory, result)?;
             return Ok(false);
         }
         if function == "mono_array_new" {
@@ -2308,6 +2363,9 @@ impl Probe {
             self.object_registry.retire_views(memory)?;
             self.reflection_registry.retire_views(memory)?;
             self.array_registry.retire(memory)?;
+            self.attribute_registry.retire_views(memory)?;
+            self.handle_registry.retire_views(memory)?;
+            self.error_registry.retire();
             return result;
         }
         let targets = self.callback_targets();
@@ -2317,6 +2375,9 @@ impl Probe {
         self.object_registry.retire_views(memory)?;
         self.reflection_registry.retire_views(memory)?;
         self.array_registry.retire(memory)?;
+        self.attribute_registry.retire_views(memory)?;
+        self.handle_registry.retire_views(memory)?;
+        self.error_registry.retire();
         self.shutdown_callbacks += stats.calls[2];
         self.gc_events_verified |= stats.gc_events;
         if stats.calls[2] != 1 {
@@ -2373,7 +2434,7 @@ impl Probe {
     }
     pub(super) fn report(&self) -> String {
         format!(
-            "native-root-ready={}\nnative-main-thread-ready={}\nnative-pre-bindings-ready={}\nnative-bindings-ready={}\nprovider-bindings={}\nnative-scalar-adapters={}\nactual-unity-scalar-callbacks-verified={}\nnative-profiler-ready={}\nactual-gc-event-mask={}\nactual-shutdown-callbacks={}\nnative-pre-images-ready={}\nactual-unitytls-leaf-verified={}\nnative-images-ready={}\nnative-metadata-ready={}\nnative-strings-ready={}\nnative-managed-types-ready={}\nnative-managed-type-invokes={}\nnative-classlib-ready={}\nnative-classlib-invokes={}\nnative-logging-ready={}\nnative-exceptions-ready={}\nnative-synchronization-ready={}\nnative-subsystems-ready={}\nnative-subsystem-map-ready={}\nnative-imgui-ready={}\nnative-attributes-ready={}\nfull-game-admission=false\n{}{}{}{}{}{}{}{}\n",
+            "native-root-ready={}\nnative-main-thread-ready={}\nnative-pre-bindings-ready={}\nnative-bindings-ready={}\nprovider-bindings={}\nnative-scalar-adapters={}\nactual-unity-scalar-callbacks-verified={}\nnative-profiler-ready={}\nactual-gc-event-mask={}\nactual-shutdown-callbacks={}\nnative-pre-images-ready={}\nactual-unitytls-leaf-verified={}\nnative-images-ready={}\nnative-metadata-ready={}\nnative-strings-ready={}\nnative-managed-types-ready={}\nnative-managed-type-invokes={}\nnative-classlib-ready={}\nnative-classlib-invokes={}\nnative-logging-ready={}\nnative-exceptions-ready={}\nnative-synchronization-ready={}\nnative-subsystems-ready={}\nnative-subsystem-map-ready={}\nnative-imgui-ready={}\nnative-attributes-ready={}\nnative-attribute-arrays-ready={}\nfull-game-admission=false\n{}{}{}{}{}{}{}{}{}\n",
             self.root_ready,
             self.main_thread_ready,
             self.pre_bindings_ready,
@@ -2400,6 +2461,8 @@ impl Probe {
             self.subsystem_map_ready,
             self.imgui_ready,
             self.attributes_ready,
+            self.attribute_arrays_ready,
+            self.error_registry.report(),
             self.attribute_registry.report(),
             self.handle_registry.report(),
             self.array_registry.report(),
@@ -2429,7 +2492,8 @@ impl Probe {
             || (self.subsystems_ready && !self.subsystem_map)
             || (self.subsystem_map_ready && !self.imgui)
             || (self.imgui_ready && !self.attributes)
-            || self.attributes_ready
+            || (self.attributes_ready && !self.attribute_arrays)
+            || self.attribute_arrays_ready
     }
 }
 fn store_stack_token(
@@ -2587,6 +2651,9 @@ mod tests {
             logging_ready: false,
             exceptions: false,
             exceptions_ready: false,
+            attribute_arrays: false,
+            attribute_arrays_ready: false,
+            error_registry: errors::Registry::default(),
             attributes: false,
             attributes_ready: false,
             attribute_api: None,
