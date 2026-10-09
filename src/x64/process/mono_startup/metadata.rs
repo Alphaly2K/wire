@@ -29,7 +29,7 @@ const CORE_CLASSES: &[&str] = &[
     "mono_get_thread_class",
     "mono_get_exception_class",
 ];
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Kind {
     Class,
     Method,
@@ -50,7 +50,9 @@ struct Iterator {
 #[derive(Default)]
 pub(super) struct Registry {
     handles: BTreeMap<u64, Entry>,
+    reverse_handles: BTreeMap<(Kind, usize), u64>,
     strings: BTreeMap<CString, (u64, HostRegion)>,
+    string_bytes: u64,
     iterators: BTreeMap<u64, Iterator>,
     queries: usize,
     retired: bool,
@@ -91,11 +93,17 @@ impl Registry {
                 if let Some((token, _)) = self.strings.get(&text) {
                     return Ok(*token);
                 }
-                if self.strings.len() >= 4096 {
+                let length = text.as_bytes_with_nul().len();
+                let span = (length as u64 + 15) & !15;
+                let next = self
+                    .string_bytes
+                    .checked_add(span)
+                    .ok_or("metadata string arena overflow")?;
+                if self.strings.len() >= 65536 || length > 32768 || next > ITER_BASE - STRING_BASE {
                     return Err("metadata string capacity exceeded".into());
                 }
-                let token = STRING_BASE + self.strings.len() as u64 * 65536;
-                let region = HostRegion::owned(text.as_bytes_with_nul().len())?;
+                let token = STRING_BASE + self.string_bytes;
+                let region = HostRegion::owned(length)?;
                 region.with_native(|p| unsafe {
                     ptr::copy_nonoverlapping(
                         text.as_ptr().cast(),
@@ -105,20 +113,17 @@ impl Registry {
                 })?;
                 memory.map_shared_data(token, region.clone(), READ, READ)?;
                 self.strings.insert(text, (token, region));
+                self.string_bytes = next;
                 Ok(token)
             }
             Value::Handle(native, kind) => {
                 if native.is_null() {
                     return Ok(0);
                 }
-                if let Some((token, _)) = self
-                    .handles
-                    .iter()
-                    .find(|(_, entry)| entry.kind == kind && entry.native == native)
-                {
+                if let Some(token) = self.reverse_handles.get(&(kind, native as usize)) {
                     return Ok(*token);
                 }
-                if self.handles.len() >= 32768 {
+                if self.handles.len() >= 65536 {
                     return Err("metadata handle capacity exceeded".into());
                 }
                 let token = HANDLE_BASE + self.handles.len() as u64 * 4096;
@@ -152,6 +157,7 @@ impl Registry {
                         userdata,
                     },
                 );
+                self.reverse_handles.insert((kind, native as usize), token);
                 Ok(token)
             }
         }
@@ -573,7 +579,7 @@ impl Registry {
         self.queries
     }
     pub(super) fn report(&self) -> String {
-        format!("native-metadata-queries={}\nnative-metadata-handles={}\nnative-metadata-strings={}\nnative-metadata-retired={}\n",self.queries,self.handles.len(),self.strings.len(),self.retired)
+        format!("native-metadata-queries={}\nnative-metadata-handles={}\nnative-metadata-strings={}\nnative-metadata-string-arena-bytes={}\nnative-metadata-retired={}\n", self.queries, self.handles.len(), self.strings.len(), self.string_bytes, self.retired)
     }
 }
 pub(super) fn handles(function: &str) -> bool {
@@ -645,6 +651,42 @@ pub(super) fn handles(function: &str) -> bool {
 mod tests {
     use super::*;
     #[test]
+    fn compact_string_arena_survives_large_metadata_scans_and_rejects_overlap_transactionally() {
+        let mut registry = Registry::default();
+        let mut memory = Memory::default();
+        let mut first = 0;
+        for index in 0..4097 {
+            let text = CString::new(format!("Type{index}")).unwrap();
+            let token = registry
+                .wrap(&mut memory, Value::Text(text.clone()))
+                .unwrap();
+            assert_eq!(
+                registry
+                    .wrap(&mut memory, Value::Text(text.clone()))
+                    .unwrap(),
+                token
+            );
+            if index == 0 {
+                first = token;
+            }
+            let mut bytes = vec![0u8; text.as_bytes_with_nul().len()];
+            memory.read(token, &mut bytes).unwrap();
+            assert_eq!(bytes, text.as_bytes_with_nul());
+            assert!(memory.write_int(token, 1, 0).is_err());
+        }
+        assert!(registry.string_bytes < 65536 * 2);
+        registry.string_bytes = ITER_BASE - STRING_BASE - 8;
+        assert!(registry
+            .wrap(&mut memory, Value::Text(CString::new("outside").unwrap()))
+            .is_err());
+        assert_eq!(memory.read_int(first, 1).unwrap(), b'T' as u64);
+        registry.retire(&mut memory).unwrap();
+        assert!(memory.read_int(first, 1).is_err());
+        assert!(registry
+            .wrap(&mut memory, Value::Text(CString::new("Type0").unwrap()))
+            .is_err());
+    }
+    #[test]
     fn metadata_class_exposes_only_its_owned_userdata_cell_and_retires_strings_and_handles() {
         let mut memory = Memory::default();
         let mut registry = Registry::default();
@@ -655,6 +697,32 @@ mod tests {
                 Value::Handle(native.as_mut_ptr().cast(), Kind::Class),
             )
             .unwrap();
+        assert_eq!(
+            registry
+                .wrap(
+                    &mut memory,
+                    Value::Handle(native.as_mut_ptr().cast(), Kind::Class)
+                )
+                .unwrap(),
+            token
+        );
+        let method = registry
+            .wrap(
+                &mut memory,
+                Value::Handle(native.as_mut_ptr().cast(), Kind::Method),
+            )
+            .unwrap();
+        assert_ne!(method, token);
+        assert_eq!(
+            registry
+                .wrap(
+                    &mut memory,
+                    Value::Handle(native.as_mut_ptr().cast(), Kind::Method)
+                )
+                .unwrap(),
+            method
+        );
+        assert!(registry.native(method, Kind::Class).is_err());
         memory.write_int(token + 232, 8, 0x12345).unwrap();
         assert_eq!(memory.read_int(token + 232, 8).unwrap(), 0x12345);
         assert_eq!(

@@ -194,6 +194,28 @@ impl Registry {
         self.user_closes += 1;
         Ok(())
     }
+    pub(super) fn borrow_assembly(&mut self, api: Api, native: Object) -> Result<u64, String> {
+        if self.retired {
+            return Err("assembly result after registry retirement".into());
+        }
+        if native.is_null() {
+            return Ok(0);
+        }
+        if let Some((token, _)) = self
+            .assemblies
+            .iter()
+            .find(|(_, entry)| entry.native == native)
+        {
+            return Ok(*token);
+        }
+        if self.assemblies.len() >= LIMIT {
+            return Err("borrowed assembly registry capacity exceeded".into());
+        }
+        let image = self.borrow_registered(unsafe { (api.image)(native) })?;
+        let token = ASSEMBLY_BASE + self.assemblies.len() as u64 * 256;
+        self.assemblies.insert(token, Assembly { native, image });
+        Ok(token)
+    }
     pub(super) fn assembly_image(&mut self, api: Api, token: u64) -> Result<u64, String> {
         if self.retired {
             return Err("assembly getter after registry retirement".into());

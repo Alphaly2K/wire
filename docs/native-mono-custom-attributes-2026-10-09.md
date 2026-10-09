@@ -95,3 +95,31 @@ handle pointers or allow writes. 586 actual external handles are used here.
 The initial array probe stopped on that unmapped direct-read cell, and did not
 complete its final GC verification. 22 targeted Rust tests and all-target feature
 Clippy pass, including direct-cell readonly bounds and one-release/revocation.
+
+## Parsed assembly lookup and full startup metadata scan
+
+`names.rs` stores real parsed names in aligned host-owned 80B records. The locked
+original `mono_assembly_name_new` (RVA 0xb1e10) allocates 80B, its version getter
+at 0xb1ef0 reads major/minor/build/revision at 64/66/68/70, and culture/token
+getters read offset 8/32. Guest main-stack records contain owned immutable string
+tokens and copied scalar fields. Native pointer fields never cross. Loaded/free
+calls check the complete snapshot and consume only the registered native owner.
+`mono_assembly_loaded` really searches this domain; assembly/image results reuse
+verified registry identities. Hash/public-key pointer payloads are refused.
+
+Metadata now uses a bounded reverse (kind,native identity) index instead of linear
+search through every issued handle. Up to 65536 handles fit in the existing
+reserved address interval. Strings allocate aligned exact-sized readonly views
+inside the existing 256MiB address arena, with 65536-entry/32768B-string bounds.
+This replaces the previous 4096 unique names × 64KiB slots, without overlapping
+iterator addresses. 4097 unique-name and arena-end rollback/revocation regressions
+pass; same native pointer under different handle kinds has separate identity.
+
+`native-mono-unity-assembly-lookup-03` exit 0, guard 231/0: 38 parsed names,
+38 real lookup hits, 38 frees, 1204030 metadata queries, 25096 typed handles,
+11506 unique names occupying 305568 arena bytes, 967 attribute objects,
+2821 field reads and 7 attribute arrays. All roots, field snapshots, arrays,
+handle cells and cleanup verify. Next boundary is `mono_object_new`, after
+240616019 guest work; this is still finite startup, not playable game admission.
+24 targeted startup tests and Clippy pass. Probe-01 hit the old string capacity;
+probe-02 exhausted its 200M work budget. Neither ran final GC validation.
