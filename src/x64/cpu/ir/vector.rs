@@ -17,6 +17,49 @@ const GREATER: u8 = MOVE + 10;
 const ALIGNED: u8 = 1;
 const PRESERVE_HIGH: u8 = 2;
 
+// Select lane width once at the cold vector dispatch boundary. Every copy
+// below has a compile-time length; no lane builds a padded temporary buffer.
+#[inline(always)]
+fn packed<const OP: u8>(a: [u8; 16], b: [u8; 16], width: usize) -> [u8; 16] {
+    macro_rules! lanes {
+        ($unsigned:ty, $signed:ty, $bytes:literal) => {{
+            let mut value = [0; 16];
+            for offset in (0..16).step_by($bytes) {
+                let a = <$unsigned>::from_le_bytes(a[offset..offset + $bytes].try_into().unwrap());
+                let b = <$unsigned>::from_le_bytes(b[offset..offset + $bytes].try_into().unwrap());
+                let result = match OP {
+                    PADD => a.wrapping_add(b),
+                    PSUB => a.wrapping_sub(b),
+                    EQUAL => {
+                        if a == b {
+                            <$unsigned>::MAX
+                        } else {
+                            0
+                        }
+                    }
+                    GREATER => {
+                        if (a as $signed) > (b as $signed) {
+                            <$unsigned>::MAX
+                        } else {
+                            0
+                        }
+                    }
+                    _ => unreachable!(),
+                };
+                value[offset..offset + $bytes].copy_from_slice(&result.to_le_bytes());
+            }
+            value
+        }};
+    }
+    match width {
+        1 => lanes!(u8, i8, 1),
+        2 => lanes!(u16, i16, 2),
+        4 => lanes!(u32, i32, 4),
+        8 => lanes!(u64, i64, 8),
+        _ => unreachable!(),
+    }
+}
+
 pub(super) fn supports(m: M) -> bool {
     matches!(
         m,
@@ -116,7 +159,7 @@ pub(super) fn lower(i: &Instruction, mut ir: ScalarIr) -> Option<ScalarIr> {
 }
 
 impl ScalarIr {
-    fn vector_operand(&mut self, i: &Instruction, op: u32) -> Option<u8> {
+    pub(super) fn vector_operand(&mut self, i: &Instruction, op: u32) -> Option<u8> {
         if i.op_kind(op) == OpKind::Register && (R::XMM0..=R::XMM15).contains(&i.op_register(op)) {
             Some(XMM + (i.op_register(op) as u32 - R::XMM0 as u32) as u8)
         } else {
@@ -124,21 +167,20 @@ impl ScalarIr {
         }
     }
 
-    fn vector_read_typed(
+    pub(super) fn vector_read_typed<const SIZE: usize>(
         &self,
         cpu: &Cpu64,
         r: u8,
-        size: usize,
         mem: &Memory,
     ) -> Result<[u8; 16], String> {
         let mut value = [0; 16];
         if r == MEMORY {
-            mem.read(self.address(cpu), &mut value[..size])?;
+            mem.read(self.address(cpu), &mut value[..SIZE])?;
         } else if r >= XMM {
-            value[..size].copy_from_slice(&cpu.xmm[(r - XMM) as usize][..size]);
+            value[..SIZE].copy_from_slice(&cpu.xmm[(r - XMM) as usize][..SIZE]);
         } else {
-            value[..size]
-                .copy_from_slice(&self.read(cpu, r, (size * 8) as u32, mem)?.to_le_bytes()[..size]);
+            value[..SIZE]
+                .copy_from_slice(&self.read(cpu, r, (SIZE * 8) as u32, mem)?.to_le_bytes()[..SIZE]);
         }
         Ok(value)
     }
@@ -165,13 +207,23 @@ impl ScalarIr {
         } else {
             16
         };
-        let b = self.vector_read_typed(cpu, self.src, size, mem)?;
+        let b = match size {
+            4 => self.vector_read_typed::<4>(cpu, self.src, mem)?,
+            8 => self.vector_read_typed::<8>(cpu, self.src, mem)?,
+            16 => self.vector_read_typed::<16>(cpu, self.src, mem)?,
+            _ => unreachable!(),
+        };
         let value = match op {
             MOVE | TRANSFER => b,
             SCALAR_MOVE => {
                 let mut value = b;
                 if self.aux & PRESERVE_HIGH != 0 {
-                    value[size..].copy_from_slice(&cpu.xmm[(self.dst - XMM) as usize][size..]);
+                    let old = &cpu.xmm[(self.dst - XMM) as usize];
+                    if size == 4 {
+                        value[4..].copy_from_slice(&old[4..]);
+                    } else {
+                        value[8..].copy_from_slice(&old[8..]);
+                    }
                 }
                 value
             }
@@ -184,40 +236,10 @@ impl ScalarIr {
                     _ => a[n] ^ b[n],
                 })
             }
-            PADD | PSUB | EQUAL | GREATER => {
-                let a = cpu.xmm[(self.dst - XMM) as usize];
-                let mut value = [0; 16];
-                for n in (0..16).step_by(width) {
-                    let mut av = [0; 8];
-                    let mut bv = [0; 8];
-                    av[..width].copy_from_slice(&a[n..n + width]);
-                    bv[..width].copy_from_slice(&b[n..n + width]);
-                    let a = u64::from_le_bytes(av);
-                    let b = u64::from_le_bytes(bv);
-                    let result = match op {
-                        PADD => a.wrapping_add(b),
-                        PSUB => a.wrapping_sub(b),
-                        EQUAL => {
-                            if a == b {
-                                u64::MAX
-                            } else {
-                                0
-                            }
-                        }
-                        _ => {
-                            if super::super::signed(a, (width * 8) as u32)
-                                > super::super::signed(b, (width * 8) as u32)
-                            {
-                                u64::MAX
-                            } else {
-                                0
-                            }
-                        }
-                    };
-                    value[n..n + width].copy_from_slice(&result.to_le_bytes()[..width]);
-                }
-                value
-            }
+            PADD => packed::<PADD>(cpu.xmm[(self.dst - XMM) as usize], b, width),
+            PSUB => packed::<PSUB>(cpu.xmm[(self.dst - XMM) as usize], b, width),
+            EQUAL => packed::<EQUAL>(cpu.xmm[(self.dst - XMM) as usize], b, width),
+            GREATER => packed::<GREATER>(cpu.xmm[(self.dst - XMM) as usize], b, width),
             _ => unreachable!(),
         };
         // This is the only write and the last fallible action.
