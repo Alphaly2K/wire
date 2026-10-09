@@ -3,6 +3,7 @@
 #include <mono/metadata/mono-config.h>
 #include <mono/metadata/mono-gc.h>
 #include <mono/metadata/object.h>
+#include <mono/metadata/reflection.h>
 #include <mono/metadata/threads.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -108,8 +109,58 @@ static void run_native_thread(void *(*entry)(void *)) {
     require(pthread_join(thread, NULL) == 0, "GC thread join");
 }
 
+extern MonoCustomAttrInfo *wire_mono_custom_attrs_from_class_checked(MonoClass *, uint16_t *);
+extern MonoCustomAttrInfo *wire_mono_custom_attrs_from_field_checked(MonoClass *, MonoClassField *, uint16_t *);
+extern MonoObject *wire_mono_custom_attrs_get_attr_checked(MonoCustomAttrInfo *, MonoClass *, uint16_t *);
+extern MonoArray *wire_mono_custom_attrs_construct_checked(MonoCustomAttrInfo *, uint16_t *);
+static void check_tag(MonoObject *object, MonoClass *tag, int expected, int toggle) {
+    require(object && mono_object_get_class(object) == tag, "real custom attribute type");
+    int number = 0;
+    uint8_t actual_toggle = 255;
+    mono_field_get_value(object, mono_class_get_field_from_name(tag, "Number"), &number);
+    mono_field_get_value(object, mono_class_get_field_from_name(tag, "Toggle"), &actual_toggle);
+    require(number == expected && actual_toggle == toggle, "real attribute constructor and named field values");
+}
+static void run_attrs(MonoImage *image) {
+    MonoClass *target = mono_class_from_name(image, "", "ProbeAttrTarget");
+    MonoClass *tag = mono_class_from_name(image, "", "ProbeTagAttribute");
+    require(target && tag, "attribute fixture classes");
+    uint16_t status = 65535;
+    MonoCustomAttrInfo *info = wire_mono_custom_attrs_from_class_checked(target, &status);
+    require(info && status == 0 && mono_custom_attrs_has_attr(info, tag), "checked class attributes");
+    MonoObject *object = wire_mono_custom_attrs_get_attr_checked(info, tag, &status);
+    require(object && status == 0, "checked attribute construction");
+    MonoGCHandle root = mono_gchandle_new_v2(object, 1);
+    require(root != NULL, "attribute strong root");
+    MonoArray *array = wire_mono_custom_attrs_construct_checked(info, &status);
+    require(array && status == 0 && mono_array_length(array) == 1, "checked real attribute array");
+    MonoGCHandle array_root = mono_gchandle_new_v2((MonoObject *)array, 1);
+    require(array_root != NULL, "attribute array strong root");
+    for (int cycle = 0; cycle < 2; ++cycle) {
+        check_tag(mono_gchandle_get_target_v2(root), tag, 71, 1);
+        array = (MonoArray *)mono_gchandle_get_target_v2(array_root);
+        check_tag(*(MonoObject **)mono_array_addr_with_size(array, sizeof(MonoObject *), 0), tag, 71, 1);
+        mono_gc_collect(mono_gc_max_generation());
+    }
+    mono_custom_attrs_free(info);
+    mono_gchandle_free_v2(array_root);
+    mono_gchandle_free_v2(root);
+    info = wire_mono_custom_attrs_from_field_checked(target, mono_class_get_field_from_name(target, "Value"), &status);
+    require(info && status == 0, "checked field attributes");
+    check_tag(wire_mono_custom_attrs_get_attr_checked(info, tag, &status), tag, 89, 0);
+    require(status == 0, "field attribute constructor success");
+    mono_custom_attrs_free(info);
+    info = wire_mono_custom_attrs_from_class_checked(mono_class_from_name(image, "", "ProbeAttrThrowTarget"), &status);
+    require(info && status == 0, "throwing attribute metadata query succeeds");
+    tag = mono_class_from_name(image, "", "ProbeThrowAttribute");
+    require(wire_mono_custom_attrs_get_attr_checked(info, tag, &status) == NULL && status != 0, "constructor exception returned as owned error code");
+    require(wire_mono_custom_attrs_construct_checked(info, &status) == NULL && status != 0, "array constructor exception returned as owned error code");
+    mono_custom_attrs_free(info);
+    require(wire_mono_custom_attrs_from_class_checked(NULL, &status) == NULL && status != 0, "invalid class refused without fake success");
+}
+
 int main(int argc, char **argv) {
-    require(argc == 5, "usage: embed_probe classlib-root fixture.exe core|interop|threads|gc|layout|remoting|collation|static-roots interp|interp-only");
+    require(argc == 5, "usage: embed_probe classlib-root fixture.exe core|interop|threads|gc|layout|remoting|collation|static-roots|attrs interp|interp-only");
     mono_set_dirs(argv[1], argv[1]);
     mono_config_parse(NULL);
     mono_jit_set_aot_mode(strcmp(argv[4], "interp-only") == 0 ? MONO_AOT_MODE_INTERP_ONLY : MONO_AOT_MODE_INTERP);
@@ -129,7 +180,9 @@ int main(int argc, char **argv) {
     require(fixture != NULL, "fixture class");
     reenter = mono_class_get_method_from_name(fixture, "Reenter", 1);
     require(reenter != NULL, "nested target");
-    if (strcmp(argv[3], "static-roots") == 0) {
+    if (strcmp(argv[3], "attrs") == 0) {
+        run_attrs(mono_assembly_get_image(assembly));
+    } else if (strcmp(argv[3], "static-roots") == 0) {
         require(invoke_int("StaticRoots", NULL) == 0, "static/thread/generic reference roots under allocation pressure");
     } else if (strcmp(argv[3], "collation") == 0) {
         require(invoke_int("Collation", NULL) == 0, "real corelib invariant/en-US/ja-JP collation across GC");

@@ -175,3 +175,20 @@ public static class NativeProbe {
     public static int ThrowBoundary() { throw new InvalidOperationException("owned top-level exception"); }
     public static int Main() { return Core(); }
 }
+
+
+[AttributeUsage(AttributeTargets.Class | AttributeTargets.Field)]
+public sealed class ProbeTagAttribute : Attribute {
+    public int Number;
+    public bool Toggle;
+    public ProbeTagAttribute(int number) { Number = number; }
+}
+[ProbeTag(71, Toggle = true)]
+public sealed class ProbeAttrTarget {
+    [ProbeTag(89, Toggle = false)] public int Value;
+}
+public sealed class ProbeThrowAttribute : Attribute {
+    public ProbeThrowAttribute() { throw new InvalidOperationException("checked attribute constructor failure"); }
+}
+[ProbeThrow]
+public sealed class ProbeAttrThrowTarget { }
