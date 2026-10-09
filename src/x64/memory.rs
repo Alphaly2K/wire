@@ -541,9 +541,13 @@ impl Memory {
             return false;
         }
         let pc = cpu.rip;
-        let Some((mut slot, _)) = self.translation_kind(pc, 2) else {
+        let Some((mut slot, entry)) = self.translation_kind(pc, 2) else {
             return false;
         };
+        // The IR admission bit is also the cached payload's mode proof.
+        if !entry.ir.get().is_some_and(|ir| ir.register_only()) {
+            return false;
+        }
         let cache = self.decoded.get().unwrap();
         let base = pc & !(PAGE - 1);
         let before = cpu.work;
@@ -562,8 +566,8 @@ impl Memory {
                     }
                 }
                 *state =
-                    super::cpu::ir::RegisterSegment::lower(&page.data[(pc - base) as usize..], pc)
-                        .map(|s| std::sync::Arc::new(super::cpu::ir::Segment::Register(s)));
+                    super::cpu::ir::Segment::lower_register(&page.data[(pc - base) as usize..], pc)
+                        .map(std::sync::Arc::new);
                 if state.is_none() {
                     // One-time negative caching retains the ordinary scalar hit
                     // cost for an isolated register operation in a memory loop.
@@ -576,12 +580,9 @@ impl Memory {
                     );
                 }
             }
-            if let Some(owner) = &*state {
-                let super::cpu::ir::Segment::Register(segment) = owner.as_ref() else {
-                    break;
-                };
+            if let Some(segment) = &*state {
                 if segment.work() <= left && allowed(pc, pc + segment.bytes) {
-                    segment.execute(cpu);
+                    segment.execute_register(cpu);
                     if BUILD_DIAGNOSTICS_V2 {
                         if let Some(d) = &self.diagnostics {
                             d.borrow_mut().segment_run(segment.work() as usize);
@@ -678,17 +679,24 @@ impl Memory {
         }
         let pc = cpu.rip;
         let segment = {
-            let Some((slot, _)) = self.translation_kind(pc, 2) else {
+            let Some((slot, entry)) = self.translation_kind(pc, 2) else {
                 return Ok(false);
             };
             let cache = self.decoded.get().unwrap();
+            if !entry
+                .ir
+                .get()
+                .is_some_and(|ir| ir.checked_segment() && !ir.register_only())
+            {
+                return Ok(false);
+            }
             let mut state = cache.segments[slot].borrow_mut();
             if state.is_none() {
                 let base = pc & !(PAGE - 1);
                 let page = &self.pages[&base];
                 *state =
-                    super::cpu::ir::CheckedSegment::lower(&page.data[(pc - base) as usize..], pc)
-                        .map(|s| std::sync::Arc::new(super::cpu::ir::Segment::Checked(s)));
+                    super::cpu::ir::Segment::lower_checked(&page.data[(pc - base) as usize..], pc)
+                        .map(std::sync::Arc::new);
                 if state.is_none() {
                     let entry = &cache.slots[slot];
                     entry.ir.set(
@@ -700,20 +708,15 @@ impl Memory {
                 }
             }
             match &*state {
-                Some(s) if matches!(s.as_ref(), super::cpu::ir::Segment::Checked(_)) => {
-                    std::sync::Arc::clone(s)
-                }
+                Some(s) => std::sync::Arc::clone(s),
                 _ => return Ok(false),
             }
         }; // Release cache/page borrows before the checked writes.
-        let super::cpu::ir::Segment::Checked(segment) = segment.as_ref() else {
-            unreachable!()
-        };
         if !allowed(pc, pc + segment.bytes) {
             return Ok(false);
         }
         let before = cpu.work;
-        let result = segment.execute(cpu, self, remaining);
+        let result = segment.execute_checked(cpu, self, remaining);
         let work = cpu.work - before;
         self.record_executions(true, work);
         if BUILD_DIAGNOSTICS_V2 && work != 0 {

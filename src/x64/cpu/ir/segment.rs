@@ -6,11 +6,9 @@ use iced_x86::{Decoder, DecoderOptions};
 const ARITHMETIC: u64 =
     CF | super::super::PF | super::super::AF | super::super::ZF | super::super::SF | OF;
 
-pub(crate) enum Segment {
-    Register(RegisterSegment),
-    Checked(CheckedSegment),
-}
-pub(crate) struct RegisterSegment {
+/// Admission bits in the owning IR entry select the verified execution mode.
+/// Both modes use the same immutable payload and instruction semantics.
+pub(crate) struct Segment {
     instructions: Box<[ScalarIr]>,
     update_flags: u16,
     pub(crate) bytes: u64,
@@ -25,8 +23,8 @@ impl IrMemory for RegisterMemory {
         unreachable!("register segment memory write")
     }
 }
-impl RegisterSegment {
-    pub(crate) fn lower(bytes: &[u8], pc: u64) -> Option<Self> {
+impl Segment {
+    pub(crate) fn lower_register(bytes: &[u8], pc: u64) -> Option<Self> {
         let mut decoder = Decoder::with_ip(64, bytes, pc, DecoderOptions::NONE);
         let mut instructions = Vec::with_capacity(16);
         while instructions.len() < 16 && decoder.can_decode() {
@@ -66,7 +64,7 @@ impl RegisterSegment {
     pub(crate) fn work(&self) -> u64 {
         self.instructions.len() as u64
     }
-    pub(crate) fn execute(&self, cpu: &mut Cpu64) {
+    pub(crate) fn execute_register(&self, cpu: &mut Cpu64) {
         // Verifier: no admitted operation reads RIP, and only the final
         // instruction can branch. Absolute RIP-relative operands were fixed
         // during lowering. A split budget uses single-instruction execution.
@@ -89,12 +87,8 @@ impl RegisterSegment {
 }
 /// A short checked sequence commits each original instruction independently.
 /// No FLAGS deletion is allowed across a possible data fault.
-pub(crate) struct CheckedSegment {
-    instructions: Box<[ScalarIr]>,
-    pub(crate) bytes: u64,
-}
-impl CheckedSegment {
-    pub(crate) fn lower(bytes: &[u8], pc: u64) -> Option<Self> {
+impl Segment {
+    pub(crate) fn lower_checked(bytes: &[u8], pc: u64) -> Option<Self> {
         let mut decoder = Decoder::with_ip(64, bytes, pc, DecoderOptions::NONE);
         let mut instructions = Vec::with_capacity(8);
         let mut memory = false;
@@ -119,10 +113,11 @@ impl CheckedSegment {
         let bytes = instructions.iter().map(|ir| ir.len as u64).sum();
         Some(Self {
             instructions: instructions.into(),
+            update_flags: u16::MAX,
             bytes,
         })
     }
-    pub(crate) fn execute(
+    pub(crate) fn execute_checked(
         &self,
         cpu: &mut Cpu64,
         mem: &mut Memory,
