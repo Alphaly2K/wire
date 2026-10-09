@@ -2,8 +2,9 @@
 //! and every native/guest access must hold the same reentrant execution lease.
 use super::{Memory, EXECUTE, PAGE, READ, USER_END, WRITE};
 use std::{
+    alloc::{alloc_zeroed, dealloc, Layout},
     any::Any,
-    cell::{Cell, UnsafeCell},
+    cell::Cell,
     collections::BTreeMap,
     ptr::NonNull,
     sync::{Arc, Condvar, Mutex},
@@ -38,22 +39,55 @@ impl Drop for Lease<'_> {
         }
     }
 }
-struct OwnedBytes(UnsafeCell<Box<[u8]>>);
+struct OwnedBytes {
+    pointer: NonNull<u8>,
+    layout: Layout,
+    _retained: Arc<dyn Any + Send + Sync>,
+}
 unsafe impl Send for OwnedBytes {}
 unsafe impl Sync for OwnedBytes {}
+impl Drop for OwnedBytes {
+    fn drop(&mut self) {
+        unsafe { dealloc(self.pointer.as_ptr(), self.layout) };
+    }
+}
 
 #[derive(Clone)]
 pub struct HostRegion(Arc<RegionInner>);
 impl HostRegion {
     /// Allocate stable owned bytes. Copies of a region share this allocation.
     pub fn owned(len: usize) -> Result<Self, String> {
-        if len == 0 || len > 256 * 1024 * 1024 {
-            return Err("invalid shared region length".into());
+        Self::owned_retained(len, 16, Arc::new(()))
+    }
+    /// Zeroed, aligned storage which retains an additional lifecycle owner.
+    /// The owner outlives every mapping/native view, including revoked aliases.
+    pub fn owned_retained(
+        len: usize,
+        alignment: usize,
+        retained: Arc<dyn Any + Send + Sync>,
+    ) -> Result<Self, String> {
+        if len == 0
+            || len > 256 * 1024 * 1024
+            || !alignment.is_power_of_two()
+            || alignment > PAGE as usize
+        {
+            return Err("invalid shared allocation size/alignment".into());
         }
-        let owner = Arc::new(OwnedBytes(UnsafeCell::new(vec![0; len].into_boxed_slice())));
-        let pointer = unsafe { NonNull::new_unchecked((&mut *owner.0.get()).as_mut_ptr()) };
-        // No other reference to these bytes exists; all later access uses a lease.
+        let layout =
+            Layout::from_size_align(len, alignment).map_err(|_| "shared allocation overflow")?;
+        let pointer =
+            NonNull::new(unsafe { alloc_zeroed(layout) }).ok_or("shared allocation failed")?;
+        let owner = Arc::new(OwnedBytes {
+            pointer,
+            layout,
+            _retained: retained,
+        });
+        // Owned storage is only accessed through the region's execution lease.
         unsafe { Self::foreign(pointer, len, owner) }
+    }
+    #[cfg(feature = "native-mono-backend")]
+    pub(crate) fn same_storage(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
     }
     /// Retain a specific foreign allocation, such as a pinned Mono array.
     ///
@@ -261,6 +295,13 @@ impl Memory {
         }
         self.invalidate_mapping(false);
         Ok(())
+    }
+    /// Verify ownership before an allocator retires an exact mapping.
+    #[cfg(feature = "native-mono-backend")]
+    pub(crate) fn owns_shared_data(&self, address: u64, region: &HostRegion) -> bool {
+        self.shared
+            .get(&address)
+            .is_some_and(|mapping| mapping.region.same_storage(region))
     }
     pub fn unmap_shared_data(&mut self, address: u64) -> Result<HostRegion, String> {
         let mapping = self

@@ -52,7 +52,7 @@ pub(super) unsafe extern "C" fn checked_access(
     }
 }
 
-fn invoke_i32(
+pub(super) fn invoke_i32(
     mono: &Mono,
     method: Object,
     parameters: &mut [Object],

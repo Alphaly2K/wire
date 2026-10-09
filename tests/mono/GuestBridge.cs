@@ -47,6 +47,12 @@ public static class GuestBridge {
 
     public static int MarshalHelperWrite(long p, int value) { System.Runtime.InteropServices.Marshal.WriteInt32(new IntPtr(p), value); return value; }
     public struct Pair { public int Left; public int Right; }
+    public static unsafe int BufferPattern(long address, int length) {
+        byte* data = (byte*)address;
+        int sum = 0;
+        for (int i = 0; i < length; i++) { data[i] = (byte)(i * 13 + 7); sum += data[i]; }
+        return sum;
+    }
     public static unsafe int ReadI32(long p) { return *(int*)p; }
     public static unsafe int WriteI32(long p, int value) { *(int*)p = value; return value; }
     public static unsafe int ReadI8(long p) { return *(sbyte*)p; }

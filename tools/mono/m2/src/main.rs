@@ -50,6 +50,7 @@ macro_rules! symbol {
 }
 mod abi;
 mod arrays;
+mod buffers;
 mod checked;
 mod concurrency;
 mod delegates;
@@ -608,6 +609,7 @@ fn main() {
     domains::run(&mono, &args[3]);
     if let Some(blocks) = args.get(5) {
         checked::run(&mono, &mut *guest, blocks);
+        buffers::run(&mono, &mut *guest);
         guest = refs::run(&mono, guest, blocks);
         guest = arrays::run(&mono, guest);
     }

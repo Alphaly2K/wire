@@ -81,6 +81,8 @@ def main():
             raise RuntimeError(f"Missing bridge evidence: {marker}")
     if args.checked_memory and "PASS checked scope rejects preexisting unchecked method transform" not in content:
         raise RuntimeError("Missing cached unchecked transform rejection")
+    if args.checked_memory and "PASS lifecycle-owned shared buffer allocation" not in content:
+        raise RuntimeError("Missing shared buffer allocator lifecycle evidence")
     if args.checked_memory and "PASS checked static IL calls" not in content:
         raise RuntimeError("Missing checked static IL call evidence")
     if args.checked_memory and "PASS scoped checked IL" not in content:
@@ -113,7 +115,7 @@ def main():
               "cpu_source_sha256": sha256(REPO / "src/x64/cpu.rs"),
               "memory_source_sha256": sha256(REPO / "src/x64/memory.rs"),
               "sources": {str(path.relative_to(REPO)): sha256(path) for path in
-                          [*sorted((HERE / "m2/src").rglob("*.rs")), REPO / "src/x64/memory/shared.rs",
+                          [*sorted((HERE / "m2/src").rglob("*.rs")), *sorted((REPO / "src/mono").rglob("*.rs")), REPO / "src/x64/memory/shared.rs",
                            REPO / "src/x64/memory/vm.rs", FIXTURES / "GuestBridge.cs", FIXTURES / "CheckedBlocks.il", FIXTURES / "NativeServicesProbe.cs"]},
               "class_libraries": {name: sha256(runtime / "probe/classlib/mono/4.5" / name)
                                   for name in ("mscorlib.dll", "System.dll", "System.Core.dll")},
@@ -128,6 +130,9 @@ def main():
               "general_managed_arrays_admitted": False,
               "native_game_backend_enabled": False,
               "shared_backing_verified": True,
+              "lifecycle_owned_checked_byte_buffer_allocator_verified": args.checked_memory,
+              "unity_allocator_vtable_integrated": False,
+              "general_managed_heap_shared": False,
               "queued_owner_thread_nested_callbacks_verified": True,
               "queued_gc_suspend_mode": "preemptive",
               "production_guest_thread_scheduler_integrated": False,
