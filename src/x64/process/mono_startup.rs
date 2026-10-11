@@ -55,6 +55,7 @@ mod images;
 mod instances;
 mod invoke;
 mod logging;
+mod managed_calls;
 mod metadata;
 mod names;
 mod objects;
@@ -259,6 +260,8 @@ pub(super) struct Probe {
     input_action_invokes: usize,
     virtual_resolutions: usize,
     serialization_invokes: usize,
+    static_invokes: usize,
+    static_output_writes: usize,
     reference_array_api: Option<reference_arrays::Api>,
     reference_array_registry: reference_arrays::Registry,
     components: bool,
@@ -695,6 +698,8 @@ impl Probe {
             input_action_invokes: 0,
             virtual_resolutions: 0,
             serialization_invokes: 0,
+            static_invokes: 0,
+            static_output_writes: 0,
             reference_array_api: None,
             reference_array_registry: reference_arrays::Registry::default(),
             components,
@@ -1600,7 +1605,28 @@ impl Probe {
             .describe(method, &self.constructor_images()?);
             match admission {
                 Ok(Some(_)) => return Ok(false),
-                Ok(None) => {}
+                Ok(None) => {
+                    if self.assets && cpu.regs[2] == 0 {
+                        let library = self
+                            .native
+                            .as_ref()
+                            .ok_or("static call before runtime")?
+                            .library;
+                        match managed_calls::Api::load(library)?.describe(
+                            method,
+                            &self.constructor_images()?,
+                            &self.reference_images()?,
+                        ) {
+                            Ok(Some(_)) => return Ok(false),
+                            Ok(None) => {}
+                            Err(reason) => {
+                                self.mark_completed_layers();
+                                self.events.push(format!("typed static managed entry deferred before invocation: {reason}"));
+                                return Ok(true);
+                            }
+                        }
+                    }
+                }
                 Err(reason) => {
                     self.mark_completed_layers();
                     self.events.push(format!(
@@ -1691,6 +1717,7 @@ impl Probe {
                 && matches!(
                     function,
                     "mono_object_get_virtual_method"
+                        | "mono_object_isinst"
                         | "mono_array_addr_with_size"
                         | "mono_object_unbox"
                 ))
@@ -1720,6 +1747,7 @@ impl Probe {
                         "mono_array_new"
                             | "mono_unity_loader_get_last_error_and_error_prepare_exception"
                             | "mono_gchandle_new_v2"
+                            | "mono_gchandle_new_weakref_v2"
                             | "mono_gchandle_get_target_v2"
                             | "mono_gchandle_free_v2"
                     )))
@@ -2039,6 +2067,29 @@ impl Probe {
             cpu.return_integer(memory, result)?;
             return Ok(false);
         }
+        if self.assets && function == "mono_object_isinst" {
+            let class = self.metadata_registry.native(a[1], metadata::Kind::Class)?;
+            let api = self.instance_api.ok_or("isinst before rooted object API")?;
+            let isinst = symbol!(
+                library,
+                "mono_object_isinst",
+                unsafe extern "C" fn(Object, Object) -> Object
+            );
+            let (result, _) =
+                callbacks::with_owner(memory, runtime, self.callback_targets(), || {
+                    let object = self.rooted_call_argument(api, a[0])?;
+                    let result = unsafe { isinst(object, class) };
+                    if result.is_null() {
+                        Ok::<u64, String>(0)
+                    } else if result == object {
+                        Ok(a[0])
+                    } else {
+                        Err("isinst returned an unadmitted remoting/proxy identity".into())
+                    }
+                })?;
+            cpu.return_integer(memory, result?)?;
+            return Ok(false);
+        }
         if self.assembly_lookup && names::handles(function) {
             let api = match self.name_api {
                 Some(api) => api,
@@ -2134,7 +2185,10 @@ impl Probe {
         }
         if matches!(
             function,
-            "mono_gchandle_new_v2" | "mono_gchandle_get_target_v2" | "mono_gchandle_free_v2"
+            "mono_gchandle_new_v2"
+                | "mono_gchandle_new_weakref_v2"
+                | "mono_gchandle_get_target_v2"
+                | "mono_gchandle_free_v2"
         ) {
             let api = match self.handle_api {
                 Some(api) => api,
@@ -2149,7 +2203,7 @@ impl Probe {
             }
             let targets = self.callback_targets();
             let (result, _) = callbacks::with_owner(memory, runtime, targets, || match function {
-                "mono_gchandle_new_v2" => {
+                "mono_gchandle_new_v2" | "mono_gchandle_new_weakref_v2" => {
                     let object = if self.array_registry.contains(a[0]) {
                         self.array_registry
                             .native(self.array_api.ok_or("empty array API absent")?, a[0])?
@@ -2171,13 +2225,21 @@ impl Probe {
                                 .into(),
                         );
                     };
-                    self.handle_registry.new_handle(api, object, a[0], a[1])
+                    if function == "mono_gchandle_new_weakref_v2" {
+                        self.handle_registry
+                            .new_weak_handle(api, object, a[0], a[1])
+                    } else {
+                        self.handle_registry.new_handle(api, object, a[0], a[1])
+                    }
                 }
                 "mono_gchandle_get_target_v2" => self.handle_registry.target(api, a[0]),
                 _ => self.handle_registry.free(api, a[0]).map(|()| 0),
             })?;
             let result = result?;
-            if function == "mono_gchandle_new_v2" {
+            if matches!(
+                function,
+                "mono_gchandle_new_v2" | "mono_gchandle_new_weakref_v2"
+            ) {
                 self.handle_registry.publish(memory, result)?;
             }
             cpu.return_integer(memory, result)?;
@@ -2389,6 +2451,242 @@ impl Probe {
     pub(super) fn handles_invoke(&self, function: &str) -> bool {
         self.managed_types && function == "mono_runtime_invoke"
     }
+    fn rooted_call_argument(&self, api: instances::Api, token: u64) -> Result<Object, String> {
+        if token == 0 {
+            return Ok(ptr::null_mut());
+        }
+        if self.object_registry.contains(token) {
+            self.object_registry
+                .native_string(self.object_api.ok_or("argument String API absent")?, token)
+        } else if self.reflection_registry.contains(token) {
+            self.reflection_registry.native(
+                self.reflection_api
+                    .ok_or("argument RuntimeType API absent")?,
+                token,
+            )
+        } else if self.instance_registry.contains(token) {
+            self.instance_registry.native(api, token)
+        } else if self.array_registry.contains(token) {
+            self.array_registry.native(
+                self.array_api.ok_or("argument empty array API absent")?,
+                token,
+            )
+        } else if self.attribute_registry.contains(token) {
+            self.attribute_registry.native(
+                self.attribute_api.ok_or("argument attribute API absent")?,
+                token,
+            )
+        } else {
+            Err("managed argument is not a live rooted identity".into())
+        }
+    }
+    fn temporary_call_slot(
+        memory: &Memory,
+        runtime: &Runtime64,
+        rsp: u64,
+        address: u64,
+        width: usize,
+    ) -> bool {
+        let Some(end) = address.checked_add(width as u64) else {
+            return false;
+        };
+        let stack = address >= rsp.saturating_add(8)
+            && address >= super::STACK
+            && end <= super::STACK + 64 * 1024 * 1024;
+        memory.owned_noncode_access(address, width)
+            && (stack
+                || runtime.live_data_slot(address, width as u64)
+                || memory.guest_private_data_slot(address, width))
+    }
+    fn dispatch_static_call(
+        &mut self,
+        cpu: &mut Cpu64,
+        memory: &mut Memory,
+        runtime: &mut Runtime64,
+    ) -> Result<bool, String> {
+        let native = self.native.as_ref().ok_or("static call before runtime")?;
+        let library = native.library;
+        let domain = native.domain;
+        let a = [cpu.regs[1], cpu.regs[2], cpu.regs[8], cpu.regs[9]];
+        if a[1] != 0 {
+            return Err("static managed call requires NULL this".into());
+        }
+        let method = self
+            .metadata_registry
+            .native(a[0], metadata::Kind::Method)?;
+        let call_api = managed_calls::Api::load(library)?;
+        let descriptor = call_api
+            .describe(
+                method,
+                &self.constructor_images()?,
+                &self.reference_images()?,
+            )?
+            .ok_or("managed entry is not an admitted static IL call")?;
+        let api = self
+            .instance_api
+            .ok_or("static call before rooted instances")?;
+        let strings = self
+            .object_api
+            .ok_or("static call before canonical strings")?;
+        let targets = self.callback_targets();
+        let rsp = cpu.regs[4];
+        if a[3] != 0 {
+            memory.check(a[3], 8, super::super::memory::WRITE)?;
+            if !a[3].is_multiple_of(8) || !Self::temporary_call_slot(memory, runtime, rsp, a[3], 8)
+            {
+                return Err("static exception output is not an owned temporary slot".into());
+            }
+        }
+        let (frame, _) = callbacks::with_owner(memory, runtime, targets, || {
+            callbacks::with_service(|memory, runtime| {
+                self.instance_registry.sync_from_guest(api, memory)?;
+                self.field_registry.sync(api, &self.instance_registry)?;
+                if let Some(array_api) = self.reference_array_api {
+                    self.reference_array_registry
+                        .sync(array_api, api, &self.instance_registry)?;
+                }
+                managed_calls::Frame::prepare(
+                    memory,
+                    &descriptor,
+                    a[2],
+                    |token, shape| {
+                        call_api.compatible(self.rooted_call_argument(api, token)?, shape)
+                    },
+                    |address, width| {
+                        Self::temporary_call_slot(memory, runtime, rsp, address, width)
+                    },
+                )
+            })
+        })?;
+        let mut frame = frame?;
+        let mut parameters = frame.pointers();
+        let initial_outputs = frame.outputs()?;
+        if a[3] != 0
+            && initial_outputs.iter().any(|out| {
+                out.address < a[3] + 8
+                    && a[3]
+                        < out.address
+                            + match out.shape {
+                                managed_calls::Shape::Scalar { width, .. } => width as u64,
+                                _ => 8,
+                            }
+            })
+        {
+            return Err("managed exception slot overlaps byref output".into());
+        }
+        let (invoked, _) = callbacks::with_metadata_owner(
+            memory,
+            runtime,
+            targets,
+            reentry::Metadata {
+                library,
+                domain,
+                metadata: &mut self.metadata_registry,
+                images: &mut self.image_registry,
+                rooted_instance: None,
+            },
+            || {
+                let mut exception = ptr::null_mut();
+                let params = if parameters.is_empty() {
+                    ptr::null_mut()
+                } else {
+                    parameters.as_mut_ptr()
+                };
+                let result =
+                    unsafe { (call_api.invoke)(method, ptr::null_mut(), params, &mut exception) };
+                if !exception.is_null() {
+                    return Err("typed static managed call raised an exception; guest outputs left unchanged".into());
+                }
+                Ok::<_, String>(result)
+            },
+        )?;
+        let result = invoked?;
+        let (converted, _) = callbacks::with_owner(memory, runtime, targets, || {
+            let result = match descriptor.returns {
+                None if result.is_null() => 0,
+                None => return Err("void managed call returned a boxed value".into()),
+                Some(shape @ managed_calls::Shape::Scalar { .. }) => {
+                    let class = call_api.scalar_box(result, shape)?;
+                    let token = self
+                        .instance_registry
+                        .borrow_boxed_result(api, result, class)?;
+                    let layout = self.boxed_layout(library, class)?;
+                    callbacks::with_service(|memory, _| {
+                        self.field_registry.publish_boxed_payload(
+                            api,
+                            &mut self.instance_registry,
+                            memory,
+                            token,
+                            layout,
+                        )
+                    })?;
+                    token
+                }
+                Some(shape @ managed_calls::Shape::Reference { .. }) => {
+                    call_api.compatible(result, shape)?;
+                    self.object_registry.borrow_reference(
+                        strings,
+                        api,
+                        &mut self.instance_registry,
+                        result,
+                    )?
+                }
+            };
+            let mut outputs = Vec::new();
+            for out in frame.outputs()? {
+                let (word, width) = match out.shape {
+                    shape @ managed_calls::Shape::Reference { .. } => {
+                        let native = call_api.compatible(out.word as Object, shape)?;
+                        (
+                            self.object_registry.borrow_reference(
+                                strings,
+                                api,
+                                &mut self.instance_registry,
+                                native,
+                            )?,
+                            8,
+                        )
+                    }
+                    managed_calls::Shape::Scalar { width, .. } => (out.word, width),
+                };
+                outputs.push((out.address, width, word));
+            }
+            self.refresh_managed_graph(library, api)?;
+            callbacks::with_service(|memory, runtime| {
+                self.object_registry.publish_pending(memory)?;
+                for &(address, width, _) in &outputs {
+                    memory.check(address, width, super::super::memory::WRITE)?;
+                    if !Self::temporary_call_slot(memory, runtime, rsp, address, width) {
+                        return Err(
+                            "managed byref output storage retired during native call".into()
+                        );
+                    }
+                }
+                if a[3] != 0 {
+                    memory.check(a[3], 8, super::super::memory::WRITE)?;
+                    if !Self::temporary_call_slot(memory, runtime, rsp, a[3], 8) {
+                        return Err(
+                            "managed exception output storage retired during native call".into(),
+                        );
+                    }
+                }
+                for &(address, width, word) in &outputs {
+                    memory.write_int(address, width, word)?;
+                }
+                if a[3] != 0 {
+                    memory.write_int(a[3], 8, 0)?;
+                }
+                Ok::<_, String>(())
+            })?;
+            Ok::<_, String>((result, outputs.len()))
+        })?;
+        let (result, outputs) = converted?;
+        self.static_invokes += 1;
+        self.static_output_writes += outputs;
+        self.events.push(format!("metadata-qualified static managed entry: {}; params={}; byref-outputs={outputs}; actual IL and boxed return", descriptor.name, descriptor.parameters.len()));
+        cpu.return_integer(memory, result)?;
+        Ok(false)
+    }
     pub(super) fn dispatch_invoke(
         &mut self,
         cpu: &mut Cpu64,
@@ -2498,6 +2796,13 @@ impl Probe {
             self.validate_unitytls(memory, runtime)?;
             self.events.push("finite ColorCurves constructor checkpoint completed; stop before initialized instance-field serialization".into());
             return Ok(true);
+        }
+        if self.assets
+            && self.curves_constructor.is_some()
+            && a[0] != self.get_type_method
+            && a[1] == 0
+        {
+            return self.dispatch_static_call(cpu, memory, runtime);
         }
         if self.components && self.curves_constructor.is_some() && a[0] != self.get_type_method {
             if a[1] == 0 {
@@ -3115,7 +3420,17 @@ impl Probe {
             })?;
             result?
         };
+        let class_result = matches!(&value, metadata::Value::Handle(_, metadata::Kind::Class));
         let result = self.metadata_registry.wrap(memory, value)?;
+        if class_result && result != 0 {
+            let (published, _) = callbacks::with_owner(memory, runtime, targets, || {
+                callbacks::with_service(|memory, _| {
+                    self.metadata_registry
+                        .publish_class_elements(library, memory, result)
+                })
+            })?;
+            published?;
+        }
         if let Some((slot, token)) = iterator_output {
             memory.write_int(slot, 8, token)?;
         }
@@ -3725,6 +4040,7 @@ impl Probe {
             self.metadata_registry.report(),
             self.events.join("\n")
         ) + "\n" + &self.native.as_ref().map_or_else(String::new, |n| n.gc.report())
+            + &format!("native-static-managed-invokes={}\nnative-static-byref-output-writes={}\n", self.static_invokes, self.static_output_writes)
     }
     pub(super) fn stopped(&self) -> bool {
         self.stopped
@@ -3911,6 +4227,8 @@ mod tests {
             input_action_invokes: 0,
             virtual_resolutions: 0,
             serialization_invokes: 0,
+            static_invokes: 0,
+            static_output_writes: 0,
             reference_array_api: None,
             reference_array_registry: reference_arrays::Registry::default(),
             components: false,

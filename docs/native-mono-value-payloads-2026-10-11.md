@@ -46,7 +46,7 @@ image选layout，分配时安装serialization fields并自动生成owned连续pa
 pending writes、refs/padding；补齐NonSerialized payload字段，mapping失败恢复旧views，成功后
 撤销旧backings。field/unbox连续访问保持同一身份，不泄露host地址。
 
-probe-34实际有4 owned payloads，wrapper请求native-value-unbox-calls仍0。wrapper只接受live
+probe-40实际有372 owned payloads（含368个真实invoke返回scalar boxes），wrapper请求native-value-unbox-calls仍0。wrapper只接受live
 boxed identities，核对native payload=object+16，给guest的是owned token+16；wrapper自身仍
 没有真实游戏调用验收。
 
@@ -63,13 +63,16 @@ List及数组。新native ref完成canonical转换后才遍历/发布。pending 
 
 ## 证据
 
-`wire-out/native-mono-unity-assets-probe-34/results.json`：exit0，52次后续ctor/5 interface
-callbacks，1749 fields/1749真实GC checks；11 reference arrays/12 value arrays全部核对；
-326 allocations、619 borrowed roots、436 strings、8 RuntimeTypes全部GC核对与退休通过。
-4 box payloads，unbox wrapper请求0；guard233/0，original Mono未attach，full_game_backend=false。
+`wire-out/native-mono-unity-assets-probe-40/results.json`：exit0，68次后续ctor/5 interface
+callbacks，368次实际static invokes/1104个byref String输出，2193 fields/2193真实GC checks；
+11 reference arrays/12 value arrays全部核对；425 allocations、1429 borrowed roots、872 strings、
+375 RuntimeTypes全部GC核对与退休通过。372 box payloads，unbox wrapper请求0；14 weak handles。
+游戏正常GC disable1/enable1、诊断unwind0/finaldepth0；guard237/0，original Mono未attach，
+full_game_backend=false。static invoke保留真实Mono返回box，先pin再生成owned payload，不创建
+另一个代替对象；详见 `native-mono-static-invoke-2026-10-12.md`。
 
-最新managed边界为带Type参数与3个out String的APIUpdaterRuntimeHelpers static Boolean
-方法，尚未执行。需要真实typed invoke/return/byref reference桥接，而不是补类名构造分支。
-完整release feature467 passed/7 ignored，Clippy clean；覆盖late bad roots/padding/Boolean、
+最新managed边界为VolumeComponent.OnEnable instance void零参数方法，尚未执行。
+普通实例方法需要按metadata/receiver关系准入，不补OnEnable类名/token名单。
+完整release feature472 passed/7 ignored，Clippy clean；覆盖late bad roots/padding/Boolean、
 跨child owners与跨arrays的dirty batch拒绝、canonical string identity、泛型闭合/继承接口、
-SerializeReference和临时GC恢复。日志同managed construction文档。
+SerializeReference、临时GC恢复、byref alias与weak NULL target等。日志同managed construction文档。

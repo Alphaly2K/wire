@@ -1,4 +1,4 @@
-//! External v2 strong GC handles. Guest tokens identify owned native handles;
+//! External v2 strong and weak GC handles. Guest tokens identify owned native handles;
 //! they never expose a Mono handle pointer or accept arbitrary object addresses.
 use super::super::super::memory::{shared::HostRegion, READ};
 use super::{Memory, Object};
@@ -6,6 +6,7 @@ use std::{collections::BTreeMap, ptr};
 #[derive(Clone, Copy)]
 pub(super) struct Api {
     new: unsafe extern "C" fn(Object, i32) -> Object,
+    weak: unsafe extern "C" fn(Object, i32) -> Object,
     target: unsafe extern "C" fn(Object) -> Object,
     free: unsafe extern "C" fn(Object),
 }
@@ -25,6 +26,10 @@ impl Api {
                 "mono_gchandle_new_v2",
                 unsafe extern "C" fn(Object, i32) -> Object
             ),
+            weak: sym!(
+                "mono_gchandle_new_weakref_v2",
+                unsafe extern "C" fn(Object, i32) -> Object
+            ),
             target: sym!(
                 "mono_gchandle_get_target_v2",
                 unsafe extern "C" fn(Object) -> Object
@@ -39,11 +44,13 @@ struct Entry {
     token: u64,
     view: HostRegion,
     published: bool,
+    weak: bool,
 }
 #[derive(Default)]
 pub(super) struct Registry {
     entries: BTreeMap<u64, Entry>,
     issued: usize,
+    weak_issued: usize,
     released: bool,
     views_retired: bool,
 }
@@ -55,18 +62,38 @@ impl Registry {
         token: u64,
         pinned: u64,
     ) -> Result<u64, String> {
-        if self.released || self.issued >= 4096 || pinned > 1 || object.is_null() || token == 0 {
-            return Err("external strong handle outside live owned object contract".into());
+        self.allocate(api, object, token, pinned, false)
+    }
+    pub(super) fn new_weak_handle(
+        &mut self,
+        api: Api,
+        object: Object,
+        token: u64,
+        track_resurrection: u64,
+    ) -> Result<u64, String> {
+        self.allocate(api, object, token, track_resurrection, true)
+    }
+    fn allocate(
+        &mut self,
+        api: Api,
+        object: Object,
+        token: u64,
+        flag: u64,
+        weak: bool,
+    ) -> Result<u64, String> {
+        if self.released || self.issued >= 4096 || flag > 1 || object.is_null() || token == 0 {
+            return Err("external handle outside live owned object contract".into());
         }
-        let native = unsafe { (api.new)(object, pinned as i32) };
+        let allocate = if weak { api.weak } else { api.new };
+        let native = unsafe { allocate(object, flag as i32) };
         if native.is_null() {
-            return Err("external native strong handle allocation failed".into());
+            return Err("external native handle allocation failed".into());
         }
         if unsafe { (api.target)(native) } != object {
             unsafe {
                 (api.free)(native);
             }
-            return Err("external strong handle identity mismatch".into());
+            return Err("external handle identity mismatch".into());
         }
         let view = match HostRegion::owned(8) {
             Ok(view) => view,
@@ -81,8 +108,11 @@ impl Registry {
             unsafe { (api.free)(native) };
             return Err(error);
         }
-        let handle = 0x6ffea0000000 + self.issued as u64 * 16;
+        // The frozen BDWGC v2 ABI tags weak handles with bit zero. Unity
+        // routes these through get_target instead of direct strong-cell reads.
+        let handle = (0x6ffea0000000 + self.issued as u64 * 16) | u64::from(weak);
         self.issued += 1;
+        self.weak_issued += usize::from(weak);
         self.entries.insert(
             handle,
             Entry {
@@ -91,6 +121,7 @@ impl Registry {
                 token,
                 view,
                 published: false,
+                weak,
             },
         );
         Ok(handle)
@@ -103,7 +134,9 @@ impl Registry {
             .entries
             .get_mut(&handle)
             .ok_or("unknown external handle view")?;
-        if !entry.published {
+        // Weak slots can clear during native GC. They are opaque: a stale
+        // readable snapshot must never bypass the native weak-link query.
+        if !entry.weak && !entry.published {
             memory.map_shared_data(handle, entry.view.clone(), READ, READ)?;
             entry.published = true;
         }
@@ -145,9 +178,13 @@ impl Registry {
         let entry = self
             .entries
             .get(&handle)
-            .ok_or("unknown or freed external strong handle")?;
-        if unsafe { (api.target)(entry.native) } != entry.object {
-            return Err("external strong handle lost object identity".into());
+            .ok_or("unknown or freed external handle")?;
+        let target = unsafe { (api.target)(entry.native) };
+        if entry.weak && target.is_null() {
+            return Ok(0);
+        }
+        if target != entry.object {
+            return Err("external handle changed object identity".into());
         }
         Ok(entry.token)
     }
@@ -197,8 +234,8 @@ impl Registry {
     }
     pub(super) fn report(&self) -> String {
         format!(
-            "native-external-strong-handles={}\nnative-external-handles-released={}\nnative-external-handle-views-retired={}\n",
-            self.issued, self.released, self.views_retired
+            "native-external-strong-handles={}\nnative-external-weak-handles={}\nnative-external-handles-released={}\nnative-external-handle-views-retired={}\n",
+            self.issued - self.weak_issued, self.weak_issued, self.released, self.views_retired
         )
     }
 }
@@ -220,7 +257,12 @@ mod tests {
     #[test]
     fn external_handles_preserve_owned_identity_reject_forgery_and_release_once() {
         ROOTS.with(|r| r.set(0));
-        let api = Api { new, target, free };
+        let api = Api {
+            new,
+            weak: new,
+            target,
+            free,
+        };
         let mut registry = Registry::default();
         let handle = registry
             .new_handle(api, 0x33usize as Object, 0x77, 1)
@@ -253,6 +295,46 @@ mod tests {
         assert!(registry.target(api, next).is_err());
         assert!(registry
             .new_handle(api, 0x33usize as Object, 0x77, 0)
+            .is_err());
+    }
+    #[test]
+    fn weak_handles_preserve_tag_query_real_target_and_never_expose_stale_cells() {
+        thread_local! { static WEAK_TARGET: Cell<usize> = const { Cell::new(0x33) }; }
+        unsafe extern "C" fn weak_target(_: Object) -> Object {
+            WEAK_TARGET.with(Cell::get) as Object
+        }
+        ROOTS.with(|r| r.set(0));
+        WEAK_TARGET.with(|r| r.set(0x33));
+        let api = Api {
+            new,
+            weak: new,
+            target: weak_target,
+            free,
+        };
+        let mut registry = Registry::default();
+        let mut memory = Memory::default();
+        let handle = registry
+            .new_weak_handle(api, 0x33usize as Object, 0x77, 1)
+            .unwrap();
+        assert_eq!(handle & 1, 1);
+        registry.publish(&mut memory, handle).unwrap();
+        assert!(memory.read_int(handle & !1, 8).is_err());
+        assert_eq!(registry.target(api, handle).unwrap(), 0x77);
+        assert!(registry.target(api, handle & !1).is_err());
+        WEAK_TARGET.with(|r| r.set(0));
+        assert_eq!(registry.target(api, handle).unwrap(), 0);
+        registry.verify(api).unwrap();
+        WEAK_TARGET.with(|r| r.set(0x44));
+        assert!(registry.target(api, handle).is_err());
+        WEAK_TARGET.with(|r| r.set(0));
+        registry.retire_view(&mut memory, handle).unwrap();
+        registry.free(api, handle).unwrap();
+        registry.release(api);
+        registry.retire_views(&mut memory).unwrap();
+        assert_eq!(ROOTS.with(Cell::get), 0);
+        assert!(registry.target(api, handle).is_err());
+        assert!(registry
+            .new_weak_handle(api, 0x33usize as Object, 0x77, 2)
             .is_err());
     }
 }

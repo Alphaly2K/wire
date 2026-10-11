@@ -22,7 +22,7 @@ receiver 必须实现接口，native virtual resolution 必须精确等于请求
 实现，无须 class 名名单。伪同名方法拒绝。零参数 callback 的 guest 空参数向量可非 NULL，
 但不读取该向量，也不传给 native invoke。
 
-一般有参数/静态方法和 value receiver 尚未准入。原有 owner-thread、strong roots、fixed
+普通静态方法现按 managed_calls.rs 的 metadata/typed ABI 准入；普通实例方法和 value receiver 尚未准入。原有 owner-thread、strong roots、fixed
 callbacks、P/Invoke rejection、异常拒绝和 no-exec guard 均保留。引擎对象被图遍历发现时，
 不能因此提前发布其字段；仍要走对应构造/binding 及 engine lifetime 检查。
 
@@ -70,21 +70,26 @@ strong root与readonly typed metadata view，核对返回type identity。
 
 ## 真实验证与当前终点
 
-实施 worktree `wire-out/native-mono-unity-assets-probe-34`：exit0。
+实施 worktree `wire-out/native-mono-unity-assets-probe-40`：exit0。
 
-- 52次后续metadata ctor（component30/asset1/map2/action19）、5次interface callbacks；
-- Renderer2DData、UniversalRenderPipelineAsset、GlobalSettings实际构造/反序列化；
-- 1749 fields/1749真实GC checks、326 allocations、619 borrowed roots；
-- 11 reference arrays/12 value arrays全部GC核对；436 strings/8 RuntimeTypes也全部核对；
-- 4 owned box payloads，native unbox wrapper请求仍0，不混淆两者；
-- 1次真实GC disable，退出恢复1次，final depth0；guard233/0，original Mono未attach；
-- ColorCurves真实engine graph、cleanup及其他roots/views retirement通过。
+- 68次后续metadata ctor（component46/asset1/map2/action19）、5次interface callbacks；
+- 368次实际 static IL invokes、1104个 canonical String byref outputs；
+- 2193 fields/2193真实GC checks、425 allocations、1429 borrowed roots；
+- 11 reference arrays/12 value arrays全部GC核对，872 strings/375 RuntimeTypes也全部核对；
+- 372 owned box payloads，含真实invoke返回boxes；native unbox wrapper请求仍0；
+- 14个真实 tagged weak handles，相关handle、roots/views生命周期通过；
+- 游戏正常GC disable1/enable1，无诊断强制unwind，final depth0；guard237/0，original Mono未attach；
+- ColorCurves实际engine graph/cleanup及其他GC/retirement验证通过。
 
-最新请求为 CoreModule 的 static Boolean
-`APIUpdaterRuntimeHelpers.GetMovedFromAttributeDataForType(Type, out String, out String, out String)`。
-尚未执行；实际IL/签名在probe-34/startup.log，需typed有参数invoke和byref reference outputs。
-不能将NULL/false硬编码成成功结果。先前probe-17的Renderer2DData限制已越过。
+原来pending的APIUpdaterRuntimeHelpers static Boolean已实际执行368次，不再是当前限制。
+Unity类型缓存的element_class prefix、真实类型谓词、weak handles及isinst也已越过。
+实现契约和证据见 `native-mono-static-invoke-2026-10-12.md`。
 
-完整release feature：467 passed/7 ignored；all-target Clippy `-D warnings` clean。
-日志为 `wire-out/native-mono-renderer2d-release-tests.log` 与 `native-mono-renderer2d-clippy.log`。
-本轮有并发build/tests，probe timing不作端到端性能对照；正式游戏窗口仍未验收。
+最新请求为 render-core 的 instance void `UnityEngine.Rendering.VolumeComponent.OnEnable`
+（method token0x06000c82、receiver为已构造ColorCurves，零参数但参数向量非NULL）。
+实际IL/签名在probe-40/startup.log，下一步使用相同typed ABI推广普通实例调用；
+不添加OnEnable类名/token名单。冻结23patchruntime/support未修改。
+
+完整release feature：472 passed/7 ignored；all-target Clippy `-D warnings` clean。
+日志为 `wire-out/native-mono-static-calls-tests.log` 与 `native-mono-static-calls-clippy.log`。
+probe有并发build/tests，耗时不作端到端性能对照；正式游戏窗口仍未验收。

@@ -142,7 +142,7 @@ impl Registry {
         specs: Vec<Spec>,
         mut reference: impl FnMut(&mut instances::Registry, Object) -> Result<u64, String>,
     ) -> Result<(), String> {
-        if self.retired || specs.len() > 256 || self.cells.len() + specs.len() > 4096 {
+        if self.retired || specs.len() > 256 || self.cells.len() + specs.len() > 32768 {
             return Err("initialized field views outside single bounded installation".into());
         }
         let api = Api::load(library)?;
@@ -320,7 +320,7 @@ impl Registry {
         owner: u64,
         layout: value_layout::Layout,
     ) -> Result<u64, String> {
-        if self.retired || !layout.value || self.payloads.len() >= 256 {
+        if self.retired || !layout.value || self.payloads.len() >= 32768 {
             return Err("unbox outside live bounded value payload registry".into());
         }
         layout.check()?;
@@ -354,7 +354,7 @@ impl Registry {
             || !layout.value
             || !roots.is_boxed(owner)
             || roots.class(root_api, owner)? != layout.class
-            || self.payloads.len() >= 256
+            || self.payloads.len() >= 32768
         {
             return Err("payload requires live allocated box and exact bounded class".into());
         }
@@ -428,7 +428,7 @@ impl Registry {
                 .iter()
                 .filter(|r| !self.cells.contains_key(&r.0))
                 .count()
-            > 4096
+            > 32768
         {
             return Err("unbox field capacity exceeded".into());
         }

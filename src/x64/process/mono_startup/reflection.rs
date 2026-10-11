@@ -61,6 +61,7 @@ struct Entry {
 #[derive(Default)]
 pub(super) struct Registry {
     entries: BTreeMap<u64, Entry>,
+    reverse: BTreeMap<usize, u64>,
     verified: usize,
     roots_released: bool,
     retired: bool,
@@ -70,14 +71,20 @@ impl Registry {
         !self.roots_released && !self.retired && self.entries.contains_key(&token)
     }
     pub(super) fn root_type(&mut self, api: Api, native: Object) -> Result<(u64, Object), String> {
-        if self.roots_released || self.retired || self.entries.len() >= 1024 {
+        if self.roots_released || self.retired {
             return Err("reflection root registry retired/full".into());
         }
         if native.is_null() {
             return Ok((0, ptr::null_mut()));
         }
-        if let Some((token, entry)) = self.entries.iter().find(|(_, e)| e.native == native) {
-            return Ok((*token, entry.ty));
+        if let Some(&token) = self.reverse.get(&(native as usize)) {
+            if self.native(api, token)? != native {
+                return Err("reflection reverse identity changed".into());
+            }
+            return Ok((token, self.entries[&token].ty));
+        }
+        if self.entries.len() >= 32768 {
+            return Err("reflection root registry full".into());
         }
         let expected = unsafe {
             (api.class_from_name)((api.corlib)(), c"System".as_ptr(), c"RuntimeType".as_ptr())
@@ -116,6 +123,7 @@ impl Registry {
                     token: 0,
                 },
             );
+            self.reverse.insert(native as usize, token);
             Ok((token, ty))
         })();
         if result.is_err() {

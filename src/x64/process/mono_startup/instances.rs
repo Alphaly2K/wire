@@ -4,7 +4,7 @@ use super::super::super::memory::{shared::HostRegion, READ, WRITE};
 use super::{c_char, Memory, Object};
 use std::{collections::BTreeMap, ptr};
 const BASE: u64 = 0x6fff00000000;
-const LIMIT: usize = 1024;
+const LIMIT: usize = 32768;
 #[derive(Clone, Copy)]
 pub(super) struct Api {
     strong: unsafe extern "C" fn(Object, i32) -> Object,
@@ -114,6 +114,7 @@ struct Root {
 #[derive(Default)]
 pub(super) struct Registry {
     roots: BTreeMap<u64, Root>,
+    reverse: BTreeMap<usize, u64>,
     verified: usize,
     boxed: std::collections::BTreeSet<u64>,
     borrowed_verified: usize,
@@ -150,7 +151,7 @@ impl Registry {
             if native.is_null() || unsafe { (api.class)(native) } != class {
                 return Err("allocated object root/class mismatch".into());
             }
-            if self.roots.values().any(|r| r.native == native) {
+            if self.reverse.contains_key(&(native as usize)) {
                 return Err("ordinary allocation reused a live object identity".into());
             }
             let cached = if unsafe { (api.assignable)(api.unity_base, class) } != 0 {
@@ -179,6 +180,7 @@ impl Registry {
                     published: false,
                 },
             );
+            self.reverse.insert(native as usize, token);
             Ok(token)
         })();
         if result.is_err() && !handle.is_null() {
@@ -221,7 +223,7 @@ impl Registry {
             if handle.is_null()
                 || unsafe { (api.target)(handle) } != native
                 || unsafe { (api.class)(native) } != class
-                || self.roots.values().any(|r| r.native == native)
+                || self.reverse.contains_key(&(native as usize))
             {
                 return Err("boxed zero root/class/identity mismatch".into());
             }
@@ -237,6 +239,7 @@ impl Registry {
                     published: false,
                 },
             );
+            self.reverse.insert(native as usize, token);
             self.boxed.insert(token);
             Ok(token)
         })();
@@ -253,8 +256,10 @@ impl Registry {
         if self.released || self.views_retired || native.is_null() {
             return Err("borrowed object outside live rooted graph".into());
         }
-        if let Some((&token, _)) = self.roots.iter().find(|(_, r)| r.native == native) {
-            self.native(api, token)?;
+        if let Some(&token) = self.reverse.get(&(native as usize)) {
+            if self.native(api, token)? != native {
+                return Err("borrowed reverse identity changed".into());
+            }
             return Ok(token);
         }
         if self.roots.len() >= LIMIT {
@@ -285,6 +290,22 @@ impl Registry {
                 published: false,
             },
         );
+        self.reverse.insert(native as usize, token);
+        Ok(token)
+    }
+    /// Real mono_runtime_invoke scalar box; exact value class/payload are
+    /// validated by the typed call adapter before this pinned adoption.
+    pub(super) fn borrow_boxed_result(
+        &mut self,
+        api: Api,
+        native: Object,
+        class: Object,
+    ) -> Result<u64, String> {
+        let token = self.borrow(api, native)?;
+        if class.is_null() || self.class(api, token)? != class {
+            return Err("returned boxed value class changed".into());
+        }
+        self.boxed.insert(token);
         Ok(token)
     }
     /// Attach an already validated empty-array identity owned by its canonical
@@ -340,7 +361,7 @@ impl Registry {
             }
             return Err("canonical array alias changed identity".into());
         }
-        if self.roots.len() >= LIMIT || self.roots.values().any(|r| r.native == native) {
+        if self.roots.len() >= LIMIT || self.reverse.contains_key(&(native as usize)) {
             return Err("canonical alias exceeds capacity or duplicates native identity".into());
         }
         let handle = unsafe { (api.strong)(native, 1) };
@@ -370,6 +391,7 @@ impl Registry {
                 published: false,
             },
         );
+        self.reverse.insert(native as usize, token);
         Ok(())
     }
     pub(super) fn compatible(

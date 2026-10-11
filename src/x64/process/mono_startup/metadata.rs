@@ -1,5 +1,6 @@
 //! Typed metadata handles with owned strings/iterators. Class memory exposes
-//! only the exact 8B embedding userdata cell; all neighbouring bytes fault.
+//! only canonical element-class and embedding userdata cells; native pointers
+//! and all neighbouring bytes remain inaccessible.
 use super::super::super::memory::{shared::HostRegion, READ, WRITE};
 use super::{c_char, CString, Memory, Object};
 use std::{collections::BTreeMap, ptr};
@@ -41,6 +42,7 @@ struct Entry {
     kind: Kind,
     native: Object,
     userdata: Option<HostRegion>,
+    element: Option<HostRegion>,
 }
 struct Iterator {
     parent: u64,
@@ -158,12 +160,69 @@ impl Registry {
                         kind,
                         native,
                         userdata,
+                        element: None,
                     },
                 );
                 self.reverse_handles.insert((kind, native as usize), token);
                 Ok(token)
             }
         }
+    }
+    /// The locked Unity type-cache hash dereferences MonoClass::element_class
+    /// at offset zero. Expose exactly this immutable pointer as a canonical
+    /// metadata token, never as an alias to the native class header.
+    pub(super) fn publish_class_elements(
+        &mut self,
+        library: Object,
+        memory: &mut Memory,
+        token: u64,
+    ) -> Result<(), String> {
+        let get = sym!(
+            library,
+            "mono_class_get_element_class",
+            unsafe extern "C" fn(Object) -> Object
+        );
+        self.publish_elements(memory, token, |class| {
+            let element = unsafe { get(class) };
+            // The frozen MSVC-profile class starts with this pointer. Verify
+            // that its native API agrees before installing an owned snapshot.
+            if unsafe { class.cast::<Object>().read_unaligned() } != element {
+                return Err("element-class prefix ABI mismatch".into());
+            }
+            Ok(element)
+        })
+    }
+    fn publish_elements(
+        &mut self,
+        memory: &mut Memory,
+        mut token: u64,
+        mut element: impl FnMut(Object) -> Result<Object, String>,
+    ) -> Result<(), String> {
+        let mut visited = std::collections::BTreeSet::new();
+        while token != 0 && visited.insert(token) {
+            if visited.len() > 64 {
+                return Err("element-class graph exceeds bounded depth".into());
+            }
+            let class = self.native(token, Kind::Class)?;
+            let native_element = element(class)?;
+            let next = self.wrap(memory, Value::Handle(native_element, Kind::Class))?;
+            if let Some(region) = &self.handles[&token].element {
+                let current =
+                    region.with_native(|p| unsafe { p.as_ptr().cast::<u64>().read_unaligned() })?;
+                if current != next {
+                    return Err("published element-class identity changed".into());
+                }
+                break;
+            }
+            let region = HostRegion::owned(8)?;
+            region.with_native(|p| unsafe {
+                p.as_ptr().cast::<u64>().write_unaligned(next);
+            })?;
+            memory.map_shared_data(token, region.clone(), READ, READ)?;
+            self.handles.get_mut(&token).unwrap().element = Some(region);
+            token = next;
+        }
+        Ok(())
     }
     /// Unity's embedding cache is guest-owned opaque data. Keep exported
     /// get/set coherent with the checked +232 cell; never install a guest
@@ -367,6 +426,17 @@ impl Registry {
         if CORE_CLASSES.contains(&function) {
             let get = sym!(lib, function, unsafe extern "C" fn() -> Object);
             return Ok(Value::Handle(unsafe { get() }, Kind::Class));
+        }
+        if let Some((kind, byte_result)) = predicate_shape(function) {
+            let native = self.native(a, kind)?;
+            let result = if byte_result {
+                let f = sym!(lib, function, unsafe extern "C" fn(Object) -> u8);
+                (unsafe { f(native) }) != 0
+            } else {
+                let f = sym!(lib, function, unsafe extern "C" fn(Object) -> i32);
+                (unsafe { f(native) }) != 0
+            };
+            return Ok(Value::Scalar(u64::from(result)));
         }
         match function {
             "mono_field_get_type" | "mono_field_get_parent" => {
@@ -665,6 +735,10 @@ impl Registry {
         }
         self.retired = true;
         for (token, entry) in &self.handles {
+            if let Some(region) = &entry.element {
+                memory.unmap_shared_data(*token)?;
+                region.revoke()?;
+            }
             if let Some(region) = &entry.userdata {
                 memory.unmap_shared_data(token + 232)?;
                 region.revoke()?;
@@ -695,8 +769,28 @@ fn type_definition_token(token: u64, rows: i32) -> Result<u32, String> {
     }
     Ok(token)
 }
+// Frozen exports use gboolean (int32) except these two MonoBoolean (byte)
+// class predicates. Keep the actual native ABI and typed metadata argument.
+fn predicate_shape(function: &str) -> Option<(Kind, bool)> {
+    match function {
+        "mono_unity_class_is_string" | "mono_unity_class_is_class_type" => {
+            Some((Kind::Class, true))
+        }
+        "mono_unity_class_is_open_constructed_type"
+        | "mono_unity_class_is_array"
+        | "mono_unity_class_is_delegate"
+        | "mono_unity_class_is_inited" => Some((Kind::Class, false)),
+        "mono_unity_type_is_generic_instance"
+        | "mono_unity_type_is_enum_type"
+        | "mono_unity_type_is_boolean"
+        | "mono_unity_type_is_pointer_type"
+        | "mono_unity_type_is_static" => Some((Kind::Type, false)),
+        _ => None,
+    }
+}
 pub(super) fn handles(function: &str) -> bool {
     CORE_CLASSES.contains(&function)
+        || predicate_shape(function).is_some()
         || matches!(
             function,
             "mono_get_corlib"
@@ -904,5 +998,39 @@ mod tests {
         assert!(memory.read_int(token + 232, 8).is_err());
         assert!(memory.read_int(text, 1).is_err());
         assert!(registry.native(token, Kind::Class).is_err());
+    }
+    #[test]
+    fn class_element_graph_uses_readonly_canonical_tokens_and_retires_exact_cells() {
+        let mut memory = Memory::default();
+        let mut registry = Registry::default();
+        let mut array = [0u64; 32];
+        let mut scalar = [0u64; 32];
+        let scalar_native = scalar.as_mut_ptr().cast();
+        let array_native = array.as_mut_ptr().cast();
+        let token = registry
+            .wrap(&mut memory, Value::Handle(array_native, Kind::Class))
+            .unwrap();
+        registry
+            .publish_elements(&mut memory, token, |class| {
+                assert!(class == array_native || class == scalar_native);
+                Ok(scalar_native)
+            })
+            .unwrap();
+        let scalar_token = memory.read_int(token, 8).unwrap();
+        assert_ne!(scalar_token, scalar_native as u64);
+        assert_eq!(
+            registry.native(scalar_token, Kind::Class).unwrap(),
+            scalar_native
+        );
+        assert_eq!(memory.read_int(scalar_token, 8).unwrap(), scalar_token);
+        assert!(memory.write_int(token, 8, 0).is_err());
+        assert!(memory.read_int(token + 8, 1).is_err());
+        assert!(memory.fetch(token, &mut [0]).is_err());
+        assert!(registry
+            .publish_elements(&mut memory, token, |_| Ok(array_native))
+            .is_err());
+        registry.retire(&mut memory).unwrap();
+        assert!(memory.read_int(token, 8).is_err());
+        assert!(memory.read_int(scalar_token, 8).is_err());
     }
 }

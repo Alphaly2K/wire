@@ -431,3 +431,27 @@ C++临时reference slots有live heap/VirtualAlloc、permissions和code-history�
 需要typed有参数invoke、实际boxed Boolean返回和canonical out refs；不能硬编码false/NULL。
 冻结runtime仍原23patch，SHA c152197b7cf1623a3d40a51a36e1e44d888b77f337b1378bb979598d2fad2eb0，
 support SHA 34705bafc092d1e644b2c7e0873340b398d1a81dd3e51c31af37a9ba0a29cea9。
+
+
+## 2026-10-12 通用 static invoke、类型缓存与弱句柄
+
+本节覆盖probe-34旧终点。实现/限制见 `native-mono-static-invoke-2026-10-12.md`。
+managed_calls.rs按owned metadata验证真实static IL、scalar/reference ABI、alias/byref输出，
+不按类名/token分派。固定16×8B native-stack slots避免Rust heap引用槽不被BDWGC扫描；
+真实返回box先pin，canonical String outputs批量转换后写回，再统一graph refresh。
+ordinary/RuntimeType roots与field/payload容量32768，反向identity改用BTreeMap；核对仍保留。
+
+反汇编确认Unity类型缓存读取MonoClass::element_class offset0，现只发布canonical readonly
+Class token，真实API/原生首字段对照，未知相邻header不映射。元数据谓词按实际native返回宽度；
+weak v2 handles使用真实native弱链接、bit0 tag且不发布stale readable cell。isinst返回真实
+原对象或NULL。诊断另有长期strong roots，不能以weak创建结果宣称真实weak-only回收已验收。
+
+最新probe-40 exit0：368 static invokes/1104 out写回、68后续ctors/5callbacks、2193 fields全部
+GC检查；425 allocations/1429 borrowed roots、872 strings/375 RuntimeTypes、11ref/12value arrays
+全部GC/retirement通过；372payloads、14weak handles。游戏正常GC disable1/enable1、unwind0、
+finaldepth0，guard237/0；original Mono未attach。472release tests passed/7ignored，Clippy clean。
+full_game_backend=false，窗口未验收，probe耗时不是端到端收益数据。
+
+下一请求VolumeComponent.OnEnable（render-core、token0x06000c82、receiver为ColorCurves）；
+需要推广普通instance IL invoke到已有typed ABI，不添加类名/token名单。实际IL见probe-40。
+冻结23patchruntime/support SHA不变。持续推进授权及本地提交/快进main授权仍有效，不push。
