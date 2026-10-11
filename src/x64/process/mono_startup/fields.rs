@@ -1,6 +1,6 @@
 //! Owned, exact-width initialized instance field cells. Guest reference values
 //! are rooted identities; native headers and host pointers never enter a view.
-use super::{c_char, instances, Memory, Object};
+use super::{c_char, instances, value_layout, Memory, Object};
 use crate::x64::memory::{shared::HostRegion, READ, WRITE};
 use std::{
     collections::BTreeMap,
@@ -18,6 +18,7 @@ struct Api {
     byref: unsafe extern "C" fn(Object) -> u32,
     type_class: unsafe extern "C" fn(Object) -> Object,
     instance_size: unsafe extern "C" fn(Object) -> i32,
+    is_value: unsafe extern "C" fn(Object) -> i32,
     assignable: unsafe extern "C" fn(Object, Object) -> i32,
     get: unsafe extern "C" fn(Object, Object, Object),
     set: unsafe extern "C" fn(Object, Object, Object),
@@ -53,6 +54,10 @@ impl Api {
             type_class: sym!(
                 "mono_class_from_mono_type",
                 unsafe extern "C" fn(Object) -> Object
+            ),
+            is_value: sym!(
+                "mono_class_is_valuetype",
+                unsafe extern "C" fn(Object) -> i32
             ),
             instance_size: sym!(
                 "mono_class_instance_size",
@@ -94,6 +99,7 @@ struct Cell {
     field: Object,
     shape: Shape,
     view: HostRegion,
+    view_offset: usize,
     committed: Vec<u8>,
     published: bool,
 }
@@ -106,6 +112,8 @@ pub(super) struct Registry {
     reference_writes: usize,
     verified: usize,
     refreshed: usize,
+    payloads: BTreeMap<u64, (value_layout::Layout, HostRegion)>,
+    unboxes: usize,
 }
 pub(super) struct Spec {
     pub(super) owner: Object,
@@ -191,8 +199,10 @@ impl Registry {
                         width: 8,
                         boolean: false,
                     },
-                    (0xe | 0x12 | 0x1d, Some(target))
-                        if !target.is_null() && unsafe { (api.type_class)(ty) } == target =>
+                    (0xe | 0x12 | 0x15 | 0x1c | 0x1d, Some(target))
+                        if !target.is_null()
+                            && unsafe { (api.type_class)(ty) } == target
+                            && unsafe { (api.is_value)(target) } == 0 =>
                     {
                         Shape::Reference(target)
                     }
@@ -249,6 +259,7 @@ impl Registry {
                     field,
                     shape,
                     view,
+                    view_offset: 0,
                     committed: value,
                     published: false,
                 },
@@ -267,7 +278,8 @@ impl Registry {
     }
     fn value(cell: &Cell) -> Result<Vec<u8>, String> {
         cell.view.with_native(|p| unsafe {
-            std::slice::from_raw_parts(p.as_ptr(), cell.shape.width()).to_vec()
+            std::slice::from_raw_parts(p.as_ptr().add(cell.view_offset), cell.shape.width())
+                .to_vec()
         })
     }
     fn validate(shape: Shape, bytes: &[u8]) -> Result<(), String> {
@@ -283,6 +295,147 @@ impl Registry {
         }
         Ok(())
     }
+    pub(super) fn unbox(
+        &mut self,
+        library: Object,
+        root_api: instances::Api,
+        roots: &mut instances::Registry,
+        memory: &mut Memory,
+        owner: u64,
+        layout: value_layout::Layout,
+    ) -> Result<u64, String> {
+        if self.retired || !layout.value || self.payloads.len() >= 256 {
+            return Err("unbox outside live bounded value payload registry".into());
+        }
+        layout.check()?;
+        let object = roots.native(root_api, owner)?;
+        if roots.class(root_api, owner)? != layout.class {
+            return Err("unbox class differs from rooted value layout".into());
+        }
+        let unbox: unsafe extern "C" fn(Object) -> Object = unsafe {
+            let p = libc::dlsym(library, c"mono_object_unbox".as_ptr());
+            if p.is_null() {
+                return Err("native unbox API absent".into());
+            }
+            std::mem::transmute(p)
+        };
+        if unsafe { unbox(object) } != unsafe { object.cast::<u8>().add(16).cast() } {
+            return Err("actual native unbox payload layout mismatch".into());
+        }
+        self.promote_payload(root_api, roots, memory, owner, layout)?;
+        self.unboxes += 1;
+        Ok(owner + 16)
+    }
+    fn promote_payload(
+        &mut self,
+        root_api: instances::Api,
+        roots: &mut instances::Registry,
+        memory: &mut Memory,
+        owner: u64,
+        layout: value_layout::Layout,
+    ) -> Result<(), String> {
+        layout.check()?;
+        if let Some((existing, _)) = self.payloads.get(&owner) {
+            if existing.class != layout.class || existing.width != layout.width {
+                return Err("unbox changed canonical value layout".into());
+            }
+            return Ok(());
+        }
+        let api = self.api.ok_or("unbox before native field API")?;
+        let object = roots.native(root_api, owner)?;
+        let mut bytes = vec![0; layout.width];
+        let mut records = Vec::new();
+        for slot in &layout.slots {
+            let width = slot.shape.width();
+            let value = &mut bytes[slot.offset..slot.offset + width];
+            unsafe { (api.get)(object, slot.field, value.as_mut_ptr().cast()) };
+            let shape = match slot.shape {
+                value_layout::Shape::Reference(class) => {
+                    let native = u64::from_le_bytes(value.try_into().unwrap()) as Object;
+                    let token = if native.is_null() {
+                        0
+                    } else {
+                        let token = roots.borrow(root_api, native)?;
+                        roots.compatible(root_api, token, class)?;
+                        token
+                    };
+                    value.copy_from_slice(&token.to_le_bytes());
+                    Shape::Reference(class)
+                }
+                value_layout::Shape::Scalar { width, boolean } => Shape::Scalar { width, boolean },
+            };
+            let address = owner + 16 + slot.offset as u64;
+            if let Some(cell) = self.cells.get(&address) {
+                if cell.owner != owner
+                    || cell.field != slot.field
+                    || cell.shape.width() != width
+                    || Self::value(cell)? != cell.committed
+                    || cell.committed != value
+                {
+                    return Err("unbox would discard pending or incompatible field snapshot".into());
+                }
+            }
+            records.push((address, slot.field, shape, slot.offset, value.to_vec()));
+        }
+        // Every existing field must correspond exactly to a validated slot.
+        if self
+            .cells
+            .iter()
+            .any(|(&address, cell)| cell.owner == owner && !records.iter().any(|r| r.0 == address))
+        {
+            return Err("unbox layout omits an already published field".into());
+        }
+        layout.validate(&bytes, root_api, roots)?;
+        if self.cells.len()
+            + records
+                .iter()
+                .filter(|r| !self.cells.contains_key(&r.0))
+                .count()
+            > 4096
+        {
+            return Err("unbox field capacity exceeded".into());
+        }
+        let full = HostRegion::owned(layout.width)?;
+        full.with_native(|p| unsafe {
+            ptr::copy_nonoverlapping(bytes.as_ptr(), p.as_ptr(), bytes.len())
+        })?;
+        let previous: Vec<_> = self
+            .cells
+            .iter()
+            .filter(|(_, c)| c.owner == owner && c.published)
+            .map(|(&a, c)| (a, c.view.clone()))
+            .collect();
+        for (address, _) in &previous {
+            memory.unmap_shared_data(*address)?;
+        }
+        if let Err(error) =
+            memory.map_shared_data(owner + 16, full.clone(), READ | WRITE, READ | WRITE)
+        {
+            for (address, view) in previous {
+                memory.map_shared_data(address, view, READ | WRITE, READ | WRITE)?;
+            }
+            return Err(error);
+        }
+        for (address, field, shape, view_offset, committed) in records {
+            self.cells.insert(
+                address,
+                Cell {
+                    owner,
+                    field,
+                    shape,
+                    view: full.clone(),
+                    view_offset,
+                    committed,
+                    published: false,
+                },
+            );
+        }
+        for (_, view) in previous {
+            view.revoke()?;
+        }
+        self.payloads.insert(owner, (layout, full));
+        Ok(())
+    }
     pub(super) fn sync(
         &mut self,
         root_api: instances::Api,
@@ -294,6 +447,12 @@ impl Registry {
         let Some(api) = self.api else {
             return Ok(());
         };
+        for (layout, view) in self.payloads.values() {
+            let bytes = view.with_native(|p| unsafe {
+                std::slice::from_raw_parts(p.as_ptr(), layout.width).to_vec()
+            })?;
+            layout.validate(&bytes, root_api, roots)?;
+        }
         let mut updates = Vec::new();
         for (&address, cell) in &self.cells {
             let bytes = Self::value(cell)?;
@@ -433,12 +592,19 @@ impl Registry {
         for (address, bytes) in updates {
             let cell = self.cells.get_mut(&address).unwrap();
             cell.view.with_native(|p| unsafe {
-                ptr::copy_nonoverlapping(bytes.as_ptr(), p.as_ptr(), bytes.len());
+                ptr::copy_nonoverlapping(
+                    bytes.as_ptr(),
+                    p.as_ptr().add(cell.view_offset),
+                    bytes.len(),
+                );
             })?;
             cell.committed = bytes;
             self.refreshed += 1;
         }
         Ok(())
+    }
+    pub(super) fn has_owner(&self, owner: u64) -> bool {
+        !self.retired && self.cells.values().any(|c| c.owner == owner)
     }
     pub(super) fn has_reference(&self, owner: u64, address: u64) -> bool {
         !self.retired
@@ -510,13 +676,19 @@ impl Registry {
                 memory.unmap_shared_data(address)?;
                 cell.published = false;
             }
-            cell.view.revoke()?;
+            if !self.payloads.contains_key(&cell.owner) {
+                cell.view.revoke()?;
+            }
+        }
+        for (&owner, (_, view)) in &self.payloads {
+            memory.unmap_shared_data(owner + 16)?;
+            view.revoke()?;
         }
         self.retired = true;
         Ok(())
     }
     pub(super) fn report(&self) -> String {
-        format!("native-instance-field-cells={}\nnative-instance-field-writes={}\nnative-instance-reference-writes={}\nnative-instance-field-gc-verifications={}\nnative-instance-field-views-retired={}\nnative-instance-field-refreshes={}\n", self.cells.len(), self.writes, self.reference_writes, self.verified, self.retired, self.refreshed)
+        format!("native-instance-field-cells={}\nnative-instance-field-writes={}\nnative-instance-reference-writes={}\nnative-instance-field-gc-verifications={}\nnative-instance-field-views-retired={}\nnative-instance-field-refreshes={}\n", self.cells.len(), self.writes, self.reference_writes, self.verified, self.retired, self.refreshed) + &format!("native-value-unbox-calls={}\nnative-value-payloads={}\n",self.unboxes,self.payloads.len())
     }
 }
 pub(super) fn is_component(library: Object, render: Object, class: Object) -> Result<bool, String> {
@@ -770,54 +942,6 @@ pub(super) fn component_specs(
     Ok(specs)
 }
 
-pub(super) fn input_box_size(
-    library: Object,
-    image: Object,
-    class: Object,
-) -> Result<Option<usize>, String> {
-    macro_rules! sym {
-        ($name:literal,$ty:ty) => {{
-            let p = unsafe { libc::dlsym(library, concat!($name, "\0").as_ptr().cast()) };
-            if p.is_null() {
-                return Err(concat!("missing input box API: ", $name).into());
-            }
-            unsafe { std::mem::transmute::<Object, $ty>(p) }
-        }};
-    }
-    let find = sym!(
-        "mono_class_from_name",
-        unsafe extern "C" fn(Object, *const c_char, *const c_char) -> Object
-    );
-    let binding = unsafe {
-        find(
-            image,
-            c"UnityEngine.InputSystem".as_ptr(),
-            c"InputBinding".as_ptr(),
-        )
-    };
-    if binding.is_null() {
-        return Err("locked InputBinding class absent".into());
-    }
-    if class != binding {
-        return Ok(None);
-    }
-    let value = sym!(
-        "mono_class_is_valuetype",
-        unsafe extern "C" fn(Object) -> i32
-    );
-    let size = sym!(
-        "mono_class_value_size",
-        unsafe extern "C" fn(Object, *mut u32) -> i32
-    );
-    let mut alignment = 0;
-    if unsafe { value(class) } == 0
-        || unsafe { size(class, &mut alignment) } != 88
-        || alignment != 8
-    {
-        return Err("InputBinding boxed value ABI mismatch".into());
-    }
-    Ok(Some(88))
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -840,6 +964,9 @@ mod tests {
                     .write_unaligned(REFERENCE.with(Counter::get));
             }
         }
+    }
+    unsafe extern "C" fn not_value(_: Object) -> i32 {
+        0
     }
     unsafe extern "C" fn set(_: Object, field: Object, value: Object) {
         if field as usize == 3 {
@@ -891,6 +1018,7 @@ mod tests {
                 kind: number,
                 byref: number,
                 type_class: pointer,
+                is_value: not_value,
                 instance_size: size,
                 assignable,
                 get,
@@ -931,12 +1059,70 @@ mod tests {
                     field: field as Object,
                     shape,
                     view,
+                    view_offset: 0,
                     committed: bytes,
                     published: true,
                 },
             );
         }
         (fields, api, roots, memory, owner)
+    }
+    #[test]
+    fn unbox_promotes_fields_to_one_writable_payload_and_keeps_tokens_private() {
+        let (mut fields, api, mut roots, mut memory, owner) = fixture();
+        let layout = value_layout::Layout {
+            class: 2usize as Object,
+            width: 16,
+            alignment: 8,
+            value: true,
+            slots: vec![
+                value_layout::Slot {
+                    offset: 0,
+                    field: 1usize as Object,
+                    shape: value_layout::Shape::Scalar {
+                        width: 1,
+                        boolean: true,
+                    },
+                },
+                value_layout::Slot {
+                    offset: 8,
+                    field: 2usize as Object,
+                    shape: value_layout::Shape::Reference(2usize as Object),
+                },
+            ],
+        };
+        fields
+            .promote_payload(api, &mut roots, &mut memory, owner, layout.clone())
+            .unwrap();
+        fields
+            .promote_payload(api, &mut roots, &mut memory, owner, layout)
+            .unwrap();
+        let mut bytes = [0; 16];
+        memory.read(owner + 16, &mut bytes).unwrap();
+        assert_eq!(bytes[0], 1);
+        assert_eq!(u64::from_le_bytes(bytes[8..].try_into().unwrap()), owner);
+        assert!(memory.read_int(owner, 8).is_err());
+        memory.write_int(owner + 16, 1, 0).unwrap();
+        memory.write_int(owner + 24, 8, owner + 8).unwrap();
+        assert!(fields.sync(api, &roots).is_err());
+        assert_eq!(SETS.with(Counter::get), 0);
+        memory.write_int(owner + 24, 8, 0).unwrap();
+        memory.write_int(owner + 17, 1, 1).unwrap();
+        assert!(fields.sync(api, &roots).is_err());
+        assert_eq!(SETS.with(Counter::get), 0);
+        memory.write_int(owner + 17, 1, 0).unwrap();
+        fields.sync(api, &roots).unwrap();
+        fields.verify(api, &roots).unwrap();
+        assert_eq!(SCALAR.with(Counter::get), 0);
+        assert_eq!(REFERENCE.with(Counter::get), 0);
+        assert_eq!(
+            fields.read(owner, 2usize as Object).unwrap(),
+            0u64.to_le_bytes()
+        );
+        assert!(fields.retire(&mut memory, &roots).is_err());
+        roots.release(api);
+        fields.retire(&mut memory, &roots).unwrap();
+        assert!(memory.read_int(owner + 16, 8).is_err());
     }
     #[test]
     fn scalar_and_reference_updates_use_typed_api_and_survive_checked_verification() {
@@ -1002,6 +1188,7 @@ mod tests {
                     alignment: 4,
                 },
                 view,
+                view_offset: 0,
                 committed: vec![0; 16],
                 published: true,
             },

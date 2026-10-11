@@ -61,6 +61,7 @@ mod reflection;
 mod services;
 mod subsystems;
 mod unitytls;
+mod value_layout;
 mod virtual_methods;
 macro_rules! symbol {
     ($library:expr, $name:literal, $ty:ty) => {{
@@ -251,6 +252,7 @@ pub(super) struct Probe {
     input_map_invokes: usize,
     input_action_invokes: usize,
     virtual_resolutions: usize,
+    serialization_invokes: usize,
     reference_array_api: Option<reference_arrays::Api>,
     reference_array_registry: reference_arrays::Registry,
     components: bool,
@@ -686,6 +688,7 @@ impl Probe {
             input_map_invokes: 0,
             input_action_invokes: 0,
             virtual_resolutions: 0,
+            serialization_invokes: 0,
             reference_array_api: None,
             reference_array_registry: reference_arrays::Registry::default(),
             components,
@@ -1285,6 +1288,88 @@ impl Probe {
         }
         Ok(images)
     }
+    fn reference_images(&self) -> Result<[Object; 5], String> {
+        Ok([
+            self.image_registry.unique_native_image(CORE_MODULE)?,
+            self.image_registry
+                .unique_native_image(animation::RENDER_CORE)?,
+            self.image_registry.unique_native_image(animation::URP)?,
+            self.image_registry.unique_native_image(INPUT_SYSTEM)?,
+            self.image_registry.unique_native_image(CORELIB)?,
+        ])
+    }
+    /// Publish bounded backing storage reachable from an admitted managed graph.
+    /// Resolved generic reference classes in frozen corlib use actual metadata;
+    /// this never admits their methods or exposes native headers.
+    fn publish_container_graph(
+        &mut self,
+        library: Object,
+        api: instances::Api,
+        mut queue: Vec<Object>,
+    ) -> Result<(), String> {
+        let core = self.image_registry.unique_native_image(CORE_MODULE)?;
+        let corlib = self.image_registry.unique_native_image(CORELIB)?;
+        let object_class = symbol!(
+            library,
+            "mono_object_get_class",
+            unsafe extern "C" fn(Object) -> Object
+        );
+        let rank = symbol!(
+            library,
+            "mono_class_get_rank",
+            unsafe extern "C" fn(Object) -> u32
+        );
+        let mut seen = Vec::new();
+        while let Some(object) = queue.pop() {
+            if object.is_null() || seen.contains(&object) {
+                continue;
+            }
+            if seen.len() >= 256 {
+                return Err("container backing graph exceeds bounded capacity".into());
+            }
+            seen.push(object);
+            let class = unsafe { object_class(object) };
+            if unsafe { rank(class) } != 0 {
+                let token = self.instance_registry.borrow(api, object)?;
+                if self.array_registry.contains(token) {
+                    continue;
+                }
+                let token = self.reference_array_registry.borrow(
+                    self.reference_array_api
+                        .ok_or("container array before typed array API")?,
+                    api,
+                    &mut self.instance_registry,
+                    object,
+                )?;
+                callbacks::with_service(|memory, _| {
+                    self.reference_array_registry.publish(memory, token)
+                })?;
+                continue;
+            }
+            let Some(specs) = field_layouts::storage_specs(library, core, corlib, object, class)?
+            else {
+                continue;
+            };
+            let owner = self.instance_registry.borrow(api, object)?;
+            if !self.field_registry.has_owner(owner) {
+                callbacks::with_service(|memory, _| {
+                    self.field_registry.install(
+                        library,
+                        api,
+                        &mut self.instance_registry,
+                        memory,
+                        specs,
+                    )
+                })?;
+            }
+            queue.extend(self.field_registry.native_references(
+                api,
+                &self.instance_registry,
+                owner,
+            )?);
+        }
+        Ok(())
+    }
     pub(super) fn stop_before(&mut self, function: &str, cpu: &Cpu64) -> Result<bool, String> {
         if self.bindings && function == "mono_profiler_install" {
             self.registry.seal()?;
@@ -1345,16 +1430,23 @@ impl Probe {
             let method = self
                 .metadata_registry
                 .native(cpu.regs[1], metadata::Kind::Method)?;
-            if constructors::Api::load(
+            let admission = constructors::Api::load(
                 self.native
                     .as_ref()
                     .ok_or("constructor before runtime")?
                     .library,
             )?
-            .describe(method, &self.constructor_images()?)?
-            .is_some()
-            {
-                return Ok(false);
+            .describe(method, &self.constructor_images()?);
+            match admission {
+                Ok(Some(_)) => return Ok(false),
+                Ok(None) => {}
+                Err(reason) => {
+                    self.mark_completed_layers();
+                    self.events.push(format!(
+                        "managed entry deferred before invocation: {reason}"
+                    ));
+                    return Ok(true);
+                }
             }
         }
         if self.curves
@@ -1429,7 +1521,9 @@ impl Probe {
             && ((self.assets
                 && matches!(
                     function,
-                    "mono_object_get_virtual_method" | "mono_array_addr_with_size"
+                    "mono_object_get_virtual_method"
+                        | "mono_array_addr_with_size"
+                        | "mono_object_unbox"
                 ))
                 || (self.assets
                     && matches!(
@@ -1570,6 +1664,34 @@ impl Probe {
         cpu.regs[4]
             .checked_add(8)
             .ok_or("object return stack overflow")?;
+        if self.assets && function == "mono_object_unbox" {
+            let api = self.instance_api.ok_or("unbox before rooted object API")?;
+            if !self.instance_registry.is_boxed(a[0]) {
+                return Err("unbox requires a live allocated boxed value identity".into());
+            }
+            let (address, _) =
+                callbacks::with_owner(memory, runtime, self.callback_targets(), || {
+                    let class = self.instance_registry.class(api, a[0])?;
+                    let layout = value_layout::Api::load(
+                        library,
+                        self.image_registry.unique_native_image(INPUT_SYSTEM)?,
+                    )?
+                    .layout(class)?;
+                    self.field_registry.sync(api, &self.instance_registry)?;
+                    callbacks::with_service(|memory, _| {
+                        self.field_registry.unbox(
+                            library,
+                            api,
+                            &mut self.instance_registry,
+                            memory,
+                            a[0],
+                            layout,
+                        )
+                    })
+                })?;
+            cpu.return_integer(memory, address?)?;
+            return Ok(false);
+        }
         if self.assets && function == "mono_array_addr_with_size" {
             let address = self.reference_array_registry.address(a[0], a[1], a[2])?;
             cpu.return_integer(memory, address)?;
@@ -1637,11 +1759,23 @@ impl Probe {
                 let (token, _) =
                     callbacks::with_owner(memory, runtime, self.callback_targets(), || {
                         let boxed = if self.assets {
-                            fields::input_box_size(
+                            let value = symbol!(
                                 library,
-                                self.image_registry.unique_native_image(INPUT_SYSTEM)?,
-                                class,
-                            )?
+                                "mono_class_is_valuetype",
+                                unsafe extern "C" fn(Object) -> i32
+                            );
+                            if unsafe { value(class) } != 0 {
+                                Some(
+                                    value_layout::Api::load(
+                                        library,
+                                        self.image_registry.unique_native_image(INPUT_SYSTEM)?,
+                                    )?
+                                    .layout(class)?
+                                    .width,
+                                )
+                            } else {
+                                None
+                            }
                         } else {
                             None
                         };
@@ -1683,7 +1817,8 @@ impl Probe {
                                     memory,
                                     specs,
                                 )
-                            })
+                            })?;
+                            self.publish_container_graph(library, api, vec![object])
                         })?;
                     installed?;
                 }
@@ -2140,8 +2275,8 @@ impl Probe {
             return Ok(true);
         }
         if self.components && self.curves_constructor.is_some() && a[0] != self.get_type_method {
-            if a[1] == 0 || a[2] != 0 {
-                return Err("component ctor requires owned this and NULL parameters".into());
+            if a[1] == 0 {
+                return Err("managed instance call requires rooted this".into());
             }
             if a[3] != 0 {
                 memory.check(a[3], 8, super::super::memory::WRITE)?;
@@ -2179,6 +2314,9 @@ impl Probe {
                 .describe(method, &self.constructor_images()?)?
                 .ok_or("managed entry is not a constructor")?;
             descriptor_api.receiver(&descriptor, object, class)?;
+            if descriptor.callback.is_none() && a[2] != 0 {
+                return Err("constructor parameters must be NULL for the zero-argument ABI".into());
+            }
             let input_image = if self.assets {
                 self.image_registry.unique_native_image(INPUT_SYSTEM)?
             } else {
@@ -2187,7 +2325,7 @@ impl Probe {
             let is_input = !input_image.is_null() && descriptor.image == input_image;
             if self.assets && self.reference_array_api.is_none() {
                 let (api, _) = callbacks::with_owner(memory, runtime, targets, || {
-                    reference_arrays::Api::load(library, input_image)
+                    reference_arrays::Api::load(library, input_image, self.reference_images()?)
                 })?;
                 self.reference_array_api = Some(api?);
             }
@@ -2245,7 +2383,9 @@ impl Probe {
                 } else if fields::is_component(library, images[1], class)? {
                     fields::component_specs(library, images, object, class)?
                 } else {
-                    field_layouts::specs(library, images[0], &images, object, class)?
+                    field_layouts::specs(library, images[0], &images, object, class).map_err(
+                        |e| format!("{} managed entry field layout: {e}", descriptor.name),
+                    )?
                 };
                 callbacks::with_service(|memory, _| {
                     self.field_registry.install(
@@ -2255,18 +2395,31 @@ impl Probe {
                         memory,
                         specs,
                     )
-                })
+                })?;
+                if self.assets {
+                    let references = self.field_registry.native_references(
+                        api,
+                        &self.instance_registry,
+                        a[1],
+                    )?;
+                    self.publish_container_graph(library, api, references)?;
+                }
+                Ok::<_, String>(())
             })?;
             installed?;
             // Keep historical per-class counters for probe comparisons only.
             // These names do not select or admit a managed implementation.
-            match (is_input, descriptor.name.as_str()) {
-                (true, "InputAction") => self.input_action_invokes += 1,
-                (true, "InputActionMap") => self.input_map_invokes += 1,
-                (true, "InputActionAsset") => self.asset_invokes += 1,
-                _ => self.component_invokes += 1,
+            if descriptor.callback.is_some() {
+                self.serialization_invokes += 1;
+            } else {
+                match (is_input, descriptor.name.as_str()) {
+                    (true, "InputAction") => self.input_action_invokes += 1,
+                    (true, "InputActionMap") => self.input_map_invokes += 1,
+                    (true, "InputActionAsset") => self.asset_invokes += 1,
+                    _ => self.component_invokes += 1,
+                }
             }
-            self.events.push(format!("metadata-qualified managed constructor: {}; real IL, rooted this, typed engine boundaries",descriptor.name));
+            self.events.push(format!("metadata-qualified managed entry: {}; serialization={}; real IL, rooted this, typed engine boundaries",descriptor.name,descriptor.callback.is_some()));
             if a[3] != 0 {
                 memory.write_int(a[3], 8, 0)?;
             }
@@ -3349,7 +3502,7 @@ impl Probe {
             self.assembly_lookup_ready,
             self.ordinary_objects_ready,
             self.curves_constructor.as_ref().map_or_else(String::new, animation::Constructor::report),
-            self.instance_registry.report() + &self.field_registry.report() + &format!("native-component-constructors={}\nnative-input-asset-constructors={}\nnative-virtual-method-resolutions={}\nnative-input-map-constructors={}\nnative-input-action-constructors={}\n", self.component_invokes, self.asset_invokes, self.virtual_resolutions, self.input_map_invokes, self.input_action_invokes),
+            self.instance_registry.report() + &self.field_registry.report() + &format!("native-component-constructors={}\nnative-input-asset-constructors={}\nnative-virtual-method-resolutions={}\nnative-input-map-constructors={}\nnative-input-action-constructors={}\nnative-serialization-callback-invokes={}\n", self.component_invokes, self.asset_invokes, self.virtual_resolutions, self.input_map_invokes, self.input_action_invokes, self.serialization_invokes),
             self.name_registry.report(),
             self.error_registry.report(),
             self.attribute_registry.report(),
@@ -3546,6 +3699,7 @@ mod tests {
             input_map_invokes: 0,
             input_action_invokes: 0,
             virtual_resolutions: 0,
+            serialization_invokes: 0,
             reference_array_api: None,
             reference_array_registry: reference_arrays::Registry::default(),
             components: false,

@@ -1,4 +1,4 @@
-//! Metadata-qualified, zero-argument managed constructors. Class names and
+//! Metadata-qualified constructors and serialization-interface callbacks. Class names and
 //! method tokens are diagnostics, never admission rules. All native crossings
 //! still use the provider's fixed adapters and rejecting P/Invoke resolver.
 use super::{c_char, Object};
@@ -23,11 +23,17 @@ pub(super) struct Api {
     header: unsafe extern "C" fn(Object) -> Object,
     code: unsafe extern "C" fn(Object, *mut u32, *mut u32) -> *const u8,
     free_header: unsafe extern "C" fn(Object),
+    find: unsafe extern "C" fn(Object, *const c_char, *const c_char) -> Object,
+    method: unsafe extern "C" fn(Object, *const c_char, i32) -> Object,
+    assignable: unsafe extern "C" fn(Object, Object) -> i32,
+    resolve: unsafe extern "C" fn(Object, Object) -> Object,
 }
 pub(super) struct Descriptor {
     pub(super) class: Object,
     pub(super) image: Object,
     pub(super) name: String,
+    pub(super) callback: Option<Object>,
+    method: Object,
 }
 impl Api {
     pub(super) fn load(library: Object) -> Result<Self, String> {
@@ -104,6 +110,22 @@ impl Api {
                 unsafe extern "C" fn(Object, *mut u32, *mut u32) -> *const u8
             ),
             free_header: sym!("mono_metadata_free_mh", unsafe extern "C" fn(Object)),
+            find: sym!(
+                "mono_class_from_name",
+                unsafe extern "C" fn(Object, *const c_char, *const c_char) -> Object
+            ),
+            method: sym!(
+                "mono_class_get_method_from_name",
+                unsafe extern "C" fn(Object, *const c_char, i32) -> Object
+            ),
+            assignable: sym!(
+                "mono_class_is_assignable_from",
+                unsafe extern "C" fn(Object, Object) -> i32
+            ),
+            resolve: sym!(
+                "mono_object_get_virtual_method",
+                unsafe extern "C" fn(Object, Object) -> Object
+            ),
         })
     }
     pub(super) fn describe(
@@ -118,7 +140,16 @@ impl Api {
         if name.is_null() {
             return Err("constructor method has no name".into());
         }
-        if unsafe { CStr::from_ptr(name) } != c".ctor" {
+        let bytes = unsafe { CStr::from_ptr(name) }.to_bytes();
+        let callback_name = bytes
+            .strip_prefix(b"UnityEngine.ISerializationCallbackReceiver.")
+            .unwrap_or(bytes);
+        let serialization = match callback_name {
+            b"OnAfterDeserialize" => Some(c"OnAfterDeserialize"),
+            b"OnBeforeSerialize" => Some(c"OnBeforeSerialize"),
+            _ => None,
+        };
+        if bytes != b".ctor" && serialization.is_none() {
             return Ok(None);
         }
         let class = unsafe { (self.class)(method) };
@@ -129,6 +160,30 @@ impl Api {
         if image.is_null() || !images.contains(&image) {
             return Err("constructor outside fingerprinted owned images".into());
         }
+        let callback = if let Some(name) = serialization {
+            let core = *images
+                .first()
+                .ok_or("serialization callback requires owned core image")?;
+            let interface = unsafe {
+                (self.find)(
+                    core,
+                    c"UnityEngine".as_ptr(),
+                    c"ISerializationCallbackReceiver".as_ptr(),
+                )
+            };
+            if interface.is_null() || unsafe { (self.assignable)(interface, class) } == 0 {
+                return Err(
+                    "managed callback does not implement the serialization interface".into(),
+                );
+            }
+            let contract = unsafe { (self.method)(interface, name.as_ptr(), 0) };
+            if contract.is_null() {
+                return Err("serialization interface method absent".into());
+            }
+            Some(contract)
+        } else {
+            None
+        };
         let mut implementation = 0;
         let flags = unsafe { (self.flags)(method, &mut implementation) };
         let sig = unsafe { (self.signature)(method) };
@@ -173,6 +228,8 @@ impl Api {
         Ok(Some(Descriptor {
             class,
             image,
+            callback,
+            method,
             name: unsafe { CStr::from_ptr(name) }
                 .to_string_lossy()
                 .into_owned(),
@@ -189,6 +246,13 @@ impl Api {
             || unsafe { (self.object_class)(object) } != class
         {
             return Err("constructor receiver differs from rooted declaring class".into());
+        }
+        if descriptor.callback.is_some_and(
+            |contract| unsafe { (self.resolve)(object, contract) } != descriptor.method,
+        ) {
+            return Err(
+                "managed callback is not the receiver's resolved interface implementation".into(),
+            );
         }
         Ok(())
     }
@@ -253,6 +317,19 @@ mod tests {
     unsafe extern "C" fn free(_: Object) {
         HEADERS.with(|c| c.set(c.get() - 1));
     }
+    thread_local! {static INTERFACE:Cell<bool>=const{Cell::new(true)};static RESOLVED:Cell<usize>=const{Cell::new(5)};}
+    unsafe extern "C" fn find(_: Object, _: *const c_char, _: *const c_char) -> Object {
+        6usize as Object
+    }
+    unsafe extern "C" fn method(_: Object, _: *const c_char, _: i32) -> Object {
+        7usize as Object
+    }
+    unsafe extern "C" fn assignable(_: Object, _: Object) -> i32 {
+        i32::from(INTERFACE.with(Cell::get))
+    }
+    unsafe extern "C" fn resolve(_: Object, _: Object) -> Object {
+        RESOLVED.with(Cell::get) as Object
+    }
     fn api() -> Api {
         FLAGS.with(|c| c.set(0));
         IMPL.with(|c| c.set(0));
@@ -279,7 +356,37 @@ mod tests {
             header,
             code,
             free_header: free,
+            find,
+            method,
+            assignable,
+            resolve,
         }
+    }
+    #[test]
+    fn callbacks_require_actual_interface_and_resolved_receiver_implementation() {
+        unsafe extern "C" fn callback_name(_: Object) -> *const c_char {
+            c"OnAfterDeserialize".as_ptr()
+        }
+        INTERFACE.with(|c| c.set(true));
+        RESOLVED.with(|c| c.set(5));
+        let api = Api {
+            name: callback_name,
+            ..api()
+        };
+        let descriptor = api
+            .describe(5usize as Object, &[3usize as Object])
+            .unwrap()
+            .unwrap();
+        assert!(descriptor.callback.is_some());
+        api.receiver(&descriptor, 9usize as Object, 2usize as Object)
+            .unwrap();
+        RESOLVED.with(|c| c.set(99));
+        assert!(api
+            .receiver(&descriptor, 9usize as Object, 2usize as Object)
+            .is_err());
+        INTERFACE.with(|c| c.set(false));
+        assert!(api.describe(5usize as Object, &[3usize as Object]).is_err());
+        assert_eq!(HEADERS.with(Cell::get), 0);
     }
     #[test]
     fn unknown_class_uses_metadata_not_name_or_method_token() {

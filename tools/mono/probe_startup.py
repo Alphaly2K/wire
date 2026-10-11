@@ -136,11 +136,18 @@ def main():
         'native_array_roots_released': 'native-array-roots-released=true' in content,
         'native_array_views_retired': 'native-array-views-retired=true' in content,
         'native_input_asset_constructors': count_marker('native-input-asset-constructors'),
+        'native_serialization_callback_invokes': count_marker('native-serialization-callback-invokes'),
         'native_virtual_method_resolutions': count_marker('native-virtual-method-resolutions'),
         'native_input_profiler_marker_calls': count_marker('native-input-profiler-marker-calls'),
         'native_input_action_constructors': count_marker('native-input-action-constructors'),
         'native_input_map_constructors': count_marker('native-input-map-constructors'),
         'native_reference_arrays': count_marker('native-reference-arrays'),
+        'native_borrowed_typed_arrays': count_marker('native-borrowed-typed-arrays'),
+        'native_value_arrays': count_marker('native-value-arrays'),
+        'native_value_array_gc_verifications': count_marker('native-value-array-gc-verifications'),
+        'native_value_array_scalar_writes': count_marker('native-value-array-scalar-writes'),
+        'native_value_unbox_calls': count_marker('native-value-unbox-calls'),
+        'native_value_payloads': count_marker('native-value-payloads'),
         'native_reference_array_writes': count_marker('native-reference-array-writes'),
         'native_reference_array_gc_verifications': count_marker('native-reference-array-gc-verifications'),
         'native_reference_array_views_retired': 'native-reference-array-views-retired=true' in content,
@@ -259,6 +266,8 @@ def main():
         raise RuntimeError('actual InputActionAsset constructor/fields/GC lifecycle incomplete')
     if evidence['native_reference_arrays'] and (evidence['native_reference_array_gc_verifications'] < evidence['native_reference_arrays'] or not evidence['native_reference_array_views_retired']):
         raise RuntimeError('owned reference arrays did not pass GC verification and retirement')
+    if evidence['native_value_arrays'] and (evidence['native_value_array_gc_verifications'] < evidence['native_value_arrays'] or not evidence['native_reference_array_views_retired']):
+        raise RuntimeError('owned value arrays did not pass GC verification and retirement')
     expected_steps = {'classlib': 1, 'logging': 2, 'exceptions': 3, 'synchronization': 5, 'subsystems': 6, 'subsystem-map': 7, 'imgui-cache': 8, 'attributes': 8, 'attribute-arrays': 8, 'assembly-lookup': 8, 'objects': 8, 'curves': 8, 'fields': 8, 'components': 8, 'assets': 8}.get(args.boundary)
     if expected_steps is not None and evidence['native_classlib_invokes'] != expected_steps:
         raise RuntimeError('actual ordered managed startup steps incomplete')

@@ -385,3 +385,22 @@ GC检查和roots/owned views退休通过，guard232/0，original Mono未attach�
 下一请求是含引用的 InputBinding[35]，继续做可复用结构体slot布局和数组/unbox桥接，
 不要重新恢复逐类构造名单，也不要把宿主struct/array payload直接映射给guest。
 用户明确授权本地提交并合入main；无需重复确认，不push。
+
+
+## Metadata value arrays、接口回调与List backing（2026-10-11）
+
+最新真实 `wire-out/native-mono-unity-assets-probe-17` exit0：41次后续构造、2次真实
+ISerializationCallbackReceiver回调、990 fields/990 GC checks，5 reference-element arrays、
+8 value-element arrays及全部GC checks；572 array barriers/32 scalar writes，1个借用backing array。
+91 allocations（3 boxes）、588 borrowed roots、430 strings，所有相关roots/views生命周期通过。
+guard233/0，original Mono未attach，full_game_backend=false。454 release tests passed/7 ignored，
+Clippy clean；冻结23patchruntime不变。详细证据/限制见native-mono-value-payloads-2026-10-11.md。
+
+构造/serialized field继续按metadata；回调按实际Unity serialization interface与virtual
+resolution，不按类名/token。boxed layout及value-array slots自动生成；generic reference字段、
+frozen corlib backing fields和已有typed SZ array接通。unbox wrapper尚无真实游戏请求（0），
+owned full-payload coalescing由单元覆盖，不能报真实游戏ABI验收。
+
+下一实际entry Renderer2DData::.ctor（0x06000210）；pending IL位于probe-17/startup.log。
+它在URP 2D managed image，依赖LayerMask/Vector3/Dictionary和ScriptableRendererData。
+继续完善image family/shape，避免恢复逐类名单。用户授权本地提交及快进main，不push。

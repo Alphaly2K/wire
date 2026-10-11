@@ -16,6 +16,7 @@ struct Api {
     byref: unsafe extern "C" fn(Object) -> u32,
     type_class: unsafe extern "C" fn(Object) -> Object,
     is_enum: unsafe extern "C" fn(Object) -> i32,
+    is_value: unsafe extern "C" fn(Object) -> i32,
     enum_base: unsafe extern "C" fn(Object) -> Object,
     size: unsafe extern "C" fn(Object, *mut u32) -> i32,
     attrs: unsafe extern "C" fn(Object, Object, *mut u16) -> Object,
@@ -80,6 +81,10 @@ impl Api {
                 unsafe extern "C" fn(Object) -> Object
             ),
             is_enum: sym!("mono_class_is_enum", unsafe extern "C" fn(Object) -> i32),
+            is_value: sym!(
+                "mono_class_is_valuetype",
+                unsafe extern "C" fn(Object) -> i32
+            ),
             enum_base: sym!(
                 "mono_class_enum_basetype",
                 unsafe extern "C" fn(Object) -> Object
@@ -101,6 +106,15 @@ impl Api {
         })
     }
     fn specs(self, images: &[Object], object: Object, class: Object) -> Result<Vec<Spec>, String> {
+        self.describe(images, object, class, false)
+    }
+    fn describe(
+        self,
+        images: &[Object],
+        object: Object,
+        class: Object,
+        storage: bool,
+    ) -> Result<Vec<Spec>, String> {
         let mut result = Vec::new();
         let mut declaring = class;
         let mut seen = Vec::new();
@@ -124,11 +138,22 @@ impl Api {
                     return Err("enumerated field belongs to another class".into());
                 }
                 let flags = unsafe { (self.flags)(field) };
-                if flags & (0x10 | 0x20 | 0x40 | 0x80) != 0 {
+                if flags
+                    & if storage {
+                        0x10 | 0x40
+                    } else {
+                        0x10 | 0x20 | 0x40 | 0x80
+                    }
+                    != 0
+                {
                     continue;
                 }
                 let mut status = 0;
-                let info = unsafe { (self.attrs)(declaring, field, &mut status) };
+                let info = if storage {
+                    ptr::null_mut()
+                } else {
+                    unsafe { (self.attrs)(declaring, field, &mut status) }
+                };
                 let attribute = !info.is_null()
                     && status == 0
                     && unsafe { (self.has)(info, self.serialize) } != 0;
@@ -140,7 +165,7 @@ impl Api {
                 if status != 0 {
                     return Err(format!("checked serialization attributes failed: {status}"));
                 }
-                if !serialized(flags, attribute) {
+                if !storage && !serialized(flags, attribute) {
                     continue;
                 }
                 let ty = unsafe { (self.ty)(field) };
@@ -148,10 +173,13 @@ impl Api {
                     return Err("serialized field is unknown/byref".into());
                 }
                 let kind = unsafe { (self.kind)(ty) };
-                let target = matches!(kind, 0xe | 0x11 | 0x12 | 0x1d)
+                let target = matches!(kind, 0xe | 0x11 | 0x12 | 0x15 | 0x1c | 0x1d)
                     .then(|| unsafe { (self.type_class)(ty) });
                 if target.is_some_and(|c| c.is_null()) {
                     return Err("serialized field type class absent".into());
+                }
+                if kind == 0x15 && unsafe { (self.is_value)(target.unwrap()) } != 0 {
+                    return Err("serialized generic value requires a reference-aware layout".into());
                 }
                 let inline = if kind == 0x11 {
                     let target = target.unwrap();
@@ -170,10 +198,18 @@ impl Api {
                         return Err("serialized enum requires exact four-byte layout".into());
                     }
                     Some((4, 4))
-                } else if matches!(kind, 2..=0xe | 0x12 | 0x1d) {
+                } else if matches!(kind, 2..=0xe | 0x12 | 0x15 | 0x1c | 0x1d) {
                     None
                 } else {
-                    return Err("serialized pointer/complex shape requires a typed adapter".into());
+                    let name = unsafe { (self.name)(field) };
+                    let name = if name.is_null() {
+                        "<absent>".into()
+                    } else {
+                        unsafe { CStr::from_ptr(name) }.to_string_lossy()
+                    };
+                    return Err(format!(
+                        "serialized field {name} kind={kind:#x} requires a typed adapter"
+                    ));
                 };
                 let name = unsafe { (self.name)(field) };
                 if name.is_null() {
@@ -202,6 +238,36 @@ pub(super) fn specs(
 ) -> Result<Vec<Spec>, String> {
     Api::load(library, core)?.specs(images, object, class)
 }
+/// Internal backing fields only for resolved reference generic instances in
+/// the fingerprinted corlib. Private/NonSerialized/readonly storage matters
+/// here; this does not change Unity serialization field selection.
+pub(super) fn storage_specs(
+    library: Object,
+    core: Object,
+    corlib: Object,
+    object: Object,
+    class: Object,
+) -> Result<Option<Vec<Spec>>, String> {
+    let api = Api::load(library, core)?;
+    if class.is_null()
+        || unsafe { (api.image)(class) } != corlib
+        || unsafe { (api.is_value)(class) } != 0
+    {
+        return Ok(None);
+    }
+    let get_type: unsafe extern "C" fn(Object) -> Object = unsafe {
+        let p = libc::dlsym(library, c"mono_class_get_type".as_ptr());
+        if p.is_null() {
+            return Err("container class type API absent".into());
+        }
+        std::mem::transmute(p)
+    };
+    let ty = unsafe { get_type(class) };
+    if ty.is_null() || unsafe { (api.kind)(ty) } != 0x15 {
+        return Ok(None);
+    }
+    Ok(Some(api.describe(&[corlib], object, class, true)?))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,6 +275,8 @@ mod tests {
     thread_local! {
         static UNSAFE_SHAPE: Cell<bool> = const { Cell::new(false) };
         static ATTRIBUTE_FAILURE: Cell<bool> = const { Cell::new(false) };
+        static GENERIC_REFERENCE: Cell<bool> = const { Cell::new(false) };
+        static GENERIC_VALUE: Cell<bool> = const { Cell::new(false) };
         static INFOS: Cell<usize> = const { Cell::new(0) };
     }
     unsafe extern "C" fn enumerate(_: Object, iterator: *mut Object) -> Object {
@@ -251,6 +319,8 @@ mod tests {
     unsafe extern "C" fn kind(ty: Object) -> u32 {
         if UNSAFE_SHAPE.with(Cell::get) && ty as usize == 2 {
             0xf
+        } else if GENERIC_REFERENCE.with(Cell::get) && ty as usize == 2 {
+            0x15
         } else if ty as usize == 1 {
             8
         } else {
@@ -262,6 +332,9 @@ mod tests {
     }
     unsafe extern "C" fn is_enum(_: Object) -> i32 {
         0
+    }
+    unsafe extern "C" fn is_value(_: Object) -> i32 {
+        i32::from(GENERIC_VALUE.with(Cell::get))
     }
     unsafe extern "C" fn size(_: Object, _: *mut u32) -> i32 {
         0
@@ -286,6 +359,8 @@ mod tests {
     fn api() -> Api {
         UNSAFE_SHAPE.with(|c| c.set(false));
         ATTRIBUTE_FAILURE.with(|c| c.set(false));
+        GENERIC_REFERENCE.with(|c| c.set(false));
+        GENERIC_VALUE.with(|c| c.set(false));
         INFOS.with(|c| c.set(0));
         Api {
             fields: enumerate,
@@ -299,6 +374,7 @@ mod tests {
             byref: zero,
             type_class: owner,
             is_enum,
+            is_value,
             enum_base: owner,
             size,
             attrs,
@@ -345,6 +421,49 @@ mod tests {
             )
             .is_err());
         assert_eq!(INFOS.with(Cell::get), 0);
+    }
+    #[test]
+    fn generic_reference_identity_is_admitted_but_generic_value_is_not() {
+        let api = api();
+        GENERIC_REFERENCE.with(|c| c.set(true));
+        let describe = || {
+            api.specs(
+                &[200usize as Object],
+                400usize as Object,
+                100usize as Object,
+            )
+        };
+        let fields = describe().unwrap();
+        assert_eq!(fields[1].kind, 0x15);
+        assert_eq!(fields[1].type_class, Some(100usize as Object));
+        assert!(fields[1].inline.is_none());
+        GENERIC_VALUE.with(|c| c.set(true));
+        assert!(describe().is_err());
+        assert_eq!(INFOS.with(Cell::get), 0);
+    }
+    #[test]
+    fn storage_fields_include_private_and_nonserialized_without_attributes() {
+        let api = api();
+        ATTRIBUTE_FAILURE.with(|c| c.set(true));
+        let fields = api
+            .describe(
+                &[200usize as Object],
+                400usize as Object,
+                100usize as Object,
+                true,
+            )
+            .unwrap();
+        assert_eq!(fields.len(), 3);
+        assert_eq!(INFOS.with(Cell::get), 0);
+        UNSAFE_SHAPE.with(|c| c.set(true));
+        assert!(api
+            .describe(
+                &[200usize as Object],
+                400usize as Object,
+                100usize as Object,
+                true
+            )
+            .is_err());
     }
     #[test]
     fn metadata_visibility_and_attributes_select_fields() {

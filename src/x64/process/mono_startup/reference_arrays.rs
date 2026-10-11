@@ -1,6 +1,6 @@
-//! Bounded SZ arrays of the two locked InputSystem reference classes. Guest
-//! elements contain rooted tokens; native elements only contain Mono references.
-use super::{c_char, instances, Memory, Object};
+//! Bounded typed SZ arrays. Value elements use metadata-derived scalar and
+//! reference slots; native pointers never enter the owned guest payload.
+use super::{instances, value_layout, Memory, Object};
 use crate::x64::memory::{shared::HostRegion, READ, WRITE};
 use std::{collections::BTreeMap, ptr};
 const BASE: u64 = 0x6ffeb0000000;
@@ -14,11 +14,19 @@ pub(super) struct Api {
     element_size: unsafe extern "C" fn(Object) -> i32,
     address: unsafe extern "C" fn(Object, i32, usize) -> Object,
     barrier: unsafe extern "C" fn(Object, Object, Object),
-    map: Object,
-    action: Object,
+    image: unsafe extern "C" fn(Object) -> Object,
+    value: unsafe extern "C" fn(Object) -> i32,
+    element: unsafe extern "C" fn(Object) -> Object,
+    rank: unsafe extern "C" fn(Object) -> u32,
+    reference_images: [Object; 5],
+    values: Option<value_layout::Api>,
 }
 impl Api {
-    pub(super) fn load(library: Object, image: Object) -> Result<Self, String> {
+    pub(super) fn load(
+        library: Object,
+        image: Object,
+        reference_images: [Object; 5],
+    ) -> Result<Self, String> {
         macro_rules! sym {
             ($name:literal, $ty:ty) => {{
                 let p = unsafe { libc::dlsym(library, concat!($name, "\0").as_ptr().cast()) };
@@ -27,35 +35,6 @@ impl Api {
                 }
                 unsafe { std::mem::transmute::<Object, $ty>(p) }
             }};
-        }
-        let find = sym!(
-            "mono_class_from_name",
-            unsafe extern "C" fn(Object, *const c_char, *const c_char) -> Object
-        );
-        let map = unsafe {
-            find(
-                image,
-                c"UnityEngine.InputSystem".as_ptr(),
-                c"InputActionMap".as_ptr(),
-            )
-        };
-        let action = unsafe {
-            find(
-                image,
-                c"UnityEngine.InputSystem".as_ptr(),
-                c"InputAction".as_ptr(),
-            )
-        };
-        let value_type = sym!(
-            "mono_class_is_valuetype",
-            unsafe extern "C" fn(Object) -> i32
-        );
-        if map.is_null()
-            || action.is_null()
-            || unsafe { value_type(map) } != 0
-            || unsafe { value_type(action) } != 0
-        {
-            return Err("locked reference element classes absent/value types".into());
         }
         Ok(Self {
             new: sym!(
@@ -83,12 +62,39 @@ impl Api {
                 "mono_gc_wbarrier_set_arrayref",
                 unsafe extern "C" fn(Object, Object, Object)
             ),
-            map,
-            action,
+            image: sym!(
+                "mono_class_get_image",
+                unsafe extern "C" fn(Object) -> Object
+            ),
+            value: sym!(
+                "mono_class_is_valuetype",
+                unsafe extern "C" fn(Object) -> i32
+            ),
+            element: sym!(
+                "mono_class_get_element_class",
+                unsafe extern "C" fn(Object) -> Object
+            ),
+            rank: sym!("mono_class_get_rank", unsafe extern "C" fn(Object) -> u32),
+            reference_images,
+            values: Some(value_layout::Api::load(library, image)?),
         })
     }
+    fn element_layout(self, element: Object) -> Result<value_layout::Layout, String> {
+        if !element.is_null()
+            && unsafe { (self.value)(element) } == 0
+            && self
+                .reference_images
+                .contains(&unsafe { (self.image)(element) })
+        {
+            Ok(value_layout::Layout::reference(element))
+        } else {
+            self.values
+                .ok_or("value layout API absent")?
+                .layout(element)
+        }
+    }
     pub(super) fn supports(self, element: Object) -> bool {
-        !element.is_null() && [self.map, self.action].contains(&element)
+        self.element_layout(element).is_ok()
     }
 }
 struct Entry {
@@ -96,9 +102,10 @@ struct Entry {
     class: Object,
     element: Object,
     length: usize,
+    layout: value_layout::Layout,
     header: HostRegion,
     payload: HostRegion,
-    committed: Vec<u64>,
+    committed: Vec<u8>,
     published: bool,
 }
 #[derive(Default)]
@@ -107,14 +114,18 @@ pub(super) struct Registry {
     retired: bool,
     writes: usize,
     verified: usize,
+    value_verified: usize,
+    scalar_writes: usize,
+    borrowed: usize,
 }
 impl Registry {
     fn layout(api: Api, entry: &Entry) -> Result<(), String> {
         let native = entry.native;
+        entry.layout.check()?;
         if native.is_null()
             || unsafe { (api.class)(native) } != entry.class
             || unsafe { (api.array_class)(entry.element, 1) } != entry.class
-            || unsafe { (api.element_size)(entry.class) } != 8
+            || unsafe { (api.element_size)(entry.class) } != entry.layout.width as i32
             || unsafe { (api.length)(native) } != entry.length
             || !unsafe {
                 native
@@ -126,10 +137,10 @@ impl Registry {
             .is_null()
             || unsafe { native.cast::<u8>().add(24).cast::<usize>().read_unaligned() }
                 != entry.length
-            || unsafe { (api.address)(native, 8, 0) }
+            || unsafe { (api.address)(native, entry.layout.width as i32, 0) }
                 != unsafe { native.cast::<u8>().add(32).cast() }
         {
-            return Err("reference SZ array identity/layout mismatch".into());
+            return Err("typed SZ array identity/layout mismatch".into());
         }
         Ok(())
     }
@@ -142,13 +153,18 @@ impl Registry {
         element: Object,
         length: u64,
     ) -> Result<u64, String> {
+        let layout = api.element_layout(element)?;
+        let payload_size = layout
+            .width
+            .checked_mul(length as usize)
+            .ok_or("typed array payload overflow")?;
         if self.retired
             || self.entries.len() >= 256
             || domain.is_null()
-            || !api.supports(element)
             || !(1..=4096).contains(&length)
+            || payload_size > 65504
         {
-            return Err("reference array outside locked bounded allocation contract".into());
+            return Err("typed array outside bounded allocation contract".into());
         }
         let length = length as usize;
         let native = unsafe { (api.new)(domain, element, length) };
@@ -160,74 +176,179 @@ impl Registry {
             p.as_ptr()
                 .add(8)
                 .cast::<u64>()
-                .write_unaligned(length as u64);
+                .write_unaligned(length as u64)
         })?;
         let entry = Entry {
             native,
             class,
             element,
             length,
+            layout,
             header,
-            payload: HostRegion::owned(length * 8)?,
-            committed: vec![0; length],
+            payload: HostRegion::owned(payload_size)?,
+            committed: vec![0; payload_size],
             published: false,
         };
         Self::layout(api, &entry)?;
+        // Only admitted fields are read; native padding is never published.
         for index in 0..length {
-            if !unsafe {
-                (api.address)(native, 8, index)
-                    .cast::<Object>()
-                    .read_unaligned()
-            }
-            .is_null()
-            {
-                return Err("new reference array has non-NULL element".into());
+            for slot in &entry.layout.slots {
+                let p = unsafe {
+                    (api.address)(native, entry.layout.width as i32, index)
+                        .cast::<u8>()
+                        .add(slot.offset)
+                };
+                if unsafe { std::slice::from_raw_parts(p, slot.shape.width()) }
+                    .iter()
+                    .any(|&b| b != 0)
+                {
+                    return Err("new typed array has nonzero admitted field".into());
+                }
             }
         }
         self.entries.insert(token, entry);
         Ok(token)
     }
+    /// Root first, then convert declared slots from an existing native SZ array.
+    /// Canonical instance identity is reused even if the field registry saw it
+    /// before this array acquired a view. Native padding remains private.
+    pub(super) fn borrow(
+        &mut self,
+        api: Api,
+        root_api: instances::Api,
+        roots: &mut instances::Registry,
+        native: Object,
+    ) -> Result<u64, String> {
+        if self.retired || native.is_null() {
+            return Err("borrowed array outside live registry".into());
+        }
+        if let Some((&token, _)) = self.entries.iter().find(|(_, e)| e.native == native) {
+            if roots.native(root_api, token)? != native {
+                return Err("borrowed array identity changed".into());
+            }
+            return Ok(token);
+        }
+        if self.entries.len() >= 256 {
+            return Err("borrowed array capacity exceeded".into());
+        }
+        let token = roots.borrow(root_api, native)?;
+        let class = roots.class(root_api, token)?;
+        if unsafe { (api.rank)(class) } != 1 {
+            return Err("borrowed array is not rank one".into());
+        }
+        let element = unsafe { (api.element)(class) };
+        let layout = api.element_layout(element)?;
+        let length = unsafe { (api.length)(native) };
+        let payload_size = layout
+            .width
+            .checked_mul(length)
+            .ok_or("borrowed array payload overflow")?;
+        if length > 4096 || payload_size > 65504 {
+            return Err("borrowed array payload exceeds bounds".into());
+        }
+        let header = HostRegion::owned(16)?;
+        header.with_native(|p| unsafe {
+            p.as_ptr()
+                .add(8)
+                .cast::<u64>()
+                .write_unaligned(length as u64)
+        })?;
+        let mut entry = Entry {
+            native,
+            class,
+            element,
+            length,
+            layout,
+            header,
+            payload: HostRegion::owned(payload_size.max(1))?,
+            committed: vec![0; payload_size],
+            published: false,
+        };
+        Self::layout(api, &entry)?;
+        let mut bytes = vec![0; payload_size];
+        for index in 0..length {
+            let base =
+                unsafe { (api.address)(native, entry.layout.width as i32, index) }.cast::<u8>();
+            for slot in &entry.layout.slots {
+                let start = index * entry.layout.width + slot.offset;
+                let data = &mut bytes[start..start + slot.shape.width()];
+                match slot.shape {
+                    value_layout::Shape::Reference(target) => {
+                        let reference =
+                            unsafe { base.add(slot.offset).cast::<Object>().read_unaligned() };
+                        let identity = if reference.is_null() {
+                            0
+                        } else {
+                            let identity = roots.borrow(root_api, reference)?;
+                            roots.compatible(root_api, identity, target)?;
+                            identity
+                        };
+                        data.copy_from_slice(&identity.to_le_bytes());
+                    }
+                    value_layout::Shape::Scalar { .. } => unsafe {
+                        ptr::copy_nonoverlapping(
+                            base.add(slot.offset),
+                            data.as_mut_ptr(),
+                            data.len(),
+                        );
+                    },
+                }
+            }
+            let start = index * entry.layout.width;
+            entry
+                .layout
+                .validate(&bytes[start..start + entry.layout.width], root_api, roots)?;
+        }
+        entry.payload.with_native(|p| unsafe {
+            ptr::copy_nonoverlapping(bytes.as_ptr(), p.as_ptr(), bytes.len())
+        })?;
+        entry.committed = bytes;
+        self.entries.insert(token, entry);
+        self.borrowed += 1;
+        Ok(token)
+    }
     pub(super) fn publish(&mut self, memory: &mut Memory, token: u64) -> Result<(), String> {
         if self.retired {
-            return Err("reference array publication after retirement".into());
+            return Err("typed array publication after retirement".into());
         }
-        let entry = self
-            .entries
-            .get_mut(&token)
-            .ok_or("unknown reference array")?;
+        let entry = self.entries.get_mut(&token).ok_or("unknown typed array")?;
         if !entry.published {
             memory.map_shared_data(token + 16, entry.header.clone(), READ, READ)?;
-            if let Err(e) = memory.map_shared_data(
-                token + 32,
-                entry.payload.clone(),
-                READ | WRITE,
-                READ | WRITE,
-            ) {
-                memory.unmap_shared_data(token + 16)?;
-                return Err(e);
+            if entry.length != 0 {
+                if let Err(error) = memory.map_shared_data(
+                    token + 32,
+                    entry.payload.clone(),
+                    READ | WRITE,
+                    READ | WRITE,
+                ) {
+                    memory.unmap_shared_data(token + 16)?;
+                    return Err(error);
+                }
             }
             entry.published = true;
         }
         Ok(())
     }
-    fn values(entry: &Entry) -> Result<Vec<u64>, String> {
-        entry.payload.with_native(|p| {
-            (0..entry.length)
-                .map(|i| unsafe { p.as_ptr().add(i * 8).cast::<u64>().read_unaligned() })
-                .collect()
+    fn values(entry: &Entry) -> Result<Vec<u8>, String> {
+        entry.payload.with_native(|p| unsafe {
+            std::slice::from_raw_parts(p.as_ptr(), entry.committed.len()).to_vec()
         })
     }
-    fn slot(&self, owner: u64, address: u64) -> Option<(u64, usize)> {
+    fn slot(&self, owner: u64, address: u64) -> Option<(u64, usize, usize)> {
         if self.retired {
             return None;
         }
         let (&token, entry) = self.entries.range(..=address).next_back()?;
-        let offset = address.checked_sub(token + 32)?;
-        ((owner == 0 || owner == token)
-            && entry.published
-            && offset.is_multiple_of(8)
-            && offset / 8 < entry.length as u64)
-            .then_some((token, (offset / 8) as usize))
+        let offset = address.checked_sub(token + 32)? as usize;
+        let index = offset / entry.layout.width;
+        if (owner != 0 && owner != token) || !entry.published || index >= entry.length {
+            return None;
+        }
+        let slot = entry.layout.slots.iter().position(|s| {
+            s.offset == offset % entry.layout.width
+                && matches!(s.shape, value_layout::Shape::Reference(_))
+        })?;
+        Some((token, index, slot))
     }
     pub(super) fn has_reference(&self, owner: u64, address: u64) -> bool {
         self.slot(owner, address).is_some()
@@ -236,11 +357,15 @@ impl Registry {
         let entry = self
             .entries
             .get(&token)
-            .ok_or("unknown reference array address")?;
-        if self.retired || !entry.published || size != 8 || index >= entry.length as u64 {
-            return Err("reference array address size/index/retirement mismatch".into());
+            .ok_or("unknown typed array address")?;
+        if self.retired
+            || !entry.published
+            || size != entry.layout.width as u64
+            || index >= entry.length as u64
+        {
+            return Err("typed array address size/index/retirement mismatch".into());
         }
-        Ok(token + 32 + index * 8)
+        Ok(token + 32 + index * size)
     }
     pub(super) fn sync(
         &mut self,
@@ -249,33 +374,54 @@ impl Registry {
         roots: &instances::Registry,
     ) -> Result<(), String> {
         if self.retired {
-            return Err("reference array sync after retirement".into());
+            return Err("typed array sync after retirement".into());
         }
         let mut updates = Vec::new();
         for (&token, entry) in &self.entries {
             if roots.native(root_api, token)? != entry.native {
-                return Err("reference array root changed".into());
+                return Err("typed array root changed".into());
             }
             Self::layout(api, entry)?;
-            for (index, value) in Self::values(entry)?.into_iter().enumerate() {
-                let native = if value == 0 {
-                    ptr::null_mut()
-                } else {
-                    roots.compatible(root_api, value, entry.element)?
-                };
-                if value != entry.committed[index] {
-                    updates.push((token, index, value, native));
+            let bytes = Self::values(entry)?;
+            for index in 0..entry.length {
+                let start = index * entry.layout.width;
+                let refs = entry.layout.validate(
+                    &bytes[start..start + entry.layout.width],
+                    root_api,
+                    roots,
+                )?;
+                for (slot, reference) in entry.layout.slots.iter().zip(refs) {
+                    let offset = start + slot.offset;
+                    let end = offset + slot.shape.width();
+                    if bytes[offset..end] != entry.committed[offset..end] {
+                        updates.push((
+                            token,
+                            index,
+                            slot.offset,
+                            bytes[offset..end].to_vec(),
+                            reference,
+                        ));
+                    }
                 }
             }
         }
-        // Validate all arrays and every token before changing any native slot.
-        for (token, index, value, native) in updates {
+        // Validate the complete batch before any scalar or reference store.
+        for (token, index, offset, bytes, reference) in updates {
             let entry = self.entries.get_mut(&token).unwrap();
-            unsafe {
-                (api.barrier)(entry.native, (api.address)(entry.native, 8, index), native);
+            let destination = unsafe {
+                (api.address)(entry.native, entry.layout.width as i32, index)
+                    .cast::<u8>()
+                    .add(offset)
+            };
+            if let Some(reference) = reference {
+                unsafe { (api.barrier)(entry.native, destination.cast(), reference) };
+                self.writes += 1;
+            } else {
+                unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), destination, bytes.len()) };
+                self.scalar_writes += 1;
             }
-            entry.committed[index] = value;
-            self.writes += 1;
+            let start = index * entry.layout.width + offset;
+            entry.committed[start..start + bytes.len()].copy_from_slice(&bytes);
         }
         Ok(())
     }
@@ -288,23 +434,36 @@ impl Registry {
         args: [u64; 3],
     ) -> Result<(), String> {
         let [owner, address, value] = args;
-        let (token, index) = self
+        let (token, index, slot) = self
             .slot(owner, address)
-            .ok_or("barrier destination is not an owned reference array slot")?;
+            .ok_or("barrier destination is not a typed array reference slot")?;
         let entry = &self.entries[&token];
+        let slot = &entry.layout.slots[slot];
+        let value_layout::Shape::Reference(class) = slot.shape else {
+            unreachable!()
+        };
         let native = if value == 0 {
             ptr::null_mut()
         } else {
-            roots.compatible(root_api, value, entry.element)?
+            roots.compatible(root_api, value, class)?
         };
-        let changed = value != entry.committed[index];
+        let offset = index * entry.layout.width + slot.offset;
+        let changed = entry.committed[offset..offset + 8] != value.to_le_bytes();
+        let slot_offset = slot.offset;
         memory.write_int(address, 8, value)?;
         self.sync(api, root_api, roots)?;
         if !changed {
             let entry = &self.entries[&token];
             unsafe {
-                (api.barrier)(entry.native, (api.address)(entry.native, 8, index), native);
-            }
+                (api.barrier)(
+                    entry.native,
+                    (api.address)(entry.native, entry.layout.width as i32, index)
+                        .cast::<u8>()
+                        .add(slot_offset)
+                        .cast(),
+                    native,
+                )
+            };
             self.writes += 1;
         }
         Ok(())
@@ -316,32 +475,46 @@ impl Registry {
         roots: &instances::Registry,
     ) -> Result<(), String> {
         if self.retired {
-            return Err("reference array verification after retirement".into());
+            return Err("typed array verification after retirement".into());
         }
         for (&token, entry) in &self.entries {
             if roots.native(root_api, token)? != entry.native {
-                return Err("reference array root lost across GC".into());
+                return Err("typed array root lost across GC".into());
             }
             Self::layout(api, entry)?;
             if Self::values(entry)? != entry.committed {
-                return Err("reference array guest values not synchronized before GC".into());
+                return Err("typed array guest values not synchronized before GC".into());
             }
-            for (index, &value) in entry.committed.iter().enumerate() {
-                let expected = if value == 0 {
-                    ptr::null_mut()
-                } else {
-                    roots.compatible(root_api, value, entry.element)?
-                };
-                if unsafe {
-                    (api.address)(entry.native, 8, index)
-                        .cast::<Object>()
-                        .read_unaligned()
-                } != expected
-                {
-                    return Err("native array reference differs across GC".into());
+            for index in 0..entry.length {
+                let start = index * entry.layout.width;
+                let refs = entry.layout.validate(
+                    &entry.committed[start..start + entry.layout.width],
+                    root_api,
+                    roots,
+                )?;
+                for (slot, reference) in entry.layout.slots.iter().zip(refs) {
+                    let p = unsafe {
+                        (api.address)(entry.native, entry.layout.width as i32, index)
+                            .cast::<u8>()
+                            .add(slot.offset)
+                    };
+                    let expected = reference
+                        .map(|r| (r as u64).to_le_bytes().to_vec())
+                        .unwrap_or_else(|| {
+                            entry.committed
+                                [start + slot.offset..start + slot.offset + slot.shape.width()]
+                                .to_vec()
+                        });
+                    if unsafe { std::slice::from_raw_parts(p, slot.shape.width()) } != expected {
+                        return Err("native typed array slot differs across GC".into());
+                    }
                 }
             }
-            self.verified += 1;
+            if entry.layout.value {
+                self.value_verified += 1;
+            } else {
+                self.verified += 1;
+            }
         }
         Ok(())
     }
@@ -354,12 +527,14 @@ impl Registry {
             return Ok(());
         }
         if !roots.roots_released() && !self.entries.is_empty() {
-            return Err("reference array views retired before roots".into());
+            return Err("typed array views retired before roots".into());
         }
         for (&token, entry) in &self.entries {
             if entry.published {
                 memory.unmap_shared_data(token + 16)?;
-                memory.unmap_shared_data(token + 32)?;
+                if entry.length != 0 {
+                    memory.unmap_shared_data(token + 32)?;
+                }
             }
             entry.header.revoke()?;
             entry.payload.revoke()?;
@@ -368,12 +543,24 @@ impl Registry {
         Ok(())
     }
     pub(super) fn report(&self) -> String {
-        format!("native-reference-arrays={}\nnative-reference-array-writes={}\nnative-reference-array-gc-verifications={}\nnative-reference-array-views-retired={}\n",self.entries.len(),self.writes,self.verified,self.retired)
+        format!("native-reference-arrays={}\nnative-reference-array-writes={}\nnative-reference-array-gc-verifications={}\nnative-reference-array-views-retired={}\n",self.entries.values().filter(|e|!e.layout.value).count(),self.writes,self.verified,self.retired)+&format!("native-value-arrays={}\nnative-value-array-gc-verifications={}\nnative-value-array-scalar-writes={}\n",self.entries.values().filter(|e|e.layout.value).count(),self.value_verified,self.scalar_writes)+&format!("native-borrowed-typed-arrays={}\n", self.borrowed)
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    unsafe extern "C" fn test_image(_: Object) -> Object {
+        1usize as Object
+    }
+    unsafe extern "C" fn test_value(_: Object) -> i32 {
+        0
+    }
+    unsafe extern "C" fn test_element(_: Object) -> Object {
+        2usize as Object
+    }
+    unsafe extern "C" fn test_rank(_: Object) -> u32 {
+        1
+    }
     use std::cell::{Cell, RefCell};
     thread_local! {
         static RAW: RefCell<Vec<Box<[usize]>>> = const { RefCell::new(Vec::new()) };
@@ -418,9 +605,170 @@ mod tests {
             element_size: size,
             address,
             barrier,
-            map: 2usize as Object,
-            action: 3usize as Object,
+            image: test_image,
+            value: test_value,
+            element: test_element,
+            rank: test_rank,
+            reference_images: [1usize as Object; 5],
+            values: None,
         }
+    }
+    #[test]
+    fn borrowed_arrays_preserve_existing_identity_and_convert_references() {
+        let api = api();
+        let root_api = instances::tests::identity_api();
+        let mut roots = instances::Registry::default();
+        let native = unsafe { new(1usize as Object, 2usize as Object, 2) };
+        unsafe {
+            address(native, 8, 0)
+                .cast::<Object>()
+                .write(4usize as Object);
+        }
+        let identity = roots.borrow(root_api, native).unwrap();
+        let mut registry = Registry::default();
+        let token = registry.borrow(api, root_api, &mut roots, native).unwrap();
+        assert_eq!(token, identity);
+        assert_eq!(
+            registry.borrow(api, root_api, &mut roots, native).unwrap(),
+            token
+        );
+        let mut memory = Memory::default();
+        registry.publish(&mut memory, token).unwrap();
+        let reference = memory.read_int(token + 32, 8).unwrap();
+        assert_ne!(reference, 4);
+        assert_eq!(roots.native(root_api, reference).unwrap(), 4usize as Object);
+        assert_eq!(memory.read_int(token + 40, 8).unwrap(), 0);
+        assert!(memory.read_int(token, 8).is_err());
+        let empty = unsafe { new(1usize as Object, 2usize as Object, 0) };
+        let empty = registry.borrow(api, root_api, &mut roots, empty).unwrap();
+        registry.publish(&mut memory, empty).unwrap();
+        assert_eq!(memory.read_int(empty + 24, 8).unwrap(), 0);
+        assert!(memory.write_int(empty + 24, 8, 1).is_err());
+        assert!(memory.read_int(empty + 32, 1).is_err());
+        registry.verify(api, root_api, &roots).unwrap();
+        roots.release(root_api);
+        registry.retire(&mut memory, &roots).unwrap();
+        assert!(memory.read_int(token + 32, 8).is_err());
+        assert!(memory.read_int(empty + 24, 8).is_err());
+        unsafe extern "C" fn invalid_rank(_: Object) -> u32 {
+            2
+        }
+        let mut roots = instances::Registry::default();
+        assert!(Registry::default()
+            .borrow(
+                Api {
+                    rank: invalid_rank,
+                    ..api
+                },
+                root_api,
+                &mut roots,
+                native
+            )
+            .is_err());
+        assert!(Registry::default()
+            .borrow(
+                Api {
+                    reference_images: [ptr::null_mut(); 5],
+                    ..api
+                },
+                root_api,
+                &mut roots,
+                native
+            )
+            .is_err());
+    }
+    #[test]
+    fn value_arrays_validate_scalars_and_all_references_before_native_writes() {
+        WRITES.with(|c| c.set(0));
+        unsafe extern "C" fn wide_size(_: Object) -> i32 {
+            24
+        }
+        unsafe extern "C" fn wide_address(p: Object, _: i32, index: usize) -> Object {
+            unsafe { p.cast::<u8>().add(32 + index * 24).cast() }
+        }
+        let api = Api {
+            element_size: wide_size,
+            address: wide_address,
+            ..api()
+        };
+        let root_api = instances::tests::identity_api();
+        let mut roots = instances::Registry::default();
+        let value = roots.borrow(root_api, 4usize as Object).unwrap();
+        let mut data = vec![0usize; 7].into_boxed_slice();
+        data[3] = 1;
+        let native = data.as_mut_ptr().cast();
+        let token = BASE;
+        roots
+            .adopt_reference_array(root_api, token, native)
+            .unwrap();
+        let header = HostRegion::owned(16).unwrap();
+        header
+            .with_native(|p| unsafe { p.as_ptr().add(8).cast::<u64>().write(1) })
+            .unwrap();
+        let layout = value_layout::Layout {
+            class: 2usize as Object,
+            width: 24,
+            alignment: 8,
+            value: true,
+            slots: vec![
+                value_layout::Slot {
+                    offset: 0,
+                    field: 1usize as Object,
+                    shape: value_layout::Shape::Reference(2usize as Object),
+                },
+                value_layout::Slot {
+                    offset: 8,
+                    field: 2usize as Object,
+                    shape: value_layout::Shape::Scalar {
+                        width: 4,
+                        boolean: false,
+                    },
+                },
+                value_layout::Slot {
+                    offset: 16,
+                    field: 3usize as Object,
+                    shape: value_layout::Shape::Reference(2usize as Object),
+                },
+            ],
+        };
+        let mut registry = Registry::default();
+        registry.entries.insert(
+            token,
+            Entry {
+                native,
+                class: 2usize as Object,
+                element: 2usize as Object,
+                length: 1,
+                layout,
+                header,
+                payload: HostRegion::owned(24).unwrap(),
+                committed: vec![0; 24],
+                published: false,
+            },
+        );
+        let mut memory = Memory::default();
+        registry.publish(&mut memory, token).unwrap();
+        memory.write_int(token + 32, 8, value).unwrap();
+        memory.write_int(token + 40, 4, 0x80000001).unwrap();
+        memory.write_int(token + 48, 8, 99).unwrap();
+        assert!(registry.sync(api, root_api, &roots).is_err());
+        assert_eq!(WRITES.with(Cell::get), 0);
+        assert_eq!(data[5], 0);
+        memory.write_int(token + 48, 8, 0).unwrap();
+        registry.sync(api, root_api, &roots).unwrap();
+        assert_eq!(data[4], 4);
+        assert_eq!(data[5], 0x80000001);
+        assert_eq!(WRITES.with(Cell::get), 1);
+        assert!(!registry.has_reference(0, token + 40));
+        assert!(registry
+            .store(api, root_api, &roots, &mut memory, [0, token + 48, value])
+            .is_ok());
+        assert_eq!(data[6], 4);
+        registry.verify(api, root_api, &roots).unwrap();
+        assert_eq!(registry.value_verified, 1);
+        roots.release(root_api);
+        registry.retire(&mut memory, &roots).unwrap();
+        assert!(memory.read_int(token + 32, 8).is_err());
     }
     #[test]
     fn reference_arrays_reject_late_forgery_before_any_native_store_and_keep_headers_private() {

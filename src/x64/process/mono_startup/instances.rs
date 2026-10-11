@@ -188,6 +188,9 @@ impl Registry {
         }
         result
     }
+    pub(super) fn is_boxed(&self, token: u64) -> bool {
+        self.contains(token) && self.boxed.contains(&token)
+    }
     /// The caller must validate the exact locked value class and its layout.
     /// Copy a zero value with NULL references, pin immediately, then publish
     /// field tokens only. No unboxed native address leaves this registry.
@@ -205,7 +208,6 @@ impl Registry {
             || class.is_null()
             || size == 0
             || size > 256
-            || !size.is_multiple_of(8)
         {
             return Err("boxed zero allocation outside live bounded layout".into());
         }
