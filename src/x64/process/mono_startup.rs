@@ -28,6 +28,7 @@ const OBJECTS_SUPPORT: &str = "34705bafc092d1e644b2c7e0873340b398d1a81dd3e51c31a
 const EXE: &str = "94cccae89918110514672a6ec249a1252ffaeb28c0ae8d8633a9352988738f12";
 const UNITY: &str = "a2022611884470ddab23927a3eb7bbaef3924c18972d30ba7b5330a8fd25bcc4";
 const CORELIB_SUPPORT: &str = "b10bb3e59af90e92e240424ac88b1f96eb27906c3fa099958713d93801b4b078";
+const INPUT_SYSTEM: &str = "79aeb3ee230428c0c53102aa8392a306312b0350e1c745be9125dcec160f6dd1";
 const CORE_MODULE: &str = "7de56d1259f25d8b0cfdc9f4c77030056886bb9ac119854d3155bd87a54c0af7";
 const IMGUI_MODULE: &str = "577712fb19f217f2e9dcc870e6cf430d4a5836c5c4a745ae89466877dfbb9745";
 const SUBSYSTEMS_MODULE: &str = "f25824d57c5f394b514df03bab7ace58d9e6eb8b55f52c5895404cb591eacf49";
@@ -241,6 +242,8 @@ pub(super) struct Probe {
     logging_ready: bool,
     exceptions: bool,
     exceptions_ready: bool,
+    assets: bool,
+    asset_invokes: usize,
     components: bool,
     component_invokes: usize,
     fields: bool,
@@ -382,17 +385,27 @@ impl Probe {
         skip_etw: bool,
         boundary: &str,
     ) -> Result<Self, String> {
-        let components = boundary == "components";
-        let fields = matches!(boundary, "fields" | "components");
-        let curves = matches!(boundary, "curves" | "fields" | "components");
-        let ordinary_objects = matches!(boundary, "objects" | "curves" | "fields" | "components");
+        let assets = boundary == "assets";
+        let components = matches!(boundary, "components" | "assets");
+        let fields = matches!(boundary, "fields" | "components" | "assets");
+        let curves = matches!(boundary, "curves" | "fields" | "components" | "assets");
+        let ordinary_objects = matches!(
+            boundary,
+            "objects" | "curves" | "fields" | "components" | "assets"
+        );
         let assembly_lookup = matches!(
             boundary,
-            "assembly-lookup" | "objects" | "curves" | "fields" | "components"
+            "assembly-lookup" | "objects" | "curves" | "fields" | "components" | "assets"
         );
         let attribute_arrays = matches!(
             boundary,
-            "attribute-arrays" | "assembly-lookup" | "objects" | "curves" | "fields" | "components"
+            "attribute-arrays"
+                | "assembly-lookup"
+                | "objects"
+                | "curves"
+                | "fields"
+                | "components"
+                | "assets"
         );
         let attributes = matches!(
             boundary,
@@ -403,6 +416,7 @@ impl Probe {
                 | "curves"
                 | "fields"
                 | "components"
+                | "assets"
         );
         let imgui = matches!(
             boundary,
@@ -414,6 +428,7 @@ impl Probe {
                 | "curves"
                 | "fields"
                 | "components"
+                | "assets"
         );
         let subsystem_map = matches!(
             boundary,
@@ -426,6 +441,7 @@ impl Probe {
                 | "curves"
                 | "fields"
                 | "components"
+                | "assets"
         );
         let subsystems = matches!(
             boundary,
@@ -439,6 +455,7 @@ impl Probe {
                 | "curves"
                 | "fields"
                 | "components"
+                | "assets"
         );
         let synchronization = matches!(
             boundary,
@@ -453,6 +470,7 @@ impl Probe {
                 | "curves"
                 | "fields"
                 | "components"
+                | "assets"
         );
         let exceptions = matches!(
             boundary,
@@ -468,6 +486,7 @@ impl Probe {
                 | "curves"
                 | "fields"
                 | "components"
+                | "assets"
         );
         let logging = matches!(
             boundary,
@@ -484,6 +503,7 @@ impl Probe {
                 | "curves"
                 | "fields"
                 | "components"
+                | "assets"
         );
         let classlib = matches!(
             boundary,
@@ -501,6 +521,7 @@ impl Probe {
                 | "curves"
                 | "fields"
                 | "components"
+                | "assets"
         );
         let managed_types = matches!(
             boundary,
@@ -519,6 +540,7 @@ impl Probe {
                 | "curves"
                 | "fields"
                 | "components"
+                | "assets"
         );
         let strings = matches!(
             boundary,
@@ -538,6 +560,7 @@ impl Probe {
                 | "curves"
                 | "fields"
                 | "components"
+                | "assets"
         );
         let (main_thread, pre_bindings, bindings, profiler, pre_images, images, metadata) = match boundary {
             "root" => (false, false, false, false, false, false, false),
@@ -547,10 +570,10 @@ impl Probe {
             "profiler" => (true, true, true, true, false, false, false),
             "pre-images" => (true, true, true, true, true, false, false),
             "images" => (true, true, true, true, true, true, false),
-            "metadata" | "strings" | "managed-types" | "classlib" | "logging" | "exceptions" | "synchronization" | "subsystems" | "subsystem-map" | "imgui-cache" | "attributes" | "attribute-arrays" | "assembly-lookup" | "objects" | "curves" | "fields" | "components" => (true, true, true, true, true, true, true),
+            "metadata" | "strings" | "managed-types" | "classlib" | "logging" | "exceptions" | "synchronization" | "subsystems" | "subsystem-map" | "imgui-cache" | "attributes" | "attribute-arrays" | "assembly-lookup" | "objects" | "curves" | "fields" | "components" | "assets" => (true, true, true, true, true, true, true),
             _ => {
                 return Err(
-                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings, profiler, pre-images, images, metadata, strings, managed-types, classlib, logging, exceptions, synchronization, subsystems, subsystem-map, imgui-cache, attributes, attribute-arrays or assembly-lookup or objects or curves or fields or components".into(),
+                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings, profiler, pre-images, images, metadata, strings, managed-types, classlib, logging, exceptions, synchronization, subsystems, subsystem-map, imgui-cache, attributes, attribute-arrays or assembly-lookup or objects or curves or fields or components or assets".into(),
                 )
             }
         };
@@ -649,6 +672,8 @@ impl Probe {
             logging_ready: false,
             exceptions,
             exceptions_ready: false,
+            assets,
+            asset_invokes: 0,
             components,
             component_invokes: 0,
             fields,
@@ -1261,12 +1286,20 @@ impl Probe {
         if self.ordinary_objects && self.main_thread_ready && function == "mono_thread_current" {
             return Ok(false);
         }
+        if self.assets && self.asset_invokes > 0 && function == "mono_array_new" && cpu.regs[8] != 0
+        {
+            self.mark_completed_layers();
+            self.events.push("actual input asset reached nonempty array allocation; stop before unadmitted element/reference lifecycle".into());
+            return Ok(true);
+        }
         if self.components && function == "mono_runtime_invoke" {
             if let Some(constructor) = &self.curves_constructor {
                 let method = self
                     .metadata_registry
                     .native(cpu.regs[1], metadata::Kind::Method)?;
-                if constructor.supports_component(method) {
+                if constructor.supports_component(method)
+                    || (self.assets && constructor.supports_asset(method))
+                {
                     return Ok(false);
                 }
             }
@@ -1695,7 +1728,15 @@ impl Probe {
             let targets = self.callback_targets();
             let (result, _) = callbacks::with_owner(memory, runtime, targets, || {
                 let object = unsafe { (api.new)(domain, element, 0) };
-                self.array_registry.root_empty(api, object, element)
+                let token = self.array_registry.root_empty(api, object, element)?;
+                if self.assets {
+                    if let Some(instance_api) = self.instance_api {
+                        let native = self.array_registry.native(api, token)?;
+                        self.instance_registry
+                            .adopt_empty_array(instance_api, token, native)?;
+                    }
+                }
+                Ok::<_, String>(token)
             })?;
             let token = result?;
             self.array_registry.publish(memory, token)?;
@@ -1910,6 +1951,16 @@ impl Probe {
                 ))
             })?;
             let (object, class) = prepared?;
+            let is_asset = self.assets
+                && self
+                    .curves_constructor
+                    .as_ref()
+                    .is_some_and(|c| c.supports_asset(method));
+            let input_image = if is_asset {
+                self.image_registry.unique_native_image(INPUT_SYSTEM)?
+            } else {
+                ptr::null_mut()
+            };
             let (constructed, _) = callbacks::with_metadata_owner(
                 memory,
                 runtime,
@@ -1922,15 +1973,21 @@ impl Probe {
                     rooted_instance: Some((a[1], class)),
                 },
                 || {
-                    self.curves_constructor
-                        .as_ref()
-                        .unwrap()
-                        .execute_component(images, method, object, class, a[1])
+                    let constructor = self.curves_constructor.as_ref().unwrap();
+                    if is_asset {
+                        constructor.execute_asset(input_image, method, object, class, a[1])
+                    } else {
+                        constructor.execute_component(images, method, object, class, a[1])
+                    }
                 },
             )?;
             constructed?;
             let (installed, _) = callbacks::with_owner(memory, runtime, targets, || {
-                let specs = fields::component_specs(library, images, object, class)?;
+                let specs = if is_asset {
+                    fields::input_asset_specs(library, object, class)?
+                } else {
+                    fields::component_specs(library, images, object, class)?
+                };
                 callbacks::with_service(|memory, _| {
                     self.field_registry.install(
                         library,
@@ -1942,7 +1999,11 @@ impl Probe {
                 })
             })?;
             installed?;
-            self.component_invokes += 1;
+            if is_asset {
+                self.asset_invokes += 1;
+            } else {
+                self.component_invokes += 1;
+            }
             if a[3] != 0 {
                 memory.write_int(a[3], 8, 0)?;
             }
@@ -2174,6 +2235,22 @@ impl Probe {
         memory: &mut Memory,
         runtime: &mut Runtime64,
     ) -> Result<(), String> {
+        if function == "mono_array_new" {
+            let library = self
+                .native
+                .as_ref()
+                .ok_or("pending array has no runtime")?
+                .library;
+            let (description, _) =
+                callbacks::with_owner(memory, runtime, self.callback_targets(), || {
+                    self.metadata_registry.describe_class(library, cpu.regs[2])
+                })?;
+            self.events.push(format!(
+                "pending typed nonempty array: length={} element={}",
+                cpu.regs[8], description?
+            ));
+            return Ok(());
+        }
         if function == "mono_object_new" {
             if cpu.regs[1] != ROOT_TOKEN {
                 return Err("pending object allocation has unknown domain".into());
@@ -2989,7 +3066,7 @@ impl Probe {
             self.assembly_lookup_ready,
             self.ordinary_objects_ready,
             self.curves_constructor.as_ref().map_or_else(String::new, animation::Constructor::report),
-            self.instance_registry.report() + &self.field_registry.report() + &format!("native-component-constructors={}\n", self.component_invokes),
+            self.instance_registry.report() + &self.field_registry.report() + &format!("native-component-constructors={}\nnative-input-asset-constructors={}\n", self.component_invokes, self.asset_invokes),
             self.name_registry.report(),
             self.error_registry.report(),
             self.attribute_registry.report(),
@@ -3181,6 +3258,8 @@ mod tests {
             logging_ready: false,
             exceptions: false,
             exceptions_ready: false,
+            assets: false,
+            asset_invokes: 0,
             components: false,
             component_invokes: 0,
             fields: false,

@@ -190,7 +190,7 @@ impl Registry {
                         width: 8,
                         boolean: false,
                     },
-                    (0x12, Some(target))
+                    (0x12 | 0x1d, Some(target))
                         if !target.is_null() && unsafe { (api.type_class)(ty) } == target =>
                     {
                         Shape::Reference(target)
@@ -670,6 +670,50 @@ pub(super) fn component_specs(
             }
             declaring = unsafe { parent(declaring) };
         }
+    }
+    Ok(specs)
+}
+
+pub(super) fn input_asset_specs(
+    library: Object,
+    object: Object,
+    class: Object,
+) -> Result<Vec<Spec>, String> {
+    let api = Api::load(library)?;
+    let mut specs = Vec::new();
+    for (name, kind) in [
+        (c"m_ActionMaps", 0x1d),
+        (c"m_ControlSchemes", 0x1d),
+        (c"m_IsProjectWide", 2),
+    ] {
+        let field = unsafe { (api.find)(class, name.as_ptr()) };
+        if field.is_null() {
+            return Err("InputActionAsset serialized field absent".into());
+        }
+        let ty = unsafe { (api.ty)(field) };
+        if ty.is_null() || unsafe { (api.kind)(ty) } != kind || unsafe { (api.byref)(ty) } != 0 {
+            return Err("InputActionAsset field type mismatch".into());
+        }
+        let target = if kind == 0x1d {
+            Some(unsafe { (api.type_class)(ty) })
+        } else {
+            None
+        };
+        let mut initial = 0u64;
+        unsafe {
+            (api.get)(object, field, (&mut initial as *mut u64).cast());
+        }
+        if initial != 0 {
+            return Err("InputActionAsset ctor changed zero-initialized serialized field".into());
+        }
+        specs.push(Spec {
+            owner: object,
+            name: name.to_owned(),
+            kind,
+            type_class: target,
+            guest_pointer: None,
+            inline: None,
+        });
     }
     Ok(specs)
 }

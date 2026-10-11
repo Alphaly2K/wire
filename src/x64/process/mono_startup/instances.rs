@@ -222,6 +222,58 @@ impl Registry {
         );
         Ok(token)
     }
+    /// Attach an already validated empty-array identity owned by its canonical
+    /// registry. This does not publish headers or accept arbitrary guest tokens.
+    pub(super) fn adopt_empty_array(
+        &mut self,
+        api: Api,
+        token: u64,
+        native: Object,
+    ) -> Result<(), String> {
+        if !(0x6ffe90000000..0x6ffe90040000).contains(&token)
+            || !(token - 0x6ffe90000000).is_multiple_of(256)
+            || self.released
+            || self.views_retired
+            || native.is_null()
+            || self.roots.len() >= LIMIT
+        {
+            return Err("array alias outside canonical live empty-array contract".into());
+        }
+        if self.roots.contains_key(&token) {
+            if self.native(api, token)? == native {
+                return Ok(());
+            }
+            return Err("canonical array alias changed identity".into());
+        }
+        let handle = unsafe { (api.strong)(native, 1) };
+        if handle.is_null() || unsafe { (api.target)(handle) } != native {
+            if !handle.is_null() {
+                unsafe {
+                    (api.free)(handle);
+                }
+            }
+            return Err("canonical array alias pin failed".into());
+        }
+        let class = unsafe { (api.class)(native) };
+        if class.is_null() {
+            unsafe {
+                (api.free)(handle);
+            }
+            return Err("canonical array alias has no class".into());
+        }
+        self.roots.insert(
+            token,
+            Root {
+                handle,
+                native,
+                class,
+                borrowed: true,
+                cached: None,
+                published: false,
+            },
+        );
+        Ok(())
+    }
     pub(super) fn compatible(
         &self,
         api: Api,
@@ -418,6 +470,39 @@ pub(super) mod tests {
             unity_base: ptr::null_mut(),
             cached_field: 5usize as Object,
         }
+    }
+    #[test]
+    fn canonical_empty_array_alias_keeps_identity_without_publishing_native_header() {
+        let api = api();
+        let mut registry = Registry::default();
+        let token = 0x6ffe90000000;
+        registry
+            .adopt_empty_array(api, token, 4usize as Object)
+            .unwrap();
+        registry
+            .adopt_empty_array(api, token, 4usize as Object)
+            .unwrap();
+        assert_eq!(registry.borrow(api, 4usize as Object).unwrap(), token);
+        assert!(registry
+            .adopt_empty_array(api, token + 1, 4usize as Object)
+            .is_err());
+        assert!(registry
+            .adopt_empty_array(api, token, 8usize as Object)
+            .is_err());
+        assert!(registry
+            .adopt_empty_array(api, token + 256, 8usize as Object)
+            .is_err());
+        assert_eq!(registry.count(), 1);
+        let mut memory = Memory::default();
+        registry.publish(&mut memory, token).unwrap();
+        assert!(memory.read_int(token, 8).is_err());
+        registry.verify(api).unwrap();
+        registry.release(api);
+        registry.retire_views(&mut memory).unwrap();
+        assert_eq!(FREES.with(Cell::get), 2);
+        assert!(registry
+            .adopt_empty_array(api, token, 4usize as Object)
+            .is_err());
     }
     #[test]
     fn borrowed_reachable_object_is_pinned_deduplicated_and_separately_counted() {

@@ -757,6 +757,17 @@ impl Constructor {
             return Err("component constructor name mismatch".into());
         }
         api.signature(method, true, false, 1, &[])?;
+        self.invoke_rooted_constructor(method, object, token)?;
+        eprintln!("NATIVE_MONO_COMPONENT_CONSTRUCTED: {:?} real managed ctor and ScriptableObject callback", name);
+        Ok(())
+    }
+    fn invoke_rooted_constructor(
+        &self,
+        method: Object,
+        object: Object,
+        token: u64,
+    ) -> Result<(), String> {
+        let api = self.api;
         let before = STATE.with(|s| -> Result<usize, String> {
             let mut s = s.borrow_mut();
             let s = s
@@ -790,7 +801,39 @@ impl Constructor {
             }
             Ok(())
         })?;
-        eprintln!("NATIVE_MONO_COMPONENT_CONSTRUCTED: {:?} real managed ctor and ScriptableObject callback", name);
+        Ok(())
+    }
+    pub(super) fn supports_asset(&self, method: Object) -> bool {
+        !method.is_null() && unsafe { (self.api.token)(method) } == 0x06000192
+    }
+    pub(super) fn execute_asset(
+        &self,
+        image: Object,
+        method: Object,
+        object: Object,
+        class: Object,
+        token: u64,
+    ) -> Result<(), String> {
+        let api = self.api;
+        let expected = api.class(image, c"UnityEngine.InputSystem", c"InputActionAsset")?;
+        if self.cleaned
+            || class != expected
+            || object.is_null()
+            || unsafe { (api.object_class)(object) } != class
+            || unsafe { (api.method_class)(method) } != class
+            || !self.supports_asset(method)
+        {
+            return Err("InputActionAsset constructor root/class/token mismatch".into());
+        }
+        let name = unsafe { (api.method_name)(method) };
+        if name.is_null() || unsafe { CStr::from_ptr(name) } != c".ctor" {
+            return Err("InputActionAsset constructor name mismatch".into());
+        }
+        api.signature(method, true, false, 1, &[])?;
+        self.invoke_rooted_constructor(method, object, token)?;
+        eprintln!(
+            "NATIVE_MONO_INPUT_ASSET_CONSTRUCTED: real managed ctor and ScriptableObject callback"
+        );
         Ok(())
     }
 }

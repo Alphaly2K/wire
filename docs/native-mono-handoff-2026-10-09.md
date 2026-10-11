@@ -335,10 +335,10 @@ fields 的反序列化：继续探测到 `0x1807b07ae` 对 owned object +0x30 �
 `docs/native-mono-unity-fields-2026-10-11.md`，成功冻结输出为
 `wire-out/native-mono-unity-fields-probe-03`。下一请求 FilmGrain::.ctor token 0x0600054c。
 
-当前实施分支仍为 codex/native-mono-shared-memory；main HEAD 10731e1。
-默认分支快进合入被自动审批拒绝：此前授权提交被判断不覆盖 main 合入副作用；用户
-“继续”也未被审批认为明确合入授权。因此 b737d8f 及后续实现暂留实施分支，继续开发
-不受影响；不得绕过拒绝。其他未跟踪文件和其他任务计划不改动。
+实施分支为 codex/native-mono-shared-memory。此前 main 快进被自动审批拒绝；用户随后
+明确授权“合入 main”，已成功将 b737d8f、2e86cde、d6c38fc 快进合入本地 main，
+main HEAD d6c38fc。该拒绝已解决，后续已验证提交继续本地合流，不 push。
+其他未跟踪文件和其他任务计划不改动。
 
 ## 批量后处理组件（2026-10-11）
 
@@ -351,4 +351,16 @@ fields 的反序列化：继续探测到 `0x1807b07ae` 对 owned object +0x30 �
 
 下一请求 InputActionAsset::.ctor，token 0x06000192，actual IL 02289800000a2a，仅调用
 ScriptableObject base ctor。需要新的锁定 InputSystem image 和 assets/数组字段通路；
-没有把它假报成功。main 合入仍受之前自动审批限制，继续分支开发。
+没有把它假报成功。用户已明确授权 main 合入，d6c38fc 已合入本地 main。
+
+## InputActionAsset 实际构造（2026-10-11）
+
+assets 检查点继续真实游戏，执行冻结 InputSystem InputActionAsset::.ctor 与真实
+ScriptableObject guest callback，新增三个精确 serialized field cells。成功输出
+`wire-out/native-mono-unity-assets-probe-01`：334 field GC checks、10 allocations、
+81 borrowed roots、原有 8-resource cleanup 全通过，guard232/0。
+完整 release feature436 passed/7 ignored，Clippy clean。
+
+下一请求 mono_object_get_virtual_method，receiver 为刚分配的 InputActionMap，
+尚未执行其 callback/非空数组反序列化。详见
+`docs/native-mono-unity-input-assets-2026-10-11.md`。完整 backend/Admission 仍 false。
