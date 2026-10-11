@@ -18,15 +18,11 @@ pub(super) struct Api {
     value: unsafe extern "C" fn(Object) -> i32,
     element: unsafe extern "C" fn(Object) -> Object,
     rank: unsafe extern "C" fn(Object) -> u32,
-    reference_images: [Object; 5],
-    values: Option<value_layout::Api>,
+    reference_images: [Object; 6],
+    values: [Option<value_layout::Api>; 6],
 }
 impl Api {
-    pub(super) fn load(
-        library: Object,
-        image: Object,
-        reference_images: [Object; 5],
-    ) -> Result<Self, String> {
+    pub(super) fn load(library: Object, reference_images: [Object; 6]) -> Result<Self, String> {
         macro_rules! sym {
             ($name:literal, $ty:ty) => {{
                 let p = unsafe { libc::dlsym(library, concat!($name, "\0").as_ptr().cast()) };
@@ -35,6 +31,10 @@ impl Api {
                 }
                 unsafe { std::mem::transmute::<Object, $ty>(p) }
             }};
+        }
+        let mut values = [None; 6];
+        for (api, image) in values.iter_mut().zip(reference_images) {
+            *api = Some(value_layout::Api::load(library, image)?);
         }
         Ok(Self {
             new: sym!(
@@ -76,7 +76,7 @@ impl Api {
             ),
             rank: sym!("mono_class_get_rank", unsafe extern "C" fn(Object) -> u32),
             reference_images,
-            values: Some(value_layout::Api::load(library, image)?),
+            values,
         })
     }
     fn element_layout(self, element: Object) -> Result<value_layout::Layout, String> {
@@ -89,7 +89,11 @@ impl Api {
             Ok(value_layout::Layout::reference(element))
         } else {
             self.values
-                .ok_or("value layout API absent")?
+                .iter()
+                .flatten()
+                .copied()
+                .find(|api| api.owns(element))
+                .ok_or("value element outside owned image family")?
                 .layout(element)
         }
     }
@@ -117,6 +121,11 @@ pub(super) struct Registry {
     value_verified: usize,
     scalar_writes: usize,
     borrowed: usize,
+    refreshed: usize,
+}
+pub(super) struct Refresh {
+    updates: Vec<(u64, Vec<u8>)>,
+    pub(super) references: Vec<Object>,
 }
 impl Registry {
     fn layout(api: Api, entry: &Entry) -> Result<(), String> {
@@ -212,12 +221,25 @@ impl Registry {
     /// Root first, then convert declared slots from an existing native SZ array.
     /// Canonical instance identity is reused even if the field registry saw it
     /// before this array acquired a view. Native padding remains private.
+    #[cfg(test)]
     pub(super) fn borrow(
         &mut self,
         api: Api,
         root_api: instances::Api,
         roots: &mut instances::Registry,
         native: Object,
+    ) -> Result<u64, String> {
+        self.borrow_with(api, root_api, roots, native, |roots, native| {
+            roots.borrow(root_api, native)
+        })
+    }
+    pub(super) fn borrow_with(
+        &mut self,
+        api: Api,
+        root_api: instances::Api,
+        roots: &mut instances::Registry,
+        native: Object,
+        reference: impl FnMut(&mut instances::Registry, Object) -> Result<u64, String>,
     ) -> Result<u64, String> {
         if self.retired || native.is_null() {
             return Err("borrowed array outside live registry".into());
@@ -265,27 +287,43 @@ impl Registry {
             published: false,
         };
         Self::layout(api, &entry)?;
-        let mut bytes = vec![0; payload_size];
-        for index in 0..length {
-            let base =
-                unsafe { (api.address)(native, entry.layout.width as i32, index) }.cast::<u8>();
+        let bytes = Self::native_values(api, root_api, roots, &entry, reference)?;
+        entry.payload.with_native(|p| unsafe {
+            ptr::copy_nonoverlapping(bytes.as_ptr(), p.as_ptr(), bytes.len())
+        })?;
+        entry.committed = bytes;
+        self.entries.insert(token, entry);
+        self.borrowed += 1;
+        Ok(token)
+    }
+    fn native_values(
+        api: Api,
+        root_api: instances::Api,
+        roots: &mut instances::Registry,
+        entry: &Entry,
+        mut reference: impl FnMut(&mut instances::Registry, Object) -> Result<u64, String>,
+    ) -> Result<Vec<u8>, String> {
+        let mut bytes = vec![0; entry.layout.width * entry.length];
+        for index in 0..entry.length {
+            let base = unsafe { (api.address)(entry.native, entry.layout.width as i32, index) }
+                .cast::<u8>();
             for slot in &entry.layout.slots {
                 let start = index * entry.layout.width + slot.offset;
                 let data = &mut bytes[start..start + slot.shape.width()];
                 match slot.shape {
                     value_layout::Shape::Reference(target) => {
-                        let reference =
+                        let native =
                             unsafe { base.add(slot.offset).cast::<Object>().read_unaligned() };
-                        let identity = if reference.is_null() {
+                        let token = if native.is_null() {
                             0
                         } else {
-                            let identity = roots.borrow(root_api, reference)?;
-                            roots.compatible(root_api, identity, target)?;
-                            identity
+                            let token = reference(roots, native)?;
+                            roots.compatible(root_api, token, target)?;
+                            token
                         };
-                        data.copy_from_slice(&identity.to_le_bytes());
+                        data.copy_from_slice(&token.to_le_bytes());
                     }
-                    value_layout::Shape::Scalar { .. } => unsafe {
+                    value_layout::Shape::Scalar { .. } | value_layout::Shape::Inline { .. } => unsafe {
                         ptr::copy_nonoverlapping(
                             base.add(slot.offset),
                             data.as_mut_ptr(),
@@ -299,13 +337,88 @@ impl Registry {
                 .layout
                 .validate(&bytes[start..start + entry.layout.width], root_api, roots)?;
         }
-        entry.payload.with_native(|p| unsafe {
-            ptr::copy_nonoverlapping(bytes.as_ptr(), p.as_ptr(), bytes.len())
-        })?;
-        entry.committed = bytes;
-        self.entries.insert(token, entry);
-        self.borrowed += 1;
-        Ok(token)
+        Ok(bytes)
+    }
+    pub(super) fn prepare_refresh(
+        &self,
+        api: Api,
+        root_api: instances::Api,
+        roots: &mut instances::Registry,
+        mut reference: impl FnMut(&mut instances::Registry, Object) -> Result<u64, String>,
+    ) -> Result<Refresh, String> {
+        if self.retired {
+            return Err("typed array refresh after retirement".into());
+        }
+        for (&token, entry) in &self.entries {
+            if roots.native(root_api, token)? != entry.native {
+                return Err("typed array refresh root changed".into());
+            }
+            Self::layout(api, entry)?;
+            if Self::values(entry)? != entry.committed {
+                return Err("array refresh would discard pending guest write".into());
+            }
+        }
+        let mut updates = Vec::new();
+        let mut references = Vec::new();
+        for (&token, entry) in &self.entries {
+            let bytes = Self::native_values(api, root_api, roots, entry, &mut reference)?;
+            if bytes != entry.committed {
+                references.extend(self.native_references(api, root_api, roots, token)?);
+                updates.push((token, bytes));
+            }
+        }
+        Ok(Refresh {
+            updates,
+            references,
+        })
+    }
+    pub(super) fn commit_refresh(&mut self, plan: Refresh) -> Result<(), String> {
+        for (token, bytes) in plan.updates {
+            let entry = self
+                .entries
+                .get_mut(&token)
+                .ok_or("array refresh layout changed")?;
+            entry.payload.with_native(|p| unsafe {
+                ptr::copy_nonoverlapping(bytes.as_ptr(), p.as_ptr(), bytes.len());
+            })?;
+            entry.committed = bytes;
+            self.refreshed += 1;
+        }
+        Ok(())
+    }
+    pub(super) fn native_references(
+        &self,
+        api: Api,
+        root_api: instances::Api,
+        roots: &instances::Registry,
+        token: u64,
+    ) -> Result<Vec<Object>, String> {
+        let entry = self
+            .entries
+            .get(&token)
+            .ok_or("unknown typed array graph")?;
+        if self.retired || roots.native(root_api, token)? != entry.native {
+            return Err("typed array graph outside live root".into());
+        }
+        Self::layout(api, entry)?;
+        let mut references = Vec::new();
+        for index in 0..entry.length {
+            for slot in &entry.layout.slots {
+                if matches!(slot.shape, value_layout::Shape::Reference(_)) {
+                    let native = unsafe {
+                        (api.address)(entry.native, entry.layout.width as i32, index)
+                            .cast::<u8>()
+                            .add(slot.offset)
+                            .cast::<Object>()
+                            .read_unaligned()
+                    };
+                    if !native.is_null() {
+                        references.push(native);
+                    }
+                }
+            }
+        }
+        Ok(references)
     }
     pub(super) fn publish(&mut self, memory: &mut Memory, token: u64) -> Result<(), String> {
         if self.retired {
@@ -543,7 +656,7 @@ impl Registry {
         Ok(())
     }
     pub(super) fn report(&self) -> String {
-        format!("native-reference-arrays={}\nnative-reference-array-writes={}\nnative-reference-array-gc-verifications={}\nnative-reference-array-views-retired={}\n",self.entries.values().filter(|e|!e.layout.value).count(),self.writes,self.verified,self.retired)+&format!("native-value-arrays={}\nnative-value-array-gc-verifications={}\nnative-value-array-scalar-writes={}\n",self.entries.values().filter(|e|e.layout.value).count(),self.value_verified,self.scalar_writes)+&format!("native-borrowed-typed-arrays={}\n", self.borrowed)
+        format!("native-reference-arrays={}\nnative-reference-array-writes={}\nnative-reference-array-gc-verifications={}\nnative-reference-array-views-retired={}\n",self.entries.values().filter(|e|!e.layout.value).count(),self.writes,self.verified,self.retired)+&format!("native-value-arrays={}\nnative-value-array-gc-verifications={}\nnative-value-array-scalar-writes={}\n",self.entries.values().filter(|e|e.layout.value).count(),self.value_verified,self.scalar_writes)+&format!("native-borrowed-typed-arrays={}\n", self.borrowed)+&format!("native-typed-array-refreshes={}\n", self.refreshed)
     }
 }
 #[cfg(test)]
@@ -609,9 +722,63 @@ mod tests {
             value: test_value,
             element: test_element,
             rank: test_rank,
-            reference_images: [1usize as Object; 5],
-            values: None,
+            reference_images: [1usize as Object; 6],
+            values: [None; 6],
         }
+    }
+    #[test]
+    fn refresh_is_atomic_across_arrays_rejects_dirty_guest_and_late_bad_reference() {
+        let api = api();
+        let root_api = instances::tests::identity_api();
+        let mut roots = instances::Registry::default();
+        let mut registry = Registry::default();
+        let mut memory = Memory::default();
+        let a = unsafe { new(1usize as Object, 2usize as Object, 1) };
+        let b = unsafe { new(1usize as Object, 2usize as Object, 1) };
+        let ta = registry.borrow(api, root_api, &mut roots, a).unwrap();
+        let tb = registry.borrow(api, root_api, &mut roots, b).unwrap();
+        registry.publish(&mut memory, ta).unwrap();
+        registry.publish(&mut memory, tb).unwrap();
+        unsafe {
+            address(a, 8, 0).cast::<Object>().write(4usize as Object);
+            address(b, 8, 0).cast::<Object>().write(8usize as Object);
+        }
+        assert!(registry
+            .prepare_refresh(api, root_api, &mut roots, |roots, native| {
+                if native as usize == 8 {
+                    return Err("late invalid native reference".into());
+                }
+                roots.borrow(root_api, native)
+            })
+            .is_err());
+        assert_eq!(memory.read_int(ta + 32, 8).unwrap(), 0);
+        assert_eq!(memory.read_int(tb + 32, 8).unwrap(), 0);
+        unsafe {
+            address(b, 8, 0).cast::<Object>().write(ptr::null_mut());
+        }
+        memory.write_int(tb + 32, 8, ta).unwrap();
+        assert!(registry
+            .prepare_refresh(api, root_api, &mut roots, |roots, native| roots
+                .borrow(root_api, native))
+            .is_err());
+        assert_eq!(memory.read_int(ta + 32, 8).unwrap(), 0);
+        memory.write_int(tb + 32, 8, 0).unwrap();
+        let plan = registry
+            .prepare_refresh(api, root_api, &mut roots, |roots, native| {
+                roots.borrow(root_api, native)
+            })
+            .unwrap();
+        assert_eq!(memory.read_int(ta + 32, 8).unwrap(), 0);
+        registry.commit_refresh(plan).unwrap();
+        let value = roots.borrow(root_api, 4usize as Object).unwrap();
+        assert_eq!(memory.read_int(ta + 32, 8).unwrap(), value);
+        registry.verify(api, root_api, &roots).unwrap();
+        roots.release(root_api);
+        registry.retire(&mut memory, &roots).unwrap();
+        assert!(registry
+            .prepare_refresh(api, root_api, &mut roots, |roots, native| roots
+                .borrow(root_api, native))
+            .is_err());
     }
     #[test]
     fn borrowed_arrays_preserve_existing_identity_and_convert_references() {
@@ -668,7 +835,7 @@ mod tests {
         assert!(Registry::default()
             .borrow(
                 Api {
-                    reference_images: [ptr::null_mut(); 5],
+                    reference_images: [ptr::null_mut(); 6],
                     ..api
                 },
                 root_api,

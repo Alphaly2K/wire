@@ -1,7 +1,7 @@
 //! Metadata-qualified constructors and serialization-interface callbacks. Class names and
 //! method tokens are diagnostics, never admission rules. All native crossings
 //! still use the provider's fixed adapters and rejecting P/Invoke resolver.
-use super::{c_char, Object};
+use super::{c_char, closed_types, Object};
 use std::ffi::CStr;
 #[derive(Clone, Copy)]
 pub(super) struct Api {
@@ -27,6 +27,8 @@ pub(super) struct Api {
     method: unsafe extern "C" fn(Object, *const c_char, i32) -> Object,
     assignable: unsafe extern "C" fn(Object, Object) -> i32,
     resolve: unsafe extern "C" fn(Object, Object) -> Object,
+    context: unsafe extern "C" fn(Object) -> Object,
+    closed: Option<closed_types::Api>,
 }
 pub(super) struct Descriptor {
     pub(super) class: Object,
@@ -122,6 +124,11 @@ impl Api {
                 "mono_class_is_assignable_from",
                 unsafe extern "C" fn(Object, Object) -> i32
             ),
+            context: sym!(
+                "mono_method_get_context",
+                unsafe extern "C" fn(Object) -> Object
+            ),
+            closed: Some(closed_types::Api::load(library)?),
             resolve: sym!(
                 "mono_object_get_virtual_method",
                 unsafe extern "C" fn(Object, Object) -> Object
@@ -195,13 +202,28 @@ impl Api {
             || unsafe { (self.instance)(sig) } == 0
             || unsafe { (self.count)(sig) } != 0
             || unsafe { (self.generic)(method) } != 0
-            || unsafe { (self.inflated)(method) } != 0
             || unsafe { (self.value)(class) } != 0
         {
             return Err(
                 "constructor requires nongeneric managed instance void() on a reference class"
                     .into(),
             );
+        }
+        if unsafe { (self.inflated)(method) } != 0 {
+            // Frozen MonoGenericContext is exactly class_inst/method_inst.
+            // Read only the native context returned for this owned method;
+            // method-specific generics remain unsupported.
+            let context = unsafe { (self.context)(method) };
+            if context.is_null() || !(context as usize).is_multiple_of(8) {
+                return Err("inflated method has no native generic context".into());
+            }
+            let instances = unsafe { std::slice::from_raw_parts(context.cast::<Object>(), 2) };
+            if instances[0].is_null() || !instances[1].is_null() {
+                return Err("managed entry requires class-only generic inflation".into());
+            }
+            self.closed
+                .ok_or("closed declaring type metadata API absent")?
+                .constructed(class)?;
         }
         let ret = unsafe { (self.returns)(sig) };
         if ret.is_null() || unsafe { (self.kind)(ret) } != 1 || unsafe { (self.byref)(ret) } != 0 {
@@ -242,17 +264,30 @@ impl Api {
         class: Object,
     ) -> Result<(), String> {
         if object.is_null()
-            || class != descriptor.class
+            || class.is_null()
             || unsafe { (self.object_class)(object) } != class
+            || unsafe { (self.value)(class) } != 0
         {
-            return Err("constructor receiver differs from rooted declaring class".into());
+            return Err("managed receiver differs from live rooted reference class".into());
         }
-        if descriptor.callback.is_some_and(
-            |contract| unsafe { (self.resolve)(object, contract) } != descriptor.method,
-        ) {
-            return Err(
-                "managed callback is not the receiver's resolved interface implementation".into(),
-            );
+        if let Some(closed) = self.closed {
+            closed.concrete(class)?;
+        }
+        if let Some(contract) = descriptor.callback {
+            // An inherited interface implementation can declare a base class;
+            // Mono's actual virtual resolution is the execution contract.
+            let interface = unsafe { (self.class)(contract) };
+            if interface.is_null()
+                || unsafe { (self.assignable)(interface, class) } == 0
+                || unsafe { (self.resolve)(object, contract) } != descriptor.method
+            {
+                return Err(
+                    "managed callback is not the receiver's resolved interface implementation"
+                        .into(),
+                );
+            }
+        } else if class != descriptor.class {
+            return Err("constructor receiver differs from rooted declaring class".into());
         }
         Ok(())
     }
@@ -262,6 +297,7 @@ mod tests {
     use super::*;
     use std::{cell::Cell, ptr};
     thread_local! {
+        static METHOD_INSTANTIATION: Cell<bool> = const { Cell::new(false) };
         static FLAGS: Cell<u32> = const { Cell::new(0) };
         static IMPL: Cell<u32> = const { Cell::new(0) };
         static COUNT: Cell<u32> = const { Cell::new(0) };
@@ -330,7 +366,22 @@ mod tests {
     unsafe extern "C" fn resolve(_: Object, _: Object) -> Object {
         RESOLVED.with(Cell::get) as Object
     }
+    unsafe extern "C" fn context(_: Object) -> Object {
+        static CONTEXT: [usize; 2] = [1, 0];
+        static METHOD_CONTEXT: [usize; 2] = [1, 1];
+        if METHOD_INSTANTIATION.with(Cell::get) {
+            METHOD_CONTEXT.as_ptr().cast_mut().cast()
+        } else {
+            CONTEXT.as_ptr().cast_mut().cast()
+        }
+    }
+    unsafe extern "C" fn serialization_name(_: Object) -> *const c_char {
+        c"OnAfterDeserialize".as_ptr()
+    }
     fn api() -> Api {
+        INTERFACE.with(|c| c.set(true));
+        RESOLVED.with(|c| c.set(5));
+        METHOD_INSTANTIATION.with(|c| c.set(false));
         FLAGS.with(|c| c.set(0));
         IMPL.with(|c| c.set(0));
         COUNT.with(|c| c.set(0));
@@ -360,17 +411,61 @@ mod tests {
             method,
             assignable,
             resolve,
+            context,
+            closed: Some(closed_types::tests::api()),
         }
     }
     #[test]
-    fn callbacks_require_actual_interface_and_resolved_receiver_implementation() {
-        unsafe extern "C" fn callback_name(_: Object) -> *const c_char {
-            c"OnAfterDeserialize".as_ptr()
+    fn inherited_callback_requires_actual_interface_resolution() {
+        let api = Api {
+            name: serialization_name,
+            ..api()
+        };
+        let descriptor = api
+            .describe(5usize as Object, &[3usize as Object])
+            .unwrap()
+            .unwrap();
+        unsafe extern "C" fn derived(_: Object) -> Object {
+            8usize as Object
         }
+        let api = Api {
+            object_class: derived,
+            ..api
+        };
+        api.receiver(&descriptor, 9usize as Object, 8usize as Object)
+            .unwrap();
+        RESOLVED.with(|c| c.set(10));
+        assert!(api
+            .receiver(&descriptor, 9usize as Object, 8usize as Object)
+            .is_err());
+        RESOLVED.with(|c| c.set(5));
+        INTERFACE.with(|c| c.set(false));
+        assert!(api
+            .receiver(&descriptor, 9usize as Object, 8usize as Object)
+            .is_err());
+    }
+    #[test]
+    fn closed_class_inflation_is_admitted_but_method_instantiation_is_not() {
+        let api = Api {
+            inflated: one,
+            ..api()
+        };
+        let descriptor = api
+            .describe(5usize as Object, &[3usize as Object])
+            .unwrap()
+            .unwrap();
+        api.receiver(&descriptor, 8usize as Object, 2usize as Object)
+            .unwrap();
+        METHOD_INSTANTIATION.with(|c| c.set(true));
+        assert!(api.describe(5usize as Object, &[3usize as Object]).is_err());
+        assert_eq!(HEADERS.with(Cell::get), 0);
+    }
+    #[test]
+    fn callbacks_require_actual_interface_and_resolved_receiver_implementation() {
         INTERFACE.with(|c| c.set(true));
         RESOLVED.with(|c| c.set(5));
         let api = Api {
-            name: callback_name,
+            name: serialization_name,
             ..api()
         };
         let descriptor = api

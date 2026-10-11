@@ -110,7 +110,12 @@ def main():
         'cpu_user_seconds': usage_after.ru_utime - usage_before.ru_utime,
         'cpu_system_seconds': usage_after.ru_stime - usage_before.ru_stime,
         'pending_boundary': (re.findall(r'^pending boundary ([^:]+):', content, re.M) or [None])[-1],
-        'native_root_ready': root_ready, 'native_main_thread_ready': 'native-main-thread-ready=true' in content,
+        'native_root_ready': root_ready,
+        'native_gc_scope_disables': count_marker('native-gc-scope-disables'),
+        'native_gc_scope_enables': count_marker('native-gc-scope-enables'),
+        'native_gc_scope_unwound': count_marker('native-gc-scope-unwound'),
+        'native_gc_scope_depth': count_marker('native-gc-scope-depth'),
+        'native_main_thread_ready': 'native-main-thread-ready=true' in content,
         'native_pre_bindings_ready': 'native-pre-bindings-ready=true' in content, 'native_bindings_ready': 'native-bindings-ready=true' in content, 'boundary': args.boundary, 'native_profiler_ready': 'native-profiler-ready=true' in content,
         'provider_bindings': count_marker('provider-bindings'), 'native_scalar_adapters': count_marker('native-scalar-adapters'),
         'actual_unity_scalar_callbacks_verified': count_marker('actual-unity-scalar-callbacks-verified'),
@@ -143,6 +148,7 @@ def main():
         'native_input_map_constructors': count_marker('native-input-map-constructors'),
         'native_reference_arrays': count_marker('native-reference-arrays'),
         'native_borrowed_typed_arrays': count_marker('native-borrowed-typed-arrays'),
+        'native_typed_array_refreshes': count_marker('native-typed-array-refreshes'),
         'native_value_arrays': count_marker('native-value-arrays'),
         'native_value_array_gc_verifications': count_marker('native-value-array-gc-verifications'),
         'native_value_array_scalar_writes': count_marker('native-value-array-scalar-writes'),
@@ -262,6 +268,8 @@ def main():
         raise RuntimeError('actual initialized-field deserialization/reference barrier/GC lifecycle incomplete')
     if args.boundary == 'components' and (evidence['native_component_constructors'] == 0 or evidence['native_instance_field_gc_verifications'] < evidence['native_instance_field_cells'] or not evidence['native_instance_field_views_retired'] or evidence['native_borrowed_object_gc_verifications'] < evidence['native_borrowed_object_roots']):
         raise RuntimeError('actual component constructor/field/GC lifecycle incomplete')
+    if evidence['native_gc_scope_depth'] != 0:
+        raise SystemExit('native Unity GC scopes were not restored before diagnostic verification')
     if args.boundary == 'assets' and (evidence['native_input_asset_constructors'] != 1 or evidence['native_instance_field_gc_verifications'] < evidence['native_instance_field_cells'] or not evidence['native_instance_field_views_retired'] or evidence['native_borrowed_object_gc_verifications'] < evidence['native_borrowed_object_roots']):
         raise RuntimeError('actual InputActionAsset constructor/fields/GC lifecycle incomplete')
     if evidence['native_reference_arrays'] and (evidence['native_reference_array_gc_verifications'] < evidence['native_reference_arrays'] or not evidence['native_reference_array_views_retired']):

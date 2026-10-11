@@ -682,6 +682,22 @@ impl Memory {
                 .get(&(address & !(PAGE - 1)))
                 .is_some_and(|p| p.generation == 0)
     }
+    /// Guest VirtualAlloc storage used by Unity's own C++ allocator. Require a
+    /// live private allocation, committed writable owned page, and no code history.
+    #[cfg(feature = "native-mono-backend")]
+    pub(crate) fn guest_private_data_slot(&self, address: u64, size: usize) -> bool {
+        let Some(end) = address.checked_add(size as u64) else {
+            return false;
+        };
+        size != 0
+            && self.owned_noncode_access(address, size)
+            && self
+                .allocations
+                .range(..=address)
+                .next_back()
+                .is_some_and(|(_, a)| a.guest && a.kind == crate::mem::MEM_PRIVATE && end <= a.end)
+            && self.check(address, size, WRITE).is_ok()
+    }
     #[inline(never)]
     pub(crate) fn try_checked_segment(
         &mut self,
@@ -1533,5 +1549,28 @@ mod reuse_tests {
                 .flatten()
                 .all(|s| s.link == (u64::MAX, usize::MAX, 0)));
         }
+    }
+}
+
+#[cfg(all(test, feature = "native-mono-backend"))]
+mod native_temporary_slot_tests {
+    use super::*;
+    #[test]
+    fn guest_virtual_slots_require_live_committed_private_writable_noncode_pages() {
+        let mut memory = Memory::default();
+        let base = memory.virtual_alloc(0, 8192, 0x3000, 4).unwrap();
+        assert!(memory.guest_private_data_slot(base + 16, 8));
+        assert!(!memory.guest_private_data_slot(base + 8188, 8));
+        assert!(!memory.guest_private_data_slot(u64::MAX - 3, 8));
+        memory.virtual_protect(base, 4096, 2).unwrap();
+        assert!(!memory.guest_private_data_slot(base + 16, 8));
+        memory.virtual_protect(base, 4096, 0x40).unwrap();
+        assert!(!memory.guest_private_data_slot(base + 16, 8));
+        memory.virtual_protect(base, 4096, 4).unwrap();
+        assert!(!memory.guest_private_data_slot(base + 16, 8));
+        memory.virtual_free(base, 0, 0x8000).unwrap();
+        assert!(!memory.guest_private_data_slot(base + 4096, 8));
+        let reserved = memory.virtual_alloc(0, 4096, 0x2000, 4).unwrap();
+        assert!(!memory.guest_private_data_slot(reserved, 8));
     }
 }

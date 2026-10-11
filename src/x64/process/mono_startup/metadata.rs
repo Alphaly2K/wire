@@ -562,6 +562,28 @@ impl Registry {
             }
         }
     }
+    pub(super) fn unity_class_get(
+        &mut self,
+        library: Object,
+        image: Object,
+        token: u64,
+    ) -> Result<Value, String> {
+        let rows = sym!(
+            library,
+            "mono_image_get_table_rows",
+            unsafe extern "C" fn(Object, i32) -> i32
+        );
+        let rows = unsafe { rows(image, 2) };
+        let token = type_definition_token(token, rows)?;
+        let get = sym!(
+            library,
+            "mono_unity_class_get",
+            unsafe extern "C" fn(Object, u32) -> Object
+        );
+        self.queries += 1;
+        // Call Unity's real checked wrapper: loader failure remains actual NULL.
+        Ok(Value::Handle(unsafe { get(image, token) }, Kind::Class))
+    }
     pub(super) fn class_from_name(
         &mut self,
         lib: Object,
@@ -665,12 +687,21 @@ impl Registry {
         format!("native-metadata-queries={}\nnative-metadata-handles={}\nnative-metadata-strings={}\nnative-metadata-string-arena-bytes={}\nnative-metadata-retired={}\n", self.queries, self.handles.len(), self.strings.len(), self.string_bytes, self.retired)
     }
 }
+fn type_definition_token(token: u64, rows: i32) -> Result<u32, String> {
+    let token = u32::try_from(token).map_err(|_| "Unity class token exceeds u32")?;
+    let row = token & 0x00ff_ffff;
+    if token >> 24 != 2 || row == 0 || rows < 0 || row > rows as u32 {
+        return Err("Unity class lookup requires an in-range TypeDef token".into());
+    }
+    Ok(token)
+}
 pub(super) fn handles(function: &str) -> bool {
     CORE_CLASSES.contains(&function)
         || matches!(
             function,
             "mono_get_corlib"
                 | "mono_class_from_name"
+                | "mono_unity_class_get"
                 | "mono_class_get_image"
                 | "mono_image_get_name"
                 | "mono_image_get_table_rows"
@@ -733,6 +764,18 @@ pub(super) fn handles(function: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unity_class_tokens_reject_wrong_table_nil_row_out_of_range_and_truncation() {
+        assert_eq!(
+            super::type_definition_token(0x02000001, 29).unwrap(),
+            0x02000001
+        );
+        for token in [0, 0x02000000, 0x0200001e, 0x01000001, 0x102000001] {
+            assert!(super::type_definition_token(token, 29).is_err());
+        }
+        assert!(super::type_definition_token(0x02000001, -1).is_err());
+    }
+
     use super::*;
     #[test]
     fn compact_string_arena_survives_large_metadata_scans_and_rejects_overlap_transactionally() {

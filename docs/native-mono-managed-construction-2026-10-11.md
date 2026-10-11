@@ -1,104 +1,90 @@
-# 元数据驱动的 Mono 构造桥接（2026-10-11）
+# 元数据驱动的 Mono 构造与序列化桥接
 
-后续构造入口不再按类名或 method token 建名单。托管构造函数和静态初始化仍由
-冻结的 ARM64 Mono interpreter 实际执行；Rust 负责受检调用、对象身份和跨架构数据。
-本阶段仍是有限启动诊断，`full_game_backend=false`，不是完整游戏后端准入。
+更新：2026-10-12。后续构造不按类名或 method token 分派。冻结 ARM64 Mono interpreter
+实际执行原始 IL；Rust 管理签名、rooted identity、typed engine boundaries 与数据同步。
+当前仍是有限启动诊断，`full_game_backend=false`，没有正式窗口或可玩验收。
 
-## 构造入口
+## 托管入口规则
 
-`src/x64/process/mono_startup/constructors.rs` 依据真实 metadata 核对：
+`constructors.rs` 核对真实 Method、declaring class、signature 和 bounded IL body。
+可用 image family 为按 SHA256 锁定的 CoreModule、render-core、URP、InputSystem、URP 2D。
+构造须 instance `void()`、reference receiver，非 static/abstract/PInvoke/InternalCall/
+native/runtime/synchronized；method 自身不能有泛型参数。receiver 实际 class 必须等于
+构造的 declaring class。
 
-- typed Method identity，method 名 `.ctor`；
-- declaring class 属于已按 SHA256 锁定的 CoreModule、render-core、URP 或 InputSystem；
-- 非 static / abstract / PInvoke / InternalCall / native / runtime / synchronized；
-- nongeneric、非 inflated、reference receiver、instance `void()`；
-- bounded 非空 IL body；rooted native receiver 的实际 class 与 declaring class 相同。
+class-only inflation 可以使用：冻结 `MonoGenericContext` 的 class_inst 非 NULL、method_inst
+为 NULL；`closed_types.rs` 递归核对真实 type arguments，拒绝开放定义、VAR/MVAR、pointer、
+byref、循环和超限。该 native context 不向 guest 发布，也不准入 method 泛型。
 
-序列化入口另外按 `UnityEngine.ISerializationCallbackReceiver` 的真实 interface contract
-准入 OnBeforeSerialize/OnAfterDeserialize；核对 rooted receiver 的 virtual resolution
-必须等于请求的 implementation。同名而未实现接口的方法拒绝，显式接口实现同样按契约核对。
-零参数接口回调可携带 guest 的非 NULL 空参数向量；不解引用，也不传给 native invoke。
+序列化方法按 `UnityEngine.ISerializationCallbackReceiver` 的实际 interface contract 准入。
+receiver 必须实现接口，native virtual resolution 必须精确等于请求的 implementation。
+允许继承实现：实际 SerializedDictionary`2 receiver 可调用 SerializedDictionary`4 base
+实现，无须 class 名名单。伪同名方法拒绝。零参数 callback 的 guest 空参数向量可非 NULL，
+但不读取该向量，也不传给 native invoke。
 
-没有将一般 `mono_runtime_invoke` 放开：有参数构造、value-type receiver、任意方法及
-其他程序集仍未准入。既有 owner-thread、strong roots、guest 参数检查、固定 callback
-和异常拒绝继续生效。P/Invoke resolver 对未登记方法拒绝解析；Unity InternalCall
-只安装经过签名与原始 guest target 核对的预编译 adapter，不向 Mono 注册未知地址。
-动态 code mappings 仍由冻结 runtime 的 no-exec guard 拒绝。
+一般有参数/静态方法和 value receiver 尚未准入。原有 owner-thread、strong roots、fixed
+callbacks、P/Invoke rejection、异常拒绝和 no-exec guard 均保留。引擎对象被图遍历发现时，
+不能因此提前发布其字段；仍要走对应构造/binding 及 engine lifetime 检查。
 
-`animation.rs::execute_managed` 提供统一的活跃 receiver scope，执行真实 IL，允许
-普通 CLR 类没有 ScriptableObject callback，也允许该 rooted receiver 实际绑定一次。
-Profiler marker 使用同一个受检 UTF16 span/scalar adapter，不按托管类或 marker 名扩展名单。
-原始 marker flags=0 时真实返回 NULL，这一正常结果原样保留。
+## 字段与图规则
 
-ColorCurves 的最初有限资源验证器仍保留：它核对八条真实曲线的创建、托管图和实际
-清理，是引擎资源/生命周期的专门验证，不是后续构造函数的分派名单。VolumeParameter
-对象图及 Vector/Color 的既有精确值布局也保留，尚未扩展为任意堆图。
+`field_layouts.rs` 枚举 owned image 与 parent chain。Unity 字段依据 public、`[SerializeField]`
+或 `[SerializeReference]` 选择，NonSerialized/static/literal/readonly 排除。属性检查只读
+metadata，不运行属性构造。`[SerializeReference]` 修复了实际
+RenderPipelineGraphicsSettingsCollection 私有 backing field 缺失。
 
-## 字段布局
+支持 exact primitives、实际整数底层的 1/2/4/8B enum、String/class/Object/SZARRAY 引用、
+reference GENERICINST，以及无 padding/Boolean/ref 的完整 scalar inline struct。
+actual size/alignment、declaration、offset、overlap 均二次核对。含引用 nested struct、
+unknown generic value、byref/raw pointer 继续拒绝；详见 value payload 文档。
 
-`field_layouts.rs` 为 InputSystem 分配的对象自动生成 serialization specs：枚举声明和
-同 image 的 parent chain；依据 public 或 `[SerializeField]` 选择字段；排除 static、
-literal、readonly 和 NonSerialized。属性只查询 metadata，不运行属性构造函数。
-不再硬编码 InputActionAsset、InputActionMap、InputAction、InputBinding 的字段名。
+分配时为 owned ordinary CLR 子对象及 boxes 发布 metadata 字段，C++ 反序列化不必等待
+零参数 ctor。这处理了没有这种 ctor 的 ProbeVolumeSceneData。冻结 corlib 的 closed
+reference generic backing 使用全部实际非static/literal storage fields，不维护 List 字段表。
+bounded graph 最多256个对象；typed array 的 declared reference slots 也参与遍历。
 
-当前形状包括 exact-width primitives、四字节 enum、String、class reference、SZARRAY
-reference，以及实际 class 为 reference type 的 GENERICINST / Object 引用。泛型值类型、
-byref、raw pointer 和含引用的 inline struct 拒绝整份描述，不复制 host bytes。
-`fields.rs` 再核对 declaration、type、offset、alignment、instance size 和 cell overlap，
-仅发布字段宽度的 owned guest views，不映射 Mono object header。
+字段和数组在借用 reference 前统一 canonicalize native String，随后发布 readonly UTF16
+view。相同 native String 在字段、数组、instance registry 中保持同一 guest identity。
+没有先发布 opaque identity、再偷偷替换字符串 token。
 
-构造前同步所有已发布字段与引用数组。构造后的字符串采用独立 canonical string root，
-然后以 native fields 更新 guest snapshots；未提交的 guest 写入不能被 refresh 吞掉。
-Reference 写入调用真实 Mono setter/barrier，对象 token 不替代 native pointer。
+每次 admitted managed call 前同步 guest 写入；之后对全部已发布字段和 typed arrays
+分别 prepare，完整验证 pending guest writes、native roots/layout/Boolean/ref 后，才提交任一
+snapshot。原生修改的 child List `_size`/`_version` 及数组也覆盖。只提交变化，只有新引用
+需要再遍历，不按 receiver 刷新局部图，不吞未同步写入。
 
-新增托管类如果落在上述 image、signature、field-shape 范围内，入口和字段规则无需新增
-Rust 类名/token 分支。新的 native ABI 或新的数据形状仍需补类型实现和验证。
+## 扫描与临时 GC 区间
 
-## 本轮一起完成的数据边界
+Unity 实际请求的 gc_disable/gc_enable/is_disabled 使用真实 BDWGC 实现，owner/thread
+核对、最大32层、enable配对及状态检查。诊断边界可能位于暂停区间，因此强制 GC、验证、
+root释放及cleanup前恢复全部尚存scope；GC验证必须真的收到完整profiler cycle。
+这是保持 Unity 请求的临时语义，不是关闭 GC 以绕过生命周期或性能检查。
 
-- 受检 virtual-method resolution：rooted reference receiver、declaring assignability、
-  非 static/value receiver；只返回 typed metadata token，不执行方法或发布 vtable。
-- 非空 InputActionMap / InputAction 引用数组：实际 Mono SZ allocation、立即 pin、
-  guest bounds/length readonly、payload 仅含 guest tokens。全 batch 验证后逐 slot
-  运行真实 write barrier；GC 前同步、GC 后核对、释放 roots 后撤销 views。
-- canonical string / empty-array alias 保持唯一身份，拒绝错位、替换、退休和容量越界。
-- `mono_string_new_wrapper`、`mono_unity_string_empty_wrapper` 实际 native 实现，校验
-  owned domain，复制 bounded 输入并 root/publish；empty singleton token 不变。
-- boxed-zero allocation 改用 metadata-derived value layout，不再使用 InputBinding 类名/88B
-  分支。含引用值数组和 owned unbox payload 的细节见
-  `native-mono-value-payloads-2026-10-11.md`。
-- frozen corlib 的 resolved generic reference backing fields 由 metadata 描述；包含实际
-  private/NonSerialized storage，不改变 Unity serialized field 筛选。已有 native SZ array
-  立即 pin，复用 canonical instance identity，再逐 slot 转换；不暴露 native headers。
+owner=NULL 写屏障可存 NULL/已强根token到C++临时槽：精确live HeapAlloc/owned buffer范围，
+或Unity自身VirtualAlloc分配器的live private、committed、writable且无code history页。
+排除freed slab slots、heap padding、共享backing、image/code/readonly/uncommitted页、
+错位和overflow；guest destination/token绝不传入native barrier。
 
-## 实际证据
+mono_unity_class_get 调用真实checked wrapper；核对 owned image、u32 TypeDef token和实际
+row范围，再返回typed Class identity。mono_type_get_object 调用真实runtime，复用RuntimeType
+strong root与readonly typed metadata view，核对返回type identity。
 
-最新输出 `wire-out/native-mono-unity-assets-probe-17`（实施 worktree）：
+## 真实验证与当前终点
 
-- exit0；41 次后续 metadata-qualified 构造（历史 component19/asset1/map2/action19）及2次实际序列化回调；
-- 最初 ColorCurves 构造、强制 GC 图验证及8次真实 engine curve cleanup 通过；
-- 990 field cells /230 native writes /138 reference barriers /175 refreshes，990 GC checks；
-- 34 virtual resolutions；5 reference-element arrays /8 value-element arrays，全部通过 GC 核对；
-- 572 array reference barriers /32 scalar writes；1个借用的已有 backing array；
-- 91 actual allocations（含3 boxed values）、588 borrowed roots、430 canonical strings；
-- 所有相关 roots/field/array/string views 通过 GC 检查并释放/撤销；
-- guard233 checks /0 denied，original Mono 未 attach，`full_game_backend=false`。
+实施 worktree `wire-out/native-mono-unity-assets-probe-34`：exit0。
 
-此前 `probe-11` 是删除逐类 ctor 名单后的原始检查点（18次构造/602 cells）。
-本轮继续填充 InputBinding[35]、更多 InputSystem value arrays、两次 Map callback、
-VolumeProfile/List backing storage 和后续 URP components。未知 managed entry 在调用前
-形成可检查的有限诊断边界，未把该方法返回为成功。
+- 52次后续metadata ctor（component30/asset1/map2/action19）、5次interface callbacks；
+- Renderer2DData、UniversalRenderPipelineAsset、GlobalSettings实际构造/反序列化；
+- 1749 fields/1749真实GC checks、326 allocations、619 borrowed roots；
+- 11 reference arrays/12 value arrays全部GC核对；436 strings/8 RuntimeTypes也全部核对；
+- 4 owned box payloads，native unbox wrapper请求仍0，不混淆两者；
+- 1次真实GC disable，退出恢复1次，final depth0；guard233/0，original Mono未attach；
+- ColorCurves真实engine graph、cleanup及其他roots/views retirement通过。
 
-下一个真实请求是 Renderer2DData::.ctor（0x06000210），位于另一个 managed image，
-尚未准入/执行。实际 IL 依赖 LayerMask/Vector3、Dictionary<uint,Material> 和
-ScriptableRendererData base ctor，见 probe-17/startup.log 的 pending listing。
-继续完善 image family 与 typed field shape，不恢复逐类 token 名单。
+最新请求为 CoreModule 的 static Boolean
+`APIUpdaterRuntimeHelpers.GetMovedFromAttributeDataForType(Type, out String, out String, out String)`。
+尚未执行；实际IL/签名在probe-34/startup.log，需typed有参数invoke和byref reference outputs。
+不能将NULL/false硬编码成成功结果。先前probe-17的Renderer2DData限制已越过。
 
-native-value-unbox-calls=0：游戏尚未实际请求该 wrapper；新 owned payload/coalescing
-有单元验证，不据此声称真实游戏 unbox ABI 已验收。此次 timing 同时存在 release tests，
-只用于诊断记录，不能作性能对照。
-
-完整 `cargo test --release --features native-mono-backend`：454 passed /7 ignored；
-all-target feature Clippy `-D warnings` clean。日志为
-`wire-out/native-mono-value-layout-release-tests.log` 和
-`wire-out/native-mono-value-layout-clippy.log`。
+完整release feature：467 passed/7 ignored；all-target Clippy `-D warnings` clean。
+日志为 `wire-out/native-mono-renderer2d-release-tests.log` 与 `native-mono-renderer2d-clippy.log`。
+本轮有并发build/tests，probe timing不作端到端性能对照；正式游戏窗口仍未验收。

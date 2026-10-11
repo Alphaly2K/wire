@@ -28,6 +28,7 @@ const OBJECTS_SUPPORT: &str = "34705bafc092d1e644b2c7e0873340b398d1a81dd3e51c31a
 const EXE: &str = "94cccae89918110514672a6ec249a1252ffaeb28c0ae8d8633a9352988738f12";
 const UNITY: &str = "a2022611884470ddab23927a3eb7bbaef3924c18972d30ba7b5330a8fd25bcc4";
 const CORELIB_SUPPORT: &str = "b10bb3e59af90e92e240424ac88b1f96eb27906c3fa099958713d93801b4b078";
+const URP_2D: &str = "ef6c25659e4daafe2b3526e65154d532b7847a37da49533da0fd85545b92fa92";
 const INPUT_SYSTEM: &str = "79aeb3ee230428c0c53102aa8392a306312b0350e1c745be9125dcec160f6dd1";
 const CORE_MODULE: &str = "7de56d1259f25d8b0cfdc9f4c77030056886bb9ac119854d3155bd87a54c0af7";
 const IMGUI_MODULE: &str = "577712fb19f217f2e9dcc870e6cf430d4a5836c5c4a745ae89466877dfbb9745";
@@ -43,10 +44,12 @@ mod arrays;
 mod attributes;
 mod bindings;
 mod callbacks;
+mod closed_types;
 mod constructors;
 mod errors;
 mod field_layouts;
 mod fields;
+mod gc_scopes;
 mod handles;
 mod images;
 mod instances;
@@ -81,6 +84,7 @@ struct Native {
     profiler: Object,
     extra_profilers: Vec<Object>,
     thread_handle: Object,
+    gc: gc_scopes::State,
     closed: bool,
     _owner_only: PhantomData<Rc<()>>,
 }
@@ -141,6 +145,7 @@ impl Native {
             profiler: ptr::null_mut(),
             extra_profilers: Vec::new(),
             thread_handle: ptr::null_mut(),
+            gc: gc_scopes::State::default(),
             closed: false,
             _owner_only: PhantomData,
         })
@@ -150,6 +155,7 @@ impl Native {
             return Err("native Mono startup cleanup on foreign owner thread".into());
         }
         if !self.closed {
+            self.gc.restore()?;
             self.closed = true;
             if !self.domain.is_null() {
                 if !self.thread_handle.is_null() {
@@ -751,6 +757,7 @@ impl Probe {
         cpu: &mut Cpu64,
         memory: &mut Memory,
         fs: &GuestFs,
+        runtime: &Runtime64,
     ) -> Result<bool, String> {
         if self.stopped {
             return Err("native Mono startup probe is closed; resume rejected".into());
@@ -1065,6 +1072,23 @@ impl Probe {
                 result = THREAD_TOKEN;
                 self.events.push("native thread object retained by v2 strong handle through complete diagnostic exposure; opaque guest token has no mapped object/header".into());
             }
+            "mono_unity_gc_disable" | "mono_unity_gc_enable" | "mono_unity_gc_is_disabled"
+                if self.assets && self.root_ready && self.main_thread_ready =>
+            {
+                if memory.read_int(
+                    cpu.gs_base
+                        .checked_add(0x48)
+                        .ok_or("GC scope TEB overflow")?,
+                    8,
+                )? != 1
+                {
+                    return Err("Unity GC scope requires guest main thread".into());
+                }
+                result = native.gc.dispatch(lib, function)?;
+                self.events.push(format!(
+                    "actual owned Unity GC scope: {function}; result={result}"
+                ));
+            }
             "mono_gc_wbarrier_set_field" if self.root_ready && self.main_thread => {
                 if self.assets && self.reference_array_registry.has_reference(a[0], a[1]) {
                     self.reference_array_registry.store(
@@ -1105,6 +1129,18 @@ impl Probe {
                 } else {
                     0
                 };
+                if self.assets
+                    && a[0] == 0
+                    && (a[2] == 0 || a[2] == owned)
+                    && a[1].is_multiple_of(8)
+                    && (runtime.live_data_slot(a[1], 8) || memory.guest_private_data_slot(a[1], 8))
+                    && memory.owned_noncode_access(a[1], 8)
+                {
+                    memory.write_int(a[1], 8, a[2])?;
+                    self.events.push(format!("owned C++ temporary reference slot {:#x}: token={:#x}; no native pointer/barrier destination", a[1], a[2]));
+                    cpu.return_integer(memory, 0)?;
+                    return Ok(false);
+                }
                 store_stack_token(memory, cpu, a, owned)?;
                 self.events.push(format!("diagnostic strong-rooted object token stored through checked guest stack slot {:#x}; raw guest destination never passed to native barrier", a[1]));
             }
@@ -1285,10 +1321,23 @@ impl Probe {
         ];
         if self.assets {
             images.push(self.image_registry.unique_native_image(INPUT_SYSTEM)?);
+            images.push(self.image_registry.unique_native_image(URP_2D)?);
         }
         Ok(images)
     }
-    fn reference_images(&self) -> Result<[Object; 5], String> {
+    fn boxed_layout(&self, library: Object, class: Object) -> Result<value_layout::Layout, String> {
+        let image = symbol!(
+            library,
+            "mono_class_get_image",
+            unsafe extern "C" fn(Object) -> Object
+        );
+        let image = unsafe { image(class) };
+        if !self.reference_images()?.contains(&image) {
+            return Err("boxed value outside fingerprinted image family".into());
+        }
+        value_layout::Api::load(library, image)?.layout(class)
+    }
+    fn reference_images(&self) -> Result<[Object; 6], String> {
         Ok([
             self.image_registry.unique_native_image(CORE_MODULE)?,
             self.image_registry
@@ -1296,7 +1345,78 @@ impl Probe {
             self.image_registry.unique_native_image(animation::URP)?,
             self.image_registry.unique_native_image(INPUT_SYSTEM)?,
             self.image_registry.unique_native_image(CORELIB)?,
+            self.image_registry.unique_native_image(URP_2D)?,
         ])
+    }
+    fn install_fields(
+        &mut self,
+        library: Object,
+        api: instances::Api,
+        specs: Vec<fields::Spec>,
+    ) -> Result<(), String> {
+        let strings = self
+            .object_api
+            .ok_or("field references before canonical strings")?;
+        callbacks::with_service(|memory, _| {
+            self.field_registry.install_with(
+                library,
+                api,
+                &mut self.instance_registry,
+                memory,
+                specs,
+                |roots, native| {
+                    self.object_registry
+                        .borrow_reference(strings, api, roots, native)
+                },
+            )?;
+            self.object_registry.publish_pending(memory)
+        })
+    }
+    /// Managed IL may mutate any previously published child or typed array.
+    /// Both registries validate their complete batches before either commits.
+    fn refresh_managed_graph(
+        &mut self,
+        library: Object,
+        api: instances::Api,
+    ) -> Result<(), String> {
+        let strings = self
+            .object_api
+            .ok_or("graph refresh before canonical strings")?;
+        let fields = self.field_registry.prepare_refresh(
+            api,
+            &mut self.instance_registry,
+            None,
+            |roots, native| {
+                self.object_registry
+                    .borrow_reference(strings, api, roots, native)
+            },
+        )?;
+        let arrays = if let Some(array_api) = self.reference_array_api {
+            Some(self.reference_array_registry.prepare_refresh(
+                array_api,
+                api,
+                &mut self.instance_registry,
+                |roots, native| {
+                    self.object_registry
+                        .borrow_reference(strings, api, roots, native)
+                },
+            )?)
+        } else {
+            None
+        };
+        let mut references = fields.references.clone();
+        if let Some(arrays) = &arrays {
+            references.extend_from_slice(&arrays.references);
+        }
+        callbacks::with_service(|memory, _| self.object_registry.publish_pending(memory))?;
+        self.field_registry.commit_refresh(fields)?;
+        if let Some(arrays) = arrays {
+            self.reference_array_registry.commit_refresh(arrays)?;
+        }
+        if self.assets && !references.is_empty() {
+            self.publish_container_graph(library, api, references)?;
+        }
+        Ok(())
     }
     /// Publish bounded backing storage reachable from an admitted managed graph.
     /// Resolved generic reference classes in frozen corlib use actual metadata;
@@ -1319,6 +1439,20 @@ impl Probe {
             "mono_class_get_rank",
             unsafe extern "C" fn(Object) -> u32
         );
+        let find = symbol!(
+            library,
+            "mono_class_from_name",
+            unsafe extern "C" fn(Object, *const c_char, *const c_char) -> Object
+        );
+        let assignable = symbol!(
+            library,
+            "mono_class_is_assignable_from",
+            unsafe extern "C" fn(Object, Object) -> i32
+        );
+        let unity = unsafe { find(core, c"UnityEngine".as_ptr(), c"Object".as_ptr()) };
+        if unity.is_null() {
+            return Err("backing graph lacks owned Unity object declaration".into());
+        }
         let mut seen = Vec::new();
         while let Some(object) = queue.pop() {
             if object.is_null() || seen.contains(&object) {
@@ -1334,33 +1468,60 @@ impl Probe {
                 if self.array_registry.contains(token) {
                     continue;
                 }
-                let token = self.reference_array_registry.borrow(
-                    self.reference_array_api
-                        .ok_or("container array before typed array API")?,
+                let array_api = self
+                    .reference_array_api
+                    .ok_or("container array before typed array API")?;
+                let strings = self
+                    .object_api
+                    .ok_or("array references before canonical strings")?;
+                let token = self.reference_array_registry.borrow_with(
+                    array_api,
                     api,
                     &mut self.instance_registry,
                     object,
+                    |roots, native| {
+                        self.object_registry
+                            .borrow_reference(strings, api, roots, native)
+                    },
                 )?;
                 callbacks::with_service(|memory, _| {
+                    self.object_registry.publish_pending(memory)?;
                     self.reference_array_registry.publish(memory, token)
                 })?;
+                queue.extend(self.reference_array_registry.native_references(
+                    array_api,
+                    api,
+                    &self.instance_registry,
+                    token,
+                )?);
                 continue;
             }
-            let Some(specs) = field_layouts::storage_specs(library, core, corlib, object, class)?
-            else {
+            let image_of = symbol!(
+                library,
+                "mono_class_get_image",
+                unsafe extern "C" fn(Object) -> Object
+            );
+            let owner = self.instance_registry.borrow(api, object)?;
+            // Engine-object fields are installed by the admitted constructor /
+            // binding path. Discovering a reference does not authorize early
+            // layout publication or replace engine lifetime validation.
+            if unsafe { assignable(unity, class) } != 0 && !self.field_registry.has_owner(owner) {
+                continue;
+            }
+            let specs = if let Some(specs) =
+                field_layouts::storage_specs(library, core, corlib, object, class)?
+            {
+                specs
+            } else if self
+                .constructor_images()?
+                .contains(&unsafe { image_of(class) })
+            {
+                field_layouts::specs(library, core, &self.constructor_images()?, object, class)?
+            } else {
                 continue;
             };
-            let owner = self.instance_registry.borrow(api, object)?;
             if !self.field_registry.has_owner(owner) {
-                callbacks::with_service(|memory, _| {
-                    self.field_registry.install(
-                        library,
-                        api,
-                        &mut self.instance_registry,
-                        memory,
-                        specs,
-                    )
-                })?;
+                self.install_fields(library, api, specs)?;
             }
             queue.extend(self.field_registry.native_references(
                 api,
@@ -1456,6 +1617,14 @@ impl Probe {
         {
             return Ok(false);
         }
+        if self.assets
+            && matches!(
+                function,
+                "mono_unity_gc_disable" | "mono_unity_gc_enable" | "mono_unity_gc_is_disabled"
+            )
+        {
+            return Ok(false);
+        }
         if self.metadata
             && self.metadata_registry.count() > 0
             && !metadata::handles(function)
@@ -1540,7 +1709,11 @@ impl Probe {
                     function,
                     "mono_string_new_len" | "mono_string_length" | "mono_string_chars"
                 )
-                || (self.managed_types && function == "mono_reflection_type_get_type")
+                || (self.managed_types
+                    && matches!(
+                        function,
+                        "mono_reflection_type_get_type" | "mono_type_get_object"
+                    ))
                 || (self.synchronization
                     && matches!(
                         function,
@@ -1672,11 +1845,7 @@ impl Probe {
             let (address, _) =
                 callbacks::with_owner(memory, runtime, self.callback_targets(), || {
                     let class = self.instance_registry.class(api, a[0])?;
-                    let layout = value_layout::Api::load(
-                        library,
-                        self.image_registry.unique_native_image(INPUT_SYSTEM)?,
-                    )?
-                    .layout(class)?;
+                    let layout = self.boxed_layout(library, class)?;
                     self.field_registry.sync(api, &self.instance_registry)?;
                     callbacks::with_service(|memory, _| {
                         self.field_registry.unbox(
@@ -1765,14 +1934,7 @@ impl Probe {
                                 unsafe extern "C" fn(Object) -> i32
                             );
                             if unsafe { value(class) } != 0 {
-                                Some(
-                                    value_layout::Api::load(
-                                        library,
-                                        self.image_registry.unique_native_image(INPUT_SYSTEM)?,
-                                    )?
-                                    .layout(class)?
-                                    .width,
-                                )
+                                Some(self.boxed_layout(library, class)?.width)
                             } else {
                                 None
                             }
@@ -1798,26 +1960,66 @@ impl Probe {
                                 "mono_class_get_image",
                                 unsafe extern "C" fn(Object) -> Object
                             );
-                            let specs = if unsafe { image_of(class) } == image {
+                            let value = symbol!(
+                                library,
+                                "mono_class_is_valuetype",
+                                unsafe extern "C" fn(Object) -> i32
+                            );
+                            let layout = if unsafe { value(class) } != 0 {
+                                Some(self.boxed_layout(library, class)?)
+                            } else {
+                                None
+                            };
+                            let find = symbol!(
+                                library,
+                                "mono_class_from_name",
+                                unsafe extern "C" fn(
+                                    Object,
+                                    *const c_char,
+                                    *const c_char,
+                                ) -> Object
+                            );
+                            let assignable = symbol!(
+                                library,
+                                "mono_class_is_assignable_from",
+                                unsafe extern "C" fn(Object, Object) -> i32
+                            );
+                            let core = self.image_registry.unique_native_image(CORE_MODULE)?;
+                            let unity =
+                                unsafe { find(core, c"UnityEngine".as_ptr(), c"Object".as_ptr()) };
+                            if unity.is_null() {
+                                return Err("owned Unity object declaration absent".into());
+                            }
+                            let ordinary_owned = self
+                                .reference_images()?
+                                .contains(&unsafe { image_of(class) })
+                                && unsafe { assignable(unity, class) } == 0;
+                            let specs = if layout.is_some()
+                                || ordinary_owned
+                                || unsafe { image_of(class) } == image
+                            {
                                 field_layouts::specs(
                                     library,
                                     self.image_registry.unique_native_image(CORE_MODULE)?,
-                                    &[image],
+                                    &self.reference_images()?,
                                     object,
                                     class,
                                 )?
                             } else {
                                 Vec::new()
                             };
-                            callbacks::with_service(|memory, _| {
-                                self.field_registry.install(
-                                    library,
-                                    api,
-                                    &mut self.instance_registry,
-                                    memory,
-                                    specs,
-                                )
-                            })?;
+                            self.install_fields(library, api, specs)?;
+                            if let Some(layout) = layout {
+                                callbacks::with_service(|memory, _| {
+                                    self.field_registry.publish_boxed_payload(
+                                        api,
+                                        &mut self.instance_registry,
+                                        memory,
+                                        token,
+                                        layout,
+                                    )
+                                })?;
+                            }
                             self.publish_container_graph(library, api, vec![object])
                         })?;
                     installed?;
@@ -2044,6 +2246,37 @@ impl Probe {
             cpu.return_integer(memory, token)?;
             return Ok(false);
         }
+        if function == "mono_type_get_object" {
+            if a[0] != ROOT_TOKEN || domain.is_null() {
+                return Err("reflection type allocation requires owned domain".into());
+            }
+            let ty = self.metadata_registry.native(a[1], metadata::Kind::Type)?;
+            let api = self
+                .reflection_api
+                .ok_or("type object before reflection API")?;
+            let get = symbol!(
+                library,
+                "mono_type_get_object",
+                unsafe extern "C" fn(Object, Object) -> Object
+            );
+            let (result, _) =
+                callbacks::with_owner(memory, runtime, self.callback_targets(), || {
+                    let native = unsafe { get(domain, ty) };
+                    let (token, actual) = self.reflection_registry.root_type(api, native)?;
+                    if actual != ty {
+                        return Err("reflection type object changed metadata identity".into());
+                    }
+                    Ok::<_, String>(token)
+                })?;
+            let token = result?;
+            self.reflection_registry.publish(memory, token, a[1])?;
+            self.events.push(format!(
+                "actual mono_type_get_object: rooted RuntimeType={token:#x}; type={:#x}",
+                a[1]
+            ));
+            cpu.return_integer(memory, token)?;
+            return Ok(false);
+        }
         if function == "mono_reflection_type_get_type" {
             let api = self
                 .reflection_api
@@ -2237,15 +2470,7 @@ impl Probe {
                     .unwrap()
                     .serialized_fields()?;
                 let (installed, _) = callbacks::with_owner(memory, runtime, targets, || {
-                    callbacks::with_service(|memory, _| {
-                        self.field_registry.install(
-                            library,
-                            api,
-                            &mut self.instance_registry,
-                            memory,
-                            specs,
-                        )
-                    })
+                    self.install_fields(library, api, specs)
                 })?;
                 installed?;
             }
@@ -2325,7 +2550,7 @@ impl Probe {
             let is_input = !input_image.is_null() && descriptor.image == input_image;
             if self.assets && self.reference_array_api.is_none() {
                 let (api, _) = callbacks::with_owner(memory, runtime, targets, || {
-                    reference_arrays::Api::load(library, input_image, self.reference_images()?)
+                    reference_arrays::Api::load(library, self.reference_images()?)
                 })?;
                 self.reference_array_api = Some(api?);
             }
@@ -2351,51 +2576,22 @@ impl Probe {
             )?;
             constructed?;
             let (installed, _) = callbacks::with_owner(memory, runtime, targets, || {
-                let specs = if is_input {
-                    let string_class = symbol!(
-                        library,
-                        "mono_get_string_class",
-                        unsafe extern "C" fn() -> Object
-                    );
-                    let object_class = symbol!(
-                        library,
-                        "mono_object_get_class",
-                        unsafe extern "C" fn(Object) -> Object
-                    );
-                    let string_api = self
-                        .object_api
-                        .ok_or("constructed strings before canonical registry")?;
-                    for native in
-                        self.field_registry
-                            .native_references(api, &self.instance_registry, a[1])?
-                    {
-                        if unsafe { object_class(native) } == unsafe { string_class() } {
-                            let token = self.object_registry.root_string(string_api, native)?;
-                            self.instance_registry.adopt_string(api, token, native)?;
-                            callbacks::with_service(|memory, _| {
-                                self.object_registry.publish_string(memory, token)
-                            })?;
-                        }
-                    }
-                    self.field_registry
-                        .refresh(api, &mut self.instance_registry, a[1])?;
+                self.refresh_managed_graph(library, api)?;
+                let specs = if self.field_registry.has_owner(a[1]) {
                     Vec::new()
                 } else if fields::is_component(library, images[1], class)? {
                     fields::component_specs(library, images, object, class)?
                 } else {
-                    field_layouts::specs(library, images[0], &images, object, class).map_err(
-                        |e| format!("{} managed entry field layout: {e}", descriptor.name),
-                    )?
-                };
-                callbacks::with_service(|memory, _| {
-                    self.field_registry.install(
+                    field_layouts::specs(
                         library,
-                        api,
-                        &mut self.instance_registry,
-                        memory,
-                        specs,
+                        images[0],
+                        &self.constructor_images()?,
+                        object,
+                        class,
                     )
-                })?;
+                    .map_err(|e| format!("{} managed entry field layout: {e}", descriptor.name))?
+                };
+                self.install_fields(library, api, specs)?;
                 if self.assets {
                     let references = self.field_registry.native_references(
                         api,
@@ -2829,6 +3025,12 @@ impl Probe {
             )?;
             self.metadata_registry.note_query();
             result?
+        } else if function == "mono_unity_class_get" {
+            let image = self.image_registry.native_image(a[0])?;
+            let (result, _) = callbacks::with_owner(memory, runtime, targets, || {
+                self.metadata_registry.unity_class_get(library, image, a[1])
+            })?;
+            result?
         } else if function == "mono_class_get_image" {
             let class = self.metadata_registry.native(a[0], metadata::Kind::Class)?;
             let get = symbol!(
@@ -3041,6 +3243,9 @@ impl Probe {
         memory: &mut Memory,
         runtime: &mut Runtime64,
     ) -> Result<(), String> {
+        if let Some(native) = &mut self.native {
+            native.gc.restore()?;
+        }
         if !self.bindings_ready {
             return Err("scalar verification needs a sealed actual registry".into());
         }
@@ -3230,6 +3435,9 @@ impl Probe {
         memory: &mut Memory,
         runtime: &mut Runtime64,
     ) -> Result<(), String> {
+        if let Some(native) = &mut self.native {
+            native.gc.restore()?;
+        }
         if !self.profiler_ready {
             return Ok(());
         }
@@ -3424,6 +3632,9 @@ impl Probe {
         if self.stopped {
             return Ok(());
         }
+        if let Some(native) = &mut self.native {
+            native.gc.restore()?;
+        }
         if let Some(constructor) = &mut self.curves_constructor {
             constructor.cleanup()?;
         }
@@ -3513,7 +3724,7 @@ impl Probe {
             self.image_registry.report(),
             self.metadata_registry.report(),
             self.events.join("\n")
-        )
+        ) + "\n" + &self.native.as_ref().map_or_else(String::new, |n| n.gc.report())
     }
     pub(super) fn stopped(&self) -> bool {
         self.stopped
@@ -3746,13 +3957,26 @@ mod tests {
         let mut cpu = Cpu64::new(0, 0x1008);
         cpu.regs[0] = 0xabcdef;
         cpu.regs[1] = u64::MAX; // Invalid table is ignored by this exact DLL.
+        let mut runtime_memory = Memory::default();
+        runtime_memory
+            .map(super::super::STACK, 65536, READ | WRITE)
+            .unwrap();
+        let runtime = Runtime64::new(
+            &mut runtime_memory,
+            0x140000000,
+            super::super::STACK,
+            65536,
+            "dispatch",
+        )
+        .unwrap();
         let fs = GuestFs::new(&std::env::current_dir().unwrap()).unwrap();
         assert!(!probe
             .dispatch(
                 "mono_unity_install_memory_callbacks",
                 &mut cpu,
                 &mut memory,
-                &fs
+                &fs,
+                &runtime
             )
             .unwrap());
         assert_eq!(cpu.rip, 0x12345);
@@ -3764,7 +3988,8 @@ mod tests {
                 "mono_unity_install_memory_callbacks",
                 &mut cpu,
                 &mut memory,
-                &fs
+                &fs,
+                &runtime
             )
             .is_err());
     }

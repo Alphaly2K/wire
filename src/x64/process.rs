@@ -1029,7 +1029,13 @@ impl Process64 {
                                 &fs,
                             )
                         } else {
-                            probe.dispatch(function, &mut self.cpu, &mut self.memory, &fs)
+                            probe.dispatch(
+                                function,
+                                &mut self.cpu,
+                                &mut self.memory,
+                                &fs,
+                                &self.runtime,
+                            )
                         })
                         .map_err(|error| {
                             self.runtime.inventory_failure(dll, function);

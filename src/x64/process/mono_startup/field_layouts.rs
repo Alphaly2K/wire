@@ -1,10 +1,11 @@
 //! Generate serialization cells from actual declarations and attributes.
 //! Neither class names nor serialized field names appear in the rules. This
 //! first shape set rejects serialized structs with references and raw pointers.
-use super::{c_char, fields::Spec, Object};
+use super::{c_char, fields::Spec, value_layout, Object};
 use std::{ffi::CStr, ptr};
 #[derive(Clone, Copy)]
 struct Api {
+    library: Object,
     fields: unsafe extern "C" fn(Object, *mut Object) -> Object,
     parent: unsafe extern "C" fn(Object) -> Object,
     image: unsafe extern "C" fn(Object) -> Object,
@@ -23,6 +24,7 @@ struct Api {
     has: unsafe extern "C" fn(Object, Object) -> i32,
     free: unsafe extern "C" fn(Object),
     serialize: Object,
+    serialize_reference: Object,
 }
 // FIELD_ACCESS_MASK=7, PUBLIC=6. NonSerialized always wins, including over
 // SerializeField. Static, literal and readonly fields are not Unity cells.
@@ -45,10 +47,18 @@ impl Api {
             unsafe extern "C" fn(Object, *const c_char, *const c_char) -> Object
         );
         let serialize = unsafe { find(core, c"UnityEngine".as_ptr(), c"SerializeField".as_ptr()) };
-        if serialize.is_null() {
-            return Err("owned SerializeField declaration absent".into());
+        let serialize_reference = unsafe {
+            find(
+                core,
+                c"UnityEngine".as_ptr(),
+                c"SerializeReference".as_ptr(),
+            )
+        };
+        if serialize.is_null() || serialize_reference.is_null() {
+            return Err("owned serialization attribute declarations absent".into());
         }
         Ok(Self {
+            library,
             fields: sym!(
                 "mono_class_get_fields",
                 unsafe extern "C" fn(Object, *mut Object) -> Object
@@ -103,6 +113,7 @@ impl Api {
             ),
             free: sym!("mono_custom_attrs_free", unsafe extern "C" fn(Object)),
             serialize,
+            serialize_reference,
         })
     }
     fn specs(self, images: &[Object], object: Object, class: Object) -> Result<Vec<Spec>, String> {
@@ -156,7 +167,8 @@ impl Api {
                 };
                 let attribute = !info.is_null()
                     && status == 0
-                    && unsafe { (self.has)(info, self.serialize) } != 0;
+                    && (unsafe { (self.has)(info, self.serialize) } != 0
+                        || unsafe { (self.has)(info, self.serialize_reference) } != 0);
                 if !info.is_null() {
                     unsafe {
                         (self.free)(info);
@@ -184,20 +196,39 @@ impl Api {
                 let inline = if kind == 0x11 {
                     let target = target.unwrap();
                     if unsafe { (self.is_enum)(target) } == 0 {
-                        return Err(
-                            "serialized struct requires a typed reference-aware layout".into()
-                        );
+                        let image = unsafe { (self.image)(target) };
+                        if !images.contains(&image) {
+                            return Err("inline scalar value outside owned images".into());
+                        }
+                        let name = unsafe { (self.name)(field) };
+                        let label = if name.is_null() {
+                            "<absent>".into()
+                        } else {
+                            unsafe { CStr::from_ptr(name) }.to_string_lossy()
+                        };
+                        Some(
+                            value_layout::Api::load(self.library, image)?
+                                .layout(target)
+                                .and_then(|layout| layout.scalar_inline())
+                                .map_err(|e| format!("inline field {label}: {e}"))?,
+                        )
+                    } else {
+                        let base = unsafe { (self.enum_base)(target) };
+                        let mut alignment = 0;
+                        if base.is_null() {
+                            return Err("serialized enum base absent".into());
+                        }
+                        let width = value_layout::enum_width(unsafe { (self.kind)(base) })
+                            .ok_or("serialized enum base is not an integer")?;
+                        if unsafe { (self.size)(target, &mut alignment) } != width as i32
+                            || alignment as usize != width
+                        {
+                            return Err(
+                                "serialized enum size/alignment differs from integer base".into()
+                            );
+                        }
+                        Some((width, width))
                     }
-                    let base = unsafe { (self.enum_base)(target) };
-                    let mut alignment = 0;
-                    if base.is_null()
-                        || !matches!(unsafe { (self.kind)(base) }, 8 | 9)
-                        || unsafe { (self.size)(target, &mut alignment) } != 4
-                        || alignment != 4
-                    {
-                        return Err("serialized enum requires exact four-byte layout".into());
-                    }
-                    Some((4, 4))
                 } else if matches!(kind, 2..=0xe | 0x12 | 0x15 | 0x1c | 0x1d) {
                     None
                 } else {
@@ -275,8 +306,11 @@ mod tests {
     thread_local! {
         static UNSAFE_SHAPE: Cell<bool> = const { Cell::new(false) };
         static ATTRIBUTE_FAILURE: Cell<bool> = const { Cell::new(false) };
+        static ENUM_KIND: Cell<u32> = const { Cell::new(0) };
+        static WRONG_ENUM_SIZE: Cell<bool> = const { Cell::new(false) };
         static GENERIC_REFERENCE: Cell<bool> = const { Cell::new(false) };
         static GENERIC_VALUE: Cell<bool> = const { Cell::new(false) };
+        static REFERENCE_ATTRIBUTE: Cell<bool> = const { Cell::new(false) };
         static INFOS: Cell<usize> = const { Cell::new(0) };
     }
     unsafe extern "C" fn enumerate(_: Object, iterator: *mut Object) -> Object {
@@ -319,6 +353,10 @@ mod tests {
     unsafe extern "C" fn kind(ty: Object) -> u32 {
         if UNSAFE_SHAPE.with(Cell::get) && ty as usize == 2 {
             0xf
+        } else if ENUM_KIND.with(Cell::get) != 0 && ty as usize == 1 {
+            0x11
+        } else if ENUM_KIND.with(Cell::get) != 0 && ty as usize == 100 {
+            ENUM_KIND.with(Cell::get)
         } else if GENERIC_REFERENCE.with(Cell::get) && ty as usize == 2 {
             0x15
         } else if ty as usize == 1 {
@@ -331,13 +369,19 @@ mod tests {
         0
     }
     unsafe extern "C" fn is_enum(_: Object) -> i32 {
-        0
+        i32::from(ENUM_KIND.with(Cell::get) != 0)
     }
     unsafe extern "C" fn is_value(_: Object) -> i32 {
         i32::from(GENERIC_VALUE.with(Cell::get))
     }
-    unsafe extern "C" fn size(_: Object, _: *mut u32) -> i32 {
-        0
+    unsafe extern "C" fn size(_: Object, alignment: *mut u32) -> i32 {
+        let width = value_layout::enum_width(ENUM_KIND.with(Cell::get)).unwrap_or(0) as u32;
+        unsafe { alignment.write(width) };
+        if WRONG_ENUM_SIZE.with(Cell::get) {
+            4
+        } else {
+            width as i32
+        }
     }
     unsafe extern "C" fn attrs(_: Object, field: Object, status: *mut u16) -> Object {
         INFOS.with(|c| c.set(c.get() + 1));
@@ -350,8 +394,16 @@ mod tests {
         }
         field
     }
-    unsafe extern "C" fn has(info: Object, _: Object) -> i32 {
-        i32::from(info as usize == 2)
+    unsafe extern "C" fn has(info: Object, attribute: Object) -> i32 {
+        i32::from(
+            info as usize == 2
+                && attribute as usize
+                    == if REFERENCE_ATTRIBUTE.with(Cell::get) {
+                        301
+                    } else {
+                        300
+                    },
+        )
     }
     unsafe extern "C" fn free(_: Object) {
         INFOS.with(|c| c.set(c.get() - 1));
@@ -359,10 +411,14 @@ mod tests {
     fn api() -> Api {
         UNSAFE_SHAPE.with(|c| c.set(false));
         ATTRIBUTE_FAILURE.with(|c| c.set(false));
+        ENUM_KIND.with(|c| c.set(0));
+        WRONG_ENUM_SIZE.with(|c| c.set(false));
         GENERIC_REFERENCE.with(|c| c.set(false));
         GENERIC_VALUE.with(|c| c.set(false));
         INFOS.with(|c| c.set(0));
+        REFERENCE_ATTRIBUTE.with(|c| c.set(false));
         Api {
+            library: ptr::null_mut(),
             fields: enumerate,
             parent,
             image,
@@ -381,6 +437,7 @@ mod tests {
             has,
             free,
             serialize: 300usize as Object,
+            serialize_reference: 301usize as Object,
         }
     }
     #[test]
@@ -398,6 +455,22 @@ mod tests {
         assert_eq!(specs[1].name, c"PrivateSerializedReference");
         assert_eq!(specs[1].kind, 0xe);
         assert_eq!(INFOS.with(Cell::get), 0);
+    }
+    #[test]
+    fn serialize_reference_selects_private_reference_and_nonserialized_still_wins() {
+        let api = api();
+        REFERENCE_ATTRIBUTE.with(|c| c.set(true));
+        let specs = api
+            .specs(
+                &[200usize as Object],
+                400usize as Object,
+                100usize as Object,
+            )
+            .unwrap();
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[1].name, c"PrivateSerializedReference");
+        assert_eq!(INFOS.with(Cell::get), 0);
+        assert!(!serialized(1 | 0x80, true));
     }
     #[test]
     fn unsupported_late_shape_and_attribute_error_reject_whole_descriptor() {
@@ -438,6 +511,25 @@ mod tests {
         assert_eq!(fields[1].type_class, Some(100usize as Object));
         assert!(fields[1].inline.is_none());
         GENERIC_VALUE.with(|c| c.set(true));
+        assert!(describe().is_err());
+        assert_eq!(INFOS.with(Cell::get), 0);
+    }
+    #[test]
+    fn wide_enum_cells_require_matching_native_size_and_integer_base() {
+        let api = api();
+        ENUM_KIND.with(|c| c.set(0xa));
+        let describe = || {
+            api.specs(
+                &[200usize as Object],
+                400usize as Object,
+                100usize as Object,
+            )
+        };
+        assert_eq!(describe().unwrap()[0].inline, Some((8, 8)));
+        WRONG_ENUM_SIZE.with(|c| c.set(true));
+        assert!(describe().is_err());
+        WRONG_ENUM_SIZE.with(|c| c.set(false));
+        ENUM_KIND.with(|c| c.set(2));
         assert!(describe().is_err());
         assert_eq!(INFOS.with(Cell::get), 0);
     }

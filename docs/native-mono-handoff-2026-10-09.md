@@ -404,3 +404,30 @@ owned full-payload coalescing由单元覆盖，不能报真实游戏ABI验收。
 下一实际entry Renderer2DData::.ctor（0x06000210）；pending IL位于probe-17/startup.log。
 它在URP 2D managed image，依赖LayerMask/Vector3/Dictionary和ScriptableRendererData。
 继续完善image family/shape，避免恢复逐类名单。用户授权本地提交及快进main，不push。
+
+## 2026-10-12 URP 2D、closed generics 与真实类型扫描
+
+当前详见 `docs/native-mono-managed-construction-2026-10-11.md` 和
+`docs/native-mono-value-payloads-2026-10-11.md`；本节覆盖上面的probe-17旧终点。
+新增URP 2D fingerprint、scalar/nested value布局、全部整数宽度enum、owned连续boxes、
+普通CLR allocation字段预发布。class-only generic inflation按真实arguments闭合检查，
+继承的ISerializationCallbackReceiver实现按actual virtual resolution准入。没有逐类名单。
+
+实际RenderPipelineGraphicsSettingsCollection使用SerializeReference，这条metadata规则已补齐。
+统一canonical strings、全部field/array共同prepare/commit refresh、array refs图遍历接通。
+真实gc_disable scope使用BDWGC并在诊断强制GC/退出前平衡恢复，不能关闭GC跳过验证。
+C++临时reference slots有live heap/VirtualAlloc、permissions和code-history检查，guest地址
+不进入native barrier。mono_unity_class_get与mono_type_get_object接通真实typed查询。
+
+最新 `wire-out/native-mono-unity-assets-probe-34` exit0：52次后续ctors/5 callbacks，
+1749 fields与全部GC核对；11 ref arrays/12 value arrays、326 allocations、619 borrowed roots、
+436 strings/8 RuntimeTypes全部GC/retirement通过；4 value payloads、unbox wrapper calls0；
+真实GC disable1/诊断unwind1/finaldepth0，guard233/0，original Mono未attach。
+完整release feature467 passed/7 ignored、Clippy clean。full_game_backend=false，正式窗口尚未验收。
+
+下一实际入口：CoreModule static Boolean
+`UnityEngine._Scripting.APIUpdating.APIUpdaterRuntimeHelpers.GetMovedFromAttributeDataForType`
+（0x060029b9），params Type、3个byref String，this=NULL。真实签名和IL位于probe-34/startup.log。
+需要typed有参数invoke、实际boxed Boolean返回和canonical out refs；不能硬编码false/NULL。
+冻结runtime仍原23patch，SHA c152197b7cf1623a3d40a51a36e1e44d888b77f337b1378bb979598d2fad2eb0，
+support SHA 34705bafc092d1e644b2c7e0873340b398d1a81dd3e51c31af37a9ba0a29cea9。

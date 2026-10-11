@@ -19,6 +19,7 @@ struct Api {
     type_class: unsafe extern "C" fn(Object) -> Object,
     instance_size: unsafe extern "C" fn(Object) -> i32,
     is_value: unsafe extern "C" fn(Object) -> i32,
+    value_size: unsafe extern "C" fn(Object, *mut u32) -> i32,
     assignable: unsafe extern "C" fn(Object, Object) -> i32,
     get: unsafe extern "C" fn(Object, Object, Object),
     set: unsafe extern "C" fn(Object, Object, Object),
@@ -58,6 +59,10 @@ impl Api {
             is_value: sym!(
                 "mono_class_is_valuetype",
                 unsafe extern "C" fn(Object) -> i32
+            ),
+            value_size: sym!(
+                "mono_class_value_size",
+                unsafe extern "C" fn(Object, *mut u32) -> i32
             ),
             instance_size: sym!(
                 "mono_class_instance_size",
@@ -123,14 +128,19 @@ pub(super) struct Spec {
     pub(super) guest_pointer: Option<u64>,
     pub(super) inline: Option<(usize, usize)>,
 }
+pub(super) struct Refresh {
+    updates: Vec<(u64, Vec<u8>)>,
+    pub(super) references: Vec<Object>,
+}
 impl Registry {
-    pub(super) fn install(
+    pub(super) fn install_with(
         &mut self,
         library: Object,
         root_api: instances::Api,
         roots: &mut instances::Registry,
         memory: &mut Memory,
         specs: Vec<Spec>,
+        mut reference: impl FnMut(&mut instances::Registry, Object) -> Result<u64, String>,
     ) -> Result<(), String> {
         if self.retired || specs.len() > 256 || self.cells.len() + specs.len() > 4096 {
             return Err("initialized field views outside single bounded installation".into());
@@ -161,12 +171,18 @@ impl Registry {
                 ));
             }
             let shape = if let Some((width, alignment)) = spec.inline {
+                let mut actual_alignment = 0;
                 if spec.kind != 0x11
                     || spec.type_class.is_none()
                     || spec.guest_pointer.is_some()
-                    || !matches!(width, 4 | 8 | 12 | 16)
-                    || alignment != 4
+                    || !(1..=256).contains(&width)
+                    || !matches!(alignment, 1 | 2 | 4 | 8)
+                    || !width.is_multiple_of(alignment)
                     || unsafe { (api.type_class)(ty) } != spec.type_class.unwrap()
+                    || unsafe { (api.is_value)(spec.type_class.unwrap()) } == 0
+                    || unsafe { (api.value_size)(spec.type_class.unwrap(), &mut actual_alignment) }
+                        != width as i32
+                    || actual_alignment as usize != alignment
                 {
                     return Err("initialized inline field type/layout mismatch".into());
                 }
@@ -237,7 +253,7 @@ impl Registry {
                 let token = if native.is_null() {
                     0
                 } else {
-                    let token = roots.borrow(root_api, native)?;
+                    let token = reference(roots, native)?;
                     roots.compatible(root_api, token, target)?;
                     token
                 };
@@ -326,6 +342,24 @@ impl Registry {
         self.unboxes += 1;
         Ok(owner + 16)
     }
+    pub(super) fn publish_boxed_payload(
+        &mut self,
+        root_api: instances::Api,
+        roots: &mut instances::Registry,
+        memory: &mut Memory,
+        owner: u64,
+        layout: value_layout::Layout,
+    ) -> Result<(), String> {
+        if self.retired
+            || !layout.value
+            || !roots.is_boxed(owner)
+            || roots.class(root_api, owner)? != layout.class
+            || self.payloads.len() >= 256
+        {
+            return Err("payload requires live allocated box and exact bounded class".into());
+        }
+        self.promote_payload(root_api, roots, memory, owner, layout)
+    }
     fn promote_payload(
         &mut self,
         root_api: instances::Api,
@@ -363,6 +397,9 @@ impl Registry {
                     Shape::Reference(class)
                 }
                 value_layout::Shape::Scalar { width, boolean } => Shape::Scalar { width, boolean },
+                value_layout::Shape::Inline { width, alignment } => {
+                    Shape::Inline { width, alignment }
+                }
             };
             let address = owner + 16 + slot.offset as u64;
             if let Some(cell) = self.cells.get(&address) {
@@ -555,22 +592,47 @@ impl Registry {
     }
     /// After an admitted managed call, rebuild exact snapshots from native
     /// fields. Reject unsynchronized guest writes before replacing any cell.
+    #[cfg(test)]
     pub(super) fn refresh(
         &mut self,
         root_api: instances::Api,
         roots: &mut instances::Registry,
         owner: u64,
     ) -> Result<(), String> {
+        let plan = self.prepare_refresh(root_api, roots, Some(owner), |roots, native| {
+            roots.borrow(root_api, native)
+        })?;
+        self.commit_refresh(plan)
+    }
+    /// Validate the entire selected field batch before changing guest snapshots.
+    pub(super) fn prepare_refresh(
+        &self,
+        root_api: instances::Api,
+        roots: &mut instances::Registry,
+        owner: Option<u64>,
+        mut reference: impl FnMut(&mut instances::Registry, Object) -> Result<u64, String>,
+    ) -> Result<Refresh, String> {
         if self.retired {
             return Err("native field refresh after retirement".into());
         }
         let api = self.api.ok_or("native field refresh before installation")?;
-        let object = roots.native(root_api, owner)?;
-        let mut updates = Vec::new();
-        for (&address, cell) in self.cells.iter().filter(|(_, c)| c.owner == owner) {
+        for cell in self
+            .cells
+            .values()
+            .filter(|c| owner.is_none_or(|o| c.owner == o))
+        {
             if Self::value(cell)? != cell.committed {
                 return Err("field refresh would discard pending guest write".into());
             }
+        }
+        let mut updates = Vec::new();
+        let mut references = Vec::new();
+        for (&address, cell) in self
+            .cells
+            .iter()
+            .filter(|(_, c)| owner.is_none_or(|o| c.owner == o))
+        {
+            let object = roots.native(root_api, cell.owner)?;
             let mut bytes = vec![0; cell.shape.width()];
             unsafe {
                 (api.get)(object, cell.field, bytes.as_mut_ptr().cast());
@@ -580,17 +642,31 @@ impl Registry {
                 let token = if native.is_null() {
                     0
                 } else {
-                    let token = roots.borrow(root_api, native)?;
+                    let token = reference(roots, native)?;
                     roots.compatible(root_api, token, class)?;
                     token
                 };
                 bytes.copy_from_slice(&token.to_le_bytes());
+                if bytes != cell.committed && !native.is_null() {
+                    references.push(native);
+                }
             }
             Self::validate(cell.shape, &bytes)?;
-            updates.push((address, bytes));
+            if bytes != cell.committed {
+                updates.push((address, bytes));
+            }
         }
-        for (address, bytes) in updates {
-            let cell = self.cells.get_mut(&address).unwrap();
+        Ok(Refresh {
+            updates,
+            references,
+        })
+    }
+    pub(super) fn commit_refresh(&mut self, plan: Refresh) -> Result<(), String> {
+        for (address, bytes) in plan.updates {
+            let cell = self
+                .cells
+                .get_mut(&address)
+                .ok_or("field refresh layout changed")?;
             cell.view.with_native(|p| unsafe {
                 ptr::copy_nonoverlapping(
                     bytes.as_ptr(),
@@ -965,6 +1041,10 @@ mod tests {
             }
         }
     }
+    unsafe extern "C" fn scalar_size(_: Object, alignment: *mut u32) -> i32 {
+        unsafe { alignment.write(4) };
+        4
+    }
     unsafe extern "C" fn not_value(_: Object) -> i32 {
         0
     }
@@ -1002,10 +1082,14 @@ mod tests {
         1
     }
     fn fixture() -> (Registry, instances::Api, instances::Registry, Memory, u64) {
+        fixture_with(instances::tests::api())
+    }
+    fn fixture_with(
+        api: instances::Api,
+    ) -> (Registry, instances::Api, instances::Registry, Memory, u64) {
         SCALAR.with(|c| c.set(1));
         REFERENCE.with(|c| c.set(4));
         SETS.with(|c| c.set(0));
-        let api = instances::tests::api();
         let mut roots = instances::Registry::default();
         let owner = roots.borrow(api, 4usize as Object).unwrap();
         let mut fields = Registry {
@@ -1019,6 +1103,7 @@ mod tests {
                 byref: number,
                 type_class: pointer,
                 is_value: not_value,
+                value_size: scalar_size,
                 instance_size: size,
                 assignable,
                 get,
@@ -1149,6 +1234,54 @@ mod tests {
         assert!(memory.read_int(owner + 24, 8).is_err());
         assert!(fields.sync(api, &roots).is_err());
         assert!(fields.read(owner, 2usize as Object).is_err());
+    }
+    #[test]
+    fn graph_refresh_includes_child_owner_and_late_dirty_cell_rejects_entire_batch() {
+        let (mut fields, api, mut roots, mut memory, owner) =
+            fixture_with(instances::tests::identity_api());
+        let child = roots.borrow(api, 8usize as Object).unwrap();
+        let view = HostRegion::owned(1).unwrap();
+        view.with_native(|p| unsafe { p.as_ptr().write(1) })
+            .unwrap();
+        memory
+            .map_shared_data(child + 16, view.clone(), READ | WRITE, READ | WRITE)
+            .unwrap();
+        fields.cells.insert(
+            child + 16,
+            Cell {
+                owner: child,
+                field: 1usize as Object,
+                shape: Shape::Scalar {
+                    width: 1,
+                    boolean: true,
+                },
+                view,
+                view_offset: 0,
+                committed: vec![1],
+                published: true,
+            },
+        );
+        SCALAR.with(|c| c.set(0));
+        REFERENCE.with(|c| c.set(0));
+        memory.write_int(child + 16, 1, 0).unwrap();
+        assert!(fields
+            .prepare_refresh(api, &mut roots, None, |roots, native| roots
+                .borrow(api, native))
+            .is_err());
+        assert_eq!(memory.read_int(owner + 16, 1).unwrap(), 1);
+        memory.write_int(child + 16, 1, 1).unwrap();
+        let plan = fields
+            .prepare_refresh(api, &mut roots, None, |roots, native| {
+                roots.borrow(api, native)
+            })
+            .unwrap();
+        assert_eq!(memory.read_int(owner + 16, 1).unwrap(), 1);
+        fields.commit_refresh(plan).unwrap();
+        assert_eq!(memory.read_int(owner + 16, 1).unwrap(), 0);
+        assert_eq!(memory.read_int(child + 16, 1).unwrap(), 0);
+        fields.verify(api, &roots).unwrap();
+        roots.release(api);
+        fields.retire(&mut memory, &roots).unwrap();
     }
     #[test]
     fn managed_refresh_keeps_native_stores_and_rejects_pending_guest_writes_and_late_bad_roots() {

@@ -156,6 +156,37 @@ impl Registry {
         }
         Ok(())
     }
+    /// Canonicalize before any field/array publishes the reference identity.
+    pub(super) fn borrow_reference(
+        &mut self,
+        api: Api,
+        root_api: super::instances::Api,
+        roots: &mut super::instances::Registry,
+        native: Object,
+    ) -> Result<u64, String> {
+        if native.is_null() {
+            return Ok(0);
+        }
+        if unsafe { (api.class)(native) } == unsafe { (api.string_class)() } {
+            let token = self.root_string(api, native)?;
+            roots.adopt_string(root_api, token, native)?;
+            Ok(token)
+        } else {
+            roots.borrow(root_api, native)
+        }
+    }
+    pub(super) fn publish_pending(&mut self, memory: &mut Memory) -> Result<(), String> {
+        let tokens: Vec<_> = self
+            .entries
+            .iter()
+            .filter(|(_, e)| !e.published)
+            .map(|(&t, _)| t)
+            .collect();
+        for token in tokens {
+            self.publish_string(memory, token)?;
+        }
+        Ok(())
+    }
     pub(super) fn native_string(&self, api: Api, token: u64) -> Result<Object, String> {
         if !self.contains(token) {
             return Err("unknown or retired managed string token".into());
@@ -244,6 +275,46 @@ mod tests {
     }
     unsafe extern "C" fn string_class() -> Object {
         0x55usize as Object
+    }
+    #[test]
+    fn field_and_array_reference_conversion_reuses_canonical_string_before_publication() {
+        let api = Api {
+            new_string,
+            strong,
+            target,
+            free,
+            length,
+            chars,
+            class,
+            string_class,
+        };
+        let root_api = super::super::instances::tests::identity_api();
+        let mut raw = vec![0u8; 24];
+        raw[16..20].copy_from_slice(&1i32.to_le_bytes());
+        raw[20..22].copy_from_slice(&65u16.to_le_bytes());
+        let native = raw.as_mut_ptr().cast();
+        let mut strings = Registry::default();
+        let mut roots = super::super::instances::Registry::default();
+        let token = strings
+            .borrow_reference(api, root_api, &mut roots, native)
+            .unwrap();
+        assert!((BASE..BASE + STRIDE * LIMIT as u64).contains(&token));
+        assert_eq!(
+            strings
+                .borrow_reference(api, root_api, &mut roots, native)
+                .unwrap(),
+            token
+        );
+        assert_eq!(roots.borrow(root_api, native).unwrap(), token);
+        let mut memory = Memory::default();
+        assert!(memory.read_int(token + 16, 4).is_err());
+        strings.publish_pending(&mut memory).unwrap();
+        assert_eq!(memory.read_int(token + 16, 4).unwrap(), 1);
+        assert_eq!(memory.read_int(token + 20, 2).unwrap(), 65);
+        strings.verify(api).unwrap();
+        roots.release(root_api);
+        strings.release_roots(api);
+        strings.retire_views(&mut memory).unwrap();
     }
     #[test]
     fn string_roots_own_exact_readonly_payload_and_release_once_before_view_retirement() {

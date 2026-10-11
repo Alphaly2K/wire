@@ -6,12 +6,19 @@ use std::ptr;
 pub(super) enum Shape {
     Scalar { width: usize, boolean: bool },
     Reference(Object),
+    Inline { width: usize, alignment: usize },
 }
 impl Shape {
     pub(super) fn width(self) -> usize {
         match self {
-            Self::Scalar { width, .. } => width,
+            Self::Scalar { width, .. } | Self::Inline { width, .. } => width,
             Self::Reference(_) => 8,
+        }
+    }
+    fn alignment(self) -> usize {
+        match self {
+            Self::Inline { alignment, .. } => alignment,
+            _ => self.width(),
         }
     }
 }
@@ -56,8 +63,14 @@ impl Layout {
         let mut covered = vec![false; self.width];
         for slot in &self.slots {
             let width = slot.shape.width();
-            if slot.offset + width > self.width
-                || !slot.offset.is_multiple_of(width)
+            let alignment = slot.shape.alignment();
+            if width == 0
+                || width > 256
+                || !matches!(alignment, 1 | 2 | 4 | 8)
+                || alignment > self.alignment
+                || !width.is_multiple_of(alignment)
+                || slot.offset + width > self.width
+                || !slot.offset.is_multiple_of(alignment)
                 || matches!(slot.shape,Shape::Reference(class) if class.is_null() || self.alignment < 8)
                 || covered[slot.offset..slot.offset + width].iter().any(|&b| b)
             {
@@ -66,6 +79,22 @@ impl Layout {
             covered[slot.offset..slot.offset + width].fill(true);
         }
         Ok(())
+    }
+    /// A plain inline cell is allowed only when every byte is a declared
+    /// non-Boolean scalar. No reference, unchecked Boolean or padding can be
+    /// hidden in the field's raw get/set ABI.
+    pub(super) fn scalar_inline(&self) -> Result<(usize, usize), String> {
+        self.check()?;
+        if self.slots.iter().any(|s| {
+            !matches!(
+                s.shape,
+                Shape::Scalar { boolean: false, .. } | Shape::Inline { .. }
+            )
+        }) || self.slots.iter().map(|s| s.shape.width()).sum::<usize>() != self.width
+        {
+            return Err("inline value requires complete non-Boolean scalar coverage".into());
+        }
+        Ok((self.width, self.alignment))
     }
     pub(super) fn validate(
         &self,
@@ -123,6 +152,15 @@ pub(super) struct Api {
     is_enum: unsafe extern "C" fn(Object) -> i32,
     enum_base: unsafe extern "C" fn(Object) -> Object,
     owned_image: Object,
+}
+pub(super) fn enum_width(kind: u32) -> Option<usize> {
+    match kind {
+        4 | 5 => Some(1),
+        6 | 7 => Some(2),
+        8 | 9 => Some(4),
+        0xa | 0xb => Some(8),
+        _ => None,
+    }
 }
 fn scalar(kind: u32) -> Option<Shape> {
     Some(Shape::Scalar {
@@ -188,13 +226,20 @@ impl Api {
             owned_image,
         })
     }
+    pub(super) fn owns(self, class: Object) -> bool {
+        !class.is_null() && unsafe { (self.image)(class) } == self.owned_image
+    }
     pub(super) fn layout(self, class: Object) -> Result<Layout, String> {
-        if class.is_null()
-            || unsafe { (self.image)(class) } != self.owned_image
-            || unsafe { (self.value)(class) } == 0
-        {
+        self.layout_inner(class, &mut Vec::new())
+    }
+    fn layout_inner(self, class: Object, path: &mut Vec<Object>) -> Result<Layout, String> {
+        if path.len() >= 8 || path.contains(&class) {
+            return Err("nested scalar value layout exceeds acyclic depth bound".into());
+        }
+        if !self.owns(class) || unsafe { (self.value)(class) } == 0 {
             return Err("value layout requires an owned metadata value class".into());
         }
+        path.push(class);
         let mut alignment = 0;
         let width = unsafe { (self.size)(class, &mut alignment) };
         if !(1..=256).contains(&width) {
@@ -235,22 +280,28 @@ impl Api {
                 Shape::Reference(unsafe { (self.type_class)(ty) })
             } else if kind == 0x11 {
                 let target = unsafe { (self.type_class)(ty) };
-                if target.is_null() || unsafe { (self.is_enum)(target) } == 0 {
-                    return Err("nested value fields require a recursive typed layout".into());
+                if target.is_null() {
+                    return Err("nested value class absent".into());
                 }
-                let base = unsafe { (self.enum_base)(target) };
-                if base.is_null() {
-                    return Err("value enum base absent".into());
+                if unsafe { (self.is_enum)(target) } == 0 {
+                    let (width, alignment) = self.layout_inner(target, path)?.scalar_inline()?;
+                    Shape::Inline { width, alignment }
+                } else {
+                    let base = unsafe { (self.enum_base)(target) };
+                    if base.is_null() {
+                        return Err("value enum base absent".into());
+                    }
+                    let kind = unsafe { (self.kind)(base) };
+                    enum_width(kind).ok_or("value enum base is not an integer")?;
+                    let shape = scalar(kind).unwrap();
+                    let mut align = 0;
+                    if unsafe { (self.size)(target, &mut align) } != shape.width() as i32
+                        || align as usize != shape.width()
+                    {
+                        return Err("value enum size/alignment mismatch".into());
+                    }
+                    shape
                 }
-                let shape =
-                    scalar(unsafe { (self.kind)(base) }).ok_or("value enum base is not scalar")?;
-                let mut align = 0;
-                if unsafe { (self.size)(target, &mut align) } != shape.width() as i32
-                    || align as usize != shape.width()
-                {
-                    return Err("value enum size/alignment mismatch".into());
-                }
-                shape
             } else {
                 return Err("raw pointer/generic/complex value field is not admitted".into());
             };
@@ -265,12 +316,16 @@ impl Api {
             });
         }
         layout.check()?;
+        path.pop();
         Ok(layout)
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn api_for_empty_refs() -> instances::Api {
+        instances::tests::api()
+    }
     fn layout() -> Layout {
         Layout {
             class: 2usize as Object,
@@ -298,6 +353,69 @@ mod tests {
                 },
             ],
         }
+    }
+    #[test]
+    fn inline_scalar_structs_reject_hidden_reference_boolean_and_padding() {
+        let mut scalar = Layout {
+            class: 2usize as Object,
+            width: 12,
+            alignment: 4,
+            value: true,
+            slots: (0..3)
+                .map(|i| Slot {
+                    offset: i * 4,
+                    field: (i + 1) as Object,
+                    shape: Shape::Scalar {
+                        width: 4,
+                        boolean: false,
+                    },
+                })
+                .collect(),
+        };
+        assert_eq!(scalar.scalar_inline().unwrap(), (12, 4));
+        scalar.slots.pop();
+        assert!(scalar.scalar_inline().is_err());
+        scalar.width = 8;
+        scalar.slots[0].shape = Shape::Scalar {
+            width: 1,
+            boolean: true,
+        };
+        assert!(scalar.scalar_inline().is_err());
+        assert!(layout().scalar_inline().is_err());
+        let mut nested = Layout {
+            class: 2usize as Object,
+            width: 24,
+            alignment: 4,
+            value: true,
+            slots: vec![
+                Slot {
+                    offset: 0,
+                    field: 1usize as Object,
+                    shape: Shape::Inline {
+                        width: 12,
+                        alignment: 4,
+                    },
+                },
+                Slot {
+                    offset: 12,
+                    field: 2usize as Object,
+                    shape: Shape::Inline {
+                        width: 12,
+                        alignment: 4,
+                    },
+                },
+            ],
+        };
+        assert_eq!(nested.scalar_inline().unwrap(), (24, 4));
+        nested
+            .validate(
+                &[0; 24],
+                api_for_empty_refs(),
+                &instances::Registry::default(),
+            )
+            .unwrap();
+        nested.slots[1].offset = 8;
+        assert!(nested.check().is_err());
     }
     #[test]
     fn late_forged_reference_padding_and_overlap_are_rejected() {
