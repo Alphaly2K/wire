@@ -1,0 +1,584 @@
+//! Owned, exact-width initialized instance field cells. Guest reference values
+//! are rooted identities; native headers and host pointers never enter a view.
+use super::{c_char, instances, Memory, Object};
+use crate::x64::memory::{shared::HostRegion, READ, WRITE};
+use std::{collections::BTreeMap, ffi::CStr, ptr};
+#[derive(Clone, Copy)]
+struct Api {
+    find: unsafe extern "C" fn(Object, *const c_char) -> Object,
+    parent: unsafe extern "C" fn(Object) -> Object,
+    flags: unsafe extern "C" fn(Object) -> u32,
+    offset: unsafe extern "C" fn(Object) -> i32,
+    ty: unsafe extern "C" fn(Object) -> Object,
+    kind: unsafe extern "C" fn(Object) -> u32,
+    byref: unsafe extern "C" fn(Object) -> u32,
+    type_class: unsafe extern "C" fn(Object) -> Object,
+    instance_size: unsafe extern "C" fn(Object) -> i32,
+    assignable: unsafe extern "C" fn(Object, Object) -> i32,
+    get: unsafe extern "C" fn(Object, Object, Object),
+    set: unsafe extern "C" fn(Object, Object, Object),
+}
+impl Api {
+    fn load(library: Object) -> Result<Self, String> {
+        macro_rules! sym {
+            ($name:literal, $ty:ty) => {{
+                let p = unsafe { libc::dlsym(library, concat!($name, "\0").as_ptr().cast()) };
+                if p.is_null() {
+                    return Err(concat!("missing instance field API: ", $name).into());
+                }
+                unsafe { std::mem::transmute::<Object, $ty>(p) }
+            }};
+        }
+        Ok(Self {
+            find: sym!(
+                "mono_class_get_field_from_name",
+                unsafe extern "C" fn(Object, *const c_char) -> Object
+            ),
+            parent: sym!(
+                "mono_field_get_parent",
+                unsafe extern "C" fn(Object) -> Object
+            ),
+            flags: sym!("mono_field_get_flags", unsafe extern "C" fn(Object) -> u32),
+            offset: sym!("mono_field_get_offset", unsafe extern "C" fn(Object) -> i32),
+            ty: sym!(
+                "mono_field_get_type",
+                unsafe extern "C" fn(Object) -> Object
+            ),
+            kind: sym!("mono_type_get_type", unsafe extern "C" fn(Object) -> u32),
+            byref: sym!("mono_type_is_byref", unsafe extern "C" fn(Object) -> u32),
+            type_class: sym!(
+                "mono_class_from_mono_type",
+                unsafe extern "C" fn(Object) -> Object
+            ),
+            instance_size: sym!(
+                "mono_class_instance_size",
+                unsafe extern "C" fn(Object) -> i32
+            ),
+            assignable: sym!(
+                "mono_class_is_assignable_from",
+                unsafe extern "C" fn(Object, Object) -> i32
+            ),
+            get: sym!(
+                "mono_field_get_value",
+                unsafe extern "C" fn(Object, Object, Object)
+            ),
+            set: sym!(
+                "mono_field_set_value",
+                unsafe extern "C" fn(Object, Object, Object)
+            ),
+        })
+    }
+}
+#[derive(Clone, Copy)]
+enum Shape {
+    Scalar { width: usize, boolean: bool },
+    Reference(Object),
+    EnginePointer(u64),
+}
+impl Shape {
+    fn width(self) -> usize {
+        match self {
+            Self::Scalar { width, .. } => width,
+            Self::Reference(_) | Self::EnginePointer(_) => 8,
+        }
+    }
+}
+struct Cell {
+    owner: u64,
+    field: Object,
+    shape: Shape,
+    view: HostRegion,
+    committed: Vec<u8>,
+    published: bool,
+}
+#[derive(Default)]
+pub(super) struct Registry {
+    api: Option<Api>,
+    cells: BTreeMap<u64, Cell>,
+    retired: bool,
+    writes: usize,
+    reference_writes: usize,
+    verified: usize,
+}
+pub(super) struct Spec {
+    pub(super) owner: Object,
+    pub(super) name: &'static CStr,
+    pub(super) kind: u32,
+    pub(super) reference: Option<Object>,
+    pub(super) guest_pointer: Option<u64>,
+}
+impl Registry {
+    pub(super) fn install(
+        &mut self,
+        library: Object,
+        root_api: instances::Api,
+        roots: &mut instances::Registry,
+        memory: &mut Memory,
+        specs: Vec<Spec>,
+    ) -> Result<(), String> {
+        if self.retired || !self.cells.is_empty() || specs.len() > 128 {
+            return Err("initialized field views outside single bounded installation".into());
+        }
+        let api = Api::load(library)?;
+        self.api = Some(api);
+        for spec in specs {
+            let owner = roots.borrow(root_api, spec.owner)?;
+            let class = roots.class(root_api, owner)?;
+            let field = unsafe { (api.find)(class, spec.name.as_ptr()) };
+            if field.is_null() || unsafe { (api.flags)(field) } & (0x10 | 0x40) != 0 {
+                return Err(format!(
+                    "initialized instance field absent: {:?}",
+                    spec.name
+                ));
+            }
+            let parent = unsafe { (api.parent)(field) };
+            let ty = unsafe { (api.ty)(field) };
+            if parent.is_null()
+                || ty.is_null()
+                || unsafe { (api.assignable)(parent, class) } == 0
+                || unsafe { (api.kind)(ty) } != spec.kind
+                || unsafe { (api.byref)(ty) } != 0
+            {
+                return Err(format!(
+                    "initialized field declaration/type mismatch: {:?}",
+                    spec.name
+                ));
+            }
+            let shape = if let Some(expected) = spec.guest_pointer {
+                if spec.kind != 0x18
+                    || spec.reference.is_some()
+                    || expected == 0
+                    || !expected.is_multiple_of(8)
+                {
+                    return Err("engine field is not a checked guest resource pointer".into());
+                }
+                memory.check(expected, 1, READ)?;
+                Shape::EnginePointer(expected)
+            } else {
+                match (spec.kind, spec.reference) {
+                    (2 | 4 | 5, None) => Shape::Scalar {
+                        width: 1,
+                        boolean: spec.kind == 2,
+                    },
+                    (3 | 6 | 7, None) => Shape::Scalar {
+                        width: 2,
+                        boolean: false,
+                    },
+                    (8 | 9 | 0xc, None) => Shape::Scalar {
+                        width: 4,
+                        boolean: false,
+                    },
+                    (0xa | 0xb | 0xd, None) => Shape::Scalar {
+                        width: 8,
+                        boolean: false,
+                    },
+                    (0x12, Some(target))
+                        if !target.is_null() && unsafe { (api.type_class)(ty) } == target =>
+                    {
+                        Shape::Reference(target)
+                    }
+                    _ => return Err("unadmitted initialized field shape".into()),
+                }
+            };
+            let offset = unsafe { (api.offset)(field) };
+            let size = unsafe { (api.instance_size)(class) };
+            let width = shape.width();
+            if offset < 16
+                || !(16..=65536).contains(&size)
+                || offset as usize + width > size as usize
+                || !(offset as usize).is_multiple_of(width)
+            {
+                return Err("initialized field offset/size/alignment mismatch".into());
+            }
+            let address = owner + offset as u64;
+            if self.cells.iter().any(|(&base, c)| {
+                address < base + c.shape.width() as u64 && base < address + width as u64
+            }) {
+                return Err("overlapping initialized field views".into());
+            }
+            let mut value = vec![0; width];
+            unsafe {
+                (api.get)(spec.owner, field, value.as_mut_ptr().cast());
+            }
+            if let Shape::Reference(target) = shape {
+                let native = u64::from_le_bytes(value.as_slice().try_into().unwrap()) as Object;
+                let token = if native.is_null() {
+                    0
+                } else {
+                    let token = roots.borrow(root_api, native)?;
+                    roots.compatible(root_api, token, target)?;
+                    token
+                };
+                value.copy_from_slice(&token.to_le_bytes());
+            }
+            if let Shape::EnginePointer(expected) = shape {
+                if value != expected.to_le_bytes() {
+                    return Err("managed engine pointer differs from owned resource".into());
+                }
+            }
+            let view = HostRegion::owned(width)?;
+            view.with_native(|p| unsafe {
+                ptr::copy_nonoverlapping(value.as_ptr(), p.as_ptr(), width)
+            })?;
+            self.cells.insert(
+                address,
+                Cell {
+                    owner,
+                    field,
+                    shape,
+                    view,
+                    committed: value,
+                    published: false,
+                },
+            );
+            let cell = self.cells.get_mut(&address).unwrap();
+            let permissions = if matches!(shape, Shape::EnginePointer(_)) {
+                READ
+            } else {
+                READ | WRITE
+            };
+            memory.map_shared_data(address, cell.view.clone(), permissions, permissions)?;
+            cell.published = true;
+            eprintln!("NATIVE_MONO_INSTANCE_FIELD: owner={owner:#x} field={:?} offset={offset} width={width}", spec.name);
+        }
+        Ok(())
+    }
+    fn value(cell: &Cell) -> Result<Vec<u8>, String> {
+        cell.view.with_native(|p| unsafe {
+            std::slice::from_raw_parts(p.as_ptr(), cell.shape.width()).to_vec()
+        })
+    }
+    fn validate(shape: Shape, bytes: &[u8]) -> Result<(), String> {
+        if bytes.len() != shape.width()
+            || matches!(shape, Shape::Scalar { boolean: true, .. }) && bytes[0] > 1
+        {
+            return Err("initialized field width/Boolean encoding mismatch".into());
+        }
+        if let Shape::EnginePointer(expected) = shape {
+            if bytes != expected.to_le_bytes() {
+                return Err("guest resource pointer changed".into());
+            }
+        }
+        Ok(())
+    }
+    pub(super) fn sync(
+        &mut self,
+        root_api: instances::Api,
+        roots: &instances::Registry,
+    ) -> Result<(), String> {
+        if self.retired {
+            return Err("instance field synchronization after retirement".into());
+        }
+        let Some(api) = self.api else {
+            return Ok(());
+        };
+        let mut updates = Vec::new();
+        for (&address, cell) in &self.cells {
+            let bytes = Self::value(cell)?;
+            Self::validate(cell.shape, &bytes)?;
+            let owner = roots.native(root_api, cell.owner)?;
+            let reference = if let Shape::Reference(class) = cell.shape {
+                let token = u64::from_le_bytes(bytes.as_slice().try_into().unwrap());
+                Some(if token == 0 {
+                    ptr::null_mut()
+                } else {
+                    roots.compatible(root_api, token, class)?
+                })
+            } else {
+                None
+            };
+            if bytes != cell.committed {
+                updates.push((address, owner, bytes, reference));
+            }
+        }
+        // Validate the entire batch before touching any native field. Pinned
+        // targets stay alive through the native reference write barrier.
+        for (address, owner, mut bytes, reference) in updates {
+            let cell = self.cells.get_mut(&address).unwrap();
+            let value = reference.unwrap_or_else(|| bytes.as_mut_ptr().cast());
+            // Mono's mono_copy_value uses the object itself for references,
+            // unlike scalar stores which dereference the value address.
+            unsafe {
+                (api.set)(owner, cell.field, value);
+            }
+            self.writes += 1;
+            self.reference_writes += usize::from(reference.is_some());
+            cell.committed = bytes;
+        }
+        Ok(())
+    }
+    pub(super) fn verify(
+        &mut self,
+        root_api: instances::Api,
+        roots: &instances::Registry,
+    ) -> Result<(), String> {
+        if self.retired {
+            return Err("instance field verification after retirement".into());
+        }
+        let Some(api) = self.api else {
+            return Ok(());
+        };
+        for cell in self.cells.values() {
+            let owner = roots.native(root_api, cell.owner)?;
+            let mut bytes = vec![0; cell.shape.width()];
+            unsafe {
+                (api.get)(owner, cell.field, bytes.as_mut_ptr().cast());
+            }
+            if let Shape::Reference(class) = cell.shape {
+                let token = u64::from_le_bytes(cell.committed.as_slice().try_into().unwrap());
+                let expected = if token == 0 {
+                    ptr::null_mut()
+                } else {
+                    roots.compatible(root_api, token, class)?
+                };
+                if u64::from_le_bytes(bytes.as_slice().try_into().unwrap()) != expected as u64 {
+                    return Err("initialized native reference differs across GC".into());
+                }
+            } else if bytes != cell.committed {
+                return Err("initialized native scalar differs across GC".into());
+            }
+            if Self::value(cell)? != cell.committed {
+                return Err("initialized guest field not synchronized before GC".into());
+            }
+            self.verified += 1;
+        }
+        Ok(())
+    }
+    pub(super) fn has_reference(&self, owner: u64, address: u64) -> bool {
+        !self.retired
+            && self.cells.get(&address).is_some_and(|c| {
+                (owner == 0 || c.owner == owner) && matches!(c.shape, Shape::Reference(_))
+            })
+    }
+    pub(super) fn store_reference(
+        &mut self,
+        root_api: instances::Api,
+        roots: &instances::Registry,
+        memory: &mut Memory,
+        owner: u64,
+        address: u64,
+        token: u64,
+    ) -> Result<(), String> {
+        if !self.has_reference(owner, address) {
+            return Err("barrier destination is not an owned reference field".into());
+        }
+        let Shape::Reference(class) = self.cells[&address].shape else {
+            unreachable!()
+        };
+        if token != 0 {
+            roots.compatible(root_api, token, class)?;
+        }
+        let changed = self.cells[&address].committed != token.to_le_bytes();
+        memory.write_int(address, 8, token)?;
+        self.sync(root_api, roots)?;
+        if !changed {
+            let cell = &self.cells[&address];
+            let native = roots.native(root_api, cell.owner)?;
+            let value = if token == 0 {
+                ptr::null_mut()
+            } else {
+                roots.compatible(root_api, token, class)?
+            };
+            unsafe {
+                (self.api.unwrap().set)(native, cell.field, value);
+            }
+            self.writes += 1;
+            self.reference_writes += 1;
+        }
+        Ok(())
+    }
+    pub(super) fn read(&self, owner: u64, field: Object) -> Result<Vec<u8>, String> {
+        if self.retired {
+            return Err("field read after retirement".into());
+        }
+        let cell = self
+            .cells
+            .values()
+            .find(|c| c.owner == owner && c.field == field)
+            .ok_or("unadmitted initialized field read")?;
+        Self::value(cell)
+    }
+    pub(super) fn retire(
+        &mut self,
+        memory: &mut Memory,
+        roots: &instances::Registry,
+    ) -> Result<(), String> {
+        if self.retired {
+            return Ok(());
+        }
+        if !self.cells.is_empty() && !roots.roots_released() {
+            return Err("instance field views retired before strong roots".into());
+        }
+        for (&address, cell) in &mut self.cells {
+            if cell.published {
+                memory.unmap_shared_data(address)?;
+                cell.published = false;
+            }
+            cell.view.revoke()?;
+        }
+        self.retired = true;
+        Ok(())
+    }
+    pub(super) fn report(&self) -> String {
+        format!("native-instance-field-cells={}\nnative-instance-field-writes={}\nnative-instance-reference-writes={}\nnative-instance-field-gc-verifications={}\nnative-instance-field-views-retired={}\n", self.cells.len(), self.writes, self.reference_writes, self.verified, self.retired)
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell as Counter;
+    thread_local! {
+        static SCALAR: Counter<u8> = const { Counter::new(1) };
+        static REFERENCE: Counter<usize> = const { Counter::new(4) };
+        static SETS: Counter<usize> = const { Counter::new(0) };
+    }
+    unsafe extern "C" fn get(_: Object, field: Object, dest: Object) {
+        unsafe {
+            if field as usize == 1 {
+                dest.cast::<u8>().write(SCALAR.with(Counter::get));
+            } else {
+                dest.cast::<usize>()
+                    .write_unaligned(REFERENCE.with(Counter::get));
+            }
+        }
+    }
+    unsafe extern "C" fn set(_: Object, field: Object, value: Object) {
+        if field as usize == 1 {
+            SCALAR.with(|c| c.set(unsafe { value.cast::<u8>().read() }));
+        } else {
+            // Reference C API values must be objects themselves, not &object.
+            assert!(value.is_null() || value as usize == 4);
+            REFERENCE.with(|c| c.set(value as usize));
+        }
+        SETS.with(|c| c.set(c.get() + 1));
+    }
+    unsafe extern "C" fn find(_: Object, _: *const c_char) -> Object {
+        1usize as Object
+    }
+    unsafe extern "C" fn pointer(_: Object) -> Object {
+        2usize as Object
+    }
+    unsafe extern "C" fn number(_: Object) -> u32 {
+        0
+    }
+    unsafe extern "C" fn offset(_: Object) -> i32 {
+        16
+    }
+    unsafe extern "C" fn size(_: Object) -> i32 {
+        64
+    }
+    unsafe extern "C" fn assignable(_: Object, _: Object) -> i32 {
+        1
+    }
+    fn fixture() -> (Registry, instances::Api, instances::Registry, Memory, u64) {
+        SCALAR.with(|c| c.set(1));
+        REFERENCE.with(|c| c.set(4));
+        SETS.with(|c| c.set(0));
+        let api = instances::tests::api();
+        let mut roots = instances::Registry::default();
+        let owner = roots.borrow(api, 4usize as Object).unwrap();
+        let mut fields = Registry {
+            api: Some(Api {
+                find,
+                parent: pointer,
+                flags: number,
+                offset,
+                ty: pointer,
+                kind: number,
+                byref: number,
+                type_class: pointer,
+                instance_size: size,
+                assignable,
+                get,
+                set,
+            }),
+            ..Registry::default()
+        };
+        let mut memory = Memory::default();
+        for (offset, field, shape, bytes) in [
+            (
+                16,
+                1,
+                Shape::Scalar {
+                    width: 1,
+                    boolean: true,
+                },
+                vec![1],
+            ),
+            (
+                24,
+                2,
+                Shape::Reference(2usize as Object),
+                owner.to_le_bytes().to_vec(),
+            ),
+        ] {
+            let view = HostRegion::owned(bytes.len()).unwrap();
+            view.with_native(|p| unsafe {
+                ptr::copy_nonoverlapping(bytes.as_ptr(), p.as_ptr(), bytes.len())
+            })
+            .unwrap();
+            memory
+                .map_shared_data(owner + offset, view.clone(), READ | WRITE, READ | WRITE)
+                .unwrap();
+            fields.cells.insert(
+                owner + offset,
+                Cell {
+                    owner,
+                    field: field as Object,
+                    shape,
+                    view,
+                    committed: bytes,
+                    published: true,
+                },
+            );
+        }
+        (fields, api, roots, memory, owner)
+    }
+    #[test]
+    fn scalar_and_reference_updates_use_typed_api_and_survive_checked_verification() {
+        let (mut fields, api, mut roots, mut memory, owner) = fixture();
+        assert!(memory.read_int(owner, 8).is_err());
+        assert!(memory.write_int(owner + 16, 2, 0).is_err());
+        assert!(memory.read_int(owner + 17, 1).is_err());
+        fields.verify(api, &roots).unwrap();
+        memory.write_int(owner + 16, 1, 0).unwrap();
+        fields
+            .store_reference(api, &roots, &mut memory, owner, owner + 24, 0)
+            .unwrap();
+        assert_eq!(SCALAR.with(Counter::get), 0);
+        assert_eq!(REFERENCE.with(Counter::get), 0);
+        fields.verify(api, &roots).unwrap();
+        fields
+            .store_reference(api, &roots, &mut memory, owner, owner + 24, owner)
+            .unwrap();
+        assert_eq!(REFERENCE.with(Counter::get), 4);
+        fields.verify(api, &roots).unwrap();
+        assert!(fields.retire(&mut memory, &roots).is_err());
+        roots.release(api);
+        fields.retire(&mut memory, &roots).unwrap();
+        assert!(memory.read_int(owner + 24, 8).is_err());
+        assert!(fields.sync(api, &roots).is_err());
+        assert!(fields.read(owner, 2usize as Object).is_err());
+    }
+    #[test]
+    fn invalid_late_reference_prevents_earlier_scalar_store_and_preserves_failed_output() {
+        let (mut fields, api, mut roots, mut memory, owner) = fixture();
+        memory.write_int(owner + 16, 1, 0).unwrap();
+        memory.write_int(owner + 24, 8, owner + 8).unwrap();
+        assert!(fields.sync(api, &roots).is_err());
+        assert_eq!(SCALAR.with(Counter::get), 1);
+        assert_eq!(SETS.with(Counter::get), 0);
+        memory.write_int(owner + 24, 8, owner).unwrap();
+        memory.write_int(owner + 16, 1, 2).unwrap();
+        assert!(fields.sync(api, &roots).is_err());
+        assert_eq!(SETS.with(Counter::get), 0);
+        assert!(!fields.has_reference(owner + 1, owner + 24));
+        assert!(!fields.has_reference(owner, owner + 25));
+        assert!(fields
+            .store_reference(api, &roots, &mut memory, owner, owner + 24, 4)
+            .is_err());
+        assert_eq!(memory.read_int(owner + 24, 8).unwrap(), owner);
+        roots.release(api);
+        fields.retire(&mut memory, &roots).unwrap();
+    }
+}

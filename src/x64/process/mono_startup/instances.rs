@@ -7,6 +7,7 @@ const BASE: u64 = 0x6fff00000000;
 const LIMIT: usize = 1024;
 #[derive(Clone, Copy)]
 pub(super) struct Api {
+    strong: unsafe extern "C" fn(Object, i32) -> Object,
     new: unsafe extern "C" fn(Object, Object, *mut u16) -> Object,
     target: unsafe extern "C" fn(Object) -> Object,
     free: unsafe extern "C" fn(Object),
@@ -63,6 +64,10 @@ impl Api {
             return Err("Unity cached pointer is not a scalar native int".into());
         }
         Ok(Self {
+            strong: sym!(
+                "mono_gchandle_new_v2",
+                unsafe extern "C" fn(Object, i32) -> Object
+            ),
             new: sym!(
                 "wire_mono_object_new_rooted_checked",
                 unsafe extern "C" fn(Object, Object, *mut u16) -> Object
@@ -97,6 +102,7 @@ struct Root {
     handle: Object,
     native: Object,
     class: Object,
+    borrowed: bool,
     cached: Option<HostRegion>,
     published: bool,
 }
@@ -104,6 +110,7 @@ struct Root {
 pub(super) struct Registry {
     roots: BTreeMap<u64, Root>,
     verified: usize,
+    borrowed_verified: usize,
     released: bool,
     views_retired: bool,
     synchronized: usize,
@@ -161,6 +168,7 @@ impl Registry {
                     handle,
                     native,
                     class,
+                    borrowed: false,
                     cached,
                     published: false,
                 },
@@ -173,6 +181,60 @@ impl Registry {
             }
         }
         result
+    }
+    /// Called only for a native reference just read from a still-rooted graph.
+    /// Pin before publishing an identity, never accept arbitrary guest pointers.
+    pub(super) fn borrow(&mut self, api: Api, native: Object) -> Result<u64, String> {
+        if self.released || self.views_retired || native.is_null() {
+            return Err("borrowed object outside live rooted graph".into());
+        }
+        if let Some((&token, _)) = self.roots.iter().find(|(_, r)| r.native == native) {
+            self.native(api, token)?;
+            return Ok(token);
+        }
+        if self.roots.len() >= LIMIT {
+            return Err("borrowed object root capacity exceeded".into());
+        }
+        let class = unsafe { (api.class)(native) };
+        if class.is_null() {
+            return Err("borrowed object has no class".into());
+        }
+        let handle = unsafe { (api.strong)(native, 1) };
+        if handle.is_null() || unsafe { (api.target)(handle) } != native {
+            if !handle.is_null() {
+                unsafe {
+                    (api.free)(handle);
+                }
+            }
+            return Err("borrowed pinned root failed".into());
+        }
+        let token = BASE + self.roots.len() as u64 * 65536;
+        self.roots.insert(
+            token,
+            Root {
+                handle,
+                native,
+                class,
+                borrowed: true,
+                cached: None,
+                published: false,
+            },
+        );
+        Ok(token)
+    }
+    pub(super) fn compatible(
+        &self,
+        api: Api,
+        token: u64,
+        expected: Object,
+    ) -> Result<Object, String> {
+        let native = self.native(api, token)?;
+        if expected.is_null()
+            || unsafe { (api.assignable)(expected, self.roots[&token].class) } == 0
+        {
+            return Err("object reference token has incompatible class".into());
+        }
+        Ok(native)
     }
     pub(super) fn publish(&mut self, memory: &mut Memory, token: u64) -> Result<(), String> {
         if !self.contains(token) {
@@ -277,8 +339,12 @@ impl Registry {
                 }
             }
         }
-        self.verified += self.roots.len();
+        self.verified += self.roots.values().filter(|r| !r.borrowed).count();
+        self.borrowed_verified += self.roots.values().filter(|r| r.borrowed).count();
         Ok(())
+    }
+    pub(super) fn roots_released(&self) -> bool {
+        self.released || self.roots.is_empty()
     }
     pub(super) fn release(&mut self, api: Api) {
         if self.released {
@@ -292,16 +358,19 @@ impl Registry {
         }
     }
     pub(super) fn report(&self) -> String {
-        format!("native-allocated-objects={}\nnative-allocated-object-gc-verifications={}\nnative-allocated-object-roots-released={}\nnative-allocated-object-views-retired={}\nnative-unity-cached-pointer-syncs={}\n", self.count(), self.verified, self.released, self.views_retired, self.synchronized)
+        format!("native-allocated-objects={}\nnative-allocated-object-gc-verifications={}\nnative-allocated-object-roots-released={}\nnative-allocated-object-views-retired={}\nnative-unity-cached-pointer-syncs={}\n", self.roots.values().filter(|r| !r.borrowed).count(), self.verified, self.released, self.views_retired, self.synchronized) + &format!("native-borrowed-object-roots={}\nnative-borrowed-object-gc-verifications={}\n", self.roots.values().filter(|r| r.borrowed).count(), self.borrowed_verified)
     }
 }
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::cell::Cell;
     thread_local! {
         static FREES: Cell<usize> = const { Cell::new(0) };
         static CHANGED: Cell<bool> = const { Cell::new(false) };
+    }
+    unsafe extern "C" fn strong(_: Object, _: i32) -> Object {
+        3usize as Object
     }
     unsafe extern "C" fn new(_: Object, _: Object, status: *mut u16) -> Object {
         unsafe {
@@ -322,8 +391,8 @@ mod tests {
     unsafe extern "C" fn free(_: Object) {
         FREES.with(|v| v.set(v.get() + 1));
     }
-    unsafe extern "C" fn assignable(base: Object, _: Object) -> i32 {
-        i32::from(!base.is_null())
+    unsafe extern "C" fn assignable(base: Object, class: Object) -> i32 {
+        i32::from(base == class || base == 1usize as Object)
     }
     thread_local! { static CACHED: Cell<u64> = const { Cell::new(0) }; }
     unsafe extern "C" fn field_get(_: Object, _: Object, dest: Object) {
@@ -334,10 +403,11 @@ mod tests {
     unsafe extern "C" fn field_set(_: Object, _: Object, value: Object) {
         CACHED.with(|v| v.set(unsafe { value.cast::<u64>().read_unaligned() }));
     }
-    fn api() -> Api {
+    pub(in crate::x64::process::mono_startup) fn api() -> Api {
         FREES.with(|v| v.set(0));
         CHANGED.with(|v| v.set(false));
         Api {
+            strong,
             new,
             target,
             free,
@@ -348,6 +418,25 @@ mod tests {
             unity_base: ptr::null_mut(),
             cached_field: 5usize as Object,
         }
+    }
+    #[test]
+    fn borrowed_reachable_object_is_pinned_deduplicated_and_separately_counted() {
+        let api = api();
+        let mut registry = Registry::default();
+        let token = registry.borrow(api, 4usize as Object).unwrap();
+        assert_eq!(registry.borrow(api, 4usize as Object).unwrap(), token);
+        assert!(registry.compatible(api, token, 5usize as Object).is_err());
+        assert!(registry.borrow(api, 8usize as Object).is_err());
+        assert!(registry.borrow(api, ptr::null_mut()).is_err());
+        assert_eq!(registry.count(), 1);
+        registry.verify(api).unwrap();
+        assert!(registry.report().contains("native-allocated-objects=0\n"));
+        assert!(registry
+            .report()
+            .contains("native-borrowed-object-roots=1\n"));
+        registry.release(api);
+        assert_eq!(FREES.with(Cell::get), 2);
+        assert!(registry.borrow(api, 4usize as Object).is_err());
     }
     #[test]
     fn allocation_root_identity_gc_and_retirement_have_no_guest_native_alias() {

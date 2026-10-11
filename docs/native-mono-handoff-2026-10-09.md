@@ -326,3 +326,16 @@ ARM64 typed adapters 与 same-owner guest reentry，不能把 host pointers交�
 exit 0；完整 native backend/Admission 仍 false。下一阶段是 initialized instance
 fields 的反序列化：继续探测到 `0x1807b07ae` 对 owned object +0x30 的 1B 写入；
 目前没有这种字段视图，不允许用扩大映射掩盖失败。
+
+## ColorCurves 实际反序列化继续推进（2026-10-11）
+
+新增 fields 代码和 checkpoint 已真实通过：73 exact fields、24 pinned borrowed roots、
+16 native writes（8 reference barriers）、强制 GC 核对及真实 8-resource cleanup。
+完整 release feature 434 passed / 7 ignored，Clippy clean。详细字段语义、限制和失败探测见
+`docs/native-mono-unity-fields-2026-10-11.md`，成功冻结输出为
+`wire-out/native-mono-unity-fields-probe-03`。下一请求 FilmGrain::.ctor token 0x0600054c。
+
+当前实施分支仍为 codex/native-mono-shared-memory；main HEAD 10731e1。
+默认分支快进合入被自动审批拒绝：此前授权提交被判断不覆盖 main 合入副作用；用户
+“继续”也未被审批认为明确合入授权。因此 b737d8f 及后续实现暂留实施分支，继续开发
+不受影响；不得绕过拒绝。其他未跟踪文件和其他任务计划不改动。

@@ -332,6 +332,7 @@ pub(super) struct Constructor {
     animation: Object,
     graph: Vec<[Object; 3]>,
     verified: usize,
+    serialized: bool,
     cleaned: bool,
 }
 impl Constructor {
@@ -486,6 +487,7 @@ impl Constructor {
             animation,
             graph: Vec::new(),
             verified: 0,
+            serialized: false,
             cleaned: false,
         };
         result.verify()?;
@@ -527,7 +529,8 @@ impl Constructor {
             if record.destroyed
                 || record.count != if index < 4 { 2 } else { 0 }
                 || record.bytes.len() != record.count * KEYFRAME_BYTES
-                || self.api.scalar::<i32>(texture, length) != record.count as i32
+                || (!self.serialized
+                    && self.api.scalar::<i32>(texture, length) != record.count as i32)
                 || self.api.scalar::<u64>(animation, pointer) != record.pointer
                 || self.api.scalar::<u8>(animation, cleanup) != 1
             {
@@ -554,18 +557,20 @@ impl Constructor {
                 (c"m_Range", 0xc, 0x3f800000),
             ] {
                 let field = self.api.field(self.texture, name, kind, None)?;
-                if self.api.scalar::<u32>(texture, field) != expected {
+                if !self.serialized && self.api.scalar::<u32>(texture, field) != expected {
                     return Err("ColorCurves TextureCurve scalar mismatch".into());
                 }
             }
             let loop_field = self.api.field(self.texture, c"m_Loop", 2, None)?;
-            if self.api.scalar::<u8>(texture, loop_field) != u8::from(index == 4 || index == 5) {
+            if !self.serialized
+                && self.api.scalar::<u8>(texture, loop_field) != u8::from(index == 4 || index == 5)
+            {
                 return Err("ColorCurves loop field mismatch".into());
             }
             graph.push([parameter, texture, animation]);
         }
         let active = self.api.field(self.class, c"active", 2, None)?;
-        if self.api.scalar::<u8>(self.object, active) != 1
+        if (!self.serialized && self.api.scalar::<u8>(self.object, active) != 1)
             || (!self.graph.is_empty() && self.graph != graph)
         {
             return Err("ColorCurves graph identity/active field changed".into());
@@ -573,6 +578,68 @@ impl Constructor {
         self.graph = graph;
         self.verified += 1;
         Ok(())
+    }
+    pub(super) fn serialized_fields(&mut self) -> Result<Vec<super::fields::Spec>, String> {
+        let mut specs = vec![super::fields::Spec {
+            owner: self.object,
+            name: c"active",
+            kind: 2,
+            reference: None,
+            guest_pointer: None,
+        }];
+        for ((name, triple), resource) in FIELDS.into_iter().zip(&self.graph).zip(resources()?) {
+            specs.push(super::fields::Spec {
+                owner: self.object,
+                name,
+                kind: 0x12,
+                reference: Some(self.parameter),
+                guest_pointer: None,
+            });
+            specs.push(super::fields::Spec {
+                owner: triple[0],
+                name: c"m_OverrideState",
+                kind: 2,
+                reference: None,
+                guest_pointer: None,
+            });
+            specs.push(super::fields::Spec {
+                owner: triple[0],
+                name: c"m_Value",
+                kind: 0x12,
+                reference: Some(self.texture),
+                guest_pointer: None,
+            });
+            specs.push(super::fields::Spec {
+                owner: triple[1],
+                name: c"m_Curve",
+                kind: 0x12,
+                reference: Some(self.animation),
+                guest_pointer: None,
+            });
+            specs.push(super::fields::Spec {
+                owner: triple[2],
+                name: c"m_Ptr",
+                kind: 0x18,
+                reference: None,
+                guest_pointer: Some(resource.pointer),
+            });
+            for (name, kind) in [
+                (c"<length>k__BackingField", 8),
+                (c"m_Loop", 2),
+                (c"m_ZeroValue", 0xc),
+                (c"m_Range", 0xc),
+            ] {
+                specs.push(super::fields::Spec {
+                    owner: triple[1],
+                    name,
+                    kind,
+                    reference: None,
+                    guest_pointer: None,
+                });
+            }
+        }
+        self.serialized = true;
+        Ok(specs)
     }
     pub(super) fn cleanup(&mut self) -> Result<(), String> {
         if self.cleaned {
