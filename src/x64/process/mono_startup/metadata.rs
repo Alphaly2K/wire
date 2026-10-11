@@ -94,7 +94,10 @@ impl Registry {
                     return Ok(*token);
                 }
                 let length = text.as_bytes_with_nul().len();
-                let span = (length as u64 + 15) & !15;
+                // Locked UnityPlayer's strstr scans 16B at a time. Reserve
+                // owned zero padding for one unaligned vector past the NUL;
+                // never make adjacent host/metadata bytes readable.
+                let span = (length as u64 + 30) & !15;
                 let next = self
                     .string_bytes
                     .checked_add(span)
@@ -103,7 +106,7 @@ impl Registry {
                     return Err("metadata string capacity exceeded".into());
                 }
                 let token = STRING_BASE + self.string_bytes;
-                let region = HostRegion::owned(length)?;
+                let region = HostRegion::owned(span as usize)?;
                 region.with_native(|p| unsafe {
                     ptr::copy_nonoverlapping(
                         text.as_ptr().cast(),
@@ -733,7 +736,7 @@ mod tests {
             assert_eq!(bytes, text.as_bytes_with_nul());
             assert!(memory.write_int(token, 1, 0).is_err());
         }
-        assert!(registry.string_bytes < 65536 * 2);
+        assert!(registry.string_bytes < 65536 * 3);
         registry.string_bytes = ITER_BASE - STRING_BASE - 8;
         assert!(registry
             .wrap(&mut memory, Value::Text(CString::new("outside").unwrap()))
@@ -744,6 +747,31 @@ mod tests {
         assert!(registry
             .wrap(&mut memory, Value::Text(CString::new("Type0").unwrap()))
             .is_err());
+    }
+    #[test]
+    fn metadata_names_have_owned_zero_padding_for_vector_scans_without_relaxing_other_views() {
+        let mut memory = Memory::default();
+        let mut registry = Registry::default();
+        let token = registry
+            .wrap(&mut memory, Value::Text(CString::new("Bounds").unwrap()))
+            .unwrap();
+        let mut vector = [0xff; 16];
+        memory.read(token, &mut vector).unwrap();
+        assert_eq!(&vector[..6], b"Bounds");
+        assert_eq!(&vector[6..], &[0; 10]);
+        memory.read(token + 6, &mut vector).unwrap();
+        assert_eq!(vector, [0; 16]);
+        assert!(memory.read_int(token + 32, 1).is_err());
+        assert!(memory.write_int(token + 7, 1, 1).is_err());
+        let next = registry
+            .wrap(&mut memory, Value::Text(CString::new("secret").unwrap()))
+            .unwrap();
+        assert_eq!(next, token + 32);
+        memory.read(token + 6, &mut vector).unwrap();
+        assert_eq!(vector, [0; 16]);
+        registry.retire(&mut memory).unwrap();
+        assert!(memory.read_int(token, 1).is_err());
+        assert!(memory.read_int(next, 1).is_err());
     }
     #[test]
     fn metadata_class_exposes_only_its_owned_userdata_cell_and_retires_strings_and_handles() {

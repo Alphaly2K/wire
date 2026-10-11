@@ -316,6 +316,74 @@ pub(super) fn log_span(target: u64, units: Option<&[u16]>) -> Result<(), String>
         Ok(())
     })
 }
+pub(super) fn guest_arguments(target: u64, args: &[u64]) -> Result<u64, String> {
+    OWNER.with(|slot| {
+        if slot.get().is_null() {
+            return Err("guest argument callback has no owner".into());
+        }
+        execute_guest(unsafe { &*slot.get() }, target, args)
+    })
+}
+/// A locked injected span contains guest addresses only. The native IL pinned
+/// input is copied bit-for-bit and revoked on every result, including faults.
+pub(super) fn guest_keyframe_span(target: u64, count: usize, bytes: &[u8]) -> Result<u64, String> {
+    if count > 4096 || bytes.len() != count * super::animation::KEYFRAME_BYTES {
+        return Err("Keyframe span exceeds checked stride/count".into());
+    }
+    OWNER.with(|slot| {
+        if slot.get().is_null() {
+            return Err("Keyframe span has no callback owner".into());
+        }
+        let owner = unsafe { &*slot.get() };
+        if owner.depth.get() >= 8 {
+            return Err("Keyframe span callback depth exceeded".into());
+        }
+        let address = 0x6ffb00000000 + owner.depth.get() as u64 * 0x21000;
+        let span = (16 + bytes.len() as u64 + 4095) & !4095;
+        owner.memory.borrow_mut().map(
+            address,
+            span,
+            super::super::super::memory::READ | super::super::super::memory::WRITE,
+        )?;
+        struct Buffer<'a, 'b>(&'a Owner<'b>, u64, u64);
+        impl Drop for Buffer<'_, '_> {
+            fn drop(&mut self) {
+                if let Err(error) = self.0.memory.borrow_mut().unmap(self.1, self.2) {
+                    eprintln!("native Keyframe span cleanup: {error}");
+                    std::process::abort();
+                }
+            }
+        }
+        let _buffer = Buffer(owner, address, span);
+        let begin = if count == 0 { 0 } else { address + 16 };
+        owner.memory.borrow_mut().write_int(address, 8, begin)?;
+        owner
+            .memory
+            .borrow_mut()
+            .write_int(address + 8, 4, count as u64)?;
+        owner.memory.borrow_mut().write(address + 16, bytes)?;
+        owner
+            .memory
+            .borrow_mut()
+            .protect(address, span, super::super::super::memory::READ)?;
+        let value = execute_guest(owner, target, &[address])?;
+        if value == 0
+            || !value.is_multiple_of(8)
+            || (0x6ffa00000000..STACK_BASE + STACK_BYTES).contains(&value)
+        {
+            return Err("curve creation did not return independent aligned guest data".into());
+        }
+        let memory = owner.memory.borrow();
+        memory.check(value, 8, super::super::super::memory::READ)?;
+        if memory
+            .check(value, 1, super::super::super::memory::EXECUTE)
+            .is_ok()
+        {
+            return Err("curve creation returned executable guest memory".into());
+        }
+        Ok(value)
+    })
+}
 pub(super) fn guest_noargs(target: u64) -> Result<(), String> {
     OWNER.with(|slot| {
         if slot.get().is_null() {
@@ -669,6 +737,7 @@ mod tests {
                 domain: ptr::null_mut(),
                 metadata: &mut registry,
                 images: &mut images,
+                rooted_instance: None,
             },
             || reference(0, &[]),
         )
@@ -725,5 +794,58 @@ mod tests {
             with_owner(&mut memory, &mut runtime, [0x1000; 7], || scalar(0, &[35])).unwrap();
         assert_eq!(value, 42);
         assert_eq!(stats.calls[0], 1);
+    }
+    #[test]
+    fn injected_keyframe_span_uses_owned_readonly_bits_and_revokes_on_fault_and_escape() {
+        let mut memory = Memory::default();
+        memory.map(0x1000, 4096, READ | WRITE | EXECUTE).unwrap();
+        memory.map(0x2000, 4096, READ | WRITE).unwrap();
+        memory
+            .map(super::super::super::STACK, 65536, READ | WRITE)
+            .unwrap();
+        // Read the first key's raw 32 bits; copy to persistent guest storage.
+        memory
+            .write(
+                0x1000,
+                &[
+                    0x48, 0x8b, 0x01, 0x8b, 0x10, 0x48, 0xb8, 0x00, 0x20, 0, 0, 0, 0, 0, 0, 0x89,
+                    0x10, 0xc3,
+                ],
+            )
+            .unwrap();
+        // Attempt to mutate the readonly injected count.
+        memory
+            .write(0x1100, &[0xc7, 0x41, 0x08, 0, 0, 0, 0, 0xc3])
+            .unwrap();
+        // Return temporary payload and callback-stack addresses (escape).
+        memory.write(0x1200, &[0x48, 0x8b, 0xc1, 0xc3]).unwrap();
+        memory
+            .write(0x1300, &[0x48, 0x8d, 0x44, 0x24, 0x20, 0xc3])
+            .unwrap();
+        let mut runtime = Runtime64::new(
+            &mut memory,
+            0x140000000,
+            super::super::super::STACK,
+            65536,
+            "span-test",
+        )
+        .unwrap();
+        let mut bytes = [0u8; super::super::animation::KEYFRAME_BYTES];
+        bytes[..4].copy_from_slice(&0x7fc12345u32.to_le_bytes());
+        let (value, _) = with_owner(&mut memory, &mut runtime, [0x1000; 7], || {
+            guest_keyframe_span(0x1000, 1, &bytes)
+        })
+        .unwrap();
+        assert_eq!(value.unwrap(), 0x2000);
+        assert_eq!(memory.read_int(0x2000, 4).unwrap(), 0x7fc12345);
+        for target in [0x1100, 0x1200, 0x1300] {
+            let (value, _) = with_owner(&mut memory, &mut runtime, [0x1000; 7], || {
+                guest_keyframe_span(target, 1, &bytes)
+            })
+            .unwrap();
+            assert!(value.is_err());
+            assert!(memory.read_int(0x6ffb00000000, 8).is_err());
+        }
+        assert!(guest_keyframe_span(0x1000, 2, &bytes).is_err());
     }
 }

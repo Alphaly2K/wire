@@ -1,6 +1,6 @@
 //! Same-owner metadata reentry for the locked subsystem map callback. Native
-//! handles remain in the existing registries; managed invocation, image loading
-//! and object operations are excluded from this nested route.
+//! handles remain in the existing registries. Only exact subsystem invokes and
+//! the externally rooted constructor instance are admitted as additional routes.
 use super::{c_char, images, metadata, string, Cpu64, Memory, Object};
 use std::ffi::CString;
 #[cfg(test)]
@@ -20,6 +20,7 @@ pub(super) struct Metadata<'a> {
     pub(super) domain: Object,
     pub(super) metadata: &'a mut metadata::Registry,
     pub(super) images: &'a mut images::Registry,
+    pub(super) rooted_instance: Option<(u64, Object)>,
 }
 impl Metadata<'_> {
     pub(super) fn dispatch(
@@ -40,6 +41,19 @@ impl Metadata<'_> {
             }
             return cpu.return_integer(memory, super::ROOT_TOKEN);
         }
+        if function == "mono_object_get_class" {
+            let (token, class) = self
+                .rooted_instance
+                .ok_or("nested object query has no owned instance")?;
+            if cpu.regs[1] != token {
+                return Err("nested object query requires the owned constructor instance".into());
+            }
+            let result = self.metadata.wrap(
+                memory,
+                metadata::Value::Handle(class, metadata::Kind::Class),
+            )?;
+            return cpu.return_integer(memory, result);
+        }
         if function == "mono_gc_wbarrier_set_field" {
             memory.read_int(cpu.regs[4], 8)?;
             let a = [cpu.regs[1], cpu.regs[2], cpu.regs[8]];
@@ -50,17 +64,17 @@ impl Metadata<'_> {
             if cpu.regs[4] < stack.0
                 || cpu.regs[4] >= stack.1
                 || a[0] != 0
-                || a[2] != 0
+                || (a[2] != 0 && self.rooted_instance.is_none_or(|(token, _)| a[2] != token))
                 || !a[1].is_multiple_of(8)
                 || a[1] < first
                 || a[1] < stack.0
                 || end > stack.1
             {
                 return Err(
-                    "nested barrier permits only NULL in a live callback-stack slot".into(),
+                    "nested barrier requires NULL or the owned instance in a live callback-stack slot".into(),
                 );
             }
-            memory.write_int(a[1], 8, 0)?;
+            memory.write_int(a[1], 8, a[2])?;
             return cpu.return_integer(memory, 0);
         }
         if !metadata::handles(function) {
@@ -275,6 +289,7 @@ mod tests {
             domain: ptr::null_mut(),
             metadata: &mut registry,
             images: &mut images,
+            rooted_instance: None,
         };
         let mut cpu = Cpu64::new(0, 0x1800);
         cpu.regs[2] = 0x1840;
@@ -311,6 +326,98 @@ mod tests {
         }
     }
     #[test]
+    fn rooted_constructor_reentry_accepts_only_exact_identity_and_live_stack_slots() {
+        let mut memory = Memory::default();
+        memory
+            .map(
+                0x1000,
+                4096,
+                crate::x64::memory::READ | crate::x64::memory::WRITE,
+            )
+            .unwrap();
+        memory.write_int(0x1800, 8, 0x1234).unwrap();
+        let mut registry = metadata::Registry::default();
+        let mut images = images::Registry::default();
+        let mut native_class = [0u64; 32];
+        let owned = 0x6fff00000000;
+        let mut route = Metadata {
+            library: ptr::null_mut(),
+            domain: ptr::null_mut(),
+            metadata: &mut registry,
+            images: &mut images,
+            rooted_instance: Some((owned, native_class.as_mut_ptr().cast())),
+        };
+        let mut cpu = Cpu64::new(0, 0x1800);
+        cpu.regs[2] = 0x1840;
+        cpu.regs[8] = owned;
+        route
+            .dispatch(
+                "mono_gc_wbarrier_set_field",
+                &mut cpu,
+                &mut memory,
+                (0x1000, 0x2000),
+            )
+            .unwrap();
+        assert_eq!(memory.read_int(0x1840, 8).unwrap(), owned);
+        assert!(memory.read_int(owned, 8).is_err());
+        cpu.regs[4] = 0x1800;
+        cpu.regs[1] = owned;
+        route
+            .dispatch(
+                "mono_object_get_class",
+                &mut cpu,
+                &mut memory,
+                (0x1000, 0x2000),
+            )
+            .unwrap();
+        assert_eq!(
+            route
+                .metadata
+                .native(cpu.regs[0], metadata::Kind::Class)
+                .unwrap(),
+            native_class.as_mut_ptr().cast()
+        );
+        for (object, destination, value) in [
+            (0, 0x1840, owned + 8),
+            (owned, 0x1840, owned),
+            (0, 0x1400, owned),
+        ] {
+            cpu.regs[4] = 0x1800;
+            cpu.regs[1] = object;
+            cpu.regs[2] = destination;
+            cpu.regs[8] = value;
+            assert!(route
+                .dispatch(
+                    "mono_gc_wbarrier_set_field",
+                    &mut cpu,
+                    &mut memory,
+                    (0x1000, 0x2000)
+                )
+                .is_err());
+            assert_eq!(memory.read_int(0x1840, 8).unwrap(), owned);
+            assert_eq!(cpu.regs[4], 0x1800);
+        }
+        cpu.regs[1] = owned + 8;
+        assert!(route
+            .dispatch(
+                "mono_object_get_class",
+                &mut cpu,
+                &mut memory,
+                (0x1000, 0x2000)
+            )
+            .is_err());
+        route.rooted_instance = None;
+        cpu.regs[1] = owned;
+        assert!(route
+            .dispatch(
+                "mono_object_get_class",
+                &mut cpu,
+                &mut memory,
+                (0x1000, 0x2000)
+            )
+            .is_err());
+    }
+    #[test]
     fn nested_userdata_uses_the_existing_identity_and_rejects_managed_invokes() {
         let mut memory = Memory::default();
         memory
@@ -335,6 +442,7 @@ mod tests {
             domain: ptr::null_mut(),
             metadata: &mut registry,
             images: &mut images,
+            rooted_instance: None,
         };
         let mut cpu = Cpu64::new(0, 0x1800);
         cpu.regs[1] = token;

@@ -37,6 +37,7 @@ const PROFILER_TOKEN: u64 = ROOT_TOKEN + 16;
 const THREAD_TOKEN: u64 = ROOT_TOKEN + 32;
 static USED: AtomicBool = AtomicBool::new(false);
 type Object = *mut c_void;
+mod animation;
 mod arrays;
 mod attributes;
 mod bindings;
@@ -239,6 +240,8 @@ pub(super) struct Probe {
     logging_ready: bool,
     exceptions: bool,
     exceptions_ready: bool,
+    curves: bool,
+    curves_constructor: Option<animation::Constructor>,
     ordinary_objects: bool,
     ordinary_objects_ready: bool,
     instance_api: Option<instances::Api>,
@@ -374,17 +377,25 @@ impl Probe {
         skip_etw: bool,
         boundary: &str,
     ) -> Result<Self, String> {
-        let ordinary_objects = boundary == "objects";
-        let assembly_lookup = matches!(boundary, "assembly-lookup" | "objects");
-        let attribute_arrays =
-            matches!(boundary, "attribute-arrays" | "assembly-lookup" | "objects");
+        let curves = boundary == "curves";
+        let ordinary_objects = matches!(boundary, "objects" | "curves");
+        let assembly_lookup = matches!(boundary, "assembly-lookup" | "objects" | "curves");
+        let attribute_arrays = matches!(
+            boundary,
+            "attribute-arrays" | "assembly-lookup" | "objects" | "curves"
+        );
         let attributes = matches!(
             boundary,
-            "attributes" | "attribute-arrays" | "assembly-lookup" | "objects"
+            "attributes" | "attribute-arrays" | "assembly-lookup" | "objects" | "curves"
         );
         let imgui = matches!(
             boundary,
-            "imgui-cache" | "attributes" | "attribute-arrays" | "assembly-lookup" | "objects"
+            "imgui-cache"
+                | "attributes"
+                | "attribute-arrays"
+                | "assembly-lookup"
+                | "objects"
+                | "curves"
         );
         let subsystem_map = matches!(
             boundary,
@@ -394,6 +405,7 @@ impl Probe {
                 | "attribute-arrays"
                 | "assembly-lookup"
                 | "objects"
+                | "curves"
         );
         let subsystems = matches!(
             boundary,
@@ -404,6 +416,7 @@ impl Probe {
                 | "attribute-arrays"
                 | "assembly-lookup"
                 | "objects"
+                | "curves"
         );
         let synchronization = matches!(
             boundary,
@@ -415,6 +428,7 @@ impl Probe {
                 | "attribute-arrays"
                 | "assembly-lookup"
                 | "objects"
+                | "curves"
         );
         let exceptions = matches!(
             boundary,
@@ -427,6 +441,7 @@ impl Probe {
                 | "attribute-arrays"
                 | "assembly-lookup"
                 | "objects"
+                | "curves"
         );
         let logging = matches!(
             boundary,
@@ -440,6 +455,7 @@ impl Probe {
                 | "attribute-arrays"
                 | "assembly-lookup"
                 | "objects"
+                | "curves"
         );
         let classlib = matches!(
             boundary,
@@ -454,6 +470,7 @@ impl Probe {
                 | "attribute-arrays"
                 | "assembly-lookup"
                 | "objects"
+                | "curves"
         );
         let managed_types = matches!(
             boundary,
@@ -469,6 +486,7 @@ impl Probe {
                 | "attribute-arrays"
                 | "assembly-lookup"
                 | "objects"
+                | "curves"
         );
         let strings = matches!(
             boundary,
@@ -485,6 +503,7 @@ impl Probe {
                 | "attribute-arrays"
                 | "assembly-lookup"
                 | "objects"
+                | "curves"
         );
         let (main_thread, pre_bindings, bindings, profiler, pre_images, images, metadata) = match boundary {
             "root" => (false, false, false, false, false, false, false),
@@ -494,10 +513,10 @@ impl Probe {
             "profiler" => (true, true, true, true, false, false, false),
             "pre-images" => (true, true, true, true, true, false, false),
             "images" => (true, true, true, true, true, true, false),
-            "metadata" | "strings" | "managed-types" | "classlib" | "logging" | "exceptions" | "synchronization" | "subsystems" | "subsystem-map" | "imgui-cache" | "attributes" | "attribute-arrays" | "assembly-lookup" | "objects" => (true, true, true, true, true, true, true),
+            "metadata" | "strings" | "managed-types" | "classlib" | "logging" | "exceptions" | "synchronization" | "subsystems" | "subsystem-map" | "imgui-cache" | "attributes" | "attribute-arrays" | "assembly-lookup" | "objects" | "curves" => (true, true, true, true, true, true, true),
             _ => {
                 return Err(
-                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings, profiler, pre-images, images, metadata, strings, managed-types, classlib, logging, exceptions, synchronization, subsystems, subsystem-map, imgui-cache, attributes, attribute-arrays or assembly-lookup or objects".into(),
+                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings, profiler, pre-images, images, metadata, strings, managed-types, classlib, logging, exceptions, synchronization, subsystems, subsystem-map, imgui-cache, attributes, attribute-arrays or assembly-lookup or objects or curves".into(),
                 )
             }
         };
@@ -596,6 +615,8 @@ impl Probe {
             logging_ready: false,
             exceptions,
             exceptions_ready: false,
+            curves,
+            curves_constructor: None,
             ordinary_objects,
             ordinary_objects_ready: false,
             instance_api: None,
@@ -1187,6 +1208,13 @@ impl Probe {
         if self.ordinary_objects && self.main_thread_ready && function == "mono_thread_current" {
             return Ok(false);
         }
+        if self.curves
+            && self.curves_constructor.is_none()
+            && self.classlib_invokes >= self.startup_limit()
+            && function == "mono_runtime_invoke"
+        {
+            return Ok(false);
+        }
         if self.metadata
             && self.metadata_registry.count() > 0
             && !metadata::handles(function)
@@ -1208,25 +1236,27 @@ impl Probe {
                 {
                     return Ok(false);
                 }
-                self.managed_types_ready = self.managed_types && self.managed_type_invokes > 0;
-                self.classlib_ready = self.classlib && self.classlib_invokes > 0;
-                self.logging_ready = self.logging && self.classlib_invokes >= 2;
-                self.exceptions_ready = self.exceptions && self.classlib_invokes >= 3;
-                self.synchronization_ready = self.synchronization && self.classlib_invokes >= 5;
-                self.subsystems_ready = self.subsystems && self.classlib_invokes >= 6;
-                self.subsystem_map_ready = self.subsystem_map && self.classlib_invokes >= 7;
-                self.imgui_ready = self.imgui && self.classlib_invokes >= 8;
-                self.attributes_ready = self.attributes && self.attribute_registry.ready();
-                self.attribute_arrays_ready = self.attribute_arrays
-                    && self.attribute_registry.arrays_ready()
-                    && self.error_registry.ready();
-                self.assembly_lookup_ready = self.assembly_lookup && self.name_registry.ready();
-                self.ordinary_objects_ready =
-                    self.ordinary_objects && self.instance_registry.count() > 0;
+                self.mark_completed_layers();
                 return Ok(true);
             }
         }
         Ok(false)
+    }
+    fn mark_completed_layers(&mut self) {
+        self.managed_types_ready = self.managed_types && self.managed_type_invokes > 0;
+        self.classlib_ready = self.classlib && self.classlib_invokes > 0;
+        self.logging_ready = self.logging && self.classlib_invokes >= 2;
+        self.exceptions_ready = self.exceptions && self.classlib_invokes >= 3;
+        self.synchronization_ready = self.synchronization && self.classlib_invokes >= 5;
+        self.subsystems_ready = self.subsystems && self.classlib_invokes >= 6;
+        self.subsystem_map_ready = self.subsystem_map && self.classlib_invokes >= 7;
+        self.imgui_ready = self.imgui && self.classlib_invokes >= 8;
+        self.attributes_ready = self.attributes && self.attribute_registry.ready();
+        self.attribute_arrays_ready = self.attribute_arrays
+            && self.attribute_registry.arrays_ready()
+            && self.error_registry.ready();
+        self.assembly_lookup_ready = self.assembly_lookup && self.name_registry.ready();
+        self.ordinary_objects_ready = self.ordinary_objects && self.instance_registry.count() > 0;
     }
     fn startup_limit(&self) -> usize {
         if self.imgui {
@@ -1676,6 +1706,75 @@ impl Probe {
         cpu.regs[4]
             .checked_add(8)
             .ok_or("invoke return stack overflow")?;
+        if self.curves
+            && self.curves_constructor.is_none()
+            && self.classlib_invokes >= self.startup_limit()
+            && a[0] != self.get_type_method
+        {
+            if a[1] == 0 || a[2] != 0 {
+                return Err("ColorCurves ctor requires owned this and NULL parameters".into());
+            }
+            if a[3] != 0 {
+                memory.check(a[3], 8, super::super::memory::WRITE)?;
+            }
+            for (name, target) in animation::BINDINGS {
+                self.registry.exact_target(name, target)?;
+            }
+            let method = self
+                .metadata_registry
+                .native(a[0], metadata::Kind::Method)?;
+            let images = [
+                self.image_registry.unique_native_image(CORE_MODULE)?,
+                self.image_registry
+                    .unique_native_image(animation::RENDER_CORE)?,
+                self.image_registry.unique_native_image(animation::URP)?,
+            ];
+            let api = self
+                .instance_api
+                .ok_or("ctor before rooted allocation API")?;
+            let targets = self.callback_targets();
+            let (prepared, _) = callbacks::with_owner(memory, runtime, targets, || {
+                callbacks::with_service(|memory, _| {
+                    self.instance_registry.sync_from_guest(api, memory)
+                })?;
+                Ok::<_, String>((
+                    self.instance_registry.native(api, a[1])?,
+                    self.instance_registry.class(api, a[1])?,
+                ))
+            })?;
+            let (object, class) = prepared?;
+            let (constructed, stats) = callbacks::with_metadata_owner(
+                memory,
+                runtime,
+                targets,
+                reentry::Metadata {
+                    library,
+                    domain: native_domain,
+                    metadata: &mut self.metadata_registry,
+                    images: &mut self.image_registry,
+                    rooted_instance: Some((a[1], class)),
+                },
+                || animation::Constructor::execute(library, images, method, object, class, a[1]),
+            )?;
+            self.curves_constructor = Some(constructed?);
+            self.events.push(format!(
+                "actual ColorCurves ctor executed; nested Mono reentries={}",
+                stats.mono_reentries
+            ));
+            if a[3] != 0 {
+                memory.write_int(a[3], 8, 0)?;
+            }
+            cpu.return_integer(memory, 0)?;
+            // `curves` is a finite constructor checkpoint. Verify this exact
+            // initialized graph across real GC before returning diagnostic
+            // success; serialized instance field views are a subsequent scope.
+            self.mark_completed_layers();
+            self.validate_scalar_callbacks(memory, runtime)?;
+            self.validate_profiler_callbacks(memory, runtime)?;
+            self.validate_unitytls(memory, runtime)?;
+            self.events.push("finite ColorCurves constructor checkpoint completed; stop before initialized instance-field serialization".into());
+            return Ok(true);
+        }
         if self.classlib && self.get_type_method != 0 && a[0] != self.get_type_method {
             let logging_init = self.logging && self.classlib_invokes == 1;
             let project_folder = self.classlib_invokes == 3;
@@ -1809,6 +1908,7 @@ impl Probe {
                         domain: native_domain,
                         metadata: &mut self.metadata_registry,
                         images: &mut self.image_registry,
+                        rooted_instance: None,
                     },
                     operation,
                 )?
@@ -2533,6 +2633,13 @@ impl Probe {
                 })?;
             verified?;
         }
+        if self.curves_constructor.is_some() {
+            let (verified, _) =
+                callbacks::with_owner(memory, runtime, self.callback_targets(), || {
+                    self.curves_constructor.as_mut().unwrap().verify()
+                })?;
+            verified?;
+        }
         if let Some(api) = self.attribute_api {
             let (verified, _) =
                 callbacks::with_owner(memory, runtime, self.callback_targets(), || {
@@ -2624,6 +2731,9 @@ impl Probe {
         if self.stopped {
             return Ok(());
         }
+        if let Some(constructor) = &mut self.curves_constructor {
+            constructor.cleanup()?;
+        }
         self.stopped = true;
         if let Some(api) = self.handle_api {
             self.handle_registry.release(api);
@@ -2668,7 +2778,7 @@ impl Probe {
     }
     pub(super) fn report(&self) -> String {
         format!(
-            "native-root-ready={}\nnative-main-thread-ready={}\nnative-pre-bindings-ready={}\nnative-bindings-ready={}\nprovider-bindings={}\nnative-scalar-adapters={}\nactual-unity-scalar-callbacks-verified={}\nnative-profiler-ready={}\nactual-gc-event-mask={}\nactual-shutdown-callbacks={}\nnative-pre-images-ready={}\nactual-unitytls-leaf-verified={}\nnative-images-ready={}\nnative-metadata-ready={}\nnative-strings-ready={}\nnative-managed-types-ready={}\nnative-managed-type-invokes={}\nnative-classlib-ready={}\nnative-classlib-invokes={}\nnative-logging-ready={}\nnative-exceptions-ready={}\nnative-synchronization-ready={}\nnative-subsystems-ready={}\nnative-subsystem-map-ready={}\nnative-imgui-ready={}\nnative-attributes-ready={}\nnative-attribute-arrays-ready={}\nnative-assembly-lookup-ready={}\nnative-ordinary-objects-ready={}\nfull-game-admission=false\n{}{}{}{}{}{}{}{}{}{}{}\n",
+            "native-root-ready={}\nnative-main-thread-ready={}\nnative-pre-bindings-ready={}\nnative-bindings-ready={}\nprovider-bindings={}\nnative-scalar-adapters={}\nactual-unity-scalar-callbacks-verified={}\nnative-profiler-ready={}\nactual-gc-event-mask={}\nactual-shutdown-callbacks={}\nnative-pre-images-ready={}\nactual-unitytls-leaf-verified={}\nnative-images-ready={}\nnative-metadata-ready={}\nnative-strings-ready={}\nnative-managed-types-ready={}\nnative-managed-type-invokes={}\nnative-classlib-ready={}\nnative-classlib-invokes={}\nnative-logging-ready={}\nnative-exceptions-ready={}\nnative-synchronization-ready={}\nnative-subsystems-ready={}\nnative-subsystem-map-ready={}\nnative-imgui-ready={}\nnative-attributes-ready={}\nnative-attribute-arrays-ready={}\nnative-assembly-lookup-ready={}\nnative-ordinary-objects-ready={}\nfull-game-admission=false\n{}{}{}{}{}{}{}{}{}{}{}{}\n",
             self.root_ready,
             self.main_thread_ready,
             self.pre_bindings_ready,
@@ -2698,6 +2808,7 @@ impl Probe {
             self.attribute_arrays_ready,
             self.assembly_lookup_ready,
             self.ordinary_objects_ready,
+            self.curves_constructor.as_ref().map_or_else(String::new, animation::Constructor::report),
             self.instance_registry.report(),
             self.name_registry.report(),
             self.error_registry.report(),
@@ -2890,6 +3001,8 @@ mod tests {
             logging_ready: false,
             exceptions: false,
             exceptions_ready: false,
+            curves: false,
+            curves_constructor: None,
             ordinary_objects: false,
             ordinary_objects_ready: false,
             instance_api: None,

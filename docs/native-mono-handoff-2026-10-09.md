@@ -10,7 +10,7 @@ main（包括 acc3d3a），后续已验证代码提交也立即合流。完整�
 - Worktree：`/Users/alphaly/.codex/worktrees/native-mono-shared-memory/wire`
 - 分支：`codex/native-mono-shared-memory`
 - 主目录：`/Users/alphaly/Projects/wire`（与实施分支同步已验证代码）
-- 当前已合入实现：`acc3d3a`；后续代码与性能证据见本文末尾。
+- 最近已合入实现：`10731e1`（真实对象分配）和 `0d391b1`（回调栈性能）；后续代码与证据见本文末尾。
 - 实施计划输入：主checkout `wire-out/unity-native-mono-plan-2026-10-09/plan.md`
 
 已有阶段提交：
@@ -318,3 +318,11 @@ Internal_Create_Injected(ref ManagedSpanWrapper)（0x18006c410）、Internal_Des
 （0x18006c2a0）和 ScriptableObject CreateScriptableObject（0x1800c1e30），需固定
 ARM64 typed adapters 与 same-owner guest reentry，不能把 host pointers交给 x64。
 继续推进；完整游戏 backend/Admission 仍 false。
+
+## 2026-10-11 真实 ColorCurves ctor
+
+新实现和验证见 `docs/native-mono-unity-curves-2026-10-11.md`。四个固定 adapter
+接入后，有限 curves 检查点在真实 ctor、强制 GC 对象图验证及 8 次真实资源释放后
+exit 0；完整 native backend/Admission 仍 false。下一阶段是 initialized instance
+fields 的反序列化：继续探测到 `0x1807b07ae` 对 owned object +0x30 的 1B 写入；
+目前没有这种字段视图，不允许用扩大映射掩盖失败。
