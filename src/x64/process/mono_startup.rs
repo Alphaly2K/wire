@@ -43,7 +43,9 @@ mod arrays;
 mod attributes;
 mod bindings;
 mod callbacks;
+mod constructors;
 mod errors;
+mod field_layouts;
 mod fields;
 mod handles;
 mod images;
@@ -54,10 +56,12 @@ mod metadata;
 mod names;
 mod objects;
 mod reentry;
+mod reference_arrays;
 mod reflection;
 mod services;
 mod subsystems;
 mod unitytls;
+mod virtual_methods;
 macro_rules! symbol {
     ($library:expr, $name:literal, $ty:ty) => {{
         let pointer = unsafe { libc::dlsym($library, concat!($name, "\0").as_ptr().cast()) };
@@ -244,6 +248,11 @@ pub(super) struct Probe {
     exceptions_ready: bool,
     assets: bool,
     asset_invokes: usize,
+    input_map_invokes: usize,
+    input_action_invokes: usize,
+    virtual_resolutions: usize,
+    reference_array_api: Option<reference_arrays::Api>,
+    reference_array_registry: reference_arrays::Registry,
     components: bool,
     component_invokes: usize,
     fields: bool,
@@ -674,6 +683,11 @@ impl Probe {
             exceptions_ready: false,
             assets,
             asset_invokes: 0,
+            input_map_invokes: 0,
+            input_action_invokes: 0,
+            virtual_resolutions: 0,
+            reference_array_api: None,
+            reference_array_registry: reference_arrays::Registry::default(),
             components,
             component_invokes: 0,
             fields,
@@ -1049,6 +1063,19 @@ impl Probe {
                 self.events.push("native thread object retained by v2 strong handle through complete diagnostic exposure; opaque guest token has no mapped object/header".into());
             }
             "mono_gc_wbarrier_set_field" if self.root_ready && self.main_thread => {
+                if self.assets && self.reference_array_registry.has_reference(a[0], a[1]) {
+                    self.reference_array_registry.store(
+                        self.reference_array_api
+                            .ok_or("array barrier before typed API")?,
+                        self.instance_api
+                            .ok_or("array barrier before pinned root API")?,
+                        &self.instance_registry,
+                        memory,
+                        [a[0], a[1], a[2]],
+                    )?;
+                    cpu.return_integer(memory, 0)?;
+                    return Ok(false);
+                }
                 if self.fields && self.field_registry.has_reference(a[0], a[1]) {
                     let api = self
                         .instance_api
@@ -1246,6 +1273,18 @@ impl Probe {
         }
         targets
     }
+    fn constructor_images(&self) -> Result<Vec<Object>, String> {
+        let mut images = vec![
+            self.image_registry.unique_native_image(CORE_MODULE)?,
+            self.image_registry
+                .unique_native_image(animation::RENDER_CORE)?,
+            self.image_registry.unique_native_image(animation::URP)?,
+        ];
+        if self.assets {
+            images.push(self.image_registry.unique_native_image(INPUT_SYSTEM)?);
+        }
+        Ok(images)
+    }
     pub(super) fn stop_before(&mut self, function: &str, cpu: &Cpu64) -> Result<bool, String> {
         if self.bindings && function == "mono_profiler_install" {
             self.registry.seal()?;
@@ -1288,20 +1327,34 @@ impl Probe {
         }
         if self.assets && self.asset_invokes > 0 && function == "mono_array_new" && cpu.regs[8] != 0
         {
+            let element = self
+                .metadata_registry
+                .native(cpu.regs[2], metadata::Kind::Class)?;
+            if self
+                .reference_array_api
+                .is_some_and(|api| api.supports(element))
+            {
+                return Ok(false);
+            }
             self.mark_completed_layers();
-            self.events.push("actual input asset reached nonempty array allocation; stop before unadmitted element/reference lifecycle".into());
+            self.events.push("actual input asset reached unadmitted nonempty element allocation; stop before copying unknown value/reference layout".into());
             return Ok(true);
         }
-        if self.components && function == "mono_runtime_invoke" {
-            if let Some(constructor) = &self.curves_constructor {
-                let method = self
-                    .metadata_registry
-                    .native(cpu.regs[1], metadata::Kind::Method)?;
-                if constructor.supports_component(method)
-                    || (self.assets && constructor.supports_asset(method))
-                {
-                    return Ok(false);
-                }
+        if self.components && self.curves_constructor.is_some() && function == "mono_runtime_invoke"
+        {
+            let method = self
+                .metadata_registry
+                .native(cpu.regs[1], metadata::Kind::Method)?;
+            if constructors::Api::load(
+                self.native
+                    .as_ref()
+                    .ok_or("constructor before runtime")?
+                    .library,
+            )?
+            .describe(method, &self.constructor_images()?)?
+            .is_some()
+            {
+                return Ok(false);
             }
         }
         if self.curves
@@ -1373,7 +1426,17 @@ impl Probe {
     }
     pub(super) fn handles_object(&self, function: &str) -> bool {
         self.strings
-            && ((self.ordinary_objects && function == "mono_object_new")
+            && ((self.assets
+                && matches!(
+                    function,
+                    "mono_object_get_virtual_method" | "mono_array_addr_with_size"
+                ))
+                || (self.assets
+                    && matches!(
+                        function,
+                        "mono_string_new_wrapper" | "mono_unity_string_empty_wrapper"
+                    ))
+                || (self.ordinary_objects && function == "mono_object_new")
                 || (self.assembly_lookup && names::handles(function))
                 || (self.attribute_arrays && errors::handles(function))
                 || (self.attributes
@@ -1507,6 +1570,33 @@ impl Probe {
         cpu.regs[4]
             .checked_add(8)
             .ok_or("object return stack overflow")?;
+        if self.assets && function == "mono_array_addr_with_size" {
+            let address = self.reference_array_registry.address(a[0], a[1], a[2])?;
+            cpu.return_integer(memory, address)?;
+            return Ok(false);
+        }
+        if self.assets && function == "mono_object_get_virtual_method" {
+            let api = self
+                .instance_api
+                .ok_or("virtual resolution before instance API")?;
+            let method = self
+                .metadata_registry
+                .native(a[1], metadata::Kind::Method)?;
+            let (resolved, _) =
+                callbacks::with_owner(memory, runtime, self.callback_targets(), || {
+                    let object = self.instance_registry.native(api, a[0])?;
+                    let class = self.instance_registry.class(api, a[0])?;
+                    virtual_methods::Api::load(library)?.resolve(object, class, method)
+                })?;
+            let token = self.metadata_registry.wrap(
+                memory,
+                metadata::Value::Handle(resolved?, metadata::Kind::Method),
+            )?;
+            self.virtual_resolutions += 1;
+            self.events.push(format!("actual rooted virtual-method resolution: object={:#x} method={:#x} result={token:#x}; no managed invocation", a[0], a[1]));
+            cpu.return_integer(memory, token)?;
+            return Ok(false);
+        }
         if self.fields
             && function == "mono_field_get_value"
             && self.instance_registry.contains(a[0])
@@ -1546,10 +1636,57 @@ impl Probe {
                 let class = self.metadata_registry.native(a[1], metadata::Kind::Class)?;
                 let (token, _) =
                     callbacks::with_owner(memory, runtime, self.callback_targets(), || {
-                        self.instance_registry.allocate(api, domain, class)
+                        let boxed = if self.assets {
+                            fields::input_box_size(
+                                library,
+                                self.image_registry.unique_native_image(INPUT_SYSTEM)?,
+                                class,
+                            )?
+                        } else {
+                            None
+                        };
+                        if let Some(size) = boxed {
+                            self.instance_registry
+                                .allocate_boxed(api, domain, class, size)
+                        } else {
+                            self.instance_registry.allocate(api, domain, class)
+                        }
                     })?;
                 let token = token?;
                 self.instance_registry.publish(memory, token)?;
+                if self.assets {
+                    let image = self.image_registry.unique_native_image(INPUT_SYSTEM)?;
+                    let (installed, _) =
+                        callbacks::with_owner(memory, runtime, self.callback_targets(), || {
+                            let object = self.instance_registry.native(api, token)?;
+                            let image_of = symbol!(
+                                library,
+                                "mono_class_get_image",
+                                unsafe extern "C" fn(Object) -> Object
+                            );
+                            let specs = if unsafe { image_of(class) } == image {
+                                field_layouts::specs(
+                                    library,
+                                    self.image_registry.unique_native_image(CORE_MODULE)?,
+                                    &[image],
+                                    object,
+                                    class,
+                                )?
+                            } else {
+                                Vec::new()
+                            };
+                            callbacks::with_service(|memory, _| {
+                                self.field_registry.install(
+                                    library,
+                                    api,
+                                    &mut self.instance_registry,
+                                    memory,
+                                    specs,
+                                )
+                            })
+                        })?;
+                    installed?;
+                }
                 self.events.push(format!("actual checked object allocated and immediately strong-rooted: {token:#x}; constructor not invoked; no native header published"));
                 token
             } else {
@@ -1709,6 +1846,34 @@ impl Probe {
             cpu.return_integer(memory, result)?;
             return Ok(false);
         }
+        if function == "mono_array_new" && self.assets && a[2] != 0 {
+            if a[0] != ROOT_TOKEN {
+                return Err("reference array allocation requires owned domain".into());
+            }
+            let element = self.metadata_registry.native(a[1], metadata::Kind::Class)?;
+            let api = self
+                .reference_array_api
+                .ok_or("reference array before checked element API")?;
+            let root_api = self
+                .instance_api
+                .ok_or("reference array before pinned root API")?;
+            let (token, _) =
+                callbacks::with_owner(memory, runtime, self.callback_targets(), || {
+                    self.reference_array_registry.allocate(
+                        api,
+                        root_api,
+                        &mut self.instance_registry,
+                        domain,
+                        element,
+                        a[2],
+                    )
+                })?;
+            let token = token?;
+            self.reference_array_registry.publish(memory, token)?;
+            self.events.push(format!("actual pinned reference SZ array allocated: token={token:#x} length={}; only owned header cells and reference tokens exposed",a[2]));
+            cpu.return_integer(memory, token)?;
+            return Ok(false);
+        }
         if function == "mono_array_new" {
             if a[0] != ROOT_TOKEN || domain.is_null() || a[2] != 0 {
                 return Err(
@@ -1767,16 +1932,70 @@ impl Probe {
             }
         };
         let targets = self.callback_targets();
-        let result = if function == "mono_string_new_len" {
-            if a[0] != ROOT_TOKEN || domain.is_null() || a[2] > 32768 {
+        let mut input_bytes = None;
+        let result = if matches!(
+            function,
+            "mono_string_new_len" | "mono_string_new_wrapper" | "mono_unity_string_empty_wrapper"
+        ) {
+            let empty = function == "mono_unity_string_empty_wrapper";
+            let wrapper = function != "mono_string_new_len";
+            if domain.is_null() || (!wrapper && (a[0] != ROOT_TOKEN || a[2] > 32768)) {
                 return Err("string allocation requires owned root and bounded input".into());
             }
-            let mut bytes = vec![0; a[2] as usize];
-            memory.read(a[1], &mut bytes)?;
+            let bytes = if empty {
+                Vec::new()
+            } else if wrapper {
+                string(memory, a[0])?.into_bytes()
+            } else {
+                let mut bytes = vec![0; a[2] as usize];
+                memory.read(a[1], &mut bytes)?;
+                bytes
+            };
+            if bytes.len() > 32768 {
+                return Err("wrapper string exceeds input bound".into());
+            }
+            input_bytes = Some(bytes.len());
+            let text = (wrapper && !empty)
+                .then(|| CString::new(bytes.clone()))
+                .transpose()
+                .map_err(|e| e.to_string())?;
             let (token, _) = callbacks::with_owner(memory, runtime, targets, || {
-                let object =
-                    unsafe { (api.new_string)(domain, bytes.as_ptr().cast(), bytes.len() as u32) };
-                self.object_registry.root_string(api, object)
+                let object = if empty {
+                    let current =
+                        symbol!(library, "mono_domain_get", unsafe extern "C" fn() -> Object);
+                    let new = symbol!(
+                        library,
+                        "mono_unity_string_empty_wrapper",
+                        unsafe extern "C" fn() -> Object
+                    );
+                    if unsafe { current() } != domain {
+                        return Err("empty string current domain mismatch".into());
+                    }
+                    unsafe { new() }
+                } else if let Some(text) = &text {
+                    let current =
+                        symbol!(library, "mono_domain_get", unsafe extern "C" fn() -> Object);
+                    let new = symbol!(
+                        library,
+                        "mono_string_new_wrapper",
+                        unsafe extern "C" fn(*const c_char) -> Object
+                    );
+                    if unsafe { current() } != domain {
+                        return Err("string wrapper current domain mismatch".into());
+                    }
+                    unsafe { new(text.as_ptr()) }
+                } else {
+                    unsafe { (api.new_string)(domain, bytes.as_ptr().cast(), bytes.len() as u32) }
+                };
+                let token = self.object_registry.root_string(api, object)?;
+                if self.assets {
+                    if let Some(instance_api) = self.instance_api {
+                        let native = self.object_registry.native_string(api, token)?;
+                        self.instance_registry
+                            .adopt_string(instance_api, token, native)?;
+                    }
+                }
+                Ok::<_, String>(token)
             })?;
             let token = token?;
             self.object_registry.publish_string(memory, token)?;
@@ -1794,7 +2013,7 @@ impl Probe {
         };
         self.events.push(format!(
             "actual owned string boundary {function} -> {result:#x}; bytes={}",
-            a[2]
+            input_bytes.unwrap_or(0)
         ));
         cpu.return_integer(memory, result)?;
         Ok(false)
@@ -1945,22 +2164,35 @@ impl Probe {
                     self.instance_registry.sync_from_guest(api, memory)
                 })?;
                 self.field_registry.sync(api, &self.instance_registry)?;
+                if let Some(array_api) = self.reference_array_api {
+                    self.reference_array_registry
+                        .sync(array_api, api, &self.instance_registry)?;
+                }
                 Ok::<_, String>((
                     self.instance_registry.native(api, a[1])?,
                     self.instance_registry.class(api, a[1])?,
                 ))
             })?;
             let (object, class) = prepared?;
-            let is_asset = self.assets
-                && self
-                    .curves_constructor
-                    .as_ref()
-                    .is_some_and(|c| c.supports_asset(method));
-            let input_image = if is_asset {
+            let descriptor_api = constructors::Api::load(library)?;
+            let descriptor = descriptor_api
+                .describe(method, &self.constructor_images()?)?
+                .ok_or("managed entry is not a constructor")?;
+            descriptor_api.receiver(&descriptor, object, class)?;
+            let input_image = if self.assets {
                 self.image_registry.unique_native_image(INPUT_SYSTEM)?
             } else {
                 ptr::null_mut()
             };
+            let is_input = !input_image.is_null() && descriptor.image == input_image;
+            if self.assets && self.reference_array_api.is_none() {
+                let (api, _) = callbacks::with_owner(memory, runtime, targets, || {
+                    reference_arrays::Api::load(library, input_image)
+                })?;
+                self.reference_array_api = Some(api?);
+            }
+            self.registry
+                .exact_target(animation::MARKER_BINDING.0, animation::MARKER_BINDING.1)?;
             let (constructed, _) = callbacks::with_metadata_owner(
                 memory,
                 runtime,
@@ -1973,20 +2205,47 @@ impl Probe {
                     rooted_instance: Some((a[1], class)),
                 },
                 || {
-                    let constructor = self.curves_constructor.as_ref().unwrap();
-                    if is_asset {
-                        constructor.execute_asset(input_image, method, object, class, a[1])
-                    } else {
-                        constructor.execute_component(images, method, object, class, a[1])
-                    }
+                    self.curves_constructor
+                        .as_ref()
+                        .unwrap()
+                        .execute_managed(images[0], method, object, a[1])
                 },
             )?;
             constructed?;
             let (installed, _) = callbacks::with_owner(memory, runtime, targets, || {
-                let specs = if is_asset {
-                    fields::input_asset_specs(library, object, class)?
-                } else {
+                let specs = if is_input {
+                    let string_class = symbol!(
+                        library,
+                        "mono_get_string_class",
+                        unsafe extern "C" fn() -> Object
+                    );
+                    let object_class = symbol!(
+                        library,
+                        "mono_object_get_class",
+                        unsafe extern "C" fn(Object) -> Object
+                    );
+                    let string_api = self
+                        .object_api
+                        .ok_or("constructed strings before canonical registry")?;
+                    for native in
+                        self.field_registry
+                            .native_references(api, &self.instance_registry, a[1])?
+                    {
+                        if unsafe { object_class(native) } == unsafe { string_class() } {
+                            let token = self.object_registry.root_string(string_api, native)?;
+                            self.instance_registry.adopt_string(api, token, native)?;
+                            callbacks::with_service(|memory, _| {
+                                self.object_registry.publish_string(memory, token)
+                            })?;
+                        }
+                    }
+                    self.field_registry
+                        .refresh(api, &mut self.instance_registry, a[1])?;
+                    Vec::new()
+                } else if fields::is_component(library, images[1], class)? {
                     fields::component_specs(library, images, object, class)?
+                } else {
+                    field_layouts::specs(library, images[0], &images, object, class)?
                 };
                 callbacks::with_service(|memory, _| {
                     self.field_registry.install(
@@ -1999,11 +2258,15 @@ impl Probe {
                 })
             })?;
             installed?;
-            if is_asset {
-                self.asset_invokes += 1;
-            } else {
-                self.component_invokes += 1;
+            // Keep historical per-class counters for probe comparisons only.
+            // These names do not select or admit a managed implementation.
+            match (is_input, descriptor.name.as_str()) {
+                (true, "InputAction") => self.input_action_invokes += 1,
+                (true, "InputActionMap") => self.input_map_invokes += 1,
+                (true, "InputActionAsset") => self.asset_invokes += 1,
+                _ => self.component_invokes += 1,
             }
+            self.events.push(format!("metadata-qualified managed constructor: {}; real IL, rooted this, typed engine boundaries",descriptor.name));
             if a[3] != 0 {
                 memory.write_int(a[3], 8, 0)?;
             }
@@ -2832,7 +3095,15 @@ impl Probe {
                 if let Some(api) = self.instance_api {
                     callbacks::with_service(|memory, _| {
                         self.instance_registry.sync_from_guest(api, memory)?;
-                        self.field_registry.sync(api, &self.instance_registry)
+                        self.field_registry.sync(api, &self.instance_registry)?;
+                        if let Some(array_api) = self.reference_array_api {
+                            self.reference_array_registry.sync(
+                                array_api,
+                                api,
+                                &self.instance_registry,
+                            )?;
+                        }
+                        Ok::<_, String>(())
                     })?;
                 }
                 unsafe {
@@ -2882,7 +3153,15 @@ impl Probe {
             let (verified, _) =
                 callbacks::with_owner(memory, runtime, self.callback_targets(), || {
                     self.instance_registry.verify(api)?;
-                    self.field_registry.verify(api, &self.instance_registry)
+                    self.field_registry.verify(api, &self.instance_registry)?;
+                    if let Some(array_api) = self.reference_array_api {
+                        self.reference_array_registry.verify(
+                            array_api,
+                            api,
+                            &self.instance_registry,
+                        )?;
+                    }
+                    Ok::<_, String>(())
                 })?;
             verified?;
         }
@@ -2953,6 +3232,8 @@ impl Probe {
             self.instance_registry.retire_views(memory)?;
             self.field_registry
                 .retire(memory, &self.instance_registry)?;
+            self.reference_array_registry
+                .retire(memory, &self.instance_registry)?;
             self.handle_registry.retire_views(memory)?;
             self.error_registry.retire();
             return result;
@@ -2967,6 +3248,8 @@ impl Probe {
         self.attribute_registry.retire_views(memory)?;
         self.instance_registry.retire_views(memory)?;
         self.field_registry
+            .retire(memory, &self.instance_registry)?;
+        self.reference_array_registry
             .retire(memory, &self.instance_registry)?;
         self.handle_registry.retire_views(memory)?;
         self.error_registry.retire();
@@ -3066,12 +3349,12 @@ impl Probe {
             self.assembly_lookup_ready,
             self.ordinary_objects_ready,
             self.curves_constructor.as_ref().map_or_else(String::new, animation::Constructor::report),
-            self.instance_registry.report() + &self.field_registry.report() + &format!("native-component-constructors={}\nnative-input-asset-constructors={}\n", self.component_invokes, self.asset_invokes),
+            self.instance_registry.report() + &self.field_registry.report() + &format!("native-component-constructors={}\nnative-input-asset-constructors={}\nnative-virtual-method-resolutions={}\nnative-input-map-constructors={}\nnative-input-action-constructors={}\n", self.component_invokes, self.asset_invokes, self.virtual_resolutions, self.input_map_invokes, self.input_action_invokes),
             self.name_registry.report(),
             self.error_registry.report(),
             self.attribute_registry.report(),
             self.handle_registry.report(),
-            self.array_registry.report(),
+            self.array_registry.report() + &self.reference_array_registry.report(),
             self.reflection_registry.report(),
             self.object_registry.report(),
             self.image_registry.report(),
@@ -3260,6 +3543,11 @@ mod tests {
             exceptions_ready: false,
             assets: false,
             asset_invokes: 0,
+            input_map_invokes: 0,
+            input_action_invokes: 0,
+            virtual_resolutions: 0,
+            reference_array_api: None,
+            reference_array_registry: reference_arrays::Registry::default(),
             components: false,
             component_invokes: 0,
             fields: false,

@@ -9,6 +9,7 @@ const LIMIT: usize = 1024;
 pub(super) struct Api {
     strong: unsafe extern "C" fn(Object, i32) -> Object,
     new: unsafe extern "C" fn(Object, Object, *mut u16) -> Object,
+    value_box: unsafe extern "C" fn(Object, Object, Object) -> Object,
     target: unsafe extern "C" fn(Object) -> Object,
     free: unsafe extern "C" fn(Object),
     class: unsafe extern "C" fn(Object) -> Object,
@@ -72,6 +73,10 @@ impl Api {
                 "wire_mono_object_new_rooted_checked",
                 unsafe extern "C" fn(Object, Object, *mut u16) -> Object
             ),
+            value_box: sym!(
+                "mono_value_box",
+                unsafe extern "C" fn(Object, Object, Object) -> Object
+            ),
             target: sym!(
                 "mono_gchandle_get_target_v2",
                 unsafe extern "C" fn(Object) -> Object
@@ -110,6 +115,7 @@ struct Root {
 pub(super) struct Registry {
     roots: BTreeMap<u64, Root>,
     verified: usize,
+    boxed: std::collections::BTreeSet<u64>,
     borrowed_verified: usize,
     released: bool,
     views_retired: bool,
@@ -182,6 +188,63 @@ impl Registry {
         }
         result
     }
+    /// The caller must validate the exact locked value class and its layout.
+    /// Copy a zero value with NULL references, pin immediately, then publish
+    /// field tokens only. No unboxed native address leaves this registry.
+    pub(super) fn allocate_boxed(
+        &mut self,
+        api: Api,
+        domain: Object,
+        class: Object,
+        size: usize,
+    ) -> Result<u64, String> {
+        if self.released
+            || self.views_retired
+            || self.roots.len() >= LIMIT
+            || domain.is_null()
+            || class.is_null()
+            || size == 0
+            || size > 256
+            || !size.is_multiple_of(8)
+        {
+            return Err("boxed zero allocation outside live bounded layout".into());
+        }
+        let mut zero = [0u64; 32];
+        let native = unsafe { (api.value_box)(domain, class, zero.as_mut_ptr().cast()) };
+        if native.is_null() {
+            return Err("native zero value boxing returned NULL".into());
+        }
+        let handle = unsafe { (api.strong)(native, 1) };
+        let result = (|| {
+            if handle.is_null()
+                || unsafe { (api.target)(handle) } != native
+                || unsafe { (api.class)(native) } != class
+                || self.roots.values().any(|r| r.native == native)
+            {
+                return Err("boxed zero root/class/identity mismatch".into());
+            }
+            let token = BASE + self.roots.len() as u64 * 65536;
+            self.roots.insert(
+                token,
+                Root {
+                    handle,
+                    native,
+                    class,
+                    borrowed: false,
+                    cached: None,
+                    published: false,
+                },
+            );
+            self.boxed.insert(token);
+            Ok(token)
+        })();
+        if result.is_err() && !handle.is_null() {
+            unsafe {
+                (api.free)(handle);
+            }
+        }
+        result
+    }
     /// Called only for a native reference just read from a still-rooted graph.
     /// Pin before publishing an identity, never accept arbitrary guest pointers.
     pub(super) fn borrow(&mut self, api: Api, native: Object) -> Result<u64, String> {
@@ -232,18 +295,51 @@ impl Registry {
     ) -> Result<(), String> {
         if !(0x6ffe90000000..0x6ffe90040000).contains(&token)
             || !(token - 0x6ffe90000000).is_multiple_of(256)
-            || self.released
-            || self.views_retired
-            || native.is_null()
-            || self.roots.len() >= LIMIT
         {
-            return Err("array alias outside canonical live empty-array contract".into());
+            return Err("array alias outside canonical empty-array arena".into());
+        }
+        self.adopt_canonical(api, token, native)
+    }
+    /// Called only after the string registry verifies this canonical identity.
+    pub(super) fn adopt_string(
+        &mut self,
+        api: Api,
+        token: u64,
+        native: Object,
+    ) -> Result<(), String> {
+        if !(0x6ffe70000000..0x6ffe78000000).contains(&token)
+            || !(token - 0x6ffe70000000).is_multiple_of(131072)
+        {
+            return Err("string alias outside canonical string arena".into());
+        }
+        self.adopt_canonical(api, token, native)
+    }
+    /// Only a fully validated owned SZ reference-array allocation may call this.
+    pub(super) fn adopt_reference_array(
+        &mut self,
+        api: Api,
+        token: u64,
+        native: Object,
+    ) -> Result<(), String> {
+        if !(0x6ffeb0000000..0x6ffeb1000000).contains(&token)
+            || !(token - 0x6ffeb0000000).is_multiple_of(65536)
+        {
+            return Err("reference array alias outside canonical arena".into());
+        }
+        self.adopt_canonical(api, token, native)
+    }
+    fn adopt_canonical(&mut self, api: Api, token: u64, native: Object) -> Result<(), String> {
+        if self.released || self.views_retired || native.is_null() {
+            return Err("canonical alias after retirement/NULL".into());
         }
         if self.roots.contains_key(&token) {
             if self.native(api, token)? == native {
                 return Ok(());
             }
             return Err("canonical array alias changed identity".into());
+        }
+        if self.roots.len() >= LIMIT || self.roots.values().any(|r| r.native == native) {
+            return Err("canonical alias exceeds capacity or duplicates native identity".into());
         }
         let handle = unsafe { (api.strong)(native, 1) };
         if handle.is_null() || unsafe { (api.target)(handle) } != native {
@@ -410,7 +506,7 @@ impl Registry {
         }
     }
     pub(super) fn report(&self) -> String {
-        format!("native-allocated-objects={}\nnative-allocated-object-gc-verifications={}\nnative-allocated-object-roots-released={}\nnative-allocated-object-views-retired={}\nnative-unity-cached-pointer-syncs={}\n", self.roots.values().filter(|r| !r.borrowed).count(), self.verified, self.released, self.views_retired, self.synchronized) + &format!("native-borrowed-object-roots={}\nnative-borrowed-object-gc-verifications={}\n", self.roots.values().filter(|r| r.borrowed).count(), self.borrowed_verified)
+        format!("native-allocated-objects={}\nnative-allocated-object-gc-verifications={}\nnative-allocated-object-roots-released={}\nnative-allocated-object-views-retired={}\nnative-unity-cached-pointer-syncs={}\n", self.roots.values().filter(|r| !r.borrowed).count(), self.verified, self.released, self.views_retired, self.synchronized) + &format!("native-borrowed-object-roots={}\nnative-borrowed-object-gc-verifications={}\n", self.roots.values().filter(|r| r.borrowed).count(), self.borrowed_verified) + &format!("native-boxed-value-objects={}\n",self.boxed.len())
     }
 }
 #[cfg(test)]
@@ -461,6 +557,12 @@ pub(super) mod tests {
         Api {
             strong,
             new,
+            value_box: {
+                unsafe extern "C" fn value_box(_: Object, _: Object, _: Object) -> Object {
+                    4usize as Object
+                }
+                value_box
+            },
             target,
             free,
             class,
@@ -469,6 +571,19 @@ pub(super) mod tests {
             field_set,
             unity_base: ptr::null_mut(),
             cached_field: 5usize as Object,
+        }
+    }
+    pub(in crate::x64::process::mono_startup) fn identity_api() -> Api {
+        unsafe extern "C" fn identity(p: Object) -> Object {
+            p
+        }
+        unsafe extern "C" fn pin(p: Object, _: i32) -> Object {
+            p
+        }
+        Api {
+            strong: pin,
+            target: identity,
+            ..api()
         }
     }
     #[test]
@@ -503,6 +618,48 @@ pub(super) mod tests {
         assert!(registry
             .adopt_empty_array(api, token, 4usize as Object)
             .is_err());
+    }
+    #[test]
+    fn boxed_zero_root_has_no_unboxed_host_alias_and_retires_with_other_objects() {
+        let api = api();
+        let mut roots = Registry::default();
+        assert!(roots
+            .allocate_boxed(api, 1usize as Object, 2usize as Object, 257)
+            .is_err());
+        let token = roots
+            .allocate_boxed(api, 1usize as Object, 2usize as Object, 88)
+            .unwrap();
+        assert_eq!(roots.native(api, token).unwrap(), 4usize as Object);
+        let mut memory = Memory::default();
+        roots.publish(&mut memory, token).unwrap();
+        assert!(memory.read_int(token + 16, 8).is_err());
+        roots.verify(api).unwrap();
+        roots.release(api);
+        roots.retire_views(&mut memory).unwrap();
+        assert_eq!(FREES.with(Cell::get), 1);
+    }
+    #[test]
+    fn canonical_string_alias_checks_arena_and_retains_exact_field_reference_identity() {
+        let api = api();
+        let mut registry = Registry::default();
+        let token = 0x6ffe70000000;
+        for invalid in [token + 1, token - 1, 0x6ffe78000000] {
+            assert!(registry
+                .adopt_string(api, invalid, 4usize as Object)
+                .is_err());
+        }
+        registry.adopt_string(api, token, 4usize as Object).unwrap();
+        assert_eq!(registry.borrow(api, 4usize as Object).unwrap(), token);
+        assert_eq!(
+            registry.compatible(api, token, 2usize as Object).unwrap(),
+            4usize as Object
+        );
+        assert!(registry.compatible(api, token, 6usize as Object).is_err());
+        assert!(registry
+            .adopt_string(api, token + 131072, 4usize as Object)
+            .is_err());
+        registry.release(api);
+        assert_eq!(FREES.with(Cell::get), 1);
     }
     #[test]
     fn borrowed_reachable_object_is_pinned_deduplicated_and_separately_counted() {

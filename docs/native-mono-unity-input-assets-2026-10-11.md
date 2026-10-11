@@ -30,3 +30,12 @@ header 不可读以及退休后拒绝。
 0x6fff005a0000 与 method token 0x6ffe403d2000。继续受检虚方法解析和实际
 serialization callback，再实现有引用元素的数组。有限检查点没有完成输入系统或
 完整游戏执行；CPU user10.196632s/wall16.916520s 不是端到端性能对照。
+
+## 当前实现已通用化
+
+上面的 probe-01 是早期检查点。最新实现不再按 Input 类列举 ctor token 或 serialized
+field names，而由 Method/Field/SerializeField metadata 生成受检入口与布局。probe-11
+已实际完成 asset1、map1、action9、34次 virtual resolution、2个非空引用数组、
+1个 boxed InputBinding、602 cells及其完整 GC/退休验证。当前停在 InputBinding[35]
+结构体数组，详细范围和证据见 `native-mono-managed-construction-2026-10-11.md`。
+完整游戏后端仍 false，没有端到端性能对照。

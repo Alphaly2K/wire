@@ -7,6 +7,10 @@ pub(super) const KEYFRAME_BYTES: usize = 28;
 pub(super) const URP: &str = "c6221a413a3d9cb94e15ef83640a835602447f6ce7f74ef55fe301d77d0af845";
 pub(super) const RENDER_CORE: &str =
     "9b36919fc9084f3d4a9e796ee2c714ca393e9c8210aaf5d40047400f65d1d338";
+pub(super) const MARKER_BINDING: (&str, u64) = (
+    "Unity.Profiling.LowLevel.Unsafe.ProfilerUnsafeUtility::CreateMarker_Injected",
+    0x180061b40,
+);
 pub(super) const BINDINGS: [(&str, u64); 4] = [
     (
         "UnityEngine.AnimationCurve::Internal_Create_Injected",
@@ -199,6 +203,9 @@ struct State {
     component_calls: usize,
     component: bool,
     offset_calls: usize,
+    input_active: bool,
+    marker_installed: bool,
+    markers: Vec<u64>,
 }
 thread_local! { static STATE: RefCell<Option<State>> = const { RefCell::new(None) }; }
 fn resources() -> Result<Vec<Resource>, String> {
@@ -333,6 +340,48 @@ unsafe extern "C" fn instance_id_offset() -> i32 {
         Ok(value)
     })
 }
+unsafe extern "C" fn create_input_marker(
+    span: *const Span,
+    category: u16,
+    flags: u16,
+    metadata_count: i32,
+) -> Object {
+    checked(|| {
+        STATE.with(|s| -> Result<(), String> {
+            if s.borrow()
+                .as_ref()
+                .is_none_or(|s| !s.input_active || s.markers.len() >= 64)
+            {
+                Err("profiler marker outside checked input invocation".into())
+            } else {
+                Ok(())
+            }
+        })?;
+        if span.is_null() || category != 1 || flags != 0 || metadata_count != 0 {
+            return Err("input profiler marker scalar ABI mismatch".into());
+        }
+        let span = unsafe { span.read_unaligned() };
+        if span.begin.is_null()
+            || span.length <= 0
+            || span.length > 128
+            || !(span.begin as usize).is_multiple_of(2)
+        {
+            return Err("input marker UTF16 span mismatch".into());
+        }
+        let units: Vec<_> = (0..span.length as usize)
+            .map(|i| unsafe { span.begin.cast::<u16>().add(i).read_unaligned() })
+            .collect();
+        let name = String::from_utf16(&units).map_err(|e| e.to_string())?;
+        let pointer = callbacks::guest_marker_span(
+            MARKER_BINDING.1,
+            &units,
+            &[category as u64, flags as u64, metadata_count as u64],
+        )?;
+        STATE.with(|s| s.borrow_mut().as_mut().unwrap().markers.push(pointer));
+        eprintln!("NATIVE_MONO_INPUT_MARKER_CREATED: name={name} actual guest result={pointer:#x}");
+        Ok(pointer as usize as Object)
+    })
+}
 pub(super) struct Constructor {
     api: Api,
     object: Object,
@@ -454,6 +503,9 @@ impl Constructor {
                 component_calls: 0,
                 component: false,
                 offset_calls: 0,
+                input_active: false,
+                marker_installed: false,
+                markers: Vec::new(),
             });
             Ok(())
         })?;
@@ -695,90 +747,75 @@ impl Constructor {
         Ok(())
     }
     pub(super) fn report(&self) -> String {
-        format!("native-color-curves-ready=true\nnative-color-curves-graph-verifications={}\nnative-color-curves-cleaned={}\n", self.verified, self.cleaned)
+        format!("native-color-curves-ready=true\nnative-color-curves-graph-verifications={}\nnative-color-curves-cleaned={}\n", self.verified, self.cleaned) + &format!("native-input-profiler-marker-calls={}\n", STATE.with(|s|s.borrow().as_ref().map_or(0,|s|s.markers.len())))
     }
 }
 
-const COMPONENTS: [(&CStr, u32); 18] = [
-    (c"ProbeVolumesOptions", 0x060008d5),
-    (c"ChannelMixer", 0x06000538),
-    (c"LiftGammaGain", 0x06000553),
-    (c"FilmGrain", 0x0600054c),
-    (c"Bloom", 0x060002f0),
-    (c"ChromaticAberration", 0x0600053b),
-    (c"ColorAdjustments", 0x0600053e),
-    (c"ColorLookup", 0x06000545),
-    (c"DepthOfField", 0x06000548),
-    (c"LensDistortion", 0x06000550),
-    (c"MotionBlur", 0x06000556),
-    (c"PaniniProjection", 0x0600055b),
-    (c"ScreenSpaceLensFlare", 0x0600055f),
-    (c"ShadowsMidtonesHighlights", 0x06000563),
-    (c"SplitToning", 0x06000566),
-    (c"Tonemapping", 0x06000569),
-    (c"Vignette", 0x0600056f),
-    (c"WhiteBalance", 0x06000572),
-];
 impl Constructor {
-    pub(super) fn supports_component(&self, method: Object) -> bool {
-        !method.is_null()
-            && COMPONENTS
-                .iter()
-                .any(|(_, token)| *token == unsafe { (self.api.token)(method) })
-    }
-    pub(super) fn execute_component(
+    // All managed constructors share this owner scope. Only native engine
+    // crossings retain typed adapters; managed class names never select code.
+    pub(super) fn execute_managed(
         &self,
-        images: [Object; 3],
-        method: Object,
-        object: Object,
-        class: Object,
-        token: u64,
-    ) -> Result<(), String> {
-        let api = self.api;
-        let (name, _) = COMPONENTS
-            .iter()
-            .find(|(_, token)| *token == unsafe { (api.token)(method) })
-            .ok_or("unadmitted URP component constructor")?;
-        let expected = if *name == c"ProbeVolumesOptions" {
-            api.class(images[1], c"UnityEngine.Rendering", name)?
-        } else {
-            api.class(images[2], c"UnityEngine.Rendering.Universal", name)?
-        };
-        if self.cleaned
-            || object.is_null()
-            || class != expected
-            || unsafe { (api.object_class)(object) } != class
-            || unsafe { (api.method_class)(method) } != class
-        {
-            return Err("component constructor class/root mismatch".into());
-        }
-        let method_name = unsafe { (api.method_name)(method) };
-        if method_name.is_null() || unsafe { CStr::from_ptr(method_name) } != c".ctor" {
-            return Err("component constructor name mismatch".into());
-        }
-        api.signature(method, true, false, 1, &[])?;
-        self.invoke_rooted_constructor(method, object, token)?;
-        eprintln!("NATIVE_MONO_COMPONENT_CONSTRUCTED: {:?} real managed ctor and ScriptableObject callback", name);
-        Ok(())
-    }
-    fn invoke_rooted_constructor(
-        &self,
+        core: Object,
         method: Object,
         object: Object,
         token: u64,
     ) -> Result<(), String> {
+        callbacks::with_service(|_, _| Ok(()))?;
+        if self.cleaned {
+            return Err("managed construction after resource cleanup".into());
+        }
         let api = self.api;
-        let before = STATE.with(|s| -> Result<usize, String> {
+        let installed = STATE.with(|s| s.borrow().as_ref().unwrap().marker_installed);
+        if !installed {
+            let profiler = api.class(
+                core,
+                c"Unity.Profiling.LowLevel.Unsafe",
+                c"ProfilerUnsafeUtility",
+            )?;
+            let span = api.class(core, c"UnityEngine.Bindings", c"ManagedSpanWrapper")?;
+            let flags = api.class(core, c"Unity.Profiling.LowLevel", c"MarkerFlags")?;
+            let mut alignment = 0;
+            if unsafe { (api.size)(flags, &mut alignment) } != 2 || alignment != 2 {
+                return Err("profiler flags value ABI mismatch".into());
+            }
+            let create = unsafe { (api.method)(profiler, c"CreateMarker_Injected".as_ptr(), 4) };
+            api.signature(
+                create,
+                false,
+                true,
+                0x18,
+                &[
+                    (0x11, true, Some(span)),
+                    (7, false, None),
+                    (0x11, false, Some(flags)),
+                    (8, false, None),
+                ],
+            )?;
+            if unsafe { (api.token)(create) } != 0x06000267 {
+                return Err("profiler marker method token mismatch".into());
+            }
+            unsafe {
+                (api.add)(
+                    c"Unity.Profiling.LowLevel.Unsafe.ProfilerUnsafeUtility::CreateMarker_Injected"
+                        .as_ptr(),
+                    create_input_marker as *const () as Object,
+                );
+            }
+            STATE.with(|s| s.borrow_mut().as_mut().unwrap().marker_installed = true);
+        }
+        let before = STATE.with(|s| -> Result<(usize, usize), String> {
             let mut s = s.borrow_mut();
             let s = s
                 .as_mut()
-                .ok_or("component constructor has no animation adapter owner")?;
-            if s.instance.is_some() || s.component || s.component_calls >= 64 {
-                return Err("component constructor owner already active/capacity exceeded".into());
+                .ok_or("managed constructor has no adapter owner")?;
+            if s.instance.is_some() || s.component || s.input_active || s.component_calls >= 64 {
+                return Err("managed constructor owner already active/capacity exceeded".into());
             }
             s.instance = Some((object, token));
             s.component = true;
-            Ok(s.component_calls)
+            s.input_active = true;
+            Ok((s.component_calls, s.offset_calls))
         })?;
         struct Scope;
         impl Drop for Scope {
@@ -788,6 +825,7 @@ impl Constructor {
                     let s = s.as_mut().unwrap();
                     s.instance = None;
                     s.component = false;
+                    s.input_active = false;
                 });
             }
         }
@@ -796,44 +834,15 @@ impl Constructor {
         STATE.with(|s| -> Result<(), String> {
             let s = s.borrow();
             let s = s.as_ref().unwrap();
-            if s.component_calls != before + 1 || s.resources.len() != 8 || s.offset_calls != 1 {
-                return Err("component constructor callback/resource count mismatch".into());
+            // Plain CLR constructors have no ScriptableObject callback;
+            // ScriptableObject subclasses bind exactly the rooted receiver.
+            if !(before.0..=before.0 + 1).contains(&s.component_calls)
+                || s.resources.len() != 8
+                || s.offset_calls != before.1
+            {
+                return Err("managed constructor changed unrelated native resources".into());
             }
             Ok(())
-        })?;
-        Ok(())
-    }
-    pub(super) fn supports_asset(&self, method: Object) -> bool {
-        !method.is_null() && unsafe { (self.api.token)(method) } == 0x06000192
-    }
-    pub(super) fn execute_asset(
-        &self,
-        image: Object,
-        method: Object,
-        object: Object,
-        class: Object,
-        token: u64,
-    ) -> Result<(), String> {
-        let api = self.api;
-        let expected = api.class(image, c"UnityEngine.InputSystem", c"InputActionAsset")?;
-        if self.cleaned
-            || class != expected
-            || object.is_null()
-            || unsafe { (api.object_class)(object) } != class
-            || unsafe { (api.method_class)(method) } != class
-            || !self.supports_asset(method)
-        {
-            return Err("InputActionAsset constructor root/class/token mismatch".into());
-        }
-        let name = unsafe { (api.method_name)(method) };
-        if name.is_null() || unsafe { CStr::from_ptr(name) } != c".ctor" {
-            return Err("InputActionAsset constructor name mismatch".into());
-        }
-        api.signature(method, true, false, 1, &[])?;
-        self.invoke_rooted_constructor(method, object, token)?;
-        eprintln!(
-            "NATIVE_MONO_INPUT_ASSET_CONSTRUCTED: real managed ctor and ScriptableObject callback"
-        );
-        Ok(())
+        })
     }
 }

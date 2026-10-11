@@ -105,6 +105,7 @@ pub(super) struct Registry {
     writes: usize,
     reference_writes: usize,
     verified: usize,
+    refreshed: usize,
 }
 pub(super) struct Spec {
     pub(super) owner: Object,
@@ -190,7 +191,7 @@ impl Registry {
                         width: 8,
                         boolean: false,
                     },
-                    (0x12 | 0x1d, Some(target))
+                    (0xe | 0x12 | 0x1d, Some(target))
                         if !target.is_null() && unsafe { (api.type_class)(ty) } == target =>
                     {
                         Shape::Reference(target)
@@ -365,6 +366,80 @@ impl Registry {
         }
         Ok(())
     }
+    /// Native references read only from exact fields of this still-rooted owner.
+    pub(super) fn native_references(
+        &self,
+        root_api: instances::Api,
+        roots: &instances::Registry,
+        owner: u64,
+    ) -> Result<Vec<Object>, String> {
+        if self.retired {
+            return Err("native field graph after retirement".into());
+        }
+        let api = self.api.ok_or("native field graph before installation")?;
+        let object = roots.native(root_api, owner)?;
+        let mut references = Vec::new();
+        for cell in self
+            .cells
+            .values()
+            .filter(|c| c.owner == owner && matches!(c.shape, Shape::Reference(_)))
+        {
+            let mut value: Object = ptr::null_mut();
+            unsafe {
+                (api.get)(object, cell.field, (&mut value as *mut Object).cast());
+            }
+            if !value.is_null() {
+                references.push(value);
+            }
+        }
+        Ok(references)
+    }
+    /// After an admitted managed call, rebuild exact snapshots from native
+    /// fields. Reject unsynchronized guest writes before replacing any cell.
+    pub(super) fn refresh(
+        &mut self,
+        root_api: instances::Api,
+        roots: &mut instances::Registry,
+        owner: u64,
+    ) -> Result<(), String> {
+        if self.retired {
+            return Err("native field refresh after retirement".into());
+        }
+        let api = self.api.ok_or("native field refresh before installation")?;
+        let object = roots.native(root_api, owner)?;
+        let mut updates = Vec::new();
+        for (&address, cell) in self.cells.iter().filter(|(_, c)| c.owner == owner) {
+            if Self::value(cell)? != cell.committed {
+                return Err("field refresh would discard pending guest write".into());
+            }
+            let mut bytes = vec![0; cell.shape.width()];
+            unsafe {
+                (api.get)(object, cell.field, bytes.as_mut_ptr().cast());
+            }
+            if let Shape::Reference(class) = cell.shape {
+                let native = u64::from_le_bytes(bytes.as_slice().try_into().unwrap()) as Object;
+                let token = if native.is_null() {
+                    0
+                } else {
+                    let token = roots.borrow(root_api, native)?;
+                    roots.compatible(root_api, token, class)?;
+                    token
+                };
+                bytes.copy_from_slice(&token.to_le_bytes());
+            }
+            Self::validate(cell.shape, &bytes)?;
+            updates.push((address, bytes));
+        }
+        for (address, bytes) in updates {
+            let cell = self.cells.get_mut(&address).unwrap();
+            cell.view.with_native(|p| unsafe {
+                ptr::copy_nonoverlapping(bytes.as_ptr(), p.as_ptr(), bytes.len());
+            })?;
+            cell.committed = bytes;
+            self.refreshed += 1;
+        }
+        Ok(())
+    }
     pub(super) fn has_reference(&self, owner: u64, address: u64) -> bool {
         !self.retired
             && self.cells.get(&address).is_some_and(|c| {
@@ -441,8 +516,29 @@ impl Registry {
         Ok(())
     }
     pub(super) fn report(&self) -> String {
-        format!("native-instance-field-cells={}\nnative-instance-field-writes={}\nnative-instance-reference-writes={}\nnative-instance-field-gc-verifications={}\nnative-instance-field-views-retired={}\n", self.cells.len(), self.writes, self.reference_writes, self.verified, self.retired)
+        format!("native-instance-field-cells={}\nnative-instance-field-writes={}\nnative-instance-reference-writes={}\nnative-instance-field-gc-verifications={}\nnative-instance-field-views-retired={}\nnative-instance-field-refreshes={}\n", self.cells.len(), self.writes, self.reference_writes, self.verified, self.retired, self.refreshed)
     }
+}
+pub(super) fn is_component(library: Object, render: Object, class: Object) -> Result<bool, String> {
+    let api = Api::load(library)?;
+    let find: unsafe extern "C" fn(Object, *const c_char, *const c_char) -> Object = unsafe {
+        let p = libc::dlsym(library, c"mono_class_from_name".as_ptr());
+        if p.is_null() {
+            return Err("component base lookup absent".into());
+        }
+        std::mem::transmute(p)
+    };
+    let base = unsafe {
+        find(
+            render,
+            c"UnityEngine.Rendering".as_ptr(),
+            c"VolumeComponent".as_ptr(),
+        )
+    };
+    if base.is_null() || class.is_null() {
+        return Err("component base/class absent".into());
+    }
+    Ok(unsafe { (api.assignable)(base, class) } != 0)
 }
 /// Enumerate only a locked VolumeComponent's declared parameters and their
 /// initialized scalar/nullable fields. Arbitrary heap graph traversal is refused.
@@ -674,50 +770,54 @@ pub(super) fn component_specs(
     Ok(specs)
 }
 
-pub(super) fn input_asset_specs(
+pub(super) fn input_box_size(
     library: Object,
-    object: Object,
+    image: Object,
     class: Object,
-) -> Result<Vec<Spec>, String> {
-    let api = Api::load(library)?;
-    let mut specs = Vec::new();
-    for (name, kind) in [
-        (c"m_ActionMaps", 0x1d),
-        (c"m_ControlSchemes", 0x1d),
-        (c"m_IsProjectWide", 2),
-    ] {
-        let field = unsafe { (api.find)(class, name.as_ptr()) };
-        if field.is_null() {
-            return Err("InputActionAsset serialized field absent".into());
-        }
-        let ty = unsafe { (api.ty)(field) };
-        if ty.is_null() || unsafe { (api.kind)(ty) } != kind || unsafe { (api.byref)(ty) } != 0 {
-            return Err("InputActionAsset field type mismatch".into());
-        }
-        let target = if kind == 0x1d {
-            Some(unsafe { (api.type_class)(ty) })
-        } else {
-            None
-        };
-        let mut initial = 0u64;
-        unsafe {
-            (api.get)(object, field, (&mut initial as *mut u64).cast());
-        }
-        if initial != 0 {
-            return Err("InputActionAsset ctor changed zero-initialized serialized field".into());
-        }
-        specs.push(Spec {
-            owner: object,
-            name: name.to_owned(),
-            kind,
-            type_class: target,
-            guest_pointer: None,
-            inline: None,
-        });
+) -> Result<Option<usize>, String> {
+    macro_rules! sym {
+        ($name:literal,$ty:ty) => {{
+            let p = unsafe { libc::dlsym(library, concat!($name, "\0").as_ptr().cast()) };
+            if p.is_null() {
+                return Err(concat!("missing input box API: ", $name).into());
+            }
+            unsafe { std::mem::transmute::<Object, $ty>(p) }
+        }};
     }
-    Ok(specs)
+    let find = sym!(
+        "mono_class_from_name",
+        unsafe extern "C" fn(Object, *const c_char, *const c_char) -> Object
+    );
+    let binding = unsafe {
+        find(
+            image,
+            c"UnityEngine.InputSystem".as_ptr(),
+            c"InputBinding".as_ptr(),
+        )
+    };
+    if binding.is_null() {
+        return Err("locked InputBinding class absent".into());
+    }
+    if class != binding {
+        return Ok(None);
+    }
+    let value = sym!(
+        "mono_class_is_valuetype",
+        unsafe extern "C" fn(Object) -> i32
+    );
+    let size = sym!(
+        "mono_class_value_size",
+        unsafe extern "C" fn(Object, *mut u32) -> i32
+    );
+    let mut alignment = 0;
+    if unsafe { value(class) } == 0
+        || unsafe { size(class, &mut alignment) } != 88
+        || alignment != 8
+    {
+        return Err("InputBinding boxed value ABI mismatch".into());
+    }
+    Ok(Some(88))
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -863,6 +963,26 @@ mod tests {
         assert!(memory.read_int(owner + 24, 8).is_err());
         assert!(fields.sync(api, &roots).is_err());
         assert!(fields.read(owner, 2usize as Object).is_err());
+    }
+    #[test]
+    fn managed_refresh_keeps_native_stores_and_rejects_pending_guest_writes_and_late_bad_roots() {
+        let (mut fields, api, mut roots, mut memory, owner) = fixture();
+        SCALAR.with(|s| s.set(0));
+        REFERENCE.with(|s| s.set(8));
+        assert!(fields.refresh(api, &mut roots, owner).is_err());
+        assert_eq!(memory.read_int(owner + 16, 1).unwrap(), 1);
+        REFERENCE.with(|s| s.set(0));
+        memory.write_int(owner + 24, 8, 0).unwrap();
+        assert!(fields.refresh(api, &mut roots, owner).is_err());
+        assert_eq!(memory.read_int(owner + 16, 1).unwrap(), 1);
+        memory.write_int(owner + 24, 8, owner).unwrap();
+        fields.refresh(api, &mut roots, owner).unwrap();
+        assert_eq!(memory.read_int(owner + 16, 1).unwrap(), 0);
+        assert_eq!(memory.read_int(owner + 24, 8).unwrap(), 0);
+        assert_eq!(SETS.with(Counter::get), 0);
+        fields.verify(api, &roots).unwrap();
+        roots.release(api);
+        fields.retire(&mut memory, &roots).unwrap();
     }
     #[test]
     fn inline_float_value_keeps_negative_zero_nan_payload_and_all_lanes_across_sync() {

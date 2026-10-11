@@ -136,7 +136,16 @@ def main():
         'native_array_roots_released': 'native-array-roots-released=true' in content,
         'native_array_views_retired': 'native-array-views-retired=true' in content,
         'native_input_asset_constructors': count_marker('native-input-asset-constructors'),
+        'native_virtual_method_resolutions': count_marker('native-virtual-method-resolutions'),
+        'native_input_profiler_marker_calls': count_marker('native-input-profiler-marker-calls'),
+        'native_input_action_constructors': count_marker('native-input-action-constructors'),
+        'native_input_map_constructors': count_marker('native-input-map-constructors'),
+        'native_reference_arrays': count_marker('native-reference-arrays'),
+        'native_reference_array_writes': count_marker('native-reference-array-writes'),
+        'native_reference_array_gc_verifications': count_marker('native-reference-array-gc-verifications'),
+        'native_reference_array_views_retired': 'native-reference-array-views-retired=true' in content,
         'native_component_constructors': count_marker('native-component-constructors'),
+        'native_instance_field_refreshes': count_marker('native-instance-field-refreshes'),
         'native_instance_field_cells': count_marker('native-instance-field-cells'),
         'native_instance_field_writes': count_marker('native-instance-field-writes'),
         'native_instance_reference_writes': count_marker('native-instance-reference-writes'),
@@ -148,6 +157,7 @@ def main():
         'native_color_curves_graph_verifications': count_marker('native-color-curves-graph-verifications'),
         'native_color_curves_cleaned': 'native-color-curves-cleaned=true' in content,
         'native_ordinary_objects_ready': 'native-ordinary-objects-ready=true' in content,
+        'native_boxed_value_objects': count_marker('native-boxed-value-objects'),
         'native_allocated_objects': count_marker('native-allocated-objects'),
         'native_allocated_object_gc_verifications': count_marker('native-allocated-object-gc-verifications'),
         'native_allocated_object_views_retired': 'native-allocated-object-views-retired=true' in content,
@@ -247,6 +257,8 @@ def main():
         raise RuntimeError('actual component constructor/field/GC lifecycle incomplete')
     if args.boundary == 'assets' and (evidence['native_input_asset_constructors'] != 1 or evidence['native_instance_field_gc_verifications'] < evidence['native_instance_field_cells'] or not evidence['native_instance_field_views_retired'] or evidence['native_borrowed_object_gc_verifications'] < evidence['native_borrowed_object_roots']):
         raise RuntimeError('actual InputActionAsset constructor/fields/GC lifecycle incomplete')
+    if evidence['native_reference_arrays'] and (evidence['native_reference_array_gc_verifications'] < evidence['native_reference_arrays'] or not evidence['native_reference_array_views_retired']):
+        raise RuntimeError('owned reference arrays did not pass GC verification and retirement')
     expected_steps = {'classlib': 1, 'logging': 2, 'exceptions': 3, 'synchronization': 5, 'subsystems': 6, 'subsystem-map': 7, 'imgui-cache': 8, 'attributes': 8, 'attribute-arrays': 8, 'assembly-lookup': 8, 'objects': 8, 'curves': 8, 'fields': 8, 'components': 8, 'assets': 8}.get(args.boundary)
     if expected_steps is not None and evidence['native_classlib_invokes'] != expected_steps:
         raise RuntimeError('actual ordered managed startup steps incomplete')

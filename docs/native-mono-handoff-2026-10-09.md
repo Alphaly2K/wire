@@ -364,3 +364,24 @@ ScriptableObject guest callback，新增三个精确 serialized field cells。�
 下一请求 mono_object_get_virtual_method，receiver 为刚分配的 InputActionMap，
 尚未执行其 callback/非空数组反序列化。详见
 `docs/native-mono-unity-input-assets-2026-10-11.md`。完整 backend/Admission 仍 false。
+
+## 构造入口通用化与引用数组（2026-10-11）
+
+用户指出逐类补构造函数不可持续；已删除后续 component/Input ctor token 名单，
+改用 `mono_startup/constructors.rs` 的统一 managed instance void() 验证和 Mono IL执行。
+`field_layouts.rs` 自动读取 InputSystem 字段及 SerializeField attributes，删除四个类的
+字段名列表。Unity/Win32 native ABI、ColorCurves资源验证和 typed layout检查保留。
+
+本轮还接真实 virtual-method resolution、非空引用数组和 write barriers、canonical
+string aliases、构造后 native snapshots、两个原始 string wrappers及受检 boxed-zero
+InputBinding。冻结23patch runtime没有修改/重建，相关输出仍可复核。
+
+最新 `wire-out/native-mono-unity-assets-probe-11` exit0：18次通用后续构造、602 cells/
+142 native writes/68 reference barriers/602 GC checks、34 virtual resolutions、
+2 reference arrays/10 slot writes、56 allocations/132 borrowed roots/52 strings；
+GC检查和roots/owned views退休通过，guard232/0，original Mono未attach。
+`full_game_backend=false`。详情及限制见 `native-mono-managed-construction-2026-10-11.md`。
+
+下一请求是含引用的 InputBinding[35]，继续做可复用结构体slot布局和数组/unbox桥接，
+不要重新恢复逐类构造名单，也不要把宿主struct/array payload直接映射给guest。
+用户明确授权本地提交并合入main；无需重复确认，不push。

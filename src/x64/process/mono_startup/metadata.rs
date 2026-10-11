@@ -487,6 +487,27 @@ impl Registry {
                 let f = sym!(lib, function, unsafe extern "C" fn(Object) -> u32);
                 Ok(Value::Scalar(unsafe { f(native) } as u64))
             }
+            "mono_array_element_size" => {
+                let class = self.native(a, Kind::Class)?;
+                let rank = sym!(
+                    lib,
+                    "mono_class_get_rank",
+                    unsafe extern "C" fn(Object) -> u32
+                );
+                if unsafe { rank(class) } != 1 {
+                    return Err("array element size requires an SZ array class".into());
+                }
+                let size = sym!(
+                    lib,
+                    "mono_array_element_size",
+                    unsafe extern "C" fn(Object) -> i32
+                );
+                let size = unsafe { size(class) };
+                if !(1..=65536).contains(&size) {
+                    return Err("array element size exceeds checked bound".into());
+                }
+                Ok(Value::Scalar(size as u64))
+            }
             "mono_class_get_type" => {
                 let native = self.native(a, Kind::Class)?;
                 let f = sym!(lib, function, unsafe extern "C" fn(Object) -> Object);
@@ -698,6 +719,7 @@ pub(super) fn handles(function: &str) -> bool {
                 | "mono_class_get_type_token"
                 | "mono_class_instance_size"
                 | "mono_class_array_element_size"
+                | "mono_array_element_size"
                 | "mono_class_get_fields"
                 | "mono_class_get_field_from_name"
                 | "mono_class_get_method_from_name"

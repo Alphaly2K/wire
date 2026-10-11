@@ -330,9 +330,32 @@ pub(super) fn guest_keyframe_span(target: u64, count: usize, bytes: &[u8]) -> Re
     if count > 4096 || bytes.len() != count * super::animation::KEYFRAME_BYTES {
         return Err("Keyframe span exceeds checked stride/count".into());
     }
+    guest_resource_span(target, count, bytes, &[], false)
+}
+/// Copy UTF16 to a temporary read-only injected span, passing three scalar ABI
+/// arguments separately. A non-NULL result must belong to guest memory; the
+/// original marker API may return NULL for disabled marker flags.
+pub(super) fn guest_marker_span(
+    target: u64,
+    units: &[u16],
+    trailing: &[u64; 3],
+) -> Result<u64, String> {
+    if units.is_empty() || units.len() > 4096 {
+        return Err("marker name span outside bound".into());
+    }
+    let bytes: Vec<_> = units.iter().flat_map(|u| u.to_le_bytes()).collect();
+    guest_resource_span(target, units.len(), &bytes, trailing, true)
+}
+fn guest_resource_span(
+    target: u64,
+    count: usize,
+    bytes: &[u8],
+    trailing: &[u64],
+    allow_null: bool,
+) -> Result<u64, String> {
     OWNER.with(|slot| {
         if slot.get().is_null() {
-            return Err("Keyframe span has no callback owner".into());
+            return Err("resource span has no callback owner".into());
         }
         let owner = unsafe { &*slot.get() };
         if owner.depth.get() >= 8 {
@@ -366,12 +389,21 @@ pub(super) fn guest_keyframe_span(target: u64, count: usize, bytes: &[u8]) -> Re
             .memory
             .borrow_mut()
             .protect(address, span, super::super::super::memory::READ)?;
-        let value = execute_guest(owner, target, &[address])?;
+        let mut args = vec![address];
+        args.extend_from_slice(trailing);
+        let value = execute_guest(owner, target, &args)?;
+        // The locked marker API returns NULL when flag bit 3 is clear;
+        // propagate its actual result. Curve creation must remain non-NULL.
+        if value == 0 && allow_null {
+            return Ok(0);
+        }
         if value == 0
             || !value.is_multiple_of(8)
             || (0x6ffa00000000..STACK_BASE + STACK_BYTES).contains(&value)
         {
-            return Err("curve creation did not return independent aligned guest data".into());
+            return Err(format!(
+                "resource callback returned invalid guest data {value:#x}"
+            ));
         }
         let memory = owner.memory.borrow();
         memory.check(value, 8, super::super::super::memory::READ)?;
@@ -379,7 +411,7 @@ pub(super) fn guest_keyframe_span(target: u64, count: usize, bytes: &[u8]) -> Re
             .check(value, 1, super::super::super::memory::EXECUTE)
             .is_ok()
         {
-            return Err("curve creation returned executable guest memory".into());
+            return Err("resource creation returned executable guest memory".into());
         }
         Ok(value)
     })
@@ -505,6 +537,37 @@ fn reject_profiler(reason: &str) -> ! {
 mod tests {
     use super::super::super::super::memory::{EXECUTE, READ, WRITE};
     use super::*;
+    #[test]
+    fn marker_span_forwards_scalar_arguments_and_revokes_owned_utf16_payload() {
+        let mut memory = Memory::default();
+        memory.map(0x1000, 4096, READ | WRITE | EXECUTE).unwrap();
+        memory.write(0x1000, &[0x48, 0x89, 0xd0, 0xc3]).unwrap(); // mov rax,rdx; ret
+        memory.write(0x1100, &[0x31, 0xc0, 0xc3]).unwrap();
+        memory.map(0x2000, 4096, READ | WRITE).unwrap();
+        memory
+            .map(super::super::super::STACK, 65536, READ | WRITE)
+            .unwrap();
+        let mut runtime = Runtime64::new(
+            &mut memory,
+            0x140000000,
+            super::super::super::STACK,
+            65536,
+            "test",
+        )
+        .unwrap();
+        let (result, _) = with_owner(&mut memory, &mut runtime, [0; 7], || {
+            guest_marker_span(0x1000, &[0x41, 0x3042], &[0x2000, 0, 0])
+        })
+        .unwrap();
+        assert_eq!(result.unwrap(), 0x2000);
+        let (null, _) = with_owner(&mut memory, &mut runtime, [0; 7], || {
+            guest_marker_span(0x1100, &[0x41], &[1, 0, 0])
+        })
+        .unwrap();
+        assert_eq!(null.unwrap(), 0);
+        assert!(memory.read_int(0x6ffb00000000, 8).is_err());
+        assert!(guest_marker_span(0x1000, &[], &[0, 0, 0]).is_err());
+    }
     #[test]
     fn leaf_owner_allocates_no_stack_and_lazy_callback_collision_preserves_existing_memory() {
         let mut memory = Memory::default();
