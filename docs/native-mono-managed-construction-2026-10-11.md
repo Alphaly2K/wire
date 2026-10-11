@@ -22,7 +22,7 @@ receiver 必须实现接口，native virtual resolution 必须精确等于请求
 实现，无须 class 名名单。伪同名方法拒绝。零参数 callback 的 guest 空参数向量可非 NULL，
 但不读取该向量，也不传给 native invoke。
 
-普通静态方法现按 managed_calls.rs 的 metadata/typed ABI 准入；普通实例方法和 value receiver 尚未准入。原有 owner-thread、strong roots、fixed
+普通静态/引用实例方法现按 managed_calls.rs 的 metadata/typed ABI 准入；value receiver 尚未准入。原有 owner-thread、strong roots、fixed
 callbacks、P/Invoke rejection、异常拒绝和 no-exec guard 均保留。引擎对象被图遍历发现时，
 不能因此提前发布其字段；仍要走对应构造/binding 及 engine lifetime 检查。
 
@@ -85,11 +85,37 @@ strong root与readonly typed metadata view，核对返回type identity。
 Unity类型缓存的element_class prefix、真实类型谓词、weak handles及isinst也已越过。
 实现契约和证据见 `native-mono-static-invoke-2026-10-12.md`。
 
-最新请求为 render-core 的 instance void `UnityEngine.Rendering.VolumeComponent.OnEnable`
-（method token0x06000c82、receiver为已构造ColorCurves，零参数但参数向量非NULL）。
-实际IL/签名在probe-40/startup.log，下一步使用相同typed ABI推广普通实例调用；
-不添加OnEnable类名/token名单。冻结23patchruntime/support未修改。
+probe-41已实际执行21次ordinary instance invokes，包括VolumeComponent.OnEnable；
+root/field/array/GC/retirement检查通过，guard237/0。这个入口不再是阻塞点。
+普通调用image family改为实际live provider-owned/fingerprinted registry；嵌套构造复用同一个
+metadata契约和owner，不增加InputSettings/analytics等类名名单。
+
+后续真实探测进入AdaptivePerformance descriptor registration、InputSystem.Reset和初始化。
+analytics对象由普通IL newobj创建；InputSettings由原始guest ScriptableObject工厂分配并执行
+真实metadata-qualified ctor。20个固定scalar ABI统一登记；JSON原始引擎转发正在验证。
+这些后续probe发生abort，尚无整轮GC/cleanup验收，不能替代probe-41完整成功证据。
+详细边界与限制见native-mono-static-invoke-2026-10-12.md。
+冻结23patchruntime/support未修改。
 
 完整release feature：472 passed/7 ignored；all-target Clippy `-D warnings` clean。
 日志为 `wire-out/native-mono-static-calls-tests.log` 与 `native-mono-static-calls-clippy.log`。
 probe有并发build/tests，耗时不作端到端性能对照；正式游戏窗口仍未验收。
+
+## 嵌套 value layout 扩展
+
+JSON序列化器需要含引用/Boolean的嵌套value。boxed allocation仍使用真实checked
+value-box API并立即root；叶槽按元数据展开到完整boxed payload offset，完整对象为GC owner。
+嵌套reference写入真实Mono field barrier，scalar只写声明的exact字节，padding不取native字节。
+class/depth/size/alignment/完整字段范围重叠均检查；裸pointer、开放generic和复杂aggregate field
+C API仍拒绝。通用构造签名与receiver规则未放宽到value receiver。
+
+
+probe-62/63/64已用以上通用规则实际通过JSON反序列化，没有新增逐类构造函数选择。
+probe-64进一步调用真实Unity Persistent allocator，后续缺失MemSet导致abort，不能宣称GC、
+cleanup或完整游戏已通过；完整成功基线仍probe-41。固定profiler/allocator接口仅为engine边界，
+不承担替代普通托管构造函数的职责。
+
+
+最终源码：feature483/default380 release tests passed（各7 ignored），两种Clippy均clean。
+probe-71已经通过游戏类empty array对象查询和Jobs状态setter，后续需要真正的Burst SharedStatic
+共享存储契约；不是补类名/ctor名单。新adapter相关完整游戏GC/退出验收尚未取得。

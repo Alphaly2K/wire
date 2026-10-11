@@ -455,3 +455,46 @@ full_game_backend=false，窗口未验收，probe耗时不是端到端收益数�
 下一请求VolumeComponent.OnEnable（render-core、token0x06000c82、receiver为ColorCurves）；
 需要推广普通instance IL invoke到已有typed ABI，不添加类名/token名单。实际IL见probe-40。
 冻结23patchruntime/support SHA不变。持续推进授权及本地提交/快进main授权仍有效，不push。
+
+## 2026-10-12 普通实例、同一owner重入与InputSystem
+
+本节覆盖上面的OnEnable旧终点。probe-41 exit0：21次ordinary instance invokes，368次static
+invokes；2193fields全部GC核对，425allocations/1429borrowed roots、872Strings/375RuntimeTypes
+全部GC/retirement通过，guard237/0、GC disable1/enable1/unwind0/finaldepth0。
+
+本轮代码主要在managed_calls/reentry/fields/value_layout与固定compiled adapters：
+实际live image family取代ordinary方法名单，static/reference instance共用typed frame；
+prepare/execute/finish避免RefCell/Memory borrow跨IL。nested constructor复用通用metadata契约。
+analytics、Resources与ScriptableObject工厂转发原始engine；v2 handle双向private转换。
+20个Application/Input/SystemInfo scalar接口批量核对metadata/注册目标，并接Win64 XMM ABI。
+
+probe-57/59实际越过InputSettings分配/构造及polling等scalar调用，进入Unity JSON序列化器。
+JSON使用owned UTF16和canonical对象/Type服务；nested value allocation/unbox与递归boxed
+reference/Boolean叶槽已实现。后续失败probe的局部成功不等于整轮GC/guard/cleanup通过。
+最新完整成功仍probe-41，full_game_backend=false，无正式窗口和端到端性能结果。
+probe-62/63/64已局部实证原始Unity JSON反序列化，probe-64已局部实证1886B Persistent分配；
+当前推进Malloc/Free/MemSet与profiler sample固定engine边界，不增加类名/ctor token名单，不改冻结23patch runtime。
+详细规则/证据见native-mono-static-invoke-2026-10-12.md及value-payload文档。
+持续本地提交、快进main的用户授权仍有效；不push。
+
+
+probe-67/70推进记录：private native IL buffers已实际4次Persistent分配、4次MemSet和33次
+bounded copy、3次普通Free；Screen宽高查询、Object.FindObjectsByType及owned game类的真实
+empty SZ array返回已实测通过。后续为Jobs compiler state setter；已核对它只写原始engine byte，
+不生成机器码。错误退出的foreign finalizer Free仍fail-stop，不能计为完整buffer cleanup成功。
+详见native-mono-unsafe-buffers-2026-10-12.md。完整成功检查点仍probe-41，尚无正式窗口。
+
+
+最终源码验证（2026-10-12）：release feature483 passed/7 ignored，default380 passed/7 ignored；
+两种配置的all-target Clippy -D warnings均clean，最终feature release binary已重建。
+日志：wire-out/native-mono-instance-reentry-tests.log、native-mono-instance-reentry-clippy.log、
+native-mono-default-regression-tests.log、native-mono-default-regression-clippy.log。
+
+最新真实probe-71已通过JobsUtility状态setter，随后缺失
+Unity.Burst.LowLevel.BurstCompilerService.GetOrCreateSharedMemory，实际ABI为
+Void*(ref UnityEngine.Hash128, UInt32 size, UInt32 alignment)，冻结target0x1800694a0。
+它要求同一key的稳定共享存储、native IL与原始引擎可见性及退出owner/lease，不能直接返回
+guest地址给native IL，也不能用当前private Malloc mirror冒充shared memory。
+其错误路径还遇到DebugLogHandler.Internal_Log_Injected及foreign finalizer Free拒绝。
+probe-62..71的局部进展仍未取得新的整轮GC/guard/cleanup验收，完整成功基线仍probe-41。
+full_game_backend=false，没有正式游戏窗口或端到端性能收益声明。

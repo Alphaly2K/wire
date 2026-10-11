@@ -46,6 +46,7 @@ mod bindings;
 mod callbacks;
 mod closed_types;
 mod constructors;
+mod engine_scalars;
 mod errors;
 mod field_layouts;
 mod fields;
@@ -54,17 +55,22 @@ mod handles;
 mod images;
 mod instances;
 mod invoke;
+mod json;
 mod logging;
 mod managed_calls;
 mod metadata;
 mod names;
 mod objects;
+mod profiler_samples;
 mod reentry;
 mod reference_arrays;
 mod reflection;
+mod resources;
+mod scriptable;
 mod services;
 mod subsystems;
 mod unitytls;
+mod unsafe_buffers;
 mod value_layout;
 mod virtual_methods;
 macro_rules! symbol {
@@ -262,6 +268,8 @@ pub(super) struct Probe {
     serialization_invokes: usize,
     static_invokes: usize,
     static_output_writes: usize,
+    instance_invokes: usize,
+    instance_output_writes: usize,
     reference_array_api: Option<reference_arrays::Api>,
     reference_array_registry: reference_arrays::Registry,
     components: bool,
@@ -700,6 +708,8 @@ impl Probe {
             serialization_invokes: 0,
             static_invokes: 0,
             static_output_writes: 0,
+            instance_invokes: 0,
+            instance_output_writes: 0,
             reference_array_api: None,
             reference_array_registry: reference_arrays::Registry::default(),
             components,
@@ -1606,22 +1616,24 @@ impl Probe {
             match admission {
                 Ok(Some(_)) => return Ok(false),
                 Ok(None) => {
-                    if self.assets && cpu.regs[2] == 0 {
+                    if self.assets {
                         let library = self
                             .native
                             .as_ref()
-                            .ok_or("static call before runtime")?
+                            .ok_or("typed managed call before runtime")?
                             .library;
                         match managed_calls::Api::load(library)?.describe(
                             method,
-                            &self.constructor_images()?,
-                            &self.reference_images()?,
+                            &self.image_registry.live_native_images()?,
+                            &self.image_registry.live_native_images()?,
                         ) {
                             Ok(Some(_)) => return Ok(false),
                             Ok(None) => {}
                             Err(reason) => {
                                 self.mark_completed_layers();
-                                self.events.push(format!("typed static managed entry deferred before invocation: {reason}"));
+                                self.events.push(format!(
+                                    "typed managed entry deferred before invocation: {reason}"
+                                ));
                                 return Ok(true);
                             }
                         }
@@ -2022,10 +2034,9 @@ impl Probe {
                                 .reference_images()?
                                 .contains(&unsafe { image_of(class) })
                                 && unsafe { assignable(unity, class) } == 0;
-                            let specs = if layout.is_some()
-                                || ordinary_owned
-                                || unsafe { image_of(class) } == image
-                            {
+                            let specs = if layout.is_some() {
+                                Vec::new()
+                            } else if ordinary_owned || unsafe { image_of(class) } == image {
                                 field_layouts::specs(
                                     library,
                                     self.image_registry.unique_native_image(CORE_MODULE)?,
@@ -2498,46 +2509,97 @@ impl Probe {
                 || runtime.live_data_slot(address, width as u64)
                 || memory.guest_private_data_slot(address, width))
     }
-    fn dispatch_static_call(
+    fn dispatch_managed_call(
         &mut self,
         cpu: &mut Cpu64,
         memory: &mut Memory,
         runtime: &mut Runtime64,
     ) -> Result<bool, String> {
-        let native = self.native.as_ref().ok_or("static call before runtime")?;
+        let native = self
+            .native
+            .as_ref()
+            .ok_or("typed managed call before runtime")?;
         let library = native.library;
         let domain = native.domain;
+        let thread_handle = native.thread_handle;
         let a = [cpu.regs[1], cpu.regs[2], cpu.regs[8], cpu.regs[9]];
-        if a[1] != 0 {
-            return Err("static managed call requires NULL this".into());
-        }
         let method = self
             .metadata_registry
             .native(a[0], metadata::Kind::Method)?;
         let call_api = managed_calls::Api::load(library)?;
+        if !resources::installed() {
+            resources::install(
+                library,
+                self.image_registry.unique_native_image(CORE_MODULE)?,
+                [
+                    self.registry
+                        .exact_target(resources::NAME, resources::TARGET)?,
+                    self.registry
+                        .exact_target(resources::FIND_NAME, resources::FIND_TARGET)?,
+                ],
+            )?;
+        }
+        if !scriptable::installed() {
+            scriptable::install(
+                library,
+                self.image_registry.unique_native_image(CORE_MODULE)?,
+                self.registry
+                    .exact_target(scriptable::NAME, scriptable::TARGET)?,
+            )?;
+        }
+        let managed_images = self.image_registry.live_native_images()?;
+        if !engine_scalars::installed() {
+            engine_scalars::install(
+                library,
+                self.image_registry.unique_native_image(CORE_MODULE)?,
+                &managed_images,
+                &self.registry,
+            )?;
+        }
+        if !profiler_samples::installed() {
+            profiler_samples::install(library, &managed_images, &self.registry)?;
+        }
+        if !unsafe_buffers::installed() {
+            unsafe_buffers::install(library, &managed_images, &self.registry)?;
+        }
+        if !json::installed() {
+            json::install(
+                library,
+                self.image_registry.unique_native_image(CORE_MODULE)?,
+                &managed_images,
+                self.registry.exact_target(json::NAME, json::TARGET)?,
+            )?;
+        }
         let descriptor = call_api
-            .describe(
-                method,
-                &self.constructor_images()?,
-                &self.reference_images()?,
-            )?
-            .ok_or("managed entry is not an admitted static IL call")?;
+            .describe(method, &managed_images, &managed_images)?
+            .ok_or("managed entry is not an admitted ordinary IL call")?;
+        if descriptor.receiver.is_some() != (a[1] != 0) {
+            return Err("managed static/instance receiver presence mismatch".into());
+        }
         let api = self
             .instance_api
-            .ok_or("static call before rooted instances")?;
+            .ok_or("managed call before rooted instances")?;
         let strings = self
             .object_api
-            .ok_or("static call before canonical strings")?;
+            .ok_or("managed call before canonical strings")?;
         let targets = self.callback_targets();
         let rsp = cpu.regs[4];
         if a[3] != 0 {
             memory.check(a[3], 8, super::super::memory::WRITE)?;
             if !a[3].is_multiple_of(8) || !Self::temporary_call_slot(memory, runtime, rsp, a[3], 8)
             {
-                return Err("static exception output is not an owned temporary slot".into());
+                return Err("managed exception output is not an owned temporary slot".into());
             }
         }
-        let (frame, _) = callbacks::with_owner(memory, runtime, targets, || {
+        let (prepared, _) = callbacks::with_owner(memory, runtime, targets, || {
+            let (receiver, receiver_class) = match descriptor.receiver {
+                Some(declared) => {
+                    let receiver = self.rooted_call_argument(api, a[1])?;
+                    let class = call_api.receiver(receiver, declared, &managed_images)?;
+                    (receiver, class)
+                }
+                None => (ptr::null_mut(), ptr::null_mut()),
+            };
             callbacks::with_service(|memory, runtime| {
                 self.instance_registry.sync_from_guest(api, memory)?;
                 self.field_registry.sync(api, &self.instance_registry)?;
@@ -2545,7 +2607,7 @@ impl Probe {
                     self.reference_array_registry
                         .sync(array_api, api, &self.instance_registry)?;
                 }
-                managed_calls::Frame::prepare(
+                let frame = managed_calls::Frame::prepare(
                     memory,
                     &descriptor,
                     a[2],
@@ -2555,10 +2617,11 @@ impl Probe {
                     |address, width| {
                         Self::temporary_call_slot(memory, runtime, rsp, address, width)
                     },
-                )
+                )?;
+                Ok::<_, String>((frame, receiver, receiver_class))
             })
         })?;
-        let mut frame = frame?;
+        let (mut frame, receiver, receiver_class) = prepared?;
         let mut parameters = frame.pointers();
         let initial_outputs = frame.outputs()?;
         if a[3] != 0
@@ -2581,9 +2644,36 @@ impl Probe {
             reentry::Metadata {
                 library,
                 domain,
+                thread_handle,
                 metadata: &mut self.metadata_registry,
                 images: &mut self.image_registry,
-                rooted_instance: None,
+                rooted_instance: descriptor.receiver.map(|_| (a[1], receiver_class)),
+                objects: Some(reentry::ObjectRoots {
+                    api,
+                    roots: &mut self.instance_registry,
+                    strings,
+                    objects: &mut self.object_registry,
+                    fields: &mut self.field_registry,
+                    handles: (
+                        self.handle_api.ok_or("nested handle API absent")?,
+                        &mut self.handle_registry,
+                    ),
+                    reflection: (
+                        self.reflection_api.ok_or("nested reflection API absent")?,
+                        &mut self.reflection_registry,
+                    ),
+                    empty_arrays: (
+                        self.array_api.ok_or("nested empty array API absent")?,
+                        &mut self.array_registry,
+                    ),
+                    attributes: (
+                        self.attribute_api.ok_or("nested attributes API absent")?,
+                        &mut self.attribute_registry,
+                    ),
+                    arrays: self
+                        .reference_array_api
+                        .map(|api| (api, &mut self.reference_array_registry)),
+                }),
             },
             || {
                 let mut exception = ptr::null_mut();
@@ -2592,10 +2682,12 @@ impl Probe {
                 } else {
                     parameters.as_mut_ptr()
                 };
-                let result =
-                    unsafe { (call_api.invoke)(method, ptr::null_mut(), params, &mut exception) };
+                let result = unsafe { (call_api.invoke)(method, receiver, params, &mut exception) };
                 if !exception.is_null() {
-                    return Err("typed static managed call raised an exception; guest outputs left unchanged".into());
+                    return Err(
+                        "typed managed call raised an exception; guest outputs left unchanged"
+                            .into(),
+                    );
                 }
                 Ok::<_, String>(result)
             },
@@ -2681,9 +2773,16 @@ impl Probe {
             Ok::<_, String>((result, outputs.len()))
         })?;
         let (result, outputs) = converted?;
-        self.static_invokes += 1;
-        self.static_output_writes += outputs;
-        self.events.push(format!("metadata-qualified static managed entry: {}; params={}; byref-outputs={outputs}; actual IL and boxed return", descriptor.name, descriptor.parameters.len()));
+        let kind = if descriptor.receiver.is_some() {
+            self.instance_invokes += 1;
+            self.instance_output_writes += outputs;
+            "instance"
+        } else {
+            self.static_invokes += 1;
+            self.static_output_writes += outputs;
+            "static"
+        };
+        self.events.push(format!("metadata-qualified {kind} managed entry: {}; params={}; byref-outputs={outputs}; actual IL and typed return", descriptor.name, descriptor.parameters.len()));
         cpu.return_integer(memory, result)?;
         Ok(false)
     }
@@ -2754,9 +2853,15 @@ impl Probe {
                 reentry::Metadata {
                     library,
                     domain: native_domain,
+                    thread_handle: self
+                        .native
+                        .as_ref()
+                        .ok_or("nested thread owner absent")?
+                        .thread_handle,
                     metadata: &mut self.metadata_registry,
                     images: &mut self.image_registry,
                     rooted_instance: Some((a[1], class)),
+                    objects: None,
                 },
                 || animation::Constructor::execute(library, images, method, object, class, a[1]),
             )?;
@@ -2797,12 +2902,16 @@ impl Probe {
             self.events.push("finite ColorCurves constructor checkpoint completed; stop before initialized instance-field serialization".into());
             return Ok(true);
         }
-        if self.assets
-            && self.curves_constructor.is_some()
-            && a[0] != self.get_type_method
-            && a[1] == 0
-        {
-            return self.dispatch_static_call(cpu, memory, runtime);
+        if self.assets && self.curves_constructor.is_some() && a[0] != self.get_type_method {
+            let method = self
+                .metadata_registry
+                .native(a[0], metadata::Kind::Method)?;
+            if constructors::Api::load(library)?
+                .describe(method, &self.constructor_images()?)?
+                .is_none()
+            {
+                return self.dispatch_managed_call(cpu, memory, runtime);
+            }
         }
         if self.components && self.curves_constructor.is_some() && a[0] != self.get_type_method {
             if a[1] == 0 {
@@ -2868,9 +2977,15 @@ impl Probe {
                 reentry::Metadata {
                     library,
                     domain: native_domain,
+                    thread_handle: self
+                        .native
+                        .as_ref()
+                        .ok_or("nested thread owner absent")?
+                        .thread_handle,
                     metadata: &mut self.metadata_registry,
                     images: &mut self.image_registry,
                     rooted_instance: Some((a[1], class)),
+                    objects: None,
                 },
                 || {
                     self.curves_constructor
@@ -2985,6 +3100,15 @@ impl Probe {
                     )?;
                 }
                 if step == 6 {
+                    subsystems::install_analytics(
+                        library,
+                        image,
+                        self.image_registry.unique_native_image(CORE_MODULE)?,
+                        self.registry.exact_target(
+                            subsystems::ANALYTICS_NAME,
+                            subsystems::ANALYTICS_TARGET,
+                        )?,
+                    )?;
                     subsystems::install(
                         library,
                         image,
@@ -3058,9 +3182,15 @@ impl Probe {
                     reentry::Metadata {
                         library,
                         domain: native_domain,
+                        thread_handle: self
+                            .native
+                            .as_ref()
+                            .ok_or("nested thread owner absent")?
+                            .thread_handle,
                         metadata: &mut self.metadata_registry,
                         images: &mut self.image_registry,
                         rooted_instance: None,
+                        objects: None,
                     },
                     operation,
                 )?
@@ -3289,46 +3419,10 @@ impl Probe {
             "mono_image_get_name" | "mono_image_get_table_rows"
         ) {
             let image = self.image_registry.native_image(a[0])?;
-            let (result, _) = callbacks::with_owner(
-                memory,
-                runtime,
-                targets,
-                || -> Result<metadata::Value, String> {
-                    if function == "mono_image_get_name" {
-                        let get = symbol!(
-                            library,
-                            "mono_image_get_name",
-                            unsafe extern "C" fn(Object) -> *const c_char
-                        );
-                        let p = unsafe { get(image) };
-                        if p.is_null() {
-                            return Err("native image name absent".into());
-                        }
-                        let mut bytes = Vec::new();
-                        for i in 0..32768 {
-                            let b = unsafe { p.add(i).read() } as u8;
-                            if b == 0 {
-                                return Ok(metadata::Value::Text(
-                                    CString::new(bytes).map_err(|e| e.to_string())?,
-                                ));
-                            }
-                            bytes.push(b);
-                        }
-                        Err("native image name exceeds bound".into())
-                    } else {
-                        let table = a[1] as u32 as i32;
-                        let get = symbol!(
-                            library,
-                            "mono_image_get_table_rows",
-                            unsafe extern "C" fn(Object, i32) -> i32
-                        );
-                        Ok(metadata::Value::Scalar(
-                            unsafe { get(image, table) } as u32 as u64
-                        ))
-                    }
-                },
-            )?;
-            self.metadata_registry.note_query();
+            let (result, _) = callbacks::with_owner(memory, runtime, targets, || {
+                self.metadata_registry
+                    .query_image(library, function, image, a[1])
+            })?;
             result?
         } else if function == "mono_unity_class_get" {
             let image = self.image_registry.native_image(a[0])?;
@@ -3953,6 +4047,7 @@ impl Probe {
         if let Some(constructor) = &mut self.curves_constructor {
             constructor.cleanup()?;
         }
+        profiler_samples::verify_balanced()?;
         self.stopped = true;
         if let Some(api) = self.handle_api {
             self.handle_registry.release(api);
@@ -3980,6 +4075,9 @@ impl Probe {
         }
         if let Some(native) = &mut self.native {
             native.cleanup()?;
+            // Raw native IL pointers remain owned until the VM can no longer
+            // execute IL/finalizers. Only then release original guest records.
+            unsafe_buffers::retire_after_vm_cleanup()?;
             if self.tls_table.is_some() {
                 let clear = symbol!(
                     native.library,
@@ -4041,6 +4139,14 @@ impl Probe {
             self.events.join("\n")
         ) + "\n" + &self.native.as_ref().map_or_else(String::new, |n| n.gc.report())
             + &format!("native-static-managed-invokes={}\nnative-static-byref-output-writes={}\n", self.static_invokes, self.static_output_writes)
+            + &format!("native-instance-managed-invokes={}\nnative-instance-byref-output-writes={}\n", self.instance_invokes, self.instance_output_writes)
+            + &subsystems::report()
+            + &resources::report()
+            + &scriptable::report()
+            + &engine_scalars::report()
+            + &json::report()
+            + &profiler_samples::report()
+            + &unsafe_buffers::report()
     }
     pub(super) fn stopped(&self) -> bool {
         self.stopped
@@ -4229,6 +4335,8 @@ mod tests {
             serialization_invokes: 0,
             static_invokes: 0,
             static_output_writes: 0,
+            instance_invokes: 0,
+            instance_output_writes: 0,
             reference_array_api: None,
             reference_array_registry: reference_arrays::Registry::default(),
             components: false,

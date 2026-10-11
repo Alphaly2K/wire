@@ -466,6 +466,23 @@ impl Registry {
     pub(super) fn has_reference(&self, owner: u64, address: u64) -> bool {
         self.slot(owner, address).is_some()
     }
+    pub(super) fn length(
+        &self,
+        api: Api,
+        root_api: instances::Api,
+        roots: &instances::Registry,
+        token: u64,
+    ) -> Result<u64, String> {
+        let entry = self
+            .entries
+            .get(&token)
+            .ok_or("unknown typed array length")?;
+        if self.retired || !entry.published || roots.native(root_api, token)? != entry.native {
+            return Err("typed array length requires a live published identity".into());
+        }
+        Self::layout(api, entry)?;
+        Ok(entry.length as u64)
+    }
     pub(super) fn address(&self, token: u64, size: u64, index: u64) -> Result<u64, String> {
         let entry = self
             .entries
@@ -879,11 +896,13 @@ mod tests {
             value: true,
             slots: vec![
                 value_layout::Slot {
+                    nested: false,
                     offset: 0,
                     field: 1usize as Object,
                     shape: value_layout::Shape::Reference(2usize as Object),
                 },
                 value_layout::Slot {
+                    nested: false,
                     offset: 8,
                     field: 2usize as Object,
                     shape: value_layout::Shape::Scalar {
@@ -892,6 +911,7 @@ mod tests {
                     },
                 },
                 value_layout::Slot {
+                    nested: false,
                     offset: 16,
                     field: 3usize as Object,
                     shape: value_layout::Shape::Reference(2usize as Object),
@@ -966,8 +986,12 @@ mod tests {
                 1,
             )
             .unwrap();
+        assert!(registry.length(api, root_api, &roots, a).is_err());
         registry.publish(&mut memory, a).unwrap();
         registry.publish(&mut memory, b).unwrap();
+        assert_eq!(registry.length(api, root_api, &roots, a).unwrap(), 2);
+        assert!(registry.length(api, root_api, &roots, value).is_err());
+        assert!(registry.length(api, root_api, &roots, a + 8).is_err());
         assert!(memory.read_int(a, 8).is_err());
         assert!(memory.write_int(a + 24, 8, 7).is_err());
         assert_eq!(memory.read_int(a + 24, 8).unwrap(), 2);
@@ -994,5 +1018,6 @@ mod tests {
         registry.retire(&mut memory, &roots).unwrap();
         assert!(memory.read_int(a + 32, 8).is_err());
         assert!(registry.address(a, 8, 0).is_err());
+        assert!(registry.length(api, root_api, &roots, a).is_err());
     }
 }

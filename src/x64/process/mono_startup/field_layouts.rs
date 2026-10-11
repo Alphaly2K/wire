@@ -269,6 +269,24 @@ pub(super) fn specs(
 ) -> Result<Vec<Spec>, String> {
     Api::load(library, core)?.specs(images, object, class)
 }
+/// Ordinary reference results read directly by engine code need actual storage,
+/// including private fields. This leaves serialized-field selection unchanged.
+pub(super) fn reference_storage_specs(
+    library: Object,
+    core: Object,
+    images: &[Object],
+    object: Object,
+    class: Object,
+) -> Result<Vec<Spec>, String> {
+    let api = Api::load(library, core)?;
+    if class.is_null()
+        || !images.contains(&unsafe { (api.image)(class) })
+        || unsafe { (api.is_value)(class) } != 0
+    {
+        return Err("reference-result storage requires a live owned reference class".into());
+    }
+    api.describe(images, object, class, true)
+}
 /// Internal backing fields only for resolved reference generic instances in
 /// the fingerprinted corlib. Private/NonSerialized/readonly storage matters
 /// here; this does not change Unity serialization field selection.

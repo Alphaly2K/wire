@@ -71,8 +71,32 @@ callbacks，368次实际static invokes/1104个byref String输出，2193 fields/2
 full_game_backend=false。static invoke保留真实Mono返回box，先pin再生成owned payload，不创建
 另一个代替对象；详见 `native-mono-static-invoke-2026-10-12.md`。
 
-最新managed边界为VolumeComponent.OnEnable instance void零参数方法，尚未执行。
-普通实例方法需要按metadata/receiver关系准入，不补OnEnable类名/token名单。
+probe-41已实际执行21次ordinary instance IL，包括VolumeComponent.OnEnable；其完整生命周期通过。
+后续JSON原始引擎转发需要嵌套value payload，仍按通用metadata/receiver关系推进。
 完整release feature472 passed/7 ignored，Clippy clean；覆盖late bad roots/padding/Boolean、
 跨child owners与跨arrays的dirty batch拒绝、canonical string identity、泛型闭合/继承接口、
 SerializeReference、临时GC恢复、byref alias与weak NULL target等。日志同managed construction文档。
+
+## 含引用的嵌套 boxed payload（2026-10-12）
+
+`value_layout::Api`递归读取实际value字段，仍要求owned image、非static/literal、已知非byref
+shape；深度8、payload256B、最终最多64叶槽。完整纯标量child保留Inline；其余已支持child
+展开到父payload offset，保留exact leaf metadata身份。完整child字段范围（含padding）也检查
+重叠，不能只以leaf之间未重叠推断explicit-layout安全。
+
+新nested boxed allocation直接发布实际布局payload，避免把含引用child按opaque Inline复制。
+flattened叶槽读写只访问已核对的完整rooted box中对应offset；native reference先转canonical
+root token。写回reference时GC owner是完整box，destination是实际native leaf地址，value是
+真实rooted对象；scalar只复制exact声明字节。padding始终owned zero，native padding不泄露。
+全部Boolean/ref/padding与pending cells先验证，整批成功后才执行native stores。
+
+nested leaf不能假冒完整boxed receiver的MonoFieldGet/Set API；aggregate field ABI尚需后续
+独立实现，遇到它应显式拒绝。普通field API和精确原生unbox检查保留，host payload不映射。
+新回归核对parent offsets、同一完整GC owner、native padding保持、guest padding/Boolean失败时
+无任何native写入。probe-62/63/64已实际越过旧inline拒绝并完成113 UTF16 units的原始Unity JSON反序列化；
+后续未实现icall导致abort，局部JSON成功仍不证明整轮GC/guard/cleanup。完整成功检查点仍为probe-41。
+
+
+最终源码完整feature483/default380 release tests passed（各7 ignored），两种Clippy均clean。
+后续probe-71已越过JSON及private native buffers，但Burst SharedStatic未接通，仍不能将这些
+局部结果作为新的整轮GC/guard/cleanup成功证据；最新完整成功基线仍probe-41。

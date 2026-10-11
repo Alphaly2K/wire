@@ -125,6 +125,30 @@ pub(super) fn with_service<T>(
         operation(&mut memory, &mut runtime)
     })
 }
+/// Borrow only for native/guest identity conversion; callers release this
+/// scope before executing engine code or managed IL that may reenter it.
+pub(super) fn with_metadata_service<T>(
+    operation: impl FnOnce(&mut super::reentry::Metadata<'_>, &mut Memory) -> Result<T, String>,
+) -> Result<T, String> {
+    OWNER.with(|slot| {
+        if slot.get().is_null() {
+            return Err("native identity service has no callback owner".into());
+        }
+        let owner = unsafe { &*slot.get() };
+        let route = owner
+            .metadata
+            .as_ref()
+            .ok_or("native identity service has no metadata route")?;
+        let mut route = route
+            .try_borrow_mut()
+            .map_err(|_| "native identity metadata is already borrowed")?;
+        let mut memory = owner
+            .memory
+            .try_borrow_mut()
+            .map_err(|_| "native identity memory is already borrowed")?;
+        operation(&mut route, &mut memory)
+    })
+}
 fn execute(owner: &Owner<'_>, slot: usize, args: &[u64]) -> Result<u64, String> {
     let target = *owner
         .targets
@@ -140,6 +164,20 @@ fn execute(owner: &Owner<'_>, slot: usize, args: &[u64]) -> Result<u64, String> 
     Ok(value)
 }
 fn execute_guest(owner: &Owner<'_>, target: u64, args: &[u64]) -> Result<u64, String> {
+    Ok(execute_scalar_guest(owner, target, args, &[])?.0)
+}
+fn execute_scalar_guest(
+    owner: &Owner<'_>,
+    target: u64,
+    args: &[u64],
+    floating: &[(usize, u64)],
+) -> Result<(u64, u64), String> {
+    if floating
+        .iter()
+        .any(|&(index, _)| index >= args.len() || index >= 4)
+    {
+        return Err("guest floating argument position outside ABI".into());
+    }
     if target == 0 || args.len() > 4 {
         return Err("guest callback target/arity not admitted".into());
     }
@@ -205,9 +243,21 @@ fn execute_guest(owner: &Owner<'_>, target: u64, args: &[u64]) -> Result<u64, St
     for (index, value) in args.iter().enumerate() {
         cpu.regs[[1, 2, 8, 9][index]] = *value;
     }
+    for &(index, bits) in floating {
+        cpu.xmm[index][..8].copy_from_slice(&bits.to_le_bytes());
+    }
     while cpu.work < WORK_LIMIT {
         if cpu.rip == RETURN {
-            return Ok(cpu.regs[0]);
+            if let Some(route) = owner.metadata.as_ref() {
+                route
+                    .try_borrow_mut()
+                    .map_err(|_| "nested completion metadata is already borrowed")?
+                    .sync_guest(&owner.memory.borrow())?;
+            }
+            return Ok((
+                cpu.regs[0],
+                u64::from_le_bytes(cpu.xmm[0][..8].try_into().unwrap()),
+            ));
         }
         let binding = owner.runtime.borrow().gateways.binding(&cpu.rip);
         if let Some(binding) = binding {
@@ -222,16 +272,24 @@ fn execute_guest(owner: &Owner<'_>, target: u64, args: &[u64]) -> Result<u64, St
                     let prepared = route
                         .try_borrow_mut()
                         .map_err(|_| "nested invoke metadata is already borrowed")?
-                        .prepare_invoke(&cpu, &owner.memory.borrow())?;
+                        .prepare_invoke(
+                            &cpu,
+                            &owner.memory.borrow(),
+                            (stack_top - STACK_SLICE, stack_top),
+                        )?;
                     // Both temporary RefCell borrows above end before native IL.
-                    prepared.execute()?;
+                    let native_result = prepared.execute()?;
+                    let result = route
+                        .try_borrow_mut()
+                        .map_err(|_| "nested invoke completion metadata is already borrowed")?
+                        .finish_invoke(&prepared, native_result, &mut owner.memory.borrow_mut())?;
                     if prepared.exception_slot != 0 {
                         owner
                             .memory
                             .borrow_mut()
                             .write_int(prepared.exception_slot, 8, 0)?;
                     }
-                    cpu.return_integer(&owner.memory.borrow(), 0)?;
+                    cpu.return_integer(&owner.memory.borrow(), result)?;
                     owner
                         .managed_reentries
                         .set(owner.managed_reentries.get() + 1);
@@ -273,6 +331,16 @@ fn execute_guest(owner: &Owner<'_>, target: u64, args: &[u64]) -> Result<u64, St
 // Transfer only owned UTF16 and a guest-local span header. The native pinned
 // pointer never becomes a guest address. Null and Unity's empty sentinel differ.
 pub(super) fn log_span(target: u64, units: Option<&[u16]>) -> Result<(), String> {
+    guest_string_span(target, units, &[]).map(|_| ())
+}
+pub(super) fn guest_string_span(
+    target: u64,
+    units: Option<&[u16]>,
+    trailing: &[u64],
+) -> Result<u64, String> {
+    if trailing.len() > 3 {
+        return Err("string span callback arity exceeded".into());
+    }
     OWNER.with(|pointer| {
         if pointer.get().is_null() {
             return Err("log span has no live same-thread owner".into());
@@ -312,8 +380,23 @@ pub(super) fn log_span(target: u64, units: Option<&[u16]>) -> Result<(), String>
             .memory
             .borrow_mut()
             .write_int(address + 8, 4, units_len as u64)?;
-        execute_guest(owner, target, &[address])?;
-        Ok(())
+        let mut arguments = vec![address];
+        arguments.extend_from_slice(trailing);
+        execute_guest(owner, target, &arguments)
+    })
+}
+/// Fixed scalar Win64 ABI: integer registers and positional XMM arguments;
+/// return both RAX and the exact low XMM0 bits. No native pointer is transferred.
+pub(super) fn guest_scalars(
+    target: u64,
+    args: &[u64],
+    floating: &[(usize, u64)],
+) -> Result<(u64, u64), String> {
+    OWNER.with(|slot| {
+        if slot.get().is_null() {
+            return Err("scalar engine callback has no owner".into());
+        }
+        execute_scalar_guest(unsafe { &*slot.get() }, target, args, floating)
     })
 }
 pub(super) fn guest_arguments(target: u64, args: &[u64]) -> Result<u64, String> {
@@ -665,6 +748,42 @@ mod tests {
         assert!(memory.read_int(STACK_BASE, 8).is_err());
     }
     #[test]
+    fn scalar_callbacks_preserve_positional_xmm_bits_and_independent_integer_return() {
+        let mut memory = Memory::default();
+        memory.map(0x1000, 4096, READ | WRITE | EXECUTE).unwrap();
+        memory
+            .map(super::super::super::STACK, 65536, READ | WRITE)
+            .unwrap();
+        // Authored Win64 movapd xmm0,xmm1; mov rax,r8; ret. This checks
+        // positional floating arguments separately from integer ABI slots.
+        memory
+            .write(0x1000, &[0x66, 0x0f, 0x28, 0xc1, 0x4c, 0x89, 0xc0, 0xc3])
+            .unwrap();
+        let mut runtime = Runtime64::new(
+            &mut memory,
+            0x140000000,
+            super::super::super::STACK,
+            65536,
+            "scalar-test",
+        )
+        .unwrap();
+        for bits in [0x7ff800000000beefu64, 0x8000000000000000, 0x7fc01234] {
+            let (value, _) = with_owner(&mut memory, &mut runtime, [0; 7], || {
+                guest_scalars(0x1000, &[123, 0, 456], &[(1, bits)])
+            })
+            .unwrap();
+            assert_eq!(value.unwrap(), (456, bits));
+            assert!(memory.read_int(STACK_BASE, 8).is_err());
+        }
+        let (value, _) = with_owner(&mut memory, &mut runtime, [0; 7], || {
+            guest_scalars(0x1000, &[123], &[(1, 7)])
+        })
+        .unwrap();
+        assert!(value.is_err());
+        assert!(memory.read_int(STACK_BASE, 8).is_err());
+        assert!(guest_scalars(0x1000, &[], &[]).is_err());
+    }
+    #[test]
     fn log_span_owns_utf16_preserves_sentinels_and_revokes_faulted_payload() {
         let mut memory = Memory::default();
         memory.map(0x1000, 4096, READ | WRITE | EXECUTE).unwrap();
@@ -798,17 +917,27 @@ mod tests {
             super::super::reentry::Metadata {
                 library: ptr::null_mut(),
                 domain: ptr::null_mut(),
+                thread_handle: ptr::null_mut(),
                 metadata: &mut registry,
                 images: &mut images,
                 rooted_instance: None,
+                objects: None,
             },
-            || reference(0, &[]),
+            || {
+                with_metadata_service(|route, memory| {
+                    route.metadata.userdata(memory, token, Some(0x123456))?;
+                    assert!(with_metadata_service(|_, _| Ok(())).is_err());
+                    Ok(())
+                })?;
+                reference(0, &[])
+            },
         )
         .unwrap();
         assert_eq!(result.unwrap(), 0x778899);
         assert_eq!(stats.mono_reentries, 2);
         assert_eq!(native[29], 0);
         assert!(OWNER.with(|slot| slot.get().is_null()));
+        assert!(with_metadata_service(|_, _| Ok(())).is_err());
         assert!(memory.read_int(STACK_BASE, 8).is_err());
         registry.retire(&mut memory).unwrap();
         assert!(memory.read_int(token + 232, 8).is_err());

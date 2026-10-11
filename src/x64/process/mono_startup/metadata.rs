@@ -414,6 +414,47 @@ impl Registry {
             unsafe { byref(ret) }
         ))
     }
+    /// The caller resolves a live provider-owned image before this leaf. Copy
+    /// names into the existing owned text arena; never publish a native char*.
+    pub(super) fn query_image(
+        &mut self,
+        lib: Object,
+        function: &str,
+        image: Object,
+        argument: u64,
+    ) -> Result<Value, String> {
+        if self.retired || image.is_null() {
+            return Err("image metadata has no live registry identity".into());
+        }
+        self.queries += 1;
+        match function {
+            "mono_image_get_name" => {
+                let get = sym!(lib, function, unsafe extern "C" fn(Object) -> *const c_char);
+                let p = unsafe { get(image) };
+                if p.is_null() {
+                    return Err("native image name absent".into());
+                }
+                let mut bytes = Vec::new();
+                for offset in 0..32768 {
+                    let b = unsafe { p.add(offset).read() } as u8;
+                    if b == 0 {
+                        return Ok(Value::Text(CString::new(bytes).map_err(|e| e.to_string())?));
+                    }
+                    bytes.push(b);
+                }
+                Err("native image name exceeds bound".into())
+            }
+            "mono_image_get_table_rows" => {
+                let get = sym!(lib, function, unsafe extern "C" fn(Object, i32) -> i32);
+                // Preserve Mono's int ABI, including its zero result for an
+                // invalid table index, without accessing native table memory.
+                Ok(Value::Scalar(
+                    unsafe { get(image, argument as u32 as i32) } as u32 as u64,
+                ))
+            }
+            _ => Err(format!("unsupported image metadata leaf: {function}")),
+        }
+    }
     pub(super) fn query(
         &mut self,
         lib: Object,

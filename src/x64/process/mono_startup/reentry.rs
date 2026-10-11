@@ -1,7 +1,11 @@
-//! Same-owner metadata reentry for the locked subsystem map callback. Native
-//! handles remain in the existing registries. Only exact subsystem invokes and
-//! the externally rooted constructor instance are admitted as additional routes.
-use super::{c_char, images, metadata, string, Cpu64, Memory, Object};
+//! Same-owner metadata and object reentry. Native handles remain in the existing
+//! registries; ordinary IL calls and typed fields reuse their metadata contracts.
+//! Guest data pointers never enter native Mono object storage.
+use super::{
+    animation, arrays, attributes, c_char, constructors, field_layouts, fields, handles, images,
+    instances, managed_calls, metadata, objects, reference_arrays, reflection, string,
+    value_layout, Cpu64, Memory, Object,
+};
 use std::ffi::CString;
 #[cfg(test)]
 use std::ptr;
@@ -15,14 +19,125 @@ macro_rules! sym {
         unsafe { std::mem::transmute::<Object, $ty>(p) }
     }};
 }
+pub(super) struct ObjectRoots<'a> {
+    pub(super) api: instances::Api,
+    pub(super) roots: &'a mut instances::Registry,
+    pub(super) strings: objects::Api,
+    pub(super) objects: &'a mut objects::Registry,
+    pub(super) fields: &'a mut fields::Registry,
+    pub(super) arrays: Option<(reference_arrays::Api, &'a mut reference_arrays::Registry)>,
+    pub(super) attributes: (attributes::Api, &'a mut attributes::Registry),
+    pub(super) reflection: (reflection::Api, &'a mut reflection::Registry),
+    pub(super) empty_arrays: (arrays::Api, &'a mut arrays::Registry),
+    pub(super) handles: (handles::Api, &'a mut handles::Registry),
+}
 pub(super) struct Metadata<'a> {
     pub(super) library: Object,
     pub(super) domain: Object,
+    pub(super) thread_handle: Object,
     pub(super) metadata: &'a mut metadata::Registry,
     pub(super) images: &'a mut images::Registry,
     pub(super) rooted_instance: Option<(u64, Object)>,
+    pub(super) objects: Option<ObjectRoots<'a>>,
 }
 impl Metadata<'_> {
+    pub(super) fn root_reflection(
+        &mut self,
+        native: Object,
+        memory: &mut Memory,
+    ) -> Result<u64, String> {
+        let roots = self
+            .objects
+            .as_mut()
+            .ok_or("reflection callback has no owned object service")?;
+        let (token, ty) = roots.reflection.1.root_type(roots.reflection.0, native)?;
+        let ty = self
+            .metadata
+            .wrap(memory, metadata::Value::Handle(ty, metadata::Kind::Type))?;
+        roots.reflection.1.publish(memory, token, ty)?;
+        Ok(token)
+    }
+    pub(super) fn root_reference(
+        &mut self,
+        native: Object,
+        memory: &mut Memory,
+    ) -> Result<u64, String> {
+        let roots = self
+            .objects
+            .as_mut()
+            .ok_or("reference conversion has no owned service")?;
+        let token =
+            roots
+                .objects
+                .borrow_reference(roots.strings, roots.api, roots.roots, native)?;
+        roots.objects.publish_pending(memory)?;
+        Ok(token)
+    }
+    pub(super) fn rooted_native(&self, token: u64) -> Result<Object, String> {
+        if token == 0 {
+            return Ok(std::ptr::null_mut());
+        }
+        let roots = self
+            .objects
+            .as_ref()
+            .ok_or("nested object query has no root service")?;
+        if roots.reflection.1.contains(token) {
+            roots.reflection.1.native(roots.reflection.0, token)
+        } else if roots.empty_arrays.1.contains(token) {
+            roots.empty_arrays.1.native(roots.empty_arrays.0, token)
+        } else if roots.attributes.1.contains(token) {
+            roots.attributes.1.native(roots.attributes.0, token)
+        } else {
+            roots.roots.native(roots.api, token)
+        }
+    }
+    pub(super) fn native_handle(&self, token: u64) -> Result<Object, String> {
+        let roots = self
+            .objects
+            .as_ref()
+            .ok_or("native handle conversion has no object service")?;
+        roots.handles.1.native_handle(roots.handles.0, token)
+    }
+    pub(super) fn sync_guest(&mut self, memory: &Memory) -> Result<(), String> {
+        if let Some(roots) = self.objects.as_mut() {
+            roots.roots.sync_from_guest(roots.api, memory)?;
+            roots.fields.sync(roots.api, roots.roots)?;
+            if let Some((api, arrays)) = roots.arrays.as_mut() {
+                arrays.sync(*api, roots.api, roots.roots)?;
+            }
+        }
+        Ok(())
+    }
+    fn refresh_native(&mut self, memory: &mut Memory) -> Result<(), String> {
+        let Some(roots) = self.objects.as_mut() else {
+            return Ok(());
+        };
+        let fields =
+            roots
+                .fields
+                .prepare_refresh(roots.api, roots.roots, None, |registry, native| {
+                    roots
+                        .objects
+                        .borrow_reference(roots.strings, roots.api, registry, native)
+                })?;
+        let arrays = if let Some((api, arrays)) = roots.arrays.as_ref() {
+            Some(
+                arrays.prepare_refresh(*api, roots.api, roots.roots, |registry, native| {
+                    roots
+                        .objects
+                        .borrow_reference(roots.strings, roots.api, registry, native)
+                })?,
+            )
+        } else {
+            None
+        };
+        roots.objects.publish_pending(memory)?;
+        roots.fields.commit_refresh(fields)?;
+        if let (Some(plan), Some((_, arrays))) = (arrays, roots.arrays.as_mut()) {
+            arrays.commit_refresh(plan)?;
+        }
+        Ok(())
+    }
     pub(super) fn dispatch(
         &mut self,
         function: &str,
@@ -41,39 +156,398 @@ impl Metadata<'_> {
             }
             return cpu.return_integer(memory, super::ROOT_TOKEN);
         }
-        if function == "mono_object_get_class" {
-            let (token, class) = self
-                .rooted_instance
-                .ok_or("nested object query has no owned instance")?;
-            if cpu.regs[1] != token {
-                return Err("nested object query requires the owned constructor instance".into());
+        if function == "mono_thread_current" {
+            if self.thread_handle.is_null()
+                || memory.read_int(
+                    cpu.gs_base.checked_add(0x48).ok_or("nested TEB overflow")?,
+                    8,
+                )? != 1
+            {
+                return Err("nested thread query requires the retained main-thread owner".into());
             }
+            let current = sym!(self.library, function, unsafe extern "C" fn() -> Object);
+            let target = sym!(
+                self.library,
+                "mono_gchandle_get_target_v2",
+                unsafe extern "C" fn(Object) -> Object
+            );
+            let thread = unsafe { current() };
+            if thread.is_null() || unsafe { target(self.thread_handle) } != thread {
+                return Err("nested main-thread root identity changed".into());
+            }
+            return cpu.return_integer(memory, super::THREAD_TOKEN);
+        }
+        if function == "mono_object_new" && self.objects.is_some() {
+            if cpu.regs[1] != super::ROOT_TOKEN {
+                return Err("nested allocation has unknown domain".into());
+            }
+            let class = self.metadata.native(cpu.regs[2], metadata::Kind::Class)?;
+            let image = sym!(
+                self.library,
+                "mono_class_get_image",
+                unsafe extern "C" fn(Object) -> Object
+            );
+            let images = self.images.live_native_images()?;
+            if !images.contains(&unsafe { image(class) }) {
+                return Err("nested allocation class outside owned images".into());
+            }
+            super::closed_types::Api::load(self.library)?.concrete(class)?;
+            let value = sym!(
+                self.library,
+                "mono_class_is_valuetype",
+                unsafe extern "C" fn(Object) -> i32
+            );
+            let layout = if unsafe { value(class) } != 0 {
+                Some(
+                    value_layout::Api::load(self.library, unsafe { image(class) })?
+                        .layout(class)?,
+                )
+            } else {
+                None
+            };
+            let roots = self
+                .objects
+                .as_mut()
+                .ok_or("nested allocation has no owned root service")?;
+            let token = if let Some(layout) = &layout {
+                roots
+                    .roots
+                    .allocate_boxed(roots.api, self.domain, class, layout.width)?
+            } else {
+                roots.roots.allocate(roots.api, self.domain, class)?
+            };
+            roots.roots.publish(memory, token)?;
+            let native = roots.roots.native(roots.api, token)?;
+            let specs = if layout.is_some() {
+                Vec::new()
+            } else {
+                field_layouts::specs(
+                    self.library,
+                    self.images.unique_native_image(super::CORE_MODULE)?,
+                    &images,
+                    native,
+                    class,
+                )?
+            };
+            roots.fields.install_with(
+                self.library,
+                roots.api,
+                roots.roots,
+                memory,
+                specs,
+                |registry, native| {
+                    roots
+                        .objects
+                        .borrow_reference(roots.strings, roots.api, registry, native)
+                },
+            )?;
+            roots.objects.publish_pending(memory)?;
+            if let Some(layout) = layout {
+                roots.fields.publish_boxed_payload(
+                    roots.api,
+                    roots.roots,
+                    memory,
+                    token,
+                    layout,
+                )?;
+            }
+            return cpu.return_integer(memory, token);
+        }
+        if function == "mono_object_unbox" && self.objects.is_some() {
+            let token = cpu.regs[1];
+            let roots = self
+                .objects
+                .as_mut()
+                .ok_or("nested unbox has no owned service")?;
+            if !roots.roots.is_boxed(token) {
+                return Err("nested unbox requires a live allocated box".into());
+            }
+            let class = roots.roots.class(roots.api, token)?;
+            let image = sym!(
+                self.library,
+                "mono_class_get_image",
+                unsafe extern "C" fn(Object) -> Object
+            );
+            let image = unsafe { image(class) };
+            if !self.images.live_native_images()?.contains(&image) {
+                return Err("nested box class outside owned image family".into());
+            }
+            let layout = value_layout::Api::load(self.library, image)?.layout(class)?;
+            roots.fields.sync(roots.api, roots.roots)?;
+            let address =
+                roots
+                    .fields
+                    .unbox(self.library, roots.api, roots.roots, memory, token, layout)?;
+            return cpu.return_integer(memory, address);
+        }
+        if self.objects.is_some()
+            && matches!(
+                function,
+                "mono_gchandle_new_v2"
+                    | "mono_gchandle_new_weakref_v2"
+                    | "mono_gchandle_get_target_v2"
+                    | "mono_gchandle_free_v2"
+            )
+        {
+            let a = [cpu.regs[1], cpu.regs[2]];
+            let native = if matches!(
+                function,
+                "mono_gchandle_new_v2" | "mono_gchandle_new_weakref_v2"
+            ) {
+                self.rooted_native(a[0])?
+            } else {
+                std::ptr::null_mut()
+            };
+            let roots = self
+                .objects
+                .as_mut()
+                .ok_or("nested handles have no object service")?;
+            let (api, handles) = &mut roots.handles;
+            let result = match function {
+                "mono_gchandle_new_v2" => handles.new_handle(*api, native, a[0], a[1])?,
+                "mono_gchandle_new_weakref_v2" => {
+                    handles.new_weak_handle(*api, native, a[0], a[1])?
+                }
+                "mono_gchandle_get_target_v2" => handles.target(*api, a[0])?,
+                "mono_gchandle_free_v2" => {
+                    handles.retire_view(memory, a[0])?;
+                    handles.free(*api, a[0])?;
+                    0
+                }
+                _ => unreachable!(),
+            };
+            if matches!(
+                function,
+                "mono_gchandle_new_v2" | "mono_gchandle_new_weakref_v2"
+            ) {
+                handles.publish(memory, result)?;
+            }
+            return cpu.return_integer(memory, result);
+        }
+        if function == "mono_object_get_class" {
+            let class = if self.objects.is_some() {
+                let native = self.rooted_native(cpu.regs[1])?;
+                if native.is_null() {
+                    return Err("nested class query has NULL object".into());
+                }
+                let get = sym!(
+                    self.library,
+                    "mono_object_get_class",
+                    unsafe extern "C" fn(Object) -> Object
+                );
+                unsafe { get(native) }
+            } else {
+                let (token, class) = self
+                    .rooted_instance
+                    .ok_or("nested object query has no owned instance")?;
+                if cpu.regs[1] != token {
+                    return Err(
+                        "nested object query requires the owned constructor instance".into(),
+                    );
+                }
+                class
+            };
             let result = self.metadata.wrap(
                 memory,
                 metadata::Value::Handle(class, metadata::Kind::Class),
             )?;
+            if self.objects.is_some() {
+                self.metadata
+                    .publish_class_elements(self.library, memory, result)?;
+            }
             return cpu.return_integer(memory, result);
+        }
+        if function == "mono_reflection_type_get_type" && self.objects.is_some() {
+            let native = self.rooted_native(cpu.regs[1])?;
+            let roots = self
+                .objects
+                .as_ref()
+                .ok_or("nested reflection service absent")?;
+            if !roots.reflection.1.contains(cpu.regs[1]) {
+                return Err("nested reflection input is not a RuntimeType".into());
+            }
+            let ty = unsafe { (roots.reflection.0.get_type)(native) };
+            let token = self
+                .metadata
+                .wrap(memory, metadata::Value::Handle(ty, metadata::Kind::Type))?;
+            return cpu.return_integer(memory, token);
+        }
+        if matches!(
+            function,
+            "mono_custom_attrs_from_class"
+                | "mono_custom_attrs_from_field"
+                | "mono_custom_attrs_has_attr"
+                | "mono_custom_attrs_free"
+        ) {
+            let a = [cpu.regs[1], cpu.regs[2]];
+            let roots = self
+                .objects
+                .as_mut()
+                .ok_or("nested attributes have no object service")?;
+            let (api, attrs) = &mut roots.attributes;
+            let result = match function {
+                "mono_custom_attrs_from_class" | "mono_custom_attrs_from_field" => {
+                    let class = self.metadata.native(a[0], metadata::Kind::Class)?;
+                    let field = if function == "mono_custom_attrs_from_field" {
+                        Some(self.metadata.native(a[1], metadata::Kind::Field)?)
+                    } else {
+                        None
+                    };
+                    attrs.query(*api, class, field)?
+                }
+                "mono_custom_attrs_has_attr" => attrs.has(
+                    *api,
+                    a[0],
+                    self.metadata.native(a[1], metadata::Kind::Class)?,
+                )?,
+                "mono_custom_attrs_free" => {
+                    attrs.free(*api, a[0])?;
+                    0
+                }
+                _ => unreachable!(),
+            };
+            return cpu.return_integer(memory, result);
+        }
+        if self.objects.is_some()
+            && matches!(
+                function,
+                "mono_array_new"
+                    | "mono_array_length"
+                    | "mono_array_addr_with_size"
+                    | "mono_gc_wbarrier_set_arrayref"
+            )
+        {
+            let a = [cpu.regs[1], cpu.regs[2], cpu.regs[8]];
+            let roots = self.objects.as_mut().ok_or("nested array service absent")?;
+            let result = match function {
+                "mono_array_new" => {
+                    if a[0] != super::ROOT_TOKEN {
+                        return Err("nested array allocation has unknown domain".into());
+                    }
+                    let element = self.metadata.native(a[1], metadata::Kind::Class)?;
+                    if a[2] == 0 {
+                        // Empty arrays have no element payload. Match the outer
+                        // route with concrete metadata and a live image owner.
+                        let image = sym!(
+                            self.library,
+                            "mono_class_get_image",
+                            unsafe extern "C" fn(Object) -> Object
+                        );
+                        if !self
+                            .images
+                            .live_native_images()?
+                            .contains(&unsafe { image(element) })
+                        {
+                            return Err("nested empty array class has no live image owner".into());
+                        }
+                        super::closed_types::Api::load(self.library)?.concrete(element)?;
+                        let native = unsafe { (roots.empty_arrays.0.new)(self.domain, element, 0) };
+                        let token = roots.empty_arrays.1.root_empty(
+                            roots.empty_arrays.0,
+                            native,
+                            element,
+                        )?;
+                        roots.roots.adopt_empty_array(roots.api, token, native)?;
+                        roots.empty_arrays.1.publish(memory, token)?;
+                        token
+                    } else {
+                        let (api, arrays) = roots
+                            .arrays
+                            .as_mut()
+                            .ok_or("nested typed array service absent")?;
+                        if !api.supports(element) {
+                            return Err("nested array element outside owned typed family".into());
+                        }
+                        let token = arrays.allocate(
+                            *api,
+                            roots.api,
+                            roots.roots,
+                            self.domain,
+                            element,
+                            a[2],
+                        )?;
+                        arrays.publish(memory, token)?;
+                        token
+                    }
+                }
+                "mono_array_length" => {
+                    if roots.empty_arrays.1.contains(a[0]) {
+                        roots.empty_arrays.1.native(roots.empty_arrays.0, a[0])?;
+                        0
+                    } else {
+                        let (api, arrays) = roots
+                            .arrays
+                            .as_ref()
+                            .ok_or("nested typed array service absent")?;
+                        arrays.length(*api, roots.api, roots.roots, a[0])?
+                    }
+                }
+                "mono_array_addr_with_size" => roots
+                    .arrays
+                    .as_ref()
+                    .ok_or("nested typed array service absent")?
+                    .1
+                    .address(a[0], a[1], a[2])?,
+                "mono_gc_wbarrier_set_arrayref" => {
+                    let (api, arrays) = roots
+                        .arrays
+                        .as_mut()
+                        .ok_or("nested typed array service absent")?;
+                    arrays.store(*api, roots.api, roots.roots, memory, a)?;
+                    0
+                }
+                _ => unreachable!(),
+            };
+            return cpu.return_integer(memory, result);
+        }
+        if self.objects.is_some()
+            && matches!(
+                function,
+                "mono_string_new_wrapper"
+                    | "mono_string_new"
+                    | "mono_string_new_len"
+                    | "mono_string_length"
+                    | "mono_string_chars"
+                    | "mono_field_get_value"
+                    | "mono_field_set_value"
+                    | "mono_object_isinst"
+            )
+        {
+            return self.dispatch_object(function, cpu, memory, stack);
         }
         if function == "mono_gc_wbarrier_set_field" {
             memory.read_int(cpu.regs[4], 8)?;
             let a = [cpu.regs[1], cpu.regs[2], cpu.regs[8]];
-            let first = cpu.regs[4].checked_add(40).ok_or("nested stack overflow")?;
-            let end = a[1]
-                .checked_add(8)
-                .ok_or("nested NULL root slot overflow")?;
-            if cpu.regs[4] < stack.0
-                || cpu.regs[4] >= stack.1
-                || a[0] != 0
-                || (a[2] != 0 && self.rooted_instance.is_none_or(|(token, _)| a[2] != token))
-                || !a[1].is_multiple_of(8)
-                || a[1] < first
-                || a[1] < stack.0
-                || end > stack.1
-            {
-                return Err(
-                    "nested barrier requires NULL or the owned instance in a live callback-stack slot".into(),
-                );
+            if let Some(roots) = self.objects.as_mut() {
+                if let Some((api, arrays)) = roots.arrays.as_mut() {
+                    if arrays.has_reference(a[0], a[1]) {
+                        arrays.store(*api, roots.api, roots.roots, memory, a)?;
+                        return cpu.return_integer(memory, 0);
+                    }
+                }
+                if roots.fields.has_reference(a[0], a[1]) {
+                    roots.fields.store_reference(
+                        roots.api,
+                        roots.roots,
+                        memory,
+                        a[0],
+                        a[1],
+                        a[2],
+                    )?;
+                    return cpu.return_integer(memory, 0);
+                }
             }
+            if a[0] != 0 {
+                return Err("nested stack barrier requires NULL owner".into());
+            }
+            if a[2] != 0 && !(a[2] == super::THREAD_TOKEN && !self.thread_handle.is_null()) {
+                if self.objects.is_some() {
+                    self.rooted_native(a[2])?;
+                } else if self.rooted_instance.is_none_or(|(token, _)| a[2] != token) {
+                    return Err("nested barrier value has no owned root identity".into());
+                }
+            }
+            checked_output(memory, cpu, stack, a[1], 8)?;
             memory.write_int(a[1], 8, a[2])?;
             return cpu.return_integer(memory, 0);
         }
@@ -167,9 +641,10 @@ impl Metadata<'_> {
                 iterator_output = Some((a[1], next));
                 value
             }
-            // Names/table data are not currently used by this exact callback.
             "mono_image_get_name" | "mono_image_get_table_rows" => {
-                return Err(format!("nested image metadata not admitted: {function}"))
+                let image = self.images.native_image(a[0])?;
+                self.metadata
+                    .query_image(self.library, function, image, a[1])?
             }
             _ => self
                 .metadata
@@ -189,7 +664,9 @@ pub(super) struct PreparedInvoke {
     library: Object,
     method: Object,
     image: Object,
-    step: usize,
+    step: Option<usize>,
+    ordinary: Option<managed_calls::Descriptor>,
+    constructor: Option<(Object, Object, u64)>,
     pub(super) exception_slot: u64,
 }
 impl Metadata<'_> {
@@ -197,47 +674,98 @@ impl Metadata<'_> {
         &mut self,
         cpu: &Cpu64,
         memory: &Memory,
+        stack: (u64, u64),
     ) -> Result<PreparedInvoke, String> {
         memory.read_int(cpu.regs[4], 8)?;
         cpu.regs[4]
             .checked_add(8)
             .ok_or("nested invoke return overflow")?;
-        if cpu.regs[2] != 0 {
-            return Err("nested subsystem invoke must be static".into());
-        }
         let exception_slot = cpu.regs[9];
         if exception_slot != 0 {
-            memory.check(exception_slot, 8, crate::x64::memory::WRITE)?;
+            checked_output(memory, cpu, stack, exception_slot, 8)?;
         }
         let method = self.metadata.native(cpu.regs[1], metadata::Kind::Method)?;
         let image = self.images.unique_native_image(super::SUBSYSTEMS_MODULE)?;
-        let step = if super::invoke::validate_classlib_init(self.library, method, image, 5).is_ok()
-        {
-            5
-        } else if super::invoke::validate_classlib_init(self.library, method, image, 6).is_ok() {
-            6
-        } else {
-            eprintln!(
-                "NATIVE_MONO_NESTED_INVOKE_REJECTED: {}",
-                self.metadata.describe_method(self.library, cpu.regs[1])?
-            );
-            for (label, _, listing) in super::invoke::owned_bodies(self.library, method)? {
-                eprintln!("NATIVE_MONO_NESTED_REJECTED_IL {label}:\n{listing}");
+        if cpu.regs[2] != 0 {
+            let mut images = self.images.live_native_images()?;
+            let core = self.images.unique_native_image(super::CORE_MODULE)?;
+            images.retain(|&image| image != core);
+            images.insert(0, core);
+            let api = constructors::Api::load(self.library)?;
+            let descriptor = api
+                .describe(method, &images)?
+                .ok_or("nested instance entry is not a metadata-qualified constructor")?;
+            if descriptor.callback.is_some() {
+                return Err("nested serialization callback needs its interface route".into());
             }
-            return Err("nested invoke outside exact SubsystemDescriptorStore/SubsystemManager clear methods".into());
+            let object = self.rooted_native(cpu.regs[2])?;
+            let get_class = sym!(
+                self.library,
+                "mono_object_get_class",
+                unsafe extern "C" fn(Object) -> Object
+            );
+            api.receiver(&descriptor, object, unsafe { get_class(object) })?;
+            self.sync_guest(memory)?;
+            return Ok(PreparedInvoke {
+                library: self.library,
+                method,
+                image,
+                step: None,
+                ordinary: None,
+                constructor: Some((core, object, cpu.regs[2])),
+                exception_slot,
+            });
+        }
+        let (step, ordinary) = if super::invoke::validate_classlib_init(
+            self.library,
+            method,
+            image,
+            5,
+        )
+        .is_ok()
+        {
+            (Some(5), None)
+        } else if super::invoke::validate_classlib_init(self.library, method, image, 6).is_ok() {
+            (Some(6), None)
+        } else {
+            if self.objects.is_none() {
+                return Err("nested ordinary invoke has no owned object service".into());
+            }
+            let images = self.images.live_native_images()?;
+            let descriptor = managed_calls::Api::load(self.library)?
+                .describe(method, &images, &images)?
+                .ok_or("nested ordinary entry is not admitted IL")?;
+            if descriptor.receiver.is_some()
+                || !descriptor.parameters.is_empty()
+                || matches!(
+                    descriptor.returns,
+                    Some(managed_calls::Shape::Scalar { .. })
+                )
+            {
+                return Err("nested ordinary invoke currently requires static zero-argument void/reference ABI".into());
+            }
+            (None, Some(descriptor))
         };
+        self.sync_guest(memory)?;
         self.metadata.note_query();
         Ok(PreparedInvoke {
             library: self.library,
             method,
             image,
             step,
+            ordinary,
+            constructor: None,
             exception_slot,
         })
     }
 }
 impl PreparedInvoke {
-    pub(super) fn execute(&self) -> Result<(), String> {
+    pub(super) fn execute(&self) -> Result<Object, String> {
+        if let Some((core, object, token)) = self.constructor {
+            animation::execute_nested_managed(self.library, core, self.method, object, token)?;
+            eprintln!("NATIVE_MONO_NESTED_CONSTRUCTOR_VERIFIED: receiver={token:#x}; metadata-qualified=true");
+            return Ok(std::ptr::null_mut());
+        }
         let invoke = sym!(
             self.library,
             "mono_runtime_invoke",
@@ -252,25 +780,237 @@ impl PreparedInvoke {
                 &mut exception,
             )
         };
-        if !exception.is_null() || !result.is_null() {
-            return Err("nested subsystem clear did not return void without exception".into());
+        if !exception.is_null() {
+            return Err("nested IL invoke raised an exception".into());
         }
-        super::invoke::verify_subsystems(self.library, self.image, self.step == 6)?;
-        eprintln!(
-            "NATIVE_MONO_NESTED_INVOKE_VERIFIED: {} static-void=true",
-            if self.step == 5 {
-                "SubsystemDescriptorStore.ClearManagedDescriptors"
-            } else {
-                "SubsystemManager.ClearSubsystems"
+        if let Some(step) = self.step {
+            if !result.is_null() {
+                return Err("nested subsystem clear returned an object".into());
             }
+            super::invoke::verify_subsystems(self.library, self.image, step == 6)?;
+            eprintln!(
+                "NATIVE_MONO_NESTED_INVOKE_VERIFIED: {} static-void=true",
+                if step == 5 {
+                    "SubsystemDescriptorStore.ClearManagedDescriptors"
+                } else {
+                    "SubsystemManager.ClearSubsystems"
+                }
+            );
+        } else {
+            let descriptor = self
+                .ordinary
+                .as_ref()
+                .ok_or("nested invoke descriptor absent")?;
+            if let Some(shape) = descriptor.returns {
+                managed_calls::Api::load(self.library)?.compatible(result, shape)?;
+            } else if !result.is_null() {
+                return Err("nested void IL returned an object".into());
+            }
+        }
+        Ok(result)
+    }
+}
+
+impl Metadata<'_> {
+    pub(super) fn finish_invoke(
+        &mut self,
+        prepared: &PreparedInvoke,
+        result: Object,
+        memory: &mut Memory,
+    ) -> Result<u64, String> {
+        if result.is_null() {
+            self.refresh_native(memory)?;
+            return Ok(0);
+        }
+        let roots = self
+            .objects
+            .as_mut()
+            .ok_or("nested reference result has no owned root service")?;
+        let token =
+            roots
+                .objects
+                .borrow_reference(roots.strings, roots.api, roots.roots, result)?;
+        roots.objects.publish_pending(memory)?;
+        self.refresh_native(memory)?;
+        let roots = self
+            .objects
+            .as_mut()
+            .ok_or("nested result root service retired")?;
+        if !roots.objects.contains(token) && !roots.fields.has_owner(token) {
+            let class = roots.roots.class(roots.api, token)?;
+            let images = self.images.live_native_images()?;
+            let specs = field_layouts::reference_storage_specs(
+                self.library,
+                self.images.unique_native_image(super::CORE_MODULE)?,
+                &images,
+                result,
+                class,
+            )?;
+            roots.fields.install_with(
+                self.library,
+                roots.api,
+                roots.roots,
+                memory,
+                specs,
+                |registry, native| {
+                    roots
+                        .objects
+                        .borrow_reference(roots.strings, roots.api, registry, native)
+                },
+            )?;
+            roots.objects.publish_pending(memory)?;
+        }
+        eprintln!(
+            "NATIVE_MONO_NESTED_ORDINARY_INVOKE_VERIFIED: {}; rooted-reference={token:#x}",
+            prepared
+                .ordinary
+                .as_ref()
+                .ok_or("nested ordinary descriptor absent")?
+                .name
         );
-        Ok(())
+        Ok(token)
+    }
+}
+
+fn checked_output(
+    memory: &Memory,
+    cpu: &Cpu64,
+    stack: (u64, u64),
+    address: u64,
+    width: usize,
+) -> Result<(), String> {
+    let end = address
+        .checked_add(width as u64)
+        .ok_or("nested output overflow")?;
+    if cpu.regs[4] < stack.0
+        || cpu.regs[4] >= stack.1
+        || !address.is_multiple_of(width as u64)
+        || address < cpu.regs[4].saturating_add(8)
+        || address < stack.0
+        || end > stack.1
+        || !memory.owned_noncode_access(address, width)
+    {
+        return Err("nested output is not a live owned callback-stack slot".into());
+    }
+    memory.check(address, width, crate::x64::memory::WRITE)
+}
+impl Metadata<'_> {
+    fn dispatch_object(
+        &mut self,
+        function: &str,
+        cpu: &mut Cpu64,
+        memory: &mut Memory,
+        stack: (u64, u64),
+    ) -> Result<(), String> {
+        let a = [cpu.regs[1], cpu.regs[2], cpu.regs[8]];
+        let library = self.library;
+        if matches!(function, "mono_field_get_value" | "mono_field_set_value") {
+            let field = self.metadata.native(a[1], metadata::Kind::Field)?;
+            let roots = self
+                .objects
+                .as_mut()
+                .ok_or("nested fields have no object service")?;
+            roots.roots.sync_from_guest(roots.api, memory)?;
+            roots.fields.sync(roots.api, roots.roots)?;
+            if function == "mono_field_set_value" {
+                roots
+                    .fields
+                    .store_value(roots.api, roots.roots, memory, a[0], field, a[2])?;
+            } else {
+                let bytes = if roots.attributes.1.contains(a[0]) {
+                    roots
+                        .attributes
+                        .1
+                        .read_field(roots.attributes.0, a[0], field)?
+                } else {
+                    roots.fields.read(a[0], field)?
+                };
+                checked_output(memory, cpu, stack, a[2], bytes.len())?;
+                memory.write(a[2], &bytes)?;
+            }
+            return cpu.return_integer(memory, 0);
+        }
+        let roots = self
+            .objects
+            .as_mut()
+            .ok_or("nested object service absent")?;
+        let result = if matches!(function, "mono_string_length" | "mono_string_chars") {
+            roots.objects.native_string(roots.strings, a[0])?;
+            if function == "mono_string_length" {
+                memory.read_int(a[0] + 16, 4)?
+            } else {
+                a[0] + 20
+            }
+        } else if function == "mono_object_isinst" {
+            let class = self.metadata.native(a[1], metadata::Kind::Class)?;
+            let object = if a[0] == 0 {
+                std::ptr::null_mut()
+            } else {
+                roots.roots.native(roots.api, a[0])?
+            };
+            let isinst = sym!(
+                library,
+                "mono_object_isinst",
+                unsafe extern "C" fn(Object, Object) -> Object
+            );
+            let found = unsafe { isinst(object, class) };
+            if found.is_null() {
+                0
+            } else if found == object {
+                a[0]
+            } else {
+                return Err("nested isinst produced another identity".into());
+            }
+        } else {
+            let wrapper = function == "mono_string_new_wrapper";
+            if !wrapper && a[0] != super::ROOT_TOKEN {
+                return Err("nested String allocation has unknown domain".into());
+            }
+            let bytes = if function == "mono_string_new_len" {
+                if a[2] > 32768 {
+                    return Err("nested String length exceeds bound".into());
+                }
+                let mut bytes = vec![0; a[2] as usize];
+                memory.read(a[1], &mut bytes)?;
+                bytes
+            } else {
+                string(memory, if wrapper { a[0] } else { a[1] })?.into_bytes()
+            };
+            if bytes.len() > 32768 {
+                return Err("nested String input exceeds bound".into());
+            }
+            let native = unsafe {
+                (roots.strings.new_string)(self.domain, bytes.as_ptr().cast(), bytes.len() as u32)
+            };
+            let token =
+                roots
+                    .objects
+                    .borrow_reference(roots.strings, roots.api, roots.roots, native)?;
+            roots.objects.publish_pending(memory)?;
+            token
+        };
+        cpu.return_integer(memory, result)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn nested_output_rejects_return_slot_misalignment_code_and_retired_storage() {
+        use crate::x64::memory::{EXECUTE, READ, WRITE};
+        let mut memory = Memory::default();
+        memory.map(0x1000, 4096, READ | WRITE).unwrap();
+        memory.map(0x2000, 4096, READ | WRITE | EXECUTE).unwrap();
+        let cpu = Cpu64::new(0, 0x1800);
+        checked_output(&memory, &cpu, (0x1000, 0x2000), 0x1840, 8).unwrap();
+        for address in [0, 0x1400, 0x1800, 0x1841, 0x2000, u64::MAX] {
+            assert!(checked_output(&memory, &cpu, (0x1000, 0x2000), address, 8).is_err());
+        }
+        assert!(checked_output(&memory, &cpu, (0x1000, 0x3000), 0x2040, 8).is_err());
+        memory.unmap(0x1000, 4096).unwrap();
+        assert!(checked_output(&memory, &cpu, (0x1000, 0x2000), 0x1840, 8).is_err());
+    }
     #[test]
     fn null_root_clear_checks_active_stack_and_keeps_outputs_on_failure() {
         let mut memory = Memory::default();
@@ -287,11 +1027,23 @@ mod tests {
         let mut route = Metadata {
             library: ptr::null_mut(),
             domain: ptr::null_mut(),
+            thread_handle: ptr::null_mut(),
             metadata: &mut registry,
             images: &mut images,
             rooted_instance: None,
+            objects: None,
         };
         let mut cpu = Cpu64::new(0, 0x1800);
+        assert!(route
+            .dispatch(
+                "mono_thread_current",
+                &mut cpu,
+                &mut memory,
+                (0x1000, 0x2000)
+            )
+            .is_err());
+        assert_eq!(cpu.rip, 0);
+        assert_eq!(cpu.regs[4], 0x1800);
         cpu.regs[2] = 0x1840;
         memory.write_int(0x1840, 8, 0xaaaaaaaa).unwrap();
         route
@@ -343,11 +1095,23 @@ mod tests {
         let mut route = Metadata {
             library: ptr::null_mut(),
             domain: ptr::null_mut(),
+            thread_handle: ptr::null_mut(),
             metadata: &mut registry,
             images: &mut images,
             rooted_instance: Some((owned, native_class.as_mut_ptr().cast())),
+            objects: None,
         };
         let mut cpu = Cpu64::new(0, 0x1800);
+        assert!(route
+            .dispatch(
+                "mono_thread_current",
+                &mut cpu,
+                &mut memory,
+                (0x1000, 0x2000)
+            )
+            .is_err());
+        assert_eq!(cpu.rip, 0);
+        assert_eq!(cpu.regs[4], 0x1800);
         cpu.regs[2] = 0x1840;
         cpu.regs[8] = owned;
         route
@@ -440,9 +1204,11 @@ mod tests {
         let mut route = Metadata {
             library: ptr::null_mut(),
             domain: ptr::null_mut(),
+            thread_handle: ptr::null_mut(),
             metadata: &mut registry,
             images: &mut images,
             rooted_instance: None,
+            objects: None,
         };
         let mut cpu = Cpu64::new(0, 0x1800);
         cpu.regs[1] = token;

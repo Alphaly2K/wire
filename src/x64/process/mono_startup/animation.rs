@@ -206,8 +206,17 @@ struct State {
     input_active: bool,
     marker_installed: bool,
     markers: Vec<u64>,
+    input_marker_calls: usize,
 }
 thread_local! { static STATE: RefCell<Option<State>> = const { RefCell::new(None) }; }
+pub(super) fn owns_marker(pointer: u64) -> bool {
+    STATE.with(|state| {
+        state
+            .borrow()
+            .as_ref()
+            .is_some_and(|state| state.marker_installed && state.markers.contains(&pointer))
+    })
+}
 fn resources() -> Result<Vec<Resource>, String> {
     STATE.with(|s| {
         s.borrow()
@@ -340,33 +349,34 @@ unsafe extern "C" fn instance_id_offset() -> i32 {
         Ok(value)
     })
 }
-unsafe extern "C" fn create_input_marker(
+unsafe extern "C" fn create_marker(
     span: *const Span,
     category: u16,
     flags: u16,
     metadata_count: i32,
 ) -> Object {
     checked(|| {
+        callbacks::with_service(|_, _| Ok(()))?;
         STATE.with(|s| -> Result<(), String> {
             if s.borrow()
                 .as_ref()
-                .is_none_or(|s| !s.input_active || s.markers.len() >= 64)
+                .is_none_or(|s| !s.marker_installed || s.markers.len() >= 4096)
             {
-                Err("profiler marker outside checked input invocation".into())
+                Err("profiler marker has no installed bounded owner".into())
             } else {
                 Ok(())
             }
         })?;
-        if span.is_null() || category != 1 || flags != 0 || metadata_count != 0 {
-            return Err("input profiler marker scalar ABI mismatch".into());
+        if span.is_null() || !(0..=255).contains(&metadata_count) {
+            return Err("profiler marker span/metadata count exceeds fixed ABI".into());
         }
         let span = unsafe { span.read_unaligned() };
         if span.begin.is_null()
             || span.length <= 0
-            || span.length > 128
+            || span.length > 4096
             || !(span.begin as usize).is_multiple_of(2)
         {
-            return Err("input marker UTF16 span mismatch".into());
+            return Err("profiler marker UTF16 span mismatch".into());
         }
         let units: Vec<_> = (0..span.length as usize)
             .map(|i| unsafe { span.begin.cast::<u16>().add(i).read_unaligned() })
@@ -377,8 +387,13 @@ unsafe extern "C" fn create_input_marker(
             &units,
             &[category as u64, flags as u64, metadata_count as u64],
         )?;
-        STATE.with(|s| s.borrow_mut().as_mut().unwrap().markers.push(pointer));
-        eprintln!("NATIVE_MONO_INPUT_MARKER_CREATED: name={name} actual guest result={pointer:#x}");
+        STATE.with(|s| {
+            let mut state = s.borrow_mut();
+            let state = state.as_mut().unwrap();
+            state.markers.push(pointer);
+            state.input_marker_calls += usize::from(state.input_active);
+        });
+        eprintln!("NATIVE_MONO_MARKER_CREATED: name={name}; category={category}; flags={flags:#x}; metadata-count={metadata_count}; actual guest result={pointer:#x}");
         Ok(pointer as usize as Object)
     })
 }
@@ -506,6 +521,7 @@ impl Constructor {
                 input_active: false,
                 marker_installed: false,
                 markers: Vec::new(),
+                input_marker_calls: 0,
             });
             Ok(())
         })?;
@@ -747,7 +763,7 @@ impl Constructor {
         Ok(())
     }
     pub(super) fn report(&self) -> String {
-        format!("native-color-curves-ready=true\nnative-color-curves-graph-verifications={}\nnative-color-curves-cleaned={}\n", self.verified, self.cleaned) + &format!("native-input-profiler-marker-calls={}\n", STATE.with(|s|s.borrow().as_ref().map_or(0,|s|s.markers.len())))
+        format!("native-color-curves-ready=true\nnative-color-curves-graph-verifications={}\nnative-color-curves-cleaned={}\n", self.verified, self.cleaned) + &format!("native-input-profiler-marker-calls={}\n", STATE.with(|s|s.borrow().as_ref().map_or(0,|s|s.input_marker_calls))) + &format!("native-profiler-marker-calls={}\n", STATE.with(|s|s.borrow().as_ref().map_or(0,|s|s.markers.len())))
     }
 }
 
@@ -765,84 +781,115 @@ impl Constructor {
         if self.cleaned {
             return Err("managed construction after resource cleanup".into());
         }
-        let api = self.api;
-        let installed = STATE.with(|s| s.borrow().as_ref().unwrap().marker_installed);
-        if !installed {
-            let profiler = api.class(
-                core,
-                c"Unity.Profiling.LowLevel.Unsafe",
-                c"ProfilerUnsafeUtility",
-            )?;
-            let span = api.class(core, c"UnityEngine.Bindings", c"ManagedSpanWrapper")?;
-            let flags = api.class(core, c"Unity.Profiling.LowLevel", c"MarkerFlags")?;
-            let mut alignment = 0;
-            if unsafe { (api.size)(flags, &mut alignment) } != 2 || alignment != 2 {
-                return Err("profiler flags value ABI mismatch".into());
-            }
-            let create = unsafe { (api.method)(profiler, c"CreateMarker_Injected".as_ptr(), 4) };
-            api.signature(
-                create,
-                false,
-                true,
-                0x18,
-                &[
-                    (0x11, true, Some(span)),
-                    (7, false, None),
-                    (0x11, false, Some(flags)),
-                    (8, false, None),
-                ],
-            )?;
-            if unsafe { (api.token)(create) } != 0x06000267 {
-                return Err("profiler marker method token mismatch".into());
-            }
-            unsafe {
-                (api.add)(
-                    c"Unity.Profiling.LowLevel.Unsafe.ProfilerUnsafeUtility::CreateMarker_Injected"
-                        .as_ptr(),
-                    create_input_marker as *const () as Object,
-                );
-            }
-            STATE.with(|s| s.borrow_mut().as_mut().unwrap().marker_installed = true);
-        }
-        let before = STATE.with(|s| -> Result<(usize, usize), String> {
-            let mut s = s.borrow_mut();
-            let s = s
-                .as_mut()
-                .ok_or("managed constructor has no adapter owner")?;
-            if s.instance.is_some() || s.component || s.input_active || s.component_calls >= 64 {
-                return Err("managed constructor owner already active/capacity exceeded".into());
-            }
-            s.instance = Some((object, token));
-            s.component = true;
-            s.input_active = true;
-            Ok((s.component_calls, s.offset_calls))
-        })?;
-        struct Scope;
-        impl Drop for Scope {
-            fn drop(&mut self) {
-                STATE.with(|s| {
-                    let mut s = s.borrow_mut();
-                    let s = s.as_mut().unwrap();
-                    s.instance = None;
-                    s.component = false;
-                    s.input_active = false;
-                });
-            }
-        }
-        let _scope = Scope;
-        api.call(method, object, ptr::null_mut())?;
-        STATE.with(|s| -> Result<(), String> {
-            let s = s.borrow();
-            let s = s.as_ref().unwrap();
-            // Plain CLR constructors have no ScriptableObject callback;
-            // ScriptableObject subclasses bind exactly the rooted receiver.
-            if !(before.0..=before.0 + 1).contains(&s.component_calls)
-                || s.resources.len() != 8
-                || s.offset_calls != before.1
-            {
-                return Err("managed constructor changed unrelated native resources".into());
-            }
-            Ok(())
-        })
+        execute_managed_with(self.api, core, method, object, token)
     }
+}
+/// The allocation and method contracts are validated by the metadata reentry
+/// route. Reuse the same scoped constructor adapters, releasing route borrows
+/// before native IL can call back into the engine.
+pub(super) fn execute_nested_managed(
+    library: Object,
+    core: Object,
+    method: Object,
+    object: Object,
+    token: u64,
+) -> Result<(), String> {
+    callbacks::with_service(|_, _| Ok(()))?;
+    STATE.with(|s| {
+        if s.borrow()
+            .as_ref()
+            .is_none_or(|s| !s.marker_installed || s.resources.iter().any(|r| r.destroyed))
+        {
+            Err("nested construction has no live installed adapter owner".to_string())
+        } else {
+            Ok(())
+        }
+    })?;
+    execute_managed_with(Api::load(library)?, core, method, object, token)
+}
+fn execute_managed_with(
+    api: Api,
+    core: Object,
+    method: Object,
+    object: Object,
+    token: u64,
+) -> Result<(), String> {
+    let installed = STATE.with(|s| s.borrow().as_ref().unwrap().marker_installed);
+    if !installed {
+        let profiler = api.class(
+            core,
+            c"Unity.Profiling.LowLevel.Unsafe",
+            c"ProfilerUnsafeUtility",
+        )?;
+        let span = api.class(core, c"UnityEngine.Bindings", c"ManagedSpanWrapper")?;
+        let flags = api.class(core, c"Unity.Profiling.LowLevel", c"MarkerFlags")?;
+        let mut alignment = 0;
+        if unsafe { (api.size)(flags, &mut alignment) } != 2 || alignment != 2 {
+            return Err("profiler flags value ABI mismatch".into());
+        }
+        let create = unsafe { (api.method)(profiler, c"CreateMarker_Injected".as_ptr(), 4) };
+        api.signature(
+            create,
+            false,
+            true,
+            0x18,
+            &[
+                (0x11, true, Some(span)),
+                (7, false, None),
+                (0x11, false, Some(flags)),
+                (8, false, None),
+            ],
+        )?;
+        if unsafe { (api.token)(create) } != 0x06000267 {
+            return Err("profiler marker method token mismatch".into());
+        }
+        unsafe {
+            (api.add)(
+                c"Unity.Profiling.LowLevel.Unsafe.ProfilerUnsafeUtility::CreateMarker_Injected"
+                    .as_ptr(),
+                create_marker as *const () as Object,
+            );
+        }
+        STATE.with(|s| s.borrow_mut().as_mut().unwrap().marker_installed = true);
+    }
+    let before = STATE.with(|s| -> Result<(usize, usize), String> {
+        let mut s = s.borrow_mut();
+        let s = s
+            .as_mut()
+            .ok_or("managed constructor has no adapter owner")?;
+        if s.instance.is_some() || s.component || s.input_active || s.component_calls >= 4096 {
+            return Err("managed constructor owner already active/capacity exceeded".into());
+        }
+        s.instance = Some((object, token));
+        s.component = true;
+        s.input_active = true;
+        Ok((s.component_calls, s.offset_calls))
+    })?;
+    struct Scope;
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            STATE.with(|s| {
+                let mut s = s.borrow_mut();
+                let s = s.as_mut().unwrap();
+                s.instance = None;
+                s.component = false;
+                s.input_active = false;
+            });
+        }
+    }
+    let _scope = Scope;
+    api.call(method, object, ptr::null_mut())?;
+    STATE.with(|s| -> Result<(), String> {
+        let s = s.borrow();
+        let s = s.as_ref().unwrap();
+        // Plain CLR constructors have no ScriptableObject callback;
+        // ScriptableObject subclasses bind exactly the rooted receiver.
+        if !(before.0..=before.0 + 1).contains(&s.component_calls)
+            || s.resources.len() != 8
+            || s.offset_calls != before.1
+        {
+            return Err("managed constructor changed unrelated native resources".into());
+        }
+        Ok(())
+    })
 }

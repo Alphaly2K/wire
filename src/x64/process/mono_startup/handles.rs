@@ -188,6 +188,14 @@ impl Registry {
         }
         Ok(entry.token)
     }
+    /// Native managed unmarshalling consumes the actual v2 handle. This pointer
+    /// is never written to guest memory or returned through a guest gateway.
+    pub(super) fn native_handle(&self, api: Api, handle: u64) -> Result<Object, String> {
+        if self.views_retired || self.target(api, handle)? == 0 {
+            return Err("native handle conversion requires a live owned target".into());
+        }
+        Ok(self.entries[&handle].native)
+    }
     pub(super) fn free(&mut self, api: Api, handle: u64) -> Result<(), String> {
         if self.released {
             return Err("external handle freed after registry release".into());
@@ -275,11 +283,17 @@ mod tests {
         assert!(memory.write_int(handle, 8, 0).is_err());
         assert!(registry.free(api, handle).is_err());
         assert_eq!(registry.target(api, handle).unwrap(), 0x77);
+        assert_eq!(
+            registry.native_handle(api, handle).unwrap(),
+            0x33usize as Object
+        );
+        assert!(registry.native_handle(api, 0x33).is_err());
         assert!(registry.target(api, 0x33).is_err());
         registry.retire_view(&mut memory, handle).unwrap();
         registry.free(api, handle).unwrap();
         assert!(memory.read_int(handle, 8).is_err());
         assert!(registry.free(api, handle).is_err());
+        assert!(registry.native_handle(api, handle).is_err());
         let next = registry
             .new_handle(api, 0x33usize as Object, 0x77, 0)
             .unwrap();
@@ -293,6 +307,7 @@ mod tests {
         assert!(memory.read_int(next, 8).is_err());
         assert_eq!(ROOTS.with(Cell::get), 0);
         assert!(registry.target(api, next).is_err());
+        assert!(registry.native_handle(api, next).is_err());
         assert!(registry
             .new_handle(api, 0x33usize as Object, 0x77, 0)
             .is_err());
@@ -323,6 +338,7 @@ mod tests {
         assert!(registry.target(api, handle & !1).is_err());
         WEAK_TARGET.with(|r| r.set(0));
         assert_eq!(registry.target(api, handle).unwrap(), 0);
+        assert!(registry.native_handle(api, handle).is_err());
         registry.verify(api).unwrap();
         WEAK_TARGET.with(|r| r.set(0x44));
         assert!(registry.target(api, handle).is_err());

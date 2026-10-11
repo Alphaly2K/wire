@@ -1,0 +1,620 @@
+//! Finite, same-owner native IL buffers backed by actual Unity allocations.
+//! The two data addresses stay private to the typed allocator adapters. This
+//! is not a shared-memory alias or admission for pointer fields/other icalls.
+use super::{bindings, callbacks, managed_calls, Object};
+use std::{
+    alloc::{alloc_zeroed, dealloc, Layout},
+    cell::RefCell,
+    collections::BTreeMap,
+    marker::PhantomData,
+    ptr::NonNull,
+    rc::Rc,
+    sync::OnceLock,
+    thread::{self, ThreadId},
+};
+const CAPACITY: usize = 64 * 1024 * 1024;
+const COUNT: usize = 4096;
+const BINDINGS: [(&std::ffi::CStr, &std::ffi::CStr, u64); 5] = [
+    (
+        c"Unity.Collections.LowLevel.Unsafe.UnsafeUtility::Malloc",
+        c"Malloc",
+        0x180067690,
+    ),
+    (
+        c"Unity.Collections.LowLevel.Unsafe.UnsafeUtility::Free",
+        c"Free",
+        0x1800676e0,
+    ),
+    (
+        c"Unity.Collections.LowLevel.Unsafe.UnsafeUtility::MemSet",
+        c"MemSet",
+        0x180067980,
+    ),
+    (
+        c"Unity.Collections.LowLevel.Unsafe.UnsafeUtility::MemCpy",
+        c"MemCpy",
+        0x180067730,
+    ),
+    (
+        c"Unity.Collections.LowLevel.Unsafe.UnsafeUtility::MemMove",
+        c"MemMove",
+        0x180067730,
+    ),
+];
+static TARGETS: OnceLock<[u64; 5]> = OnceLock::new();
+struct Bytes {
+    pointer: NonNull<u8>,
+    layout: Layout,
+    owner: ThreadId,
+    _owner_only: PhantomData<Rc<()>>,
+}
+impl Bytes {
+    fn new(size: usize, alignment: usize) -> Result<Self, String> {
+        let layout = Layout::from_size_align(size, alignment)
+            .map_err(|_| "native buffer layout overflow")?;
+        let pointer = NonNull::new(unsafe { alloc_zeroed(layout) })
+            .ok_or("native buffer allocation failed")?;
+        Ok(Self {
+            pointer,
+            layout,
+            owner: thread::current().id(),
+            _owner_only: PhantomData,
+        })
+    }
+    fn initialize(&self, bytes: &[u8]) -> Result<(), String> {
+        if self.owner != thread::current().id() || bytes.len() != self.layout.size() {
+            return Err("native buffer initialization owner/size mismatch".into());
+        }
+        // No slice/reference into native data escapes. Later raw IL access is
+        // confined to the live synchronous owner; this backing is never mapped.
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.pointer.as_ptr(), bytes.len())
+        };
+        Ok(())
+    }
+}
+impl Drop for Bytes {
+    fn drop(&mut self) {
+        assert_eq!(self.owner, thread::current().id());
+        unsafe { dealloc(self.pointer.as_ptr(), self.layout) };
+    }
+}
+struct Allocation {
+    guest: u64,
+    allocator: i32,
+    bytes: Bytes,
+}
+#[derive(Default)]
+struct Arena {
+    live: BTreeMap<usize, Allocation>,
+    // Keep retired host addresses/storage until Mono cleanup. A stale native
+    // pointer cannot accidentally match a newly allocated buffer at that base.
+    retired: Vec<Bytes>,
+    reserved: usize,
+    pending_count: usize,
+    retained: usize,
+    allocations: usize,
+    frees: usize,
+    cleanup_frees: usize,
+    memsets: usize,
+    copies: usize,
+    closed: bool,
+}
+impl Arena {
+    fn reserve(&mut self, size: usize) -> Result<(), String> {
+        if self.closed
+            || self.allocations + self.pending_count >= COUNT
+            || self
+                .retained
+                .checked_add(self.reserved)
+                .and_then(|n| n.checked_add(size))
+                .is_none_or(|n| n > CAPACITY)
+        {
+            return Err("native IL buffer owner is closed or exceeds retained capacity".into());
+        }
+        self.reserved += size;
+        self.pending_count += 1;
+        Ok(())
+    }
+    fn lookup(&self, pointer: usize, allocator: i32) -> Result<&Allocation, String> {
+        self.live
+            .get(&pointer)
+            .filter(|a| a.allocator == allocator)
+            .ok_or_else(|| {
+                "native buffer free requires an exact live base and matching allocator".into()
+            })
+    }
+    fn range(&self, pointer: usize, size: usize) -> Result<(usize, u64), String> {
+        let (&base, allocation) = self
+            .live
+            .range(..=pointer)
+            .next_back()
+            .ok_or("native buffer span has no live owner")?;
+        let offset = pointer
+            .checked_sub(base)
+            .ok_or("native buffer span underflow")?;
+        if offset
+            .checked_add(size)
+            .is_none_or(|end| end > allocation.bytes.layout.size())
+        {
+            return Err("native buffer span crosses its exact allocation".into());
+        }
+        Ok((base, allocation.guest + offset as u64))
+    }
+    fn copy(&mut self, destination: usize, source: usize, size: usize) -> Result<(), String> {
+        // Validate both complete owned ranges before the first write. The
+        // frozen profile registers MemCpy and MemMove to the same implementation.
+        // The frozen CRT jump table for length zero points directly to RET
+        // (0x181b8a14e). Neither pointer is dereferenced, including NULL.
+        if size == 0 {
+            self.copies += 1;
+            return Ok(());
+        }
+        self.range(destination, size)
+            .map_err(|e| format!("native copy destination: {e}; size={size}"))?;
+        self.range(source, size)
+            .map_err(|e| format!("native copy source: {e}; size={size}"))?;
+        if size != 0 {
+            // Data stays wholly native. Overlap is handled as memmove; no
+            // possibly pointer-bearing bytes are ever copied into guest Memory.
+            unsafe { std::ptr::copy(source as *const u8, destination as *mut u8, size) };
+        }
+        self.copies += 1;
+        Ok(())
+    }
+    fn insert(&mut self, allocation: Allocation) -> Result<usize, String> {
+        let pointer = allocation.bytes.pointer.as_ptr() as usize;
+        let end = allocation
+            .guest
+            .checked_add(allocation.bytes.layout.size() as u64)
+            .ok_or("engine allocation range overflow")?;
+        if self.closed
+            || self.live.contains_key(&pointer)
+            || self
+                .live
+                .values()
+                .any(|a| a.guest < end && allocation.guest < a.guest + a.bytes.layout.size() as u64)
+        {
+            return Err(
+                "native buffer owner closed or duplicate/overlapping engine allocation".into(),
+            );
+        }
+        self.retained += allocation.bytes.layout.size();
+        self.allocations += 1;
+        self.live.insert(pointer, allocation);
+        Ok(pointer)
+    }
+    fn retire(&mut self, pointer: usize, allocator: i32) -> Result<(), String> {
+        self.lookup(pointer, allocator)?;
+        let allocation = self.live.remove(&pointer).unwrap();
+        self.retired.push(allocation.bytes);
+        self.frees += 1;
+        Ok(())
+    }
+}
+thread_local! { static ARENA: RefCell<Arena> = RefCell::new(Arena::default()); }
+struct Reservation(usize);
+impl Reservation {
+    fn new(size: usize) -> Result<Self, String> {
+        ARENA.with(|arena| arena.borrow_mut().reserve(size))?;
+        Ok(Self(size))
+    }
+}
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        ARENA.with(|arena| {
+            let mut arena = arena.borrow_mut();
+            arena.reserved -= self.0;
+            arena.pending_count -= 1;
+        });
+    }
+}
+pub(super) fn installed() -> bool {
+    TARGETS.get().is_some()
+}
+pub(super) fn install(
+    library: Object,
+    images: &[Object],
+    registry: &bindings::Registry,
+) -> Result<(), String> {
+    macro_rules! sym {
+        ($name:literal, $ty:ty) => {{
+            let p = unsafe { libc::dlsym(library, concat!($name, "\0").as_ptr().cast()) };
+            if p.is_null() {
+                return Err(concat!("missing native buffer API: ", $name).into());
+            }
+            unsafe { std::mem::transmute::<Object, $ty>(p) }
+        }};
+    }
+    let find = sym!(
+        "mono_class_from_name",
+        unsafe extern "C" fn(Object, *const std::ffi::c_char, *const std::ffi::c_char) -> Object
+    );
+    let method = sym!(
+        "mono_class_get_method_from_name",
+        unsafe extern "C" fn(Object, *const std::ffi::c_char, i32) -> Object
+    );
+    let corlib = sym!("mono_get_corlib", unsafe extern "C" fn() -> Object);
+    let add = sym!(
+        "mono_add_internal_call",
+        unsafe extern "C" fn(*const std::ffi::c_char, Object)
+    );
+    let unique = |namespace: &std::ffi::CStr, name: &std::ffi::CStr| -> Result<Object, String> {
+        let mut classes: Vec<_> = images
+            .iter()
+            .map(|&image| unsafe { find(image, namespace.as_ptr(), name.as_ptr()) })
+            .filter(|p| !p.is_null())
+            .collect();
+        classes.sort_unstable_by_key(|p| *p as usize);
+        classes.dedup();
+        if classes.len() != 1 {
+            return Err(format!(
+                "native buffer class identity ambiguous: {namespace:?}.{name:?}"
+            ));
+        }
+        Ok(classes[0])
+    };
+    let owner = unique(c"Unity.Collections.LowLevel.Unsafe", c"UnsafeUtility")?;
+    let allocator = unique(c"Unity.Collections", c"Allocator")?;
+    let corlib = unsafe { corlib() };
+    if !images.contains(&corlib) {
+        return Err("native buffer corelib is not owned".into());
+    }
+    let system = |name: &std::ffi::CStr| unsafe { find(corlib, c"System".as_ptr(), name.as_ptr()) };
+    let classes = [
+        system(c"Void"),
+        system(c"Int64"),
+        system(c"Int32"),
+        allocator,
+        system(c"IntPtr"),
+    ];
+    let api = managed_calls::Api::load(library)?;
+    let mut targets = [0; 5];
+    for (index, &(name, member, target)) in BINDINGS.iter().enumerate() {
+        targets[index] =
+            registry.exact_target(name.to_str().map_err(|e| e.to_string())?, target)?;
+        let method = unsafe {
+            method(
+                owner,
+                member.as_ptr(),
+                match index {
+                    0 => 4,
+                    1 => 2,
+                    _ => 3,
+                },
+            )
+        };
+        if index == 2 {
+            api.buffer_memset_icall(
+                method,
+                owner,
+                &[classes[0], system(c"Byte"), classes[1]],
+                images,
+            )?;
+        } else if index >= 3 {
+            api.buffer_copy_icall(method, owner, &[classes[0], classes[1]], images)?;
+        } else {
+            api.allocator_icall(method, owner, index == 1, &classes, images)?;
+        }
+    }
+    TARGETS
+        .set(targets)
+        .map_err(|_| "native buffer bindings already installed")?;
+    let adapters: [Object; BINDINGS.len()] = [
+        malloc as *const () as Object,
+        free as *const () as Object,
+        memset as *const () as Object,
+        memcpy as *const () as Object,
+        memcpy as *const () as Object,
+    ];
+    for ((name, _, _), adapter) in BINDINGS.into_iter().zip(adapters) {
+        unsafe { add(name.as_ptr(), adapter) };
+    }
+    Ok(())
+}
+fn request(
+    size: i64,
+    alignment: i32,
+    allocator: i32,
+    context: usize,
+) -> Result<(usize, usize), String> {
+    // Temp is implicitly retired by the engine scheduler; custom/context
+    // allocators require a different ownership contract. Neither is admitted.
+    if !(1..=CAPACITY as i64).contains(&size)
+        || alignment <= 0
+        || !(alignment as usize).is_power_of_two()
+        || alignment > 4096
+        || !matches!(allocator, 3 | 4)
+        || context != 0
+    {
+        return Err(format!("unsupported native buffer request: size={size}; alignment={alignment}; allocator={allocator}; context={context:#x}"));
+    }
+    Ok((size as usize, alignment as usize))
+}
+fn allocate(size: i64, alignment: i32, allocator: i32, context: usize) -> Result<Object, String> {
+    callbacks::with_service(|_, _| Ok(()))?;
+    let (size, alignment) = request(size, alignment, allocator, context)?;
+    let targets = TARGETS
+        .get()
+        .ok_or("native buffer bindings not installed")?;
+    let _reservation = Reservation::new(size)?;
+    let bytes = Bytes::new(size, alignment)?;
+    // Execute the actual Unity allocator with its complete four-argument ABI.
+    // No registry borrow or native pointer is retained by guest engine code.
+    let guest = callbacks::guest_arguments(
+        targets[0],
+        &[size as u64, alignment as u64, allocator as u32 as u64, 0],
+    )?;
+    if guest == 0 {
+        return Ok(std::ptr::null_mut());
+    }
+    let prepared = (|| -> Result<usize, String> {
+        let mut initial = vec![0; size];
+        callbacks::with_service(|memory, runtime| {
+            if !guest.is_multiple_of(alignment as u64) {
+                return Err("original engine allocator returned a misaligned buffer".into());
+            }
+            memory.check(
+                guest,
+                size,
+                crate::x64::memory::READ | crate::x64::memory::WRITE,
+            )?;
+            // Split at actual page boundaries to verify the complete range,
+            // not only its first page, against code history and ownership.
+            let mut at = guest;
+            let end = guest
+                .checked_add(size as u64)
+                .ok_or("engine buffer overflow")?;
+            while at < end {
+                let width = (end - at).min(4096 - (at & 4095)) as usize;
+                if !memory.owned_noncode_access(at, width)
+                    || !(runtime.live_data_slot(at, width as u64)
+                        || memory.guest_private_data_slot(at, width))
+                {
+                    return Err(
+                        "original engine buffer is not wholly live owned noncode data".into(),
+                    );
+                }
+                at += width as u64;
+            }
+            memory.read(guest, &mut initial)
+        })?;
+        bytes.initialize(&initial)?;
+        ARENA.with(|arena| {
+            arena.borrow_mut().insert(Allocation {
+                guest,
+                allocator,
+                bytes,
+            })
+        })
+    })();
+    match prepared {
+        Ok(pointer) => {
+            eprintln!("NATIVE_MONO_UNSAFE_BUFFER_ALLOCATED: size={size}; alignment={alignment}; allocator={allocator}; original-engine-allocation={guest:#x}; native-address-private=true");
+            Ok(pointer as Object)
+        }
+        Err(error) => {
+            callbacks::guest_arguments(targets[1], &[guest, allocator as u32 as u64])?;
+            Err(error)
+        }
+    }
+}
+fn release(pointer: usize, allocator: i32) -> Result<(), String> {
+    callbacks::with_service(|_, _| Ok(()))?;
+    let targets = TARGETS
+        .get()
+        .ok_or("native buffer bindings not installed")?;
+    if pointer == 0 {
+        callbacks::guest_arguments(targets[1], &[0, allocator as u32 as u64])?;
+        return Ok(());
+    }
+    let guest = ARENA.with(|arena| arena.borrow().lookup(pointer, allocator).map(|a| a.guest))?;
+    callbacks::guest_arguments(targets[1], &[guest, allocator as u32 as u64])?;
+    ARENA.with(|arena| arena.borrow_mut().retire(pointer, allocator))?;
+    eprintln!("NATIVE_MONO_UNSAFE_BUFFER_FREED: allocator={allocator}; original-engine-allocation={guest:#x}; native-address-private=true");
+    Ok(())
+}
+fn fill(pointer: usize, value: u8, size: i64) -> Result<(), String> {
+    callbacks::with_service(|_, _| Ok(()))?;
+    if !(0..=CAPACITY as i64).contains(&size) {
+        return Err("native MemSet size exceeds the owned span contract".into());
+    }
+    let size = size as usize;
+    if size == 0 {
+        let targets = TARGETS
+            .get()
+            .ok_or("native buffer bindings not installed")?;
+        callbacks::guest_arguments(targets[2], &[0, u64::from(value), 0])?;
+        ARENA.with(|arena| arena.borrow_mut().memsets += 1);
+        return Ok(());
+    }
+    let (base, guest) = ARENA.with(|arena| arena.borrow().range(pointer, size))?;
+    let targets = TARGETS
+        .get()
+        .ok_or("native buffer bindings not installed")?;
+    // MemSet overwrites the complete declared span; no native bytes/pointers
+    // need to be published to the guest. Preserve the original engine checks.
+    callbacks::guest_arguments(targets[2], &[guest, u64::from(value), size as u64])?;
+    let mut result = vec![0; size];
+    callbacks::with_service(|memory, _| memory.read(guest, &mut result))?;
+    if result.iter().any(|&byte| byte != value) {
+        return Err("original Unity MemSet did not produce the requested bytes".into());
+    }
+    ARENA.with(|arena| -> Result<(), String> {
+        let mut arena = arena.borrow_mut();
+        // Engine reentry may have changed lifetime: validate again before the
+        // first native write, then copy only this exact checked subrange.
+        if arena.range(pointer, size)? != (base, guest) {
+            return Err("native MemSet backing changed during engine callback".into());
+        }
+        if size != 0 {
+            unsafe { std::ptr::copy_nonoverlapping(result.as_ptr(), pointer as *mut u8, size) };
+        }
+        arena.memsets += 1;
+        Ok(())
+    })?;
+    eprintln!("NATIVE_MONO_UNSAFE_BUFFER_MEMSET_VERIFIED: size={size}; value={value:#x}; native-address-private=true");
+    Ok(())
+}
+fn checked<T>(operation: impl FnOnce() -> Result<T, String>) -> T {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation)) {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => {
+            eprintln!("NATIVE_MONO_UNSAFE_BUFFER_REJECT: {error}");
+            std::process::abort();
+        }
+        Err(_) => {
+            eprintln!("NATIVE_MONO_UNSAFE_BUFFER_REJECT: adapter panicked");
+            std::process::abort();
+        }
+    }
+}
+unsafe extern "C" fn malloc(size: i64, alignment: i32, allocator: i32, context: usize) -> Object {
+    checked(|| allocate(size, alignment, allocator, context))
+}
+unsafe extern "C" fn free(pointer: Object, allocator: i32) {
+    checked(|| release(pointer as usize, allocator));
+}
+unsafe extern "C" fn memset(pointer: Object, value: u8, size: i64) {
+    checked(|| fill(pointer as usize, value, size));
+}
+unsafe extern "C" fn memcpy(destination: Object, source: Object, size: i64) {
+    checked(|| {
+        callbacks::with_service(|_, _| Ok(()))?;
+        if !(0..=CAPACITY as i64).contains(&size) {
+            return Err("native buffer copy exceeds the owned span contract".into());
+        }
+        ARENA.with(|arena| {
+            arena
+                .borrow_mut()
+                .copy(destination as usize, source as usize, size as usize)
+        })?;
+        eprintln!(
+            "NATIVE_MONO_UNSAFE_BUFFER_COPY_VERIFIED: size={size}; native-address-private=true"
+        );
+        Ok(())
+    });
+}
+/// Called only after Mono cleanup has returned: no native IL or finalizer can
+/// still use these private addresses. This is finite diagnostic teardown, not
+/// a replacement for the production allocator/scheduler/shared-buffer contract.
+pub(super) fn retire_after_vm_cleanup() -> Result<(), String> {
+    let remaining = ARENA.with(|arena| -> Result<Vec<(usize, i32)>, String> {
+        let mut arena = arena.borrow_mut();
+        if arena.reserved != 0 || arena.pending_count != 0 {
+            return Err("native buffer allocation still pending at VM shutdown".into());
+        }
+        arena.closed = true;
+        Ok(arena
+            .live
+            .iter()
+            .map(|(&p, a)| (p, a.allocator))
+            .collect::<Vec<_>>())
+    })?;
+    for (pointer, allocator) in remaining {
+        release(pointer, allocator)?;
+        ARENA.with(|arena| arena.borrow_mut().cleanup_frees += 1);
+    }
+    ARENA.with(|arena| {
+        let mut arena = arena.borrow_mut();
+        arena.retired.clear();
+        arena.retained = 0;
+    });
+    Ok(())
+}
+pub(super) fn report() -> String {
+    ARENA.with(|arena| {
+        let a = arena.borrow();
+        format!("native-unsafe-buffer-allocations={}\nnative-unsafe-buffer-frees={}\nnative-unsafe-buffer-memsets={}\nnative-unsafe-buffer-copies={}\nnative-unsafe-buffer-cleanup-frees={}\nnative-unsafe-buffer-live={}\nnative-unsafe-buffer-retained-bytes={}\nnative-unsafe-buffer-closed={}\n", a.allocations, a.frees, a.memsets, a.copies, a.cleanup_frees, a.live.len(), a.retained, a.closed)
+    })
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn buffer_alignment_private_storage_exact_free_and_no_address_reuse() {
+        let bytes = Bytes::new(33, 64).unwrap();
+        assert_eq!(bytes.pointer.as_ptr() as usize % 64, 0);
+        bytes.initialize(&[7; 33]).unwrap();
+        let mut arena = Arena::default();
+        let pointer = arena
+            .insert(Allocation {
+                guest: 0x100000,
+                allocator: 4,
+                bytes,
+            })
+            .unwrap();
+        assert_ne!(pointer as u64, arena.lookup(pointer, 4).unwrap().guest);
+        unsafe {
+            (pointer as *mut u8).add(32).write(19);
+        }
+        assert_eq!(unsafe { (pointer as *const u8).add(32).read() }, 19);
+        assert_eq!(arena.range(pointer + 32, 1).unwrap(), (pointer, 0x100020));
+        assert!(arena.range(pointer + 32, 2).is_err());
+        assert!(arena.range(pointer, usize::MAX).is_err());
+        assert!(arena.lookup(pointer + 1, 4).is_err());
+        assert!(arena.lookup(pointer, 3).is_err());
+        assert!(arena.retire(pointer, 3).is_err());
+        assert_eq!(arena.live.len(), 1);
+        arena.retire(pointer, 4).unwrap();
+        assert!(arena.lookup(pointer, 4).is_err());
+        assert!(arena.retire(pointer, 4).is_err());
+        let other = Bytes::new(33, 64).unwrap();
+        assert_ne!(other.pointer.as_ptr() as usize, pointer);
+        assert_eq!(arena.retired.len(), 1);
+    }
+    #[test]
+    fn buffer_copy_preserves_overlap_and_rejects_both_bad_ranges_before_writes() {
+        let mut empty = Arena::default();
+        empty.copy(0, 0, 0).unwrap();
+        empty.copy(usize::MAX, 1, 0).unwrap();
+        assert_eq!(empty.copies, 2);
+        assert!(empty.copy(0, 0, 1).is_err());
+        let bytes = Bytes::new(8, 8).unwrap();
+        bytes.initialize(&[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+        let mut arena = Arena::default();
+        let pointer = arena
+            .insert(Allocation {
+                guest: 0x300000,
+                allocator: 4,
+                bytes,
+            })
+            .unwrap();
+        arena.copy(pointer + 2, pointer, 6).unwrap();
+        let read = || unsafe { std::slice::from_raw_parts(pointer as *const u8, 8) }.to_vec();
+        assert_eq!(read(), [1, 2, 1, 2, 3, 4, 5, 6]);
+        assert!(arena.copy(pointer, pointer + 7, 2).is_err());
+        assert!(arena.copy(pointer + 7, pointer, 2).is_err());
+        assert!(arena.copy(pointer, pointer, usize::MAX).is_err());
+        assert_eq!(read(), [1, 2, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(arena.copies, 1);
+        arena.retire(pointer, 4).unwrap();
+        assert!(arena.copy(pointer, pointer, 1).is_err());
+    }
+    #[test]
+    fn unsupported_allocator_context_and_reentrant_capacity_fail_before_mutation() {
+        assert!(request(0, 16, 4, 0).is_err());
+        assert!(request(-1, 16, 4, 0).is_err());
+        assert!(request(16, 3, 4, 0).is_err());
+        assert!(request(16, 16, 2, 0).is_err());
+        assert!(request(16, 16, 4, 17).is_err());
+        let mut arena = Arena::default();
+        arena.reserve(CAPACITY).unwrap();
+        assert!(arena.reserve(1).is_err());
+        assert_eq!(arena.pending_count, 1);
+        assert_eq!(arena.reserved, CAPACITY);
+        arena.reserved = 0;
+        arena.pending_count = 0;
+        arena.closed = true;
+        assert!(arena.reserve(1).is_err());
+        let bytes = Bytes::new(8, 8).unwrap();
+        assert!(arena
+            .insert(Allocation {
+                guest: 0x200000,
+                allocator: 4,
+                bytes
+            })
+            .is_err());
+        assert!(arena.live.is_empty());
+    }
+}

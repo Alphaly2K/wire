@@ -23,6 +23,7 @@ struct Api {
     assignable: unsafe extern "C" fn(Object, Object) -> i32,
     get: unsafe extern "C" fn(Object, Object, Object),
     set: unsafe extern "C" fn(Object, Object, Object),
+    barrier: unsafe extern "C" fn(Object, Object, Object),
 }
 impl Api {
     fn load(library: Object) -> Result<Self, String> {
@@ -80,6 +81,10 @@ impl Api {
                 "mono_field_set_value",
                 unsafe extern "C" fn(Object, Object, Object)
             ),
+            barrier: sym!(
+                "mono_gc_wbarrier_set_field",
+                unsafe extern "C" fn(Object, Object, Object)
+            ),
         })
     }
 }
@@ -100,6 +105,7 @@ impl Shape {
     }
 }
 struct Cell {
+    payload_offset: Option<usize>,
     owner: u64,
     field: Object,
     shape: Shape,
@@ -133,6 +139,48 @@ pub(super) struct Refresh {
     pub(super) references: Vec<Object>,
 }
 impl Registry {
+    fn read_native(api: Api, object: Object, cell: &Cell, bytes: &mut [u8]) {
+        if let Some(offset) = cell.payload_offset {
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    object.cast::<u8>().add(16 + offset),
+                    bytes.as_mut_ptr(),
+                    bytes.len(),
+                );
+            }
+        } else {
+            unsafe {
+                (api.get)(object, cell.field, bytes.as_mut_ptr().cast());
+            }
+        }
+    }
+    fn write_native(
+        api: Api,
+        object: Object,
+        cell: &Cell,
+        bytes: &mut [u8],
+        reference: Option<Object>,
+    ) {
+        if let Some(offset) = cell.payload_offset {
+            let destination = unsafe { object.cast::<u8>().add(16 + offset) };
+            if let Some(reference) = reference {
+                // The complete boxed object remains the GC owner for nested
+                // reference leaves; never use a guest token as the barrier owner.
+                unsafe {
+                    (api.barrier)(object, destination.cast(), reference);
+                }
+            } else {
+                unsafe {
+                    ptr::copy_nonoverlapping(bytes.as_ptr(), destination, bytes.len());
+                }
+            }
+        } else {
+            let value = reference.unwrap_or_else(|| bytes.as_mut_ptr().cast());
+            unsafe {
+                (api.set)(object, cell.field, value);
+            }
+        }
+    }
     pub(super) fn install_with(
         &mut self,
         library: Object,
@@ -271,6 +319,7 @@ impl Registry {
             self.cells.insert(
                 address,
                 Cell {
+                    payload_offset: None,
                     owner,
                     field,
                     shape,
@@ -382,7 +431,17 @@ impl Registry {
         for slot in &layout.slots {
             let width = slot.shape.width();
             let value = &mut bytes[slot.offset..slot.offset + width];
-            unsafe { (api.get)(object, slot.field, value.as_mut_ptr().cast()) };
+            if slot.nested {
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        object.cast::<u8>().add(16 + slot.offset),
+                        value.as_mut_ptr(),
+                        width,
+                    );
+                }
+            } else {
+                unsafe { (api.get)(object, slot.field, value.as_mut_ptr().cast()) };
+            }
             let shape = match slot.shape {
                 value_layout::Shape::Reference(class) => {
                     let native = u64::from_le_bytes(value.try_into().unwrap()) as Object;
@@ -412,7 +471,14 @@ impl Registry {
                     return Err("unbox would discard pending or incompatible field snapshot".into());
                 }
             }
-            records.push((address, slot.field, shape, slot.offset, value.to_vec()));
+            records.push((
+                address,
+                slot.field,
+                shape,
+                slot.offset,
+                value.to_vec(),
+                slot.nested.then_some(slot.offset),
+            ));
         }
         // Every existing field must correspond exactly to a validated slot.
         if self
@@ -453,10 +519,11 @@ impl Registry {
             }
             return Err(error);
         }
-        for (address, field, shape, view_offset, committed) in records {
+        for (address, field, shape, view_offset, committed, payload_offset) in records {
             self.cells.insert(
                 address,
                 Cell {
+                    payload_offset,
                     owner,
                     field,
                     shape,
@@ -513,12 +580,7 @@ impl Registry {
         // targets stay alive through the native reference write barrier.
         for (address, owner, mut bytes, reference) in updates {
             let cell = self.cells.get_mut(&address).unwrap();
-            let value = reference.unwrap_or_else(|| bytes.as_mut_ptr().cast());
-            // Mono's mono_copy_value uses the object itself for references,
-            // unlike scalar stores which dereference the value address.
-            unsafe {
-                (api.set)(owner, cell.field, value);
-            }
+            Self::write_native(api, owner, cell, &mut bytes, reference);
             self.writes += 1;
             self.reference_writes += usize::from(reference.is_some());
             cell.committed = bytes;
@@ -539,9 +601,7 @@ impl Registry {
         for cell in self.cells.values() {
             let owner = roots.native(root_api, cell.owner)?;
             let mut bytes = vec![0; cell.shape.width()];
-            unsafe {
-                (api.get)(owner, cell.field, bytes.as_mut_ptr().cast());
-            }
+            Self::read_native(api, owner, cell, &mut bytes);
             if let Shape::Reference(class) = cell.shape {
                 let token = u64::from_le_bytes(cell.committed.as_slice().try_into().unwrap());
                 let expected = if token == 0 {
@@ -580,10 +640,9 @@ impl Registry {
             .values()
             .filter(|c| c.owner == owner && matches!(c.shape, Shape::Reference(_)))
         {
-            let mut value: Object = ptr::null_mut();
-            unsafe {
-                (api.get)(object, cell.field, (&mut value as *mut Object).cast());
-            }
+            let mut bytes = [0; 8];
+            Self::read_native(api, object, cell, &mut bytes);
+            let value = u64::from_le_bytes(bytes) as Object;
             if !value.is_null() {
                 references.push(value);
             }
@@ -634,9 +693,7 @@ impl Registry {
         {
             let object = roots.native(root_api, cell.owner)?;
             let mut bytes = vec![0; cell.shape.width()];
-            unsafe {
-                (api.get)(object, cell.field, bytes.as_mut_ptr().cast());
-            }
+            Self::read_native(api, object, cell, &mut bytes);
             if let Shape::Reference(class) = cell.shape {
                 let native = u64::from_le_bytes(bytes.as_slice().try_into().unwrap()) as Object;
                 let token = if native.is_null() {
@@ -717,13 +774,66 @@ impl Registry {
             } else {
                 roots.compatible(root_api, token, class)?
             };
-            unsafe {
-                (self.api.unwrap().set)(native, cell.field, value);
-            }
+            Self::write_native(
+                self.api.unwrap(),
+                native,
+                cell,
+                &mut token.to_le_bytes(),
+                Some(value),
+            );
             self.writes += 1;
             self.reference_writes += 1;
         }
         Ok(())
+    }
+    /// The embedding API takes reference values directly, but scalar/inline
+    /// values by address. Resolve the shape from this exact owned field cell.
+    pub(super) fn store_value(
+        &mut self,
+        root_api: instances::Api,
+        roots: &instances::Registry,
+        memory: &mut Memory,
+        owner: u64,
+        field: Object,
+        value: u64,
+    ) -> Result<(), String> {
+        if self.retired {
+            return Err("field write after retirement".into());
+        }
+        let (&address, cell) = self
+            .cells
+            .iter()
+            .find(|(_, c)| c.owner == owner && c.field == field)
+            .ok_or("unadmitted initialized field write")?;
+        if cell.payload_offset.is_some() {
+            return Err("embedded value leaf is not a field of the complete boxed receiver".into());
+        }
+        let api = self.api.ok_or("field write before installation")?;
+        if unsafe { (api.flags)(field) } & (0x10 | 0x20 | 0x40) != 0 {
+            return Err("field API write requires mutable instance storage".into());
+        }
+        if matches!(cell.shape, Shape::Reference(_)) {
+            return self.store_reference(root_api, roots, memory, owner, address, value);
+        }
+        if matches!(cell.shape, Shape::EnginePointer(_)) {
+            return Err("field API cannot replace owned engine resources".into());
+        }
+        let width = cell.shape.width();
+        let alignment = match cell.shape {
+            Shape::Inline { alignment, .. } => alignment,
+            _ => width,
+        };
+        let mut bytes = vec![0; width];
+        if value != 0 {
+            if !value.is_multiple_of(alignment as u64) || !memory.owned_noncode_access(value, width)
+            {
+                return Err("field API scalar input is not aligned owned data".into());
+            }
+            memory.read(value, &mut bytes)?;
+        }
+        Self::validate(cell.shape, &bytes)?;
+        memory.write(address, &bytes)?;
+        self.sync(root_api, roots)
     }
     pub(super) fn read(&self, owner: u64, field: Object) -> Result<Vec<u8>, String> {
         if self.retired {
@@ -734,6 +844,9 @@ impl Registry {
             .values()
             .find(|c| c.owner == owner && c.field == field)
             .ok_or("unadmitted initialized field read")?;
+        if cell.payload_offset.is_some() {
+            return Err("embedded value leaf needs its actual boxed parent field ABI".into());
+        }
         Self::value(cell)
     }
     pub(super) fn retire(
@@ -1026,6 +1139,7 @@ mod tests {
         static SCALAR: Counter<u8> = const { Counter::new(1) };
         static REFERENCE: Counter<usize> = const { Counter::new(4) };
         static SETS: Counter<usize> = const { Counter::new(0) };
+        static BARRIER_OWNER: Counter<usize> = const { Counter::new(0) };
         static INLINE: RefCell<[u8; 16]> = const { RefCell::new([0; 16]) };
     }
     unsafe extern "C" fn get(_: Object, field: Object, dest: Object) {
@@ -1108,6 +1222,20 @@ mod tests {
                 assignable,
                 get,
                 set,
+                barrier: {
+                    unsafe extern "C" fn barrier(
+                        owner: Object,
+                        destination: Object,
+                        reference: Object,
+                    ) {
+                        BARRIER_OWNER.with(|c| c.set(owner as usize));
+                        unsafe {
+                            destination.cast::<Object>().write_unaligned(reference);
+                        }
+                        SETS.with(|c| c.set(c.get() + 1));
+                    }
+                    barrier
+                },
             }),
             ..Registry::default()
         };
@@ -1140,6 +1268,7 @@ mod tests {
             fields.cells.insert(
                 owner + offset,
                 Cell {
+                    payload_offset: None,
                     owner,
                     field: field as Object,
                     shape,
@@ -1153,6 +1282,75 @@ mod tests {
         (fields, api, roots, memory, owner)
     }
     #[test]
+    fn nested_box_leaves_keep_complete_gc_owner_and_reject_dirty_padding_before_native_stores() {
+        let (mut fields, _, _, _, _) = fixture();
+        fields.cells.clear();
+        let api = instances::tests::identity_api();
+        let mut roots = instances::Registry::default();
+        let mut object = [0u8; 48];
+        let native = object.as_mut_ptr().cast();
+        object[17..24].fill(0xcc);
+        object[24..32].copy_from_slice(&(native as usize as u64).to_le_bytes());
+        let owner = roots.borrow(api, native).unwrap();
+        let layout = value_layout::Layout {
+            class: 2usize as Object,
+            width: 24,
+            alignment: 8,
+            value: true,
+            slots: vec![
+                value_layout::Slot {
+                    nested: true,
+                    offset: 0,
+                    field: 1usize as Object,
+                    shape: value_layout::Shape::Scalar {
+                        width: 1,
+                        boolean: true,
+                    },
+                },
+                value_layout::Slot {
+                    nested: true,
+                    offset: 8,
+                    field: 2usize as Object,
+                    shape: value_layout::Shape::Reference(2usize as Object),
+                },
+            ],
+        };
+        let mut memory = Memory::default();
+        fields
+            .promote_payload(api, &mut roots, &mut memory, owner, layout)
+            .unwrap();
+        assert_eq!(memory.read_int(owner + 24, 8).unwrap(), owner);
+        assert_eq!(memory.read_int(owner + 17, 1).unwrap(), 0);
+        assert!(memory.read_int(owner, 8).is_err());
+        assert!(fields.read(owner, 1usize as Object).is_err());
+        assert!(fields
+            .store_value(
+                api,
+                &roots,
+                &mut memory,
+                owner,
+                1usize as Object,
+                owner + 16
+            )
+            .is_err());
+        memory.write_int(owner + 16, 1, 1).unwrap();
+        memory.write_int(owner + 24, 8, 0).unwrap();
+        fields.sync(api, &roots).unwrap();
+        assert_eq!(object[16], 1);
+        assert_eq!(u64::from_le_bytes(object[24..32].try_into().unwrap()), 0);
+        assert_eq!(BARRIER_OWNER.with(Counter::get), native as usize);
+        assert_eq!(&object[17..24], &[0xcc; 7]);
+        fields.verify(api, &roots).unwrap();
+        memory.write_int(owner + 16, 1, 0).unwrap();
+        memory.write_int(owner + 18, 1, 1).unwrap();
+        assert!(fields.sync(api, &roots).is_err());
+        assert_eq!(object[16], 1);
+        memory.write_int(owner + 18, 1, 0).unwrap();
+        memory.write_int(owner + 16, 1, 2).unwrap();
+        assert!(fields.sync(api, &roots).is_err());
+        assert_eq!(object[16], 1);
+    }
+    #[test]
     fn unbox_promotes_fields_to_one_writable_payload_and_keeps_tokens_private() {
         let (mut fields, api, mut roots, mut memory, owner) = fixture();
         let layout = value_layout::Layout {
@@ -1162,6 +1360,7 @@ mod tests {
             value: true,
             slots: vec![
                 value_layout::Slot {
+                    nested: false,
                     offset: 0,
                     field: 1usize as Object,
                     shape: value_layout::Shape::Scalar {
@@ -1170,6 +1369,7 @@ mod tests {
                     },
                 },
                 value_layout::Slot {
+                    nested: false,
                     offset: 8,
                     field: 2usize as Object,
                     shape: value_layout::Shape::Reference(2usize as Object),
@@ -1236,6 +1436,49 @@ mod tests {
         assert!(fields.read(owner, 2usize as Object).is_err());
     }
     #[test]
+    fn embedding_field_api_distinguishes_direct_refs_from_scalar_addresses() {
+        let (mut fields, api, mut roots, mut memory, owner) = fixture();
+        memory.map(0x1000, 4096, READ | WRITE).unwrap();
+        memory.write_int(0x1000, 1, 2).unwrap();
+        assert!(fields
+            .store_value(api, &roots, &mut memory, owner, 1usize as Object, 0x1000)
+            .is_err());
+        assert_eq!(memory.read_int(owner + 16, 1).unwrap(), 1);
+        assert_eq!(SETS.with(Counter::get), 0);
+        memory.write_int(0x1000, 1, 0).unwrap();
+        fields
+            .store_value(api, &roots, &mut memory, owner, 1usize as Object, 0x1000)
+            .unwrap();
+        assert_eq!(SCALAR.with(Counter::get), 0);
+        // The token has no readable object header. A pointer-to-token is not a
+        // valid reference input to Mono's embedding field setter.
+        fields
+            .store_value(api, &roots, &mut memory, owner, 2usize as Object, 0)
+            .unwrap();
+        fields
+            .store_value(api, &roots, &mut memory, owner, 2usize as Object, owner)
+            .unwrap();
+        assert_eq!(REFERENCE.with(Counter::get), 4);
+        memory.write_int(0x1000, 8, owner).unwrap();
+        assert!(fields
+            .store_value(api, &roots, &mut memory, owner, 2usize as Object, 0x1000)
+            .is_err());
+        assert_eq!(REFERENCE.with(Counter::get), 4);
+        unsafe extern "C" fn readonly(_: Object) -> u32 {
+            0x20
+        }
+        fields.api.as_mut().unwrap().flags = readonly;
+        assert!(fields
+            .store_value(api, &roots, &mut memory, owner, 2usize as Object, 0)
+            .is_err());
+        fields.verify(api, &roots).unwrap();
+        roots.release(api);
+        fields.retire(&mut memory, &roots).unwrap();
+        assert!(fields
+            .store_value(api, &roots, &mut memory, owner, 1usize as Object, 0)
+            .is_err());
+    }
+    #[test]
     fn graph_refresh_includes_child_owner_and_late_dirty_cell_rejects_entire_batch() {
         let (mut fields, api, mut roots, mut memory, owner) =
             fixture_with(instances::tests::identity_api());
@@ -1249,6 +1492,7 @@ mod tests {
         fields.cells.insert(
             child + 16,
             Cell {
+                payload_offset: None,
                 owner: child,
                 field: 1usize as Object,
                 shape: Shape::Scalar {
@@ -1314,6 +1558,7 @@ mod tests {
         fields.cells.insert(
             owner + 32,
             Cell {
+                payload_offset: None,
                 owner,
                 field: 3usize as Object,
                 shape: Shape::Inline {

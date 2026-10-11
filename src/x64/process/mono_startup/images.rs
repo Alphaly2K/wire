@@ -62,6 +62,31 @@ pub(super) struct Registry {
     retired: bool,
 }
 impl Registry {
+    /// Assemblies admitted by ordinary IL invocation come from the actual
+    /// owned image registry, not a growing list of library/class names. Each
+    /// live input has a recorded SHA256 and a provider-held native reference.
+    pub(super) fn live_native_images(&self) -> Result<Vec<Object>, String> {
+        if self.retired {
+            return Err("managed image family requested after retirement".into());
+        }
+        let mut images = Vec::new();
+        for entry in self.images.values() {
+            if entry.user_refs == 0 && !entry.borrowed {
+                continue;
+            }
+            if entry.native.is_null()
+                || entry.hash.len() != 64
+                || !entry.hash.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                return Err("live managed image lacks a fingerprinted native identity".into());
+            }
+            images.push(entry.native);
+        }
+        if images.is_empty() {
+            return Err("managed image family is empty".into());
+        }
+        Ok(images)
+    }
     pub(super) fn unique_native_image(&self, hash: &str) -> Result<Object, String> {
         if self.retired {
             return Err("image lookup after retirement".into());
@@ -437,5 +462,32 @@ mod tests {
         assert!(registry.assembly_image(api, assembly).is_err());
         assert!(registry.close(api, image).is_err());
         assert!(registry.borrow_registered(IMAGE as Object).is_err());
+    }
+    #[test]
+    fn ordinary_calls_require_live_fingerprinted_input_images_and_reject_retirement() {
+        let mut registry = Registry::default();
+        assert!(registry.live_native_images().is_err());
+        registry.images.insert(
+            IMAGE_BASE,
+            Image {
+                native: IMAGE as Object,
+                name: CString::new("UnknownLibrary.dll").unwrap(),
+                hash: "a".repeat(64),
+                user_refs: 0,
+                borrowed: true,
+            },
+        );
+        assert_eq!(
+            registry.live_native_images().unwrap(),
+            vec![IMAGE as Object]
+        );
+        registry.images.get_mut(&IMAGE_BASE).unwrap().hash = "unverified".into();
+        assert!(registry.live_native_images().is_err());
+        let entry = registry.images.get_mut(&IMAGE_BASE).unwrap();
+        entry.hash = "a".repeat(64);
+        entry.borrowed = false;
+        assert!(registry.live_native_images().is_err());
+        registry.retired = true;
+        assert!(registry.live_native_images().is_err());
     }
 }

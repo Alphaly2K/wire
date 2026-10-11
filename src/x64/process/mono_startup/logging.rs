@@ -8,7 +8,7 @@ static TARGET_PC: OnceLock<u64> = OnceLock::new();
 thread_local! { static RECORDS: RefCell<Vec<Option<Vec<u16>>>> = const { RefCell::new(Vec::new()) }; }
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct Span {
+pub(super) struct Span {
     begin: *const u16,
     length: i32,
 }
@@ -153,6 +153,39 @@ pub(super) fn install(library: Object, image: Object, target: u64) -> Result<(),
     }
     let api = Api::load(library)?;
     let class = unsafe { (api.class)(image, c"UnityEngine".as_ptr(), c"UnityLogWriter".as_ptr()) };
+    if class.is_null() {
+        return Err("locked Unity logging class absent".into());
+    }
+    let method = unsafe { (api.method)(class, c"WriteStringToUnityLogImpl_Injected".as_ptr(), 1) };
+    if method.is_null() || unsafe { (api.token)(method) } != 0x06001d07 {
+        return Err("locked Unity logging method mismatch".into());
+    }
+    validate_span_method(library, image, method)?;
+    TARGET_PC
+        .set(target)
+        .map_err(|_| "Unity logging adapter already installed")?;
+    let add = sym!(
+        library,
+        "mono_add_internal_call",
+        unsafe extern "C" fn(*const c_char, Object)
+    );
+    unsafe {
+        add(
+            c"UnityEngine.UnityLogWriter::WriteStringToUnityLogImpl_Injected".as_ptr(),
+            write as *const () as Object,
+        );
+    }
+    eprintln!("NATIVE_MONO_LOGGING_ABI: ref span size=16 align=8 begin=0 length=8; fixed owned UTF16 adapter");
+    Ok(())
+}
+/// Shared static void(ref ManagedSpanWrapper) ABI for fixed compiled adapters.
+/// The member's owning image/target are checked separately by its installer.
+pub(super) fn validate_span_method(
+    library: Object,
+    image: Object,
+    method: Object,
+) -> Result<(), String> {
+    let api = Api::load(library)?;
     let span = unsafe {
         (api.class)(
             image,
@@ -160,18 +193,23 @@ pub(super) fn install(library: Object, image: Object, target: u64) -> Result<(),
             c"ManagedSpanWrapper".as_ptr(),
         )
     };
-    if class.is_null() || span.is_null() {
-        return Err("locked Unity logging classes absent".into());
+    if span.is_null() {
+        return Err("locked Unity span class absent".into());
     }
-    let method = unsafe { (api.method)(class, c"WriteStringToUnityLogImpl_Injected".as_ptr(), 1) };
     let parameter = api.parameter(method, true)?;
-    if unsafe { (api.token)(method) } != 0x06001d07
-        || unsafe { (api.kind)(parameter) } != 0x11
+    if unsafe { (api.kind)(parameter) } != 0x11
         || unsafe { (api.byref)(parameter) } != 1
         || unsafe { (api.type_class)(parameter) } != span
     {
-        return Err("locked Unity logging span signature mismatch".into());
+        return Err("locked Unity injected span signature mismatch".into());
     }
+    validate_span_layout(library, span)
+}
+pub(super) fn validate_span_layout(library: Object, span: Object) -> Result<(), String> {
+    if span.is_null() {
+        return Err("locked Unity span class absent".into());
+    }
+    let api = Api::load(library)?;
     let field = sym!(
         library,
         "mono_class_get_field_from_name",
@@ -206,46 +244,38 @@ pub(super) fn install(library: Object, image: Object, target: u64) -> Result<(),
     {
         return Err("locked ManagedSpanWrapper layout mismatch".into());
     }
-    TARGET_PC
-        .set(target)
-        .map_err(|_| "Unity logging adapter already installed")?;
-    let add = sym!(
-        library,
-        "mono_add_internal_call",
-        unsafe extern "C" fn(*const c_char, Object)
-    );
-    unsafe {
-        add(
-            c"UnityEngine.UnityLogWriter::WriteStringToUnityLogImpl_Injected".as_ptr(),
-            write as *const () as Object,
-        );
-    }
-    eprintln!("NATIVE_MONO_LOGGING_ABI: ref span size=16 align=8 begin=0 length=8; fixed owned UTF16 adapter");
     Ok(())
+}
+/// Only native IL callbacks supply this span; copy the pinned UTF16 input
+/// before crossing into checked guest memory. Never publish its native pointer.
+pub(super) unsafe fn owned_span(span: *const Span) -> Result<Option<Vec<u16>>, String> {
+    if span.is_null() {
+        return Err("NULL native Unity span".into());
+    }
+    let span = unsafe { span.read_unaligned() };
+    if span.length < 0
+        || span.length > 65536
+        || (span.length > 0
+            && (span.begin as usize <= 1 || !(span.begin as usize).is_multiple_of(2)))
+    {
+        return Err("native Unity span outside bounded UTF16 contract".into());
+    }
+    if span.length == 0 {
+        match span.begin as usize {
+            0 => Ok(None),
+            1 => Ok(Some(Vec::new())),
+            _ => Err("invalid empty Unity span sentinel".into()),
+        }
+    } else {
+        Ok(Some(
+            unsafe { std::slice::from_raw_parts(span.begin, span.length as usize) }.to_vec(),
+        ))
+    }
 }
 unsafe extern "C" fn write(span: *const Span) {
     let result = std::panic::catch_unwind(|| -> Result<(), String> {
         callbacks::with_service(|_, _| Ok(()))?;
-        if span.is_null() {
-            return Err("NULL native logging span".into());
-        }
-        let span = unsafe { span.read_unaligned() };
-        if span.length < 0
-            || span.length > 65536
-            || (span.length > 0
-                && (span.begin as usize <= 1 || !(span.begin as usize).is_multiple_of(2)))
-        {
-            return Err("native logging span outside bounded UTF16 contract".into());
-        }
-        let units = if span.length == 0 {
-            match span.begin as usize {
-                0 => None,
-                1 => Some(Vec::new()),
-                _ => return Err("invalid empty Unity log sentinel".into()),
-            }
-        } else {
-            Some(unsafe { std::slice::from_raw_parts(span.begin, span.length as usize) }.to_vec())
-        };
+        let units = unsafe { owned_span(span) }?;
         callbacks::log_span(
             *TARGET_PC.get().ok_or("logging adapter not installed")?,
             units.as_deref(),
@@ -370,4 +400,38 @@ pub(super) fn verify(library: Object, image: Object) -> Result<(), String> {
     })?;
     eprintln!("NATIVE_MONO_LOGGING_VERIFIED: actual managed null/empty/Unicode/Console routes=4");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn shared_injected_span_keeps_null_empty_and_owned_utf16_distinct_and_rejects_bad_shapes() {
+        let null = Span {
+            begin: ptr::null(),
+            length: 0,
+        };
+        let empty = Span {
+            begin: ptr::without_provenance(1),
+            length: 0,
+        };
+        assert_eq!(unsafe { owned_span(&null) }.unwrap(), None);
+        assert_eq!(unsafe { owned_span(&empty) }.unwrap(), Some(Vec::new()));
+        let mut units = [0x4e00, 0xd83d, 0xde00, 0];
+        let span = Span {
+            begin: units.as_ptr(),
+            length: units.len() as i32,
+        };
+        let copied = unsafe { owned_span(&span) }.unwrap().unwrap();
+        units.fill(0);
+        assert_eq!(copied, vec![0x4e00, 0xd83d, 0xde00, 0]);
+        for (begin, length) in [(0, 1), (1, 1), (3, 1), (2, -1), (2, 65537), (2, 0)] {
+            let bad = Span {
+                begin: begin as *const u16,
+                length,
+            };
+            assert!(unsafe { owned_span(&bad) }.is_err());
+        }
+        assert!(unsafe { owned_span(ptr::null()) }.is_err());
+    }
 }

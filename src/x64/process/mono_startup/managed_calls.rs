@@ -1,4 +1,4 @@
-//! Metadata-qualified static IL calls with owned scalar arguments and String
+//! Metadata-qualified ordinary IL calls with owned scalar arguments and String
 //! byref outputs. Guest pointers never enter mono_runtime_invoke's parameter ABI.
 use super::{c_char, closed_types, Memory, Object};
 use crate::x64::memory::{READ, WRITE};
@@ -16,13 +16,13 @@ pub(super) enum Shape {
     },
 }
 impl Shape {
-    fn width(self) -> usize {
+    pub(super) fn width(self) -> usize {
         match self {
             Self::Scalar { width, .. } => width,
             Self::Reference { .. } => 8,
         }
     }
-    fn validate(self, word: u64) -> Result<(), String> {
+    pub(super) fn validate(self, word: u64) -> Result<(), String> {
         if matches!(self, Self::Scalar { boolean: true, .. }) && word & 255 > 1 {
             return Err("managed Boolean is not canonical".into());
         }
@@ -35,6 +35,7 @@ pub(super) struct Parameter {
     pub(super) byref: bool,
 }
 pub(super) struct Descriptor {
+    pub(super) receiver: Option<Object>,
     pub(super) parameters: Vec<Parameter>,
     pub(super) returns: Option<Shape>,
     pub(super) name: String,
@@ -53,6 +54,7 @@ pub(super) struct Api {
     kind: unsafe extern "C" fn(Object) -> u32,
     byref: unsafe extern "C" fn(Object) -> u32,
     type_class: unsafe extern "C" fn(Object) -> Object,
+    pointer_type: unsafe extern "C" fn(Object) -> Object,
     value: unsafe extern "C" fn(Object) -> i32,
     is_enum: unsafe extern "C" fn(Object) -> i32,
     enum_base: unsafe extern "C" fn(Object) -> Object,
@@ -122,6 +124,10 @@ impl Api {
                 "mono_class_from_mono_type",
                 unsafe extern "C" fn(Object) -> Object
             ),
+            pointer_type: sym!(
+                "mono_type_get_ptr_type",
+                unsafe extern "C" fn(Object) -> Object
+            ),
             value: sym!(
                 "mono_class_is_valuetype",
                 unsafe extern "C" fn(Object) -> i32
@@ -168,7 +174,7 @@ impl Api {
             closed: closed_types::Api::load(library)?,
         })
     }
-    fn shape(self, ty: Object, images: &[Object]) -> Result<Shape, String> {
+    pub(super) fn shape(self, ty: Object, images: &[Object]) -> Result<Shape, String> {
         if ty.is_null() {
             return Err("managed parameter/return type missing".into());
         }
@@ -231,7 +237,14 @@ impl Api {
         }
         let mut implementation = 0;
         let flags = unsafe { (self.flags)(method, &mut implementation) };
-        if flags & 0x10 == 0 {
+        let name = unsafe { (self.name)(method) };
+        if name.is_null() {
+            return Err("managed method name missing".into());
+        }
+        let name = unsafe { CStr::from_ptr(name) };
+        // Constructors have their existing allocation/interface-specific
+        // contracts. Ordinary calls never bypass those through this route.
+        if matches!(name.to_bytes(), b".ctor" | b".cctor") {
             return Ok(None);
         }
         let class = unsafe { (self.class)(method) };
@@ -239,14 +252,21 @@ impl Api {
         if class.is_null()
             || !images.contains(&unsafe { (self.image)(class) })
             || sig.is_null()
-            || !static_il_flags(flags, implementation)
-            || unsafe { (self.instance)(sig) } != 0
+            || !managed_il_flags(flags, implementation, unsafe { (self.instance)(sig) } != 0)
             || unsafe { (self.generic)(method) } != 0
             || unsafe { (self.inflated)(method) } != 0
         {
-            return Err("static managed method outside owned concrete IL contract".into());
+            return Err("managed method outside owned concrete IL contract".into());
         }
         self.closed.concrete(class)?;
+        let receiver = if flags & 0x10 == 0 {
+            if unsafe { (self.value)(class) } != 0 {
+                return Err("managed value receiver needs a separate unboxed ABI".into());
+            }
+            Some(class)
+        } else {
+            None
+        };
         let count = unsafe { (self.count)(sig) };
         if count > 16 {
             return Err("managed parameter count exceeds bound".into());
@@ -258,11 +278,7 @@ impl Api {
         let returns = if unsafe { (self.kind)(ret) } == 1 {
             None
         } else {
-            let shape = self.shape(ret, reference_images)?;
-            if matches!(shape, Shape::Reference { string: false, .. }) {
-                return Err("managed reference return requires a canonical output adapter".into());
-            }
-            Some(shape)
+            Some(self.shape(ret, reference_images)?)
         };
         let mut parameters = Vec::new();
         let mut iterator = ptr::null_mut();
@@ -277,26 +293,487 @@ impl Api {
         }
         let header = unsafe { (self.header)(method) };
         if header.is_null() {
-            return Err("managed static method has no IL body".into());
+            return Err("managed method has no IL body".into());
         }
         let mut length = 0;
         let mut stack = 0;
         let code = unsafe { (self.code)(header, &mut length, &mut stack) };
         unsafe { (self.free)(header) };
         if code.is_null() || !(1..=65536).contains(&length) || stack > 256 {
-            return Err("managed static IL body exceeds bounds".into());
-        }
-        let name = unsafe { (self.name)(method) };
-        if name.is_null() {
-            return Err("managed static method name missing".into());
+            return Err("managed IL body exceeds bounds".into());
         }
         Ok(Some(Descriptor {
+            receiver,
             parameters,
             returns,
-            name: unsafe { CStr::from_ptr(name) }
-                .to_string_lossy()
-                .into_owned(),
+            name: name.to_string_lossy().into_owned(),
         }))
+    }
+    /// Fixed compiled reference -> reference internal-call adapters check the
+    /// actual static metadata signature before registering any native callback.
+    pub(super) fn reference_icall(
+        self,
+        method: Object,
+        owner: Object,
+        argument: Object,
+        result: Object,
+    ) -> Result<(), String> {
+        if method.is_null() || unsafe { (self.class)(method) } != owner {
+            return Err("reference icall owner mismatch".into());
+        }
+        let mut implementation = 0;
+        let flags = unsafe { (self.flags)(method, &mut implementation) };
+        let sig = unsafe { (self.signature)(method) };
+        if sig.is_null()
+            || flags & 0x10 == 0
+            || flags & (0x400 | 0x2000) != 0
+            || implementation & 0x1000 == 0
+            || unsafe { (self.instance)(sig) } != 0
+            || unsafe { (self.count)(sig) } != 1
+            || unsafe { (self.generic)(method) } != 0
+            || unsafe { (self.inflated)(method) } != 0
+        {
+            return Err("reference icall is not a concrete static InternalCall".into());
+        }
+        let mut iterator = ptr::null_mut();
+        for (ty, class) in [
+            (unsafe { (self.parameters)(sig, &mut iterator) }, argument),
+            (unsafe { (self.returns)(sig) }, result),
+        ] {
+            if ty.is_null()
+                || class.is_null()
+                || unsafe { (self.byref)(ty) } != 0
+                || !matches!(unsafe { (self.kind)(ty) }, 0x12 | 0x1d)
+                || unsafe { (self.type_class)(ty) } != class
+                || unsafe { (self.value)(class) } != 0
+            {
+                return Err("reference icall argument/return ABI mismatch".into());
+            }
+            self.closed.concrete(class)?;
+        }
+        Ok(())
+    }
+    pub(super) fn find_objects_icall(
+        self,
+        method: Object,
+        owner: Object,
+        arguments: [Object; 3],
+        result: Object,
+    ) -> Result<(), String> {
+        if method.is_null() || owner.is_null() || unsafe { (self.class)(method) } != owner {
+            return Err("object query icall owner mismatch".into());
+        }
+        let mut implementation = 0;
+        let flags = unsafe { (self.flags)(method, &mut implementation) };
+        let sig = unsafe { (self.signature)(method) };
+        if sig.is_null()
+            || flags & 0x10 == 0
+            || flags & (0x400 | 0x2000) != 0
+            || implementation & 0x1000 == 0
+            || unsafe { (self.instance)(sig) } != 0
+            || unsafe { (self.count)(sig) } != 3
+            || unsafe { (self.generic)(method) } != 0
+            || unsafe { (self.inflated)(method) } != 0
+        {
+            return Err("object query is not the exact static InternalCall".into());
+        }
+        let mut iterator = ptr::null_mut();
+        for (index, expected) in std::iter::once(result).chain(arguments).enumerate() {
+            let ty = unsafe {
+                if index == 0 {
+                    (self.returns)(sig)
+                } else {
+                    (self.parameters)(sig, &mut iterator)
+                }
+            };
+            let kind = match index {
+                0 => 0x1d,
+                1 => 0x12,
+                _ => 0x11,
+            };
+            if ty.is_null()
+                || expected.is_null()
+                || unsafe { (self.byref)(ty) } != 0
+                || unsafe { (self.kind)(ty) } != kind
+                || unsafe { (self.type_class)(ty) } != expected
+            {
+                return Err("object query exact reference/enum class mismatch".into());
+            }
+            self.closed.concrete(expected)?;
+            if index < 2 {
+                if unsafe { (self.value)(expected) } != 0 {
+                    return Err("object query reference is a value class".into());
+                }
+            } else {
+                let mut alignment = 0;
+                if unsafe { (self.is_enum)(expected) } == 0
+                    || unsafe { (self.kind)((self.enum_base)(expected)) } != 8
+                    || unsafe { (self.size)(expected, &mut alignment) } != 4
+                    || alignment != 4
+                {
+                    return Err("object query enum is not actual Int32 storage".into());
+                }
+            }
+        }
+        Ok(())
+    }
+    pub(super) fn type_bool_intptr_icall(
+        self,
+        method: Object,
+        owner: Object,
+        argument: Object,
+    ) -> Result<(), String> {
+        if method.is_null() || unsafe { (self.class)(method) } != owner {
+            return Err("factory icall owner mismatch".into());
+        }
+        let mut implementation = 0;
+        let flags = unsafe { (self.flags)(method, &mut implementation) };
+        let sig = unsafe { (self.signature)(method) };
+        if sig.is_null()
+            || flags & 0x10 == 0
+            || flags & (0x400 | 0x2000) != 0
+            || implementation & 0x1000 == 0
+            || unsafe { (self.instance)(sig) } != 0
+            || unsafe { (self.count)(sig) } != 2
+            || unsafe { (self.generic)(method) } != 0
+            || unsafe { (self.inflated)(method) } != 0
+        {
+            return Err("factory icall is not a concrete static InternalCall".into());
+        }
+        let ret = unsafe { (self.returns)(sig) };
+        let mut iterator = ptr::null_mut();
+        let ty = unsafe { (self.parameters)(sig, &mut iterator) };
+        let boolean = unsafe { (self.parameters)(sig, &mut iterator) };
+        if ret.is_null()
+            || ty.is_null()
+            || boolean.is_null()
+            || unsafe { (self.kind)(ret) } != 0x18
+            || unsafe { (self.byref)(ret) } != 0
+            || unsafe { (self.kind)(ty) } != 0x12
+            || unsafe { (self.byref)(ty) } != 0
+            || unsafe { (self.type_class)(ty) } != argument
+            || unsafe { (self.kind)(boolean) } != 2
+            || unsafe { (self.byref)(boolean) } != 0
+        {
+            return Err("factory icall Type/Boolean/IntPtr ABI mismatch".into());
+        }
+        let class = unsafe { (self.type_class)(ret) };
+        let mut alignment = 0;
+        if class.is_null()
+            || unsafe { (self.value)(class) } == 0
+            || unsafe { (self.size)(class, &mut alignment) } != 8
+            || alignment != 8
+        {
+            return Err("factory IntPtr is not native 64-bit scalar storage".into());
+        }
+        self.closed.concrete(argument)
+    }
+    /// Compiled scalar adapters verify the exact primitive/enum classes and
+    /// InternalCall signature. No IntPtr, reference or byref is admitted here.
+    pub(super) fn scalar_icall(
+        self,
+        method: Object,
+        owner: Object,
+        returns: Object,
+        arguments: &[Object],
+        images: &[Object],
+    ) -> Result<(), String> {
+        self.fixed_scalar_icall(method, owner, returns, arguments, images, false)
+    }
+    /// Marker IntPtr values are opaque owned guest identities, never native
+    /// dereferenceable pointers. This does not admit IntPtr to ordinary IL ABI.
+    pub(super) fn marker_icall(
+        self,
+        method: Object,
+        owner: Object,
+        returns: Object,
+        intptr: Object,
+        images: &[Object],
+    ) -> Result<(), String> {
+        self.fixed_scalar_icall(method, owner, returns, &[intptr], images, true)
+    }
+    fn fixed_scalar_icall(
+        self,
+        method: Object,
+        owner: Object,
+        returns: Object,
+        arguments: &[Object],
+        images: &[Object],
+        marker: bool,
+    ) -> Result<(), String> {
+        if method.is_null()
+            || owner.is_null()
+            || !images.contains(&unsafe { (self.image)(owner) })
+            || unsafe { (self.class)(method) } != owner
+            || arguments.len() > 4
+        {
+            return Err("scalar icall owner/arity mismatch".into());
+        }
+        let mut implementation = 0;
+        let flags = unsafe { (self.flags)(method, &mut implementation) };
+        let sig = unsafe { (self.signature)(method) };
+        if sig.is_null()
+            || flags & 0x10 == 0
+            || flags & (0x400 | 0x2000) != 0
+            || implementation & 0x1000 == 0
+            || unsafe { (self.instance)(sig) } != 0
+            || unsafe { (self.count)(sig) } as usize != arguments.len()
+            || unsafe { (self.generic)(method) } != 0
+            || unsafe { (self.inflated)(method) } != 0
+        {
+            return Err("scalar icall is not a concrete static InternalCall".into());
+        }
+        let mut iterator = ptr::null_mut();
+        for (index, expected) in std::iter::once(returns)
+            .chain(arguments.iter().copied())
+            .enumerate()
+        {
+            let ty = unsafe {
+                if index == 0 {
+                    (self.returns)(sig)
+                } else {
+                    (self.parameters)(sig, &mut iterator)
+                }
+            };
+            if ty.is_null()
+                || expected.is_null()
+                || unsafe { (self.byref)(ty) } != 0
+                || unsafe { (self.type_class)(ty) } != expected
+            {
+                return Err("scalar icall exact type mismatch".into());
+            }
+            if index == 0 && unsafe { (self.kind)(ty) } == 1 {
+                continue;
+            }
+            if marker && index == 1 && unsafe { (self.kind)(ty) } == 0x18 {
+                let mut alignment = 0;
+                if unsafe { (self.size)(expected, &mut alignment) } != 8 || alignment != 8 {
+                    return Err("marker IntPtr storage is not 64-bit".into());
+                }
+                continue;
+            }
+            if !matches!(self.shape(ty, images)?, Shape::Scalar { .. }) {
+                return Err("scalar icall requires primitive/enum values".into());
+            }
+        }
+        Ok(())
+    }
+    /// Fixed UnsafeUtility allocator ABI only. Raw pointers are not admitted
+    /// to ordinary managed calls or generic field/array payload publication.
+    /// Classes are Void, Int64, Int32, Allocator and IntPtr respectively.
+    pub(super) fn allocator_icall(
+        self,
+        method: Object,
+        owner: Object,
+        free: bool,
+        classes: &[Object; 5],
+        images: &[Object],
+    ) -> Result<(), String> {
+        let specs: &[(u32, Object)] = if free {
+            &[(1, classes[0]), (0xf, classes[0]), (0x11, classes[3])]
+        } else {
+            &[
+                (0xf, classes[0]),
+                (0xa, classes[1]),
+                (8, classes[2]),
+                (0x11, classes[3]),
+                (0x18, classes[4]),
+            ]
+        };
+        self.fixed_buffer_icall(method, owner, specs, images)
+    }
+    pub(super) fn buffer_memset_icall(
+        self,
+        method: Object,
+        owner: Object,
+        classes: &[Object; 3],
+        images: &[Object],
+    ) -> Result<(), String> {
+        self.fixed_buffer_icall(
+            method,
+            owner,
+            &[
+                (1, classes[0]),
+                (0xf, classes[0]),
+                (5, classes[1]),
+                (0xa, classes[2]),
+            ],
+            images,
+        )
+    }
+    pub(super) fn buffer_copy_icall(
+        self,
+        method: Object,
+        owner: Object,
+        classes: &[Object; 2],
+        images: &[Object],
+    ) -> Result<(), String> {
+        self.fixed_buffer_icall(
+            method,
+            owner,
+            &[
+                (1, classes[0]),
+                (0xf, classes[0]),
+                (0xf, classes[0]),
+                (0xa, classes[1]),
+            ],
+            images,
+        )
+    }
+    fn fixed_buffer_icall(
+        self,
+        method: Object,
+        owner: Object,
+        specs: &[(u32, Object)],
+        images: &[Object],
+    ) -> Result<(), String> {
+        if method.is_null()
+            || owner.is_null()
+            || !images.contains(&unsafe { (self.image)(owner) })
+            || unsafe { (self.class)(method) } != owner
+            || specs.iter().any(|(_, p)| p.is_null())
+        {
+            return Err("allocator icall owner/type identity mismatch".into());
+        }
+        let mut implementation = 0;
+        let flags = unsafe { (self.flags)(method, &mut implementation) };
+        let sig = unsafe { (self.signature)(method) };
+        if sig.is_null()
+            || flags & 0x10 == 0
+            || flags & (0x400 | 0x2000) != 0
+            || implementation & 0x1000 == 0
+            || unsafe { (self.instance)(sig) } != 0
+            || unsafe { (self.count)(sig) } as usize != specs.len() - 1
+            || unsafe { (self.generic)(method) } != 0
+            || unsafe { (self.inflated)(method) } != 0
+        {
+            return Err("allocator icall is not an exact static InternalCall".into());
+        }
+        let mut iterator = ptr::null_mut();
+        for (index, &(kind, expected)) in specs.iter().enumerate() {
+            let ty = unsafe {
+                if index == 0 {
+                    (self.returns)(sig)
+                } else {
+                    (self.parameters)(sig, &mut iterator)
+                }
+            };
+            if ty.is_null()
+                || unsafe { (self.byref)(ty) } != 0
+                || unsafe { (self.kind)(ty) } != kind
+            {
+                return Err("allocator icall type kind/byref mismatch".into());
+            }
+            let element = if kind == 0xf {
+                unsafe { (self.pointer_type)(ty) }
+            } else {
+                ty
+            };
+            if element.is_null()
+                || unsafe { (self.type_class)(element) } != expected
+                || (kind == 0xf
+                    && (unsafe { (self.kind)(element) } != 1
+                        || unsafe { (self.byref)(element) } != 0))
+            {
+                return Err("allocator icall exact class/pointer element mismatch".into());
+            }
+            if kind == 1 || kind == 0xf {
+                continue;
+            }
+            let mut alignment = 0;
+            let width = match kind {
+                5 => 1,
+                8 | 0x11 => 4,
+                _ => 8,
+            };
+            if unsafe { (self.size)(expected, &mut alignment) } != width
+                || alignment != width as u32
+                || (kind == 0x11
+                    && (unsafe { (self.is_enum)(expected) } == 0
+                        || unsafe { (self.kind)((self.enum_base)(expected)) } != 8))
+            {
+                return Err("allocator scalar/enum storage mismatch".into());
+            }
+        }
+        Ok(())
+    }
+    pub(super) fn json_from_icall(
+        self,
+        method: Object,
+        owner: Object,
+        span: Object,
+        object: Object,
+        ty: Object,
+    ) -> Result<(), String> {
+        if method.is_null() || owner.is_null() || unsafe { (self.class)(method) } != owner {
+            return Err("JSON icall owner mismatch".into());
+        }
+        let mut implementation = 0;
+        let flags = unsafe { (self.flags)(method, &mut implementation) };
+        let sig = unsafe { (self.signature)(method) };
+        if sig.is_null()
+            || flags & 0x10 == 0
+            || flags & (0x400 | 0x2000) != 0
+            || implementation & 0x1000 == 0
+            || unsafe { (self.instance)(sig) } != 0
+            || unsafe { (self.count)(sig) } != 3
+            || unsafe { (self.generic)(method) } != 0
+            || unsafe { (self.inflated)(method) } != 0
+        {
+            return Err("JSON entry is not a concrete static InternalCall".into());
+        }
+        let mut iterator = ptr::null_mut();
+        for (actual, expected, kind, byref) in [
+            (unsafe { (self.returns)(sig) }, object, 0x1c, false),
+            (
+                unsafe { (self.parameters)(sig, &mut iterator) },
+                span,
+                0x11,
+                true,
+            ),
+            (
+                unsafe { (self.parameters)(sig, &mut iterator) },
+                object,
+                0x1c,
+                false,
+            ),
+            (
+                unsafe { (self.parameters)(sig, &mut iterator) },
+                ty,
+                0x12,
+                false,
+            ),
+        ] {
+            if actual.is_null()
+                || expected.is_null()
+                || unsafe { (self.kind)(actual) } != kind
+                || (unsafe { (self.byref)(actual) } != 0) != byref
+                || unsafe { (self.type_class)(actual) } != expected
+            {
+                return Err("JSON span/Object/Type ABI mismatch".into());
+            }
+        }
+        Ok(())
+    }
+    pub(super) fn receiver(
+        self,
+        native: Object,
+        declared: Object,
+        images: &[Object],
+    ) -> Result<Object, String> {
+        if native.is_null() || declared.is_null() {
+            return Err("managed instance receiver is NULL".into());
+        }
+        let actual = unsafe { (self.object_class)(native) };
+        if actual.is_null()
+            || !images.contains(&unsafe { (self.image)(actual) })
+            || unsafe { (self.value)(actual) } != 0
+            || unsafe { (self.assignable)(declared, actual) } == 0
+        {
+            return Err("managed receiver is not an owned assignable reference class".into());
+        }
+        self.closed.concrete(actual)?;
+        Ok(actual)
     }
     pub(super) fn compatible(self, native: Object, shape: Shape) -> Result<Object, String> {
         let Shape::Reference { class, .. } = shape else {
@@ -326,8 +803,8 @@ impl Api {
         Ok(class)
     }
 }
-fn static_il_flags(flags: u32, implementation: u32) -> bool {
-    flags & 0x10 != 0
+fn managed_il_flags(flags: u32, implementation: u32, instance: bool) -> bool {
+    (flags & 0x10 == 0) == instance
         && flags & (0x400 | 0x2000) == 0
         && implementation & (0x3 | 0x4 | 0x20 | 0x1000) == 0
 }
@@ -483,6 +960,7 @@ mod tests {
         let mut memory = Memory::default();
         memory.map(0x1000, 4096, READ | WRITE).unwrap();
         let descriptor = Descriptor {
+            receiver: None,
             name: "UnknownStaticMethod".into(),
             returns: Some(boolean()),
             parameters: vec![
@@ -532,6 +1010,7 @@ mod tests {
         let mut memory = Memory::default();
         memory.map(0x1000, 4096, READ | WRITE).unwrap();
         let descriptor = Descriptor {
+            receiver: None,
             name: "BooleanOutputs".into(),
             returns: None,
             parameters: vec![
@@ -591,12 +1070,16 @@ mod tests {
     }
     #[test]
     fn native_internalcall_pinvoke_abstract_and_synchronized_static_entries_are_rejected() {
-        assert!(static_il_flags(0x96, 0));
+        assert!(managed_il_flags(0x96, 0, false));
+        assert!(managed_il_flags(0x86, 0, true));
+        assert!(!managed_il_flags(0x96, 0, true));
+        assert!(!managed_il_flags(0x86, 0, false));
         for flags in [0x6, 0x496, 0x2096] {
-            assert!(!static_il_flags(flags, 0));
+            assert!(!managed_il_flags(flags, 0, false));
         }
         for implementation in [1, 3, 4, 0x20, 0x1000] {
-            assert!(!static_il_flags(0x96, implementation));
+            assert!(!managed_il_flags(0x96, implementation, false));
+            assert!(!managed_il_flags(0x86, implementation, true));
         }
     }
 }

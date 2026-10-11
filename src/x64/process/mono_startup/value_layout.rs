@@ -24,6 +24,7 @@ impl Shape {
 }
 #[derive(Clone)]
 pub(super) struct Slot {
+    pub(super) nested: bool,
     pub(super) offset: usize,
     pub(super) field: Object,
     pub(super) shape: Shape,
@@ -43,12 +44,34 @@ impl Layout {
             width: 8,
             alignment: 8,
             slots: vec![Slot {
+                nested: false,
                 offset: 0,
                 field: ptr::null_mut(),
                 shape: Shape::Reference(class),
             }],
             value: false,
         }
+    }
+    fn append_nested(&mut self, offset: usize, child: Self) -> Result<(), String> {
+        child.check()?;
+        let end = offset
+            .checked_add(child.width)
+            .ok_or("nested value offset overflow")?;
+        if end > self.width
+            || !offset.is_multiple_of(child.alignment)
+            || child.alignment > self.alignment
+        {
+            return Err("nested value exceeds parent size/alignment".into());
+        }
+        for mut slot in child.slots {
+            slot.offset = slot
+                .offset
+                .checked_add(offset)
+                .ok_or("nested leaf offset overflow")?;
+            slot.nested = true;
+            self.slots.push(slot);
+        }
+        Ok(())
     }
     pub(super) fn check(&self) -> Result<(), String> {
         if self.class.is_null()
@@ -234,7 +257,7 @@ impl Api {
     }
     fn layout_inner(self, class: Object, path: &mut Vec<Object>) -> Result<Layout, String> {
         if path.len() >= 8 || path.contains(&class) {
-            return Err("nested scalar value layout exceeds acyclic depth bound".into());
+            return Err("nested value layout exceeds acyclic depth bound".into());
         }
         if !self.owns(class) || unsafe { (self.value)(class) } == 0 {
             return Err("value layout requires an owned metadata value class".into());
@@ -254,6 +277,7 @@ impl Api {
         };
         let mut iterator = ptr::null_mut();
         let mut count = 0;
+        let mut ranges = Vec::new();
         loop {
             let field = unsafe { (self.fields)(class, &mut iterator) };
             if field.is_null() {
@@ -274,6 +298,41 @@ impl Api {
                 return Err("value field unknown/byref".into());
             }
             let kind = unsafe { (self.kind)(ty) };
+            let offset = unsafe { (self.offset)(field) };
+            if offset < 16 {
+                return Err("value field points into native object header".into());
+            }
+            let offset = (offset - 16) as usize;
+            if kind == 0x11 {
+                let target = unsafe { (self.type_class)(ty) };
+                if target.is_null() {
+                    return Err("nested value class absent".into());
+                }
+                if unsafe { (self.is_enum)(target) } == 0 {
+                    let child = self.layout_inner(target, path)?;
+                    let end = offset
+                        .checked_add(child.width)
+                        .ok_or("nested field range overflow")?;
+                    if ranges
+                        .iter()
+                        .any(|&(start, stop)| offset < stop && start < end)
+                    {
+                        return Err("nested value field envelopes overlap".into());
+                    }
+                    ranges.push((offset, end));
+                    if let Ok((width, alignment)) = child.scalar_inline() {
+                        layout.slots.push(Slot {
+                            nested: false,
+                            offset,
+                            field,
+                            shape: Shape::Inline { width, alignment },
+                        });
+                    } else {
+                        layout.append_nested(offset, child)?;
+                    }
+                    continue;
+                }
+            }
             let shape = if let Some(shape) = scalar(kind) {
                 shape
             } else if matches!(kind, 0xe | 0x12 | 0x1d) {
@@ -283,10 +342,7 @@ impl Api {
                 if target.is_null() {
                     return Err("nested value class absent".into());
                 }
-                if unsafe { (self.is_enum)(target) } == 0 {
-                    let (width, alignment) = self.layout_inner(target, path)?.scalar_inline()?;
-                    Shape::Inline { width, alignment }
-                } else {
+                {
                     let base = unsafe { (self.enum_base)(target) };
                     if base.is_null() {
                         return Err("value enum base absent".into());
@@ -305,12 +361,19 @@ impl Api {
             } else {
                 return Err("raw pointer/generic/complex value field is not admitted".into());
             };
-            let offset = unsafe { (self.offset)(field) };
-            if offset < 16 {
-                return Err("value field points into native object header".into());
+            let end = offset
+                .checked_add(shape.width())
+                .ok_or("value field range overflow")?;
+            if ranges
+                .iter()
+                .any(|&(start, stop)| offset < stop && start < end)
+            {
+                return Err("value field envelopes overlap".into());
             }
+            ranges.push((offset, end));
             layout.slots.push(Slot {
-                offset: (offset - 16) as usize,
+                nested: false,
+                offset,
                 field,
                 shape,
             });
@@ -334,11 +397,13 @@ mod tests {
             value: true,
             slots: vec![
                 Slot {
+                    nested: false,
                     offset: 0,
                     field: 1usize as Object,
                     shape: Shape::Reference(2usize as Object),
                 },
                 Slot {
+                    nested: false,
                     offset: 8,
                     field: 2usize as Object,
                     shape: Shape::Scalar {
@@ -347,6 +412,7 @@ mod tests {
                     },
                 },
                 Slot {
+                    nested: false,
                     offset: 16,
                     field: 3usize as Object,
                     shape: Shape::Reference(2usize as Object),
@@ -363,6 +429,7 @@ mod tests {
             value: true,
             slots: (0..3)
                 .map(|i| Slot {
+                    nested: false,
                     offset: i * 4,
                     field: (i + 1) as Object,
                     shape: Shape::Scalar {
@@ -389,6 +456,7 @@ mod tests {
             value: true,
             slots: vec![
                 Slot {
+                    nested: false,
                     offset: 0,
                     field: 1usize as Object,
                     shape: Shape::Inline {
@@ -397,6 +465,7 @@ mod tests {
                     },
                 },
                 Slot {
+                    nested: false,
                     offset: 12,
                     field: 2usize as Object,
                     shape: Shape::Inline {
@@ -416,6 +485,41 @@ mod tests {
             .unwrap();
         nested.slots[1].offset = 8;
         assert!(nested.check().is_err());
+    }
+    #[test]
+    fn nested_reference_boolean_leaves_use_parent_offsets_and_keep_padding_checked() {
+        let mut child = layout();
+        child.slots[1].shape = Shape::Scalar {
+            width: 1,
+            boolean: true,
+        };
+        let mut parent = Layout {
+            class: 2usize as Object,
+            width: 40,
+            alignment: 8,
+            value: true,
+            slots: Vec::new(),
+        };
+        parent.append_nested(8, child.clone()).unwrap();
+        parent.check().unwrap();
+        assert_eq!(
+            parent.slots.iter().map(|s| s.offset).collect::<Vec<_>>(),
+            [8, 16, 24]
+        );
+        assert!(parent.slots.iter().all(|s| s.nested));
+        assert!(parent.scalar_inline().is_err());
+        let api = api_for_empty_refs();
+        let roots = instances::Registry::default();
+        let mut bytes = [0; 40];
+        bytes[16] = 1;
+        parent.validate(&bytes, api, &roots).unwrap();
+        bytes[16] = 2;
+        assert!(parent.validate(&bytes, api, &roots).is_err());
+        bytes[16] = 1;
+        bytes[17] = 1;
+        assert!(parent.validate(&bytes, api, &roots).is_err());
+        assert!(parent.append_nested(20, child.clone()).is_err());
+        assert!(parent.append_nested(24, child).is_err());
     }
     #[test]
     fn late_forged_reference_padding_and_overlap_are_rejected() {

@@ -145,6 +145,8 @@ def main():
         'native_serialization_callback_invokes': count_marker('native-serialization-callback-invokes'),
         'native_static_managed_invokes': count_marker('native-static-managed-invokes'),
         'native_static_byref_output_writes': count_marker('native-static-byref-output-writes'),
+        'native_instance_managed_invokes': count_marker('native-instance-managed-invokes'),
+        'native_instance_byref_output_writes': count_marker('native-instance-byref-output-writes'),
         'native_virtual_method_resolutions': count_marker('native-virtual-method-resolutions'),
         'native_input_profiler_marker_calls': count_marker('native-input-profiler-marker-calls'),
         'native_input_action_constructors': count_marker('native-input-action-constructors'),
@@ -200,6 +202,24 @@ def main():
         'native_imgui_ready': 'native-imgui-ready=true' in content,
         'native_subsystem_map_ready': 'native-subsystem-map-ready=true' in content,
         'native_subsystems_ready': 'native-subsystems-ready=true' in content,
+        'native_subsystem_analytics_calls': count_marker('native-subsystem-analytics-calls'),
+        'native_resources_find_calls': count_marker('native-resources-find-calls'),
+        'native_object_find_by_type_calls': count_marker('native-object-find-by-type-calls'),
+        'native_scriptable_factory_calls': count_marker('native-scriptable-factory-calls'),
+        'native_engine_scalar_calls': count_marker('native-engine-scalar-calls'),
+        'native_json_deserialize_calls': count_marker('native-json-deserialize-calls'),
+        'native_profiler_marker_calls': count_marker('native-profiler-marker-calls'),
+        'native_profiler_sample_begins': count_marker('native-profiler-sample-begins'),
+        'native_profiler_sample_ends': count_marker('native-profiler-sample-ends'),
+        'native_profiler_sample_depth': count_marker('native-profiler-sample-depth'),
+        'native_unsafe_buffer_allocations': count_marker('native-unsafe-buffer-allocations'),
+        'native_unsafe_buffer_frees': count_marker('native-unsafe-buffer-frees'),
+        'native_unsafe_buffer_memsets': count_marker('native-unsafe-buffer-memsets'),
+        'native_unsafe_buffer_copies': count_marker('native-unsafe-buffer-copies'),
+        'native_unsafe_buffer_cleanup_frees': count_marker('native-unsafe-buffer-cleanup-frees'),
+        'native_unsafe_buffer_live': count_marker('native-unsafe-buffer-live'),
+        'native_unsafe_buffer_retained_bytes': count_marker('native-unsafe-buffer-retained-bytes'),
+        'native_unsafe_buffer_closed': 'native-unsafe-buffer-closed=true' in content,
         'native_synchronization_ready': 'native-synchronization-ready=true' in content,
         'native_exceptions_ready': 'native-exceptions-ready=true' in content,
         'native_logging_routes_verified': 4 if 'actual managed null/empty/Unicode/Console routes=4' in content else 0,
@@ -271,6 +291,10 @@ def main():
         raise RuntimeError('actual initialized-field deserialization/reference barrier/GC lifecycle incomplete')
     if args.boundary == 'components' and (evidence['native_component_constructors'] == 0 or evidence['native_instance_field_gc_verifications'] < evidence['native_instance_field_cells'] or not evidence['native_instance_field_views_retired'] or evidence['native_borrowed_object_gc_verifications'] < evidence['native_borrowed_object_roots']):
         raise RuntimeError('actual component constructor/field/GC lifecycle incomplete')
+    if evidence['native_profiler_sample_begins'] != evidence['native_profiler_sample_ends'] or evidence['native_profiler_sample_depth'] != 0:
+        raise RuntimeError('native profiler samples did not close in owner order')
+    if evidence['native_unsafe_buffer_allocations'] and (evidence['native_unsafe_buffer_frees'] != evidence['native_unsafe_buffer_allocations'] or evidence['native_unsafe_buffer_live'] != 0 or evidence['native_unsafe_buffer_retained_bytes'] != 0 or not evidence['native_unsafe_buffer_closed']):
+        raise RuntimeError('native private buffers did not retire guest records and actual storage after VM cleanup')
     if evidence['native_gc_scope_depth'] != 0:
         raise SystemExit('native Unity GC scopes were not restored before diagnostic verification')
     if args.boundary == 'assets' and (evidence['native_input_asset_constructors'] != 1 or evidence['native_instance_field_gc_verifications'] < evidence['native_instance_field_cells'] or not evidence['native_instance_field_views_retired'] or evidence['native_borrowed_object_gc_verifications'] < evidence['native_borrowed_object_roots']):
