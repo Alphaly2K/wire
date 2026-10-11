@@ -2,7 +2,11 @@
 //! are rooted identities; native headers and host pointers never enter a view.
 use super::{c_char, instances, Memory, Object};
 use crate::x64::memory::{shared::HostRegion, READ, WRITE};
-use std::{collections::BTreeMap, ffi::CStr, ptr};
+use std::{
+    collections::BTreeMap,
+    ffi::{CStr, CString},
+    ptr,
+};
 #[derive(Clone, Copy)]
 struct Api {
     find: unsafe extern "C" fn(Object, *const c_char) -> Object,
@@ -74,12 +78,14 @@ enum Shape {
     Scalar { width: usize, boolean: bool },
     Reference(Object),
     EnginePointer(u64),
+    Inline { width: usize, alignment: usize },
 }
 impl Shape {
     fn width(self) -> usize {
         match self {
             Self::Scalar { width, .. } => width,
             Self::Reference(_) | Self::EnginePointer(_) => 8,
+            Self::Inline { width, .. } => width,
         }
     }
 }
@@ -102,10 +108,11 @@ pub(super) struct Registry {
 }
 pub(super) struct Spec {
     pub(super) owner: Object,
-    pub(super) name: &'static CStr,
+    pub(super) name: CString,
     pub(super) kind: u32,
-    pub(super) reference: Option<Object>,
+    pub(super) type_class: Option<Object>,
     pub(super) guest_pointer: Option<u64>,
+    pub(super) inline: Option<(usize, usize)>,
 }
 impl Registry {
     pub(super) fn install(
@@ -116,7 +123,7 @@ impl Registry {
         memory: &mut Memory,
         specs: Vec<Spec>,
     ) -> Result<(), String> {
-        if self.retired || !self.cells.is_empty() || specs.len() > 128 {
+        if self.retired || specs.len() > 256 || self.cells.len() + specs.len() > 4096 {
             return Err("initialized field views outside single bounded installation".into());
         }
         let api = Api::load(library)?;
@@ -144,9 +151,20 @@ impl Registry {
                     spec.name
                 ));
             }
-            let shape = if let Some(expected) = spec.guest_pointer {
+            let shape = if let Some((width, alignment)) = spec.inline {
+                if spec.kind != 0x11
+                    || spec.type_class.is_none()
+                    || spec.guest_pointer.is_some()
+                    || !matches!(width, 4 | 8 | 12 | 16)
+                    || alignment != 4
+                    || unsafe { (api.type_class)(ty) } != spec.type_class.unwrap()
+                {
+                    return Err("initialized inline field type/layout mismatch".into());
+                }
+                Shape::Inline { width, alignment }
+            } else if let Some(expected) = spec.guest_pointer {
                 if spec.kind != 0x18
-                    || spec.reference.is_some()
+                    || spec.type_class.is_some()
                     || expected == 0
                     || !expected.is_multiple_of(8)
                 {
@@ -155,7 +173,7 @@ impl Registry {
                 memory.check(expected, 1, READ)?;
                 Shape::EnginePointer(expected)
             } else {
-                match (spec.kind, spec.reference) {
+                match (spec.kind, spec.type_class) {
                     (2 | 4 | 5, None) => Shape::Scalar {
                         width: 1,
                         boolean: spec.kind == 2,
@@ -186,7 +204,10 @@ impl Registry {
             if offset < 16
                 || !(16..=65536).contains(&size)
                 || offset as usize + width > size as usize
-                || !(offset as usize).is_multiple_of(width)
+                || !(offset as usize).is_multiple_of(match shape {
+                    Shape::Inline { alignment, .. } => alignment,
+                    _ => width,
+                })
             {
                 return Err("initialized field offset/size/alignment mismatch".into());
             }
@@ -423,18 +444,252 @@ impl Registry {
         format!("native-instance-field-cells={}\nnative-instance-field-writes={}\nnative-instance-reference-writes={}\nnative-instance-field-gc-verifications={}\nnative-instance-field-views-retired={}\n", self.cells.len(), self.writes, self.reference_writes, self.verified, self.retired)
     }
 }
+/// Enumerate only a locked VolumeComponent's declared parameters and their
+/// initialized scalar/nullable fields. Arbitrary heap graph traversal is refused.
+pub(super) fn component_specs(
+    library: Object,
+    images: [Object; 3],
+    object: Object,
+    class: Object,
+) -> Result<Vec<Spec>, String> {
+    macro_rules! sym {
+        ($name:literal, $ty:ty) => {{
+            let p = unsafe { libc::dlsym(library, concat!($name, "\0").as_ptr().cast()) };
+            if p.is_null() {
+                return Err(concat!("missing component field symbol: ", $name).into());
+            }
+            unsafe { std::mem::transmute::<Object, $ty>(p) }
+        }};
+    }
+    let api = Api::load(library)?;
+    let find = sym!(
+        "mono_class_from_name",
+        unsafe extern "C" fn(Object, *const c_char, *const c_char) -> Object
+    );
+    let fields = sym!(
+        "mono_class_get_fields",
+        unsafe extern "C" fn(Object, *mut Object) -> Object
+    );
+    let parent = sym!(
+        "mono_class_get_parent",
+        unsafe extern "C" fn(Object) -> Object
+    );
+    let class_image = sym!(
+        "mono_class_get_image",
+        unsafe extern "C" fn(Object) -> Object
+    );
+    let field_name = sym!(
+        "mono_field_get_name",
+        unsafe extern "C" fn(Object) -> *const c_char
+    );
+    let object_class = sym!(
+        "mono_object_get_class",
+        unsafe extern "C" fn(Object) -> Object
+    );
+    let enum_class = sym!("mono_class_is_enum", unsafe extern "C" fn(Object) -> i32);
+    let enum_base = sym!(
+        "mono_class_enum_basetype",
+        unsafe extern "C" fn(Object) -> Object
+    );
+    let value_size = sym!(
+        "mono_class_value_size",
+        unsafe extern "C" fn(Object, *mut u32) -> i32
+    );
+    let [core, render, urp] = images;
+    let parameter = unsafe {
+        find(
+            render,
+            c"UnityEngine.Rendering".as_ptr(),
+            c"VolumeParameter".as_ptr(),
+        )
+    };
+    if parameter.is_null() || object.is_null() || unsafe { object_class(object) } != class {
+        return Err("component graph has no exact live root/parameter class".into());
+    }
+    let mut inline_classes = Vec::new();
+    for (name, names) in [
+        (c"Vector2", &[c"x", c"y"][..]),
+        (c"Vector3", &[c"x", c"y", c"z"][..]),
+        (c"Vector4", &[c"x", c"y", c"z", c"w"][..]),
+        (c"Color", &[c"r", c"g", c"b", c"a"][..]),
+    ] {
+        let class = unsafe { find(core, c"UnityEngine".as_ptr(), name.as_ptr()) };
+        if class.is_null() {
+            return Err("locked inline value class absent".into());
+        }
+        let mut alignment = 0;
+        let width = unsafe { value_size(class, &mut alignment) };
+        if width != names.len() as i32 * 4 || alignment != 4 {
+            return Err("inline value size/alignment mismatch".into());
+        }
+        for (index, name) in names.iter().enumerate() {
+            let field = unsafe { (api.find)(class, name.as_ptr()) };
+            if field.is_null()
+                || unsafe { (api.flags)(field) } & (0x10 | 0x40) != 0
+                || unsafe { (api.kind)((api.ty)(field)) } != 0xc
+                || unsafe { (api.byref)((api.ty)(field)) } != 0
+                || unsafe { (api.offset)(field) } != 16 + index as i32 * 4
+            {
+                return Err("inline value float field layout mismatch".into());
+            }
+        }
+        inline_classes.push((class, width as usize));
+    }
+    let spec = |owner, field| -> Result<Spec, String> {
+        let ty = unsafe { (api.ty)(field) };
+        if ty.is_null() || unsafe { (api.byref)(ty) } != 0 {
+            return Err("component field has unknown/byref type".into());
+        }
+        let kind = unsafe { (api.kind)(ty) };
+        let target = if matches!(kind, 0x11 | 0x12) {
+            Some(unsafe { (api.type_class)(ty) })
+        } else {
+            None
+        };
+        if target.is_some_and(|c| c.is_null()) {
+            return Err("component field type class absent".into());
+        }
+        let inline = if kind == 0x11 {
+            let class = target.unwrap();
+            if unsafe { enum_class(class) } != 0 {
+                if ![core, render, urp].contains(&unsafe { class_image(class) }) {
+                    return Err("enum field outside locked images".into());
+                }
+                let base = unsafe { enum_base(class) };
+                let mut alignment = 0;
+                if base.is_null()
+                    || !matches!(unsafe { (api.kind)(base) }, 8 | 9)
+                    || unsafe { value_size(class, &mut alignment) } != 4
+                    || alignment != 4
+                {
+                    return Err("enum field is not an exact four-byte value".into());
+                }
+                Some((4, 4))
+            } else {
+                Some((
+                    inline_classes
+                        .iter()
+                        .find(|(c, _)| *c == class)
+                        .ok_or("unadmitted inline struct field")?
+                        .1,
+                    4,
+                ))
+            }
+        } else {
+            None
+        };
+        let name = unsafe { field_name(field) };
+        if name.is_null() {
+            return Err("component field has no name".into());
+        }
+        Ok(Spec {
+            owner,
+            name: unsafe { CStr::from_ptr(name) }.to_owned(),
+            kind,
+            type_class: target,
+            guest_pointer: None,
+            inline,
+        })
+    };
+    let mut specs = vec![Spec {
+        owner: object,
+        name: c"active".to_owned(),
+        kind: 2,
+        type_class: None,
+        guest_pointer: None,
+        inline: None,
+    }];
+    let mut iterator = ptr::null_mut();
+    let mut count = 0;
+    loop {
+        let field = unsafe { fields(class, &mut iterator) };
+        if field.is_null() {
+            break;
+        }
+        count += 1;
+        if count > 64 {
+            return Err("component declared field capacity exceeded".into());
+        }
+        if unsafe { (api.flags)(field) } & (0x10 | 0x40) != 0 {
+            continue;
+        }
+        let root_field = spec(object, field)?;
+        let Some(target) = root_field.type_class else {
+            return Err("component root field is not a parameter reference".into());
+        };
+        if root_field.kind != 0x12 || unsafe { (api.assignable)(parameter, target) } == 0 {
+            return Err("component root field is not a VolumeParameter".into());
+        }
+        let mut child: Object = ptr::null_mut();
+        unsafe {
+            (api.get)(object, field, (&mut child as *mut Object).cast());
+        }
+        if child.is_null() || unsafe { object_class(child) } != target {
+            return Err("component constructor did not initialize exact parameter class".into());
+        }
+        specs.push(root_field);
+        let mut declaring = target;
+        for depth in 0..8 {
+            if declaring.is_null() {
+                return Err("parameter parent chain ended early".into());
+            }
+            if ![render, urp].contains(&unsafe { class_image(declaring) }) {
+                return Err("parameter class outside locked render images".into());
+            }
+            let mut iterator = ptr::null_mut();
+            let mut child_count = 0;
+            loop {
+                let field = unsafe { fields(declaring, &mut iterator) };
+                if field.is_null() {
+                    break;
+                }
+                child_count += 1;
+                if child_count > 32 {
+                    return Err("parameter field capacity exceeded".into());
+                }
+                if unsafe { (api.flags)(field) } & (0x10 | 0x40) != 0 {
+                    continue;
+                }
+                let child_field = spec(child, field)?;
+                if child_field.kind == 0x12 {
+                    let mut native: Object = ptr::null_mut();
+                    unsafe {
+                        (api.get)(child, field, (&mut native as *mut Object).cast());
+                    }
+                    if !native.is_null() {
+                        return Err("non-null nested parameter reference needs a separate checked graph adapter".into());
+                    }
+                }
+                specs.push(child_field);
+            }
+            if declaring == parameter {
+                break;
+            }
+            if depth == 7 {
+                return Err("parameter inheritance depth exceeded".into());
+            }
+            declaring = unsafe { parent(declaring) };
+        }
+    }
+    Ok(specs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell as Counter;
+    use std::cell::{Cell as Counter, RefCell};
     thread_local! {
         static SCALAR: Counter<u8> = const { Counter::new(1) };
         static REFERENCE: Counter<usize> = const { Counter::new(4) };
         static SETS: Counter<usize> = const { Counter::new(0) };
+        static INLINE: RefCell<[u8; 16]> = const { RefCell::new([0; 16]) };
     }
     unsafe extern "C" fn get(_: Object, field: Object, dest: Object) {
         unsafe {
-            if field as usize == 1 {
+            if field as usize == 3 {
+                INLINE
+                    .with(|c| ptr::copy_nonoverlapping(c.borrow().as_ptr(), dest.cast::<u8>(), 16));
+            } else if field as usize == 1 {
                 dest.cast::<u8>().write(SCALAR.with(Counter::get));
             } else {
                 dest.cast::<usize>()
@@ -443,7 +698,12 @@ mod tests {
         }
     }
     unsafe extern "C" fn set(_: Object, field: Object, value: Object) {
-        if field as usize == 1 {
+        if field as usize == 3 {
+            INLINE.with(|c| {
+                c.borrow_mut()
+                    .copy_from_slice(unsafe { std::slice::from_raw_parts(value.cast::<u8>(), 16) })
+            });
+        } else if field as usize == 1 {
             SCALAR.with(|c| c.set(unsafe { value.cast::<u8>().read() }));
         } else {
             // Reference C API values must be objects themselves, not &object.
@@ -559,6 +819,40 @@ mod tests {
         assert!(memory.read_int(owner + 24, 8).is_err());
         assert!(fields.sync(api, &roots).is_err());
         assert!(fields.read(owner, 2usize as Object).is_err());
+    }
+    #[test]
+    fn inline_float_value_keeps_negative_zero_nan_payload_and_all_lanes_across_sync() {
+        let (mut fields, api, mut roots, mut memory, owner) = fixture();
+        INLINE.with(|c| c.borrow_mut().fill(0));
+        let view = HostRegion::owned(16).unwrap();
+        memory
+            .map_shared_data(owner + 32, view.clone(), READ | WRITE, READ | WRITE)
+            .unwrap();
+        fields.cells.insert(
+            owner + 32,
+            Cell {
+                owner,
+                field: 3usize as Object,
+                shape: Shape::Inline {
+                    width: 16,
+                    alignment: 4,
+                },
+                view,
+                committed: vec![0; 16],
+                published: true,
+            },
+        );
+        let bits: Vec<u8> = [0x80000000u32, 0x7fc01234, 0x3f800000, 0xbf800000]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        memory.write(owner + 32, &bits).unwrap();
+        fields.sync(api, &roots).unwrap();
+        fields.verify(api, &roots).unwrap();
+        assert_eq!(INLINE.with(|c| c.borrow().to_vec()), bits);
+        roots.release(api);
+        fields.retire(&mut memory, &roots).unwrap();
+        assert!(memory.read_int(owner + 32, 8).is_err());
     }
     #[test]
     fn invalid_late_reference_prevents_earlier_scalar_store_and_preserves_failed_output() {

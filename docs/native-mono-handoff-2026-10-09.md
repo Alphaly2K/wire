@@ -339,3 +339,16 @@ fields 的反序列化：继续探测到 `0x1807b07ae` 对 owned object +0x30 �
 默认分支快进合入被自动审批拒绝：此前授权提交被判断不覆盖 main 合入副作用；用户
 “继续”也未被审批认为明确合入授权。因此 b737d8f 及后续实现暂留实施分支，继续开发
 不受影响；不得绕过拒绝。其他未跟踪文件和其他任务计划不改动。
+
+## 批量后处理组件（2026-10-11）
+
+在 fields 后继续实际执行 7 个 URP/render-core constructors 和各自反序列化（含 Bloom
+的 CoreModule enum、ProbeVolumesOptions 的 Vector3）。成功冻结输出
+`wire-out/native-mono-unity-components-probe-04`：331 field GC checks、81 borrowed roots、
+75 native writes/10 reference barriers、真实 8-resource cleanup 全通过；noexec 232/0。
+完整 release feature 435 passed / 7 ignored、Clippy clean。
+具体实现准入与未执行部分见 `docs/native-mono-unity-components-2026-10-11.md`。
+
+下一请求 InputActionAsset::.ctor，token 0x06000192，actual IL 02289800000a2a，仅调用
+ScriptableObject base ctor。需要新的锁定 InputSystem image 和 assets/数组字段通路；
+没有把它假报成功。main 合入仍受之前自动审批限制，继续分支开发。

@@ -196,6 +196,8 @@ struct State {
     instance: Option<(Object, u64)>,
     resources: Vec<Resource>,
     scriptable_calls: usize,
+    component_calls: usize,
+    component: bool,
     offset_calls: usize,
 }
 thread_local! { static STATE: RefCell<Option<State>> = const { RefCell::new(None) }; }
@@ -300,7 +302,15 @@ unsafe extern "C" fn scriptable(object: Object) {
             }
         })?;
         callbacks::guest_arguments(BINDINGS[2].1, &[token])?;
-        STATE.with(|s| s.borrow_mut().as_mut().unwrap().scriptable_calls += 1);
+        STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            let s = s.as_mut().unwrap();
+            if s.component {
+                s.component_calls += 1;
+            } else {
+                s.scriptable_calls += 1;
+            }
+        });
         Ok(())
     })
 }
@@ -441,6 +451,8 @@ impl Constructor {
                 instance: Some((object, token)),
                 resources: Vec::new(),
                 scriptable_calls: 0,
+                component_calls: 0,
+                component: false,
                 offset_calls: 0,
             });
             Ok(())
@@ -582,46 +594,52 @@ impl Constructor {
     pub(super) fn serialized_fields(&mut self) -> Result<Vec<super::fields::Spec>, String> {
         let mut specs = vec![super::fields::Spec {
             owner: self.object,
-            name: c"active",
+            name: c"active".to_owned(),
             kind: 2,
-            reference: None,
+            type_class: None,
             guest_pointer: None,
+            inline: None,
         }];
         for ((name, triple), resource) in FIELDS.into_iter().zip(&self.graph).zip(resources()?) {
             specs.push(super::fields::Spec {
                 owner: self.object,
-                name,
+                name: name.to_owned(),
                 kind: 0x12,
-                reference: Some(self.parameter),
+                type_class: Some(self.parameter),
                 guest_pointer: None,
+                inline: None,
             });
             specs.push(super::fields::Spec {
                 owner: triple[0],
-                name: c"m_OverrideState",
+                name: c"m_OverrideState".to_owned(),
                 kind: 2,
-                reference: None,
+                type_class: None,
                 guest_pointer: None,
+                inline: None,
             });
             specs.push(super::fields::Spec {
                 owner: triple[0],
-                name: c"m_Value",
+                name: c"m_Value".to_owned(),
                 kind: 0x12,
-                reference: Some(self.texture),
+                type_class: Some(self.texture),
                 guest_pointer: None,
+                inline: None,
             });
             specs.push(super::fields::Spec {
                 owner: triple[1],
-                name: c"m_Curve",
+                name: c"m_Curve".to_owned(),
                 kind: 0x12,
-                reference: Some(self.animation),
+                type_class: Some(self.animation),
                 guest_pointer: None,
+                inline: None,
             });
             specs.push(super::fields::Spec {
                 owner: triple[2],
-                name: c"m_Ptr",
+                name: c"m_Ptr".to_owned(),
                 kind: 0x18,
-                reference: None,
+                type_class: None,
                 guest_pointer: Some(resource.pointer),
+                inline: None,
             });
             for (name, kind) in [
                 (c"<length>k__BackingField", 8),
@@ -631,10 +649,11 @@ impl Constructor {
             ] {
                 specs.push(super::fields::Spec {
                     owner: triple[1],
-                    name,
+                    name: name.to_owned(),
                     kind,
-                    reference: None,
+                    type_class: None,
                     guest_pointer: None,
+                    inline: None,
                 });
             }
         }
@@ -677,5 +696,101 @@ impl Constructor {
     }
     pub(super) fn report(&self) -> String {
         format!("native-color-curves-ready=true\nnative-color-curves-graph-verifications={}\nnative-color-curves-cleaned={}\n", self.verified, self.cleaned)
+    }
+}
+
+const COMPONENTS: [(&CStr, u32); 18] = [
+    (c"ProbeVolumesOptions", 0x060008d5),
+    (c"ChannelMixer", 0x06000538),
+    (c"LiftGammaGain", 0x06000553),
+    (c"FilmGrain", 0x0600054c),
+    (c"Bloom", 0x060002f0),
+    (c"ChromaticAberration", 0x0600053b),
+    (c"ColorAdjustments", 0x0600053e),
+    (c"ColorLookup", 0x06000545),
+    (c"DepthOfField", 0x06000548),
+    (c"LensDistortion", 0x06000550),
+    (c"MotionBlur", 0x06000556),
+    (c"PaniniProjection", 0x0600055b),
+    (c"ScreenSpaceLensFlare", 0x0600055f),
+    (c"ShadowsMidtonesHighlights", 0x06000563),
+    (c"SplitToning", 0x06000566),
+    (c"Tonemapping", 0x06000569),
+    (c"Vignette", 0x0600056f),
+    (c"WhiteBalance", 0x06000572),
+];
+impl Constructor {
+    pub(super) fn supports_component(&self, method: Object) -> bool {
+        !method.is_null()
+            && COMPONENTS
+                .iter()
+                .any(|(_, token)| *token == unsafe { (self.api.token)(method) })
+    }
+    pub(super) fn execute_component(
+        &self,
+        images: [Object; 3],
+        method: Object,
+        object: Object,
+        class: Object,
+        token: u64,
+    ) -> Result<(), String> {
+        let api = self.api;
+        let (name, _) = COMPONENTS
+            .iter()
+            .find(|(_, token)| *token == unsafe { (api.token)(method) })
+            .ok_or("unadmitted URP component constructor")?;
+        let expected = if *name == c"ProbeVolumesOptions" {
+            api.class(images[1], c"UnityEngine.Rendering", name)?
+        } else {
+            api.class(images[2], c"UnityEngine.Rendering.Universal", name)?
+        };
+        if self.cleaned
+            || object.is_null()
+            || class != expected
+            || unsafe { (api.object_class)(object) } != class
+            || unsafe { (api.method_class)(method) } != class
+        {
+            return Err("component constructor class/root mismatch".into());
+        }
+        let method_name = unsafe { (api.method_name)(method) };
+        if method_name.is_null() || unsafe { CStr::from_ptr(method_name) } != c".ctor" {
+            return Err("component constructor name mismatch".into());
+        }
+        api.signature(method, true, false, 1, &[])?;
+        let before = STATE.with(|s| -> Result<usize, String> {
+            let mut s = s.borrow_mut();
+            let s = s
+                .as_mut()
+                .ok_or("component constructor has no animation adapter owner")?;
+            if s.instance.is_some() || s.component || s.component_calls >= 64 {
+                return Err("component constructor owner already active/capacity exceeded".into());
+            }
+            s.instance = Some((object, token));
+            s.component = true;
+            Ok(s.component_calls)
+        })?;
+        struct Scope;
+        impl Drop for Scope {
+            fn drop(&mut self) {
+                STATE.with(|s| {
+                    let mut s = s.borrow_mut();
+                    let s = s.as_mut().unwrap();
+                    s.instance = None;
+                    s.component = false;
+                });
+            }
+        }
+        let _scope = Scope;
+        api.call(method, object, ptr::null_mut())?;
+        STATE.with(|s| -> Result<(), String> {
+            let s = s.borrow();
+            let s = s.as_ref().unwrap();
+            if s.component_calls != before + 1 || s.resources.len() != 8 || s.offset_calls != 1 {
+                return Err("component constructor callback/resource count mismatch".into());
+            }
+            Ok(())
+        })?;
+        eprintln!("NATIVE_MONO_COMPONENT_CONSTRUCTED: {:?} real managed ctor and ScriptableObject callback", name);
+        Ok(())
     }
 }

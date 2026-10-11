@@ -241,6 +241,8 @@ pub(super) struct Probe {
     logging_ready: bool,
     exceptions: bool,
     exceptions_ready: bool,
+    components: bool,
+    component_invokes: usize,
     fields: bool,
     field_registry: fields::Registry,
     curves: bool,
@@ -380,20 +382,27 @@ impl Probe {
         skip_etw: bool,
         boundary: &str,
     ) -> Result<Self, String> {
-        let fields = boundary == "fields";
-        let curves = matches!(boundary, "curves" | "fields");
-        let ordinary_objects = matches!(boundary, "objects" | "curves" | "fields");
+        let components = boundary == "components";
+        let fields = matches!(boundary, "fields" | "components");
+        let curves = matches!(boundary, "curves" | "fields" | "components");
+        let ordinary_objects = matches!(boundary, "objects" | "curves" | "fields" | "components");
         let assembly_lookup = matches!(
             boundary,
-            "assembly-lookup" | "objects" | "curves" | "fields"
+            "assembly-lookup" | "objects" | "curves" | "fields" | "components"
         );
         let attribute_arrays = matches!(
             boundary,
-            "attribute-arrays" | "assembly-lookup" | "objects" | "curves" | "fields"
+            "attribute-arrays" | "assembly-lookup" | "objects" | "curves" | "fields" | "components"
         );
         let attributes = matches!(
             boundary,
-            "attributes" | "attribute-arrays" | "assembly-lookup" | "objects" | "curves" | "fields"
+            "attributes"
+                | "attribute-arrays"
+                | "assembly-lookup"
+                | "objects"
+                | "curves"
+                | "fields"
+                | "components"
         );
         let imgui = matches!(
             boundary,
@@ -404,6 +413,7 @@ impl Probe {
                 | "objects"
                 | "curves"
                 | "fields"
+                | "components"
         );
         let subsystem_map = matches!(
             boundary,
@@ -415,6 +425,7 @@ impl Probe {
                 | "objects"
                 | "curves"
                 | "fields"
+                | "components"
         );
         let subsystems = matches!(
             boundary,
@@ -427,6 +438,7 @@ impl Probe {
                 | "objects"
                 | "curves"
                 | "fields"
+                | "components"
         );
         let synchronization = matches!(
             boundary,
@@ -440,6 +452,7 @@ impl Probe {
                 | "objects"
                 | "curves"
                 | "fields"
+                | "components"
         );
         let exceptions = matches!(
             boundary,
@@ -454,6 +467,7 @@ impl Probe {
                 | "objects"
                 | "curves"
                 | "fields"
+                | "components"
         );
         let logging = matches!(
             boundary,
@@ -469,6 +483,7 @@ impl Probe {
                 | "objects"
                 | "curves"
                 | "fields"
+                | "components"
         );
         let classlib = matches!(
             boundary,
@@ -485,6 +500,7 @@ impl Probe {
                 | "objects"
                 | "curves"
                 | "fields"
+                | "components"
         );
         let managed_types = matches!(
             boundary,
@@ -502,6 +518,7 @@ impl Probe {
                 | "objects"
                 | "curves"
                 | "fields"
+                | "components"
         );
         let strings = matches!(
             boundary,
@@ -520,6 +537,7 @@ impl Probe {
                 | "objects"
                 | "curves"
                 | "fields"
+                | "components"
         );
         let (main_thread, pre_bindings, bindings, profiler, pre_images, images, metadata) = match boundary {
             "root" => (false, false, false, false, false, false, false),
@@ -529,10 +547,10 @@ impl Probe {
             "profiler" => (true, true, true, true, false, false, false),
             "pre-images" => (true, true, true, true, true, false, false),
             "images" => (true, true, true, true, true, true, false),
-            "metadata" | "strings" | "managed-types" | "classlib" | "logging" | "exceptions" | "synchronization" | "subsystems" | "subsystem-map" | "imgui-cache" | "attributes" | "attribute-arrays" | "assembly-lookup" | "objects" | "curves" | "fields" => (true, true, true, true, true, true, true),
+            "metadata" | "strings" | "managed-types" | "classlib" | "logging" | "exceptions" | "synchronization" | "subsystems" | "subsystem-map" | "imgui-cache" | "attributes" | "attribute-arrays" | "assembly-lookup" | "objects" | "curves" | "fields" | "components" => (true, true, true, true, true, true, true),
             _ => {
                 return Err(
-                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings, profiler, pre-images, images, metadata, strings, managed-types, classlib, logging, exceptions, synchronization, subsystems, subsystem-map, imgui-cache, attributes, attribute-arrays or assembly-lookup or objects or curves or fields".into(),
+                    "native Mono startup boundary must be root, main-thread, pre-bindings, bindings, profiler, pre-images, images, metadata, strings, managed-types, classlib, logging, exceptions, synchronization, subsystems, subsystem-map, imgui-cache, attributes, attribute-arrays or assembly-lookup or objects or curves or fields or components".into(),
                 )
             }
         };
@@ -631,6 +649,8 @@ impl Probe {
             logging_ready: false,
             exceptions,
             exceptions_ready: false,
+            components,
+            component_invokes: 0,
             fields,
             field_registry: fields::Registry::default(),
             curves,
@@ -1241,6 +1261,16 @@ impl Probe {
         if self.ordinary_objects && self.main_thread_ready && function == "mono_thread_current" {
             return Ok(false);
         }
+        if self.components && function == "mono_runtime_invoke" {
+            if let Some(constructor) = &self.curves_constructor {
+                let method = self
+                    .metadata_registry
+                    .native(cpu.regs[1], metadata::Kind::Method)?;
+                if constructor.supports_component(method) {
+                    return Ok(false);
+                }
+            }
+        }
         if self.curves
             && self.curves_constructor.is_none()
             && self.classlib_invokes >= self.startup_limit()
@@ -1848,6 +1878,76 @@ impl Probe {
             self.validate_unitytls(memory, runtime)?;
             self.events.push("finite ColorCurves constructor checkpoint completed; stop before initialized instance-field serialization".into());
             return Ok(true);
+        }
+        if self.components && self.curves_constructor.is_some() && a[0] != self.get_type_method {
+            if a[1] == 0 || a[2] != 0 {
+                return Err("component ctor requires owned this and NULL parameters".into());
+            }
+            if a[3] != 0 {
+                memory.check(a[3], 8, super::super::memory::WRITE)?;
+            }
+            let method = self
+                .metadata_registry
+                .native(a[0], metadata::Kind::Method)?;
+            let api = self
+                .instance_api
+                .ok_or("component before rooted allocation API")?;
+            let targets = self.callback_targets();
+            let images = [
+                self.image_registry.unique_native_image(CORE_MODULE)?,
+                self.image_registry
+                    .unique_native_image(animation::RENDER_CORE)?,
+                self.image_registry.unique_native_image(animation::URP)?,
+            ];
+            let (prepared, _) = callbacks::with_owner(memory, runtime, targets, || {
+                callbacks::with_service(|memory, _| {
+                    self.instance_registry.sync_from_guest(api, memory)
+                })?;
+                self.field_registry.sync(api, &self.instance_registry)?;
+                Ok::<_, String>((
+                    self.instance_registry.native(api, a[1])?,
+                    self.instance_registry.class(api, a[1])?,
+                ))
+            })?;
+            let (object, class) = prepared?;
+            let (constructed, _) = callbacks::with_metadata_owner(
+                memory,
+                runtime,
+                targets,
+                reentry::Metadata {
+                    library,
+                    domain: native_domain,
+                    metadata: &mut self.metadata_registry,
+                    images: &mut self.image_registry,
+                    rooted_instance: Some((a[1], class)),
+                },
+                || {
+                    self.curves_constructor
+                        .as_ref()
+                        .unwrap()
+                        .execute_component(images, method, object, class, a[1])
+                },
+            )?;
+            constructed?;
+            let (installed, _) = callbacks::with_owner(memory, runtime, targets, || {
+                let specs = fields::component_specs(library, images, object, class)?;
+                callbacks::with_service(|memory, _| {
+                    self.field_registry.install(
+                        library,
+                        api,
+                        &mut self.instance_registry,
+                        memory,
+                        specs,
+                    )
+                })
+            })?;
+            installed?;
+            self.component_invokes += 1;
+            if a[3] != 0 {
+                memory.write_int(a[3], 8, 0)?;
+            }
+            cpu.return_integer(memory, 0)?;
+            return Ok(false);
         }
         if self.classlib && self.get_type_method != 0 && a[0] != self.get_type_method {
             let logging_init = self.logging && self.classlib_invokes == 1;
@@ -2889,7 +2989,7 @@ impl Probe {
             self.assembly_lookup_ready,
             self.ordinary_objects_ready,
             self.curves_constructor.as_ref().map_or_else(String::new, animation::Constructor::report),
-            self.instance_registry.report() + &self.field_registry.report(),
+            self.instance_registry.report() + &self.field_registry.report() + &format!("native-component-constructors={}\n", self.component_invokes),
             self.name_registry.report(),
             self.error_registry.report(),
             self.attribute_registry.report(),
@@ -3081,6 +3181,8 @@ mod tests {
             logging_ready: false,
             exceptions: false,
             exceptions_ready: false,
+            components: false,
+            component_invokes: 0,
             fields: false,
             field_registry: fields::Registry::default(),
             curves: false,
