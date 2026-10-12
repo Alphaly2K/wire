@@ -63,6 +63,7 @@ def run(cleanup):
     parser.add_argument('--window', action='store_true', help='show actual guest windows through the native presenter')
     parser.add_argument('--capture-frame', action='store_true', help='capture an actual Present to frame.ppm; enables the native presenter')
     parser.add_argument('--managed-trace', action='store_true', help='debug-only native managed call trace; timing is not a performance result')
+    parser.add_argument('--bridge-audit', action='store_true', help='diagnostic metadata/icall lookup inventory; no game methods are executed by the audit')
     parser.add_argument('--max-instr', type=int, default=30000000, help='bounded guest work budget')
     parser.add_argument('--skip-etw', action='store_true', help='explicit diagnostic platform divergence')
     parser.add_argument('--boundary', choices=('root', 'main-thread', 'pre-bindings', 'bindings', 'profiler', 'pre-images', 'images', 'metadata', 'strings', 'managed-types', 'classlib', 'logging', 'exceptions', 'synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup', 'objects', 'curves', 'fields', 'components', 'assets'), default='root', help='finite diagnostic initialization boundary')
@@ -122,6 +123,9 @@ def run(cleanup):
         if key.startswith('MONO_') or key in ('DYLD_INSERT_LIBRARIES', 'DYLD_LIBRARY_PATH'):
             env.pop(key)
     env.pop('WIRE_NATIVE_MONO_MANAGED_TRACE', None)
+    env.pop('WIRE_NATIVE_MONO_BRIDGE_AUDIT', None)
+    if args.bridge_audit:
+        env['WIRE_NATIVE_MONO_BRIDGE_AUDIT'] = str(output / 'bridge-audit')
     if args.managed_trace:
         env['WIRE_NATIVE_MONO_MANAGED_TRACE'] = '1'
     env.update(DYLD_INSERT_LIBRARIES=str(guard), MONO_THREADS_SUSPEND='preemptive')
@@ -145,7 +149,7 @@ def run(cleanup):
     (output / 'command.json').write_text(json.dumps({'command': command, 'cwd': str(clone),
         'game_sandbox': str(sandbox),
         'storage_policy': 'one reused sandbox; ephemeral symlinks and wire snapshot; logs retained',
-        'environment': {key: env[key] for key in ('DYLD_INSERT_LIBRARIES', 'MONO_THREADS_SUSPEND', 'WIRE_NATIVE_MONO_MANAGED_TRACE') if key in env},
+        'environment': {key: env[key] for key in ('DYLD_INSERT_LIBRARIES', 'MONO_THREADS_SUSPEND', 'WIRE_NATIVE_MONO_MANAGED_TRACE', 'WIRE_NATIVE_MONO_BRIDGE_AUDIT') if key in env},
         'full_game_backend': False, 'timing_is_performance_comparison': False,
         'native_presenter_requested': args.window or args.capture_frame,
         'present_capture_requested': args.capture_frame}, indent=2) + '\n')

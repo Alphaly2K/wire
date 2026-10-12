@@ -83,6 +83,13 @@ shared sandbox retains its writable configuration and saves; it must not point
 to the original game. Keep one runtime build in the main workspace and reuse it
 with `--runtime-output`, rather than rebuilding under separate worktrees. Build wire
 with `native-mono-backend`. Use `--boundary root|main-thread|pre-bindings`;
+
+`--bridge-audit` records actual native InternalCall lookup without invoking
+declared methods or resolving PInvoke libraries. Join that snapshot with all
+offline declarations using `bridge_inventory.py`; full signatures, input
+fingerprints, original targets and unknown identities are retained. This is
+diagnostic lookup coverage, not behavioral admission or a performance run.
+See `docs/native-mono-bridge-gap-inventory-2026-10-13.md` for the batch work list.
 Windows ETW is rejected unless explicitly disabled with `--skip-etw`. This
 provider is separate from complete-game Admission and stops before general
 objects/InternalCalls. See `docs/native-mono-unity-startup-provider-2026-10-09.md`.

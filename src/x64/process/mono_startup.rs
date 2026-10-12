@@ -47,6 +47,7 @@ mod attributes;
 mod awaitables;
 mod binding_strings;
 mod bindings;
+mod bridge_audit;
 mod burst_shared;
 mod callbacks;
 mod closed_types;
@@ -3432,6 +3433,18 @@ impl Probe {
                 &managed_images,
                 self.registry.exact_target(json::NAME, json::TARGET)?,
             )?;
+        }
+        if bridge_audit::requested() {
+            let (audit, _) =
+                callbacks::with_owner(memory, runtime, self.callback_targets(), || {
+                    bridge_audit::run_once(
+                        library,
+                        &managed_images,
+                        &self.registry,
+                        &self.image_registry.tsv(),
+                    )
+                })?;
+            audit?;
         }
         let descriptor = call_api
             .describe(method, &managed_images, &managed_images)?
