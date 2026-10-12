@@ -132,7 +132,7 @@ SZARRAY 参数的实际元素类型若继承 UnityEngine.Object，则复用 cano
 IntPtr 返回仅在当前 managed wrapper 的完整指令边界尾部为
 `call <当前 icall>; call UnmarshalUnityObject<T>(IntPtr); ret` 时识别为对象句柄。
 MethodDef/MethodSpec 与闭合返回类型由本次实际 metadata 解析，converter 要属于
-同 image 的 UnityEngine.Bindings.Unmarshal，T 要继承 UnityEngine.Object；多 wrapper
+实际 engine-base image 中的 UnityEngine.Bindings.Unmarshal，T 要继承 UnityEngine.Object；多 wrapper
 推导冲突则保留缺口。结果复用原有 live guest handle → native v2 handle 协议，
 零句柄直接返回零。解析不执行 wrapper，也不含冻结 token 或目标地址。
 
@@ -148,3 +148,31 @@ Clippy（`-D warnings`）与 8 项 inventory/harness 回归通过。新回归覆
 header 指针、canary 与失败输出不写回，以及变化后的 MethodDef/MethodSpec、截断 IL
 与 operand 内伪 CALL 的拒绝。整个 startup provider 的冻结前置规格与第二游戏验收
 仍列入待办。
+
+## 常用数值类族与对象指针参数
+
+Display、HDROutputSettings、Physics/Physics2D、Random、HumanTrait、DynamicGI、Debug、
+GUI/GUIUtility 与 CameraRaycastHelper 共用现有描述符，不增加逐方法签名或实现。
+probe-167 自动注册 3,734 个入口，实际通过 Display.RelativeMouseAtImpl、pixelRect、
+eventMask、ScreenPointToRay、裁剪平面与 cullingMask。30.37 秒，242 draws / 92 presents，
+guard checks=335 / denied=0；下一缺口为 Raycast 的 Camera IntPtr 参数。
+
+该参数现由实际包装 IL 的有序参数加载与闭合
+Object.MarshalledUnityObject.Marshal<T>/MarshalNotNull<T> 推导。调用源、MethodSpec、
+参数类型、引擎继承、native IntPtr 返回、静态 IL 属性与实际嵌套声明者均核对。
+此协议接受简单直线包装；有分支、参数重排、多个目标调用、其他 pointer converter
+或多个包装推导冲突时保留缺口。Marshal 的零值可转发，MarshalNotNull 的零值拒绝；
+非零值仍走 live original engine data pointer 检查，宿主地址不会传给 Win64。
+对象返回转换允许包装方法引用 CoreModule 的真实 helper，去掉错误的同包装 image
+限制；仍以实际 engine-base 的 owned image 为 helper 所有者。
+
+probe-168 自动注册 **3,852** 个入口，实际执行 RaycastTry / RaycastTry2D，越过
+DoSendMouseEvents，继续创建 Naninovel.ProjectResources 与 InputActionAsset 并执行
+Transform.set_position。33.09 秒后在资源字段投影的 generic value 分类处中止：
+现有代码把所有 GENERICINST value 提前拒绝，下一步复用既有引用叶子布局与写屏障。
+本轮未完成正常收尾，guard/图形最终计数没有采集；最后画面仍为加载页。
+
+本批完整 release feature 回归 **542 passed / 7 ignored**，release build、all-target
+Clippy（`-D warnings`）通过。新回归覆盖动态 token、有序加载、未验证 converter、
+分支/重复调用/截断拒绝，以及 nullable NULL 转发、required NULL 和伪造宿主指针
+失败时保持 native 输出。纯 scalar ABI 继续拒绝 capability-like Int64/IntPtr。

@@ -193,7 +193,7 @@ impl Api {
                 !text.is_null() && unsafe { CStr::from_ptr(text) } == expected
             };
             if converter_owner.is_null()
-                || unsafe { (self.image)(converter_owner) } != image
+                || unsafe { (self.image)(converter_owner) } != unsafe { (self.image)(engine_base) }
                 || !text_is(
                     unsafe { namespace(converter_owner) },
                     c"UnityEngine.Bindings",
@@ -235,6 +235,180 @@ impl Api {
             result = Some(expected);
         }
         Ok(result)
+    }
+    /// Infer engine-pointer arguments from ordinary generated wrappers. The
+    /// wrapper loads its parameters in order and uses the actual closed
+    /// Object.MarshalledUnityObject.Marshal<T> helper. Other IntPtr sources and
+    /// wrappers with control flow stay outside this protocol.
+    pub(super) fn engine_pointer_arguments(
+        self,
+        method: Object,
+        owner: Object,
+        engine_base: Object,
+        images: &[Object],
+    ) -> Result<Vec<Option<bool>>, String> {
+        macro_rules! sym {
+            ($name:literal, $ty:ty) => {{
+                let p = unsafe { libc::dlsym(self.library, concat!($name, "\0").as_ptr().cast()) };
+                if p.is_null() {
+                    return Err(concat!("missing engine pointer metadata API: ", $name).into());
+                }
+                unsafe { std::mem::transmute::<Object, $ty>(p) }
+            }};
+        }
+        let methods = sym!(
+            "mono_class_get_methods",
+            unsafe extern "C" fn(Object, *mut Object) -> Object
+        );
+        let token = sym!("mono_method_get_token", unsafe extern "C" fn(Object) -> u32);
+        let resolve = sym!(
+            "mono_get_method",
+            unsafe extern "C" fn(Object, u32, Object) -> Object
+        );
+        let class_name = sym!(
+            "mono_class_get_name",
+            unsafe extern "C" fn(Object) -> *const c_char
+        );
+        let nesting = sym!(
+            "mono_class_get_nesting_type",
+            unsafe extern "C" fn(Object) -> Object
+        );
+        let intptr = sym!("mono_get_intptr_class", unsafe extern "C" fn() -> Object);
+        let image = unsafe { (self.image)(owner) };
+        let target = unsafe { token(method) };
+        let signature = unsafe { (self.signature)(method) };
+        if signature.is_null() || target >> 24 != 6 || !images.contains(&image) {
+            return Err("engine pointer source lacks owned MethodDef/signature".into());
+        }
+        let arity = unsafe { (self.count)(signature) } as usize;
+        if arity > 8 {
+            return Err("engine pointer argument bound exceeded".into());
+        }
+        let mut result = None;
+        let mut iterator = ptr::null_mut();
+        loop {
+            let wrapper = unsafe { methods(owner, &mut iterator) };
+            if wrapper.is_null() {
+                break;
+            }
+            let mut implementation = 0;
+            let flags = unsafe { (self.flags)(wrapper, &mut implementation) };
+            let sig = unsafe { (self.signature)(wrapper) };
+            if implementation & (0x1000 | 3) != 0
+                || flags & (0x400 | 0x2000) != 0
+                || sig.is_null()
+                || unsafe { (self.generic)(wrapper) } != 0
+                || unsafe { (self.inflated)(wrapper) } != 0
+            {
+                continue;
+            }
+            let mut arguments = Vec::new();
+            if unsafe { (self.instance)(sig) } != 0 {
+                arguments.push((owner, false));
+            }
+            let mut parameter = ptr::null_mut();
+            for _ in 0..unsafe { (self.count)(sig) } {
+                let ty = unsafe { (self.parameters)(sig, &mut parameter) };
+                if ty.is_null() {
+                    return Err("engine wrapper parameter metadata absent".into());
+                }
+                arguments.push((
+                    unsafe { (self.type_class)(ty) },
+                    unsafe { (self.byref)(ty) } != 0,
+                ));
+            }
+            if arguments.len() != arity {
+                continue;
+            }
+            let header = unsafe { (self.header)(wrapper) };
+            if header.is_null() {
+                continue;
+            }
+            let (mut length, mut stack) = (0, 0);
+            let code = unsafe { (self.code)(header, &mut length, &mut stack) };
+            let inferred = if code.is_null() || !(6..=256).contains(&length) || stack > 16 {
+                None
+            } else {
+                engine_pointer_prefix(
+                    unsafe { std::slice::from_raw_parts(code, length as usize) },
+                    target,
+                    arity,
+                    |position, converter| {
+                        let (source, reference) = arguments[position];
+                        if reference
+                            || source.is_null()
+                            || !images.contains(&unsafe { (self.image)(source) })
+                        {
+                            return None;
+                        }
+                        let converter = unsafe { resolve(image, converter, owner) };
+                        if converter.is_null() {
+                            return None;
+                        }
+                        let declaring = unsafe { (self.class)(converter) };
+                        if declaring.is_null()
+                            || unsafe { nesting(declaring) } != engine_base
+                            || !text_matches(
+                                unsafe { class_name(declaring) },
+                                c"MarshalledUnityObject",
+                            )
+                        {
+                            return None;
+                        }
+                        let nullable =
+                            if text_matches(unsafe { (self.name)(converter) }, c"Marshal") {
+                                true
+                            } else if text_matches(
+                                unsafe { (self.name)(converter) },
+                                c"MarshalNotNull",
+                            ) {
+                                false
+                            } else {
+                                return None;
+                            };
+                        let sig = unsafe { (self.signature)(converter) };
+                        let mut implementation = 0;
+                        let flags = unsafe { (self.flags)(converter, &mut implementation) };
+                        if sig.is_null()
+                            || flags & 0x10 == 0
+                            || flags & (0x400 | 0x2000) != 0
+                            || implementation & (0x1000 | 3) != 0
+                            || unsafe { (self.instance)(sig) } != 0
+                            || unsafe { (self.count)(sig) } != 1
+                        {
+                            return None;
+                        }
+                        let mut iter = ptr::null_mut();
+                        let ty = unsafe { (self.parameters)(sig, &mut iter) };
+                        let returns = unsafe { (self.returns)(sig) };
+                        if ty.is_null() || returns.is_null() {
+                            return None;
+                        }
+                        let expected = unsafe { (self.type_class)(ty) };
+                        if expected.is_null()
+                            || unsafe { (self.byref)(ty) } != 0
+                            || unsafe { (self.kind)(ty) } != 0x12
+                            || !images.contains(&unsafe { (self.image)(expected) })
+                            || unsafe { (self.assignable)(engine_base, expected) } == 0
+                            || unsafe { (self.assignable)(expected, source) } == 0
+                            || unsafe { (self.byref)(returns) } != 0
+                            || unsafe { (self.kind)(returns) } != 0x18
+                            || unsafe { (self.type_class)(returns) } != unsafe { intptr() }
+                        {
+                            return None;
+                        }
+                        Some(nullable)
+                    },
+                )
+            };
+            unsafe { (self.free)(header) };
+            let Some(inferred) = inferred else { continue };
+            if result.as_ref().is_some_and(|prior| prior != &inferred) {
+                return Ok(vec![None; arity]);
+            }
+            result = Some(inferred);
+        }
+        Ok(result.unwrap_or_else(|| vec![None; arity]))
     }
     /// Diagnostic reads only the actual Exception metadata/message field. A
     /// private pinned root stays live; no ToString IL or native pointer is
@@ -1421,6 +1595,16 @@ fn concrete_method(generic: bool, inflated: bool, instance: bool, constructed: b
         }
 }
 fn engine_handle_tail(code: &[u8], target: u32) -> Option<u32> {
+    let instructions = engine_wrapper_instructions(code)?;
+    match instructions.as_slice() {
+        [.., (0x28, called), (0x28, converter), (0x2a, _)] if *called == target => Some(*converter),
+        _ => None,
+    }
+}
+fn text_matches(text: *const c_char, expected: &CStr) -> bool {
+    !text.is_null() && unsafe { CStr::from_ptr(text) } == expected
+}
+fn engine_wrapper_instructions(code: &[u8]) -> Option<Vec<(u8, u32)>> {
     // Parse complete instruction boundaries in the small generated wrapper
     // vocabulary. Unknown opcodes defer; operands cannot impersonate CALLs.
     let mut at = 0;
@@ -1436,22 +1620,67 @@ fn engine_handle_tail(code: &[u8], target: u32) -> Option<u32> {
             _ => return None,
         };
         let operand = code.get(at..at.checked_add(width)?)?;
-        instructions.push((
-            opcode,
-            if opcode == 0x28 {
-                Some(u32::from_le_bytes(operand.try_into().ok()?))
-            } else {
-                None
-            },
-        ));
+        let mut word = [0; 4];
+        let copied = operand.len().min(4);
+        word[..copied].copy_from_slice(&operand[..copied]);
+        instructions.push((opcode, u32::from_le_bytes(word)));
         at += width;
     }
-    match instructions.as_slice() {
-        [.., (0x28, Some(called)), (0x28, Some(converter)), (0x2a, None)] if *called == target => {
-            Some(*converter)
-        }
-        _ => None,
+    Some(instructions)
+}
+fn engine_pointer_prefix(
+    code: &[u8],
+    target: u32,
+    arity: usize,
+    mut marshal: impl FnMut(usize, u32) -> Option<bool>,
+) -> Option<Vec<Option<bool>>> {
+    let instructions = engine_wrapper_instructions(code)?;
+    if arity > 8
+        || instructions
+            .iter()
+            .filter(|&&(op, token)| op == 0x28 && token == target)
+            .count()
+            != 1
+    {
+        return None;
     }
+    let mut at = 0;
+    let mut arguments = Vec::new();
+    for position in 0..arity {
+        while instructions.get(at).is_some_and(|&(op, _)| op == 0) {
+            at += 1;
+        }
+        let &(op, operand) = instructions.get(at)?;
+        let (index, address) = match op {
+            0x02..=0x05 => ((op - 2) as usize, false),
+            0x0e => (operand as usize, false),
+            0x0f => (operand as usize, true),
+            _ => return None,
+        };
+        if index != position {
+            return None;
+        }
+        at += 1;
+        let pointer = if let Some(&(0x28, converter)) = instructions.get(at) {
+            if converter != target {
+                if address || converter >> 24 != 0x2b {
+                    return None;
+                }
+                let nullable = marshal(position, converter)?;
+                at += 1;
+                Some(nullable)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        arguments.push(pointer);
+    }
+    while instructions.get(at).is_some_and(|&(op, _)| op == 0) {
+        at += 1;
+    }
+    (instructions.get(at) == Some(&(0x28, target))).then_some(arguments)
 }
 fn managed_il_flags(flags: u32, implementation: u32, instance: bool) -> bool {
     (flags & 0x10 == 0) == instance
@@ -1663,6 +1892,46 @@ impl Frame {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn engine_pointer_wrappers_require_ordered_loads_and_verified_marshal_calls() {
+        let target: u32 = 0x06001234;
+        let marshal: u32 = 0x2b007654;
+        let mut code = vec![0x02, 0x28];
+        code.extend(marshal.to_le_bytes());
+        code.extend([0x0f, 1, 0x04, 0x05, 0x28]);
+        code.extend(target.to_le_bytes());
+        code.push(0x2a);
+        assert_eq!(
+            engine_pointer_prefix(&code, target, 4, |index, token| {
+                (index == 0 && token == marshal).then_some(true)
+            }),
+            Some(vec![Some(true), None, None, None])
+        );
+        assert_eq!(engine_pointer_prefix(&code, target, 4, |_, _| None), None);
+        let mut reordered = code.clone();
+        reordered[0] = 0x03;
+        assert_eq!(
+            engine_pointer_prefix(&reordered, target, 4, |_, _| Some(true)),
+            None
+        );
+        let mut branched = code.clone();
+        branched.splice(0..0, [0x2b, 0]);
+        assert_eq!(
+            engine_pointer_prefix(&branched, target, 4, |_, _| Some(true)),
+            None
+        );
+        let mut duplicate = code.clone();
+        duplicate.push(0x28);
+        duplicate.extend(target.to_le_bytes());
+        assert_eq!(
+            engine_pointer_prefix(&duplicate, target, 4, |_, _| Some(true)),
+            None
+        );
+        assert_eq!(
+            engine_pointer_prefix(&code[..code.len() - 2], target, 4, |_, _| Some(true)),
+            None
+        );
+    }
     #[test]
     fn engine_handle_wrapper_uses_current_tokens_and_rejects_calls_inside_operands() {
         let mut code = vec![

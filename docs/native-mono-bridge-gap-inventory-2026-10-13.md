@@ -96,3 +96,8 @@ probe-164 至 probe-166 接入同一 invoke 下的输入快照、engine-object S
 下一实际缺口为 Display.RelativeMouseAtImpl。上方 missing 分组保留 probe-160 的
 全量快照，未将后续新增注册混入旧统计。本批完整回归 541 passed / 7 ignored，
 build、all-target Clippy 与 8 项 inventory/harness 回归通过。
+
+常用 numeric/value 类族与 wrapper-derived 引擎指针参数使 probe-168 自动注册数
+达到 **3,852**。Display、相机射线与 3D/2D Raycast 已实际执行，继续到资源字段中的
+GENERICINST value 边界。完整回归 542 passed / 7 ignored，release build 和 all-target
+Clippy 通过。全量静态 snapshot 仍使用上方明确编号的旧采样，未重算 missing 分组。

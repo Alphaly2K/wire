@@ -20,10 +20,21 @@ const FAMILIES: &[(&CStr, &CStr)] = &[
     (c"UnityEngine", c"QualitySettings"),
     (c"UnityEngine", c"Time"),
     (c"UnityEngine", c"Screen"),
+    (c"UnityEngine", c"Display"),
+    (c"UnityEngine", c"HDROutputSettings"),
     (c"UnityEngine", c"Cursor"),
     (c"UnityEngine", c"AudioSettings"),
     (c"UnityEngine", c"AudioListener"),
     (c"UnityEngine", c"Input"),
+    (c"UnityEngine", c"CameraRaycastHelper"),
+    (c"UnityEngine", c"Physics"),
+    (c"UnityEngine", c"Physics2D"),
+    (c"UnityEngine", c"Random"),
+    (c"UnityEngine", c"HumanTrait"),
+    (c"UnityEngine", c"DynamicGI"),
+    (c"UnityEngine", c"Debug"),
+    (c"UnityEngine", c"GUI"),
+    (c"UnityEngine", c"GUIUtility"),
     (c"UnityEngine", c"Mathf"),
     (c"UnityEngine", c"GL"),
     (c"UnityEngine", c"Graphics"),
@@ -83,6 +94,7 @@ enum Argument {
     Scalar(Scalar),
     Value(Payload),
     EngineSelf,
+    EnginePointer { nullable: bool },
     EngineArray { class: usize },
 }
 struct Binding {
@@ -216,7 +228,10 @@ fn decode(binding: &Binding, capture: &Capture) -> Result<Vec<u64>, String> {
                 integer += 1;
                 value
             }
-            Argument::Value(_) | Argument::EngineSelf | Argument::EngineArray { .. } => {
+            Argument::Value(_)
+            | Argument::EngineSelf
+            | Argument::EnginePointer { .. }
+            | Argument::EngineArray { .. } => {
                 let value = capture.integer[integer];
                 integer += 1;
                 Ok(value)
@@ -483,6 +498,7 @@ pub(super) fn install(
             let mut names = [ptr::null(); 8];
             unsafe { param_names(method, names.as_mut_ptr()) };
             let mut result = None;
+            let mut engine_arguments = None;
             let mut supported = true;
             for index in 0..=arity {
                 let ty = unsafe {
@@ -522,6 +538,20 @@ pub(super) fn install(
                     && unsafe { CStr::from_ptr(names[0]) } == c"_unity_self"
                 {
                     arguments.push(Argument::EngineSelf);
+                } else if index != 0 && type_kind == 0x18 && class == intptr && !reference {
+                    if engine_arguments.is_none() {
+                        engine_arguments = Some(api.engine_pointer_arguments(
+                            method,
+                            owner,
+                            engine_base,
+                            &family,
+                        )?);
+                    }
+                    let Some(nullable) = engine_arguments.as_ref().unwrap()[index - 1] else {
+                        supported = false;
+                        break;
+                    };
+                    arguments.push(Argument::EnginePointer { nullable });
                 } else if !reference && type_kind == 0x1d && index != 0 {
                     let element = unsafe { element_class(class) };
                     if element.is_null()
@@ -674,8 +704,13 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
     let mut checked = arguments.to_vec();
     let mut array_pins = Vec::new();
     for (argument, value) in binding.arguments.iter().zip(&mut checked) {
-        if matches!(argument, Argument::EngineSelf) {
-            *value = engine_objects::engine_pointer(*value as usize)?;
+        if matches!(
+            argument,
+            Argument::EngineSelf | Argument::EnginePointer { .. }
+        ) {
+            if *value != 0 || !matches!(argument, Argument::EnginePointer { nullable: true }) {
+                *value = engine_objects::engine_pointer(*value as usize)?;
+            }
         } else if let Argument::EngineArray { class } = argument {
             let native = managed_calls::Api::load(binding.library as Object)?.compatible(
                 *value as Object,
@@ -1068,6 +1103,43 @@ mod tests {
                 &receiver,
                 &[output.as_ptr() as u64, output.as_mut_ptr() as u64],
             )
+        })
+        .unwrap();
+        assert!(result.is_err());
+        assert_eq!(output, [9.0; 3]);
+        memory
+            .write(0x1000, &[0xc7, 0x02, 0, 0, 0x80, 0x3f, 0xc3])
+            .unwrap();
+        let pointer = binding(
+            "NullableEngineArgument",
+            0x1000,
+            vec![Argument::EnginePointer { nullable: true }, value(12, true)],
+            1,
+        );
+        let (result, _) = callbacks::with_owner(&mut memory, &mut runtime, [0; 7], || {
+            execute(&pointer, &[0, output.as_mut_ptr() as u64])
+        })
+        .unwrap();
+        result.unwrap();
+        assert_eq!(output, [1.0, 0.0, 0.0]);
+        output = [9.0; 3];
+        let (result, _) = callbacks::with_owner(&mut memory, &mut runtime, [0; 7], || {
+            execute(
+                &pointer,
+                &[output.as_ptr() as u64, output.as_mut_ptr() as u64],
+            )
+        })
+        .unwrap();
+        assert!(result.is_err());
+        assert_eq!(output, [9.0; 3]);
+        let required = binding(
+            "RequiredEngineArgument",
+            0x1000,
+            vec![Argument::EnginePointer { nullable: false }, value(12, true)],
+            1,
+        );
+        let (result, _) = callbacks::with_owner(&mut memory, &mut runtime, [0; 7], || {
+            execute(&required, &[0, output.as_mut_ptr() as u64])
         })
         .unwrap();
         assert!(result.is_err());
