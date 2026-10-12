@@ -51,6 +51,7 @@ mod burst_shared;
 mod callbacks;
 mod closed_types;
 mod constructors;
+mod engine_components;
 mod engine_objects;
 mod engine_scalars;
 mod errors;
@@ -1833,7 +1834,10 @@ impl Probe {
                 self.metadata_registry
                     .publish_class_elements(native.library, memory, result)?;
             }
-            self.events.push(format!("worker {guest} immutable metadata leaf {function} served by process owner: {result:#x}; actual worker TLS retained"));
+            let count = self.metadata_registry.count();
+            if count <= 64 || count.is_power_of_two() {
+                self.events.push(format!("worker {guest} immutable metadata leaf {function} served by process owner: {result:#x}; actual worker TLS retained; queries={count}"));
+            }
             return cpu.return_integer(memory, result);
         }
         if function == "mono_gc_wbarrier_set_field" {
@@ -3260,6 +3264,14 @@ impl Probe {
         }
         if !engine_objects::installed() {
             engine_objects::install(
+                library,
+                self.image_registry.unique_native_image(CORE_MODULE)?,
+                &managed_images,
+                &self.registry,
+            )?;
+        }
+        if !engine_components::installed() {
+            engine_components::install(
                 library,
                 self.image_registry.unique_native_image(CORE_MODULE)?,
                 &managed_images,
@@ -5005,6 +5017,7 @@ impl Probe {
             + &resources::report()
             + &scriptable::report()
             + &engine_scalars::report()
+            + &engine_components::report()
             + &json::report()
             + &profiler_samples::report()
             + &profiler_recorders::report()

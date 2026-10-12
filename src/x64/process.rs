@@ -11,6 +11,8 @@ use std::{
 };
 mod exception;
 #[cfg(feature = "native-mono-backend")]
+mod mono_scheduler;
+#[cfg(feature = "native-mono-backend")]
 mod mono_startup;
 mod mono_trace;
 const STACK: u64 = 0x7ff000000000;
@@ -1026,43 +1028,49 @@ impl Process64 {
                             self.cpu.regs[8],
                             self.cpu.regs[9],
                         ];
-                        let ready = (if probe.handles_invoke(function) {
-                            probe.dispatch_invoke(
-                                &mut self.cpu,
-                                &mut self.memory,
-                                &mut self.runtime,
-                            )
-                        } else if probe.handles_object(function) {
-                            probe.dispatch_object(
-                                function,
-                                &mut self.cpu,
-                                &mut self.memory,
-                                &mut self.runtime,
-                            )
-                        } else if probe.handles_metadata(function) {
-                            probe.dispatch_metadata(
-                                function,
-                                &mut self.cpu,
-                                &mut self.memory,
-                                &mut self.runtime,
-                            )
-                        } else if probe.handles_image(function) {
-                            probe.dispatch_image(
-                                function,
-                                &mut self.cpu,
-                                &mut self.memory,
-                                &mut self.runtime,
-                                &fs,
-                            )
-                        } else {
-                            probe.dispatch(
-                                function,
-                                &mut self.cpu,
-                                &mut self.memory,
-                                &fs,
-                                &self.runtime,
-                            )
-                        })
+                        let ready = mono_scheduler::with_scheduler(
+                            &mut self.contexts,
+                            self.loader_owner,
+                            || {
+                                if probe.handles_invoke(function) {
+                                    probe.dispatch_invoke(
+                                        &mut self.cpu,
+                                        &mut self.memory,
+                                        &mut self.runtime,
+                                    )
+                                } else if probe.handles_object(function) {
+                                    probe.dispatch_object(
+                                        function,
+                                        &mut self.cpu,
+                                        &mut self.memory,
+                                        &mut self.runtime,
+                                    )
+                                } else if probe.handles_metadata(function) {
+                                    probe.dispatch_metadata(
+                                        function,
+                                        &mut self.cpu,
+                                        &mut self.memory,
+                                        &mut self.runtime,
+                                    )
+                                } else if probe.handles_image(function) {
+                                    probe.dispatch_image(
+                                        function,
+                                        &mut self.cpu,
+                                        &mut self.memory,
+                                        &mut self.runtime,
+                                        &fs,
+                                    )
+                                } else {
+                                    probe.dispatch(
+                                        function,
+                                        &mut self.cpu,
+                                        &mut self.memory,
+                                        &fs,
+                                        &self.runtime,
+                                    )
+                                }
+                            },
+                        )?
                         .map_err(|error| {
                             self.runtime.inventory_failure(dll, function);
                             format!("{name}: {error}")

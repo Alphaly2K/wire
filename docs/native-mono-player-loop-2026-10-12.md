@@ -98,4 +98,61 @@ adapter 现在选择独立 32,000,000 work 上限。普通标量、GC/profiler c
 2,000,000；没有运行时任意预算开关，也不改变深度、借用、root 或地址检查。
 预算恰好执行完 RET 时允许正常返回；失败诊断包含 target/RIP/work/limit/depth 和
 重入计数。真实 guest 指令回归覆盖准确边界、无限循环拒绝、失败后 TEB/depth 复原，
-以及大型资源预算不会影响前后的普通 callback。下一轮 probe-137 验证资源能否返回。
+以及大型资源预算不会影响前后的普通 callback。完整 release feature 回归
+**524 passed / 7 ignored**、all-target Clippy 和格式检查通过。
+
+代码提交到本地 main：`f29769a`。probe-137 继续执行了更多 UnityEvent 与 Image
+OnAfterDeserialize，23.60 秒后停止于尚未接入的 callback control transition。
+该轮已越过旧 2M work 上限，没有跑满新 32M 上限；仍未证明 Resources.Load 正常
+返回。下一轮增加真实 gateway/control 诊断，以区分需要的 Win32 callback、调度
+或 loader 行为，不将这些请求当作成功忽略。
+
+probe-138 定位到 `api-ms-win-core-synch-l1-2-0.dll!WaitOnAddress`，原资源 callback
+已执行 3,695,384 work 后真正阻塞。仅提高 callback 预算不能解决：外层 Process64
+的 guest worker CPU contexts 此时暂停，主线程原生 IL 在同步等待原 Unity 的 job。
+
+新增 `mono_scheduler` 以同步作用域借用现有 guest contexts；只在 main native
+callback 等待时按有界 quantum 执行可运行的 C++ guest worker。执行使用唯一的
+Memory/Runtime、该 worker 原 TEB/CPU/FPU 状态与现有 Win32 等待/唤醒实现，并把
+work 计入 callback 上限；返回前恢复 main 身份及保存 worker 进度。没有第二个
+宿主线程执行 guest 代码，也不把 WaitOnAddress 替换成成功或轮询内存变化。
+目前 notification/loader、worker exit、其他 control 和 worker Mono gateway
+仍明确拒绝，后者必须接实际 worker TLS 的 typed request，不能在主线程代执行。
+真实指令测试证明 main 只在 worker 写入并 WakeByAddressSingle 后返回成功，记录
+实际 worker thread ID；未支持的 worker Mono gateway 保持 CPU/上下文并恢复 main。
+
+probe-139 使用该调度路径实际越过等待；初始化 UI 的 Resources.Load 返回原引擎
+真实句柄 `0x6ffea0003510`。后续克隆进入 Canvas 层级通知与 Image 的
+OnCanvasHierarchyChanged，24.15 秒后因缺
+`UnityEngine.Behaviour::get_isActiveAndEnabled_Injected` 而抛出托管异常。
+Mono 打印的“class libraries out of sync”是未注册 icall 的通用消息；这轮具体缺失
+声明已经定位，不据该文字认定 runtime/corelib 指纹不匹配。
+
+新增组件状态族同时核对 17 个 Behaviour/GameObject/Component 签名与原注册地址，
+全部通过后才安装已编译 adapter：enabled/active 状态、SetActive、layer、component
+index、gameObject/transform，以及 static 状态。输入只转发仍 live 的原 guest 引擎
+数据地址；Boolean 使用原 Win64 ABI，handle getter 复用真实 v2 root、结果类型和
+图同步检查。普通托管 OnCanvasHierarchyChanged 等继续由元数据解析，无类名白名单。
+下一轮 probe-140 验证这组接口及后续 UI 克隆；可交互游戏验收仍未完成。
+
+组件族与调度代码完整 release feature 回归 **525 passed / 7 ignored**，Clippy clean。
+probe-140 通过整族安装检查，但本轮主循环在首次图形提交之前遇到独立 Win64
+`imm32.dll!ImmGetCompositionStringW` 缺口，13.23 秒退出；没有执行成功的组件
+状态 marker，不能报告 UI 克隆完成。不同实际调度/窗口事件可让该导入提前出现。
+
+沿用现有“桌面没有 IME/HIMC”的真实能力状态，composition A/W 查询、设置、
+conversion/open status、notify/font/window 等 API 成组支持无上下文的失败路径，
+返回 0/FALSE 且不读写输入/输出 buffer，没有伪造 HIMC 或启用 composition。
+只读核对 Wine `dlls/imm32/imm.c` 的 invalid IMC 分支（LGPL-2.1-or-later；独立 Rust
+实现；未复制 C 代码），参考 SHA256 为
+`c0511233694b0ec314b9124345a3fc4b230619c133f0d3f9bc6fe55a03be272a`。
+新增回归检查 NULL/未签发上下文、不可读输入与 sentinel 输出不变。
+
+同时把 worker immutable metadata leaf 的重复事件限为前 64 次和累计 query 的
+二次幂，完整调用/metadata 统计与 API inventory 保持。probe-140 原先积累了
+217,305 行启动输出（本轮目录 22 MB）；这项变更减少诊断存储和日志构建成本，
+不以日志减少量宣称整款游戏性能倍数。
+
+当前这批整体验证为 **526 passed / 7 ignored**，all-target Clippy、格式检查及
+harness 4 项回归通过。协作等待回归还覆盖整个 worker TEB 被撤销时的错误返回，
+确保 main 身份恢复且 worker context 没丢失。probe-141 使用这份冻结 executable。

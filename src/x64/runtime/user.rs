@@ -157,6 +157,11 @@ pub(super) fn dwords(name: &str) -> &'static [usize] {
         "GetDeviceCaps" => &[1],
         "DwmGetWindowAttribute" => &[1, 3],
         "ImmAssociateContextEx" => &[2],
+        "ImmGetCompositionStringA" | "ImmGetCompositionStringW" => &[1, 3],
+        "ImmSetCompositionStringA" | "ImmSetCompositionStringW" => &[1, 3, 5],
+        "ImmNotifyIME" => &[1, 2, 3],
+        "ImmSetOpenStatus" => &[1],
+        "ImmSetConversionStatus" => &[1, 2],
         "ShowCursor" | "EnableMouseInPointer" => &[0],
         "LoadImageA" | "LoadImageW" => &[2, 3, 4, 5],
         "AdjustWindowRect" => &[1, 2],
@@ -205,6 +210,12 @@ impl Runtime64 {
             if name == "ImmIsIME" {
                 return Ok(0);
             }
+            if name == "ImmGetDefaultIMEWnd" {
+                if args[0] != 0 && !self.user.windows.contains_key(&args[0]) {
+                    self.set_error(mem, 1400)?;
+                }
+                return Ok(0);
+            }
             let window = matches!(
                 name,
                 "ImmGetContext"
@@ -225,6 +236,9 @@ impl Runtime64 {
             if name == "ImmAssociateContextEx" && args[1] == 0 && matches!(args[2], 0 | 1) {
                 return Ok(1);
             }
+            // No HIMC has been issued. Wine's composition/status routines fail
+            // before dereferencing payload/output pointers for an invalid IMC.
+            // Preserve those buffers; this does not implement an IME frontend.
             self.set_error(mem, 6)?;
             return Ok(0);
         }
@@ -667,9 +681,15 @@ pub(super) fn is_callback(name: &str) -> bool {
 }
 pub(super) fn ime_arity(name: &str) -> Option<usize> {
     Some(match name {
-        "ImmGetContext" | "ImmIsIME" | "ImmGetOpenStatus" => 1,
-        "ImmReleaseContext" | "ImmAssociateContext" => 2,
-        "ImmAssociateContextEx" => 3,
+        "ImmGetContext" | "ImmIsIME" | "ImmGetOpenStatus" | "ImmGetDefaultIMEWnd" => 1,
+        "ImmReleaseContext"
+        | "ImmAssociateContext"
+        | "ImmSetOpenStatus"
+        | "ImmSetCompositionFontW"
+        | "ImmSetCompositionWindow" => 2,
+        "ImmAssociateContextEx" | "ImmGetConversionStatus" | "ImmSetConversionStatus" => 3,
+        "ImmGetCompositionStringA" | "ImmGetCompositionStringW" | "ImmNotifyIME" => 4,
+        "ImmSetCompositionStringA" | "ImmSetCompositionStringW" => 6,
         _ => return None,
     })
 }

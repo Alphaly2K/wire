@@ -6004,6 +6004,45 @@ fn win64_address_waits_check_size_values_timeouts_and_faults_before_blocking() {
     );
 }
 #[test]
+fn win64_ime_without_input_context_fails_before_touching_composition_buffers() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let output = STACK + 0x400;
+    let sentinel = [0xa5; 32];
+    mem.write(output, &sentinel).unwrap();
+    for context in [0, 0x1234567890] {
+        for (name, args) in [
+            ("ImmGetCompositionStringA", vec![context, 8, output, 32]),
+            ("ImmGetCompositionStringW", vec![context, 8, output, 32]),
+            ("ImmGetConversionStatus", vec![context, output, output + 4]),
+            (
+                "ImmSetCompositionStringA",
+                vec![context, 9, 0xbad, 32, 0xbad, 32],
+            ),
+            (
+                "ImmSetCompositionStringW",
+                vec![context, 9, 0xbad, 32, 0xbad, 32],
+            ),
+            ("ImmSetOpenStatus", vec![context, 1]),
+            ("ImmSetCompositionFontW", vec![context, 0xbad]),
+            ("ImmSetCompositionWindow", vec![context, 0xbad]),
+            ("ImmNotifyIME", vec![context, 0x15, 4, 0]),
+        ] {
+            assert!(wire::x64::runtime::import_supported("imm32.dll", name));
+            assert_eq!(
+                startup_dll_call(&mut mem, &mut cpu, &mut runtime, "imm32.dll", name, &args),
+                0
+            );
+            assert_eq!(
+                startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+                6
+            );
+            let mut bytes = [0; 32];
+            mem.read(output, &mut bytes).unwrap();
+            assert_eq!(bytes, sentinel);
+        }
+    }
+}
+#[test]
 fn amd64_address_wait_queues_wake_first_arrival_and_all_across_single_step_budgets() {
     use wire::x64::process::{Outcome, Process64};
     const CODE: u64 = 0x580000000;

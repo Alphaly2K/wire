@@ -272,6 +272,7 @@ def run(cleanup):
         'native_object_find_by_type_calls': count_marker('native-object-find-by-type-calls'),
         'native_scriptable_factory_calls': count_marker('native-scriptable-factory-calls'),
         'native_engine_scalar_calls': count_marker('native-engine-scalar-calls'),
+        'native_component_state_calls': count_marker('native-component-state-calls'),
         'native_engine_object_getter_calls': count_marker('native-engine-object-getter-calls'),
         'native_profiler_recorder_calls': count_marker('native-profiler-recorder-calls'),
         'native_profiler_recorders_created': count_marker('native-profiler-recorders-created'),

@@ -430,7 +430,24 @@ fn execute_scalar_guest_bounded(
                 &mut cpu,
                 &mut owner.memory.borrow_mut(),
             )?;
-            match control { Control::Returned=>{}, _=>return Err("native callback requested a scheduler/loader/control transition not yet admitted".into()) }
+            match control {
+                Control::Returned => {}
+                Control::Blocked => {
+                    let work = super::super::mono_scheduler::pump(
+                        &mut owner.memory.borrow_mut(),
+                        &mut owner.runtime.borrow_mut(),
+                        work_limit - cpu.work,
+                    )?;
+                    cpu.work += work;
+                    continue;
+                }
+                other => {
+                    return Err(format!(
+                        "native callback requested a scheduler/loader/control transition not yet admitted; target={target:#x}; rip={:#x}; work={}; function={}!{}; control={other:?}",
+                        cpu.rip, cpu.work, binding.dll, binding.original_function,
+                    ));
+                }
+            }
             cpu.work += 1;
         } else {
             cpu.step_bounded(&mut owner.memory.borrow_mut(), work_limit - cpu.work)?;
@@ -1139,6 +1156,126 @@ mod tests {
         assert!(memory.read_int(STACK_BASE, 8).is_err());
     }
     use super::*;
+    #[test]
+    fn native_guest_wait_runs_existing_worker_and_requires_real_address_wake() {
+        use super::super::super::{mono_scheduler, Call, Context};
+        use std::collections::BTreeMap;
+        fn mov(code: &mut Vec<u8>, register: u8, value: u64) {
+            code.extend([0x48 | (register >> 3), 0xb8 | (register & 7)]);
+            code.extend(value.to_le_bytes());
+        }
+        for mode in 0..3 {
+            let reject_worker_mono = mode == 1;
+            let mut memory = Memory::default();
+            memory.map(0x1000, 4096, READ | WRITE | EXECUTE).unwrap();
+            memory.map(0x2000, 4096, READ | WRITE).unwrap();
+            memory
+                .map(super::super::super::STACK, 65536, READ | WRITE)
+                .unwrap();
+            let mut runtime = Runtime64::new(
+                &mut memory,
+                0x140000000,
+                super::super::super::STACK,
+                65536,
+                "native-wait",
+            )
+            .unwrap();
+            runtime.enable_scheduler();
+            let wait = runtime.register("api-ms-win-core-synch-l1-2-0.dll", "WaitOnAddress");
+            let wake = runtime.register("api-ms-win-core-synch-l1-2-0.dll", "WakeByAddressSingle");
+            let get_id = runtime.register("kernel32.dll", "GetCurrentThreadId");
+            let mono = runtime.register("mono-2.0-bdwgc.dll", "mono_thread_current");
+            let mut code = vec![0x48, 0x83, 0xec, 0x28];
+            for (register, value) in [
+                (1, 0x2000),
+                (2, 0x2008),
+                (8, 4),
+                (9, u32::MAX as u64),
+                (0, wait),
+            ] {
+                mov(&mut code, register, value);
+            }
+            code.extend([0xff, 0xd0, 0x48, 0x83, 0xc4, 0x28, 0xc3]);
+            memory.write(0x1000, &code).unwrap();
+            let mut code = vec![0x48, 0x83, 0xec, 0x28];
+            if reject_worker_mono {
+                mov(&mut code, 0, mono);
+                code.extend([0xff, 0xd0]);
+            } else {
+                mov(&mut code, 0, get_id);
+                code.extend([0xff, 0xd0]);
+                mov(&mut code, 2, 0x2010);
+                code.extend([0x48, 0x89, 0x02]);
+                mov(&mut code, 1, 0x2000);
+                code.extend([0xc7, 0x01, 1, 0, 0, 0]);
+                mov(&mut code, 0, wake);
+                code.extend([0xff, 0xd0]);
+            }
+            code.extend([0xeb, 0xfe]);
+            memory.write(0x1100, &code).unwrap();
+            let rsp = super::super::super::STACK + 65536 - 72;
+            memory.write_int(rsp, 8, 0x1000).unwrap();
+            let mut cpu = Cpu64::new(0, rsp);
+            cpu.regs[8] = 0x1100;
+            runtime
+                .dispatch("kernel32.dll", "CreateThread", &mut cpu, &mut memory)
+                .unwrap();
+            let spawn = runtime.take_threads().pop().unwrap();
+            let worker = spawn.id;
+            if mode == 2 {
+                // A malformed worker TEB must not strand the selected context
+                // or leave Runtime switched away from the native main owner.
+                memory.unmap(spawn.cpu.gs_base, 3 * 4096).unwrap();
+            }
+            let mut contexts = BTreeMap::from([(
+                worker,
+                Context {
+                    rsp: spawn.cpu.regs[4],
+                    cpu: spawn.cpu,
+                    current: Call {
+                        name: "started worker".into(),
+                        target: 0x1100,
+                        base: 0,
+                        notify: false,
+                        require_true: false,
+                        reason: 0,
+                        parameter: 0,
+                    },
+                    calls: Default::default(),
+                    exit_code: None,
+                    started: true,
+                    callbacks: Vec::new(),
+                },
+            )]);
+            let result = mono_scheduler::with_scheduler(&mut contexts, None, || {
+                with_owner(&mut memory, &mut runtime, [0; 7], || {
+                    guest_arguments(0x1000, &[])
+                })
+            })
+            .unwrap()
+            .unwrap()
+            .0;
+            assert_eq!(runtime.active_thread(), 1);
+            assert!(memory.read_int(STACK_BASE, 8).is_err());
+            if mode == 2 {
+                assert!(result.is_err());
+                assert_eq!(contexts[&worker].cpu.work, 0);
+            } else if reject_worker_mono {
+                assert!(contexts[&worker].cpu.work > 0);
+                assert!(result.unwrap_err().contains("typed worker reentry"));
+                assert_eq!(contexts[&worker].cpu.rip, mono);
+                assert_eq!(memory.read_int(0x2000, 4).unwrap(), 0);
+            } else {
+                assert!(contexts[&worker].cpu.work > 0);
+                assert_eq!(result.unwrap(), 1);
+                assert_eq!(memory.read_int(0x2000, 4).unwrap(), 1);
+                assert_eq!(memory.read_int(0x2010, 8).unwrap(), worker);
+            }
+            assert!(mono_scheduler::pump(&mut memory, &mut runtime, 10)
+                .unwrap_err()
+                .contains("no cooperative process scheduler"));
+        }
+    }
     #[test]
     fn callback_work_bound_preserves_exact_return_and_restores_after_exhaustion() {
         let mut memory = Memory::default();
