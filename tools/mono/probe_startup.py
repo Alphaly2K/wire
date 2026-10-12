@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Drive actual Unity into the exact-sample finite native Mono startup provider."""
 import argparse
+from contextlib import ExitStack
 import csv
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -9,17 +11,44 @@ import re
 import resource
 import shutil
 import subprocess
+import tempfile
 import time
 from probe import REPO, sha256
 
 
+def link_input(source, destination, cleanup):
+    """Borrow an existing input without retaining a second copy after the run."""
+    source = source.resolve(strict=True)
+    destination.symlink_to(source, target_is_directory=source.is_dir())
+    cleanup.callback(destination.unlink, missing_ok=True)
+    return destination
+
+
+def snapshot_player_logs(sandbox, output):
+    users = sandbox / 'Users'
+    if users.is_dir():
+        for name in ('Player.log', 'Player-prev.log'):
+            for log in users.rglob(name):
+                destination = output / 'guest-logs' / log.relative_to(users)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(log, destination)
+
+
 def main():
+    # Input links and the small frozen wire executable retire even on timeout,
+    # failed evidence checks or interruption. The game directory is reused.
+    with ExitStack() as cleanup:
+        run(cleanup)
+
+
+def run(cleanup):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--game', type=Path, required=True, help='read-only original EXE')
     parser.add_argument('--runtime-output', type=Path, default=REPO / 'wire-out/native-mono-game-classlib')
     parser.add_argument('--output', type=Path, default=REPO / 'wire-out/native-mono-unity-startup-probe')
-    parser.add_argument('--registration-reference', type=Path, default=REPO / 'wire-out/native-mono-unity-callback-trace/summary/registered-internal-calls.tsv', help='frozen original Unity registration trace')
+    parser.add_argument('--registration-reference', type=Path, default=REPO / 'wire-out/native-mono-probe-state/registration-reference.tsv', help='frozen original Unity registration trace')
     parser.add_argument('--wire', type=Path, default=REPO / 'target/release/wire')
+    parser.add_argument('--sandbox', type=Path, default=REPO / 'wire-out/native-mono-probe-state/runtime', help='reuse one existing isolated game directory; never copy the game per probe')
     parser.add_argument('--graphics-backend', type=Path, help='existing native graphics backend')
     parser.add_argument('--moltenvk', type=Path, help='existing MoltenVK paired with graphics backend')
     parser.add_argument('--window', action='store_true', help='show actual guest windows through the native presenter')
@@ -41,18 +70,33 @@ def main():
     library = runtime / 'build-runtime/mono/mini/.libs/libmonoboehm-2.0.1.dylib'
     guard = runtime / 'probe/noexec_guard.dylib'
     support = runtime / 'probe/classlib/mono/4.5/mscorlib.dll.dylib'
-    clone = output / 'runtime'
-    if clone.exists():
-        parser.error('use a fresh output: existing game copies are never overwritten')
-    clone.mkdir()
-    # APFS data clones: original game and runtime artifacts remain read-only.
-    subprocess.run(['cp', '-cR', str(game.parent) + '/.', str(clone)], check=True)
-    managed = clone / 'AliceToPapaADV_1-0-0_Data/Managed'
+    sandbox = args.sandbox.resolve()
+    if not sandbox.is_relative_to(REPO / 'wire-out') or sandbox == game.parent or not sandbox.is_dir():
+        parser.error('--sandbox must be an existing isolated game directory under wire-out')
+    for path in (game, library, guard, support, args.wire):
+        if not path.is_file():
+            parser.error(f'required input is missing: {path}')
+    lock = cleanup.enter_context((sandbox.parent / 'startup.lock').open('a'))
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        parser.error('another startup probe is using this game sandbox')
+    if sha256(sandbox / game.name) != sha256(game) or sha256(sandbox / 'UnityPlayer.dll') != sha256(game.parent / 'UnityPlayer.dll'):
+        parser.error('reused sandbox does not match the requested original game')
+    clone = link_input(sandbox, output / 'runtime', cleanup)
+    managed = sandbox / 'AliceToPapaADV_1-0-0_Data/Managed'
     if sha256(managed / 'mscorlib.dll') != sha256(runtime / 'probe/classlib/mono/4.5/mscorlib.dll'):
         raise RuntimeError('game/corelib differs from development precompiled support input')
-    shutil.copy2(support, managed / support.name)
-    executable = output / 'wire'
-    shutil.copy2(args.wire.resolve(), executable)
+    support_destination = managed / support.name
+    if support_destination.resolve() == support.resolve():
+        parser.error('precompiled support input must be outside the writable game sandbox')
+    support_destination.unlink(missing_ok=True)
+    link_input(support, support_destination, cleanup)
+    # Freeze only this small executable; a Cargo rebuild may replace its input.
+    # The snapshot is ephemeral, and each probe retains its exact input digest.
+    snapshot = Path(cleanup.enter_context(tempfile.TemporaryDirectory(prefix='wire-snapshot-', dir=sandbox.parent))) / 'wire'
+    shutil.copy2(args.wire.resolve(), snapshot)
+    executable = link_input(snapshot, output / 'wire', cleanup)
     paths = {'exe': game, 'UnityPlayer': game.parent / 'UnityPlayer.dll',
              'original_mono': game.parent / 'MonoBleedingEdge/EmbedRuntime/mono-2.0-bdwgc.dll',
              'corelib': managed / 'mscorlib.dll', 'native_mono': library,
@@ -60,7 +104,7 @@ def main():
     if args.graphics_backend:
         for name, path in [('graphics_backend', args.graphics_backend.resolve()), ('moltenvk', args.moltenvk.resolve())]:
             frozen = output / (name + '.dylib')
-            shutil.copy2(path, frozen)
+            link_input(path, frozen, cleanup)
             paths[name] = frozen
     inputs = {name: {'path': str(path), 'sha256': sha256(path)} for name, path in paths.items()}
     (output / 'inputs.json').write_text(json.dumps(inputs, indent=2) + '\n')
@@ -74,7 +118,7 @@ def main():
     env.update(DYLD_INSERT_LIBRARIES=str(guard), MONO_THREADS_SUSPEND='preemptive')
     if args.boundary in ('bindings', 'profiler', 'pre-images', 'images', 'metadata', 'strings', 'managed-types', 'classlib', 'logging', 'exceptions', 'synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup', 'objects', 'curves', 'fields', 'components', 'assets'):
         reference = args.registration_reference.resolve()
-        shutil.copy2(reference, output / 'registration-reference.tsv')
+        link_input(reference, output / 'registration-reference.tsv', cleanup)
         inputs['registration_reference'] = {'path': str(reference), 'sha256': sha256(reference)}
         (output / 'inputs.json').write_text(json.dumps(inputs, indent=2) + '\n')
     command = [str(executable), 'probe64', str(clone / game.name), '--startup',
@@ -90,11 +134,14 @@ def main():
         command.append('--native-mono-probe-skip-etw')
     command.extend(['--native-mono-probe-boundary', args.boundary])
     (output / 'command.json').write_text(json.dumps({'command': command, 'cwd': str(clone),
+        'game_sandbox': str(sandbox),
+        'storage_policy': 'one reused sandbox; ephemeral symlinks and wire snapshot; logs retained',
         'environment': {key: env[key] for key in ('DYLD_INSERT_LIBRARIES', 'MONO_THREADS_SUSPEND', 'WIRE_NATIVE_MONO_MANAGED_TRACE') if key in env},
         'full_game_backend': False, 'timing_is_performance_comparison': False,
         'native_presenter_requested': args.window or args.capture_frame,
         'present_capture_requested': args.capture_frame}, indent=2) + '\n')
     start = time.monotonic()
+    cleanup.callback(snapshot_player_logs, sandbox, output)
     with (output / 'startup.log').open('w') as stream:
         usage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
         result = subprocess.run(command, cwd=clone, env=env, stdout=stream, stderr=subprocess.STDOUT, timeout=180)

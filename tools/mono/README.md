@@ -73,7 +73,15 @@ prepare通过锁定archive验证整套patch的精确prefix，可重复处理覆�
 ## Real Unity finite startup provider
 
 `probe_startup.py` drives the exact AliceToPapaADV UnityPlayer through native
-Mono root/main-thread/domain configuration in a fresh APFS clone. Build wire
+Mono root/main-thread/domain configuration in one reused isolated game directory.
+`--sandbox` defaults to `wire-out/native-mono-probe-state/runtime`; the tool never
+copies the game. Each run borrows inputs through temporary symlinks, freezes only
+the small wire executable, and removes those links and the executable snapshot on
+normal exit, failure, timeout or Python interruption. Logs, hashes and captured
+frames remain in `--output`, including a snapshot of Unity's Player logs. The
+shared sandbox retains its writable configuration and saves; it must not point
+to the original game. Keep one runtime build in the main workspace and reuse it
+with `--runtime-output`, rather than rebuilding under separate worktrees. Build wire
 with `native-mono-backend`. Use `--boundary root|main-thread|pre-bindings`;
 Windows ETW is rejected unless explicitly disabled with `--skip-etw`. This
 provider is separate from complete-game Admission and stops before general
