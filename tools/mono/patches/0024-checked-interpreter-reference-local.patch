@@ -1,0 +1,99 @@
+--- a/mono/mini/interp/interp.c
++++ b/mono/mini/interp/interp.c
+@@ -511,6 +511,96 @@
+             return TRUE;
+     }
+     return FALSE;
++}
++
++/* A fixed native bridge may fill a reference in a two-word generic local.
++ * The integer passed by managed code is never treated as an arbitrary host
++ * address: resolve it against the current thread's live interpreter frames,
++ * inflated local metadata and exact field layout before any read/write.
++ * local_template/expected are embedding-owned metadata, not guest integers. */
++MONO_API int
++wire_mono_interp_reference_pair_checked (MonoClass *local_template, MonoClass *expected,
++                                        gpointer after, MonoObject *value, int store)
++{
++    if (sizeof (gpointer) != 8 || !local_template || !expected || !after ||
++        ((gsize)after & 7) || (store != 0 && store != 1) ||
++        (!store && value) || !m_class_is_valuetype (local_template) ||
++        m_class_is_valuetype (expected))
++        return 1;
++    int status = 2;
++    MONO_ENTER_GC_UNSAFE;
++    for (MonoLMF *lmf = mono_get_lmf (); lmf && status == 2;
++         lmf = (MonoLMF*)((gsize)lmf->previous_lmf & ~(gsize)3)) {
++        if (!((gsize)lmf->previous_lmf & 2)) continue;
++        MonoLMFExt *ext = (MonoLMFExt*)lmf;
++        if (ext->kind != MONO_LMFEXT_INTERP_EXIT &&
++            ext->kind != MONO_LMFEXT_INTERP_EXIT_WITH_CTX) continue;
++        for (InterpFrame *frame = ext->interp_exit_data; frame && status == 2;
++             frame = frame->parent) {
++            InterpMethod *imethod = frame->imethod;
++            if (!imethod) continue; /* P/Invoke-only frames have no IL locals. */
++            MonoMethod *method = imethod->method;
++            if (!frame->stack || !imethod->local_offsets ||
++                method->wrapper_type != MONO_WRAPPER_NONE ||
++                m_class_get_image (method->klass) != m_class_get_image (local_template)) continue;
++            ERROR_DECL (error);
++            MonoMethodHeader *header = mono_method_get_header_checked (method, error);
++            if (!is_ok (error) || !header) {
++                mono_error_cleanup (error);
++                status = 3;
++                break;
++            }
++            mono_error_cleanup (error);
++            guint32 count = 0;
++            MonoType **locals = mono_method_header_get_locals (header, &count, NULL);
++            if (count > 4096) status = 3;
++            for (guint32 i = 0; i < count && status == 2; ++i) {
++                guint32 offset = imethod->local_offsets [i];
++                if (offset > imethod->total_locals_size ||
++                    16 > imethod->total_locals_size - offset ||
++                    (gsize)after != (gsize)frame->stack + offset + 8) continue;
++                MonoType *local = locals [i];
++                if (local->byref || local->type != MONO_TYPE_GENERICINST) continue;
++                MonoGenericClass *generic = local->data.generic_class;
++                if (generic->container_class != local_template || !generic->context.class_inst ||
++                    generic->context.class_inst->type_argc != 1) continue;
++                MonoType *argument = generic->context.class_inst->type_argv [0];
++                if (argument->byref || mono_class_from_mono_type_internal (argument) != expected) continue;
++                MonoClass *klass = mono_class_from_mono_type_internal (local);
++                guint32 alignment = 0;
++                if (!m_class_is_valuetype (klass) || mono_class_has_failure (klass) ||
++                    mono_class_value_size (klass, &alignment) != 16 || alignment != 8) continue;
++                gpointer iter = NULL;
++                MonoClassField *field;
++                int fields = 0;
++                gboolean reference = FALSE, tail = FALSE, valid = TRUE;
++                while ((field = mono_class_get_fields_internal (klass, &iter))) {
++                    ++fields;
++                    MonoType *type = mono_field_get_type (field);
++                    const char *name = mono_field_get_name (field);
++                    if ((mono_field_get_flags (field) & FIELD_ATTRIBUTE_STATIC) || type->byref) {
++                        valid = FALSE;
++                        break;
++                    }
++                    if (!strcmp (name, "t") && mono_field_get_offset (field) == sizeof (MonoObject) &&
++                        mono_class_from_mono_type_internal (type) == expected) reference = TRUE;
++                    else if (!strcmp (name, "onePointerFurtherThanT") && type->type == MONO_TYPE_I &&
++                             mono_field_get_offset (field) == sizeof (MonoObject) + 8) tail = TRUE;
++                    else valid = FALSE;
++                }
++                if (!valid || fields != 2 || !reference || !tail) continue;
++                if (value && !mono_class_is_assignable_from_internal (expected, mono_object_class (value))) {
++                    status = 4;
++                    break;
++                }
++                if (store) mono_gc_wbarrier_generic_store_internal ((guchar*)after - 8, value);
++                status = 0;
++            }
++            mono_metadata_free_mh (header);
++        }
++    }
++    MONO_EXIT_GC_UNSAFE;
++    return status;
+ }
+ 
+ /* Arguments that are passed when invoking only a finally/filter clause from the frame */

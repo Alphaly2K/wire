@@ -12,6 +12,13 @@ public struct ProbePair {
     public long Y;
 }
 
+// Same metadata shape as Unity's generic GetComponent<T> output local.
+[StructLayout(LayoutKind.Sequential)]
+public struct ProbeReferencePair<T> {
+    public T t;
+    public IntPtr onePointerFurtherThanT;
+}
+
 public static class NativeProbe {
     private static int finalizerCount;
     private sealed class Finalizable {
@@ -23,6 +30,26 @@ public static class NativeProbe {
     private static extern long HostRef(ref ProbePair value, out int result);
     [MethodImpl(MethodImplOptions.InternalCall)]
     private static extern int HostBounce(int value);
+    [MethodImpl(MethodImplOptions.InternalCall)]
+    private static extern void HostLocalReference(Type type, IntPtr after, object value);
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static unsafe T LocalReference<T>(T value) where T : class {
+        ProbeReferencePair<T> pair = default(ProbeReferencePair<T>);
+        pair.onePointerFurtherThanT = (IntPtr)0x1234;
+        HostLocalReference(typeof(T), (IntPtr)(&pair.onePointerFurtherThanT), value);
+        if (pair.onePointerFurtherThanT != (IntPtr)0x1234) throw new Exception("tail field overwritten");
+        GC.Collect();
+        return pair.t;
+    }
+    public static int ReferenceLocals() {
+        ProbeAllocated value = new ProbeAllocated();
+        if (!Object.ReferenceEquals(LocalReference(value), value)) return 81;
+        if (LocalReference<ProbeAllocated>(null) != null) return 82;
+        if (LocalReference("local-reference") != "local-reference") return 83;
+        if (!Object.ReferenceEquals(LocalReference<object>(value), value)) return 84;
+        return 0;
+    }
 
     [DllImport("wire_mono_probe", CallingConvention = CallingConvention.Cdecl)]
     private static extern ProbePair wire_probe_pair(ProbePair value, double increment);

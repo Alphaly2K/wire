@@ -1043,6 +1043,21 @@ impl Metadata<'_> {
             if a[0] != 0 {
                 return Err("nested stack barrier requires NULL owner".into());
             }
+            if let Some(class) = super::callbacks::live_reference_output(a[1]) {
+                if self.objects.is_none() || !memory.owned_noncode_access(a[1], 8) {
+                    return Err("nested reference output has no owned object/memory service".into());
+                }
+                let native = self.rooted_native(a[2])?;
+                managed_calls::Api::load(self.library)?.compatible(
+                    native,
+                    managed_calls::Shape::Reference {
+                        class,
+                        string: false,
+                    },
+                )?;
+                memory.write_int(a[1], 8, a[2])?;
+                return cpu.return_integer(memory, 0);
+            }
             if a[2] != 0 && !(a[2] == super::THREAD_TOKEN && !self.thread_handle.is_null()) {
                 if self.objects.is_some() {
                     self.rooted_native(a[2])?;

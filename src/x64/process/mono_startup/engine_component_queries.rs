@@ -7,7 +7,7 @@ use std::{
     sync::OnceLock,
 };
 
-const SPECS: [(&CStr, &CStr, u64); 8] = [
+const SPECS: [(&CStr, &CStr, u64); 11] = [
     (
         c"GameObject",
         c"GetComponentsInternal_Injected",
@@ -28,6 +28,13 @@ const SPECS: [(&CStr, &CStr, u64); 8] = [
     (c"GameObject", c"GetComponentCount_Injected", 0x180074cc0),
     (c"GameObject", c"GetComponentIndex_Injected", 0x1800bd450),
     (c"Component", c"GetComponent_Injected", 0x1800bac90),
+    (c"Component", c"GetComponentFastPath_Injected", 0x1800babe0),
+    (c"GameObject", c"GetComponentFastPath_Injected", 0x1800bbd60),
+    (
+        c"GameObject",
+        c"TryGetComponentFastPath_Injected",
+        0x1800bc9b0,
+    ),
 ];
 macro_rules! sym {
     ($lib:expr, $name:literal, $ty:ty) => {{
@@ -51,19 +58,21 @@ struct Api {
     method: unsafe extern "C" fn(Object, *const libc::c_char, i32) -> Object,
     length: unsafe extern "C" fn(Object) -> usize,
     array_address: unsafe extern "C" fn(Object, i32, usize) -> Object,
+    reference_pair: unsafe extern "C" fn(Object, Object, Object, Object, i32) -> i32,
 }
 struct Binding {
     library: usize,
     api: Api,
     component: usize,
     corlib: usize,
-    targets: [u64; 8],
+    targets: [u64; 11],
     images: Vec<usize>,
     component_game_object: u64,
     game_object: usize,
+    reference_pair_template: usize,
 }
 static BINDING: OnceLock<Binding> = OnceLock::new();
-thread_local! { static CALLS: Cell<[usize; 8]> = const { Cell::new([0; 8]) }; }
+thread_local! { static CALLS: Cell<[usize; 11]> = const { Cell::new([0; 11]) }; }
 pub(super) fn installed() -> bool {
     BINDING.get().is_some()
 }
@@ -109,7 +118,7 @@ pub(super) fn install(
     let span = class(core, c"UnityEngine.Bindings", c"ManagedSpanWrapper");
     logging::validate_span_layout(library, span)?;
     let call_api = managed_calls::Api::load(library)?;
-    let mut targets = [0; 8];
+    let mut targets = [0; 11];
     let mut names = Vec::new();
     for (index, (owner, member, target)) in SPECS.iter().enumerate() {
         let owner_class = class(core, c"UnityEngine", owner);
@@ -123,6 +132,7 @@ pub(super) fn install(
             5 => vec![integer, pointer],
             6 => vec![integer, pointer, pointer],
             7 => vec![pointer, pointer, (0x11, span, true)],
+            8..=10 => vec![void, pointer, ty, pointer],
             _ => unreachable!(),
         };
         let name = CString::new(format!(
@@ -146,6 +156,10 @@ pub(super) fn install(
     if component_class.is_null() {
         return Err("component query result declaration absent".into());
     }
+    let reference_pair_template = class(core, c"UnityEngine", c"CastHelper`1");
+    if reference_pair_template.is_null() {
+        return Err("component reference local declaration absent".into());
+    }
     BINDING
         .set(Binding {
             library: library as usize,
@@ -158,6 +172,7 @@ pub(super) fn install(
                 0x1800bab90,
             )?,
             game_object: class(core, c"UnityEngine", c"GameObject") as usize,
+            reference_pair_template: reference_pair_template as usize,
             api: Api {
                 object_class: sym!(
                     library,
@@ -210,6 +225,11 @@ pub(super) fn install(
                     "mono_array_addr_with_size",
                     unsafe extern "C" fn(Object, i32, usize) -> Object
                 ),
+                reference_pair: sym!(
+                    library,
+                    "wire_mono_interp_reference_pair_checked",
+                    unsafe extern "C" fn(Object, Object, Object, Object, i32) -> i32
+                ),
             },
         })
         .map_err(|_| "component queries already installed")?;
@@ -222,6 +242,9 @@ pub(super) fn install(
         count as *const (),
         index as *const (),
         component_name as *const (),
+        component_fast as *const (),
+        game_object_fast as *const (),
+        try_component_fast as *const (),
     ]) {
         unsafe { add(name.as_ptr(), adapter as Object) };
     }
@@ -573,6 +596,64 @@ unsafe extern "C" fn component_name(pointer: usize, span: *const logging::Span) 
         note(7);
         Ok(result)
     })
+}
+
+fn fast_path(which: usize, pointer: usize, ty: Object, after: Object) {
+    checked(|| {
+        let b = binding()?;
+        let pointer = engine_objects::engine_pointer(pointer)?;
+        let (ty, class) = query_type(b, ty)?;
+        let check = |value, store| {
+            let status = unsafe {
+                (b.api.reference_pair)(
+                    b.reference_pair_template as Object,
+                    class,
+                    after,
+                    value,
+                    store,
+                )
+            };
+            if status == 0 {
+                Ok(())
+            } else {
+                Err(format!(
+                    "component exact interpreter output local rejected: status={status}"
+                ))
+            }
+        };
+        // Prove current local ownership before calling the engine. Do not pass
+        // the host pointer to Win64 or dereference an unverified IntPtr here.
+        check(std::ptr::null_mut(), 0)?;
+        let token = callbacks::guest_reference_pair(b.targets[which], &[pointer, ty, 0], 2, class)?;
+        let native = callbacks::with_metadata_service(|route, memory| {
+            route.sync_guest(memory)?;
+            route.rooted_native(token)
+        })?;
+        let calls = managed_calls::Api::load(b.library as Object)?;
+        for expected in [b.component as Object, class] {
+            calls.compatible(
+                native,
+                managed_calls::Shape::Reference {
+                    class: expected,
+                    string: false,
+                },
+            )?;
+        }
+        // Nested reentry/GC has finished; revalidate the live exact slot and
+        // use Mono's real reference barrier before IL reads CastHelper<T>.t.
+        check(native, 1)?;
+        note(which);
+        Ok(())
+    });
+}
+unsafe extern "C" fn component_fast(pointer: usize, ty: Object, after: Object) {
+    fast_path(8, pointer, ty, after);
+}
+unsafe extern "C" fn game_object_fast(pointer: usize, ty: Object, after: Object) {
+    fast_path(9, pointer, ty, after);
+}
+unsafe extern "C" fn try_component_fast(pointer: usize, ty: Object, after: Object) {
+    fast_path(10, pointer, ty, after);
 }
 
 #[cfg(test)]

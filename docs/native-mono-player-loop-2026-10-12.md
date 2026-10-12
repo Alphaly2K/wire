@@ -225,3 +225,38 @@ probe-147 实际执行 CanvasGroup 的 interactable/ignoreParentGroups，继续�
 `Naninovel.ScriptableUIBehaviour::Awake`。25.07 秒后缺 Component 的
 GetComponentFastPath_Injected。下一步核对原生 Mono 解释帧中 CastHelper<T> 的
 精确引用输出槽位；不能将 IL 给出的任意 IntPtr 当作可写宿主地址。
+
+GetComponent/TryGetComponent 的三个 FastPath 声明现按原 CoreModule metadata 与
+registration target 成组安装。Win64 只收到私有 16B guest 缓冲区内部的 +8 地址，
+原引擎产生的第一 word 按 MonoObject token 解码，经现有 root 同步及 Component/
+requested class 双重 assignability 检查；第二 word canary 须保持不变。
+
+第 24 个 frozen runtime patch 提供 checked interpreter reference-local API：仅当前
+线程真实 LMF interpreter exit/parent frames，按 inflated method header 与实际
+local_offsets 确认 exact CastHelper<T> local，核对 template image/identity、闭合 T、
+16B size/8B alignment、两个非静态字段的名字、类型和 offset。执行原引擎之前先
+验证，嵌套回调结束后重新验证，再调用 Mono 内部真实 GC reference barrier。
+宿主输出指针不交给 Win64，也不以整个 native heap/stack 可写作为准入依据。
+
+真实 native fixture 覆盖三种 reference T、assignable derived value、NULL、GC 后
+引用保持，以及 NULL/misalignment/wrong field/native stack/wrong template/wrong T/
+incompatible value/retired frame 的拒绝；所有拒绝保持 sentinel 和原引用不变。
+普通与 Unity incremental=3 下全部 11 套 fixtures 通过，五种 noexec negative routes
+均 exit 86。构建审计为 304 linked objects / 668 dependencies / 0 unmatched。
+Rust 完整回归 **528 passed / 7 ignored**，all-target release Clippy clean，目录
+复用/异常清理 harness 4 项通过。只在上述验证完成之后更新精确 runtime/support SHA：
+
+- runtime：`813ba7548520c706de1de76ae8bd7b5b2f31cf1daadbf51e0d4f230bbe173c69`。
+- support：`6bb5f274387eb907ecc97ddc963bc832d249adf52a452b58b1d417fa50424e0e`。
+
+probe-148 实际通过 native CastHelper<T> 局部槽位验证，24.54 秒后在原 FastPath 的
+guest `mono_gc_wbarrier_set_field` 停止：其 NULL-owner 输出在私有 guest 缓冲区，
+不是 callback stack 或 engine heap allocation。新增同线程、按嵌套深度登记的
+exact first-word reference output lease；仅这个 8B 地址及其声明 class 可接收真实
+rooted/assignable reference。普通 byte payload、+8 tail、padding 和已退出作用域
+没有此权限。正常返回和失败都先撤销 lease 再 unmap。新增回归覆盖两种退出路径。
+
+probe-149 实际执行并完成 Component::GetComponentFastPath_Injected，继续越过
+ScriptableUIBehaviour::Awake，到 UnityEngine.UI.Image::OnEnable；当前缺
+Texture2D::get_whiteTexture_Injected。没有放宽 native local 或 guest reference
+输出准入。仍未到可交互界面，full_game_backend=false。

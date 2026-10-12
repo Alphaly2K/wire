@@ -19,6 +19,8 @@ static _Thread_local MonoThread *thread_identity;
 static int boundary_exceptions;
 static MonoGCHandle strong_handle, weak_handle, finalizable_weak;
 static MonoThread *worker_identities[2];
+static MonoClass *reference_pair_template;
+static void *retired_reference_slot;
 
 static void require(int success, const char *label) {
     if (!success) { fprintf(stderr, "FAIL: %s\n", label); exit(1); }
@@ -122,6 +124,41 @@ static void check_tag(MonoObject *object, MonoClass *tag, int expected, int togg
     require(number == expected && actual_toggle == toggle, "real attribute constructor and named field values");
 }
 extern MonoGCHandle wire_mono_object_new_rooted_checked(MonoDomain *, MonoClass *, uint16_t *);
+extern int wire_mono_interp_reference_pair_checked(MonoClass *, MonoClass *, void *, MonoObject *, int);
+static void host_local_reference(MonoReflectionType *type, void *after, MonoObject *value) {
+    MonoClass *expected = mono_class_from_mono_type(mono_reflection_type_get_type(type));
+    require(wire_mono_interp_reference_pair_checked(reference_pair_template, expected, after, NULL, 0) == 0,
+            "exact inflated reference local admitted");
+    MonoObject **slot = (MonoObject **)((char *)after - 8);
+    MonoObject *before = *slot;
+    void *sentinel[2] = { (void *)0x5678, (void *)0x1234 };
+    require(wire_mono_interp_reference_pair_checked(reference_pair_template, expected, NULL, value, 1) != 0,
+            "NULL output rejected");
+    require(wire_mono_interp_reference_pair_checked(reference_pair_template, expected, (char *)after + 1, value, 1) != 0,
+            "misaligned output rejected");
+    require(wire_mono_interp_reference_pair_checked(reference_pair_template, expected, (char *)after - 8, value, 1) != 0 &&
+            wire_mono_interp_reference_pair_checked(reference_pair_template, expected, (char *)after + 8, value, 1) != 0,
+            "wrong field/interior address rejected");
+    require(wire_mono_interp_reference_pair_checked(reference_pair_template, expected, &sentinel[1], value, 1) != 0 &&
+            sentinel[0] == (void *)0x5678 && sentinel[1] == (void *)0x1234, "native stack rejected without mutation");
+    require(wire_mono_interp_reference_pair_checked(reference_pair_template, mono_get_int32_class(), after, value, 1) != 0 &&
+            wire_mono_interp_reference_pair_checked(mono_get_object_class(), expected, after, value, 1) != 0,
+            "value type/wrong local template rejected");
+    MonoClass *wrong = expected == mono_get_string_class() ? mono_get_object_class() : mono_get_string_class();
+    require(wire_mono_interp_reference_pair_checked(reference_pair_template, wrong, after, value, 1) != 0 &&
+            wire_mono_interp_reference_pair_checked(reference_pair_template, expected, after, value, 9) != 0,
+            "wrong generic T and operation rejected");
+    if (expected != mono_get_object_class()) {
+        MonoObject *wrong_value = expected == mono_get_string_class() ? mono_object_new(domain, mono_get_object_class()) :
+            (MonoObject *)mono_string_new(domain, "incompatible reference");
+        require(wire_mono_interp_reference_pair_checked(reference_pair_template, expected, after, wrong_value, 1) != 0,
+                "incompatible object rejected before store");
+    }
+    require(*slot == before && *(void **)after == (void *)0x1234, "all rejected operations preserve both fields");
+    require(wire_mono_interp_reference_pair_checked(reference_pair_template, expected, after, value, 1) == 0 && *slot == value,
+            "real GC reference barrier stores exact local");
+    retired_reference_slot = after;
+}
 static void run_objects(MonoImage *image) {
     MonoClass *klass = mono_class_from_name(image, "", "ProbeAllocated");
     require(klass != NULL, "allocated class");
@@ -199,7 +236,7 @@ static void run_attrs(MonoImage *image) {
 }
 
 int main(int argc, char **argv) {
-    require(argc == 5, "usage: embed_probe classlib-root fixture.exe core|interop|threads|gc|layout|remoting|collation|static-roots|attrs|objects interp|interp-only");
+    require(argc == 5, "usage: embed_probe classlib-root fixture.exe core|interop|threads|gc|layout|remoting|collation|static-roots|attrs|objects|reference-locals interp|interp-only");
     mono_set_dirs(argv[1], argv[1]);
     mono_config_parse(NULL);
     mono_jit_set_aot_mode(strcmp(argv[4], "interp-only") == 0 ? MONO_AOT_MODE_INTERP_ONLY : MONO_AOT_MODE_INTERP);
@@ -213,13 +250,20 @@ int main(int argc, char **argv) {
     mono_add_internal_call("NativeProbe::HostScale", (const void *)host_scale);
     mono_add_internal_call("NativeProbe::HostRef", (const void *)host_ref);
     mono_add_internal_call("NativeProbe::HostBounce", (const void *)host_bounce);
+    mono_add_internal_call("NativeProbe::HostLocalReference", (const void *)host_local_reference);
     MonoAssembly *assembly = mono_domain_assembly_open(domain, argv[2]);
     require(assembly != NULL, "fixture assembly");
     fixture = mono_class_from_name(mono_assembly_get_image(assembly), "", "NativeProbe");
     require(fixture != NULL, "fixture class");
+    reference_pair_template = mono_class_from_name(mono_assembly_get_image(assembly), "", "ProbeReferencePair`1");
+    require(reference_pair_template != NULL, "reference local template");
     reenter = mono_class_get_method_from_name(fixture, "Reenter", 1);
     require(reenter != NULL, "nested target");
-    if (strcmp(argv[3], "objects") == 0) {
+    if (strcmp(argv[3], "reference-locals") == 0) {
+        require(invoke_int("ReferenceLocals", NULL) == 0, "generic local references survive GC with NULL and assignable values");
+        require(retired_reference_slot && wire_mono_interp_reference_pair_checked(reference_pair_template,
+                mono_get_object_class(), retired_reference_slot, NULL, 1) != 0, "retired frame slot rejected");
+    } else if (strcmp(argv[3], "objects") == 0) {
         run_objects(mono_assembly_get_image(assembly));
     } else if (strcmp(argv[3], "attrs") == 0) {
         run_attrs(mono_assembly_get_image(assembly));

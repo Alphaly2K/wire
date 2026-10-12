@@ -118,7 +118,7 @@ def main():
     parser.add_argument("stage", choices=("compile", "run", "all"))
     parser.add_argument("--output", type=Path, default=REPO / "wire-out/native-mono-m1")
     parser.add_argument("--sdk", type=Path, default=DEFAULT_SDK)
-    parser.add_argument("--cases", nargs="+", choices=("core", "interop", "threads", "gc", "layout", "remoting", "collation", "static-roots", "attrs", "objects"), default=["core", "interop", "threads", "gc", "layout", "remoting", "collation", "static-roots", "attrs", "objects"])
+    parser.add_argument("--cases", nargs="+", choices=("core", "interop", "threads", "gc", "layout", "remoting", "collation", "static-roots", "attrs", "objects", "reference-locals"), default=["core", "interop", "threads", "gc", "layout", "remoting", "collation", "static-roots", "attrs", "objects", "reference-locals"])
     parser.add_argument("--incremental", action="store_true", help="initialize with the real Unity --gc-params=incremental=3 profile")
     parser.add_argument("--support-builder", type=Path, help="existing read-only development AOT tool input")
     parser.add_argument("--classlib-input", type=Path, help="existing read-only managed class libraries (copied to ignored output)")

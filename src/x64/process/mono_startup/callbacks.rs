@@ -32,6 +32,7 @@ struct Owner<'a> {
     gc_events: Cell<u32>,
     mono_reentries: Cell<usize>,
     managed_reentries: Cell<usize>,
+    reference_outputs: Cell<[Option<(u64, usize)>; 8]>,
     metadata: Option<RefCell<super::reentry::Metadata<'a>>>,
 }
 impl Drop for Owner<'_> {
@@ -58,6 +59,22 @@ pub(super) fn live_temporary_slot(address: u64, width: u64) -> Result<bool, Stri
             .try_borrow()
             .map_err(|_| "temporary reference runtime is already borrowed")?;
         Ok(runtime.live_data_slot(address, width))
+    })
+}
+/// Exact first-word reference output leases of fixed FastPath adapters. No
+/// neighboring bytes or general byte payloads become managed reference slots.
+pub(super) fn live_reference_output(address: u64) -> Option<super::Object> {
+    OWNER.with(|slot| {
+        if slot.get().is_null() {
+            return None;
+        }
+        let owner = unsafe { &*slot.get() };
+        owner
+            .reference_outputs
+            .get()
+            .into_iter()
+            .flatten()
+            .find_map(|(at, class)| (at == address).then_some(class as super::Object))
     })
 }
 struct Scope;
@@ -123,6 +140,7 @@ fn with_routes<'a, T>(
         gc_events: Cell::new(0),
         mono_reentries: Cell::new(0),
         managed_reentries: Cell::new(0),
+        reference_outputs: Cell::new([None; 8]),
         metadata: metadata.map(RefCell::new),
     };
     // Only the TLS pointer erases the lifetime. Scope clears it before this
@@ -686,6 +704,45 @@ pub(super) fn guest_byte_arguments(
     args: &[u64],
     spans: &[(usize, &[u8])],
 ) -> Result<GuestByteResult, String> {
+    let spans: Vec<_> = spans
+        .iter()
+        .map(|&(index, bytes)| (index, bytes, 0))
+        .collect();
+    guest_byte_arguments_at(target, args, &spans)
+}
+/// An interior pointer stays inside its declared scoped payload. In particular,
+/// Unity's FastPath output points one word beyond the reference it fills.
+pub(super) fn guest_byte_arguments_at(
+    target: u64,
+    args: &[u64],
+    spans: &[(usize, &[u8], usize)],
+) -> Result<GuestByteResult, String> {
+    guest_byte_arguments_impl(target, args, spans, None)
+}
+pub(super) fn guest_reference_pair(
+    target: u64,
+    args: &[u64],
+    index: usize,
+    class: super::Object,
+) -> Result<u64, String> {
+    if class.is_null() {
+        return Err("FastPath reference output requires a declared class".into());
+    }
+    let mut pair = [0; 16];
+    pair[8..].copy_from_slice(&0x7ac3_d156_29be_048fu64.to_le_bytes());
+    let (_, outputs) =
+        guest_byte_arguments_impl(target, args, &[(index, &pair, 8)], Some(class as usize))?;
+    if outputs[0][8..] != pair[8..] {
+        return Err("component FastPath wrote beyond its reference output".into());
+    }
+    Ok(u64::from_le_bytes(outputs[0][..8].try_into().unwrap()))
+}
+fn guest_byte_arguments_impl(
+    target: u64,
+    args: &[u64],
+    spans: &[(usize, &[u8], usize)],
+    reference_class: Option<usize>,
+) -> Result<GuestByteResult, String> {
     OWNER.with(|slot| {
         if slot.get().is_null() || args.len() > 8 || spans.len() > 8 {
             return Err("typed byte callback owner/arity absent".into());
@@ -694,8 +751,13 @@ pub(super) fn guest_byte_arguments(
         let mut seen = [false; 8];
         let mut offset = 0usize;
         let mut offsets = Vec::new();
-        for &(index, bytes) in spans {
-            if index >= args.len() || seen[index] || bytes.is_empty() || bytes.len() > 65536 {
+        for &(index, bytes, interior) in spans {
+            if index >= args.len()
+                || seen[index]
+                || bytes.is_empty()
+                || bytes.len() > 65536
+                || interior >= bytes.len()
+            {
                 return Err("typed byte callback span/argument invalid".into());
             }
             seen[index] = true;
@@ -726,15 +788,38 @@ pub(super) fn guest_byte_arguments(
             }
         }
         let _payload = Payload(owner, base, size);
+        struct ReferenceOutput<'a, 'b>(&'a Owner<'b>, usize);
+        impl Drop for ReferenceOutput<'_, '_> {
+            fn drop(&mut self) {
+                let mut outputs = self.0.reference_outputs.get();
+                outputs[self.1] = None;
+                self.0.reference_outputs.set(outputs);
+            }
+        }
+        let _reference = if let Some(class) = reference_class {
+            if spans.len() != 1 || spans[0].1.len() != 16 || spans[0].2 != 8 {
+                return Err("reference output requires an exact two-word FastPath payload".into());
+            }
+            let depth = owner.depth.get();
+            let mut outputs = owner.reference_outputs.get();
+            if outputs[depth].is_some() {
+                return Err("reference output scope already occupied".into());
+            }
+            outputs[depth] = Some((base, class));
+            owner.reference_outputs.set(outputs);
+            Some(ReferenceOutput(owner, depth))
+        } else {
+            None
+        };
         let mut args = args.to_vec();
-        for (&(index, bytes), &offset) in spans.iter().zip(&offsets) {
+        for (&(index, bytes, interior), &offset) in spans.iter().zip(&offsets) {
             let address = base + offset as u64;
             owner.memory.borrow_mut().write(address, bytes)?;
-            args[index] = address;
+            args[index] = address + interior as u64;
         }
         let result = execute_scalar_guest(owner, target, &args, &[])?;
         let mut outputs = Vec::new();
-        for (&(_, bytes), &offset) in spans.iter().zip(&offsets) {
+        for (&(_, bytes, _), &offset) in spans.iter().zip(&offsets) {
             let mut out = vec![0; bytes.len()];
             owner.memory.borrow().read(base + offset as u64, &mut out)?;
             outputs.push(out);
@@ -1441,6 +1526,11 @@ mod tests {
         memory
             .map(super::super::super::STACK, 65536, READ | WRITE)
             .unwrap();
+        // mov [r8-8],rcx; ret -- FastPath fills the preceding word.
+        memory
+            .write(0x1100, &[0x49, 0x89, 0x48, 0xf8, 0xc3])
+            .unwrap();
+        memory.write(0x1200, &[0x0f, 0x0b]).unwrap();
         let mut runtime = Runtime64::new(
             &mut memory,
             0x140000000,
@@ -1456,8 +1546,29 @@ mod tests {
             assert_eq!(result.1[0], input);
             assert_eq!(result.1[1], 16u64.to_le_bytes());
             assert!(with_service(|memory, _| memory.read_int(0x6ff900000000, 8)).is_err());
+            assert_eq!(
+                guest_reference_pair(0x1100, &[71, 0, 0], 2, 1usize as super::super::Object)?,
+                71
+            );
+            assert!(live_reference_output(0x6ff900000000).is_none());
+            assert!(
+                guest_reference_pair(0x1200, &[0; 3], 2, 1usize as super::super::Object).is_err()
+            );
+            assert!(live_reference_output(0x6ff900000000).is_none());
+            assert!(with_service(|memory, _| memory.read_int(0x6ff900000000, 8)).is_err());
             assert!(guest_byte_arguments(0x1000, &[0; 4], &[(4, &input)]).is_err());
             assert!(guest_byte_arguments(0x1000, &[0; 4], &[(0, &input), (0, &input)]).is_err());
+            let mut pair = [0; 16];
+            pair[8..].copy_from_slice(&0x1234u64.to_le_bytes());
+            let output = guest_byte_arguments_at(0x1100, &[71, 0, 0], &[(2, &pair, 8)])?.1;
+            assert_eq!(&output[0][..8], &71u64.to_le_bytes());
+            assert_eq!(&output[0][8..], &pair[8..]);
+            for invalid in [16, usize::MAX] {
+                assert!(guest_byte_arguments_at(0x1100, &[0; 3], &[(2, &pair, invalid)]).is_err());
+            }
+            assert!(guest_byte_arguments_at(0x1200, &[0; 3], &[(2, &pair, 8)]).is_err());
+            assert_eq!(pair[..8], [0; 8]);
+            assert!(with_service(|memory, _| memory.read_int(0x6ff900000000, 8)).is_err());
             Ok::<_, String>(())
         })
         .unwrap();

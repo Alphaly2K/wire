@@ -23,10 +23,10 @@ const INCREMENTAL_SUPPORT: &str =
 const ATTRIBUTES_CANDIDATE: &str =
     "94a8252dfb4bf7aa3584be4b1888afd128431cc7ea70b7bd6773fc299cab0a5e";
 const ATTRIBUTES_SUPPORT: &str = "7cd421d0e370b09a865848a59e47aa2b1362fd9ff484804fe3b2c1b4a5bc8029";
-// Locked 23-patch build in the main checkout: fresh objects, audited inputs,
+// Locked 24-patch build in the main checkout: audited objects and inputs,
 // ordinary/incremental native fixtures and executable-memory guard verified.
-const OBJECTS_CANDIDATE: &str = "9c777efecc3066b3f574968e2566591cafa77a0d35306cb920dc77177f913b4c";
-const OBJECTS_SUPPORT: &str = "def3ecff994baa8542b1926b6b19875457224fe841dc13076a14670cf13c43c7";
+const OBJECTS_CANDIDATE: &str = "813ba7548520c706de1de76ae8bd7b5b2f31cf1daadbf51e0d4f230bbe173c69";
+const OBJECTS_SUPPORT: &str = "6bb5f274387eb907ecc97ddc963bc832d249adf52a452b58b1d417fa50424e0e";
 const EXE: &str = "94cccae89918110514672a6ec249a1252ffaeb28c0ae8d8633a9352988738f12";
 const UNITY: &str = "a2022611884470ddab23927a3eb7bbaef3924c18972d30ba7b5330a8fd25bcc4";
 const CORELIB_SUPPORT: &str = "b10bb3e59af90e92e240424ac88b1f96eb27906c3fa099958713d93801b4b078";
