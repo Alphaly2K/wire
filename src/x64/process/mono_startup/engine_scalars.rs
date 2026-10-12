@@ -12,7 +12,7 @@ struct Spec {
     argument: Option<(&'static CStr, &'static CStr)>,
     adapter: Object,
 }
-const COUNT: usize = 60;
+const COUNT: usize = 70;
 static TARGETS: OnceLock<[u64; COUNT]> = OnceLock::new();
 thread_local! { static CALLS: RefCell<[usize; COUNT]> = const { RefCell::new([0; COUNT]) }; }
 pub(super) fn installed() -> bool {
@@ -312,6 +312,25 @@ integer_getter!(adapter_56, 56);
 integer_setter!(adapter_57, 57);
 integer_getter!(adapter_58, 58);
 integer_setter!(adapter_59, 59);
+unsafe extern "C" fn adapter_60() -> i64 {
+    call::<60>(&[], &[]).0 as i64
+}
+integer_getter!(adapter_61, 61);
+integer_getter!(adapter_62, 62);
+macro_rules! boolean_getter {
+    ($name:ident,$slot:literal) => {
+        unsafe extern "C" fn $name() -> u8 {
+            call::<$slot>(&[], &[]).0 as u8
+        }
+    };
+}
+boolean_getter!(adapter_63, 63);
+boolean_getter!(adapter_64, 64);
+boolean_getter!(adapter_65, 65);
+boolean_getter!(adapter_66, 66);
+boolean_getter!(adapter_67, 67);
+boolean_getter!(adapter_68, 68);
+integer_getter!(adapter_69, 69);
 fn specs() -> [Spec; COUNT] {
     [
     Spec { binding: c"UnityEngine.Application::get_isFocused", namespace: c"UnityEngine", owner: c"Application", method: c"get_isFocused", target: 0x18006d380, returns: (c"System", c"Boolean"), argument: None, adapter: adapter_0 as *const () as Object },
@@ -374,5 +393,15 @@ fn specs() -> [Spec; COUNT] {
     Spec { binding: c"UnityEngine.Screen::set_fullScreenMode", namespace: c"UnityEngine", owner: c"Screen", method: c"set_fullScreenMode", target: 0x18007cdb0, returns: (c"System", c"Void"), argument: Some((c"UnityEngine", c"FullScreenMode")), adapter: adapter_57 as *const () as Object },
     Spec { binding: c"UnityEngine.Screen::get_sleepTimeout", namespace: c"UnityEngine", owner: c"Screen", method: c"get_sleepTimeout", target: 0x18007cc30, returns: (c"System", c"Int32"), argument: None, adapter: adapter_58 as *const () as Object },
     Spec { binding: c"UnityEngine.Screen::set_sleepTimeout", namespace: c"UnityEngine", owner: c"Screen", method: c"set_sleepTimeout", target: 0x18007cc40, returns: (c"System", c"Void"), argument: Some((c"System", c"Int32")), adapter: adapter_59 as *const () as Object },
+    Spec { binding: c"UnityEngine.SystemInfo::MaxGraphicsBufferSize", namespace: c"UnityEngine", owner: c"SystemInfo", method: c"MaxGraphicsBufferSize", target: 0x1800cac30, returns: (c"System", c"Int64"), argument: None, adapter: adapter_60 as *const () as Object },
+    Spec { binding: c"UnityEngine.SystemInfo::GetGraphicsDeviceType", namespace: c"UnityEngine", owner: c"SystemInfo", method: c"GetGraphicsDeviceType", target: 0x1800c9e50, returns: (c"UnityEngine.Rendering", c"GraphicsDeviceType"), argument: None, adapter: adapter_61 as *const () as Object },
+    Spec { binding: c"UnityEngine.SystemInfo::GetGraphicsShaderLevel", namespace: c"UnityEngine", owner: c"SystemInfo", method: c"GetGraphicsShaderLevel", target: 0x1800ca280, returns: (c"System", c"Int32"), argument: None, adapter: adapter_62 as *const () as Object },
+    Spec { binding: c"UnityEngine.SystemInfo::SupportsComputeShaders", namespace: c"UnityEngine", owner: c"SystemInfo", method: c"SupportsComputeShaders", target: 0x1800ca460, returns: (c"System", c"Boolean"), argument: None, adapter: adapter_63 as *const () as Object },
+    Spec { binding: c"UnityEngine.SystemInfo::SupportsInstancing", namespace: c"UnityEngine", owner: c"SystemInfo", method: c"SupportsInstancing", target: 0x1800ca4d0, returns: (c"System", c"Boolean"), argument: None, adapter: adapter_64 as *const () as Object },
+    Spec { binding: c"UnityEngine.SystemInfo::Supports2DArrayTextures", namespace: c"UnityEngine", owner: c"SystemInfo", method: c"Supports2DArrayTextures", target: 0x1800ca3f0, returns: (c"System", c"Boolean"), argument: None, adapter: adapter_65 as *const () as Object },
+    Spec { binding: c"UnityEngine.SystemInfo::Supports32bitsIndexBuffer", namespace: c"UnityEngine", owner: c"SystemInfo", method: c"Supports32bitsIndexBuffer", target: 0x1800ca4f0, returns: (c"System", c"Boolean"), argument: None, adapter: adapter_66 as *const () as Object },
+    Spec { binding: c"UnityEngine.SystemInfo::SupportsAsyncCompute", namespace: c"UnityEngine", owner: c"SystemInfo", method: c"SupportsAsyncCompute", target: 0x1800cab20, returns: (c"System", c"Boolean"), argument: None, adapter: adapter_67 as *const () as Object },
+    Spec { binding: c"UnityEngine.SystemInfo::SupportsSetConstantBuffer", namespace: c"UnityEngine", owner: c"SystemInfo", method: c"SupportsSetConstantBuffer", target: 0x1800cac00, returns: (c"System", c"Boolean"), argument: None, adapter: adapter_68 as *const () as Object },
+    Spec { binding: c"UnityEngine.SystemInfo::GetMaxTextureSize", namespace: c"UnityEngine", owner: c"SystemInfo", method: c"GetMaxTextureSize", target: 0x1800caa70, returns: (c"System", c"Int32"), argument: None, adapter: adapter_69 as *const () as Object },
 ]
 }

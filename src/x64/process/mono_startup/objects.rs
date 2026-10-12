@@ -4,8 +4,12 @@ use super::super::super::memory::{shared::HostRegion, READ};
 use super::{c_char, Memory, Object};
 use std::{collections::BTreeMap, ptr};
 const BASE: u64 = 0x6ffe70000000;
-const STRIDE: u64 = 131072;
-const LIMIT: usize = 1024;
+const ARENA_BYTES: u64 = 0x08000000;
+const LIMIT: usize = 32768;
+const ALIGNMENT: u64 = 4096;
+pub(super) fn canonical_token(token: u64) -> bool {
+    (BASE..BASE + ARENA_BYTES).contains(&token) && (token - BASE).is_multiple_of(ALIGNMENT)
+}
 #[derive(Clone, Copy)]
 pub(super) struct Api {
     pub(super) new_string: unsafe extern "C" fn(Object, *const c_char, u32) -> Object,
@@ -65,6 +69,8 @@ struct Entry {
 #[derive(Default)]
 pub(super) struct Registry {
     entries: BTreeMap<u64, Entry>,
+    reverse: BTreeMap<usize, u64>,
+    next_offset: u64,
     verified: usize,
     roots_released: bool,
     retired: bool,
@@ -103,14 +109,20 @@ impl Registry {
         Ok(payload)
     }
     pub(super) fn root_string(&mut self, api: Api, native: Object) -> Result<u64, String> {
-        if self.roots_released || self.retired || self.entries.len() >= LIMIT {
+        if self.roots_released || self.retired {
             return Err("native string outside live bounded root registry".into());
         }
         if native.is_null() {
             return Err("native string allocation returned NULL".into());
         }
-        if let Some((token, _)) = self.entries.iter().find(|(_, e)| e.native == native) {
-            return Ok(*token);
+        if let Some(&token) = self.reverse.get(&(native as usize)) {
+            if self.native_string(api, token)? != native {
+                return Err("string reverse identity changed".into());
+            }
+            return Ok(token);
+        }
+        if self.entries.len() >= LIMIT {
+            return Err("native string root capacity exceeded".into());
         }
         let root = unsafe { (api.strong)(native, 0) };
         if root.is_null() {
@@ -121,11 +133,20 @@ impl Registry {
                 return Err("native string root target mismatch".into());
             }
             let payload = Self::payload(api, native)?;
+            // A page-aligned, never-reused slot covers the complete immutable
+            // header/UTF16 view. Stay inside the original string arena rather
+            // than consuming 128KiB for every short metadata/JSON string.
+            let span = (payload.len() as u64 + 16 + ALIGNMENT - 1) & !(ALIGNMENT - 1);
+            let next = self
+                .next_offset
+                .checked_add(span)
+                .filter(|&end| end <= ARENA_BYTES)
+                .ok_or("native string view arena exhausted")?;
             let view = HostRegion::owned(payload.len())?;
             view.with_native(|p| unsafe {
                 ptr::copy_nonoverlapping(payload.as_ptr(), p.as_ptr(), payload.len());
             })?;
-            let token = BASE + self.entries.len() as u64 * STRIDE;
+            let token = BASE + self.next_offset;
             self.entries.insert(
                 token,
                 Entry {
@@ -136,6 +157,8 @@ impl Registry {
                     published: false,
                 },
             );
+            self.reverse.insert(native as usize, token);
+            self.next_offset = next;
             Ok(token)
         })();
         if result.is_err() {
@@ -298,7 +321,7 @@ mod tests {
         let token = strings
             .borrow_reference(api, root_api, &mut roots, native)
             .unwrap();
-        assert!((BASE..BASE + STRIDE * LIMIT as u64).contains(&token));
+        assert!(canonical_token(token));
         assert_eq!(
             strings
                 .borrow_reference(api, root_api, &mut roots, native)
@@ -358,5 +381,48 @@ mod tests {
         registry.retire_views(&mut memory).unwrap();
         assert!(memory.read_int(token + 16, 4).is_err());
         assert!(registry.root_string(api, native).is_err());
+    }
+    #[test]
+    fn json_strings_scale_past_1024_without_aliasing_payloads_or_adjacent_arenas() {
+        let api = Api {
+            new_string,
+            strong,
+            target,
+            free,
+            length,
+            chars,
+            class,
+            string_class,
+        };
+        let mut raw: Vec<_> = (0..1500)
+            .map(|index| {
+                let length = if index == 0 { 32768 } else { 1 };
+                let mut bytes = vec![0u8; 22 + length * 2];
+                bytes[16..20].copy_from_slice(&(length as i32).to_le_bytes());
+                bytes[20..22].copy_from_slice(&65u16.to_le_bytes());
+                bytes
+            })
+            .collect();
+        let mut registry = Registry::default();
+        let mut previous_end = BASE;
+        for bytes in &mut raw {
+            let native = bytes.as_mut_ptr().cast();
+            let token = registry.root_string(api, native).unwrap();
+            assert!(canonical_token(token));
+            assert!(token >= previous_end);
+            previous_end = token + 16 + registry.entries[&token].payload.len() as u64;
+            assert_eq!(registry.root_string(api, native).unwrap(), token);
+        }
+        assert!(previous_end < BASE + ARENA_BYTES);
+        assert_eq!(registry.entries.len(), 1500);
+        registry.verify(api).unwrap();
+        let token = *registry.entries.last_key_value().unwrap().0;
+        let mut memory = Memory::default();
+        registry.publish_string(&mut memory, token).unwrap();
+        assert_eq!(memory.read_int(token + 20, 2).unwrap(), 65);
+        registry.release_roots(api);
+        registry.retire_views(&mut memory).unwrap();
+        assert!(memory.read_int(token + 20, 2).is_err());
+        assert_eq!(ROOTS.with(Cell::get), 0);
     }
 }

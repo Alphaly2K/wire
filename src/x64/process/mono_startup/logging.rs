@@ -3,15 +3,55 @@
 use super::{c_char, callbacks, Object};
 use std::{
     cell::{Cell, RefCell},
+    collections::VecDeque,
     ffi::CStr,
     ptr,
-    sync::OnceLock,
+    sync::{Mutex, OnceLock},
+    thread::{self, ThreadId},
 };
 pub(super) const NAME: &str = "UnityEngine.UnityLogWriter::WriteStringToUnityLogImpl_Injected";
 pub(super) const TARGET: u64 = 0x1800b0b80;
 pub(super) const DEBUG_NAME: &str = "UnityEngine.DebugLogHandler::Internal_Log_Injected";
 pub(super) const DEBUG_TARGET: u64 = 0x180079570;
 static DEBUG_PC: OnceLock<u64> = OnceLock::new();
+struct DebugRecord {
+    kind: i32,
+    option: i32,
+    units: Option<Vec<u16>>,
+}
+struct FinalizerLogs {
+    owner: ThreadId,
+    pending: VecDeque<DebugRecord>,
+    queued: usize,
+    drained: usize,
+    closed: bool,
+}
+impl FinalizerLogs {
+    fn new() -> Self {
+        Self {
+            owner: thread::current().id(),
+            pending: VecDeque::new(),
+            queued: 0,
+            drained: 0,
+            closed: false,
+        }
+    }
+    fn enqueue(&mut self, record: DebugRecord, finalizing: bool) -> Result<(), String> {
+        if !finalizing || self.closed || self.pending.len() >= 1024 || self.queued >= 65536 {
+            return Err("debug log requires authenticated finalizer and live bounded queue".into());
+        }
+        self.pending.push_back(record);
+        self.queued += 1;
+        Ok(())
+    }
+    fn next(&mut self) -> Result<Option<DebugRecord>, String> {
+        if self.owner != thread::current().id() {
+            return Err("finalizer debug log drain on foreign thread".into());
+        }
+        Ok(self.pending.pop_front())
+    }
+}
+static FINALIZER_LOGS: OnceLock<Mutex<FinalizerLogs>> = OnceLock::new();
 thread_local! { static DEBUG_CALLS: Cell<usize> = const { Cell::new(0) }; }
 static TARGET_PC: OnceLock<u64> = OnceLock::new();
 thread_local! { static RECORDS: RefCell<Vec<Option<Vec<u16>>>> = const { RefCell::new(Vec::new()) }; }
@@ -237,6 +277,9 @@ pub(super) fn install_debug(
     DEBUG_PC
         .set(target)
         .map_err(|_| "Unity debug logger already installed")?;
+    FINALIZER_LOGS
+        .set(Mutex::new(FinalizerLogs::new()))
+        .map_err(|_| "Unity finalizer debug logger already installed")?;
     unsafe {
         add(
             c"UnityEngine.DebugLogHandler::Internal_Log_Injected".as_ptr(),
@@ -247,28 +290,80 @@ pub(super) fn install_debug(
 }
 unsafe extern "C" fn debug_log(kind: i32, option: i32, span: *const Span, context: usize) {
     let result = std::panic::catch_unwind(|| -> Result<(), String> {
-        callbacks::with_service(|_, _| Ok(()))?;
         if !(0..=4).contains(&kind) || !matches!(option, 0 | 1) || context != 0 {
             return Err(format!("debug logger requires known enums and NULL context: type={kind}; option={option}; context={context:#x}"));
         }
         let units = unsafe { owned_span(span) }?;
-        callbacks::guest_positioned_string_span(
-            *DEBUG_PC.get().ok_or("Unity debug logger not installed")?,
-            units.as_deref(),
-            &[kind as u32 as u64, option as u32 as u64],
-            &[0],
-        )?;
-        DEBUG_CALLS.with(|calls| calls.set(calls.get() + 1));
-        eprintln!(
-            "NATIVE_MONO_DEBUG_LOG_FORWARDED: type={kind}; option={option}; message={:?}",
-            units.as_deref().map(String::from_utf16_lossy)
-        );
-        Ok(())
+        let record = DebugRecord {
+            kind,
+            option,
+            units,
+        };
+        if !callbacks::has_owner() {
+            FINALIZER_LOGS
+                .get()
+                .ok_or("finalizer debug logger absent")?
+                .lock()
+                .map_err(|_| "finalizer debug logger poisoned")?
+                .enqueue(record, super::unsafe_buffers::actual_finalizer_scope())?;
+            eprintln!("NATIVE_MONO_DEBUG_LOG_FINALIZER_QUEUED: runtime-finalizer-scope=true");
+            return Ok(());
+        }
+        forward_debug(record)
     });
     if !matches!(result, Ok(Ok(()))) {
         eprintln!("NATIVE_MONO_DEBUG_LOG_REJECT: {result:?}");
         std::process::abort();
     }
+}
+fn forward_debug(record: DebugRecord) -> Result<(), String> {
+    let DebugRecord {
+        kind,
+        option,
+        units,
+    } = record;
+    callbacks::with_service(|_, _| Ok(()))?;
+    callbacks::guest_positioned_string_span(
+        *DEBUG_PC.get().ok_or("Unity debug logger not installed")?,
+        units.as_deref(),
+        &[kind as u32 as u64, option as u32 as u64],
+        &[0],
+    )?;
+    DEBUG_CALLS.with(|calls| calls.set(calls.get() + 1));
+    eprintln!(
+        "NATIVE_MONO_DEBUG_LOG_FORWARDED: type={kind}; option={option}; message={:?}",
+        units.as_deref().map(String::from_utf16_lossy)
+    );
+    Ok(())
+}
+/// A real Mono finalizer may only enqueue owned UTF16. The guest owner executes
+/// the original logger without holding this lock or publishing native pointers.
+pub(super) fn drain_finalizers() -> Result<(), String> {
+    let Some(queue) = FINALIZER_LOGS.get() else {
+        return Ok(());
+    };
+    loop {
+        let record = queue
+            .lock()
+            .map_err(|_| "finalizer debug logger poisoned")?
+            .next()?;
+        let Some(record) = record else { return Ok(()) };
+        forward_debug(record)?;
+        queue
+            .lock()
+            .map_err(|_| "finalizer debug logger poisoned")?
+            .drained += 1;
+    }
+}
+pub(super) fn retire_after_vm_cleanup() -> Result<(), String> {
+    drain_finalizers()?;
+    if let Some(queue) = FINALIZER_LOGS.get() {
+        queue
+            .lock()
+            .map_err(|_| "finalizer debug logger poisoned")?
+            .closed = true;
+    }
+    Ok(())
 }
 /// Shared static void(ref ManagedSpanWrapper) ABI for fixed compiled adapters.
 /// The member's owning image/target are checked separately by its installer.
@@ -495,12 +590,42 @@ pub(super) fn verify(library: Object, image: Object) -> Result<(), String> {
 }
 
 pub(super) fn debug_report() -> String {
-    format!("native-debug-log-calls={}\n", DEBUG_CALLS.with(Cell::get))
+    let mut report = format!("native-debug-log-calls={}\n", DEBUG_CALLS.with(Cell::get));
+    if let Some(queue) = FINALIZER_LOGS.get() {
+        let queue = queue.lock().unwrap();
+        report += &format!("native-debug-log-finalizers-queued={}\nnative-debug-log-finalizers-drained={}\nnative-debug-log-finalizers-pending={}\n", queue.queued, queue.drained, queue.pending.len());
+    }
+    report
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn finalizer_logs_require_authenticated_scope_owner_drain_and_live_queue() {
+        let mut queue = FinalizerLogs::new();
+        let record = || DebugRecord {
+            kind: 2,
+            option: 0,
+            units: Some(vec![0x4e00, 0xd83d, 0xde00]),
+        };
+        assert!(queue.enqueue(record(), false).is_err());
+        queue.enqueue(record(), true).unwrap();
+        queue = thread::spawn(move || {
+            assert!(queue.next().is_err());
+            queue
+        })
+        .join()
+        .unwrap();
+        let actual = queue.next().unwrap().unwrap();
+        assert_eq!(
+            (actual.kind, actual.option, actual.units),
+            (2, 0, Some(vec![0x4e00, 0xd83d, 0xde00]))
+        );
+        assert!(queue.next().unwrap().is_none());
+        queue.closed = true;
+        assert!(queue.enqueue(record(), true).is_err());
+    }
     #[test]
     fn shared_injected_span_keeps_null_empty_and_owned_utf16_distinct_and_rejects_bad_shapes() {
         let null = Span {

@@ -40,7 +40,211 @@ pub(super) struct Metadata<'a> {
     pub(super) rooted_instance: Option<(u64, Object)>,
     pub(super) objects: Option<ObjectRoots<'a>>,
 }
+pub(super) fn handles_allocation(function: &str) -> bool {
+    matches!(
+        function,
+        "mono_array_new"
+            | "mono_string_new"
+            | "mono_string_new_len"
+            | "mono_string_new_wrapper"
+            | "mono_unity_string_empty_wrapper"
+    )
+}
+pub(super) enum PreparedAllocation {
+    Array(Box<reference_arrays::WorkerRequest>),
+    EmptyArray {
+        api: arrays::Api,
+        roots: instances::Api,
+        domain: Object,
+        element: Object,
+    },
+    String {
+        new: unsafe extern "C" fn(Object, *const c_char, u32) -> Object,
+        roots: instances::Api,
+        domain: Object,
+        bytes: Vec<u8>,
+        empty: Option<unsafe extern "C" fn() -> Object>,
+    },
+}
+pub(super) enum Allocated {
+    Array(reference_arrays::WorkerAllocation),
+    EmptyArray(Object, instances::WorkerRoot),
+    String(instances::WorkerRoot),
+}
+impl PreparedAllocation {
+    /// Native allocation may expand the GC heap and call the original Unity
+    /// profiler. No Metadata, Memory or Runtime RefCell is borrowed here.
+    pub(super) fn execute(self) -> Result<Allocated, String> {
+        match self {
+            Self::Array(request) => Ok(Allocated::Array(request.execute()?)),
+            Self::EmptyArray {
+                api,
+                roots,
+                domain,
+                element,
+            } => {
+                let native = unsafe { (api.new)(domain, element, 0) };
+                Ok(Allocated::EmptyArray(element, roots.worker_root(native)?))
+            }
+            Self::String {
+                new,
+                roots,
+                domain,
+                bytes,
+                empty,
+            } => {
+                let native = match empty {
+                    Some(empty) => unsafe { empty() },
+                    None => unsafe { new(domain, bytes.as_ptr().cast(), bytes.len() as u32) },
+                };
+                Ok(Allocated::String(roots.worker_root(native)?))
+            }
+        }
+    }
+}
 impl Metadata<'_> {
+    pub(super) fn prepare_allocation(
+        &mut self,
+        function: &str,
+        cpu: &Cpu64,
+        memory: &Memory,
+    ) -> Result<PreparedAllocation, String> {
+        let a = [cpu.regs[1], cpu.regs[2], cpu.regs[8]];
+        let roots = self
+            .objects
+            .as_mut()
+            .ok_or("nested allocation has no owned root service")?;
+        if function == "mono_array_new" {
+            if a[0] != super::ROOT_TOKEN {
+                return Err("nested array allocation has unknown domain".into());
+            }
+            let element = self.metadata.native(a[1], metadata::Kind::Class)?;
+            if a[2] == 0 {
+                let image = sym!(
+                    self.library,
+                    "mono_class_get_image",
+                    unsafe extern "C" fn(Object) -> Object
+                );
+                if !self
+                    .images
+                    .live_native_images()?
+                    .contains(&unsafe { image(element) })
+                {
+                    return Err("nested empty array class has no live image owner".into());
+                }
+                super::closed_types::Api::load(self.library)?.concrete(element)?;
+                return Ok(PreparedAllocation::EmptyArray {
+                    api: roots.empty_arrays.0,
+                    roots: roots.api,
+                    domain: self.domain,
+                    element,
+                });
+            }
+            let (api, arrays) = roots
+                .arrays
+                .as_mut()
+                .ok_or("nested typed array service absent")?;
+            if !api.supports(element) {
+                return Err("nested array element outside owned typed family".into());
+            }
+            return Ok(PreparedAllocation::Array(Box::new(arrays.prepare_worker(
+                *api,
+                roots.api,
+                self.domain,
+                element,
+                a[2],
+            )?)));
+        }
+        if !handles_allocation(function) {
+            return Err("untyped nested allocation".into());
+        }
+        let empty = function == "mono_unity_string_empty_wrapper";
+        let wrapper = function == "mono_string_new_wrapper";
+        if !wrapper && !empty && a[0] != super::ROOT_TOKEN {
+            return Err("nested String allocation has unknown domain".into());
+        }
+        let bytes = if empty {
+            Vec::new()
+        } else if function == "mono_string_new_len" {
+            if a[2] > 32768 {
+                return Err("nested String length exceeds bound".into());
+            }
+            let mut bytes = vec![0; a[2] as usize];
+            memory.read(a[1], &mut bytes)?;
+            bytes
+        } else {
+            string(memory, if wrapper { a[0] } else { a[1] })?.into_bytes()
+        };
+        if bytes.len() > 32768 {
+            return Err("nested String input exceeds bound".into());
+        }
+        let empty = if empty {
+            let current = sym!(
+                self.library,
+                "mono_domain_get",
+                unsafe extern "C" fn() -> Object
+            );
+            if unsafe { current() } != self.domain {
+                return Err("nested empty string current domain mismatch".into());
+            }
+            Some(sym!(
+                self.library,
+                "mono_unity_string_empty_wrapper",
+                unsafe extern "C" fn() -> Object
+            ))
+        } else {
+            None
+        };
+        Ok(PreparedAllocation::String {
+            new: roots.strings.new_string,
+            roots: roots.api,
+            domain: self.domain,
+            bytes,
+            empty,
+        })
+    }
+    pub(super) fn finish_allocation(
+        &mut self,
+        allocation: Allocated,
+        memory: &mut Memory,
+    ) -> Result<u64, String> {
+        let roots = self
+            .objects
+            .as_mut()
+            .ok_or("nested allocation completion has no owned root service")?;
+        match allocation {
+            Allocated::Array(allocation) => {
+                let (api, arrays) = roots
+                    .arrays
+                    .as_mut()
+                    .ok_or("nested typed array completion service absent")?;
+                let token = arrays.adopt_worker(*api, roots.api, roots.roots, allocation)?;
+                arrays.publish(memory, token)?;
+                Ok(token)
+            }
+            Allocated::EmptyArray(element, pin) => {
+                let native = pin.target()?;
+                let token =
+                    roots
+                        .empty_arrays
+                        .1
+                        .root_empty(roots.empty_arrays.0, native, element)?;
+                roots.roots.adopt_empty_array(roots.api, token, native)?;
+                roots.empty_arrays.1.publish(memory, token)?;
+                Ok(token)
+            }
+            Allocated::String(pin) => {
+                let token = roots.objects.borrow_reference(
+                    roots.strings,
+                    roots.api,
+                    roots.roots,
+                    pin.target()?,
+                )?;
+                roots.objects.publish_pending(memory)?;
+                Ok(token)
+            }
+        }
+    }
     pub(super) fn root_reflection(
         &mut self,
         native: Object,
@@ -91,6 +295,30 @@ impl Metadata<'_> {
             roots.roots.native(roots.api, token)
         }
     }
+    pub(super) fn root_blittable_array(
+        &mut self,
+        native: Object,
+        memory: &mut Memory,
+    ) -> Result<(u64, usize, usize), String> {
+        self.refresh_native(memory)?;
+        let roots = self
+            .objects
+            .as_mut()
+            .ok_or("GPU data array has no owned root service")?;
+        let (api, arrays) = roots
+            .arrays
+            .as_mut()
+            .ok_or("GPU data array has no typed array service")?;
+        let (length, width) = api.blittable_array(native)?;
+        let token =
+            arrays.borrow_with(*api, roots.api, roots.roots, native, |registry, native| {
+                roots
+                    .objects
+                    .borrow_reference(roots.strings, roots.api, registry, native)
+            })?;
+        arrays.publish(memory, token)?;
+        Ok((token, length, width))
+    }
     pub(super) fn native_handle(&self, token: u64) -> Result<Object, String> {
         let roots = self
             .objects
@@ -131,12 +359,123 @@ impl Metadata<'_> {
         } else {
             None
         };
+        let mut references = fields.references.clone();
+        if let Some(arrays) = &arrays {
+            references.extend_from_slice(&arrays.references);
+        }
         roots.objects.publish_pending(memory)?;
         roots.fields.commit_refresh(fields)?;
         if let (Some(plan), Some((_, arrays))) = (arrays, roots.arrays.as_mut()) {
             arrays.commit_refresh(plan)?;
         }
+        if !references.is_empty() {
+            self.publish_container_graph(memory, references)?;
+        }
         Ok(())
+    }
+    /// Publish backing arrays/serialized children before returning to engine
+    /// code which may read them directly. Root identity and actual metadata
+    /// govern this bounded graph; native headers/pointers never become views.
+    fn publish_container_graph(
+        &mut self,
+        memory: &mut Memory,
+        mut queue: Vec<Object>,
+    ) -> Result<(), String> {
+        let object_class = sym!(
+            self.library,
+            "mono_object_get_class",
+            unsafe extern "C" fn(Object) -> Object
+        );
+        let rank = sym!(
+            self.library,
+            "mono_class_get_rank",
+            unsafe extern "C" fn(Object) -> u32
+        );
+        let image = sym!(
+            self.library,
+            "mono_class_get_image",
+            unsafe extern "C" fn(Object) -> Object
+        );
+        let core = self.images.unique_native_image(super::CORE_MODULE)?;
+        let corlib = self.images.unique_native_image(super::CORELIB)?;
+        let images = self.images.live_native_images()?;
+        let roots = self
+            .objects
+            .as_mut()
+            .ok_or("nested container graph has no owned root service")?;
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(native) = queue.pop() {
+            if native.is_null() || !seen.insert(native as usize) {
+                continue;
+            }
+            if seen.len() > 4096 {
+                return Err("nested container graph exceeds bounded capacity".into());
+            }
+            let token =
+                roots
+                    .objects
+                    .borrow_reference(roots.strings, roots.api, roots.roots, native)?;
+            if roots.objects.contains(token) {
+                continue;
+            }
+            let class = unsafe { object_class(native) };
+            if unsafe { rank(class) } != 0 {
+                if roots.empty_arrays.1.contains(token) {
+                    continue;
+                }
+                let (api, arrays) = roots
+                    .arrays
+                    .as_mut()
+                    .ok_or("nested container array service absent")?;
+                let token = arrays.borrow_with(
+                    *api,
+                    roots.api,
+                    roots.roots,
+                    native,
+                    |registry, native| {
+                        roots
+                            .objects
+                            .borrow_reference(roots.strings, roots.api, registry, native)
+                    },
+                )?;
+                arrays.publish(memory, token)?;
+                queue.extend(arrays.native_references(*api, roots.api, roots.roots, token)?);
+                continue;
+            }
+            if roots.api.engine_class(class) && !roots.fields.has_owner(token) {
+                continue;
+            }
+            if !images.contains(&unsafe { image(class) }) {
+                return Err("nested container class has no live image owner".into());
+            }
+            if !roots.fields.has_owner(token) {
+                let specs = if let Some(specs) =
+                    field_layouts::storage_specs(self.library, core, corlib, native, class)?
+                {
+                    specs
+                } else {
+                    field_layouts::specs(self.library, core, &images, native, class)?
+                };
+                roots.fields.install_with(
+                    self.library,
+                    roots.api,
+                    roots.roots,
+                    memory,
+                    specs,
+                    |registry, native| {
+                        roots
+                            .objects
+                            .borrow_reference(roots.strings, roots.api, registry, native)
+                    },
+                )?;
+            }
+            queue.extend(
+                roots
+                    .fields
+                    .native_references(roots.api, roots.roots, token)?,
+            );
+        }
+        roots.objects.publish_pending(memory)
     }
     pub(super) fn dispatch(
         &mut self,
@@ -220,8 +559,16 @@ impl Metadata<'_> {
             let native = roots.roots.native(roots.api, token)?;
             let specs = if layout.is_some() {
                 Vec::new()
-            } else {
+            } else if roots.api.engine_class(class) {
                 field_layouts::specs(
+                    self.library,
+                    self.images.unique_native_image(super::CORE_MODULE)?,
+                    &images,
+                    native,
+                    class,
+                )?
+            } else {
+                field_layouts::reference_storage_specs(
                     self.library,
                     self.images.unique_native_image(super::CORE_MODULE)?,
                     &images,
@@ -532,6 +879,43 @@ impl Metadata<'_> {
                         return cpu.return_integer(memory, 0);
                     }
                 }
+                // A constructor can create a referenced ordinary object in
+                // native IL before the engine first accesses its fields. A
+                // live root permits metadata discovery, never an arbitrary
+                // heap write or an early Unity cached-pointer publication.
+                if !roots.fields.has_reference(a[0], a[1]) {
+                    if let Some(owner) = roots.roots.interior_owner(a[1]) {
+                        if a[0] == 0 || a[0] == owner {
+                            let class = roots.roots.class(roots.api, owner)?;
+                            if !roots.api.engine_class(class) && !roots.roots.is_boxed(owner) {
+                                let native = roots.roots.native(roots.api, owner)?;
+                                let specs = field_layouts::reference_storage_specs(
+                                    self.library,
+                                    self.images.unique_native_image(super::CORE_MODULE)?,
+                                    &self.images.live_native_images()?,
+                                    native,
+                                    class,
+                                )?;
+                                roots.fields.install_with(
+                                    self.library,
+                                    roots.api,
+                                    roots.roots,
+                                    memory,
+                                    specs,
+                                    |registry, native| {
+                                        roots.objects.borrow_reference(
+                                            roots.strings,
+                                            roots.api,
+                                            registry,
+                                            native,
+                                        )
+                                    },
+                                )?;
+                                roots.objects.publish_pending(memory)?;
+                            }
+                        }
+                    }
+                }
                 if roots.fields.has_reference(a[0], a[1]) {
                     roots.fields.store_reference(
                         roots.api,
@@ -541,6 +925,12 @@ impl Metadata<'_> {
                         a[1],
                         a[2],
                     )?;
+                    let owner = roots
+                        .roots
+                        .interior_owner(a[1])
+                        .ok_or("reference barrier owner vanished")?;
+                    let native = roots.roots.native(roots.api, owner)?;
+                    self.publish_container_graph(memory, vec![native])?;
                     return cpu.return_integer(memory, 0);
                 }
             }

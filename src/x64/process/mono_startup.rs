@@ -53,7 +53,9 @@ mod engine_scalars;
 mod errors;
 mod field_layouts;
 mod fields;
+mod gc_control;
 mod gc_scopes;
+mod gpu_buffers;
 mod handles;
 mod images;
 mod input_events;
@@ -76,7 +78,9 @@ mod resources;
 mod screen;
 mod scriptable;
 mod services;
+mod shaders;
 mod subsystems;
+mod text_assets;
 mod unitytls;
 mod unsafe_buffers;
 mod value_layout;
@@ -2353,6 +2357,9 @@ impl Probe {
         {
             return Ok(false);
         }
+        if self.assets && gc_control::handles(function) {
+            return Ok(false);
+        }
         if self.metadata
             && self.metadata_registry.count() > 0
             && !metadata::handles(function)
@@ -2415,14 +2422,15 @@ impl Probe {
     }
     pub(super) fn handles_object(&self, function: &str) -> bool {
         self.strings
-            && ((self.assets
-                && matches!(
-                    function,
-                    "mono_object_get_virtual_method"
-                        | "mono_object_isinst"
-                        | "mono_array_addr_with_size"
-                        | "mono_object_unbox"
-                ))
+            && ((self.assets && gc_control::handles(function))
+                || (self.assets
+                    && matches!(
+                        function,
+                        "mono_object_get_virtual_method"
+                            | "mono_object_isinst"
+                            | "mono_array_addr_with_size"
+                            | "mono_object_unbox"
+                    ))
                 || (self.assets
                     && matches!(
                         function,
@@ -2567,6 +2575,46 @@ impl Probe {
         cpu.regs[4]
             .checked_add(8)
             .ok_or("object return stack overflow")?;
+        if self.assets && gc_control::handles(function) {
+            if !self.root_ready || !self.main_thread_ready || domain.is_null() {
+                return Err(
+                    "GC control requires the live owned root domain and main thread".into(),
+                );
+            }
+            let api = gc_control::Api::load(library)?;
+            let targets = self.callback_targets();
+            let (result, stats) = callbacks::with_owner(memory, runtime, targets, || {
+                if gc_control::collecting(function) {
+                    if let Some(api) = self.instance_api {
+                        callbacks::with_service(|memory, _| {
+                            self.instance_registry.sync_from_guest(api, memory)?;
+                            self.field_registry.sync(api, &self.instance_registry)?;
+                            if let Some(arrays) = self.reference_array_api {
+                                self.reference_array_registry.sync(
+                                    arrays,
+                                    api,
+                                    &self.instance_registry,
+                                    memory,
+                                )?;
+                            }
+                            Ok::<_, String>(())
+                        })?;
+                    }
+                }
+                api.call(function, a[0])
+            })?;
+            let result = result?;
+            self.gc_events_verified |= stats.gc_events;
+            if gc_control::collecting(function) {
+                self.verify_gc_roots(memory, runtime)?;
+            }
+            self.events.push(format!(
+                "actual native GC control {function}: result={result:#x}; callbacks={}",
+                stats.calls[3]
+            ));
+            cpu.return_integer(memory, result)?;
+            return Ok(false);
+        }
         if self.assets && function == "mono_object_unbox" {
             let api = self.instance_api.ok_or("unbox before rooted object API")?;
             if !self.instance_registry.is_boxed(a[0]) {
@@ -3234,6 +3282,30 @@ impl Probe {
         }
         if !screen::installed() {
             screen::install(
+                library,
+                self.image_registry.unique_native_image(CORE_MODULE)?,
+                &managed_images,
+                &self.registry,
+            )?;
+        }
+        if !gpu_buffers::installed() {
+            gpu_buffers::install(
+                library,
+                self.image_registry.unique_native_image(CORE_MODULE)?,
+                &managed_images,
+                &self.registry,
+            )?;
+        }
+        if !shaders::installed() {
+            shaders::install(
+                library,
+                self.image_registry.unique_native_image(CORE_MODULE)?,
+                &managed_images,
+                &self.registry,
+            )?;
+        }
+        if !text_assets::installed() {
+            text_assets::install(
                 library,
                 self.image_registry.unique_native_image(CORE_MODULE)?,
                 &managed_images,
@@ -4612,6 +4684,15 @@ impl Probe {
             ));
         }
         self.gc_events_verified |= stats.gc_events;
+        self.verify_gc_roots(memory, runtime)?;
+        self.events.push(format!("actual native BDWGC collection -> compiled GC adapter -> original Unity Win64 callback: {} calls, event mask {:#x}; no guest pointer passed to native profiler", stats.calls[3], stats.gc_events));
+        Ok(())
+    }
+    fn verify_gc_roots(
+        &mut self,
+        memory: &mut Memory,
+        runtime: &mut Runtime64,
+    ) -> Result<(), String> {
         if let Some(api) = self.object_api {
             let (verified, _) =
                 callbacks::with_owner(memory, runtime, self.callback_targets(), || {
@@ -4670,7 +4751,6 @@ impl Probe {
                 })?;
             verified?;
         }
-        self.events.push(format!("actual native BDWGC collection -> compiled GC adapter -> original Unity Win64 callback: {} calls, event mask {:#x}; no guest pointer passed to native profiler", stats.calls[3], stats.gc_events));
         Ok(())
     }
     pub(super) fn validate_unitytls(
@@ -4798,10 +4878,12 @@ impl Probe {
         }
         if let Some(native) = &mut self.native {
             native.cleanup()?;
+            logging::retire_after_vm_cleanup()?;
             // Raw native IL pointers remain owned until the VM can no longer
             // execute IL/finalizers. Only then release original guest records.
             unsafe_buffers::retire_after_vm_cleanup()?;
             binding_strings::retire_after_vm_cleanup()?;
+            gpu_buffers::retire_after_vm_cleanup()?;
             profiler_recorders::retire_after_vm_cleanup()?;
             burst_shared::retire_after_vm_cleanup()?;
             if self.tls_table.is_some() {

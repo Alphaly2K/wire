@@ -133,6 +133,11 @@ impl WorkerRoot {
     }
 }
 impl Api {
+    pub(super) fn engine_class(self, class: Object) -> bool {
+        !self.unity_base.is_null()
+            && !class.is_null()
+            && unsafe { (self.assignable)(self.unity_base, class) } != 0
+    }
     pub(super) fn worker_root(self, object: Object) -> Result<WorkerRoot, String> {
         if object.is_null() {
             return Err("worker receiver cannot be NULL".into());
@@ -236,6 +241,15 @@ impl Registry {
     }
     pub(super) fn contains(&self, token: u64) -> bool {
         !self.released && !self.views_retired && self.roots.contains_key(&token)
+    }
+    /// Candidate for metadata discovery only. This never authorizes a write:
+    /// the caller must match the exact declared field and its complete layout.
+    pub(super) fn interior_owner(&self, address: u64) -> Option<u64> {
+        if self.released || self.views_retired {
+            return None;
+        }
+        let (&token, _) = self.roots.range(..=address).next_back()?;
+        (address >= token + 16 && address - token < 65536).then_some(token)
     }
     pub(super) fn allocate(
         &mut self,
@@ -478,9 +492,7 @@ impl Registry {
         token: u64,
         native: Object,
     ) -> Result<(), String> {
-        if !(0x6ffe70000000..0x6ffe78000000).contains(&token)
-            || !(token - 0x6ffe70000000).is_multiple_of(131072)
-        {
+        if !super::objects::canonical_token(token) {
             return Err("string alias outside canonical string arena".into());
         }
         self.adopt_canonical(api, token, native)

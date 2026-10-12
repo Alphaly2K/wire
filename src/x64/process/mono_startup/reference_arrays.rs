@@ -5,6 +5,19 @@ use crate::x64::memory::{shared::HostRegion, READ, WRITE};
 use std::{collections::BTreeMap, ptr};
 const BASE: u64 = 0x6ffeb0000000;
 const STRIDE: u64 = 65536;
+fn bounded_payload(layout: &value_layout::Layout, length: usize) -> Result<usize, String> {
+    let bytes = layout
+        .width
+        .checked_mul(length)
+        .ok_or("typed array payload overflow")?;
+    // Keep every array within its existing 64KiB identity slot. Byte/scalar
+    // assets may exceed 4096 elements; reference and Boolean graphs retain
+    // their smaller traversal bound.
+    if bytes > STRIDE as usize - 32 || (length > 4096 && layout.scalar_inline().is_err()) {
+        return Err("typed array outside bounded payload/traversal contract".into());
+    }
+    Ok(bytes)
+}
 fn validate_engine_handles(bytes: &[u8], mut live: impl FnMut(u64) -> bool) -> Result<(), String> {
     if !bytes.len().is_multiple_of(8) {
         return Err("IntPtr payload width mismatch".into());
@@ -138,6 +151,26 @@ impl Api {
     pub(super) fn supports(self, element: Object) -> bool {
         self.element_layout(element).is_ok()
     }
+    pub(super) fn blittable_array(self, native: Object) -> Result<(usize, usize), String> {
+        if native.is_null() {
+            return Err("GPU data array is NULL".into());
+        }
+        let class = unsafe { (self.class)(native) };
+        let element = unsafe { (self.element)(class) };
+        if class.is_null()
+            || element.is_null()
+            || element == self.intptr
+            || unsafe { (self.rank)(class) } != 1
+            || unsafe { (self.array_class)(element, 1) } != class
+        {
+            return Err("GPU data requires exact rank-one SZ array".into());
+        }
+        let (width, _) = self.element_layout(element)?.scalar_inline()?;
+        if unsafe { (self.element_size)(class) } != width as i32 {
+            return Err("GPU data array stride differs from metadata".into());
+        }
+        Ok((unsafe { (self.length)(native) }, width))
+    }
 }
 struct Entry {
     native: Object,
@@ -172,11 +205,8 @@ unsafe impl Send for WorkerAllocation {}
 impl WorkerRequest {
     pub(super) fn execute(self) -> Result<WorkerAllocation, String> {
         let layout = self.api.element_layout(self.element)?;
-        let payload_size = layout
-            .width
-            .checked_mul(self.length)
-            .ok_or("worker array size overflow")?;
-        if self.length > 4096 || payload_size > 65504 || self.domain.is_null() {
+        bounded_payload(&layout, self.length)?;
+        if self.domain.is_null() {
             return Err("worker typed array exceeds allocation bounds".into());
         }
         let native = unsafe { (self.api.new)(self.domain, self.element, self.length) };
@@ -255,16 +285,11 @@ impl Registry {
         length: u64,
     ) -> Result<WorkerRequest, String> {
         let layout = api.element_layout(element)?;
-        let payload_size = layout
-            .width
-            .checked_mul(length as usize)
-            .ok_or("typed array payload overflow")?;
-        if self.retired
-            || self.entries.len() >= 256
-            || domain.is_null()
-            || length > 4096
-            || payload_size > 65504
-        {
+        bounded_payload(
+            &layout,
+            usize::try_from(length).map_err(|_| "typed array length overflow")?,
+        )?;
+        if self.retired || self.entries.len() >= 256 || domain.is_null() {
             return Err("typed array outside bounded allocation contract".into());
         }
         Ok(WorkerRequest {
@@ -381,13 +406,7 @@ impl Registry {
         let element = unsafe { (api.element)(class) };
         let layout = api.element_layout(element)?;
         let length = unsafe { (api.length)(native) };
-        let payload_size = layout
-            .width
-            .checked_mul(length)
-            .ok_or("borrowed array payload overflow")?;
-        if length > 4096 || payload_size > 65504 {
-            return Err("borrowed array payload exceeds bounds".into());
-        }
+        let payload_size = bounded_payload(&layout, length)?;
         let header = HostRegion::owned(16)?;
         header.with_native(|p| unsafe {
             p.as_ptr()
@@ -819,6 +838,34 @@ impl Registry {
 mod tests {
     use super::*;
     #[test]
+    fn scalar_assets_fit_identity_slot_without_expanding_reference_traversal() {
+        let scalar = value_layout::Layout {
+            class: 1usize as Object,
+            width: 1,
+            alignment: 1,
+            value: true,
+            slots: vec![value_layout::Slot {
+                field: ptr::null_mut(),
+                offset: 0,
+                nested: false,
+                shape: value_layout::Shape::Scalar {
+                    width: 1,
+                    boolean: false,
+                },
+            }],
+        };
+        assert_eq!(bounded_payload(&scalar, 19642).unwrap(), 19642);
+        assert_eq!(bounded_payload(&scalar, 65504).unwrap(), 65504);
+        assert!(bounded_payload(&scalar, 65505).is_err());
+        assert!(bounded_payload(&value_layout::Layout::reference(1usize as Object), 4097).is_err());
+        let mut boolean = scalar;
+        boolean.slots[0].shape = value_layout::Shape::Scalar {
+            width: 1,
+            boolean: true,
+        };
+        assert!(bounded_payload(&boolean, 4097).is_err());
+    }
+    #[test]
     fn intptr_arrays_accept_only_null_and_live_guest_data_handles() {
         let valid = [0u64, 0x30001000];
         let bytes: Vec<_> = valid.into_iter().flat_map(u64::to_le_bytes).collect();
@@ -897,6 +944,29 @@ mod tests {
             reference_images: [1usize as Object; 6],
             values: [None; 6],
         }
+    }
+    #[test]
+    fn gpu_arrays_reject_reference_pointer_and_multidimensional_shapes() {
+        let api = api();
+        assert!(api.blittable_array(ptr::null_mut()).is_err());
+        // Reference arrays must never upload rooted tokens or native pointers
+        // as if they were numeric GPU data, even when their size is eight bytes.
+        assert!(api.blittable_array(4usize as Object).is_err());
+        assert!(Api {
+            intptr: 2usize as Object,
+            ..api
+        }
+        .blittable_array(4usize as Object)
+        .is_err());
+        unsafe extern "C" fn rank_two(_: Object) -> u32 {
+            2
+        }
+        assert!(Api {
+            rank: rank_two,
+            ..api
+        }
+        .blittable_array(4usize as Object)
+        .is_err());
     }
     #[test]
     fn worker_allocates_on_its_os_thread_and_keeps_array_root_through_publication() {

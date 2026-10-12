@@ -789,7 +789,7 @@ impl Api {
         if method.is_null()
             || owner.is_null()
             || specs.is_empty()
-            || specs.len() > 6
+            || specs.len() > 9
             || !images.contains(&unsafe { (self.image)(owner) })
             || unsafe { (self.class)(method) } != owner
         {

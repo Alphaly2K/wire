@@ -116,12 +116,14 @@ fn with_routes<'a, T>(
     if !worker_registration {
         super::unsafe_buffers::drain_finalizers()?;
         super::profiler_recorders::drain_finalizers()?;
+        super::logging::drain_finalizers()?;
     }
     let result = operation();
     super::burst_shared::validate_handles()?;
     if !worker_registration {
         super::unsafe_buffers::drain_finalizers()?;
         super::profiler_recorders::drain_finalizers()?;
+        super::logging::drain_finalizers()?;
     }
     temporary.verify()?;
     drop(scope);
@@ -135,6 +137,9 @@ fn with_routes<'a, T>(
 }
 // Native classlib services borrow the existing guest process only for a bounded
 // synchronous operation. No managed/native pointer is passed into this closure.
+pub(super) fn has_owner() -> bool {
+    OWNER.with(|slot| !slot.get().is_null())
+}
 pub(super) fn with_service<T>(
     operation: impl FnOnce(&mut Memory, &mut Runtime64) -> Result<T, String>,
 ) -> Result<T, String> {
@@ -329,6 +334,21 @@ fn execute_scalar_guest(
                     owner
                         .managed_reentries
                         .set(owner.managed_reentries.get() + 1);
+                } else if super::reentry::handles_allocation(&binding.original_function) {
+                    let prepared = route
+                        .try_borrow_mut()
+                        .map_err(|_| "nested allocation metadata is already borrowed")?
+                        .prepare_allocation(
+                            &binding.original_function,
+                            &cpu,
+                            &owner.memory.borrow(),
+                        )?;
+                    let allocation = prepared.execute()?;
+                    let token = route
+                        .try_borrow_mut()
+                        .map_err(|_| "nested allocation completion metadata is already borrowed")?
+                        .finish_allocation(allocation, &mut owner.memory.borrow_mut())?;
+                    cpu.return_integer(&owner.memory.borrow(), token)?;
                 } else {
                     route
                         .try_borrow_mut()
@@ -341,7 +361,8 @@ fn execute_scalar_guest(
                         )
                         .map_err(|error| {
                             format!(
-                                "{error}; args={:x?}; rsp={:#x}",
+                                "{error}; function={}; args={:x?}; rsp={:#x}",
+                                binding.original_function,
                                 [cpu.regs[1], cpu.regs[2], cpu.regs[8], cpu.regs[9]],
                                 cpu.regs[4]
                             )
@@ -835,7 +856,7 @@ fn scalar(slot: usize, args: &[u64]) -> u64 {
     match result {
         Ok(Ok(value)) => value,
         other => {
-            eprintln!("NATIVE_MONO_CALLBACK_REJECT: {other:?}");
+            eprintln!("NATIVE_MONO_CALLBACK_REJECT: slot={slot}; args={args:x?}; result={other:?}; backtrace={}", std::backtrace::Backtrace::force_capture());
             std::process::abort();
         }
     }
@@ -913,6 +934,59 @@ fn reject_profiler(reason: &str) -> ! {
 #[cfg(test)]
 mod tests {
     use super::super::super::super::memory::{EXECUTE, READ, WRITE};
+    unsafe extern "C" fn allocating_string(
+        _: super::super::Object,
+        _: *const super::super::c_char,
+        _: u32,
+    ) -> super::super::Object {
+        // A heap expansion callback must execute real guest instructions while
+        // the prepared native allocation holds no Rust memory/metadata borrow.
+        unsafe { profiler_resize(ptr::null_mut(), 0x20000) };
+        4usize as super::super::Object
+    }
+    #[test]
+    fn prepared_native_allocation_allows_synchronous_heap_resize_guest_reentry() {
+        let mut memory = Memory::default();
+        memory.map(0x1000, 4096, READ | WRITE | EXECUTE).unwrap();
+        memory.write(0x1000, &[0x48, 0x89, 0xd0, 0xc3]).unwrap();
+        memory
+            .map(super::super::super::STACK, 65536, READ | WRITE)
+            .unwrap();
+        let mut runtime = Runtime64::new(
+            &mut memory,
+            0x140000000,
+            super::super::super::STACK,
+            65536,
+            "allocation-profiler",
+        )
+        .unwrap();
+        let (result, stats) = with_owner(
+            &mut memory,
+            &mut runtime,
+            [0, 0, 0, 0, 0x1000, 0, 0],
+            || {
+                let allocation = super::super::reentry::PreparedAllocation::String {
+                    new: allocating_string,
+                    roots: super::super::instances::tests::identity_api(),
+                    domain: ptr::null_mut(),
+                    bytes: vec![b'a', b'b'],
+                    empty: None,
+                }
+                .execute()?;
+                match allocation {
+                    super::super::reentry::Allocated::String(root) => {
+                        assert_eq!(root.target()?, 4usize as super::super::Object)
+                    }
+                    _ => return Err("allocation reply kind changed".into()),
+                }
+                Ok::<_, String>(())
+            },
+        )
+        .unwrap();
+        result.unwrap();
+        assert_eq!(stats.calls[4], 1);
+        assert!(memory.read_int(STACK_BASE, 8).is_err());
+    }
     use super::*;
     #[test]
     fn utf16_arguments_preserve_two_spans_float_output_and_fault_cleanup() {

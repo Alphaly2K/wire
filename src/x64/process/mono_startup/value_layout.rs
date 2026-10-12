@@ -1,7 +1,7 @@
 //! Bounded metadata-derived value layouts. Only declared scalar/enum/reference
 //! slots are copied; padding is owned zero bytes, never native heap contents.
 use super::{instances, Object};
-use std::ptr;
+use std::{ffi::CStr, ptr};
 #[derive(Clone, Copy)]
 pub(super) enum Shape {
     Scalar { width: usize, boolean: bool },
@@ -161,6 +161,7 @@ impl Layout {
 }
 #[derive(Clone, Copy)]
 pub(super) struct Api {
+    closed: super::closed_types::Api,
     image: unsafe extern "C" fn(Object) -> Object,
     value: unsafe extern "C" fn(Object) -> i32,
     size: unsafe extern "C" fn(Object, *mut u32) -> i32,
@@ -174,6 +175,8 @@ pub(super) struct Api {
     type_class: unsafe extern "C" fn(Object) -> Object,
     is_enum: unsafe extern "C" fn(Object) -> i32,
     enum_base: unsafe extern "C" fn(Object) -> Object,
+    class_name: unsafe extern "C" fn(Object) -> *const libc::c_char,
+    field_name: unsafe extern "C" fn(Object) -> *const libc::c_char,
     owned_image: Object,
 }
 pub(super) fn enum_width(kind: u32) -> Option<usize> {
@@ -209,6 +212,7 @@ impl Api {
             }};
         }
         Ok(Self {
+            closed: super::closed_types::Api::load(library)?,
             image: sym!(
                 "mono_class_get_image",
                 unsafe extern "C" fn(Object) -> Object
@@ -246,6 +250,14 @@ impl Api {
                 "mono_class_enum_basetype",
                 unsafe extern "C" fn(Object) -> Object
             ),
+            class_name: sym!(
+                "mono_class_get_name",
+                unsafe extern "C" fn(Object) -> *const libc::c_char
+            ),
+            field_name: sym!(
+                "mono_field_get_name",
+                unsafe extern "C" fn(Object) -> *const libc::c_char
+            ),
             owned_image,
         })
     }
@@ -262,6 +274,7 @@ impl Api {
         if !self.owns(class) || unsafe { (self.value)(class) } == 0 {
             return Err("value layout requires an owned metadata value class".into());
         }
+        self.closed.concrete(class)?;
         path.push(class);
         let mut alignment = 0;
         let width = unsafe { (self.size)(class, &mut alignment) };
@@ -303,12 +316,13 @@ impl Api {
                 return Err("value field points into native object header".into());
             }
             let offset = (offset - 16) as usize;
-            if kind == 0x11 {
+            if matches!(kind, 0x11 | 0x15) {
                 let target = unsafe { (self.type_class)(ty) };
                 if target.is_null() {
                     return Err("nested value class absent".into());
                 }
-                if unsafe { (self.is_enum)(target) } == 0 {
+                self.closed.concrete(target)?;
+                if unsafe { (self.value)(target) } != 0 && unsafe { (self.is_enum)(target) } == 0 {
                     let child = self.layout_inner(target, path)?;
                     let end = offset
                         .checked_add(child.width)
@@ -335,8 +349,13 @@ impl Api {
             }
             let shape = if let Some(shape) = scalar(kind) {
                 shape
-            } else if matches!(kind, 0xe | 0x12 | 0x1d) {
-                Shape::Reference(unsafe { (self.type_class)(ty) })
+            } else if matches!(kind, 0xe | 0x12 | 0x15 | 0x1c | 0x1d) {
+                let target = unsafe { (self.type_class)(ty) };
+                if target.is_null() || unsafe { (self.value)(target) } != 0 {
+                    return Err("reference value field has absent/value class".into());
+                }
+                self.closed.concrete(target)?;
+                Shape::Reference(target)
             } else if kind == 0x11 {
                 let target = unsafe { (self.type_class)(ty) };
                 if target.is_null() {
@@ -359,7 +378,20 @@ impl Api {
                     shape
                 }
             } else {
-                return Err("raw pointer/generic/complex value field is not admitted".into());
+                let label = |name: *const libc::c_char| {
+                    if name.is_null() {
+                        "<absent>".into()
+                    } else {
+                        unsafe { CStr::from_ptr(name) }
+                            .to_string_lossy()
+                            .into_owned()
+                    }
+                };
+                return Err(format!(
+                    "raw pointer/generic/complex value field is not admitted: class={} field={} kind={kind:#x} offset={offset}",
+                    label(unsafe { (self.class_name)(class) }),
+                    label(unsafe { (self.field_name)(field) }),
+                ));
             };
             let end = offset
                 .checked_add(shape.width())
@@ -386,6 +418,105 @@ impl Api {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+    thread_local! { static FIELD_KIND: Cell<u32> = const { Cell::new(0x15) }; }
+    unsafe extern "C" fn test_image(_: Object) -> Object {
+        1usize as Object
+    }
+    unsafe extern "C" fn test_value(class: Object) -> i32 {
+        i32::from(class == 10usize as Object)
+    }
+    unsafe extern "C" fn test_all_value(_: Object) -> i32 {
+        1
+    }
+    unsafe extern "C" fn test_size(_: Object, alignment: *mut u32) -> i32 {
+        unsafe { *alignment = 8 };
+        8
+    }
+    unsafe extern "C" fn test_fields(_: Object, iterator: *mut Object) -> Object {
+        if unsafe { *iterator }.is_null() {
+            unsafe { *iterator = 1usize as Object };
+            1usize as Object
+        } else {
+            ptr::null_mut()
+        }
+    }
+    unsafe extern "C" fn test_zero(_: Object) -> u32 {
+        0
+    }
+    unsafe extern "C" fn test_parent(_: Object) -> Object {
+        10usize as Object
+    }
+    unsafe extern "C" fn test_offset(_: Object) -> i32 {
+        16
+    }
+    unsafe extern "C" fn test_type(_: Object) -> Object {
+        3usize as Object
+    }
+    unsafe extern "C" fn test_kind(_: Object) -> u32 {
+        FIELD_KIND.with(Cell::get)
+    }
+    unsafe extern "C" fn test_class(_: Object) -> Object {
+        2usize as Object
+    }
+    unsafe extern "C" fn test_enum(_: Object) -> i32 {
+        0
+    }
+    unsafe extern "C" fn test_name(_: Object) -> *const libc::c_char {
+        c"test".as_ptr()
+    }
+    #[test]
+    fn value_fields_admit_closed_generic_and_object_references_but_reject_pointers() {
+        let api = Api {
+            closed: super::super::closed_types::tests::api(),
+            image: test_image,
+            value: test_value,
+            size: test_size,
+            fields: test_fields,
+            flags: test_zero,
+            parent: test_parent,
+            offset: test_offset,
+            ty: test_type,
+            kind: test_kind,
+            byref: test_zero,
+            type_class: test_class,
+            is_enum: test_enum,
+            enum_base: test_type,
+            class_name: test_name,
+            field_name: test_name,
+            owned_image: 1usize as Object,
+        };
+        for kind in [0x15, 0x1c] {
+            FIELD_KIND.with(|value| value.set(kind));
+            let layout = api.layout(10usize as Object).unwrap();
+            assert!(matches!(layout.slots[0].shape, Shape::Reference(_)));
+            assert!(layout.scalar_inline().is_err());
+            layout
+                .validate(
+                    &[0; 8],
+                    api_for_empty_refs(),
+                    &instances::Registry::default(),
+                )
+                .unwrap();
+            assert!(layout
+                .validate(
+                    &99u64.to_le_bytes(),
+                    api_for_empty_refs(),
+                    &instances::Registry::default()
+                )
+                .is_err());
+        }
+        for kind in [0xf, 0x13, 0x16, 0x18, 0x19, 0x1b, 0x1e] {
+            FIELD_KIND.with(|value| value.set(kind));
+            assert!(api.layout(10usize as Object).is_err());
+        }
+        FIELD_KIND.with(|value| value.set(0x15));
+        let value_class = Api {
+            value: test_all_value,
+            ..api
+        };
+        assert!(value_class.layout(10usize as Object).is_err());
+    }
     fn api_for_empty_refs() -> instances::Api {
         instances::tests::api()
     }

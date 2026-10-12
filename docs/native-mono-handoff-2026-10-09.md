@@ -50,6 +50,30 @@ probe-113实际完成两次Unity.VisualScripting.VariablesAsset构造，下一�
 Screen分辨率/刷新率两个typed adapter及全屏/休眠6个scalar接口已实现，继续probe-114。
 当前完整feature回归509 passed/7 ignored；新增Screen族后的定向回归105 passed。
 
+`e728422`已在main提交输入、字符串、PlayerPrefs、资源、nested field与Screen实现。
+probe-114实际97 Present，深色过渡背景，止于mono_gc_max_generation。GC控制族12接口
+已接入，完整510 passed/7 ignored、Clippy通过；probe-115执行真实collection及8个原GC
+callback，root核对成功。下一阻塞SystemInfo.MaxGraphicsBufferSize/ComputeBuffer.InitBuffer。
+GPU buffer成组22个adapter及10个SystemInfo scalar正在验证，证据与所有权约束见
+`native-mono-gpu-startup-2026-10-12.md`。仍未到游戏可交互界面，继续推进。
+
+probe-118实际PropertyToID和Shader.SetGlobalBuffer成功，TextAsset原资源加载返回非NULL。
+ComputeBuffer实际finalizer警告已原engine转发；队列queued=1/drained=1/pending=0，
+unsafe-buffer finalizer同步释放成功，shutdown callback=1。完整feature513 passed/7 ignored，
+Shader all-target Clippy clean。probe-119进一步实际TextAsset请求19642个Byte；旧4096元素
+限制拒绝。现scalar数组扩展到既有64KiB identity slot容量，reference/Boolean遍历界限不变；
+继续probe-120。尚无Naninovel标题/可交互游戏验收。
+
+probe-120真实读取两份TextAsset并进入Naninovel.EngineTypes构造/JSON；下一阻塞是旧String
+registry1024身份容量。已改按实际payload的4KiB对齐槽位，保留原128MiB arena边界与全部
+GC/readonly/noexec检查，增加BTreeMap反查及1500字符串生命周期回归，继续probe-121。
+
+probe-122完整调用栈确认第二份TextAsset array new触发BDWGC heap resize，旧metadata借用
+跨native分配而阻止原profiler回调。现Array/String同步allocation也使用prepare/execute/finish
+和真实临时pin；定向112 passed。probe-123已反序列化19639单位Naninovel.EngineTypes JSON，
+进入EngineConfiguration及AudioConfiguration；下一私有字段barrier正改用已有完整storage
+布局检查，继续probe-124。游戏未可交互，full_game_backend仍false。
+
 已有阶段提交：
 
 | 提交 | 结果 |
