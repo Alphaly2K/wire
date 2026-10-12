@@ -215,3 +215,13 @@ probe-146 实际越过 List<CanvasGroup> 投影，执行到其元素的 enabled 
 查询；后者缺 `CanvasGroup::get_interactable_Injected`。完整回归 **528 passed /
 7 ignored**，build 与 Clippy clean。`Component[]` 写入 `CanvasGroup[]` 的类型限制
 未放宽；成功来自原带类型数组查询与真实 List<T> IL。仍未到可交互界面。
+
+CanvasGroup 八个状态接口和 CanvasRenderer 常用的颜色、材质、纹理、网格、裁剪
+与深度共追加 41 个固定声明；UI 表合计 114 项，完整 target/signature 验证后安装。
+Color 与 Rect/Vector2 一样要求完整标量布局；带 index 的 material setter 按原
+三参数 ABI 转发。完整回归 **528 passed / 7 ignored**，build/Clippy 通过。
+
+probe-147 实际执行 CanvasGroup 的 interactable/ignoreParentGroups，继续到
+`Naninovel.ScriptableUIBehaviour::Awake`。25.07 秒后缺 Component 的
+GetComponentFastPath_Injected。下一步核对原生 Mono 解释帧中 CastHelper<T> 的
+精确引用输出槽位；不能将 IL 给出的任意 IntPtr 当作可写宿主地址。

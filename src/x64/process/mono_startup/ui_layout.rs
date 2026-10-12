@@ -23,6 +23,7 @@ enum Shape {
     ValueSet(&'static CStr, usize),
     Handle(&'static CStr, bool),
     SetHandle,
+    SetIndexedHandle,
     StaticHandle(&'static CStr),
     Void,
     StaticBoolean,
@@ -83,6 +84,9 @@ macro_rules! shape {
     };
     (handle_set) => {
         Shape::SetHandle
+    };
+    (handle_index_set) => {
+        Shape::SetIndexedHandle
     };
     (static_handle, $class:expr) => {
         Shape::StaticHandle($class)
@@ -172,6 +176,25 @@ macro_rules! adapter {
                     engine_objects::engine_pointer(value)?
                 };
                 callbacks::guest_arguments(b.targets[Slot::$name as usize], &[p, value])?;
+                note(Slot::$name as usize);
+                Ok(())
+            });
+        }
+    };
+    ($name:ident, handle_index_set) => {
+        unsafe extern "C" fn $name(p: usize, value: usize, index: i32) {
+            checked(|| {
+                let b = binding()?;
+                let p = engine_objects::engine_pointer(p)?;
+                let value = if value == 0 {
+                    0
+                } else {
+                    engine_objects::engine_pointer(value)?
+                };
+                callbacks::guest_arguments(
+                    b.targets[Slot::$name as usize],
+                    &[p, value, index as u32 as u64],
+                )?;
                 note(Slot::$name as usize);
                 Ok(())
             });
@@ -292,6 +315,47 @@ apis! {
     set_changed, c"Transform", c"set_hasChanged_Injected", 0x1800cce00, (bool_set);
     child, c"Transform", c"GetChild_Injected", 0x1800cd150, (handle_at, c"Transform");
     old_child_count, c"Transform", c"GetChildCount_Injected", 0x1800cc7a0, (int_get);
+    group_alpha, c"CanvasGroup", c"get_alpha_Injected", 0x18009c230, (float_get);
+    set_group_alpha, c"CanvasGroup", c"set_alpha_Injected", 0x1801a2df0, (float_set);
+    group_interactable, c"CanvasGroup", c"get_interactable_Injected", 0x180139640, (bool_get);
+    set_group_interactable, c"CanvasGroup", c"set_interactable_Injected", 0x1801a2ea0, (bool_set);
+    group_raycasts, c"CanvasGroup", c"get_blocksRaycasts_Injected", 0x18013c2e0, (bool_get);
+    set_group_raycasts, c"CanvasGroup", c"set_blocksRaycasts_Injected", 0x1801a2f30, (bool_set);
+    ignore_groups, c"CanvasGroup", c"get_ignoreParentGroups_Injected", 0x1801a2fc0, (bool_get);
+    set_ignore_groups, c"CanvasGroup", c"set_ignoreParentGroups_Injected", 0x1801a2fd0, (bool_set);
+    renderer_pop, c"CanvasRenderer", c"get_hasPopInstruction_Injected", 0x1801a3060, (bool_get);
+    set_renderer_pop, c"CanvasRenderer", c"set_hasPopInstruction_Injected", 0x1801a3070, (bool_set);
+    materials, c"CanvasRenderer", c"get_materialCount_Injected", 0x180075430, (int_get);
+    set_materials, c"CanvasRenderer", c"set_materialCount_Injected", 0x1801a30a0, (int_set);
+    pop_materials, c"CanvasRenderer", c"get_popMaterialCount_Injected", 0x1800d0880, (int_get);
+    set_pop_materials, c"CanvasRenderer", c"set_popMaterialCount_Injected", 0x1801a30e0, (int_set);
+    absolute_depth, c"CanvasRenderer", c"get_absoluteDepth_Injected", 0x1801a3120, (int_get);
+    renderer_moved, c"CanvasRenderer", c"get_hasMoved_Injected", 0x1801a3140, (bool_get);
+    cull_transparent, c"CanvasRenderer", c"get_cullTransparentMesh_Injected", 0x1801a3170, (bool_get);
+    set_cull_transparent, c"CanvasRenderer", c"set_cullTransparentMesh_Injected", 0x1801a3180, (bool_set);
+    has_clipping, c"CanvasRenderer", c"get_hasRectClipping_Injected", 0x1801a31a0, (bool_get);
+    relative_depth, c"CanvasRenderer", c"get_relativeDepth_Injected", 0x1801a31b0, (int_get);
+    renderer_cull, c"CanvasRenderer", c"get_cull_Injected", 0x1801a31d0, (bool_get);
+    set_renderer_cull, c"CanvasRenderer", c"set_cull_Injected", 0x1801a31e0, (bool_set);
+    set_renderer_color, c"CanvasRenderer", c"SetColor_Injected", 0x1801a3200, (value_set, c"Color", 16);
+    renderer_color, c"CanvasRenderer", c"GetColor_Injected", 0x1801a32c0, (value_get, c"Color", 16);
+    enable_clipping, c"CanvasRenderer", c"EnableRectClipping_Injected", 0x1801a32f0, (value_set, c"Rect", 16);
+    clipping_softness, c"CanvasRenderer", c"get_clippingSoftness_Injected", 0x1801a33c0, (value_get, c"Vector2", 8);
+    set_clipping_softness, c"CanvasRenderer", c"set_clippingSoftness_Injected", 0x1801a33e0, (value_set, c"Vector2", 8);
+    disable_clipping, c"CanvasRenderer", c"DisableRectClipping_Injected", 0x1801a3420, (void);
+    set_renderer_material, c"CanvasRenderer", c"SetMaterial_Injected", 0x1801a3440, (handle_index_set);
+    renderer_material, c"CanvasRenderer", c"GetMaterial_Injected", 0x1801a3470, (handle_at, c"Material");
+    set_renderer_pop_material, c"CanvasRenderer", c"SetPopMaterial_Injected", 0x1801a34c0, (handle_index_set);
+    renderer_pop_material, c"CanvasRenderer", c"GetPopMaterial_Injected", 0x1801a34f0, (handle_at, c"Material");
+    set_texture, c"CanvasRenderer", c"SetTexture_Injected", 0x1801a3550, (handle_set);
+    secondary_textures, c"CanvasRenderer", c"GetSecondaryTextureCount_Injected", 0x180083dc0, (int_get);
+    set_secondary_textures, c"CanvasRenderer", c"SetSecondaryTextureCount_Injected", 0x1801a3670, (int_set);
+    secondary_texture, c"CanvasRenderer", c"GetSecondaryTexture_Injected", 0x1801a3ba0, (handle_at, c"Texture");
+    set_alpha_texture, c"CanvasRenderer", c"SetAlphaTexture_Injected", 0x1801a3fb0, (handle_set);
+    set_mesh, c"CanvasRenderer", c"SetMesh_Injected", 0x1801a3fe0, (handle_set);
+    mesh, c"CanvasRenderer", c"GetMesh_Injected", 0x1801a3ff0, (handle_get, c"Mesh");
+    clear_renderer, c"CanvasRenderer", c"Clear_Injected", 0x1801a4160, (void);
+    inherited_alpha, c"CanvasRenderer", c"GetInheritedAlpha_Injected", 0x1801a4170, (float_get);
 }
 pub(super) fn installed() -> bool {
     BINDING.get().is_some()
@@ -409,6 +473,7 @@ pub(super) fn install(
                 vec![pointer]
             }
             Shape::SetHandle => vec![void, pointer, pointer],
+            Shape::SetIndexedHandle => vec![void, pointer, pointer, integer],
             Shape::Void => vec![void, pointer],
             Shape::StaticBoolean => vec![void, scalar(Scalar::Boolean)?],
             Shape::Parent => vec![void, pointer, pointer, scalar(Scalar::Boolean)?],
