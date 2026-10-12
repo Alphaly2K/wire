@@ -292,3 +292,17 @@ color format、mipmap count、sRGB 和 shadow sampling，以及原格式转换/�
 后者的 RuntimeType token 已在 reflection registry，尚未接入通用 typed-array
 reference root 路由。下一步统一其 canonical root 及真正的类型屏障检查。
 当前 full_game_backend=false，未宣称标题或可交互界面成功。
+
+probe-153 发现简单地把所有 reflection token 加入 ordinary roots 会让配置 prefab
+加载回退：有些 RuntimeType 已先被普通对象图发布，不能再给同一 native identity
+分配第二个 token。现统一所有 RuntimeType 返回入口；ordinary graph 先发现时复用
+它的原 token，reflection 先发现时在 ordinary root service 启用前接入既有 roots。
+已发布身份发生冲突仍拒绝，reference assignability、exact RuntimeType/MonoType
+验证和 readonly metadata cell 均保留。新增两种发现顺序、冲突和退休后的回归。
+同时按真实声明接入 Object.MarkDirty_Injected，修复进度 Slider 的缺失调用。
+完整 release feature 回归 **531 passed / 7 ignored**，harness 4 项通过。
+Release build 与 all-target Clippy 通过。probe-154 实际越过旧冲突与 MarkDirty，
+完成 GetCurrentPlayerLoopInternal；28.64 秒后原 SetPlayerLoopInternal 在
+`0x1800d5442` 读取 graph-first RuntimeType 的 +16 metadata cell 时未映射。
+这次数组引用屏障已成功，剩下的是 setter 输入对象图的反射 payload publication。
+此外进度 Slider 下一处缺 UISystemProfilerApi.AddMarker_Injected。

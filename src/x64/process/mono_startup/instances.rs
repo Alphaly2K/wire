@@ -242,6 +242,18 @@ impl Registry {
     pub(super) fn contains(&self, token: u64) -> bool {
         !self.released && !self.views_retired && self.roots.contains_key(&token)
     }
+    pub(super) fn token_for_native(&self, api: Api, native: Object) -> Result<Option<u64>, String> {
+        if self.released || self.views_retired {
+            return Err("ordinary reverse lookup after root retirement".into());
+        }
+        let Some(&token) = self.reverse.get(&(native as usize)) else {
+            return Ok(None);
+        };
+        if self.native(api, token)? != native {
+            return Err("ordinary reverse root identity changed".into());
+        }
+        Ok(Some(token))
+    }
     /// Candidate for metadata discovery only. This never authorizes a write:
     /// the caller must match the exact declared field and its complete layout.
     pub(super) fn interior_owner(&self, address: u64) -> Option<u64> {
@@ -492,6 +504,20 @@ impl Registry {
             || !(token - 0x6ffe90000000).is_multiple_of(256)
         {
             return Err("array alias outside canonical empty-array arena".into());
+        }
+        self.adopt_canonical(api, token, native)
+    }
+    /// The reflection registry has already checked exact RuntimeType class and
+    /// native MonoType payload. Share that canonical identity with generic
+    /// reference fields/arrays without exposing its object header or pointer.
+    pub(super) fn adopt_reflection_type(
+        &mut self,
+        api: Api,
+        token: u64,
+        native: Object,
+    ) -> Result<(), String> {
+        if !super::reflection::canonical_token(token) {
+            return Err("RuntimeType alias outside canonical reflection arena".into());
         }
         self.adopt_canonical(api, token, native)
     }
@@ -934,6 +960,38 @@ pub(super) mod tests {
         assert_eq!(FREES.with(Cell::get), 2);
         assert!(registry
             .adopt_empty_array(api, token, 4usize as Object)
+            .is_err());
+    }
+    #[test]
+    fn canonical_reflection_alias_shares_identity_and_rejects_foreign_or_changed_tokens() {
+        let api = api();
+        let mut registry = Registry::default();
+        let token = 0x6ffe80000000;
+        for invalid in [token - 256, token + 1, token + 32768 * 256] {
+            assert!(registry
+                .adopt_reflection_type(api, invalid, 4usize as Object)
+                .is_err());
+        }
+        registry
+            .adopt_reflection_type(api, token, 4usize as Object)
+            .unwrap();
+        registry
+            .adopt_reflection_type(api, token, 4usize as Object)
+            .unwrap();
+        assert_eq!(registry.borrow(api, 4usize as Object).unwrap(), token);
+        assert!(registry
+            .adopt_reflection_type(api, token, 8usize as Object)
+            .is_err());
+        assert!(registry
+            .adopt_reflection_type(api, token + 256, 4usize as Object)
+            .is_err());
+        let mut memory = Memory::default();
+        registry.publish(&mut memory, token).unwrap();
+        assert!(memory.read_int(token, 8).is_err());
+        registry.release(api);
+        registry.retire_views(&mut memory).unwrap();
+        assert!(registry
+            .adopt_reflection_type(api, token, 4usize as Object)
             .is_err());
     }
     #[test]

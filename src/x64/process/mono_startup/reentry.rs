@@ -319,7 +319,12 @@ impl Metadata<'_> {
         match allocation {
             Allocated::RuntimeType(pin, expected) => {
                 let native = pin.target()?;
-                let (token, actual) = roots.reflection.1.root_type(roots.reflection.0, native)?;
+                let (token, actual) = roots.reflection.1.root_type_in(
+                    roots.reflection.0,
+                    roots.api,
+                    roots.roots,
+                    native,
+                )?;
                 if actual != expected {
                     return Err("nested RuntimeType changed metadata identity".into());
                 }
@@ -415,7 +420,11 @@ impl Metadata<'_> {
             .objects
             .as_mut()
             .ok_or("reflection callback has no owned object service")?;
-        let (token, ty) = roots.reflection.1.root_type(roots.reflection.0, native)?;
+        let (token, ty) =
+            roots
+                .reflection
+                .1
+                .root_type_in(roots.reflection.0, roots.api, roots.roots, native)?;
         let ty = self
             .metadata
             .wrap(memory, metadata::Value::Handle(ty, metadata::Kind::Type))?;

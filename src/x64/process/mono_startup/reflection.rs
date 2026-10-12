@@ -4,6 +4,9 @@ use super::super::super::memory::{shared::HostRegion, READ};
 use super::{c_char, Memory, Object};
 use std::{collections::BTreeMap, ptr};
 const BASE: u64 = 0x6ffe80000000;
+pub(super) fn canonical_token(token: u64) -> bool {
+    (BASE..BASE + 32768 * 256).contains(&token) && (token - BASE).is_multiple_of(256)
+}
 #[derive(Clone, Copy)]
 pub(super) struct Api {
     strong: unsafe extern "C" fn(Object, i32) -> Object,
@@ -71,6 +74,51 @@ impl Registry {
         !self.roots_released && !self.retired && self.entries.contains_key(&token)
     }
     pub(super) fn root_type(&mut self, api: Api, native: Object) -> Result<(u64, Object), String> {
+        self.root_type_at(api, native, None)
+    }
+    /// Reuse a rooted graph's existing identity if it reached RuntimeType first.
+    /// Early reflection roots are adopted before the generic graph starts, so
+    /// both orders produce one token, not pointer aliases for the same object.
+    pub(super) fn root_type_in(
+        &mut self,
+        api: Api,
+        roots_api: super::instances::Api,
+        roots: &mut super::instances::Registry,
+        native: Object,
+    ) -> Result<(u64, Object), String> {
+        let existing = roots.token_for_native(roots_api, native)?;
+        let result = self.root_type_at(api, native, existing)?;
+        if result.0 != 0 {
+            if canonical_token(result.0) {
+                roots.adopt_reflection_type(roots_api, result.0, native)?;
+            } else if roots.native(roots_api, result.0)? != native {
+                return Err("reflection graph root identity changed".into());
+            }
+        }
+        Ok(result)
+    }
+    pub(super) fn adopt_early_roots(
+        &self,
+        api: Api,
+        roots_api: super::instances::Api,
+        roots: &mut super::instances::Registry,
+    ) -> Result<(), String> {
+        for &token in self.entries.keys() {
+            let native = self.native(api, token)?;
+            if canonical_token(token) {
+                roots.adopt_reflection_type(roots_api, token, native)?;
+            } else if roots.native(roots_api, token)? != native {
+                return Err("reflection early root identity changed".into());
+            }
+        }
+        Ok(())
+    }
+    fn root_type_at(
+        &mut self,
+        api: Api,
+        native: Object,
+        existing: Option<u64>,
+    ) -> Result<(u64, Object), String> {
         if self.roots_released || self.retired {
             return Err("reflection root registry retired/full".into());
         }
@@ -78,6 +126,9 @@ impl Registry {
             return Ok((0, ptr::null_mut()));
         }
         if let Some(&token) = self.reverse.get(&(native as usize)) {
+            if existing.is_some_and(|existing| existing != token) {
+                return Err("RuntimeType has conflicting published root identities".into());
+            }
             if self.native(api, token)? != native {
                 return Err("reflection reverse identity changed".into());
             }
@@ -112,7 +163,10 @@ impl Registry {
             {
                 return Err("RuntimeType metadata payload ABI mismatch".into());
             }
-            let token = BASE + self.entries.len() as u64 * 256;
+            let token = existing.unwrap_or(BASE + self.entries.len() as u64 * 256);
+            if self.entries.contains_key(&token) {
+                return Err("reflection root token already occupied".into());
+            }
             self.entries.insert(
                 token,
                 Entry {
@@ -244,6 +298,98 @@ mod tests {
     }
     unsafe extern "C" fn get_type(p: Object) -> Object {
         unsafe { p.cast::<u8>().add(16).cast::<Object>().read_unaligned() }
+    }
+    fn api() -> Api {
+        Api {
+            strong,
+            target,
+            free,
+            class,
+            corlib,
+            class_from_name,
+            get_type,
+        }
+    }
+    #[test]
+    fn reflection_and_graph_discovery_orders_preserve_one_readonly_identity() {
+        let api = api();
+        let roots_api = super::super::instances::tests::identity_api();
+        for reflection_first in [true, false] {
+            let mut raw = [0u8; 24];
+            raw[16..24].copy_from_slice(&0x11223344u64.to_ne_bytes());
+            let native = raw.as_mut_ptr().cast();
+            let mut registry = Registry::default();
+            let mut roots = super::super::instances::Registry::default();
+            let mut memory = Memory::default();
+            let first = if reflection_first {
+                let first = registry.root_type(api, native).unwrap().0;
+                registry
+                    .adopt_early_roots(api, roots_api, &mut roots)
+                    .unwrap();
+                assert!(canonical_token(first));
+                first
+            } else {
+                let first = roots.borrow(roots_api, native).unwrap();
+                assert!(!canonical_token(first));
+                first
+            };
+            let (token, ty) = registry
+                .root_type_in(api, roots_api, &mut roots, native)
+                .unwrap();
+            assert_eq!(token, first);
+            assert_eq!(ty as u64, 0x11223344);
+            assert_eq!(roots.borrow(roots_api, native).unwrap(), first);
+            assert_eq!(
+                roots.token_for_native(roots_api, native).unwrap(),
+                Some(first)
+            );
+            assert_eq!(registry.root_type(api, native).unwrap().0, first);
+            assert_eq!(roots.count(), 1);
+            registry
+                .publish(&mut memory, token, 0x6ffe40000100)
+                .unwrap();
+            roots.publish(&mut memory, token).unwrap();
+            assert_eq!(memory.read_int(token + 16, 8).unwrap(), 0x6ffe40000100);
+            assert!(memory.check(token + 16, 8, WRITE).is_err());
+            assert!(memory.check(token + 16, 8, EXECUTE).is_err());
+            assert!(memory.read_int(token, 8).is_err());
+            assert!(registry.publish(&mut memory, token, 0x11223344).is_err());
+            registry.verify(api).unwrap();
+            roots.verify(roots_api).unwrap();
+            roots.release(roots_api);
+            assert!(registry
+                .root_type_in(api, roots_api, &mut roots, native)
+                .is_err());
+            registry.release_roots(api);
+            registry.retire_views(&mut memory).unwrap();
+            roots.retire_views(&mut memory).unwrap();
+            assert!(memory.read_int(token + 16, 8).is_err());
+            assert_eq!(ROOTS.with(Cell::get), 0);
+        }
+    }
+    #[test]
+    fn previously_published_conflicting_runtime_type_identity_is_rejected() {
+        let api = api();
+        let roots_api = super::super::instances::tests::identity_api();
+        let mut raw = [0u8; 24];
+        raw[16..24].copy_from_slice(&0x11223344u64.to_ne_bytes());
+        let native = raw.as_mut_ptr().cast();
+        let mut registry = Registry::default();
+        let mut roots = super::super::instances::Registry::default();
+        let reflection = registry.root_type(api, native).unwrap().0;
+        let graph = roots.borrow(roots_api, native).unwrap();
+        assert_ne!(reflection, graph);
+        assert!(registry
+            .adopt_early_roots(api, roots_api, &mut roots)
+            .is_err());
+        assert!(registry
+            .root_type_in(api, roots_api, &mut roots, native)
+            .is_err());
+        assert_eq!(registry.root_type(api, native).unwrap().0, reflection);
+        assert_eq!(roots.borrow(roots_api, native).unwrap(), graph);
+        roots.release(roots_api);
+        registry.release_roots(api);
+        assert_eq!(ROOTS.with(Cell::get), 0);
     }
     #[test]
     fn reflection_roots_publish_only_typed_metadata_cell_and_retire_without_leaking_native_addresses(

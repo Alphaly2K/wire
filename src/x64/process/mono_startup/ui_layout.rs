@@ -291,6 +291,7 @@ macro_rules! apis {
     };
 }
 apis! {
+    mark_dirty, c"Object", c"MarkDirty_Injected", 0x1800522a0, (void);
     create_render_texture, c"RenderTexture", c"Internal_Create", 0x1800aedf0, (create_reference, c"RenderTexture");
     render_width, c"RenderTexture", c"get_width_Injected", 0x1800ae4e0, (int_get);
     set_render_width, c"RenderTexture", c"set_width_Injected", 0x1800ae4f0, (int_set);

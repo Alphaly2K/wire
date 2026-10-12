@@ -1617,6 +1617,13 @@ impl Probe {
                         self.image_registry.unique_native_image(CORE_MODULE)?,
                     )?;
                     self.instance_api = Some(api);
+                    if let Some(reflection_api) = self.reflection_api {
+                        self.reflection_registry.adopt_early_roots(
+                            reflection_api,
+                            api,
+                            &mut self.instance_registry,
+                        )?;
+                    }
                     api
                 }
             };
@@ -2707,6 +2714,13 @@ impl Probe {
                         })?;
                     let api = api?;
                     self.instance_api = Some(api);
+                    if let Some(reflection_api) = self.reflection_api {
+                        self.reflection_registry.adopt_early_roots(
+                            reflection_api,
+                            api,
+                            &mut self.instance_registry,
+                        )?;
+                    }
                     api
                 }
             };
@@ -3033,7 +3047,16 @@ impl Probe {
             let (result, _) =
                 callbacks::with_owner(memory, runtime, self.callback_targets(), || {
                     let native = unsafe { get(domain, ty) };
-                    let (token, actual) = self.reflection_registry.root_type(api, native)?;
+                    let (token, actual) = if let Some(root_api) = self.instance_api {
+                        self.reflection_registry.root_type_in(
+                            api,
+                            root_api,
+                            &mut self.instance_registry,
+                            native,
+                        )?
+                    } else {
+                        self.reflection_registry.root_type(api, native)?
+                    };
                     if actual != ty {
                         return Err("reflection type object changed metadata identity".into());
                     }
@@ -4124,7 +4147,16 @@ impl Probe {
             if !exception.is_null() {
                 return Err("native System.Type.GetType raised a managed exception; exception ABI not yet admitted".into());
             }
-            self.reflection_registry.root_type(reflection_api, result)
+            if let Some(root_api) = self.instance_api {
+                self.reflection_registry.root_type_in(
+                    reflection_api,
+                    root_api,
+                    &mut self.instance_registry,
+                    result,
+                )
+            } else {
+                self.reflection_registry.root_type(reflection_api, result)
+            }
         })?;
         let (object, ty) = result?;
         let ty_token = self
