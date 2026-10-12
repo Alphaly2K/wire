@@ -274,6 +274,7 @@ def run(cleanup):
         'native_engine_scalar_calls': count_marker('native-engine-scalar-calls'),
         'native_component_state_calls': count_marker('native-component-state-calls'),
         'native_component_query_calls': count_marker('native-component-query-calls'),
+        'native_ui_layout_calls': count_marker('native-ui-layout-calls'),
         'native_engine_object_getter_calls': count_marker('native-engine-object-getter-calls'),
         'native_profiler_recorder_calls': count_marker('native-profiler-recorder-calls'),
         'native_profiler_recorders_created': count_marker('native-profiler-recorders-created'),

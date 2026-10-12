@@ -87,6 +87,7 @@ mod services;
 mod shaders;
 mod subsystems;
 mod text_assets;
+mod ui_layout;
 mod unitytls;
 mod unsafe_buffers;
 mod value_layout;
@@ -3287,6 +3288,9 @@ impl Probe {
                 &self.registry,
             )?;
         }
+        if !ui_layout::installed() {
+            ui_layout::install(library, &managed_images, &self.registry)?;
+        }
         if !input_events::installed() {
             input_events::install(library, &managed_images, &self.registry)?;
         }
@@ -5028,6 +5032,7 @@ impl Probe {
             + &engine_scalars::report()
             + &engine_components::report()
             + &engine_component_queries::report()
+            + &ui_layout::report()
             + &json::report()
             + &profiler_samples::report()
             + &profiler_recorders::report()

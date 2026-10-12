@@ -173,3 +173,18 @@ probe-142 实际越过 `GetComponentsInternal_Injected`，将原生 IL 的 List<
 字段和数组交给原引擎，结果回到 native Mono，继续到 Canvas 的像素比例查询。
 23.55 秒后缺 `Canvas::get_referencePixelsPerUnit_Injected`，尚未完成 UI 克隆。
 当前完整回归仍为 **526 passed / 7 ignored**，release build、Clippy 均通过。
+
+下一批 Canvas / RectTransform / Transform 层级共 73 个固定接口，同样在全部
+真实 signature 和 registration target 校验通过后注册。Canvas scalar、enum、
+material/camera/rootCanvas getter，RectTransform 的 Rect/Vector2 读写和 parent/
+child/sibling 操作均转发原 Unity。enum 核对真实 Int32 底层布局，浮点 setter
+使用原 Win64 参数位置对应的 XMM register，返回读取 XMM0；Rect/Vector2 须有
+完整 non-Boolean scalar 覆盖，按 4B alignment / 16B 或 8B width 检查，复制到
+临时 guest 槽位，回调结束才写回 native byref。所有句柄结果仍经 canonical roots
+与期望 managed class 检查；没有自行计算布局或替代原引擎状态。
+
+这批完整 release feature 回归 **526 passed / 7 ignored**，build 和 all-target
+Clippy clean；probe-143 实际执行 Canvas 的 referencePixelsPerUnit 与 Transform
+GetParent，以及 Component 的 GetComponentsForListInternal。26.99 秒后在下一次
+组件 List backing array 写屏障处遭遇类型不匹配，检查在写入前拒绝；继续诊断
+实际 array class 与 List 字段的期望 class。未实际执行的成员仅算 ABI 安装。
