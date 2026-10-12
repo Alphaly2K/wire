@@ -105,6 +105,7 @@ enum Command {
     Allocation(super::instances::WorkerRequest),
     Invoke(super::constructors::WorkerRequest),
     Virtual(super::virtual_methods::WorkerRequest),
+    Array(Box<super::reference_arrays::WorkerRequest>),
     Close,
 }
 enum Reply {
@@ -113,6 +114,7 @@ enum Reply {
     Attributes(super::attributes::WorkerResult),
     Allocation(super::instances::WorkerAllocation),
     Virtual(super::virtual_methods::WorkerResult),
+    Array(super::reference_arrays::WorkerAllocation),
 }
 struct Completion {
     result: Result<Reply, String>,
@@ -190,6 +192,7 @@ impl Attachment {
                 | Command::Allocation(_)
                 | Command::Invoke(_)
                 | Command::Virtual(_)
+                | Command::Array(_)
         ) {
             self.current()?;
             if unsafe { (self.api.domain)() } as usize != self.root {
@@ -201,6 +204,7 @@ impl Attachment {
                 Command::Allocation(request) => request.execute().map(Reply::Allocation),
                 Command::Invoke(request) => request.execute().map(|()| Reply::Scalar(0)),
                 Command::Virtual(request) => request.execute().map(Reply::Virtual),
+                Command::Array(request) => (*request).execute().map(Reply::Array),
                 _ => unreachable!(),
             };
         }
@@ -268,6 +272,7 @@ impl Attachment {
                 unreachable!()
             }
             Command::Virtual(_) => unreachable!(),
+            Command::Array(_) => unreachable!(),
         }
     }
 }
@@ -630,6 +635,34 @@ impl State {
                 Ok(value)
             }
             _ => Err("worker virtual resolution received mismatched result".into()),
+        }
+    }
+    pub(super) fn allocate_array(
+        &mut self,
+        guest: u64,
+        request: super::reference_arrays::WorkerRequest,
+    ) -> Result<super::reference_arrays::WorkerAllocation, String> {
+        if self.closed || self.owner != Some(thread::current().id()) {
+            return Err("worker array allocation outside live process owner".into());
+        }
+        let api = self
+            .api
+            .ok_or("worker array allocation before native TLS setup")?;
+        let worker = self
+            .workers
+            .get_mut(&guest)
+            .filter(|w| w.attached)
+            .ok_or("worker array allocation before actual root attachment")?;
+        match worker.request(
+            api,
+            Command::Array(Box::new(request)),
+            &mut super::callbacks::worker_profiler,
+        )? {
+            Reply::Array(value) => {
+                self.calls += 1;
+                Ok(value)
+            }
+            _ => Err("worker array allocation received mismatched result".into()),
         }
     }
     pub(super) fn close(&mut self) -> Result<(), String> {

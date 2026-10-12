@@ -1349,7 +1349,13 @@ impl Probe {
             || !self.main_thread_ready
             || (!workers::State::handles(function)
                 && function != "mono_gc_wbarrier_set_field"
-                && !matches!(function, "mono_object_new" | "mono_object_get_class")
+                && !matches!(
+                    function,
+                    "mono_object_new"
+                        | "mono_object_get_class"
+                        | "mono_array_new"
+                        | "mono_array_addr_with_size"
+                )
                 && function != "mono_runtime_invoke"
                 && function != "mono_object_get_virtual_method"
                 && !immutable_image_leaf
@@ -1379,6 +1385,58 @@ impl Probe {
             .checked_add(8)
             .ok_or("Mono worker return stack overflow")?;
         let targets = self.callback_targets();
+        if function == "mono_array_addr_with_size" {
+            let address =
+                self.reference_array_registry
+                    .address(cpu.regs[1], cpu.regs[2], cpu.regs[8])?;
+            return cpu.return_integer(memory, address);
+        }
+        if function == "mono_array_new" {
+            if cpu.regs[1] != ROOT_TOKEN {
+                return Err("worker array allocation requires owned root domain".into());
+            }
+            let native = self
+                .native
+                .as_mut()
+                .ok_or("worker array before native runtime")?;
+            let api = self
+                .reference_array_api
+                .ok_or("worker array before element API")?;
+            let roots = self.instance_api.ok_or("worker array before root API")?;
+            let element = self
+                .metadata_registry
+                .native(cpu.regs[2], metadata::Kind::Class)?;
+            eprintln!(
+                "NATIVE_MONO_WORKER_ARRAY: {}; length={}",
+                self.metadata_registry
+                    .describe_class(native.library, cpu.regs[2])?,
+                cpu.regs[8]
+            );
+            let request = self.reference_array_registry.prepare_worker(
+                api,
+                roots,
+                native.domain,
+                element,
+                cpu.regs[8],
+            )?;
+            let (allocated, stats) =
+                callbacks::with_worker_registration_owner(memory, runtime, targets, || {
+                    native.workers.allocate_array(guest, request)
+                })?;
+            self.gc_events_verified |= stats.gc_events;
+            let (adopted, _) =
+                callbacks::with_worker_registration_owner(memory, runtime, targets, || {
+                    self.reference_array_registry.adopt_worker(
+                        api,
+                        roots,
+                        &mut self.instance_registry,
+                        allocated?,
+                    )
+                })?;
+            let token = adopted?;
+            self.reference_array_registry.publish(memory, token)?;
+            return cpu.return_integer(memory, token);
+        }
         if function == "mono_object_get_virtual_method" {
             let api = self
                 .instance_api
@@ -1409,10 +1467,8 @@ impl Probe {
         }
         if function == "mono_runtime_invoke" {
             let a = [cpu.regs[1], cpu.regs[2], cpu.regs[8], cpu.regs[9]];
-            if a[1] == 0 || a[2] != 0 {
-                return Err(
-                    "worker instance entry requires rooted receiver and zero parameters".into(),
-                );
+            if a[1] == 0 {
+                return Err("worker instance entry requires rooted receiver".into());
             }
             let (stack_base, stack_end) = runtime.native_worker_stack_bounds(memory, cpu)?;
             if a[3] != 0 {
@@ -1464,6 +1520,10 @@ impl Probe {
                     let class = self.instance_registry.class(api, a[1])?;
                     let request = constructors::Api::load(library)?
                         .prepare_worker(library, method, &images, object, class)?;
+                    // Zero parameters are proved by actual method metadata,
+                    // not by the caller's params pointer. Unity may supply an
+                    // unused non-NULL scratch vector even for a void/no-arg IL
+                    // callback. It is never dereferenced or forwarded here.
                     Ok::<_, String>((request, object, class))
                 })?;
             let (request, object, class) = prepared?;
@@ -1766,6 +1826,56 @@ impl Probe {
         }
         if function == "mono_gc_wbarrier_set_field" {
             let a = [cpu.regs[1], cpu.regs[2], cpu.regs[8], cpu.regs[9]];
+            let array = self.reference_array_registry.has_reference(a[0], a[1]);
+            let field = self.field_registry.has_reference(a[0], a[1]);
+            if array || field {
+                let api = self
+                    .instance_api
+                    .ok_or("worker managed reference before roots")?;
+                let (domain, stats) =
+                    callbacks::with_worker_registration_owner(memory, runtime, targets, || {
+                        native.workers.dispatch(
+                            native.library,
+                            native.domain,
+                            guest,
+                            "mono_domain_get",
+                            0,
+                        )
+                    })?;
+                self.gc_events_verified |= stats.gc_events;
+                if domain? != ROOT_TOKEN {
+                    return Err("worker managed reference before actual root attachment".into());
+                }
+                // Only an exact declared reference cell may reach the existing
+                // canonical-root barrier. NULL owner is accepted by that API;
+                // it recovers the real native owner from the registered cell.
+                let (stored, _) =
+                    callbacks::with_worker_registration_owner(memory, runtime, targets, || {
+                        callbacks::with_service(|memory, _| {
+                            if array {
+                                self.reference_array_registry.store(
+                                    self.reference_array_api
+                                        .ok_or("worker array reference before typed API")?,
+                                    api,
+                                    &self.instance_registry,
+                                    memory,
+                                    [a[0], a[1], a[2]],
+                                )
+                            } else {
+                                self.field_registry.store_reference(
+                                    api,
+                                    &self.instance_registry,
+                                    memory,
+                                    a[0],
+                                    a[1],
+                                    a[2],
+                                )
+                            }
+                        })
+                    })?;
+                stored?;
+                return cpu.return_integer(memory, 0);
+            }
             let (stack_base, stack_end) = runtime.native_worker_stack_bounds(memory, cpu)?;
             let end = a[1]
                 .checked_add(8)

@@ -377,6 +377,7 @@ impl Metadata<'_> {
             "mono_custom_attrs_from_class"
                 | "mono_custom_attrs_from_field"
                 | "mono_custom_attrs_has_attr"
+                | "mono_custom_attrs_get_attr"
                 | "mono_custom_attrs_free"
         ) {
             let a = [cpu.regs[1], cpu.regs[2]];
@@ -396,6 +397,11 @@ impl Metadata<'_> {
                     attrs.query(*api, class, field)?
                 }
                 "mono_custom_attrs_has_attr" => attrs.has(
+                    *api,
+                    a[0],
+                    self.metadata.native(a[1], metadata::Kind::Class)?,
+                )?,
+                "mono_custom_attrs_get_attr" => attrs.get(
                     *api,
                     a[0],
                     self.metadata.native(a[1], metadata::Kind::Class)?,
@@ -658,7 +664,7 @@ impl Metadata<'_> {
     }
 }
 /// Preparation borrows the registries and checked guest memory. Execution owns
-/// only stable native metadata and no-argument ABI data, so GC and guest reentry
+/// only stable native metadata and owned ABI data, so GC and guest reentry
 /// can run without an outstanding Memory/registry borrow.
 pub(super) struct PreparedInvoke {
     library: Object,
@@ -667,6 +673,10 @@ pub(super) struct PreparedInvoke {
     step: Option<usize>,
     ordinary: Option<managed_calls::Descriptor>,
     constructor: Option<(Object, Object, u64)>,
+    receiver: Object,
+    frame: Option<managed_calls::Frame>,
+    stack: (u64, u64),
+    rsp: u64,
     pub(super) exception_slot: u64,
 }
 impl Metadata<'_> {
@@ -685,6 +695,10 @@ impl Metadata<'_> {
             checked_output(memory, cpu, stack, exception_slot, 8)?;
         }
         let method = self.metadata.native(cpu.regs[1], metadata::Kind::Method)?;
+        eprintln!(
+            "NATIVE_MONO_NESTED_INVOKE: {}",
+            self.metadata.describe_method(self.library, cpu.regs[1])?
+        );
         let image = self.images.unique_native_image(super::SUBSYSTEMS_MODULE)?;
         if cpu.regs[2] != 0 {
             let mut images = self.images.live_native_images()?;
@@ -692,61 +706,85 @@ impl Metadata<'_> {
             images.retain(|&image| image != core);
             images.insert(0, core);
             let api = constructors::Api::load(self.library)?;
-            let descriptor = api
-                .describe(method, &images)?
-                .ok_or("nested instance entry is not a metadata-qualified constructor")?;
-            if descriptor.callback.is_some() {
-                return Err("nested serialization callback needs its interface route".into());
-            }
             let object = self.rooted_native(cpu.regs[2])?;
             let get_class = sym!(
                 self.library,
                 "mono_object_get_class",
                 unsafe extern "C" fn(Object) -> Object
             );
-            api.receiver(&descriptor, object, unsafe { get_class(object) })?;
+            let constructor = api.describe(method, &images)?;
+            let ordinary = if let Some(descriptor) = constructor.as_ref() {
+                api.receiver(descriptor, object, unsafe { get_class(object) })?;
+                None
+            } else {
+                let calls = managed_calls::Api::load(self.library)?;
+                let descriptor = calls
+                    .describe(method, &images, &images)?
+                    .ok_or("nested instance entry is not metadata-qualified ordinary IL")?;
+                let declared = descriptor
+                    .receiver
+                    .ok_or("nested instance method is static")?;
+                calls.receiver(object, declared, &images)?;
+                if matches!(
+                    descriptor.returns,
+                    Some(managed_calls::Shape::Scalar { .. })
+                ) {
+                    return Err(
+                        "nested ordinary instance entry requires void/reference return ABI".into(),
+                    );
+                }
+                Some(descriptor)
+            };
             self.sync_guest(memory)?;
+            let frame = ordinary
+                .as_ref()
+                .map(|descriptor| self.prepare_frame(descriptor, cpu, memory, stack))
+                .transpose()?;
             return Ok(PreparedInvoke {
                 library: self.library,
                 method,
                 image,
                 step: None,
-                ordinary: None,
-                constructor: Some((core, object, cpu.regs[2])),
+                ordinary,
+                constructor: constructor.map(|_| (core, object, cpu.regs[2])),
+                receiver: object,
+                frame,
+                stack,
+                rsp: cpu.regs[4],
                 exception_slot,
             });
         }
-        let (step, ordinary) = if super::invoke::validate_classlib_init(
-            self.library,
-            method,
-            image,
-            5,
-        )
-        .is_ok()
-        {
-            (Some(5), None)
-        } else if super::invoke::validate_classlib_init(self.library, method, image, 6).is_ok() {
-            (Some(6), None)
-        } else {
-            if self.objects.is_none() {
-                return Err("nested ordinary invoke has no owned object service".into());
-            }
-            let images = self.images.live_native_images()?;
-            let descriptor = managed_calls::Api::load(self.library)?
-                .describe(method, &images, &images)?
-                .ok_or("nested ordinary entry is not admitted IL")?;
-            if descriptor.receiver.is_some()
-                || !descriptor.parameters.is_empty()
-                || matches!(
-                    descriptor.returns,
-                    Some(managed_calls::Shape::Scalar { .. })
-                )
+        let (step, ordinary) =
+            if super::invoke::validate_classlib_init(self.library, method, image, 5).is_ok() {
+                (Some(5), None)
+            } else if super::invoke::validate_classlib_init(self.library, method, image, 6).is_ok()
             {
-                return Err("nested ordinary invoke currently requires static zero-argument void/reference ABI".into());
-            }
-            (None, Some(descriptor))
-        };
+                (Some(6), None)
+            } else {
+                if self.objects.is_none() {
+                    return Err("nested ordinary invoke has no owned object service".into());
+                }
+                let images = self.images.live_native_images()?;
+                let descriptor = managed_calls::Api::load(self.library)?
+                    .describe(method, &images, &images)?
+                    .ok_or("nested ordinary entry is not admitted IL")?;
+                if descriptor.receiver.is_some()
+                    || matches!(
+                        descriptor.returns,
+                        Some(managed_calls::Shape::Scalar { .. })
+                    )
+                {
+                    return Err(
+                        "nested ordinary static invoke requires void/reference return ABI".into(),
+                    );
+                }
+                (None, Some(descriptor))
+            };
         self.sync_guest(memory)?;
+        let frame = ordinary
+            .as_ref()
+            .map(|descriptor| self.prepare_frame(descriptor, cpu, memory, stack))
+            .transpose()?;
         self.metadata.note_query();
         Ok(PreparedInvoke {
             library: self.library,
@@ -755,12 +793,60 @@ impl Metadata<'_> {
             step,
             ordinary,
             constructor: None,
+            receiver: std::ptr::null_mut(),
+            frame,
+            stack,
+            rsp: cpu.regs[4],
             exception_slot,
         })
     }
+    fn prepare_frame(
+        &self,
+        descriptor: &managed_calls::Descriptor,
+        cpu: &Cpu64,
+        memory: &Memory,
+        stack: (u64, u64),
+    ) -> Result<managed_calls::Frame, String> {
+        let calls = managed_calls::Api::load(self.library)?;
+        let frame = managed_calls::Frame::prepare(
+            memory,
+            descriptor,
+            cpu.regs[8],
+            |token, shape| calls.compatible(self.rooted_native(token)?, shape),
+            |address, width| checked_output(memory, cpu, stack, address, width).is_ok(),
+        )?;
+        if cpu.regs[9] != 0
+            && frame.outputs()?.iter().any(|out| {
+                out.address < cpu.regs[9] + 8
+                    && cpu.regs[9] < out.address + out.shape.width() as u64
+            })
+        {
+            return Err("nested exception slot overlaps byref output".into());
+        }
+        Ok(frame)
+    }
 }
 impl PreparedInvoke {
-    pub(super) fn execute(&self) -> Result<Object, String> {
+    fn commit_outputs(
+        &self,
+        memory: &mut Memory,
+        outputs: &[(u64, usize, u64)],
+    ) -> Result<(), String> {
+        for &(address, width, _) in outputs {
+            checked_output_at(memory, self.rsp, self.stack, address, width)?;
+        }
+        if self.exception_slot != 0 {
+            checked_output_at(memory, self.rsp, self.stack, self.exception_slot, 8)?;
+        }
+        for &(address, width, word) in outputs {
+            memory.write_int(address, width, word)?;
+        }
+        if self.exception_slot != 0 {
+            memory.write_int(self.exception_slot, 8, 0)?;
+        }
+        Ok(())
+    }
+    pub(super) fn execute(&mut self) -> Result<Object, String> {
         if let Some((core, object, token)) = self.constructor {
             animation::execute_nested_managed(self.library, core, self.method, object, token)?;
             eprintln!("NATIVE_MONO_NESTED_CONSTRUCTOR_VERIFIED: receiver={token:#x}; metadata-qualified=true");
@@ -771,12 +857,21 @@ impl PreparedInvoke {
             "mono_runtime_invoke",
             unsafe extern "C" fn(Object, Object, *mut Object, *mut Object) -> Object
         );
+        let mut parameters = self
+            .frame
+            .as_mut()
+            .map(|frame| frame.pointers())
+            .unwrap_or_default();
         let mut exception = std::ptr::null_mut();
         let result = unsafe {
             invoke(
                 self.method,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
+                self.receiver,
+                if parameters.is_empty() {
+                    std::ptr::null_mut()
+                } else {
+                    parameters.as_mut_ptr()
+                },
                 &mut exception,
             )
         };
@@ -818,8 +913,38 @@ impl Metadata<'_> {
         result: Object,
         memory: &mut Memory,
     ) -> Result<u64, String> {
+        let mut outputs = Vec::new();
+        if let Some(frame) = prepared.frame.as_ref() {
+            let calls = managed_calls::Api::load(self.library)?;
+            for out in frame.outputs()? {
+                let word = match out.shape {
+                    shape @ managed_calls::Shape::Reference { .. } => {
+                        self.root_reference(calls.compatible(out.word as Object, shape)?, memory)?
+                    }
+                    managed_calls::Shape::Scalar { .. } => out.word,
+                };
+                checked_output_at(
+                    memory,
+                    prepared.rsp,
+                    prepared.stack,
+                    out.address,
+                    out.shape.width(),
+                )?;
+                outputs.push((out.address, out.shape.width(), word));
+            }
+        }
+        if prepared.exception_slot != 0 {
+            checked_output_at(
+                memory,
+                prepared.rsp,
+                prepared.stack,
+                prepared.exception_slot,
+                8,
+            )?;
+        }
         if result.is_null() {
             self.refresh_native(memory)?;
+            prepared.commit_outputs(memory, &outputs)?;
             return Ok(0);
         }
         let roots = self
@@ -868,6 +993,7 @@ impl Metadata<'_> {
                 .ok_or("nested ordinary descriptor absent")?
                 .name
         );
+        prepared.commit_outputs(memory, &outputs)?;
         Ok(token)
     }
 }
@@ -879,13 +1005,22 @@ fn checked_output(
     address: u64,
     width: usize,
 ) -> Result<(), String> {
+    checked_output_at(memory, cpu.regs[4], stack, address, width)
+}
+fn checked_output_at(
+    memory: &Memory,
+    rsp: u64,
+    stack: (u64, u64),
+    address: u64,
+    width: usize,
+) -> Result<(), String> {
     let end = address
         .checked_add(width as u64)
         .ok_or("nested output overflow")?;
-    if cpu.regs[4] < stack.0
-        || cpu.regs[4] >= stack.1
+    if rsp < stack.0
+        || rsp >= stack.1
         || !address.is_multiple_of(width as u64)
-        || address < cpu.regs[4].saturating_add(8)
+        || address < rsp.saturating_add(8)
         || address < stack.0
         || end > stack.1
         || !memory.owned_noncode_access(address, width)
@@ -996,6 +1131,47 @@ impl Metadata<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn nested_byref_completion_preflights_all_outputs_and_exception_before_writes() {
+        use crate::x64::memory::{READ, WRITE};
+        let mut memory = Memory::default();
+        memory.map(0x1000, 4096, READ | WRITE).unwrap();
+        let mut prepared = PreparedInvoke {
+            library: ptr::null_mut(),
+            method: ptr::null_mut(),
+            image: ptr::null_mut(),
+            step: None,
+            ordinary: None,
+            constructor: None,
+            receiver: ptr::null_mut(),
+            frame: None,
+            stack: (0x1000, 0x2000),
+            rsp: 0x1800,
+            exception_slot: 0x1880,
+        };
+        memory.write_int(0x1840, 8, 0xaaaaaaaa).unwrap();
+        memory.write_int(0x1880, 8, 0xbbbbbbbb).unwrap();
+        assert!(prepared
+            .commit_outputs(&mut memory, &[(0x1840, 1, 1), (0x2000, 8, 2)])
+            .is_err());
+        assert_eq!(memory.read_int(0x1840, 8).unwrap(), 0xaaaaaaaa);
+        assert_eq!(memory.read_int(0x1880, 8).unwrap(), 0xbbbbbbbb);
+        prepared.exception_slot = 0x1800;
+        assert!(prepared
+            .commit_outputs(&mut memory, &[(0x1840, 1, 1)])
+            .is_err());
+        assert_eq!(memory.read_int(0x1840, 8).unwrap(), 0xaaaaaaaa);
+        prepared.exception_slot = 0x1880;
+        prepared
+            .commit_outputs(&mut memory, &[(0x1840, 1, 1)])
+            .unwrap();
+        assert_eq!(memory.read_int(0x1840, 8).unwrap(), 0xaaaaaa01);
+        assert_eq!(memory.read_int(0x1880, 8).unwrap(), 0);
+        memory.unmap(0x1000, 4096).unwrap();
+        assert!(prepared
+            .commit_outputs(&mut memory, &[(0x1840, 1, 1)])
+            .is_err());
+    }
     #[test]
     fn nested_output_rejects_return_slot_misalignment_code_and_retired_storage() {
         use crate::x64::memory::{EXECUTE, READ, WRITE};

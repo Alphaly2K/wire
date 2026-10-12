@@ -303,7 +303,7 @@ fn execute_scalar_guest(
                     )
                 })?;
                 if binding.original_function.as_ref() == "mono_runtime_invoke" {
-                    let prepared = route
+                    let mut prepared = route
                         .try_borrow_mut()
                         .map_err(|_| "nested invoke metadata is already borrowed")?
                         .prepare_invoke(
@@ -317,12 +317,6 @@ fn execute_scalar_guest(
                         .try_borrow_mut()
                         .map_err(|_| "nested invoke completion metadata is already borrowed")?
                         .finish_invoke(&prepared, native_result, &mut owner.memory.borrow_mut())?;
-                    if prepared.exception_slot != 0 {
-                        owner
-                            .memory
-                            .borrow_mut()
-                            .write_int(prepared.exception_slot, 8, 0)?;
-                    }
                     cpu.return_integer(&owner.memory.borrow(), result)?;
                     owner
                         .managed_reentries

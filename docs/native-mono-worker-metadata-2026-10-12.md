@@ -122,3 +122,70 @@ owner串行读取并复用既有live image registry/owned text arena，禁止发
 21个已有core class getters只读取mono_defaults；同样采用已attached worker的owner串行
 只读通道，corlib返回须与CORELIB fingerprint registry中保留的实际image一致。
 image阶段完整feature release回归仍496 passed/7 ignored。
+
+`f77d6c1`已直接提交main：worker metadata/attributes/objects/invoke/virtual、显示器IntPtr[]、
+小结构体、ProfilerRecorder、GraphicsSettings和锁交接修复，包含实际代码3123新增行。
+本地提交，无push。
+
+`probe-95`40draw/13Present，worker在List._items的exact declared reference field写入前停止。
+把既有fields/reference-arrays barrier路由接到worker：先验证actual root attachment，仅exact
+登记reference cell可转换canonical object token并调用原native field/barrier API。NULL owner
+沿用既有实现，从受检cell恢复真实owner，非托管C++临时槽仍单独保持其范围与身份检查。
+
+`probe-96`随后在runtime_invoke被params非NULL检查拒绝。`probe-97`真实签名证实为
+UniversalAdditionalCameraData的零参数OnAfterDeserialize；Unity传的是unused scratch
+vector。以metadata参数数目证明零参数，不解引用或转交这块scratch，72draw/24Present，
+继续到worker数组分配。上述改动92项Mono定向回归通过。
+
+worker数组Request只带retained domain/element capabilities与受限length，在actual worker分配
+并立即建立pinned v2 root；Reply持有独立root直到owner采用。布局沿用metadata-derived scalar/
+reference slots，owner验证真实class/length/offset32与zero initialization再publish；0长度只
+映射immutable header。新OS线程回归覆盖0/1长度、实际worker执行、root移交、私有header、
+容量与退休拒绝。大Request用Box使高频scalar worker命令保持小尺寸。
+
+`probe-98`实际分配Int32[1]与Vector3[4]，执行Light2D.OnAfterDeserialize；后续main线程
+ScriptableObject factory的nested invoke因旧constructor-only限制拒绝。现复用ordinary IL
+签名/closed declaring type/receiver assignability校验，准入zero-argument void/reference
+instance方法；构造及serialization接口仍保留其已有metadata验证。没有按OnEnable等名称
+选择执行逻辑。继续probe-99获取实际方法和后续边界。
+
+`probe-99`确认nested instance为AdaptivePerformanceManagerSpawner.OnEnable，真实IL开始执行，
+止于未注册GameObject.Find_Injected。`probe-100`固定Find/FindWithTag适配器完成实际engine
+查找（该样本Find返回NULL），后续Internal_CreateGameObject_Injected缺失。此时完整feature
+release回归497 passed/7 ignored，Mono定向93项通过。
+
+GameObject创建/添加组件/DontDestroyOnLoad也采用固定编译的typed adapters，每项核对冻结
+InternalCall target与真实metadata：UTF16名字复制到private guest span；对象/Type用canonical
+roots；engine IntPtr只能来自live owned noncode guest data。对象返回使用真实native v2
+GC handle交给IL Unmarshal，禁止将C++指针当MonoObject。
+
+原生IL直接new GameObject时原有borrowed root尚没有cached-pointer view。新
+publish_engine_object先核对UnityEngine.Object assignability，只映射实际m_CachedPtr的8B槽，
+保留既有pending guest写入；native初值若非NULL必须是aligned owned noncode guest data。
+回归覆盖header不可见、精确cell写入同步、重复publish、code pointer拒绝与root/view退休。
+
+`probe-101`实际引擎成功创建GameObject，rooted-self=0x6fff07c20000；AddComponent进入nested
+mono_custom_attrs_get_attr，旧nested route缺此项。复用既有checked native attribute构造及强根
+API，不改变其构造准入；继续probe-102。
+
+`probe-102`实际完成AddComponent，执行AdaptivePerformanceManager构造及Awake，
+62draw/21Present；停止于尚未注册Object.DestroyImmediate_Injected。不是Mono版本失配：
+其后提示out-of-sync是未注册InternalCall触发的通用诊断。完整feature release回归
+498 passed/7 ignored；94项Mono定向回归和all-target Clippy通过。
+
+对象销毁新增固定DestroyImmediate/Destroy适配器，分别验证真实Boolean与Single签名，
+冻结目标0x1800c2fd0/0x1800c2eb0；延时参数保留原float32位型至Win64 XMM1。NULL沿用
+原引擎语义，非NULL仍须live owned noncode engine data；原引擎完成后同步cached-pointer
+views，不跳过Awake或伪造删除。正在继续真实游戏复测。
+
+`probe-103`原引擎完成销毁并回调实际OnDestroy，越过AdaptivePerformance初始化，
+下一处为NativeInputSystem.Update。新scalar adapter核对InputModule真实Int32 enum与
+0x180132a10，按值调用原引擎。`probe-104`进入ShouldRunUpdate(enum,out bool)后，因nested
+invoke仅允许零参数被拒绝。
+
+nested ordinary invoke复用已有managed_calls.Frame：从guest读取bounded参数vector，
+scalar复制至native栈，reference通过canonical roots与assignability转译，byref仅限当前
+callback的live owned stack。managed IL执行期间释放Memory/route借用；完成后重新检查所有
+输出与exception槽，canonicalize引用、刷新图，再事务性写回，不发布native stack指针。
+仍只允许void/reference返回，IntPtr与raw pointer不进入普通参数。新增回归证明后段输出/
+exception失效时先前输出不变，以及1B bool精确写回；95项Mono定向release测试通过。

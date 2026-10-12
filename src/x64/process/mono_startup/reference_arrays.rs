@@ -151,6 +151,43 @@ struct Entry {
     published: bool,
     engine_handles: bool,
 }
+/// Retained domain/element metadata and bounded scalar length only. Managed
+/// allocation and pinning occur on the actual attached worker before replying.
+pub(super) struct WorkerRequest {
+    api: Api,
+    roots: instances::Api,
+    domain: Object,
+    element: Object,
+    length: usize,
+}
+unsafe impl Send for WorkerRequest {}
+pub(super) struct WorkerAllocation {
+    root: instances::WorkerRoot,
+    element: Object,
+    length: usize,
+    layout: value_layout::Layout,
+}
+// Private owned pin and nonmoving layout capabilities; no unrooted pointer.
+unsafe impl Send for WorkerAllocation {}
+impl WorkerRequest {
+    pub(super) fn execute(self) -> Result<WorkerAllocation, String> {
+        let layout = self.api.element_layout(self.element)?;
+        let payload_size = layout
+            .width
+            .checked_mul(self.length)
+            .ok_or("worker array size overflow")?;
+        if self.length > 4096 || payload_size > 65504 || self.domain.is_null() {
+            return Err("worker typed array exceeds allocation bounds".into());
+        }
+        let native = unsafe { (self.api.new)(self.domain, self.element, self.length) };
+        Ok(WorkerAllocation {
+            root: self.roots.worker_root(native)?,
+            element: self.element,
+            length: self.length,
+            layout,
+        })
+    }
+}
 #[derive(Default)]
 pub(super) struct Registry {
     entries: BTreeMap<u64, Entry>,
@@ -201,6 +238,22 @@ impl Registry {
         element: Object,
         length: u64,
     ) -> Result<u64, String> {
+        if length == 0 {
+            return Err("nonempty typed allocation requires positive length".into());
+        }
+        let allocation = self
+            .prepare_worker(api, root_api, domain, element, length)?
+            .execute()?;
+        self.adopt_worker(api, root_api, roots, allocation)
+    }
+    pub(super) fn prepare_worker(
+        &self,
+        api: Api,
+        root_api: instances::Api,
+        domain: Object,
+        element: Object,
+        length: u64,
+    ) -> Result<WorkerRequest, String> {
         let layout = api.element_layout(element)?;
         let payload_size = layout
             .width
@@ -209,13 +262,40 @@ impl Registry {
         if self.retired
             || self.entries.len() >= 256
             || domain.is_null()
-            || !(1..=4096).contains(&length)
+            || length > 4096
             || payload_size > 65504
         {
             return Err("typed array outside bounded allocation contract".into());
         }
-        let length = length as usize;
-        let native = unsafe { (api.new)(domain, element, length) };
+        Ok(WorkerRequest {
+            api,
+            roots: root_api,
+            domain,
+            element,
+            length: length as usize,
+        })
+    }
+    pub(super) fn adopt_worker(
+        &mut self,
+        api: Api,
+        root_api: instances::Api,
+        roots: &mut instances::Registry,
+        allocation: WorkerAllocation,
+    ) -> Result<u64, String> {
+        if self.retired || self.entries.len() >= 256 {
+            return Err("worker array reply reached retired/full registry".into());
+        }
+        let WorkerAllocation {
+            root,
+            element,
+            length,
+            layout,
+        } = allocation;
+        let native = root.target()?;
+        let payload_size = layout
+            .width
+            .checked_mul(length)
+            .ok_or("worker array reply size overflow")?;
         let token = BASE + self.entries.len() as u64 * STRIDE;
         roots.adopt_reference_array(root_api, token, native)?;
         let class = unsafe { (api.array_class)(element, 1) };
@@ -233,7 +313,7 @@ impl Registry {
             length,
             layout,
             header,
-            payload: HostRegion::owned(payload_size)?,
+            payload: HostRegion::owned(payload_size.max(1))?,
             committed: vec![0; payload_size],
             published: false,
             engine_handles: element == api.intptr,
@@ -816,6 +896,65 @@ mod tests {
             rank: test_rank,
             reference_images: [1usize as Object; 6],
             values: [None; 6],
+        }
+    }
+    #[test]
+    fn worker_allocates_on_its_os_thread_and_keeps_array_root_through_publication() {
+        unsafe extern "C" fn worker_new(_: Object, _: Object, length: usize) -> Object {
+            assert_eq!(std::thread::current().name(), Some("wire-test-array"));
+            let mut data = vec![0usize; 4 + length].into_boxed_slice();
+            data[3] = length;
+            Box::into_raw(data).cast::<usize>().cast()
+        }
+        let api = Api {
+            new: worker_new,
+            ..api()
+        };
+        let roots_api = instances::tests::identity_api();
+        let mut arrays = Registry::default();
+        let mut roots = instances::Registry::default();
+        let mut memory = Memory::default();
+        let mut backing = Vec::new();
+        for length in [0, 1] {
+            let request = arrays
+                .prepare_worker(api, roots_api, 1usize as Object, 2usize as Object, length)
+                .unwrap();
+            let reply = std::thread::Builder::new()
+                .name("wire-test-array".into())
+                .spawn(move || request.execute())
+                .unwrap()
+                .join()
+                .unwrap()
+                .unwrap();
+            backing.push((reply.root.target().unwrap(), length as usize));
+            let token = arrays
+                .adopt_worker(api, roots_api, &mut roots, reply)
+                .unwrap();
+            arrays.publish(&mut memory, token).unwrap();
+            assert_eq!(
+                arrays.length(api, roots_api, &roots, token).unwrap(),
+                length
+            );
+            assert_eq!(memory.read_int(token + 24, 8).unwrap(), length);
+            assert_eq!(memory.read_int(token + 32, 8).is_ok(), length != 0);
+            assert!(memory.read_int(token, 8).is_err());
+        }
+        assert!(arrays
+            .prepare_worker(api, roots_api, 1usize as Object, 2usize as Object, 4097)
+            .is_err());
+        arrays.verify(api, roots_api, &roots).unwrap();
+        roots.release(roots_api);
+        arrays.retire(&mut memory, &roots).unwrap();
+        assert!(arrays
+            .prepare_worker(api, roots_api, 1usize as Object, 2usize as Object, 1)
+            .is_err());
+        for (pointer, length) in backing {
+            unsafe {
+                drop(Box::from_raw(ptr::slice_from_raw_parts_mut(
+                    pointer.cast::<usize>(),
+                    4 + length,
+                )));
+            }
         }
     }
     #[test]

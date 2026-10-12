@@ -27,6 +27,14 @@ probe-91的SharedStatic锁交接死锁由sample定位并修复；probe-92实际�
 没有新增类名名单，也不在owner代执行worker IL。最新证据与边界见
 `native-mono-worker-metadata-2026-10-12.md`。继续到游戏画面及可交互循环，不以Logo或提交收工。
 
+2026-10-12最新：worker virtual/只读metadata已完成（`f77d6c1`）。随后实际worker数组/
+精确reference barrier、普通nested instance IL、GameObject查找/创建/AddComponent及cached
+cell已实测；probe-103实际执行AdaptivePerformanceManager.Awake及原引擎DestroyImmediate，
+正确回调OnDestroy。probe-104进入NativeInputSystem.Update与ShouldRunUpdate(enum,out bool)，
+新nested参数Frame复用现有typed ABI，95项Mono定向回归通过，all-target Clippy clean。
+完整feature上次498 passed/7 ignored（新增nested参数后待完整复验）。当前probe-105继续，
+未到Naninovel标题/可交互界面，full_game_backend仍false。
+
 已有阶段提交：
 
 | 提交 | 结果 |

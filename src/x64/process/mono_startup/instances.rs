@@ -575,6 +575,35 @@ impl Registry {
         }
         Ok(())
     }
+    /// Native IL may construct a Unity object before the engine binds it. Admit
+    /// only this rooted UnityEngine.Object's exact checked m_CachedPtr cell.
+    pub(super) fn publish_engine_object(
+        &mut self,
+        api: Api,
+        memory: &mut Memory,
+        token: u64,
+    ) -> Result<(), String> {
+        let native = self.native(api, token)?;
+        let class = self.class(api, token)?;
+        if api.unity_base.is_null() || unsafe { (api.assignable)(api.unity_base, class) } == 0 {
+            return Err("engine binding requires an actual rooted Unity object".into());
+        }
+        if self.roots[&token].cached.is_none() {
+            let mut value = 0u64;
+            unsafe {
+                (api.field_get)(native, api.cached_field, (&mut value as *mut u64).cast());
+            }
+            if value != 0 && (!value.is_multiple_of(8) || !memory.owned_noncode_access(value, 1)) {
+                return Err("borrowed Unity cached pointer is not owned guest engine data".into());
+            }
+            let view = HostRegion::owned(8)?;
+            view.with_native(|pointer| unsafe {
+                pointer.cast::<u64>().as_ptr().write(value);
+            })?;
+            self.roots.get_mut(&token).unwrap().cached = Some(view);
+        }
+        self.publish(memory, token)
+    }
     pub(super) fn sync_from_guest(&mut self, api: Api, memory: &Memory) -> Result<(), String> {
         if self.released || self.views_retired {
             return Err("ordinary scalar synchronization after retirement".into());
@@ -757,6 +786,44 @@ pub(super) mod tests {
             target: identity,
             ..api()
         }
+    }
+    #[test]
+    fn borrowed_unity_engine_binding_publishes_only_cached_cell_and_rejects_code() {
+        let api = Api {
+            unity_base: 1usize as Object,
+            ..identity_api()
+        };
+        CACHED.with(|value| value.set(0));
+        let mut roots = Registry::default();
+        let mut memory = Memory::default();
+        memory.map(0x4000, 4096, READ | WRITE).unwrap();
+        memory
+            .map(0x8000, 4096, READ | crate::x64::memory::EXECUTE)
+            .unwrap();
+        let token = roots.borrow(api, 4usize as Object).unwrap();
+        roots
+            .publish_engine_object(api, &mut memory, token)
+            .unwrap();
+        assert!(memory.read_int(token, 8).is_err());
+        memory.write_int(token + 16, 8, 0x4000).unwrap();
+        roots
+            .publish_engine_object(api, &mut memory, token)
+            .unwrap();
+        assert_eq!(memory.read_int(token + 16, 8).unwrap(), 0x4000);
+        roots.sync_from_guest(api, &memory).unwrap();
+        assert_eq!(CACHED.with(Cell::get), 0x4000);
+        CACHED.with(|value| value.set(0x8000));
+        let other = roots.borrow(api, 8usize as Object).unwrap();
+        assert!(roots
+            .publish_engine_object(api, &mut memory, other)
+            .is_err());
+        assert!(memory.read_int(other + 16, 8).is_err());
+        roots.release(api);
+        roots.retire_views(&mut memory).unwrap();
+        assert!(memory.read_int(token + 16, 8).is_err());
+        assert!(roots
+            .publish_engine_object(api, &mut memory, token)
+            .is_err());
     }
     #[test]
     fn worker_allocation_transfers_a_strong_root_and_drops_failed_replies() {

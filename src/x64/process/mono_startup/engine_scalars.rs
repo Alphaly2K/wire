@@ -12,7 +12,7 @@ struct Spec {
     argument: Option<(&'static CStr, &'static CStr)>,
     adapter: Object,
 }
-const COUNT: usize = 29;
+const COUNT: usize = 30;
 static TARGETS: OnceLock<[u64; COUNT]> = OnceLock::new();
 thread_local! { static CALLS: RefCell<[usize; COUNT]> = const { RefCell::new([0; COUNT]) }; }
 pub(super) fn installed() -> bool {
@@ -50,12 +50,22 @@ pub(super) fn install(
     if core.is_null() || corlib.is_null() || !images.contains(&core) || !images.contains(&corlib) {
         return Err("scalar binding family has no owned core/corelib images".into());
     }
-    let class = |namespace: &CStr, name: &CStr| unsafe {
-        find(
-            if namespace == c"System" { corlib } else { core },
-            namespace.as_ptr(),
-            name.as_ptr(),
-        )
+    let class = |namespace: &CStr, name: &CStr| {
+        if namespace == c"System" {
+            return unsafe { find(corlib, namespace.as_ptr(), name.as_ptr()) };
+        }
+        let mut classes: Vec<_> = images
+            .iter()
+            .map(|&image| unsafe { find(image, namespace.as_ptr(), name.as_ptr()) })
+            .filter(|p| !p.is_null())
+            .collect();
+        classes.sort_unstable_by_key(|p| *p as usize);
+        classes.dedup();
+        if classes.len() == 1 {
+            classes[0]
+        } else {
+            std::ptr::null_mut()
+        }
     };
     let specs = specs();
     let api = managed_calls::Api::load(library)?;
@@ -235,6 +245,9 @@ unsafe extern "C" fn adapter_27() -> i32 {
 unsafe extern "C" fn adapter_28() -> i32 {
     call::<28>(&[], &[]).0 as i32
 }
+unsafe extern "C" fn adapter_29(update_type: i32) {
+    call::<29>(&[u64::from(update_type as u32)], &[]);
+}
 fn specs() -> [Spec; COUNT] {
     [
     Spec { binding: c"UnityEngine.Application::get_isFocused", namespace: c"UnityEngine", owner: c"Application", method: c"get_isFocused", target: 0x18006d380, returns: (c"System", c"Boolean"), argument: None, adapter: adapter_0 as *const () as Object },
@@ -266,5 +279,6 @@ fn specs() -> [Spec; COUNT] {
     Spec { binding: c"Unity.Jobs.LowLevel.Unsafe.JobsUtility::set_JobDebuggerEnabled", namespace: c"Unity.Jobs.LowLevel.Unsafe", owner: c"JobsUtility", method: c"set_JobDebuggerEnabled", target: 0x18005fee0, returns: (c"System", c"Void"), argument: Some((c"System", c"Boolean")), adapter: adapter_26 as *const () as Object },
     Spec { binding: c"UnityEngine.QualitySettings::get_activeColorSpace", namespace: c"UnityEngine", owner: c"QualitySettings", method: c"get_activeColorSpace", target: 0x180088390, returns: (c"UnityEngine", c"ColorSpace"), argument: None, adapter: adapter_27 as *const () as Object },
     Spec { binding: c"UnityEngine.QualitySettings::get_desiredColorSpace", namespace: c"UnityEngine", owner: c"QualitySettings", method: c"get_desiredColorSpace", target: 0x180088390, returns: (c"UnityEngine", c"ColorSpace"), argument: None, adapter: adapter_28 as *const () as Object },
+    Spec { binding: c"UnityEngineInternal.Input.NativeInputSystem::Update", namespace: c"UnityEngineInternal.Input", owner: c"NativeInputSystem", method: c"Update", target: 0x180132a10, returns: (c"System", c"Void"), argument: Some((c"UnityEngineInternal.Input", c"NativeInputUpdateType")), adapter: adapter_29 as *const () as Object },
 ]
 }
