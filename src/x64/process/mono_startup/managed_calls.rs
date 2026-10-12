@@ -76,13 +76,16 @@ struct ExceptionClause {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum PointerSource {
     Engine { nullable: bool },
-    CommandBuffer { nullable: bool },
+    OwnedResource { class: usize, nullable: bool },
 }
 impl PointerSource {
     fn nullable(self) -> Self {
         match self {
             Self::Engine { .. } => Self::Engine { nullable: true },
-            Self::CommandBuffer { .. } => Self::CommandBuffer { nullable: true },
+            Self::OwnedResource { class, .. } => Self::OwnedResource {
+                class,
+                nullable: true,
+            },
         }
     }
 }
@@ -422,8 +425,11 @@ impl Api {
                     if converter.is_null() {
                         return None;
                     }
-                    if super::command_buffers::converter(source, converter) {
-                        return Some(PointerSource::CommandBuffer { nullable: false });
+                    if super::owned_resources::converter(source, converter) {
+                        return Some(PointerSource::OwnedResource {
+                            class: source as usize,
+                            nullable: false,
+                        });
                     }
                     let declaring = unsafe { (self.class)(converter) };
                     if declaring.is_null()
@@ -2750,13 +2756,19 @@ mod tests {
         code.extend(target.to_le_bytes());
         code.push(0x2a);
         let source = |p, t| {
-            (p == 1 && t == converter).then_some(PointerSource::CommandBuffer { nullable: false })
+            (p == 1 && t == converter).then_some(PointerSource::OwnedResource {
+                class: 0x1234,
+                nullable: false,
+            })
         };
         assert_eq!(
             engine_pointer_nullable_prefix(&code, target, 2, source, PointerSource::nullable),
             Some(vec![
                 None,
-                Some(PointerSource::CommandBuffer { nullable: true })
+                Some(PointerSource::OwnedResource {
+                    class: 0x1234,
+                    nullable: true
+                })
             ])
         );
         let mut changed = code.clone();

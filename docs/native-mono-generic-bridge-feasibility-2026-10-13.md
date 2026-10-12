@@ -431,3 +431,35 @@ created=1 / released=1 / live=0，command buffers created=0 / live=0 / closed=tr
 owner-thread release 和 finalizer 队列，不能把 factory 安装当成完整资源协议。
 独立参考 executor 批次完整 release 回归 **558 passed / 7 ignored**；随后预算修正的
 普通/资源隔离回归、release build 和 all-target Clippy 均通过。
+
+## Typed owned-resource 机制
+
+所有权注册表由 CommandBuffer 泛化到 `owned_resources.rs`。同一记录包含实际资源
+class 身份、原 guest pointer 和 Live / Queued / Releasing / Released 状态；不同 class
+的 token 不可互用，同一个 engine pointer 不能获得两个 live owner。最终释放只在原
+engine owner thread 执行，foreign actual-finalizer 入队；quiesce 在 VM/Mono roots 退休
+前排空资源，随后关闭 registry。退休 token 不复用，即使 engine allocation 的地址
+被另一个资源 class 重用，旧 token 仍失效。
+
+本批同时审查零参数 factory / `void(IntPtr)` destructor 的五组生命周期角色：
+CommandBuffer、MaterialPropertyBlock、RectOffset、ObjectGUIState、TextGenerator。
+这是一张语义准入表；factory/destructor 的完整签名、m_Ptr 实例字段、marshaller
+完整 IL 和原始 targets 均读取实际 metadata/registration，没有冻结数值规格。缺少
+角色的 profile 保留未支持状态，已有 lifecycle adapter 的整组接口不被覆盖。
+预编译的五槽入口池按 descriptor 选择目标，创建/释放复用同一实现。缺少已验证
+BindingsMarshaller 的 class 不获得跨类 pointer provenance。
+
+各资源的所有普通方法由共用 scalar/value/string/array 描述符发现，外部消费者从
+完整包装 IL 推导带实际 class 的 PointerSource，不增加逐方法 adapter。静态清单中
+除 CommandBuffer 的 179 个声明外，MaterialPropertyBlock 43、RectOffset 14、
+ObjectGUIState 2、TextGenerator 14；typed span outputs、GPU buffers、复杂 reference
+containers 和超过当前 16 参数 ABI pool 的调用仍需对应的共用协议。
+
+probe-186 对整个 owned-resource 批次进行实际验收：自动注册 **4,176** 个入口，
+60.77 秒、182 draws / 69 presents，正常退出配置边界。MaterialPropertyBlock 通过
+原 engine factory 创建，最终 owned resources created=1 / live=0 / closed=true，
+material property blocks created=1 / live=0 / closed=true；guard checks=322 / denied=0。
+完整 release 回归 **558 passed / 7 ignored**，release build、all-target Clippy
+（`-D warnings`）与 **16 项**工具回归通过。最后帧仍为加载页，URP 初始化异常进入
+Shader.get_keywordSpace_Injected。下一批按 shader keyword/view 的完整协议处理，
+包括借用 view 的来源、nested reference、字符串与数组，继续使用全量静态清单。

@@ -52,7 +52,6 @@ mod bridge_audit;
 mod burst_shared;
 mod callbacks;
 mod closed_types;
-mod command_buffers;
 mod constructors;
 mod engine_component_queries;
 mod engine_components;
@@ -77,6 +76,7 @@ mod managed_calls;
 mod metadata;
 mod names;
 mod objects;
+mod owned_resources;
 mod player_loop;
 mod player_prefs;
 mod profiler_recorders;
@@ -3465,8 +3465,8 @@ impl Probe {
                 &managed_images,
             )?;
         }
-        if !command_buffers::installed() {
-            command_buffers::install(
+        if !owned_resources::installed() {
+            owned_resources::install(
                 library,
                 self.image_registry.unique_native_image(CORE_MODULE)?,
                 &managed_images,
@@ -5103,7 +5103,7 @@ impl Probe {
                     }),
                 },
                 || {
-                    command_buffers::quiesce()?;
+                    owned_resources::quiesce()?;
                     async_operations::quiesce()
                 },
             )?;
@@ -5180,7 +5180,7 @@ impl Probe {
             native.cleanup()?;
             logging::retire_after_vm_cleanup()?;
             async_operations::retire_after_vm_cleanup()?;
-            command_buffers::retire_after_vm_cleanup()?;
+            owned_resources::retire_after_vm_cleanup()?;
             // Raw native IL pointers remain owned until the VM can no longer
             // execute IL/finalizers. Only then release original guest records.
             unsafe_buffers::retire_after_vm_cleanup()?;
@@ -5253,7 +5253,7 @@ impl Probe {
             + &subsystems::report()
             + &resources::report()
             + &async_operations::report()
-            + &command_buffers::report()
+            + &owned_resources::report()
             + &scriptable::report()
             + &engine_scalars::report()
             + &engine_components::report()

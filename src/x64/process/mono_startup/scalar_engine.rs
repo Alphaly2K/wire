@@ -4,7 +4,7 @@
 //! Engine references/arrays use the existing rooted container protocol. Other
 //! pointer/callback/lifetime shapes stay outside the ordinary value ABI.
 use super::{
-    bindings, callbacks, command_buffers, engine_objects, images, managed_calls, render_context,
+    bindings, callbacks, engine_objects, images, managed_calls, owned_resources, render_context,
     value_layout, Object,
 };
 use std::{
@@ -113,7 +113,7 @@ enum Argument {
     DataArray { class: usize },
     Utf16Span,
     RenderContext,
-    CommandBuffer { nullable: bool },
+    OwnedResource { class: usize, nullable: bool },
     ReferenceContainer { class: usize },
 }
 struct Binding {
@@ -470,6 +470,21 @@ pub(super) fn install(
     }
     // Discover engine object types by their actual inheritance, not a list of
     // Camera/Transform/Renderer method names. Non-engine assemblies stay out.
+    for owner in owned_resources::classes() {
+        if !visited.insert(owner as usize) {
+            continue;
+        }
+        let text = unsafe { type_name(class_type(owner), 2) };
+        if text.is_null() {
+            return Err("owned resource type name absent".into());
+        }
+        let name = unsafe { CStr::from_ptr(text) }
+            .to_str()
+            .map(|name| name.replace('+', "."))
+            .map_err(|e| e.to_string());
+        unsafe { free(text.cast()) };
+        owners.push((owner, name?, false));
+    }
     for &image in &family {
         let name = unsafe { image_name(image) };
         if name.is_null() {
@@ -611,7 +626,7 @@ pub(super) fn install(
                     result = Some(Return::EngineHandle {
                         class: class as usize,
                     });
-                } else if (engine_object || command_buffers::class(owner))
+                } else if (engine_object || owned_resources::class(owner))
                     && index == 1
                     && type_kind == 0x18
                     && !reference
@@ -619,8 +634,11 @@ pub(super) fn install(
                     && !names[0].is_null()
                     && unsafe { CStr::from_ptr(names[0]) } == c"_unity_self"
                 {
-                    arguments.push(if command_buffers::class(owner) {
-                        Argument::CommandBuffer { nullable: false }
+                    arguments.push(if owned_resources::class(owner) {
+                        Argument::OwnedResource {
+                            class: owner as usize,
+                            nullable: false,
+                        }
                     } else {
                         Argument::EngineSelf
                     });
@@ -641,8 +659,8 @@ pub(super) fn install(
                         managed_calls::PointerSource::Engine { nullable } => {
                             Argument::EnginePointer { nullable }
                         }
-                        managed_calls::PointerSource::CommandBuffer { nullable } => {
-                            Argument::CommandBuffer { nullable }
+                        managed_calls::PointerSource::OwnedResource { class, nullable } => {
+                            Argument::OwnedResource { class, nullable }
                         }
                     });
                 } else if index != 0
@@ -845,7 +863,7 @@ pub(super) fn install(
                 arguments,
                 returns: result.ok_or("engine scalar return absent")?,
                 work: if context_owner
-                    || command_buffers::class(owner)
+                    || owned_resources::class(owner)
                     || asset_bases
                         .iter()
                         .any(|&base| !base.is_null() && unsafe { assignable(base, owner) } != 0)
@@ -893,9 +911,9 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
     }
     let mut object_pins = Vec::new();
     for (argument, value) in binding.arguments.iter().zip(&mut checked) {
-        if let Argument::CommandBuffer { nullable } = argument {
+        if let Argument::OwnedResource { class, nullable } = argument {
             if *value != 0 || !nullable {
-                *value = command_buffers::pointer(*value as usize)?;
+                *value = owned_resources::pointer(*value as usize, *class)?;
             }
         } else if matches!(
             argument,

@@ -171,7 +171,7 @@ fn with_routes<'a, T>(
         super::unsafe_buffers::drain_finalizers()?;
         super::profiler_recorders::drain_finalizers()?;
         super::logging::drain_finalizers()?;
-        super::command_buffers::drain_finalizers()?;
+        super::owned_resources::drain_finalizers()?;
         if owner.metadata.is_some() {
             super::async_operations::drain_finalizers()?;
         }
@@ -182,7 +182,7 @@ fn with_routes<'a, T>(
         super::unsafe_buffers::drain_finalizers()?;
         super::profiler_recorders::drain_finalizers()?;
         super::logging::drain_finalizers()?;
-        super::command_buffers::drain_finalizers()?;
+        super::owned_resources::drain_finalizers()?;
         if owner.metadata.is_some() {
             super::async_operations::drain_finalizers()?;
         }
