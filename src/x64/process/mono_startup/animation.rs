@@ -667,6 +667,7 @@ impl Constructor {
             type_class: None,
             guest_pointer: None,
             inline: None,
+            nested: None,
         }];
         for ((name, triple), resource) in FIELDS.into_iter().zip(&self.graph).zip(resources()?) {
             specs.push(super::fields::Spec {
@@ -676,6 +677,7 @@ impl Constructor {
                 type_class: Some(self.parameter),
                 guest_pointer: None,
                 inline: None,
+                nested: None,
             });
             specs.push(super::fields::Spec {
                 owner: triple[0],
@@ -684,6 +686,7 @@ impl Constructor {
                 type_class: None,
                 guest_pointer: None,
                 inline: None,
+                nested: None,
             });
             specs.push(super::fields::Spec {
                 owner: triple[0],
@@ -692,6 +695,7 @@ impl Constructor {
                 type_class: Some(self.texture),
                 guest_pointer: None,
                 inline: None,
+                nested: None,
             });
             specs.push(super::fields::Spec {
                 owner: triple[1],
@@ -700,6 +704,7 @@ impl Constructor {
                 type_class: Some(self.animation),
                 guest_pointer: None,
                 inline: None,
+                nested: None,
             });
             specs.push(super::fields::Spec {
                 owner: triple[2],
@@ -708,6 +713,7 @@ impl Constructor {
                 type_class: None,
                 guest_pointer: Some(resource.pointer),
                 inline: None,
+                nested: None,
             });
             for (name, kind) in [
                 (c"<length>k__BackingField", 8),
@@ -722,6 +728,7 @@ impl Constructor {
                     type_class: None,
                     guest_pointer: None,
                     inline: None,
+                    nested: None,
                 });
             }
         }

@@ -616,6 +616,27 @@ impl Api {
             images,
         )
     }
+    pub(super) fn tracked_allocator_icall(
+        self,
+        method: Object,
+        owner: Object,
+        classes: &[Object; 5],
+        images: &[Object],
+    ) -> Result<(), String> {
+        self.fixed_buffer_icall(
+            method,
+            owner,
+            &[
+                (0xf, classes[0]),
+                (0xa, classes[1]),
+                (8, classes[2]),
+                (0x11, classes[3]),
+                (8, classes[2]),
+                (0x18, classes[4]),
+            ],
+            images,
+        )
+    }
     pub(super) fn buffer_copy_icall(
         self,
         method: Object,
@@ -733,6 +754,38 @@ impl Api {
         images: &[Object],
         enum_storage: &[(Object, u32)],
     ) -> Result<(), String> {
+        self.fixed_typed_static(method, owner, specs, images, enum_storage, true)
+    }
+    pub(super) fn fixed_typed_managed(
+        self,
+        method: Object,
+        owner: Object,
+        specs: &[(u32, Object, bool)],
+        images: &[Object],
+    ) -> Result<(), String> {
+        self.fixed_typed_static(method, owner, specs, images, &[], false)?;
+        let header = unsafe { (self.header)(method) };
+        if header.is_null() {
+            return Err("fixed managed entry has no IL header".into());
+        }
+        let mut size = 0;
+        let mut stack = 0;
+        let code = unsafe { (self.code)(header, &mut size, &mut stack) };
+        unsafe { (self.free)(header) };
+        if code.is_null() || size == 0 {
+            return Err("fixed managed entry has no IL".into());
+        }
+        Ok(())
+    }
+    fn fixed_typed_static(
+        self,
+        method: Object,
+        owner: Object,
+        specs: &[(u32, Object, bool)],
+        images: &[Object],
+        enum_storage: &[(Object, u32)],
+        internal: bool,
+    ) -> Result<(), String> {
         if method.is_null()
             || owner.is_null()
             || specs.is_empty()
@@ -748,7 +801,11 @@ impl Api {
         if sig.is_null()
             || flags & 0x10 == 0
             || flags & (0x400 | 0x2000) != 0
-            || implementation & 0x1000 == 0
+            || if internal {
+                implementation & 0x1000 == 0
+            } else {
+                !managed_il_flags(flags, implementation, false)
+            }
             || unsafe { (self.instance)(sig) } != 0
             || unsafe { (self.count)(sig) } as usize != specs.len() - 1
             || unsafe { (self.generic)(method) } != 0

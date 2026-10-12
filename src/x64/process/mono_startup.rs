@@ -42,6 +42,7 @@ type Object = *mut c_void;
 mod animation;
 mod arrays;
 mod attributes;
+mod binding_strings;
 mod bindings;
 mod burst_shared;
 mod callbacks;
@@ -55,6 +56,7 @@ mod fields;
 mod gc_scopes;
 mod handles;
 mod images;
+mod input_events;
 mod instances;
 mod invoke;
 mod jobs;
@@ -64,12 +66,14 @@ mod managed_calls;
 mod metadata;
 mod names;
 mod objects;
+mod player_prefs;
 mod profiler_recorders;
 mod profiler_samples;
 mod reentry;
 mod reference_arrays;
 mod reflection;
 mod resources;
+mod screen;
 mod scriptable;
 mod services;
 mod subsystems;
@@ -3161,6 +3165,7 @@ impl Probe {
             .metadata_registry
             .native(a[0], metadata::Kind::Method)?;
         let call_api = managed_calls::Api::load(library)?;
+        let managed_images = self.image_registry.live_native_images()?;
         if !resources::installed() {
             resources::install(
                 library,
@@ -3171,6 +3176,8 @@ impl Probe {
                     self.registry
                         .exact_target(resources::FIND_NAME, resources::FIND_TARGET)?,
                 ],
+                &managed_images,
+                &self.registry,
             )?;
         }
         if !scriptable::installed() {
@@ -3181,7 +3188,6 @@ impl Probe {
                     .exact_target(scriptable::NAME, scriptable::TARGET)?,
             )?;
         }
-        let managed_images = self.image_registry.live_native_images()?;
         if !logging::debug_installed() {
             logging::install_debug(
                 library,
@@ -3201,6 +3207,33 @@ impl Probe {
         }
         if !engine_objects::installed() {
             engine_objects::install(
+                library,
+                self.image_registry.unique_native_image(CORE_MODULE)?,
+                &managed_images,
+                &self.registry,
+            )?;
+        }
+        if !input_events::installed() {
+            input_events::install(library, &managed_images, &self.registry)?;
+        }
+        if !binding_strings::installed() {
+            binding_strings::install(
+                library,
+                self.image_registry.unique_native_image(CORE_MODULE)?,
+                &managed_images,
+                &self.registry,
+            )?;
+        }
+        if !player_prefs::installed() {
+            player_prefs::install(
+                library,
+                self.image_registry.unique_native_image(CORE_MODULE)?,
+                &managed_images,
+                &self.registry,
+            )?;
+        }
+        if !screen::installed() {
+            screen::install(
                 library,
                 self.image_registry.unique_native_image(CORE_MODULE)?,
                 &managed_images,
@@ -4768,6 +4801,7 @@ impl Probe {
             // Raw native IL pointers remain owned until the VM can no longer
             // execute IL/finalizers. Only then release original guest records.
             unsafe_buffers::retire_after_vm_cleanup()?;
+            binding_strings::retire_after_vm_cleanup()?;
             profiler_recorders::retire_after_vm_cleanup()?;
             burst_shared::retire_after_vm_cleanup()?;
             if self.tls_table.is_some() {

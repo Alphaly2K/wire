@@ -248,6 +248,9 @@ pub(super) fn install(
     Ok(())
 }
 fn native_handle(b: &Binding, class: usize, handle: u64) -> Result<usize, String> {
+    engine_handle(b.library as Object, class as Object, handle)
+}
+pub(super) fn engine_handle(library: Object, class: Object, handle: u64) -> Result<usize, String> {
     if handle == 0 {
         return Ok(0);
     }
@@ -259,10 +262,10 @@ fn native_handle(b: &Binding, class: usize, handle: u64) -> Result<usize, String
             .ok_or("engine object result has no root service")?;
         let token = roots.handles.1.target(roots.handles.0, handle)?;
         let object = route.rooted_native(token)?;
-        managed_calls::Api::load(b.library as Object)?.compatible(
+        managed_calls::Api::load(library)?.compatible(
             object,
             managed_calls::Shape::Reference {
-                class: class as Object,
+                class,
                 string: false,
             },
         )?;
@@ -326,7 +329,7 @@ fn checked<T>(operation: impl FnOnce() -> Result<T, String>) -> T {
         }
     }
 }
-fn engine_pointer(pointer: usize) -> Result<u64, String> {
+pub(super) fn engine_pointer(pointer: usize) -> Result<u64, String> {
     callbacks::with_service(|memory, runtime| {
         let pointer = pointer as u64;
         if pointer == 0

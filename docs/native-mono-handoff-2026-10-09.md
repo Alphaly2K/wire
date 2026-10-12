@@ -35,6 +35,21 @@ cell已实测；probe-103实际执行AdaptivePerformanceManager.Awake及原引�
 完整feature上次498 passed/7 ignored（新增nested参数后待完整复验）。当前probe-105继续，
 未到Naninovel标题/可交互界面，full_game_backend仍false。
 
+2026-10-12继续：probe-110完成原NativeInputSystem.NotifyUpdate（2事件/100B），Keyboard/
+Mouse创建与tracked Temp释放；11个输出字符串adapter、24个scalar接口接入。
+probe-111实际PlayerPrefs.HasKey返回false，下一阻塞ResourcesAPIInternal.Load_Injected。
+PlayerPrefs完整常用10接口和资源加载7接口已实现；Mono定向104项通过，资源族复测中。
+input/string前一批完整feature506 passed/7 ignored；PlayerPrefs all-target Clippy通过。
+输入事件、UTF16输出及scoped多span边界详见`native-mono-input-events-2026-10-12.md`。
+游戏仍未到可交互界面；保留full_game_backend=false，继续自行实测修复。
+
+probe-112原Resources.Load返回NULL，随后fallback创建ScriptableObject被嵌套`_data`
+旧纯scalar限制拒绝。已实现metadata-derived nested实例value groups、精确reference
+barrier、owned zero padding、whole-field get/set及完整批次预检；105项定向回归通过。
+probe-113实际完成两次Unity.VisualScripting.VariablesAsset构造，下一阻塞Screen.SetResolution。
+Screen分辨率/刷新率两个typed adapter及全屏/休眠6个scalar接口已实现，继续probe-114。
+当前完整feature回归509 passed/7 ignored；新增Screen族后的定向回归105 passed。
+
 已有阶段提交：
 
 | 提交 | 结果 |

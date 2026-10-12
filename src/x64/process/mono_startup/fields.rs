@@ -114,6 +114,12 @@ struct Cell {
     committed: Vec<u8>,
     published: bool,
 }
+struct InlinePayload {
+    owner: u64,
+    field: Object,
+    layout: value_layout::Layout,
+    view: HostRegion,
+}
 #[derive(Default)]
 pub(super) struct Registry {
     api: Option<Api>,
@@ -124,6 +130,7 @@ pub(super) struct Registry {
     verified: usize,
     refreshed: usize,
     payloads: BTreeMap<u64, (value_layout::Layout, HostRegion)>,
+    inline_payloads: BTreeMap<u64, InlinePayload>,
     unboxes: usize,
 }
 pub(super) struct Spec {
@@ -133,6 +140,7 @@ pub(super) struct Spec {
     pub(super) type_class: Option<Object>,
     pub(super) guest_pointer: Option<u64>,
     pub(super) inline: Option<(usize, usize)>,
+    pub(super) nested: Option<value_layout::Layout>,
 }
 pub(super) struct Refresh {
     updates: Vec<(u64, Vec<u8>)>,
@@ -218,6 +226,32 @@ impl Registry {
                     spec.name
                 ));
             }
+            if let Some(layout) = spec.nested {
+                if spec.inline.is_some()
+                    || spec.guest_pointer.is_some()
+                    || spec.kind != 0x11
+                    || spec.type_class != Some(layout.class)
+                    || unsafe { (api.type_class)(ty) } != layout.class
+                    || unsafe { (api.is_value)(layout.class) } == 0
+                {
+                    return Err("nested instance value type mismatch".into());
+                }
+                let mut alignment = 0;
+                if unsafe { (api.value_size)(layout.class, &mut alignment) } != layout.width as i32
+                    || alignment as usize != layout.alignment
+                {
+                    return Err("nested instance value size/alignment mismatch".into());
+                }
+                self.install_inline(
+                    root_api,
+                    roots,
+                    memory,
+                    (owner, field),
+                    layout,
+                    &mut reference,
+                )?;
+                continue;
+            }
             let shape = if let Some((width, alignment)) = spec.inline {
                 let mut actual_alignment = 0;
                 if spec.kind != 0x11
@@ -289,6 +323,8 @@ impl Registry {
             let address = owner + offset as u64;
             if self.cells.iter().any(|(&base, c)| {
                 address < base + c.shape.width() as u64 && base < address + width as u64
+            }) || self.inline_payloads.iter().any(|(&base, p)| {
+                address < base + p.layout.width as u64 && base < address + width as u64
             }) {
                 return Err("overlapping initialized field views".into());
             }
@@ -339,6 +375,104 @@ impl Registry {
             cell.published = true;
             eprintln!("NATIVE_MONO_INSTANCE_FIELD: owner={owner:#x} field={:?} offset={offset} width={width}", spec.name);
         }
+        Ok(())
+    }
+    fn install_inline(
+        &mut self,
+        root_api: instances::Api,
+        roots: &mut instances::Registry,
+        memory: &mut Memory,
+        receiver: (u64, Object),
+        layout: value_layout::Layout,
+        reference: &mut impl FnMut(&mut instances::Registry, Object) -> Result<u64, String>,
+    ) -> Result<(), String> {
+        let (owner, field) = receiver;
+        layout.check()?;
+        let api = self.api.ok_or("nested value before field API")?;
+        let object = roots.native(root_api, owner)?;
+        let offset = unsafe { (api.offset)(field) };
+        let size = unsafe { (api.instance_size)(roots.class(root_api, owner)?) };
+        if !layout.value
+            || offset < 16
+            || !(16..=65536).contains(&size)
+            || offset as usize + layout.width > size as usize
+            || !(offset as usize).is_multiple_of(layout.alignment)
+            || self.cells.len() + layout.slots.len() > 32768
+        {
+            return Err("nested instance field offset/size/capacity mismatch".into());
+        }
+        let address = owner + offset as u64;
+        if self.cells.iter().any(|(&base, c)| {
+            address < base + c.shape.width() as u64 && base < address + layout.width as u64
+        }) || self.inline_payloads.iter().any(|(&base, p)| {
+            address < base + p.layout.width as u64 && base < address + layout.width as u64
+        }) {
+            return Err("nested instance field envelopes overlap".into());
+        }
+        // Copy declared leaves only. Padding is freshly zeroed; nested
+        // references are rooted identities, not raw pointers from Mono's heap.
+        let mut bytes = vec![0; layout.width];
+        let mut records = Vec::new();
+        for slot in &layout.slots {
+            let width = slot.shape.width();
+            let value = &mut bytes[slot.offset..slot.offset + width];
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    object.cast::<u8>().add(offset as usize + slot.offset),
+                    value.as_mut_ptr(),
+                    width,
+                )
+            };
+            let shape = match slot.shape {
+                value_layout::Shape::Reference(class) => {
+                    let native = u64::from_le_bytes(value.try_into().unwrap()) as Object;
+                    let token = if native.is_null() {
+                        0
+                    } else {
+                        let token = reference(roots, native)?;
+                        roots.compatible(root_api, token, class)?;
+                        token
+                    };
+                    value.copy_from_slice(&token.to_le_bytes());
+                    Shape::Reference(class)
+                }
+                value_layout::Shape::Scalar { width, boolean } => Shape::Scalar { width, boolean },
+                value_layout::Shape::Inline { width, alignment } => {
+                    Shape::Inline { width, alignment }
+                }
+            };
+            records.push((slot.offset, slot.field, shape, value.to_vec()));
+        }
+        layout.validate(&bytes, root_api, roots)?;
+        let view = HostRegion::owned(layout.width)?;
+        view.with_native(|p| unsafe {
+            ptr::copy_nonoverlapping(bytes.as_ptr(), p.as_ptr(), bytes.len())
+        })?;
+        memory.map_shared_data(address, view.clone(), READ | WRITE, READ | WRITE)?;
+        for (at, leaf, shape, committed) in records {
+            self.cells.insert(
+                address + at as u64,
+                Cell {
+                    payload_offset: Some(offset as usize - 16 + at),
+                    owner,
+                    field: leaf,
+                    shape,
+                    view: view.clone(),
+                    view_offset: at,
+                    committed,
+                    published: false,
+                },
+            );
+        }
+        self.inline_payloads.insert(
+            address,
+            InlinePayload {
+                owner,
+                field,
+                layout,
+                view,
+            },
+        );
         Ok(())
     }
     fn value(cell: &Cell) -> Result<Vec<u8>, String> {
@@ -551,12 +685,7 @@ impl Registry {
         let Some(api) = self.api else {
             return Ok(());
         };
-        for (layout, view) in self.payloads.values() {
-            let bytes = view.with_native(|p| unsafe {
-                std::slice::from_raw_parts(p.as_ptr(), layout.width).to_vec()
-            })?;
-            layout.validate(&bytes, root_api, roots)?;
-        }
+        self.validate_payloads(root_api, roots)?;
         let mut updates = Vec::new();
         for (&address, cell) in &self.cells {
             let bytes = Self::value(cell)?;
@@ -587,6 +716,24 @@ impl Registry {
         }
         Ok(())
     }
+    fn validate_payloads(
+        &self,
+        api: instances::Api,
+        roots: &instances::Registry,
+    ) -> Result<(), String> {
+        for (layout, view) in self
+            .payloads
+            .values()
+            .map(|(l, v)| (l, v))
+            .chain(self.inline_payloads.values().map(|p| (&p.layout, &p.view)))
+        {
+            let bytes = view.with_native(|p| unsafe {
+                std::slice::from_raw_parts(p.as_ptr(), layout.width).to_vec()
+            })?;
+            layout.validate(&bytes, api, roots)?;
+        }
+        Ok(())
+    }
     pub(super) fn verify(
         &mut self,
         root_api: instances::Api,
@@ -598,6 +745,7 @@ impl Registry {
         let Some(api) = self.api else {
             return Ok(());
         };
+        self.validate_payloads(root_api, roots)?;
         for cell in self.cells.values() {
             let owner = roots.native(root_api, cell.owner)?;
             let mut bytes = vec![0; cell.shape.width()];
@@ -675,6 +823,7 @@ impl Registry {
             return Err("native field refresh after retirement".into());
         }
         let api = self.api.ok_or("native field refresh before installation")?;
+        self.validate_payloads(root_api, roots)?;
         for cell in self
             .cells
             .values()
@@ -800,6 +949,28 @@ impl Registry {
         if self.retired {
             return Err("field write after retirement".into());
         }
+        if let Some((&address, payload)) = self
+            .inline_payloads
+            .iter()
+            .find(|(_, p)| p.owner == owner && p.field == field)
+        {
+            let api = self.api.ok_or("nested field write before installation")?;
+            if unsafe { (api.flags)(field) } & (0x10 | 0x20 | 0x40) != 0 {
+                return Err("nested field API write requires mutable instance storage".into());
+            }
+            let mut bytes = vec![0; payload.layout.width];
+            if value != 0 {
+                if !value.is_multiple_of(payload.layout.alignment as u64)
+                    || !memory.owned_noncode_access(value, bytes.len())
+                {
+                    return Err("nested field API input is not aligned owned data".into());
+                }
+                memory.read(value, &mut bytes)?;
+            }
+            payload.layout.validate(&bytes, root_api, roots)?;
+            memory.write(address, &bytes)?;
+            return self.sync(root_api, roots);
+        }
         let (&address, cell) = self
             .cells
             .iter()
@@ -839,6 +1010,15 @@ impl Registry {
         if self.retired {
             return Err("field read after retirement".into());
         }
+        if let Some(payload) = self
+            .inline_payloads
+            .values()
+            .find(|p| p.owner == owner && p.field == field)
+        {
+            return payload.view.with_native(|p| unsafe {
+                std::slice::from_raw_parts(p.as_ptr(), payload.layout.width).to_vec()
+            });
+        }
         let cell = self
             .cells
             .values()
@@ -865,13 +1045,22 @@ impl Registry {
                 memory.unmap_shared_data(address)?;
                 cell.published = false;
             }
-            if !self.payloads.contains_key(&cell.owner) {
+            if !self.payloads.contains_key(&cell.owner)
+                && !self
+                    .inline_payloads
+                    .values()
+                    .any(|p| p.owner == cell.owner && p.view.same_storage(&cell.view))
+            {
                 cell.view.revoke()?;
             }
         }
         for (&owner, (_, view)) in &self.payloads {
             memory.unmap_shared_data(owner + 16)?;
             view.revoke()?;
+        }
+        for (&address, payload) in &self.inline_payloads {
+            memory.unmap_shared_data(address)?;
+            payload.view.revoke()?;
         }
         self.retired = true;
         Ok(())
@@ -1046,6 +1235,7 @@ pub(super) fn component_specs(
             type_class: target,
             guest_pointer: None,
             inline,
+            nested: None,
         })
     };
     let mut specs = vec![Spec {
@@ -1055,6 +1245,7 @@ pub(super) fn component_specs(
         type_class: None,
         guest_pointer: None,
         inline: None,
+        nested: None,
     }];
     let mut iterator = ptr::null_mut();
     let mut count = 0;
@@ -1135,6 +1326,122 @@ pub(super) fn component_specs(
 mod tests {
     use super::*;
     use std::cell::{Cell as Counter, RefCell};
+    #[test]
+    fn nested_instance_fields_keep_padding_private_and_barrier_complete_owner() {
+        let (fixture, _, _, _, _) = fixture();
+        let api = instances::tests::identity_api();
+        let mut roots = instances::Registry::default();
+        let mut storage = [0u64; 8];
+        let native = storage.as_mut_ptr().cast::<std::ffi::c_void>();
+        {
+            let bytes = unsafe { std::slice::from_raw_parts_mut(native.cast::<u8>(), 64) };
+            bytes[16..40].fill(0xcc);
+            bytes[16] = 1;
+            bytes[24..32].copy_from_slice(&4u64.to_le_bytes());
+            bytes[32..36].copy_from_slice(&7u32.to_le_bytes());
+        }
+        let owner = roots.borrow(api, native).unwrap();
+        let class = 2usize as Object;
+        let layout = value_layout::Layout {
+            class,
+            width: 24,
+            alignment: 8,
+            value: true,
+            slots: vec![
+                value_layout::Slot {
+                    nested: false,
+                    offset: 0,
+                    field: 1usize as Object,
+                    shape: value_layout::Shape::Scalar {
+                        width: 1,
+                        boolean: true,
+                    },
+                },
+                value_layout::Slot {
+                    nested: false,
+                    offset: 8,
+                    field: 2usize as Object,
+                    shape: value_layout::Shape::Reference(class),
+                },
+                value_layout::Slot {
+                    nested: false,
+                    offset: 16,
+                    field: 3usize as Object,
+                    shape: value_layout::Shape::Scalar {
+                        width: 4,
+                        boolean: false,
+                    },
+                },
+            ],
+        };
+        let field = 10usize as Object;
+        let mut fields = Registry {
+            api: fixture.api,
+            ..Registry::default()
+        };
+        let mut memory = Memory::default();
+        fields
+            .install_inline(
+                api,
+                &mut roots,
+                &mut memory,
+                (owner, field),
+                layout.clone(),
+                &mut |roots, native| roots.borrow(api, native),
+            )
+            .unwrap();
+        let initial = fields.read(owner, field).unwrap();
+        assert_eq!(&initial[1..8], &[0; 7]);
+        assert_eq!(&initial[20..24], &[0; 4]);
+        assert_ne!(u64::from_le_bytes(initial[8..16].try_into().unwrap()), 4);
+        assert!(fields
+            .install_inline(
+                api,
+                &mut roots,
+                &mut memory,
+                (owner, field),
+                layout,
+                &mut |roots, native| roots.borrow(api, native)
+            )
+            .is_err());
+        // A later invalid Boolean/padding/reference must reject earlier scalar
+        // edits too, before changing any native field or running a barrier.
+        memory.write_int(owner + 32, 4, 99).unwrap();
+        for (at, width, bad) in [(16, 1, 2), (17, 1, 0xaa), (24, 8, 0xdeadbeef)] {
+            let mut previous = vec![0; width];
+            memory.read(owner + at, &mut previous).unwrap();
+            memory.write_int(owner + at, width, bad).unwrap();
+            assert!(fields.sync(api, &roots).is_err());
+            assert_eq!(storage[4] as u32, 7);
+            memory.write(owner + at, &previous).unwrap();
+        }
+        memory.write_int(owner + 24, 8, 0).unwrap();
+        fields.sync(api, &roots).unwrap();
+        assert_eq!(storage[4] as u32, 99);
+        assert_eq!(storage[3], 0);
+        assert_eq!(BARRIER_OWNER.with(Counter::get), native as usize);
+        assert_eq!((storage[2] >> 8) & 255, 0xcc);
+        fields.verify(api, &roots).unwrap();
+        // Exercise the actual whole-field C API, rather than treating a leaf
+        // MonoClassField as if it were declared by the complete receiver.
+        memory.map(0x2000, 4096, READ | WRITE).unwrap();
+        let mut whole = fields.read(owner, field).unwrap();
+        whole[0] = 0;
+        whole[16..20].copy_from_slice(&123u32.to_le_bytes());
+        memory.write(0x2000, &whole).unwrap();
+        fields
+            .store_value(api, &roots, &mut memory, owner, field, 0x2000)
+            .unwrap();
+        assert_eq!(storage[2] as u8, 0);
+        assert_eq!(storage[4] as u32, 123);
+        storage[2] = (storage[2] & !255) | 1;
+        assert_eq!(storage[2] as u8, 1);
+        fields.refresh(api, &mut roots, owner).unwrap();
+        assert_eq!(fields.read(owner, field).unwrap()[0], 1);
+        roots.release(api);
+        fields.retire(&mut memory, &roots).unwrap();
+        assert!(memory.read_int(owner + 16, 1).is_err());
+    }
     thread_local! {
         static SCALAR: Counter<u8> = const { Counter::new(1) };
         static REFERENCE: Counter<usize> = const { Counter::new(4) };

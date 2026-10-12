@@ -1,6 +1,6 @@
 //! Generate serialization cells from actual declarations and attributes.
 //! Neither class names nor serialized field names appear in the rules. This
-//! first shape set rejects serialized structs with references and raw pointers.
+//! Nested values expose only metadata-checked leaves; raw pointers are rejected.
 use super::{c_char, fields::Spec, value_layout, Object};
 use std::{ffi::CStr, ptr};
 #[derive(Clone, Copy)]
@@ -193,6 +193,7 @@ impl Api {
                 if kind == 0x15 && unsafe { (self.is_value)(target.unwrap()) } != 0 {
                     return Err("serialized generic value requires a reference-aware layout".into());
                 }
+                let mut nested = None;
                 let inline = if kind == 0x11 {
                     let target = target.unwrap();
                     if unsafe { (self.is_enum)(target) } == 0 {
@@ -206,12 +207,16 @@ impl Api {
                         } else {
                             unsafe { CStr::from_ptr(name) }.to_string_lossy()
                         };
-                        Some(
-                            value_layout::Api::load(self.library, image)?
-                                .layout(target)
-                                .and_then(|layout| layout.scalar_inline())
-                                .map_err(|e| format!("inline field {label}: {e}"))?,
-                        )
+                        let layout = value_layout::Api::load(self.library, image)?
+                            .layout(target)
+                            .map_err(|e| format!("inline field {label}: {e}"))?;
+                        match layout.scalar_inline() {
+                            Ok(shape) => Some(shape),
+                            Err(_) => {
+                                nested = Some(layout);
+                                None
+                            }
+                        }
                     } else {
                         let base = unsafe { (self.enum_base)(target) };
                         let mut alignment = 0;
@@ -253,6 +258,7 @@ impl Api {
                     type_class: target,
                     guest_pointer: None,
                     inline,
+                    nested,
                 });
             }
             declaring = unsafe { (self.parent)(declaring) };

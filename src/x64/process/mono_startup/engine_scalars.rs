@@ -12,7 +12,7 @@ struct Spec {
     argument: Option<(&'static CStr, &'static CStr)>,
     adapter: Object,
 }
-const COUNT: usize = 30;
+const COUNT: usize = 60;
 static TARGETS: OnceLock<[u64; COUNT]> = OnceLock::new();
 thread_local! { static CALLS: RefCell<[usize; COUNT]> = const { RefCell::new([0; COUNT]) }; }
 pub(super) fn installed() -> bool {
@@ -248,6 +248,70 @@ unsafe extern "C" fn adapter_28() -> i32 {
 unsafe extern "C" fn adapter_29(update_type: i32) {
     call::<29>(&[u64::from(update_type as u32)], &[]);
 }
+unsafe extern "C" fn adapter_30() -> u8 {
+    call::<30>(&[], &[]).0 as u8
+}
+macro_rules! integer_getter {
+    ($name:ident, $slot:literal) => {
+        unsafe extern "C" fn $name() -> i32 {
+            call::<$slot>(&[], &[]).0 as i32
+        }
+    };
+}
+macro_rules! integer_setter {
+    ($name:ident, $slot:literal) => {
+        unsafe extern "C" fn $name(value: i32) {
+            call::<$slot>(&[value as u32 as u64], &[]);
+        }
+    };
+}
+macro_rules! single_getter {
+    ($name:ident, $slot:literal) => {
+        unsafe extern "C" fn $name() -> f32 {
+            f32::from_bits(call::<$slot>(&[], &[]).1 as u32)
+        }
+    };
+}
+macro_rules! double_getter {
+    ($name:ident, $slot:literal) => {
+        unsafe extern "C" fn $name() -> f64 {
+            f64::from_bits(call::<$slot>(&[], &[]).1)
+        }
+    };
+}
+integer_getter!(adapter_31, 31);
+integer_setter!(adapter_32, 32);
+integer_getter!(adapter_33, 33);
+integer_setter!(adapter_34, 34);
+single_getter!(adapter_35, 35);
+double_getter!(adapter_36, 36);
+single_getter!(adapter_37, 37);
+double_getter!(adapter_38, 38);
+single_getter!(adapter_39, 39);
+single_getter!(adapter_40, 40);
+double_getter!(adapter_41, 41);
+single_getter!(adapter_42, 42);
+double_getter!(adapter_43, 43);
+single_getter!(adapter_44, 44);
+double_getter!(adapter_45, 45);
+single_getter!(adapter_46, 46);
+single_getter!(adapter_47, 47);
+single_getter!(adapter_48, 48);
+single_getter!(adapter_49, 49);
+single_getter!(adapter_50, 50);
+integer_getter!(adapter_51, 51);
+single_getter!(adapter_52, 52);
+double_getter!(adapter_53, 53);
+unsafe extern "C" fn adapter_54() -> u8 {
+    call::<54>(&[], &[]).0 as u8
+}
+unsafe extern "C" fn adapter_55(value: u8) {
+    call::<55>(&[value as u64], &[]);
+}
+integer_getter!(adapter_56, 56);
+integer_setter!(adapter_57, 57);
+integer_getter!(adapter_58, 58);
+integer_setter!(adapter_59, 59);
 fn specs() -> [Spec; COUNT] {
     [
     Spec { binding: c"UnityEngine.Application::get_isFocused", namespace: c"UnityEngine", owner: c"Application", method: c"get_isFocused", target: 0x18006d380, returns: (c"System", c"Boolean"), argument: None, adapter: adapter_0 as *const () as Object },
@@ -280,5 +344,35 @@ fn specs() -> [Spec; COUNT] {
     Spec { binding: c"UnityEngine.QualitySettings::get_activeColorSpace", namespace: c"UnityEngine", owner: c"QualitySettings", method: c"get_activeColorSpace", target: 0x180088390, returns: (c"UnityEngine", c"ColorSpace"), argument: None, adapter: adapter_27 as *const () as Object },
     Spec { binding: c"UnityEngine.QualitySettings::get_desiredColorSpace", namespace: c"UnityEngine", owner: c"QualitySettings", method: c"get_desiredColorSpace", target: 0x180088390, returns: (c"UnityEngine", c"ColorSpace"), argument: None, adapter: adapter_28 as *const () as Object },
     Spec { binding: c"UnityEngineInternal.Input.NativeInputSystem::Update", namespace: c"UnityEngineInternal.Input", owner: c"NativeInputSystem", method: c"Update", target: 0x180132a10, returns: (c"System", c"Void"), argument: Some((c"UnityEngineInternal.Input", c"NativeInputUpdateType")), adapter: adapter_29 as *const () as Object },
+    Spec { binding: c"UnityEngine.Debug::get_isDebugBuild", namespace: c"UnityEngine", owner: c"Debug", method: c"get_isDebugBuild", target: 0x18005fed0, returns: (c"System", c"Boolean"), argument: None, adapter: adapter_30 as *const () as Object },
+    Spec { binding: c"UnityEngine.Application::get_targetFrameRate", namespace: c"UnityEngine", owner: c"Application", method: c"get_targetFrameRate", target: 0x18006fb40, returns: (c"System", c"Int32"), argument: None, adapter: adapter_31 as *const () as Object },
+    Spec { binding: c"UnityEngine.Application::set_targetFrameRate", namespace: c"UnityEngine", owner: c"Application", method: c"set_targetFrameRate", target: 0x18006fb50, returns: (c"System", c"Void"), argument: Some((c"System", c"Int32")), adapter: adapter_32 as *const () as Object },
+    Spec { binding: c"UnityEngine.QualitySettings::get_vSyncCount", namespace: c"UnityEngine", owner: c"QualitySettings", method: c"get_vSyncCount", target: 0x180085ff0, returns: (c"System", c"Int32"), argument: None, adapter: adapter_33 as *const () as Object },
+    Spec { binding: c"UnityEngine.QualitySettings::set_vSyncCount", namespace: c"UnityEngine", owner: c"QualitySettings", method: c"set_vSyncCount", target: 0x180086010, returns: (c"System", c"Void"), argument: Some((c"System", c"Int32")), adapter: adapter_34 as *const () as Object },
+    Spec { binding: c"UnityEngine.Time::get_time", namespace: c"UnityEngine", owner: c"Time", method: c"get_time", target: 0x1800cae50, returns: (c"System", c"Single"), argument: None, adapter: adapter_35 as *const () as Object },
+    Spec { binding: c"UnityEngine.Time::get_timeAsDouble", namespace: c"UnityEngine", owner: c"Time", method: c"get_timeAsDouble", target: 0x1800caea0, returns: (c"System", c"Double"), argument: None, adapter: adapter_36 as *const () as Object },
+    Spec { binding: c"UnityEngine.Time::get_timeSinceLevelLoad", namespace: c"UnityEngine", owner: c"Time", method: c"get_timeSinceLevelLoad", target: 0x1800caf10, returns: (c"System", c"Single"), argument: None, adapter: adapter_37 as *const () as Object },
+    Spec { binding: c"UnityEngine.Time::get_timeSinceLevelLoadAsDouble", namespace: c"UnityEngine", owner: c"Time", method: c"get_timeSinceLevelLoadAsDouble", target: 0x1800caf30, returns: (c"System", c"Double"), argument: None, adapter: adapter_38 as *const () as Object },
+    Spec { binding: c"UnityEngine.Time::get_deltaTime", namespace: c"UnityEngine", owner: c"Time", method: c"get_deltaTime", target: 0x1800caf40, returns: (c"System", c"Single"), argument: None, adapter: adapter_39 as *const () as Object },
+    Spec { binding: c"UnityEngine.Time::get_fixedTime", namespace: c"UnityEngine", owner: c"Time", method: c"get_fixedTime", target: 0x1800caf90, returns: (c"System", c"Single"), argument: None, adapter: adapter_40 as *const () as Object },
+    Spec { binding: c"UnityEngine.Time::get_fixedTimeAsDouble", namespace: c"UnityEngine", owner: c"Time", method: c"get_fixedTimeAsDouble", target: 0x1800cafd0, returns: (c"System", c"Double"), argument: None, adapter: adapter_41 as *const () as Object },
+    Spec { binding: c"UnityEngine.Time::get_unscaledTime", namespace: c"UnityEngine", owner: c"Time", method: c"get_unscaledTime", target: 0x1800cb010, returns: (c"System", c"Single"), argument: None, adapter: adapter_42 as *const () as Object },
+    Spec { binding: c"UnityEngine.Time::get_unscaledTimeAsDouble", namespace: c"UnityEngine", owner: c"Time", method: c"get_unscaledTimeAsDouble", target: 0x1800cb060, returns: (c"System", c"Double"), argument: None, adapter: adapter_43 as *const () as Object },
+    Spec { binding: c"UnityEngine.Time::get_fixedUnscaledTime", namespace: c"UnityEngine", owner: c"Time", method: c"get_fixedUnscaledTime", target: 0x1800cb0b0, returns: (c"System", c"Single"), argument: None, adapter: adapter_44 as *const () as Object },
+    Spec { binding: c"UnityEngine.Time::get_fixedUnscaledTimeAsDouble", namespace: c"UnityEngine", owner: c"Time", method: c"get_fixedUnscaledTimeAsDouble", target: 0x1800cb0f0, returns: (c"System", c"Double"), argument: None, adapter: adapter_45 as *const () as Object },
+    Spec { binding: c"UnityEngine.Time::get_unscaledDeltaTime", namespace: c"UnityEngine", owner: c"Time", method: c"get_unscaledDeltaTime", target: 0x1800cb130, returns: (c"System", c"Single"), argument: None, adapter: adapter_46 as *const () as Object },
+    Spec { binding: c"UnityEngine.Time::get_fixedUnscaledDeltaTime", namespace: c"UnityEngine", owner: c"Time", method: c"get_fixedUnscaledDeltaTime", target: 0x1800cb180, returns: (c"System", c"Single"), argument: None, adapter: adapter_47 as *const () as Object },
+    Spec { binding: c"UnityEngine.Time::get_fixedDeltaTime", namespace: c"UnityEngine", owner: c"Time", method: c"get_fixedDeltaTime", target: 0x1800cb1c0, returns: (c"System", c"Single"), argument: None, adapter: adapter_48 as *const () as Object },
+    Spec { binding: c"UnityEngine.Time::get_smoothDeltaTime", namespace: c"UnityEngine", owner: c"Time", method: c"get_smoothDeltaTime", target: 0x1800cb3c0, returns: (c"System", c"Single"), argument: None, adapter: adapter_49 as *const () as Object },
+    Spec { binding: c"UnityEngine.Time::get_timeScale", namespace: c"UnityEngine", owner: c"Time", method: c"get_timeScale", target: 0x1800cb470, returns: (c"System", c"Single"), argument: None, adapter: adapter_50 as *const () as Object },
+    Spec { binding: c"UnityEngine.Time::get_frameCount", namespace: c"UnityEngine", owner: c"Time", method: c"get_frameCount", target: 0x1800cb490, returns: (c"System", c"Int32"), argument: None, adapter: adapter_51 as *const () as Object },
+    Spec { binding: c"UnityEngine.Time::get_realtimeSinceStartup", namespace: c"UnityEngine", owner: c"Time", method: c"get_realtimeSinceStartup", target: 0x1800cb4b0, returns: (c"System", c"Single"), argument: None, adapter: adapter_52 as *const () as Object },
+    Spec { binding: c"UnityEngine.Time::get_realtimeSinceStartupAsDouble", namespace: c"UnityEngine", owner: c"Time", method: c"get_realtimeSinceStartupAsDouble", target: 0x1800cb4d0, returns: (c"System", c"Double"), argument: None, adapter: adapter_53 as *const () as Object },
+    Spec { binding: c"UnityEngine.Screen::get_fullScreen", namespace: c"UnityEngine", owner: c"Screen", method: c"get_fullScreen", target: 0x18007ccd0, returns: (c"System", c"Boolean"), argument: None, adapter: adapter_54 as *const () as Object },
+    Spec { binding: c"UnityEngine.Screen::set_fullScreen", namespace: c"UnityEngine", owner: c"Screen", method: c"set_fullScreen", target: 0x18007cd00, returns: (c"System", c"Void"), argument: Some((c"System", c"Boolean")), adapter: adapter_55 as *const () as Object },
+    Spec { binding: c"UnityEngine.Screen::get_fullScreenMode", namespace: c"UnityEngine", owner: c"Screen", method: c"get_fullScreenMode", target: 0x18007cda0, returns: (c"UnityEngine", c"FullScreenMode"), argument: None, adapter: adapter_56 as *const () as Object },
+    Spec { binding: c"UnityEngine.Screen::set_fullScreenMode", namespace: c"UnityEngine", owner: c"Screen", method: c"set_fullScreenMode", target: 0x18007cdb0, returns: (c"System", c"Void"), argument: Some((c"UnityEngine", c"FullScreenMode")), adapter: adapter_57 as *const () as Object },
+    Spec { binding: c"UnityEngine.Screen::get_sleepTimeout", namespace: c"UnityEngine", owner: c"Screen", method: c"get_sleepTimeout", target: 0x18007cc30, returns: (c"System", c"Int32"), argument: None, adapter: adapter_58 as *const () as Object },
+    Spec { binding: c"UnityEngine.Screen::set_sleepTimeout", namespace: c"UnityEngine", owner: c"Screen", method: c"set_sleepTimeout", target: 0x18007cc40, returns: (c"System", c"Void"), argument: Some((c"System", c"Int32")), adapter: adapter_59 as *const () as Object },
 ]
 }

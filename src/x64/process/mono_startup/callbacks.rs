@@ -112,6 +112,7 @@ fn with_routes<'a, T>(
     OWNER.with(|slot| slot.set((&owner as *const Owner<'_>).cast::<Owner<'static>>()));
     let scope = Scope;
     let _execution = super::burst_shared::execution()?;
+    let temporary = super::unsafe_buffers::TemporaryScope::enter()?;
     if !worker_registration {
         super::unsafe_buffers::drain_finalizers()?;
         super::profiler_recorders::drain_finalizers()?;
@@ -122,6 +123,7 @@ fn with_routes<'a, T>(
         super::unsafe_buffers::drain_finalizers()?;
         super::profiler_recorders::drain_finalizers()?;
     }
+    temporary.verify()?;
     drop(scope);
     let stats = Stats {
         calls: owner.calls.get(),
@@ -309,6 +311,7 @@ fn execute_scalar_guest(
                         .prepare_invoke(
                             &cpu,
                             &owner.memory.borrow(),
+                            &owner.runtime.borrow(),
                             (stack_top - STACK_SLICE, stack_top),
                         )?;
                     // Both temporary RefCell borrows above end before native IL.
@@ -316,7 +319,12 @@ fn execute_scalar_guest(
                     let result = route
                         .try_borrow_mut()
                         .map_err(|_| "nested invoke completion metadata is already borrowed")?
-                        .finish_invoke(&prepared, native_result, &mut owner.memory.borrow_mut())?;
+                        .finish_invoke(
+                            &prepared,
+                            native_result,
+                            &mut owner.memory.borrow_mut(),
+                            &owner.runtime.borrow(),
+                        )?;
                     cpu.return_integer(&owner.memory.borrow(), result)?;
                     owner
                         .managed_reentries
@@ -442,6 +450,115 @@ pub(super) fn guest_arguments(target: u64, args: &[u64]) -> Result<u64, String> 
             return Err("guest argument callback has no owner".into());
         }
         execute_guest(unsafe { &*slot.get() }, target, args)
+    })
+}
+/// UTF16 span arguments share one scoped guest allocation. All positions are
+/// Win64 positions, including XMM inputs and the optional 16B output header.
+pub(super) type GuestSpanResult = ((u64, u64), Option<[u8; 16]>);
+pub(super) fn guest_span_arguments(
+    target: u64,
+    args: &[u64],
+    floating: &[(usize, u64)],
+    spans: &[(usize, Option<&[u16]>)],
+    output: Option<usize>,
+) -> Result<GuestSpanResult, String> {
+    OWNER.with(|slot| {
+        if slot.get().is_null() || args.len() > 8 || spans.len() > 8 {
+            return Err("UTF16 callback owner/arity absent".into());
+        }
+        let owner = unsafe { &*slot.get() };
+        let mut seen = [false; 8];
+        let mut offset = 0usize;
+        let mut offsets = Vec::new();
+        for &(index, units) in spans {
+            if index >= args.len() || seen[index] || units.is_some_and(|u| u.len() > 65536) {
+                return Err("UTF16 callback span/argument invalid".into());
+            }
+            seen[index] = true;
+            offsets.push(offset);
+            offset += 16 + units.map_or(0, |u| u.len() * 2);
+            offset = (offset + 15) & !15;
+        }
+        let output_offset = if let Some(index) = output {
+            if index >= args.len() || seen[index] {
+                return Err("UTF16 callback output position invalid".into());
+            }
+            let at = offset;
+            offset += 16;
+            Some(at)
+        } else {
+            None
+        };
+        if floating.iter().enumerate().any(|(i, &(index, _))| {
+            index >= args.len()
+                || index >= 4
+                || seen[index]
+                || output == Some(index)
+                || floating[..i].iter().any(|&(prior, _)| prior == index)
+        }) {
+            return Err("UTF16 callback floating position invalid".into());
+        }
+        let size = (offset.max(1) as u64 + 4095) & !4095;
+        if size > 0x110000 || owner.depth.get() >= 8 {
+            return Err("UTF16 callback capacity exceeded".into());
+        }
+        let base = 0x6ff800000000 + owner.depth.get() as u64 * 0x110000;
+        owner.memory.borrow_mut().map(
+            base,
+            size,
+            super::super::super::memory::READ | super::super::super::memory::WRITE,
+        )?;
+        struct Payload<'a, 'b>(&'a Owner<'b>, u64, u64);
+        impl Drop for Payload<'_, '_> {
+            fn drop(&mut self) {
+                if let Err(error) = self.0.memory.borrow_mut().unmap(self.1, self.2) {
+                    eprintln!("native UTF16 callback cleanup: {error}");
+                    std::process::abort();
+                }
+            }
+        }
+        let _payload = Payload(owner, base, size);
+        let mut arguments = args.to_vec();
+        for (&(index, units), &offset) in spans.iter().zip(&offsets) {
+            let address = base + offset as u64;
+            let begin = match units {
+                None => 0,
+                Some([]) => 1,
+                Some(units) => {
+                    let bytes: Vec<_> = units.iter().flat_map(|u| u.to_le_bytes()).collect();
+                    owner.memory.borrow_mut().write(address + 16, &bytes)?;
+                    address + 16
+                }
+            };
+            owner.memory.borrow_mut().write_int(address, 8, begin)?;
+            owner.memory.borrow_mut().write_int(
+                address + 8,
+                4,
+                units.map_or(0, |u| u.len()) as u64,
+            )?;
+            arguments[index] = address;
+        }
+        if let (Some(index), Some(offset)) = (output, output_offset) {
+            arguments[index] = base + offset as u64;
+        }
+        let result = execute_scalar_guest(owner, target, &arguments, floating)?;
+        let header = if let Some(offset) = output_offset {
+            let mut bytes = [0; 16];
+            owner
+                .memory
+                .borrow()
+                .read(base + offset as u64, &mut bytes)?;
+            // Output strings must belong to the engine allocator, never to a
+            // borrowed input span which is revoked when this scope ends.
+            let pointer = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+            if (base..base + size).contains(&pointer) {
+                return Err("engine output aliases scoped UTF16 input".into());
+            }
+            Some(bytes)
+        } else {
+            None
+        };
+        Ok((result, header))
     })
 }
 /// Fixed adapters marshal declared byref value bytes into private guest slots.
@@ -797,6 +914,77 @@ fn reject_profiler(reason: &str) -> ! {
 mod tests {
     use super::super::super::super::memory::{EXECUTE, READ, WRITE};
     use super::*;
+    #[test]
+    fn utf16_arguments_preserve_two_spans_float_output_and_fault_cleanup() {
+        let mut memory = Memory::default();
+        memory.map(0x1000, 4096, READ | WRITE | EXECUTE).unwrap();
+        memory.map(0x2000, 4096, READ | WRITE).unwrap();
+        // Return the first UTF16 unit from each span through a guest output
+        // allocation, preserving the actual third Win64 output position.
+        // mov rax,[rcx]; movzx eax,word [rax]; mov r9,[rdx];
+        // movzx r9d,word [r9]; add eax,r9d; mov [0x2000],rax;
+        // mov qword [r8],0x2000; mov dword [r8+8],1; ret
+        memory
+            .write(
+                0x1000,
+                &[
+                    0x48, 0x8b, 0x01, 0x0f, 0xb7, 0x00, 0x4c, 0x8b, 0x0a, 0x45, 0x0f, 0xb7, 0x09,
+                    0x44, 0x01, 0xc8, 0x48, 0xa3, 0, 0x20, 0, 0, 0, 0, 0, 0, 0x49, 0xc7, 0x00, 0,
+                    0x20, 0, 0, 0x41, 0xc7, 0x40, 0x08, 1, 0, 0, 0, 0xc3,
+                ],
+            )
+            .unwrap();
+        // movaps xmm0,xmm1; ret -- f32 default/result bits, including NaN.
+        memory.write(0x1100, &[0x0f, 0x28, 0xc1, 0xc3]).unwrap();
+        // An engine output must not borrow an input which is about to retire.
+        // mov rax,[rcx]; mov [r8],rax; ret
+        memory
+            .write(0x1200, &[0x48, 0x8b, 0x01, 0x49, 0x89, 0x00, 0xc3])
+            .unwrap();
+        // mov rax,[0]; ret -- exercise RAII payload teardown after a fault.
+        memory
+            .write(0x1300, &[0x48, 0xa1, 0, 0, 0, 0, 0, 0, 0, 0, 0xc3])
+            .unwrap();
+        memory
+            .map(super::super::super::STACK, 65536, READ | WRITE)
+            .unwrap();
+        let mut runtime = Runtime64::new(
+            &mut memory,
+            0x140000000,
+            super::super::super::STACK,
+            65536,
+            "UTF16-arguments",
+        )
+        .unwrap();
+        let (result, _) = with_owner(&mut memory, &mut runtime, [0; 7], || {
+            let spans = [
+                (0, Some([0x3042u16].as_slice())),
+                (1, Some([0x3044u16].as_slice())),
+            ];
+            let result = guest_span_arguments(0x1000, &[0; 3], &[], &spans, Some(2))?;
+            assert_eq!(result.0 .0, 0x6086);
+            let header = result.1.unwrap();
+            assert_eq!(u64::from_le_bytes(header[..8].try_into().unwrap()), 0x2000);
+            assert_eq!(i32::from_le_bytes(header[8..12].try_into().unwrap()), 1);
+            for bits in [0x80000000u64, 0x7fc01234, 0x3fa00000] {
+                assert_eq!(
+                    guest_span_arguments(0x1100, &[0; 2], &[(1, bits)], &[(0, None)], None)?
+                        .0
+                         .1,
+                    bits
+                );
+            }
+            assert!(guest_span_arguments(0x1200, &[0; 3], &[], &spans, Some(2)).is_err());
+            assert!(guest_span_arguments(0x1300, &[0; 3], &[], &spans, Some(2)).is_err());
+            assert!(guest_span_arguments(0x1000, &[0; 3], &[], &spans, Some(0)).is_err());
+            assert!(guest_span_arguments(0x1000, &[0; 3], &[(1, 0)], &spans, Some(2)).is_err());
+            assert!(with_service(|memory, _| memory.read_int(0x6ff800000000, 8)).is_err());
+            Ok::<_, String>(())
+        })
+        .unwrap();
+        result.unwrap();
+        assert!(memory.read_int(0x6ff800000000, 8).is_err());
+    }
     #[test]
     fn byte_arguments_preserve_positions_and_revoke_private_spans() {
         let mut memory = Memory::default();

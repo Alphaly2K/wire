@@ -14,7 +14,7 @@ use std::{
 };
 const CAPACITY: usize = 64 * 1024 * 1024;
 const COUNT: usize = 4096;
-const BINDINGS: [(&std::ffi::CStr, &std::ffi::CStr, u64); 5] = [
+const BINDINGS: [(&std::ffi::CStr, &std::ffi::CStr, u64); 7] = [
     (
         c"Unity.Collections.LowLevel.Unsafe.UnsafeUtility::Malloc",
         c"Malloc",
@@ -40,14 +40,131 @@ const BINDINGS: [(&std::ffi::CStr, &std::ffi::CStr, u64); 5] = [
         c"MemMove",
         0x180067730,
     ),
+    (
+        c"Unity.Collections.LowLevel.Unsafe.UnsafeUtility::MallocTracked",
+        c"MallocTracked",
+        0x1800674d0,
+    ),
+    (
+        c"Unity.Collections.LowLevel.Unsafe.UnsafeUtility::FreeTracked",
+        c"FreeTracked",
+        0x1800675a0,
+    ),
 ];
-static TARGETS: OnceLock<[u64; 5]> = OnceLock::new();
+static TARGETS: OnceLock<[u64; 7]> = OnceLock::new();
 // The frozen runtime does not export mono_gc_is_finalizer_thread. Its public
 // profiler events bracket the actual managed finalizer invocation instead.
 // A foreign caller is admitted only inside this authenticated runtime scope.
 thread_local! {
     static FINALIZING: Cell<usize> = const { Cell::new(0) };
     static FINALIZER_EXECUTION: RefCell<Option<super::burst_shared::Execution>> = const { RefCell::new(None) };
+    static INPUT_SPANS: RefCell<BTreeMap<usize, usize>> = const { RefCell::new(BTreeMap::new()) };
+    static TEMP_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+pub(super) struct TemporaryScope(usize, PhantomData<Rc<()>>);
+impl TemporaryScope {
+    pub(super) fn enter() -> Result<Self, String> {
+        TEMP_DEPTH.with(|depth| {
+            let next = depth
+                .get()
+                .checked_add(1)
+                .ok_or("temporary invocation depth overflow")?;
+            depth.set(next);
+            Ok(Self(next, PhantomData))
+        })
+    }
+    pub(super) fn verify(&self) -> Result<(), String> {
+        if self.0 == 1
+            && ARENA.with(|arena| {
+                arena
+                    .borrow()
+                    .live
+                    .values()
+                    .any(|allocation| allocation.allocator == 2)
+            })
+        {
+            return Err("native Temp allocation survived its synchronous IL invocation; engine resume denied".into());
+        }
+        Ok(())
+    }
+}
+impl Drop for TemporaryScope {
+    fn drop(&mut self) {
+        TEMP_DEPTH.with(|depth| {
+            assert_eq!(depth.get(), self.0);
+            depth.set(self.0 - 1);
+        });
+    }
+}
+/// Scoped native copy access to a privately owned input-event snapshot. This
+/// capability permits no allocator/free operation and never maps host pointers.
+pub(super) struct InputSpan {
+    words: Vec<u64>,
+    length: usize,
+    _owner_only: PhantomData<Rc<()>>,
+}
+impl InputSpan {
+    pub(super) fn new(length: usize) -> Result<Self, String> {
+        if length == 0 || length > 1024 * 1024 {
+            return Err("input copy span length mismatch".into());
+        }
+        let mut words = vec![0u64; length.div_ceil(8)];
+        let base = words.as_mut_ptr() as usize;
+        INPUT_SPANS.with(|spans| {
+            let mut spans = spans.borrow_mut();
+            if spans.len() >= 8 || spans.contains_key(&base) {
+                return Err("input copy span capacity/identity mismatch".into());
+            }
+            spans.insert(base, length);
+            Ok(Self {
+                words,
+                length,
+                _owner_only: PhantomData,
+            })
+        })
+    }
+    pub(super) fn pointer(&self) -> usize {
+        self.words.as_ptr() as usize
+    }
+    pub(super) fn bytes(&self, length: usize) -> Result<&[u8], String> {
+        if length > self.length {
+            return Err("input copy span exceeds backing".into());
+        }
+        Ok(unsafe { std::slice::from_raw_parts(self.words.as_ptr().cast(), length) })
+    }
+    pub(super) fn bytes_mut(&mut self, length: usize) -> Result<&mut [u8], String> {
+        if length > self.length {
+            return Err("input copy span exceeds backing".into());
+        }
+        Ok(unsafe { std::slice::from_raw_parts_mut(self.words.as_mut_ptr().cast(), length) })
+    }
+}
+impl Drop for InputSpan {
+    fn drop(&mut self) {
+        INPUT_SPANS.with(|spans| {
+            spans.borrow_mut().remove(&self.pointer());
+        });
+    }
+}
+fn input_span_contains(pointer: usize, size: usize) -> bool {
+    INPUT_SPANS.with(|spans| {
+        spans
+            .borrow()
+            .range(..=pointer)
+            .next_back()
+            .is_some_and(|(&base, &length)| {
+                pointer
+                    .checked_sub(base)
+                    .and_then(|offset| offset.checked_add(size))
+                    .is_some_and(|end| end <= length)
+            })
+    })
+}
+pub(super) fn export_input_span(pointer: usize, size: usize) -> Result<(u64, Vec<u8>), String> {
+    let (_, guest) = ARENA.with(|arena| arena.borrow().range(pointer, size))?;
+    let mut bytes = vec![0; size];
+    unsafe { std::ptr::copy_nonoverlapping(pointer as *const u8, bytes.as_mut_ptr(), size) };
+    Ok((guest, bytes))
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReleaseState {
@@ -58,6 +175,7 @@ enum ReleaseState {
 }
 struct ReleaseRecord {
     allocator: i32,
+    tracked: bool,
     state: ReleaseState,
 }
 struct Releases {
@@ -78,6 +196,14 @@ impl Releases {
         }
     }
     fn register(&mut self, pointer: usize, allocator: i32) -> Result<(), String> {
+        self.register_kind(pointer, allocator, false)
+    }
+    fn register_kind(
+        &mut self,
+        pointer: usize,
+        allocator: i32,
+        tracked: bool,
+    ) -> Result<(), String> {
         if self.owner != thread::current().id()
             || self.closed
             || self.records.len() >= COUNT
@@ -89,6 +215,7 @@ impl Releases {
             pointer,
             ReleaseRecord {
                 allocator,
+                tracked,
                 state: ReleaseState::Live,
             },
         );
@@ -107,6 +234,16 @@ impl Releases {
             .ok_or("finalizer Free requires exact live base/allocator and one release")?;
         record.state = ReleaseState::Queued;
         self.queued += 1;
+        Ok(())
+    }
+    fn validate_family(&self, pointer: usize, allocator: i32, tracked: bool) -> Result<(), String> {
+        if self
+            .records
+            .get(&pointer)
+            .is_none_or(|r| r.allocator != allocator || r.tracked != tracked)
+        {
+            return Err("native Free requires matching tracked allocation family".into());
+        }
         Ok(())
     }
     fn begin(&mut self, pointer: usize, allocator: i32, queued: bool) -> Result<(), String> {
@@ -296,10 +433,14 @@ impl Arena {
             self.copies += 1;
             return Ok(());
         }
-        self.range(destination, size)
-            .map_err(|e| format!("native copy destination: {e}; size={size}"))?;
-        self.range(source, size)
-            .map_err(|e| format!("native copy source: {e}; size={size}"))?;
+        if !input_span_contains(destination, size) {
+            self.range(destination, size)
+                .map_err(|e| format!("native copy destination: {e}; size={size}"))?;
+        }
+        if !input_span_contains(source, size) {
+            self.range(source, size)
+                .map_err(|e| format!("native copy source: {e}; size={size}"))?;
+        }
         if size != 0 {
             // Data stays wholly native. Overlap is handled as memmove; no
             // possibly pointer-bearing bytes are ever copied into guest Memory.
@@ -415,7 +556,7 @@ pub(super) fn install(
         system(c"IntPtr"),
     ];
     let api = managed_calls::Api::load(library)?;
-    let mut targets = [0; 5];
+    let mut targets = [0; 7];
     for (index, &(name, member, target)) in BINDINGS.iter().enumerate() {
         targets[index] =
             registry.exact_target(name.to_str().map_err(|e| e.to_string())?, target)?;
@@ -426,6 +567,8 @@ pub(super) fn install(
                 match index {
                     0 => 4,
                     1 => 2,
+                    5 => 5,
+                    6 => 2,
                     _ => 3,
                 },
             )
@@ -437,10 +580,12 @@ pub(super) fn install(
                 &[classes[0], system(c"Byte"), classes[1]],
                 images,
             )?;
-        } else if index >= 3 {
+        } else if index == 3 || index == 4 {
             api.buffer_copy_icall(method, owner, &[classes[0], classes[1]], images)?;
+        } else if index == 5 {
+            api.tracked_allocator_icall(method, owner, &classes, images)?;
         } else {
-            api.allocator_icall(method, owner, index == 1, &classes, images)?;
+            api.allocator_icall(method, owner, index == 1 || index == 6, &classes, images)?;
         }
     }
     let create_profiler = sym!(
@@ -475,6 +620,8 @@ pub(super) fn install(
         memset as *const () as Object,
         memcpy as *const () as Object,
         memcpy as *const () as Object,
+        malloc_tracked as *const () as Object,
+        free_tracked as *const () as Object,
     ];
     for ((name, _, _), adapter) in BINDINGS.into_iter().zip(adapters) {
         unsafe { add(name.as_ptr(), adapter) };
@@ -487,13 +634,15 @@ fn request(
     allocator: i32,
     context: usize,
 ) -> Result<(usize, usize), String> {
-    // Temp is implicitly retired by the engine scheduler; custom/context
-    // allocators require a different ownership contract. Neither is admitted.
+    // Temp is admitted only inside a synchronous native invocation, and must
+    // be explicitly released before its outermost owner scope returns to the
+    // engine scheduler. Custom/context allocators remain outside this contract.
     if !(1..=CAPACITY as i64).contains(&size)
         || alignment <= 0
         || !(alignment as usize).is_power_of_two()
         || alignment > 4096
-        || !matches!(allocator, 3 | 4)
+        || !(matches!(allocator, 3 | 4)
+            || (allocator == 2 && TEMP_DEPTH.with(|depth| depth.get() != 0)))
         || context != 0
     {
         return Err(format!("unsupported native buffer request: size={size}; alignment={alignment}; allocator={allocator}; context={context:#x}"));
@@ -501,6 +650,15 @@ fn request(
     Ok((size as usize, alignment as usize))
 }
 fn allocate(size: i64, alignment: i32, allocator: i32, context: usize) -> Result<Object, String> {
+    allocate_kind(size, alignment, allocator, context, None)
+}
+fn allocate_kind(
+    size: i64,
+    alignment: i32,
+    allocator: i32,
+    context: usize,
+    skip: Option<i32>,
+) -> Result<Object, String> {
     callbacks::with_service(|_, _| Ok(()))?;
     let (size, alignment) = request(size, alignment, allocator, context)?;
     let targets = TARGETS
@@ -510,10 +668,26 @@ fn allocate(size: i64, alignment: i32, allocator: i32, context: usize) -> Result
     let bytes = Bytes::new(size, alignment)?;
     // Execute the actual Unity allocator with its complete four-argument ABI.
     // No registry borrow or native pointer is retained by guest engine code.
-    let guest = callbacks::guest_arguments(
-        targets[0],
-        &[size as u64, alignment as u64, allocator as u32 as u64, 0],
-    )?;
+    let guest = if let Some(skip) = skip {
+        if !(0..=1024).contains(&skip) {
+            return Err("tracked allocation stack skip exceeds bound".into());
+        }
+        callbacks::guest_arguments(
+            targets[5],
+            &[
+                size as u64,
+                alignment as u64,
+                allocator as u32 as u64,
+                skip as u64,
+                0,
+            ],
+        )?
+    } else {
+        callbacks::guest_arguments(
+            targets[0],
+            &[size as u64, alignment as u64, allocator as u32 as u64, 0],
+        )?
+    };
     if guest == 0 {
         return Ok(std::ptr::null_mut());
     }
@@ -556,12 +730,16 @@ fn allocate(size: i64, alignment: i32, allocator: i32, context: usize) -> Result
                 bytes,
             })
         })?;
-        RELEASES
+        let mut releases = RELEASES
             .get()
             .ok_or("native buffer release registry absent")?
             .lock()
-            .map_err(|_| "native release registry poisoned")?
-            .register(pointer, allocator)?;
+            .map_err(|_| "native release registry poisoned")?;
+        if skip.is_some() {
+            releases.register_kind(pointer, allocator, true)?;
+        } else {
+            releases.register(pointer, allocator)?;
+        }
         Ok(pointer)
     })();
     match prepared {
@@ -570,12 +748,18 @@ fn allocate(size: i64, alignment: i32, allocator: i32, context: usize) -> Result
             Ok(pointer as Object)
         }
         Err(error) => {
-            callbacks::guest_arguments(targets[1], &[guest, allocator as u32 as u64])?;
+            callbacks::guest_arguments(
+                targets[if skip.is_some() { 6 } else { 1 }],
+                &[guest, allocator as u32 as u64],
+            )?;
             Err(error)
         }
     }
 }
 fn release(pointer: usize, allocator: i32) -> Result<(), String> {
+    release_kind(pointer, allocator, false)
+}
+fn release_kind(pointer: usize, allocator: i32, tracked: bool) -> Result<(), String> {
     let releases = RELEASES
         .get()
         .ok_or("native buffer release registry absent")?;
@@ -583,6 +767,17 @@ fn release(pointer: usize, allocator: i32) -> Result<(), String> {
         .lock()
         .map_err(|_| "native release registry poisoned")?
         .owner;
+    if pointer == 0 && owner == thread::current().id() {
+        callbacks::guest_arguments(
+            TARGETS.get().ok_or("native buffer bindings absent")?[if tracked { 6 } else { 1 }],
+            &[0, allocator as u32 as u64],
+        )?;
+        return Ok(());
+    }
+    releases
+        .lock()
+        .map_err(|_| "native release registry poisoned")?
+        .validate_family(pointer, allocator, tracked)?;
     if owner != thread::current().id() {
         // The finalizer never borrows guest Memory, touches native bytes or
         // waits for the owner (Mono cleanup may be waiting for this thread).
@@ -616,8 +811,16 @@ fn release_owned(pointer: usize, allocator: i32, queued: bool) -> Result<(), Str
         .lock()
         .map_err(|_| "native release registry poisoned")?
         .begin(pointer, allocator, queued)?;
+    let tracked = releases
+        .lock()
+        .map_err(|_| "native release registry poisoned")?
+        .records[&pointer]
+        .tracked;
     // No arena or release lock crosses engine execution or native IL reentry.
-    callbacks::guest_arguments(targets[1], &[guest, allocator as u32 as u64])?;
+    callbacks::guest_arguments(
+        targets[if tracked { 6 } else { 1 }],
+        &[guest, allocator as u32 as u64],
+    )?;
     ARENA.with(|arena| arena.borrow_mut().retire(pointer, allocator))?;
     releases
         .lock()
@@ -713,6 +916,18 @@ unsafe extern "C" fn malloc(size: i64, alignment: i32, allocator: i32, context: 
 unsafe extern "C" fn free(pointer: Object, allocator: i32) {
     checked(|| release(pointer as usize, allocator));
 }
+unsafe extern "C" fn malloc_tracked(
+    size: i64,
+    alignment: i32,
+    allocator: i32,
+    skip: i32,
+    context: usize,
+) -> Object {
+    checked(|| allocate_kind(size, alignment, allocator, context, Some(skip)))
+}
+unsafe extern "C" fn free_tracked(pointer: Object, allocator: i32) {
+    checked(|| release_kind(pointer as usize, allocator, true));
+}
 unsafe extern "C" fn memset(pointer: Object, value: u8, size: i64) {
     checked(|| fill(pointer as usize, value, size));
 }
@@ -751,7 +966,14 @@ pub(super) fn retire_after_vm_cleanup() -> Result<(), String> {
             .collect::<Vec<_>>())
     })?;
     for (pointer, allocator) in remaining {
-        release(pointer, allocator)?;
+        let tracked = RELEASES
+            .get()
+            .ok_or("native release registry absent")?
+            .lock()
+            .map_err(|_| "native release registry poisoned")?
+            .records[&pointer]
+            .tracked;
+        release_kind(pointer, allocator, tracked)?;
         ARENA.with(|arena| arena.borrow_mut().cleanup_frees += 1);
     }
     ARENA.with(|arena| {
@@ -788,6 +1010,64 @@ pub(super) fn report() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn temp_scope_rejects_scheduler_resume_until_explicit_release() {
+        assert!(request(80, 8, 2, 0).is_err());
+        let scope = TemporaryScope::enter().unwrap();
+        request(80, 8, 2, 0).unwrap();
+        let old = ARENA.with(|arena| std::mem::take(&mut *arena.borrow_mut()));
+        let pointer = ARENA.with(|arena| {
+            let mut arena = arena.borrow_mut();
+            arena.reserve(80).unwrap();
+            arena
+                .insert(Allocation {
+                    guest: 0x1000,
+                    allocator: 2,
+                    bytes: Bytes::new(80, 8).unwrap(),
+                })
+                .unwrap()
+        });
+        assert!(scope.verify().is_err());
+        ARENA.with(|arena| arena.borrow_mut().retire(pointer, 2).unwrap());
+        scope.verify().unwrap();
+        ARENA.with(|arena| *arena.borrow_mut() = old);
+        drop(scope);
+        assert!(request(80, 8, 2, 0).is_err());
+    }
+    #[test]
+    fn scoped_input_copy_owns_backing_checks_both_ranges_and_retires_capability() {
+        let mut source = InputSpan::new(20).unwrap();
+        source.bytes_mut(20).unwrap().copy_from_slice(&[0x5a; 20]);
+        let destination = InputSpan::new(20).unwrap();
+        let mut arena = Arena::default();
+        arena
+            .copy(destination.pointer(), source.pointer(), 20)
+            .unwrap();
+        assert_eq!(destination.bytes(20).unwrap(), &[0x5a; 20]);
+        assert!(arena
+            .copy(destination.pointer(), source.pointer(), 21)
+            .is_err());
+        assert_eq!(destination.bytes(20).unwrap(), &[0x5a; 20]);
+        assert!(arena
+            .copy(destination.pointer() + 1, source.pointer(), 20)
+            .is_err());
+        let retired = source.pointer();
+        drop(source);
+        assert!(arena.copy(destination.pointer(), retired, 20).is_err());
+        assert_eq!(destination.bytes(20).unwrap(), &[0x5a; 20]);
+        assert!(arena.lookup(destination.pointer(), 4).is_err());
+    }
+    #[test]
+    fn tracked_release_identity_keeps_allocator_and_allocation_family() {
+        let mut releases = Releases::new();
+        releases.register_kind(0x1000, 4, true).unwrap();
+        releases.register(0x2000, 4).unwrap();
+        releases.validate_family(0x1000, 4, true).unwrap();
+        assert!(releases.validate_family(0x1000, 4, false).is_err());
+        assert!(releases.validate_family(0x1000, 3, true).is_err());
+        assert!(releases.validate_family(0x2000, 4, true).is_err());
+        assert_eq!(releases.records[&0x1000].state, ReleaseState::Live);
+    }
     #[test]
     fn finalizer_queue_checks_origin_identity_duplicate_and_owner_drain() {
         let mut releases = Releases::new();

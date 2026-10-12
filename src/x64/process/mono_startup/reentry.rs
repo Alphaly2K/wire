@@ -510,6 +510,7 @@ impl Metadata<'_> {
             && matches!(
                 function,
                 "mono_string_new_wrapper"
+                    | "mono_unity_string_empty_wrapper"
                     | "mono_string_new"
                     | "mono_string_new_len"
                     | "mono_string_length"
@@ -675,6 +676,7 @@ pub(super) struct PreparedInvoke {
     constructor: Option<(Object, Object, u64)>,
     receiver: Object,
     frame: Option<managed_calls::Frame>,
+    input: Option<super::input_events::Prepared>,
     stack: (u64, u64),
     rsp: u64,
     pub(super) exception_slot: u64,
@@ -684,6 +686,7 @@ impl Metadata<'_> {
         &mut self,
         cpu: &Cpu64,
         memory: &Memory,
+        runtime: &crate::x64::runtime::Runtime64,
         stack: (u64, u64),
     ) -> Result<PreparedInvoke, String> {
         memory.read_int(cpu.regs[4], 8)?;
@@ -700,6 +703,37 @@ impl Metadata<'_> {
             self.metadata.describe_method(self.library, cpu.regs[1])?
         );
         let image = self.images.unique_native_image(super::SUBSYSTEMS_MODULE)?;
+        self.sync_guest(memory)?;
+        if let Some(input) =
+            super::input_events::prepare(method, memory, runtime, cpu.regs[8], |address, width| {
+                checked_output(memory, cpu, stack, address, 1).is_ok()
+                    && address
+                        .checked_add(width as u64)
+                        .is_some_and(|end| end <= stack.1)
+            })?
+        {
+            if cpu.regs[2] != 0
+                || (exception_slot != 0
+                    && input.output_address() < exception_slot + 8
+                    && exception_slot < input.output_address() + 20)
+            {
+                return Err("input callback receiver/exception output mismatch".into());
+            }
+            return Ok(PreparedInvoke {
+                library: self.library,
+                method,
+                image,
+                step: None,
+                ordinary: None,
+                constructor: None,
+                receiver: std::ptr::null_mut(),
+                frame: None,
+                input: Some(input),
+                stack,
+                rsp: cpu.regs[4],
+                exception_slot,
+            });
+        }
         if cpu.regs[2] != 0 {
             let mut images = self.images.live_native_images()?;
             let core = self.images.unique_native_image(super::CORE_MODULE)?;
@@ -749,6 +783,7 @@ impl Metadata<'_> {
                 constructor: constructor.map(|_| (core, object, cpu.regs[2])),
                 receiver: object,
                 frame,
+                input: None,
                 stack,
                 rsp: cpu.regs[4],
                 exception_slot,
@@ -795,6 +830,7 @@ impl Metadata<'_> {
             constructor: None,
             receiver: std::ptr::null_mut(),
             frame,
+            input: None,
             stack,
             rsp: cpu.regs[4],
             exception_slot,
@@ -847,6 +883,9 @@ impl PreparedInvoke {
         Ok(())
     }
     pub(super) fn execute(&mut self) -> Result<Object, String> {
+        if let Some(input) = self.input.as_mut() {
+            return input.execute();
+        }
         if let Some((core, object, token)) = self.constructor {
             animation::execute_nested_managed(self.library, core, self.method, object, token)?;
             eprintln!("NATIVE_MONO_NESTED_CONSTRUCTOR_VERIFIED: receiver={token:#x}; metadata-qualified=true");
@@ -912,7 +951,23 @@ impl Metadata<'_> {
         prepared: &PreparedInvoke,
         result: Object,
         memory: &mut Memory,
+        runtime: &crate::x64::runtime::Runtime64,
     ) -> Result<u64, String> {
+        if let Some(input) = prepared.input.as_ref() {
+            self.refresh_native(memory)?;
+            if prepared.exception_slot != 0 {
+                checked_output_at(
+                    memory,
+                    prepared.rsp,
+                    prepared.stack,
+                    prepared.exception_slot,
+                    8,
+                )?;
+            }
+            input.finish(memory, runtime)?;
+            prepared.commit_outputs(memory, &[])?;
+            return Ok(0);
+        }
         let mut outputs = Vec::new();
         if let Some(frame) = prepared.frame.as_ref() {
             let calls = managed_calls::Api::load(self.library)?;
@@ -1097,11 +1152,14 @@ impl Metadata<'_> {
                 return Err("nested isinst produced another identity".into());
             }
         } else {
+            let empty = function == "mono_unity_string_empty_wrapper";
             let wrapper = function == "mono_string_new_wrapper";
-            if !wrapper && a[0] != super::ROOT_TOKEN {
+            if !wrapper && !empty && a[0] != super::ROOT_TOKEN {
                 return Err("nested String allocation has unknown domain".into());
             }
-            let bytes = if function == "mono_string_new_len" {
+            let bytes = if empty {
+                Vec::new()
+            } else if function == "mono_string_new_len" {
                 if a[2] > 32768 {
                     return Err("nested String length exceeds bound".into());
                 }
@@ -1114,8 +1172,25 @@ impl Metadata<'_> {
             if bytes.len() > 32768 {
                 return Err("nested String input exceeds bound".into());
             }
-            let native = unsafe {
-                (roots.strings.new_string)(self.domain, bytes.as_ptr().cast(), bytes.len() as u32)
+            let native = if empty {
+                let current = sym!(library, "mono_domain_get", unsafe extern "C" fn() -> Object);
+                let new = sym!(
+                    library,
+                    "mono_unity_string_empty_wrapper",
+                    unsafe extern "C" fn() -> Object
+                );
+                if unsafe { current() } != self.domain {
+                    return Err("nested empty string current domain mismatch".into());
+                }
+                unsafe { new() }
+            } else {
+                unsafe {
+                    (roots.strings.new_string)(
+                        self.domain,
+                        bytes.as_ptr().cast(),
+                        bytes.len() as u32,
+                    )
+                }
             };
             let token =
                 roots
@@ -1145,6 +1220,7 @@ mod tests {
             constructor: None,
             receiver: ptr::null_mut(),
             frame: None,
+            input: None,
             stack: (0x1000, 0x2000),
             rsp: 0x1800,
             exception_slot: 0x1880,
