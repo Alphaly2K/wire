@@ -272,3 +272,23 @@ CameraManager 构造和 PlayerLoop 查询。现有终点包括 RenderTexture.Int
 GraphicsFormatUtility/SystemInfo 的格式能力接口，以及 PlayerLoop 重入调用的
 mono_type_get_object。后者须使用 prepare/execute/finish 的真实 RuntimeType 分配，
 避免在分配及 GC 重入时持有 Rust registry/memory 借用。尚未完成初始化服务。
+
+RenderTexture 创建及常用状态/生命周期追加 54 个固定入口，UI 表合计 215 项。
+Internal_Create 只接收经声明 class 核对的真实 Mono receiver，经已有 canonical root
+和 cached-pointer view 交给原引擎，回调后同步；没有自行分配 renderer handle。
+新增 59 个纯 scalar GraphicsFormatUtility/SystemInfo 转换、分类及能力查询。
+SystemInfo 同名同 arity 的旧托管重载导致 probe-151 的安装校验拒绝，现枚举声明
+并按完整 scalar ABI 和 InternalCall flags 选择唯一匹配；不放宽签名要求。
+
+mono_type_get_object 的嵌套分配拆为 prepare/execute/finish；execute 不持 Rust
+registry/memory 借用，返回值先用临时强 root 固定；finish 检查 exact RuntimeType
+class/实际 MonoType identity，再发布 readonly metadata token cell。现有同步 GC
+profiler 回归增加这个路径，真实分配中能够执行原 guest callback。
+完整回归 **528 passed / 7 ignored**，build、all-target Clippy、harness 均通过。
+
+probe-152 实际完成 RenderTexture.Internal_Create、width/height、depthStencilFormat、
+color format、mipmap count、sRGB 和 shadow sampling，以及原格式转换/能力查询。
+27.58 秒后到初始化进度 Slider 的 Object.MarkDirty 与 PlayerLoop 数组引用写回。
+后者的 RuntimeType token 已在 reflection registry，尚未接入通用 typed-array
+reference root 路由。下一步统一其 canonical root 及真正的类型屏障检查。
+当前 full_game_backend=false，未宣称标题或可交互界面成功。

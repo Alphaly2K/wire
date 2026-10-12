@@ -1181,6 +1181,13 @@ mod tests {
         }
         4usize as super::super::Object
     }
+    unsafe extern "C" fn allocating_runtime_type(
+        _: super::super::Object,
+        _: super::super::Object,
+    ) -> super::super::Object {
+        unsafe { profiler_resize(ptr::null_mut(), 0x40000) };
+        4usize as super::super::Object
+    }
     #[test]
     fn prepared_native_allocation_allows_synchronous_heap_resize_guest_reentry() {
         let mut memory = Memory::default();
@@ -1232,12 +1239,26 @@ mod tests {
                     _ => return Err("object allocation reply kind changed".into()),
                 }
                 roots.release(super::super::instances::tests::identity_api());
+                let allocation = super::super::reentry::PreparedAllocation::RuntimeType {
+                    get: allocating_runtime_type,
+                    roots: super::super::instances::tests::identity_api(),
+                    domain: 1usize as super::super::Object,
+                    ty: 2usize as super::super::Object,
+                }
+                .execute()?;
+                match allocation {
+                    super::super::reentry::Allocated::RuntimeType(root, ty) => {
+                        assert_eq!(root.target()?, 4usize as super::super::Object);
+                        assert_eq!(ty, 2usize as super::super::Object);
+                    }
+                    _ => return Err("RuntimeType allocation reply kind changed".into()),
+                }
                 Ok::<_, String>(())
             },
         )
         .unwrap();
         result.unwrap();
-        assert_eq!(stats.calls[4], 2);
+        assert_eq!(stats.calls[4], 3);
         assert!(memory.read_int(STACK_BASE, 8).is_err());
     }
     use super::*;

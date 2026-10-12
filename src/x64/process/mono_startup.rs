@@ -61,6 +61,7 @@ mod fields;
 mod gc_control;
 mod gc_scopes;
 mod gpu_buffers;
+mod graphics_formats;
 mod handles;
 mod images;
 mod input_events;
@@ -3291,6 +3292,9 @@ impl Probe {
         if !ui_layout::installed() {
             ui_layout::install(library, &managed_images, &self.registry)?;
         }
+        if !graphics_formats::installed() {
+            graphics_formats::install(library, &managed_images, &self.registry)?;
+        }
         if !input_events::installed() {
             input_events::install(library, &managed_images, &self.registry)?;
         }
@@ -5033,6 +5037,7 @@ impl Probe {
             + &engine_components::report()
             + &engine_component_queries::report()
             + &ui_layout::report()
+            + &graphics_formats::report()
             + &json::report()
             + &profiler_samples::report()
             + &profiler_recorders::report()

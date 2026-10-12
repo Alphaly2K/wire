@@ -18,6 +18,7 @@ enum Scalar {
 #[derive(Clone, Copy)]
 enum Shape {
     Get(Scalar),
+    GetBoolean(Scalar),
     Set(Scalar),
     ValueGet(&'static CStr, usize),
     ValueSet(&'static CStr, usize),
@@ -28,6 +29,8 @@ enum Shape {
     Void,
     StaticBoolean,
     Parent,
+    CreateReference(&'static CStr),
+    StaticPointerVoid,
 }
 struct Spec {
     owner: &'static CStr,
@@ -72,6 +75,18 @@ macro_rules! shape {
     };
     (enum_get_in, $namespace:expr, $class:expr) => {
         Shape::Get(Scalar::Enum($namespace, $class))
+    };
+    (enum_set_in, $namespace:expr, $class:expr) => {
+        Shape::Set(Scalar::Enum($namespace, $class))
+    };
+    (enum_bool_get, $namespace:expr, $class:expr) => {
+        Shape::GetBoolean(Scalar::Enum($namespace, $class))
+    };
+    (create_reference, $class:expr) => {
+        Shape::CreateReference($class)
+    };
+    (static_pointer_void) => {
+        Shape::StaticPointerVoid
     };
     (value_get, $class:expr, $width:expr) => {
         Shape::ValueGet($class, $width)
@@ -133,6 +148,34 @@ macro_rules! adapter {
     };
     ($name:ident, enum_get_in, $namespace:expr, $class:expr) => {
         adapter!($name, int_get);
+    };
+    ($name:ident, enum_set_in, $namespace:expr, $class:expr) => {
+        adapter!($name, int_set);
+    };
+    ($name:ident, enum_bool_get, $namespace:expr, $class:expr) => {
+        unsafe extern "C" fn $name(p: usize, flag: u8) -> i32 {
+            scalar(Slot::$name as usize, p, Some(flag as u64)).0 as i32
+        }
+    };
+    ($name:ident, create_reference, $class:expr) => {
+        unsafe extern "C" fn $name(object: Object) {
+            create_reference(Slot::$name as usize, object);
+        }
+    };
+    ($name:ident, static_pointer_void) => {
+        unsafe extern "C" fn $name(pointer: usize) {
+            checked(|| {
+                let b = binding()?;
+                let pointer = if pointer == 0 {
+                    0
+                } else {
+                    engine_objects::engine_pointer(pointer)?
+                };
+                callbacks::guest_arguments(b.targets[Slot::$name as usize], &[pointer])?;
+                note(Slot::$name as usize);
+                Ok(())
+            });
+        }
     };
     ($name:ident, float_get) => {
         unsafe extern "C" fn $name(p: usize) -> f32 {
@@ -248,6 +291,60 @@ macro_rules! apis {
     };
 }
 apis! {
+    create_render_texture, c"RenderTexture", c"Internal_Create", 0x1800aedf0, (create_reference, c"RenderTexture");
+    render_width, c"RenderTexture", c"get_width_Injected", 0x1800ae4e0, (int_get);
+    set_render_width, c"RenderTexture", c"set_width_Injected", 0x1800ae4f0, (int_set);
+    render_height, c"RenderTexture", c"get_height_Injected", 0x1800ae500, (int_get);
+    set_render_height, c"RenderTexture", c"set_height_Injected", 0x1800ae510, (int_set);
+    render_dimension, c"RenderTexture", c"get_dimension_Injected", 0x1800a78e0, (enum_get_in, c"UnityEngine.Rendering", c"TextureDimension");
+    set_render_dimension, c"RenderTexture", c"set_dimension_Injected", 0x1800ae520, (enum_set_in, c"UnityEngine.Rendering", c"TextureDimension");
+    render_format, c"RenderTexture", c"GetColorFormat_Injected", 0x1800ae530, (enum_bool_get, c"UnityEngine.Experimental.Rendering", c"GraphicsFormat");
+    set_render_format, c"RenderTexture", c"SetColorFormat_Injected", 0x1800ae540, (enum_set_in, c"UnityEngine.Experimental.Rendering", c"GraphicsFormat");
+    render_use_mip, c"RenderTexture", c"get_useMipMap_Injected", 0x1800ae550, (bool_get);
+    set_render_use_mip, c"RenderTexture", c"set_useMipMap_Injected", 0x1800ae560, (bool_set);
+    render_srgb, c"RenderTexture", c"get_sRGB_Injected", 0x1800ae570, (bool_get);
+    render_vr, c"RenderTexture", c"get_vrUsage_Injected", 0x1800ae5a0, (enum_get, c"VRTextureUsage");
+    set_render_vr, c"RenderTexture", c"set_vrUsage_Injected", 0x1800ae5b0, (enum_set, c"VRTextureUsage");
+    render_memoryless, c"RenderTexture", c"get_memorylessMode_Injected", 0x1800ae5c0, (enum_get, c"RenderTextureMemoryless");
+    set_render_memoryless, c"RenderTexture", c"set_memorylessMode_Injected", 0x1800ae5d0, (enum_set, c"RenderTextureMemoryless");
+    render_stencil, c"RenderTexture", c"get_stencilFormat_Injected", 0x1800ae5e0, (enum_get_in, c"UnityEngine.Experimental.Rendering", c"GraphicsFormat");
+    set_render_stencil, c"RenderTexture", c"set_stencilFormat_Injected", 0x1800ae5f0, (enum_set_in, c"UnityEngine.Experimental.Rendering", c"GraphicsFormat");
+    render_depth_stencil, c"RenderTexture", c"get_depthStencilFormat_Injected", 0x1800ae6c0, (enum_get_in, c"UnityEngine.Experimental.Rendering", c"GraphicsFormat");
+    set_render_depth_stencil, c"RenderTexture", c"set_depthStencilFormat_Injected", 0x1800ae6d0, (enum_set_in, c"UnityEngine.Experimental.Rendering", c"GraphicsFormat");
+    render_auto_mips, c"RenderTexture", c"get_autoGenerateMips_Injected", 0x1800ae6e0, (bool_get);
+    set_render_auto_mips, c"RenderTexture", c"set_autoGenerateMips_Injected", 0x1800ae6f0, (bool_set);
+    render_volume_depth, c"RenderTexture", c"get_volumeDepth_Injected", 0x1800ae700, (int_get);
+    set_render_volume_depth, c"RenderTexture", c"set_volumeDepth_Injected", 0x1800ae710, (int_set);
+    render_msaa, c"RenderTexture", c"get_antiAliasing_Injected", 0x1800ae720, (int_get);
+    set_render_msaa, c"RenderTexture", c"set_antiAliasing_Injected", 0x1800ae730, (int_set);
+    render_bind_ms, c"RenderTexture", c"get_bindTextureMS_Injected", 0x1800ae740, (bool_get);
+    set_render_bind_ms, c"RenderTexture", c"set_bindTextureMS_Injected", 0x1800ae750, (bool_set);
+    render_random_write, c"RenderTexture", c"get_enableRandomWrite_Injected", 0x1800ae760, (bool_get);
+    set_render_random_write, c"RenderTexture", c"set_enableRandomWrite_Injected", 0x1800ae770, (bool_set);
+    render_dynamic_scale, c"RenderTexture", c"get_useDynamicScale_Injected", 0x1800ae780, (bool_get);
+    set_render_dynamic_scale, c"RenderTexture", c"set_useDynamicScale_Injected", 0x1800ae790, (bool_set);
+    render_dynamic_scale_explicit, c"RenderTexture", c"get_useDynamicScaleExplicit_Injected", 0x1800ae7a0, (bool_get);
+    set_render_dynamic_scale_explicit, c"RenderTexture", c"set_useDynamicScaleExplicit_Injected", 0x1800ae7b0, (bool_set);
+    render_shading_rate, c"RenderTexture", c"get_enableShadingRate_Injected", 0x1800ae7c0, (bool_get);
+    set_render_shading_rate, c"RenderTexture", c"set_enableShadingRate_Injected", 0x1800ae7d0, (bool_set);
+    render_apply_scale, c"RenderTexture", c"ApplyDynamicScale_Injected", 0x1800ae7e0, (void);
+    render_power_two, c"RenderTexture", c"GetIsPowerOfTwo_Injected", 0x1800ae9a0, (bool_get);
+    active_render_texture, c"RenderTexture", c"GetActive_Injected", 0x1800ae9c0, (static_handle, c"RenderTexture");
+    set_active_render_texture, c"RenderTexture", c"SetActive_Injected", 0x1800aea10, (static_pointer_void);
+    set_render_mip_count, c"RenderTexture", c"SetMipMapCount_Injected", 0x1800aeb60, (int_set);
+    set_render_shadow_mode, c"RenderTexture", c"SetShadowSamplingMode_Injected", 0x1800aeb70, (enum_set_in, c"UnityEngine.Rendering", c"ShadowSamplingMode");
+    render_restore, c"RenderTexture", c"MarkRestoreExpected_Injected", 0x18005fee0, (void);
+    render_resolve_aa, c"RenderTexture", c"ResolveAA_Injected", 0x1800aebb0, (void);
+    render_resolve_to, c"RenderTexture", c"ResolveAATo_Injected", 0x1800aebc0, (handle_set);
+    allocate_render_texture, c"RenderTexture", c"Create_Injected", 0x1800aed10, (bool_get);
+    release_render_texture, c"RenderTexture", c"Release_Injected", 0x1800aed40, (void);
+    render_created, c"RenderTexture", c"IsCreated_Injected", 0x1800aed50, (bool_get);
+    generate_render_mips, c"RenderTexture", c"GenerateMips_Injected", 0x1800aed80, (void);
+    set_render_srgb, c"RenderTexture", c"SetSRGBReadWrite_Injected", 0x1800aede0, (bool_set);
+    render_supports_stencil, c"RenderTexture", c"SupportsStencil_Injected", 0x1800aeee0, (bool_get);
+    release_temporary_render, c"RenderTexture", c"ReleaseTemporary_Injected", 0x1800aeff0, (void);
+    render_depth, c"RenderTexture", c"get_depth_Injected", 0x1800af1d0, (int_get);
+    set_render_depth, c"RenderTexture", c"set_depth_Injected", 0x1800af1f0, (int_set);
     white_texture, c"Texture2D", c"get_whiteTexture_Injected", 0x1800a8260, (static_handle, c"Texture2D");
     black_texture, c"Texture2D", c"get_blackTexture_Injected", 0x1800a82a0, (static_handle, c"Texture2D");
     red_texture, c"Texture2D", c"get_redTexture_Injected", 0x1800a82e0, (static_handle, c"Texture2D");
@@ -501,6 +598,7 @@ pub(super) fn install(
         let owner = class(c"UnityEngine", spec.owner)?;
         let signature = match spec.shape {
             Shape::Get(s) => vec![scalar(s)?, pointer],
+            Shape::GetBoolean(s) => vec![scalar(s)?, pointer, scalar(Scalar::Boolean)?],
             Shape::Set(s) => vec![void, pointer, scalar(s)?],
             Shape::ValueGet(name, width) | Shape::ValueSet(name, width) => {
                 let c = class(c"UnityEngine", name)?;
@@ -530,6 +628,12 @@ pub(super) fn install(
             Shape::Void => vec![void, pointer],
             Shape::StaticBoolean => vec![void, scalar(Scalar::Boolean)?],
             Shape::Parent => vec![void, pointer, pointer, scalar(Scalar::Boolean)?],
+            Shape::CreateReference(name) => {
+                let class = class(c"UnityEngine", name)?;
+                returns[index] = class as usize;
+                vec![void, (0x12, class, false)]
+            }
+            Shape::StaticPointerVoid => vec![void, pointer],
         };
         let name = CString::new(format!(
             "UnityEngine.{}::{}",
@@ -606,7 +710,7 @@ fn scalar(index: usize, pointer: usize, argument: Option<u64>) -> (u64, u64) {
         if let Some(value) = argument {
             if matches!(
                 spec.shape,
-                Shape::Set(Scalar::Boolean) | Shape::StaticBoolean
+                Shape::Set(Scalar::Boolean) | Shape::StaticBoolean | Shape::GetBoolean(_)
             ) {
                 boolean(value)?;
             }
@@ -638,6 +742,37 @@ fn handle(index: usize, pointer: Option<usize>, at: Option<i32>) -> usize {
         note(index);
         Ok(handle)
     })
+}
+fn create_reference(index: usize, object: Object) {
+    checked(|| {
+        let b = binding()?;
+        managed_calls::Api::load(b.library as Object)?.compatible(
+            object,
+            managed_calls::Shape::Reference {
+                class: b.returns[index] as Object,
+                string: false,
+            },
+        )?;
+        if object.is_null() {
+            return Err("Unity creation receiver is NULL".into());
+        }
+        let token = callbacks::with_metadata_service(|route, memory| {
+            route.sync_guest(memory)?;
+            let token = route.root_reference(object, memory)?;
+            let roots = route
+                .objects
+                .as_mut()
+                .ok_or("Unity creation has no owned roots")?;
+            roots
+                .roots
+                .publish_engine_object(roots.api, memory, token)?;
+            Ok(token)
+        })?;
+        callbacks::guest_arguments(b.targets[index], &[token])?;
+        callbacks::with_metadata_service(|route, memory| route.sync_guest(memory))?;
+        note(index);
+        Ok(())
+    });
 }
 unsafe fn value_call(
     index: usize,

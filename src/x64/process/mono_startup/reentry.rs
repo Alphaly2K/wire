@@ -45,6 +45,7 @@ pub(super) fn handles_allocation(function: &str) -> bool {
     matches!(
         function,
         "mono_object_new"
+            | "mono_type_get_object"
             | "mono_array_new"
             | "mono_string_new"
             | "mono_string_new_len"
@@ -53,6 +54,12 @@ pub(super) fn handles_allocation(function: &str) -> bool {
     )
 }
 pub(super) enum PreparedAllocation {
+    RuntimeType {
+        get: unsafe extern "C" fn(Object, Object) -> Object,
+        domain: Object,
+        ty: Object,
+        roots: instances::Api,
+    },
     Object(instances::WorkerRequest, Option<value_layout::Layout>),
     Array(Box<reference_arrays::WorkerRequest>),
     EmptyArray {
@@ -70,6 +77,7 @@ pub(super) enum PreparedAllocation {
     },
 }
 pub(super) enum Allocated {
+    RuntimeType(instances::WorkerRoot, Object),
     Object(instances::WorkerAllocation, Option<value_layout::Layout>),
     Array(reference_arrays::WorkerAllocation),
     EmptyArray(Object, instances::WorkerRoot),
@@ -80,6 +88,18 @@ impl PreparedAllocation {
     /// profiler. No Metadata, Memory or Runtime RefCell is borrowed here.
     pub(super) fn execute(self) -> Result<Allocated, String> {
         match self {
+            Self::RuntimeType {
+                get,
+                domain,
+                ty,
+                roots,
+            } => {
+                let native = unsafe { get(domain, ty) };
+                if native.is_null() {
+                    return Err("nested RuntimeType allocation returned NULL".into());
+                }
+                Ok(Allocated::RuntimeType(roots.worker_root(native)?, ty))
+            }
             Self::Object(request, layout) => Ok(Allocated::Object(request.execute()?, layout)),
             Self::Array(request) => Ok(Allocated::Array(request.execute()?)),
             Self::EmptyArray {
@@ -148,6 +168,22 @@ impl Metadata<'_> {
             .objects
             .as_mut()
             .ok_or("nested allocation has no owned root service")?;
+        if function == "mono_type_get_object" {
+            if a[0] != super::ROOT_TOKEN || self.domain.is_null() {
+                return Err("nested RuntimeType allocation requires owned domain".into());
+            }
+            let ty = self.metadata.native(a[1], metadata::Kind::Type)?;
+            return Ok(PreparedAllocation::RuntimeType {
+                get: sym!(
+                    self.library,
+                    "mono_type_get_object",
+                    unsafe extern "C" fn(Object, Object) -> Object
+                ),
+                domain: self.domain,
+                ty,
+                roots: roots.api,
+            });
+        }
         if function == "mono_object_new" {
             if a[0] != super::ROOT_TOKEN {
                 return Err("nested allocation has unknown domain".into());
@@ -281,6 +317,19 @@ impl Metadata<'_> {
             .as_mut()
             .ok_or("nested allocation completion has no owned root service")?;
         match allocation {
+            Allocated::RuntimeType(pin, expected) => {
+                let native = pin.target()?;
+                let (token, actual) = roots.reflection.1.root_type(roots.reflection.0, native)?;
+                if actual != expected {
+                    return Err("nested RuntimeType changed metadata identity".into());
+                }
+                let ty = self.metadata.wrap(
+                    memory,
+                    metadata::Value::Handle(expected, metadata::Kind::Type),
+                )?;
+                roots.reflection.1.publish(memory, token, ty)?;
+                Ok(token)
+            }
             Allocated::Object(allocation, layout) => {
                 let token = roots.roots.adopt_allocation(allocation)?;
                 roots.roots.publish(memory, token)?;
