@@ -601,6 +601,19 @@ impl Metadata<'_> {
             if roots.objects.contains(token) {
                 continue;
             }
+            if roots.reflection.0.runtime_type(native) {
+                let (object, ty) = roots.reflection.1.root_type_in(
+                    roots.reflection.0,
+                    roots.api,
+                    roots.roots,
+                    native,
+                )?;
+                let ty = self
+                    .metadata
+                    .wrap(memory, metadata::Value::Handle(ty, metadata::Kind::Type))?;
+                roots.reflection.1.publish(memory, object, ty)?;
+                continue;
+            }
             let class = unsafe { object_class(native) };
             if unsafe { rank(class) } != 0 {
                 if roots.empty_arrays.1.contains(token) {

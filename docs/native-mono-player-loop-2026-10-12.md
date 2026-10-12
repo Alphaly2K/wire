@@ -306,3 +306,15 @@ Release build 与 all-target Clippy 通过。probe-154 实际越过旧冲突与 
 `0x1800d5442` 读取 graph-first RuntimeType 的 +16 metadata cell 时未映射。
 这次数组引用屏障已成功，剩下的是 setter 输入对象图的反射 payload publication。
 此外进度 Slider 下一处缺 UISystemProfilerApi.AddMarker_Injected。
+
+PlayerLoop setter 现在在原引擎执行前投影实际输入容器图，遇到 exact RuntimeType
+时复用 canonical root 并发布 readonly MonoType token；不把其宿主 IntPtr 字段
+当作通用 struct payload。UISystemProfilerApi 的三个接口整组核对 metadata 和
+original targets，UTF16 使用 scoped guest copy，Begin/EndSample 仍调用原引擎。
+完整回归 **531 passed / 7 ignored**，release build 和 all-target Clippy 通过。
+
+probe-155 实际完成 GetCurrentPlayerLoopInternal、SetPlayerLoopInternal 和 UI
+AddMarker，未出现 InternalCall 缺失或 adapter reject。28.93 秒后到
+SetupCoroutine.InvokeMoveNext(IEnumerator, IntPtr) 的固定入口；其 IntPtr 是布尔
+输出槽，普通 IL ABI 按预期拒绝，下一步需要私有输出缓冲区及精确写回契约。
+这只是新的有限边界，full_game_backend=false，仍未到可交互界面。

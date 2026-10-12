@@ -18,6 +18,12 @@ pub(super) struct Api {
     pub(super) get_type: unsafe extern "C" fn(Object) -> Object,
 }
 impl Api {
+    pub(super) fn runtime_type(self, native: Object) -> bool {
+        let expected = unsafe {
+            (self.class_from_name)((self.corlib)(), c"System".as_ptr(), c"RuntimeType".as_ptr())
+        };
+        !native.is_null() && !expected.is_null() && unsafe { (self.class)(native) } == expected
+    }
     pub(super) fn load(library: Object) -> Result<Self, String> {
         macro_rules! sym {
             ($name:literal,$ty:ty) => {{
@@ -137,10 +143,7 @@ impl Registry {
         if self.entries.len() >= 32768 {
             return Err("reflection root registry full".into());
         }
-        let expected = unsafe {
-            (api.class_from_name)((api.corlib)(), c"System".as_ptr(), c"RuntimeType".as_ptr())
-        };
-        if expected.is_null() || unsafe { (api.class)(native) } != expected {
+        if !api.runtime_type(native) {
             return Err("invoke result is not exact corelib RuntimeType".into());
         }
         let root = unsafe { (api.strong)(native, 0) };

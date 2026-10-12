@@ -89,6 +89,7 @@ mod shaders;
 mod subsystems;
 mod text_assets;
 mod ui_layout;
+mod ui_profiler;
 mod unitytls;
 mod unsafe_buffers;
 mod value_layout;
@@ -3314,6 +3315,14 @@ impl Probe {
         }
         if !ui_layout::installed() {
             ui_layout::install(library, &managed_images, &self.registry)?;
+        }
+        if !ui_profiler::installed() {
+            ui_profiler::install(
+                library,
+                self.image_registry.unique_native_image(CORE_MODULE)?,
+                &managed_images,
+                &self.registry,
+            )?;
         }
         if !graphics_formats::installed() {
             graphics_formats::install(library, &managed_images, &self.registry)?;

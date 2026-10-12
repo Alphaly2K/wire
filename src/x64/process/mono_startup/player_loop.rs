@@ -310,23 +310,10 @@ unsafe extern "C" fn set_loop(native: Object) {
         }
         let token = callbacks::with_metadata_service(|route, memory| {
             route.sync_guest(memory)?;
-            let roots = route
-                .objects
-                .as_mut()
-                .ok_or("player-loop replacement has no roots")?;
-            let (api, arrays) = roots
-                .arrays
-                .as_mut()
-                .ok_or("player-loop replacement has no array service")?;
-            let token =
-                arrays.borrow_with(*api, roots.api, roots.roots, native, |registry, native| {
-                    roots
-                        .objects
-                        .borrow_reference(roots.strings, roots.api, registry, native)
-                })?;
-            roots.objects.publish_pending(memory)?;
-            arrays.publish(memory, token)?;
-            Ok(token)
+            // The original setter reads each RuntimeType's metadata cell
+            // directly. Publish actual typed children as well as array slots;
+            // delegate references remain rooted opaque objects.
+            route.root_container(native, memory)
         })?;
         callbacks::guest_arguments(b.targets[2], &[token])?;
         eprintln!("NATIVE_MONO_PLAYER_LOOP_SET: actual-engine=true; rooted-delegates=true");
