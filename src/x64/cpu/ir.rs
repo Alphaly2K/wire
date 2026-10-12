@@ -948,6 +948,53 @@ mod equivalence {
     use crate::x64::memory::{EXECUTE, READ, WRITE};
 
     #[test]
+    fn string_compare_loop_matches_reference_that_bypasses_populated_ir_cache() {
+        const PC: u64 = 0x140000000;
+        const DATA: u64 = 0x200000000;
+        // Authored byte comparison, with a negative base-relative key pointer,
+        // I32 subtraction and separate mismatch / terminator FLAGS consumers.
+        let code = [
+            0x44, 0x0f, 0xb6, 0x01, 0x42, 0x0f, 0xb6, 0x14, 0x09, 0x44, 0x2b, 0xc2, 0x75, 0x07,
+            0x48, 0xff, 0xc1, 0x85, 0xd2, 0x75, 0xeb, 0x45, 0x85, 0xc0, 0x0f, 0x94, 0xc0,
+        ];
+        for key in [b"mipmap_info\0".as_slice(), b"mipmap_Info\0", b"\0"] {
+            let setup = || {
+                let mut memory = Memory::default();
+                memory.map(PC, 4096, READ | WRITE | EXECUTE).unwrap();
+                memory.write(PC, &code).unwrap();
+                memory.map(DATA, 4096, READ | WRITE).unwrap();
+                memory.write(DATA, key).unwrap();
+                memory.write(DATA + 128, b"mipmap_info\0").unwrap();
+                memory.enable_execution_stats();
+                memory
+            };
+            let mut fast_memory = setup();
+            let mut reference_memory = setup();
+            let mut fast = Cpu64::new(PC, 0);
+            fast.regs[1] = DATA + 128;
+            fast.regs[9] = 0u64.wrapping_sub(128);
+            let mut reference = fast.clone();
+            // decode() installs an IR entry too. The reference must still take
+            // only the independently decoded, transactional executor.
+            reference.decode(&reference_memory).unwrap();
+            assert!(reference_memory.cached_ir(PC).unwrap().is_some());
+            while fast.rip != PC + code.len() as u64 {
+                assert!(fast.work < 1000);
+                fast.step_bounded(&mut fast_memory, 24).unwrap();
+            }
+            while reference.rip != PC + code.len() as u64 {
+                assert!(reference.work < 1000);
+                reference.step_reference(&mut reference_memory).unwrap();
+            }
+            assert_eq!(fast, reference);
+            assert_eq!(fast.regs[0], u64::from(key == b"mipmap_info\0"));
+            let stats = reference_memory.execution_stats().unwrap();
+            assert_eq!(stats.ir_steps, 0);
+            assert_eq!(stats.fallback_steps, reference.work);
+        }
+    }
+
+    #[test]
     fn added_typed_operations_match_transactional_fallback_on_success_and_faults() {
         const CODE: u64 = 0x140000000;
         const DATA: u64 = 0x200000000;

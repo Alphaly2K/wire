@@ -52,6 +52,7 @@ mod bridge_audit;
 mod burst_shared;
 mod callbacks;
 mod closed_types;
+mod command_buffers;
 mod constructors;
 mod engine_component_queries;
 mod engine_components;
@@ -83,6 +84,7 @@ mod profiler_samples;
 mod reentry;
 mod reference_arrays;
 mod reflection;
+mod render_context;
 mod resources;
 mod scalar_engine;
 mod screen;
@@ -2331,7 +2333,9 @@ impl Probe {
                 Ok(Some(_)) => return Ok(false),
                 Ok(None) => {
                     if self.assets {
-                        if input_events::describes(method) {
+                        if input_events::describes(method)
+                            || render_context::descriptor(method).is_some()
+                        {
                             return Ok(false);
                         }
                         let library = self
@@ -3454,6 +3458,21 @@ impl Probe {
                 self.registry.exact_target(json::NAME, json::TARGET)?,
             )?;
         }
+        if !render_context::installed() {
+            render_context::install(
+                library,
+                self.image_registry.unique_native_image(CORE_MODULE)?,
+                &managed_images,
+            )?;
+        }
+        if !command_buffers::installed() {
+            command_buffers::install(
+                library,
+                self.image_registry.unique_native_image(CORE_MODULE)?,
+                &managed_images,
+                &self.registry,
+            )?;
+        }
         if !scalar_engine::installed() {
             scalar_engine::install(library, &self.image_registry, &self.registry)?;
         }
@@ -3475,15 +3494,16 @@ impl Probe {
             &managed_images,
         )?;
         let output_boolean = coroutine.as_ref().map(|entry| entry.boolean);
-        let descriptor = match input_events::descriptor(method) {
-            Some(entry) => entry,
-            None => match coroutine {
-                Some(entry) => entry.call,
-                None => call_api
-                    .describe(method, &managed_images, &managed_images)?
-                    .ok_or("managed entry is not an admitted ordinary IL call")?,
-            },
-        };
+        let descriptor =
+            match input_events::descriptor(method).or_else(|| render_context::descriptor(method)) {
+                Some(entry) => entry,
+                None => match coroutine {
+                    Some(entry) => entry.call,
+                    None => call_api
+                        .describe(method, &managed_images, &managed_images)?
+                        .ok_or("managed entry is not an admitted ordinary IL call")?,
+                },
+            };
         if descriptor.receiver.is_some() != (a[1] != 0) {
             return Err("managed static/instance receiver presence mismatch".into());
         }
@@ -3553,6 +3573,12 @@ impl Probe {
             })
         })?;
         let (mut frame, mut input, receiver, receiver_class) = prepared?;
+        let (render_scope, _) =
+            callbacks::with_owner(memory, runtime, targets, || match frame.as_mut() {
+                Some(frame) => render_context::Scope::prepare(method, frame, rsp),
+                None => Ok(None),
+            })?;
+        let _render_scope = render_scope?;
         let mut parameters = match input.as_mut() {
             Some(input) => input.parameters(),
             None => frame
@@ -5076,7 +5102,10 @@ impl Probe {
                             .map(|api| (api, &mut self.reference_array_registry)),
                     }),
                 },
-                async_operations::quiesce,
+                || {
+                    command_buffers::quiesce()?;
+                    async_operations::quiesce()
+                },
             )?;
             result?;
         }
@@ -5151,6 +5180,7 @@ impl Probe {
             native.cleanup()?;
             logging::retire_after_vm_cleanup()?;
             async_operations::retire_after_vm_cleanup()?;
+            command_buffers::retire_after_vm_cleanup()?;
             // Raw native IL pointers remain owned until the VM can no longer
             // execute IL/finalizers. Only then release original guest records.
             unsafe_buffers::retire_after_vm_cleanup()?;
@@ -5223,6 +5253,7 @@ impl Probe {
             + &subsystems::report()
             + &resources::report()
             + &async_operations::report()
+            + &command_buffers::report()
             + &scriptable::report()
             + &engine_scalars::report()
             + &engine_components::report()

@@ -149,7 +149,7 @@ def run(cleanup):
     (output / 'command.json').write_text(json.dumps({'command': command, 'cwd': str(clone),
         'game_sandbox': str(sandbox),
         'storage_policy': 'one reused sandbox; ephemeral symlinks and wire snapshot; logs retained',
-        'environment': {key: env[key] for key in ('DYLD_INSERT_LIBRARIES', 'MONO_THREADS_SUSPEND', 'WIRE_NATIVE_MONO_MANAGED_TRACE', 'WIRE_NATIVE_MONO_BRIDGE_AUDIT') if key in env},
+        'environment': {key: env[key] for key in ('DYLD_INSERT_LIBRARIES', 'MONO_THREADS_SUSPEND', 'WIRE_NATIVE_MONO_MANAGED_TRACE', 'WIRE_NATIVE_MONO_BRIDGE_AUDIT', 'WIRE_NATIVE_MONO_CALLBACK_REFERENCE_INTERPRETER', 'WIRE_NATIVE_MONO_CALLBACK_DIAGNOSTICS') if key in env},
         'full_game_backend': False, 'timing_is_performance_comparison': False,
         'native_presenter_requested': args.window or args.capture_frame,
         'present_capture_requested': args.capture_frame}, indent=2) + '\n')
@@ -289,6 +289,9 @@ def run(cleanup):
         'native_profiler_recorder_finalizers_drained': count_marker('native-profiler-recorder-finalizers-drained'),
         'native_profiler_recorders_closed': 'native-profiler-recorders-closed=true' in content,
         'native_async_operations_created': count_marker('native-async-operations-created'),
+        'native_command_buffers_created': count_marker('native-command-buffers-created'),
+        'native_command_buffers_live': count_marker('native-command-buffers-live'),
+        'native_command_buffers_closed': 'native-command-buffers-closed=true' in content,
         'native_async_operations_released': count_marker('native-async-operations-released'),
         'native_async_operations_live': count_marker('native-async-operations-live'),
         'native_async_operation_finalizers_queued': count_marker('native-async-operations-finalizers-queued'),

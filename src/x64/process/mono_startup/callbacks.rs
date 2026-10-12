@@ -11,9 +11,27 @@ const STACK_BASE: u64 = 0x6ffd00000000;
 const STACK_BYTES: u64 = 1024 * 1024;
 const RETURN: u64 = 0x6ffd00100000;
 const WORK_LIMIT: u64 = 2_000_000;
-// Resource loads and prefab clones deserialize entire checked object graphs.
-// Only their fixed, signature-verified adapters select this larger bound.
-const ASSET_WORK_LIMIT: u64 = 32_000_000;
+// Resource loads, prefab clones and render-pipeline changes can traverse whole
+// asset graphs. The actual metadata owner/protocol selects this bounded work
+// allowance; ordinary calls retain their small limit.
+const ASSET_WORK_LIMIT: u64 = 128_000_000;
+#[derive(Clone, Copy)]
+pub(super) enum Work {
+    Ordinary,
+    Asset,
+}
+impl Work {
+    fn limit(self) -> u64 {
+        match self {
+            Self::Ordinary => WORK_LIMIT,
+            Self::Asset => ASSET_WORK_LIMIT,
+        }
+    }
+}
+struct BytePolicy {
+    reference_class: Option<usize>,
+    work: Work,
+}
 const STACK_SLICE: u64 = STACK_BYTES / 8;
 #[derive(Clone, Copy, Default)]
 pub(super) struct Stats {
@@ -153,6 +171,7 @@ fn with_routes<'a, T>(
         super::unsafe_buffers::drain_finalizers()?;
         super::profiler_recorders::drain_finalizers()?;
         super::logging::drain_finalizers()?;
+        super::command_buffers::drain_finalizers()?;
         if owner.metadata.is_some() {
             super::async_operations::drain_finalizers()?;
         }
@@ -163,6 +182,7 @@ fn with_routes<'a, T>(
         super::unsafe_buffers::drain_finalizers()?;
         super::profiler_recorders::drain_finalizers()?;
         super::logging::drain_finalizers()?;
+        super::command_buffers::drain_finalizers()?;
         if owner.metadata.is_some() {
             super::async_operations::drain_finalizers()?;
         }
@@ -342,6 +362,13 @@ fn execute_scalar_guest_bounded(
     }
     let mono_start = owner.mono_reentries.get();
     let managed_start = owner.managed_reentries.get();
+    // Explicit diagnostic comparison against the transactional x86 interpreter.
+    // Normal execution keeps the IR path and its existing bounded work contract.
+    let reference = std::env::var_os("WIRE_NATIVE_MONO_CALLBACK_REFERENCE_INTERPRETER")
+        .is_some_and(|v| v == "1");
+    let diagnostic =
+        std::env::var_os("WIRE_NATIVE_MONO_CALLBACK_DIAGNOSTICS").is_some_and(|v| v == "1");
+    let mut tail = std::collections::BTreeMap::<u64, usize>::new();
     loop {
         if cpu.rip == RETURN {
             if let Some(route) = owner.metadata.as_ref() {
@@ -356,6 +383,31 @@ fn execute_scalar_guest_bounded(
             ));
         }
         if cpu.work >= work_limit {
+            if diagnostic {
+                eprintln!("NATIVE_MONO_CALLBACK_LIMIT_TRACE: reference={reference}; last-4096-work-pcs={tail:x?}");
+                let memory = owner.memory.borrow();
+                for (index, &address) in cpu.regs.iter().enumerate() {
+                    let mut header = [0u8; 32];
+                    if memory.read(address, &mut header).is_err() {
+                        continue;
+                    }
+                    let pointer = u64::from_le_bytes(header[..8].try_into().unwrap());
+                    let mut bytes = [0u8; 1024];
+                    let pointee = memory
+                        .read(pointer, &mut bytes)
+                        .is_ok()
+                        .then_some(bytes.as_slice());
+                    eprintln!("NATIVE_MONO_CALLBACK_LIMIT_MEMORY: register={index}; address={address:#x}; header={header:02x?}; first-pointer={pointer:#x}; data={pointee:02x?}");
+                    for offset in [8, 16, 24] {
+                        let pointer =
+                            u64::from_le_bytes(header[offset..offset + 8].try_into().unwrap());
+                        let mut bytes = [0u8; 64];
+                        if memory.read(pointer, &mut bytes).is_ok() {
+                            eprintln!("NATIVE_MONO_CALLBACK_LIMIT_POINTEE: register={index}; offset={offset}; pointer={pointer:#x}; data={bytes:02x?}");
+                        }
+                    }
+                }
+            }
             return Err(format!(
                 "native callback work limit exceeded; target={target:#x}; rip={:#x}; work={}; limit={work_limit}; depth={}; mono-reentries={}; managed-reentries={}; registers={:x?}",
                 cpu.rip,
@@ -365,6 +417,9 @@ fn execute_scalar_guest_bounded(
                 owner.managed_reentries.get() - managed_start,
                 cpu.regs,
             ));
+        }
+        if diagnostic && cpu.work.saturating_add(4096) >= work_limit {
+            *tail.entry(cpu.rip).or_default() += 1;
         }
         let binding = owner.runtime.borrow().gateways.binding(&cpu.rip);
         if let Some(binding) = binding {
@@ -475,6 +530,8 @@ fn execute_scalar_guest_bounded(
                 }
             }
             cpu.work += 1;
+        } else if reference {
+            cpu.step_reference(&mut owner.memory.borrow_mut())?;
         } else {
             cpu.step_bounded(&mut owner.memory.borrow_mut(), work_limit - cpu.work)?;
         }
@@ -570,11 +627,25 @@ pub(super) fn guest_scalars(
     args: &[u64],
     floating: &[(usize, u64)],
 ) -> Result<(u64, u64), String> {
+    guest_scalars_with_work(target, args, floating, Work::Ordinary)
+}
+pub(super) fn guest_scalars_with_work(
+    target: u64,
+    args: &[u64],
+    floating: &[(usize, u64)],
+    work: Work,
+) -> Result<(u64, u64), String> {
     OWNER.with(|slot| {
         if slot.get().is_null() {
             return Err("scalar engine callback has no owner".into());
         }
-        execute_scalar_guest(unsafe { &*slot.get() }, target, args, floating)
+        execute_scalar_guest_bounded(
+            unsafe { &*slot.get() },
+            target,
+            args,
+            floating,
+            work.limit(),
+        )
     })
 }
 pub(super) fn guest_arguments(target: u64, args: &[u64]) -> Result<u64, String> {
@@ -725,7 +796,18 @@ pub(super) fn guest_byte_arguments_at(
     args: &[u64],
     spans: &[(usize, &[u8], usize)],
 ) -> Result<GuestByteResult, String> {
-    guest_byte_arguments_impl(target, args, spans, None, &[], &[], &[])
+    guest_byte_arguments_impl(
+        target,
+        args,
+        spans,
+        BytePolicy {
+            reference_class: None,
+            work: Work::Ordinary,
+        },
+        &[],
+        &[],
+        &[],
+    )
 }
 /// Scalar/value ABI with positional floating inputs and exact byref aliases.
 /// Alias sources must be declared payloads; no native address reaches Win64.
@@ -736,7 +818,7 @@ pub(super) fn guest_value_arguments(
     spans: &[(usize, &[u8])],
     aliases: &[(usize, usize)],
 ) -> Result<GuestByteResult, String> {
-    guest_value_span_arguments(target, args, floating, spans, aliases, &[])
+    guest_value_span_arguments(target, args, floating, spans, aliases, &[], Work::Ordinary)
 }
 /// Input strings and byref values share one checked positional payload scope.
 pub(super) fn guest_value_span_arguments(
@@ -746,12 +828,24 @@ pub(super) fn guest_value_span_arguments(
     spans: &[(usize, &[u8])],
     aliases: &[(usize, usize)],
     utf16: &[(usize, Option<&[u16]>)],
+    work: Work,
 ) -> Result<GuestByteResult, String> {
     let spans: Vec<_> = spans
         .iter()
         .map(|&(index, bytes)| (index, bytes, 0))
         .collect();
-    guest_byte_arguments_impl(target, args, &spans, None, floating, aliases, utf16)
+    guest_byte_arguments_impl(
+        target,
+        args,
+        &spans,
+        BytePolicy {
+            reference_class: None,
+            work,
+        },
+        floating,
+        aliases,
+        utf16,
+    )
 }
 pub(super) fn guest_reference_pair(
     target: u64,
@@ -768,7 +862,10 @@ pub(super) fn guest_reference_pair(
         target,
         args,
         &[(index, &pair, 8)],
-        Some(class as usize),
+        BytePolicy {
+            reference_class: Some(class as usize),
+            work: Work::Ordinary,
+        },
         &[],
         &[],
         &[],
@@ -782,7 +879,7 @@ fn guest_byte_arguments_impl(
     target: u64,
     args: &[u64],
     spans: &[(usize, &[u8], usize)],
-    reference_class: Option<usize>,
+    policy: BytePolicy,
     floating: &[(usize, u64)],
     aliases: &[(usize, usize)],
     utf16: &[(usize, Option<&[u16]>)],
@@ -868,7 +965,7 @@ fn guest_byte_arguments_impl(
                 self.0.reference_outputs.set(outputs);
             }
         }
-        let _reference = if let Some(class) = reference_class {
+        let _reference = if let Some(class) = policy.reference_class {
             if spans.len() != 1 || spans[0].1.len() != 16 || spans[0].2 != 8 {
                 return Err("reference output requires an exact two-word FastPath payload".into());
             }
@@ -911,7 +1008,8 @@ fn guest_byte_arguments_impl(
             )?;
             args[index] = address;
         }
-        let result = execute_scalar_guest(owner, target, &args, floating)?;
+        let result =
+            execute_scalar_guest_bounded(owner, target, &args, floating, policy.work.limit())?;
         let mut outputs = Vec::new();
         for (&(_, bytes, _), &offset) in spans.iter().zip(&offsets) {
             let mut out = vec![0; bytes.len()];
@@ -1546,6 +1644,19 @@ mod tests {
             let before = guest_arguments(0x1000, &[iterations]).unwrap_err();
             assert!(before.contains("work=2000000; limit=2000000"));
             guest_asset_arguments(0x1000, &[iterations])?;
+            guest_scalars_with_work(0x1000, &[iterations], &[], Work::Asset)?;
+            guest_value_span_arguments(0x1000, &[iterations], &[], &[], &[], &[], Work::Asset)?;
+            assert!(guest_value_span_arguments(
+                0x1000,
+                &[iterations],
+                &[],
+                &[],
+                &[],
+                &[],
+                Work::Ordinary
+            )
+            .unwrap_err()
+            .contains("limit=2000000"));
             let after = guest_arguments(0x1000, &[iterations]).unwrap_err();
             assert!(after.contains("work=2000000; limit=2000000"));
             Ok::<_, String>(())
@@ -1703,6 +1814,7 @@ mod tests {
                 &[(0, &input)],
                 &[(3, 0)],
                 &[(2, Some(&[0x4e00, 0xd83d, 0xde00]))],
+                Work::Ordinary,
             )?;
             assert_eq!(bytes, [526u32.to_le_bytes().to_vec()]);
             assert!(guest_value_span_arguments(
@@ -1711,7 +1823,8 @@ mod tests {
                 &[],
                 &[(0, &input)],
                 &[(2, 0)],
-                &[(2, None)]
+                &[(2, None)],
+                Work::Ordinary
             )
             .is_err());
             assert!(with_service(|memory, _| memory.read_int(0x6ff900000000, 8)).is_err());

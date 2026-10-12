@@ -322,3 +322,112 @@ probe-175 自动安装 **4,020** 个入口，实际通过 Mesh 颜色/索引上�
 render-context IntPtr 参数；Player.log 另记录 Material.CreateWithMaterial 的包装
 来源含显式 null guards，简单直线来源分析尚未覆盖。下一批按渲染上下文/命令及
 受检查的对象包装协议推进，保持原实际 render loop。
+
+## 成批对象 guard 与渲染所有权协议
+
+对象 marshal 来源分析增加有界、无回边的 CFG：解析完整 IL 指令边界，跟踪参数
+来源、dup 和 null 分支；所有 incoming stacks 必须一致。只有实际 metadata 验证过
+的 Marshal/MarshalNotNull 和 ThrowHelper 可处理对应转换/终止路径，其他调用、
+参数重排、局部/字段写与来源冲突继续拒绝。没有 Material 方法名、token 或 RVA 特例。
+
+probe-176 自动注册 **4,059** 个入口，实际执行 Material.CreateWithMaterial_Injected，
+原 MissingMethodException 消失；40.34 秒、244 draws / 92 presents，guard checks=337 /
+denied=0，GC depth=0、async live=0。最后帧仍是加载页，pending entry 为
+RenderPipelineManager.DoRenderLoop_Internal。这批完整回归 **552 passed / 7 ignored**，
+release build 与 all-target Clippy 通过。
+
+ScriptableRenderContext 从实际 metadata 核对唯一实例 m_Ptr、8B size/alignment 和
+完整 managed render-loop 签名。每次原始 DoRenderLoop_Internal 调用签发一个同线程、
+不可跨线程移动且从不复用的 opaque token；在对应 scope 内还原原 guest engine 指针，
+结束立即退休。实例 receiver 和 injected ref receiver 共用同一 byref 协议；原引擎修改
+readonly context payload 时拒绝，native token 存储不会被 guest 指针覆盖。
+
+这批最初完整回归 **553 passed / 7 ignored**，release build / Clippy 通过。probe-177
+自动注册 **4,077** 个入口，但旧 pre-invoke admission 仍先按普通参数规则拒绝 IntPtr，
+所以尚未实际执行 render loop；39.12 秒、263 draws / 99 presents，guard denied=0。
+随后修正 admission，使已验证 context entry 与实际 invoke 使用相同描述符。
+
+后续实现以整组协议为单位：CommandBuffer 的 actual InitBuffer / ReleaseBuffer targets、
+m_Ptr 来源、所有权与 owner-thread release 单独验证，普通数值/字符串/对象/数组方法
+共用入口池。跨类的 CommandBuffer 参数由 actual BindingsMarshaller 的完整
+`ldarg.0; ldfld <actual m_Ptr>; ret` IL 验证，nullable wrapper 同时核对转换分支、literal
+native NULL 分支及完整 branch targets。创建和使用不把原 guest pointer 暴露给 native
+IL；foreign finalizer 入队，owner quiescence 在 Mono handle/root 退休前释放真实引擎资源。
+
+静态清单中 CommandBuffer 共 **179** 个 icall；其中异步读回、GPU fence、
+RenderTargetIdentifier 内嵌指针等仍需要各自的生命周期/布局协议，不因普通方法准入
+而放开。CullingResults 的 ptr/m_AllocationInfo 和可供 native IL 解引用的数组数据，
+也需要独立作用域与 shadow buffer 协议。全量盘点用于提前发现这些整组边界，游戏运行
+用于验证实际回调、线程、资源释放和最终画面，当前 `full_game_backend=false`。
+
+CommandBuffer / context 批次最终完整回归 **556 passed / 7 ignored**，release build、
+all-target Clippy 与 **16 项** metadata/harness/build-tool 回归通过。probe-178 自动
+注册 **4,127** 个入口，比 probe-177 增加 50 个普通接口；39.13 秒后 context 原型的
+heap-only 检查拒绝原 C++ 调用借用的数据，returncode=1。退出 command buffers
+created=0 / live=0 / closed=true、async live=0、GC depth=0，guard checks=341 / denied=0。
+最后帧仍为加载页，这次没有完成 render-loop 执行验收。
+
+借用上下文现同时核对原 suspended call 的 rsp、已有 temporary-slot 规则、8B 可读
+非代码存储和 main stack 范围。heap 与 borrowed-stack 分别记录存储来源；每次绑定
+使用都重新核对，scope 退休后 token 失效。回归覆盖有效 caller stack 和低于 caller
+活跃边界的失效 stack，而非为某个样本指针放宽全部 engine-pointer 规则。
+
+probe-179 越过上述 admission/borrow 检查，开始真实 render-loop 初始化，进入
+Shader.set_globalRenderPipeline_Injected。该资源操作在普通 callback 的 2,000,000
+work budget 处停止，returncode=-6、39.81 秒；abort 没有完整最终 guard/清理统计。
+随后按 actual owner/继承关系，将既有 32,000,000 asset budget 统一用于 Shader、
+Material、Mesh、Texture、ScriptableRenderContext 与 CommandBuffer 类族。标量、
+UTF16 与混合 byref 共用同一预算策略，不逐方法添加例外；普通 callback 仍为
+2,000,000。预算回归同时验证 asset scalar/typed-payload 路由完成后，普通路由仍按
+原预算拒绝长调用。
+
+## 成批实施与渲染循环诊断
+
+后续实施单位为协议，不再以游戏第一次抛出的单个方法作为工作清单。实际 metadata、
+包装 IL、原引擎 registrations 和静态 unsafe 使用点已经全量盘点；普通 ABI 自动
+生成数据描述符，指针/句柄/回调则按共用协议批量接入后统一验收。
+
+渲染清单中的待办如下。数量来自 probe-174 全量 snapshot，保留历史采样身份，
+不代表当前 lookup 状态，也不把游戏未用平台接口列为启动必需项。
+
+| 共用协议 | 静态范围 | 实施/验收状态 |
+| --- | --- | --- |
+| RenderContext 作用域与普通调用 | ScriptableRenderContext 35 个 icall | 作用域与普通 ABI 已实现，实际 render-loop 已进入 |
+| CommandBuffer 所有权、marshal 和普通操作 | CommandBuffer 179 个 icall | 两个所有权边界和 50 个普通方法接入；真实创建验收待完成 |
+| 带 finally 的对象返回转换 | 同形 engine-object 包装 | 读取真实 EH ranges，核对 native-result、managed-result、pin 三种独立 local；probe-181 实际通过 GraphicsSettings 返回 |
+| 大数值 payload | ScriptableCullingParameters、CameraProperties 固定数组/Boolean/padding | 待实现 metadata-derived 字段转换，不能直接复制裸结构 |
+| 借用裁剪结果 | CullingResults 14 个 icall，AllocationInfo/NativeArray | 待实现 scope、shadow buffers 和全部消费者 |
+| 渲染目标标识 | RenderTargetIdentifier 及其数组 | 待核对内嵌 buffer pointer 的来源、有效性和生命周期 |
+| 异步 GPU 与任务 | fence、readback、job callback | 待实现 owner-thread completion、GC roots 与退休顺序 |
+
+probe-180 在统一资源预算的 **32,000,000 work** 处仍停在 shader-property 哈希
+查询，49.88 秒后 abort；继续增大预算无助于定位。probe-181 的 finally 返回批次
+完整 release 回归 **557 passed / 7 ignored**，build、all-target Clippy（`-D warnings`）
+和 16 项工具回归通过。真实游戏自动注册数增加，实际通过
+GraphicsSettings.Internal_GetSettingsForRenderPipeline_Injected；但 57.49 秒后仍在
+Shader.set_globalRenderPipeline_Injected 的同一查询 abort。表内有正常 empty
+sentinel，最后帧仍为加载页。abort 没有完整 guard/资源清理计数。
+
+probe-182 暂时禁用 callback 的批量执行，仍复现同一状态。代码复查发现原
+`step_fallback` 在 decode 后会命中单指令 IR，所以该轮是单步 IR 对照。新增独立
+`step_reference` 直接使用 decoded transactional executor，保持 checked decoding、
+异常与提交边界；默认路径仍使用 IR。自编字符串比较循环回归核对负地址差、I32
+减法、不同大小写、空字符串和终止 FLAGS，同时证明已填充 IR cache 后参考执行
+仍有 ir_steps=0。超预算诊断同时记录可读寄存器 header 与其中的有界 pointee。
+
+probe-183 使用真正独立的参考 executor，90.75 秒后仍在同样的 32M 边界停止，
+查询字串与实际 bucket key 完全一致。probe-184 又采样最后 4,096 work 的 PC 分布：
+原哈希查询进入 6 次、完成返回 5 次，上层着色器属性遍历也正常推进。此前根据单个
+终止 RIP 怀疑哈希死循环，证据不足；当前证据指向正常批量资源工作耗尽原型预算。
+统一资源协议预算因此改为 128M，普通 callback 仍为 2M；不增加单方法例外，也不
+改变指针、作用域或执行内存准入。若新预算仍耗尽，应继续检查上层进度与资产规模，
+不能把多个停止点具有相同 RIP 当成死循环的证据。
+
+probe-185 实际通过 Shader.set_globalRenderPipeline_Injected，并正常收尾：66.73 秒、
+266 draws / 105 presents，guard checks=322 / denied=0，GC scope depth=0，async
+created=1 / released=1 / live=0，command buffers created=0 / live=0 / closed=true。
+最后帧仍为加载页。Player.log 的 URP 初始化异常来自 MaterialPropertyBlock.CreateImpl，
+属于上述 owned-resource 协议，需要与 CommandBuffer 共用 typed identity、marshal、
+owner-thread release 和 finalizer 队列，不能把 factory 安装当成完整资源协议。
+独立参考 executor 批次完整 release 回归 **558 passed / 7 ignored**；随后预算修正的
+普通/资源隔离回归、release build 和 all-target Clippy 均通过。

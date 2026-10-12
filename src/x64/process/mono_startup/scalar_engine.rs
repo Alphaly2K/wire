@@ -3,7 +3,10 @@
 //! MethodDef tokens, assembly hashes, signature combinations and guest RVAs.
 //! Engine references/arrays use the existing rooted container protocol. Other
 //! pointer/callback/lifetime shapes stay outside the ordinary value ABI.
-use super::{bindings, callbacks, engine_objects, images, managed_calls, value_layout, Object};
+use super::{
+    bindings, callbacks, command_buffers, engine_objects, images, managed_calls, render_context,
+    value_layout, Object,
+};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
@@ -44,6 +47,8 @@ const FAMILIES: &[(&CStr, &CStr)] = &[
     (c"UnityEngine", c"UISystemProfilerApi"),
     (c"UnityEngine.TextCore.LowLevel", c"FontEngine"),
     (c"UnityEngine.Rendering", c"GraphicsSettings"),
+    (c"UnityEngine.Rendering", c"ScriptableRenderContext"),
+    (c"UnityEngine.Rendering", c"CommandBuffer"),
     (c"UnityEngine.Rendering", c"SplashScreen"),
     (
         c"UnityEngine.Experimental.Rendering",
@@ -107,6 +112,9 @@ enum Argument {
     Exception { class: usize },
     DataArray { class: usize },
     Utf16Span,
+    RenderContext,
+    CommandBuffer { nullable: bool },
+    ReferenceContainer { class: usize },
 }
 struct Binding {
     library: usize,
@@ -114,6 +122,7 @@ struct Binding {
     target: u64,
     arguments: Vec<Argument>,
     returns: Return,
+    work: callbacks::Work,
 }
 enum Return {
     Scalar(Scalar),
@@ -378,6 +387,10 @@ pub(super) fn install(
         unsafe extern "C" fn(Object) -> Object
     );
     let is_enum = sym!("mono_class_is_enum", unsafe extern "C" fn(Object) -> i32);
+    let is_value = sym!(
+        "mono_class_is_valuetype",
+        unsafe extern "C" fn(Object) -> i32
+    );
     let image_of = sym!(
         "mono_class_get_image",
         unsafe extern "C" fn(Object) -> Object
@@ -419,6 +432,13 @@ pub(super) fn install(
         return Err("engine Object/IntPtr/Exception metadata identity absent or ambiguous".into());
     }
     let engine_base = engine_bases[0];
+    let asset_bases = [c"Shader", c"Material", c"Mesh", c"Texture"].map(|name| unsafe {
+        find(
+            image_of(engine_base),
+            c"UnityEngine".as_ptr(),
+            name.as_ptr(),
+        )
+    });
     let span = unsafe {
         find(
             image_of(engine_base),
@@ -530,7 +550,9 @@ pub(super) fn install(
                 continue;
             }
             let (method, method_flags) = candidates[0];
-            if method_flags & 0x10 == 0 {
+            let instance = method_flags & 0x10 == 0;
+            let context_owner = render_context::context_class(owner);
+            if instance && !context_owner {
                 deferred += 1;
                 continue;
             }
@@ -543,7 +565,7 @@ pub(super) fn install(
                 return Err("engine signature absent".into());
             }
             let arity = unsafe { count(sig) } as usize;
-            if arity > ARGUMENT_CAPACITY {
+            if arity + usize::from(instance) > ARGUMENT_CAPACITY {
                 deferred += 1;
                 continue;
             }
@@ -551,6 +573,9 @@ pub(super) fn install(
             let mut signature_types = Vec::new();
             let mut enum_storage = Vec::new();
             let mut arguments = Vec::new();
+            if instance {
+                arguments.push(Argument::RenderContext);
+            }
             let mut names = [ptr::null(); ARGUMENT_CAPACITY];
             unsafe { param_names(method, names.as_mut_ptr()) };
             let mut result = None;
@@ -586,7 +611,7 @@ pub(super) fn install(
                     result = Some(Return::EngineHandle {
                         class: class as usize,
                     });
-                } else if engine_object
+                } else if (engine_object || command_buffers::class(owner))
                     && index == 1
                     && type_kind == 0x18
                     && !reference
@@ -594,7 +619,11 @@ pub(super) fn install(
                     && !names[0].is_null()
                     && unsafe { CStr::from_ptr(names[0]) } == c"_unity_self"
                 {
-                    arguments.push(Argument::EngineSelf);
+                    arguments.push(if command_buffers::class(owner) {
+                        Argument::CommandBuffer { nullable: false }
+                    } else {
+                        Argument::EngineSelf
+                    });
                 } else if index != 0 && type_kind == 0x18 && class == intptr && !reference {
                     if engine_arguments.is_none() {
                         engine_arguments = Some(api.engine_pointer_arguments(
@@ -604,11 +633,18 @@ pub(super) fn install(
                             &family,
                         )?);
                     }
-                    let Some(nullable) = engine_arguments.as_ref().unwrap()[index - 1] else {
+                    let Some(source) = engine_arguments.as_ref().unwrap()[index - 1] else {
                         supported = false;
                         break;
                     };
-                    arguments.push(Argument::EnginePointer { nullable });
+                    arguments.push(match source {
+                        managed_calls::PointerSource::Engine { nullable } => {
+                            Argument::EnginePointer { nullable }
+                        }
+                        managed_calls::PointerSource::CommandBuffer { nullable } => {
+                            Argument::CommandBuffer { nullable }
+                        }
+                    });
                 } else if index != 0
                     && !reference
                     && matches!(type_kind, 0x12 | 0x15)
@@ -666,6 +702,21 @@ pub(super) fn install(
                     }
                     super::logging::validate_span_layout(library, span)?;
                     arguments.push(Argument::Utf16Span);
+                } else if index != 0
+                    && reference
+                    && type_kind == 0x11
+                    && render_context::context_class(class)
+                {
+                    arguments.push(Argument::RenderContext);
+                } else if context_owner
+                    && index != 0
+                    && !reference
+                    && matches!(type_kind, 0x12 | 0x15 | 0x1c)
+                    && unsafe { is_value(class) } == 0
+                {
+                    arguments.push(Argument::ReferenceContainer {
+                        class: class as usize,
+                    });
                 } else if reference {
                     if index == 0 {
                         supported = false;
@@ -765,13 +816,23 @@ pub(super) fn install(
                 deferred += 1;
                 continue;
             }
-            api.fixed_typed_icall_enum_storage(
-                method,
-                owner,
-                &signature_types,
-                &family,
-                &enum_storage,
-            )?;
+            if instance {
+                api.fixed_typed_instance_icall_enum_storage(
+                    method,
+                    owner,
+                    &signature_types,
+                    &family,
+                    &enum_storage,
+                )?;
+            } else {
+                api.fixed_typed_icall_enum_storage(
+                    method,
+                    owner,
+                    &signature_types,
+                    &family,
+                    &enum_storage,
+                )?;
+            }
             // Existing semantic adapters keep their registration. This
             // lookup never executes a method or generates a wrapper.
             if !unsafe { lookup(method) }.is_null() {
@@ -783,6 +844,16 @@ pub(super) fn install(
                 target,
                 arguments,
                 returns: result.ok_or("engine scalar return absent")?,
+                work: if context_owner
+                    || command_buffers::class(owner)
+                    || asset_bases
+                        .iter()
+                        .any(|&base| !base.is_null() && unsafe { assignable(base, owner) } != 0)
+                {
+                    callbacks::Work::Asset
+                } else {
+                    callbacks::Work::Ordinary
+                },
             });
         }
     }
@@ -807,9 +878,26 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
         return Err("engine argument arity changed".into());
     }
     let mut checked = arguments.to_vec();
+    let mut contexts = Vec::new();
+    for (index, (argument, &value)) in binding.arguments.iter().zip(arguments).enumerate() {
+        if matches!(argument, Argument::RenderContext) {
+            contexts.push((index, unsafe {
+                render_context::native_payload(value as usize)
+            }?));
+        }
+    }
+    // Temporary native cells contain restored original guest pointers. They are
+    // copied through the normal byref payload protocol, never passed to guest.
+    for &(index, ref pointer) in &contexts {
+        checked[index] = pointer as *const u64 as u64;
+    }
     let mut object_pins = Vec::new();
     for (argument, value) in binding.arguments.iter().zip(&mut checked) {
-        if matches!(
+        if let Argument::CommandBuffer { nullable } = argument {
+            if *value != 0 || !nullable {
+                *value = command_buffers::pointer(*value as usize)?;
+            }
+        } else if matches!(
             argument,
             Argument::EngineSelf | Argument::EnginePointer { .. }
         ) {
@@ -819,7 +907,8 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
         } else if let Argument::EngineArray { class }
         | Argument::EngineObject { class }
         | Argument::Exception { class }
-        | Argument::DataArray { class } = argument
+        | Argument::DataArray { class }
+        | Argument::ReferenceContainer { class } = argument
         {
             let native = managed_calls::Api::load(binding.library as Object)?.compatible(
                 *value as Object,
@@ -874,6 +963,11 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
         .iter()
         .map(|argument| match argument {
             Argument::Value(layout) => Some(*layout),
+            Argument::RenderContext => Some(Payload {
+                width: 8,
+                alignment: 8,
+                output: false,
+            }),
             _ => None,
         })
         .collect();
@@ -898,24 +992,26 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
             .iter()
             .map(|(position, units)| (*position, units.as_deref()))
             .collect();
-        let (value, outputs) = if strings.is_empty() {
-            callbacks::guest_value_arguments(
-                binding.target,
-                arguments,
-                &floating,
-                &spans,
-                &frame.aliases,
-            )?
-        } else {
-            callbacks::guest_value_span_arguments(
-                binding.target,
-                arguments,
-                &floating,
-                &spans,
-                &frame.aliases,
-                &strings,
-            )?
-        };
+        let (value, outputs) =
+            if strings.is_empty() && matches!(binding.work, callbacks::Work::Ordinary) {
+                callbacks::guest_value_arguments(
+                    binding.target,
+                    arguments,
+                    &floating,
+                    &spans,
+                    &frame.aliases,
+                )?
+            } else {
+                callbacks::guest_value_span_arguments(
+                    binding.target,
+                    arguments,
+                    &floating,
+                    &spans,
+                    &frame.aliases,
+                    &strings,
+                    binding.work,
+                )?
+            };
         (value, Some(frame), outputs)
     } else if !utf16.is_empty() {
         let strings: Vec<_> = utf16
@@ -923,18 +1019,38 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
             .map(|(position, units)| (*position, units.as_deref()))
             .collect();
         (
-            callbacks::guest_span_arguments(binding.target, arguments, &floating, &strings, None)?
-                .0,
+            callbacks::guest_value_span_arguments(
+                binding.target,
+                arguments,
+                &floating,
+                &[],
+                &[],
+                &strings,
+                binding.work,
+            )?
+            .0,
             None,
             Vec::new(),
         )
     } else {
         (
-            callbacks::guest_scalars(binding.target, arguments, &floating)?,
+            callbacks::guest_scalars_with_work(binding.target, arguments, &floating, binding.work)?,
             None,
             Vec::new(),
         )
     };
+    if let Some(frame) = &frame {
+        for &(index, pointer) in &contexts {
+            let position = frame
+                .spans
+                .iter()
+                .position(|span| span.0 == index)
+                .ok_or("render context payload absent")?;
+            if outputs.get(position).map(Vec::as_slice) != Some(pointer.to_le_bytes().as_slice()) {
+                return Err("engine modified readonly render context payload".into());
+            }
+        }
+    }
     let word = match binding.returns {
         Return::Scalar(scalar) => {
             scalar.normalize(if scalar.floating() { value.1 } else { value.0 })?
@@ -955,7 +1071,8 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
     }
     // Validate the result and every output before changing any native slot.
     if let Some(frame) = frame {
-        unsafe { frame.commit(&outputs) }?;
+        let readonly: Vec<_> = contexts.iter().map(|context| context.0).collect();
+        unsafe { frame.commit(&outputs, &readonly) }?;
     }
     Ok(if binding.returns.floating() {
         (0, word)
@@ -1026,7 +1143,7 @@ impl ValueFrame {
             destinations,
         })
     }
-    unsafe fn commit(&self, outputs: &[Vec<u8>]) -> Result<(), String> {
+    unsafe fn commit(&self, outputs: &[Vec<u8>], readonly: &[usize]) -> Result<(), String> {
         if outputs.len() != self.destinations.len()
             || outputs
                 .iter()
@@ -1035,7 +1152,14 @@ impl ValueFrame {
         {
             return Err("native value output length mismatch; all outputs unchanged".into());
         }
-        for (bytes, &(address, layout)) in outputs.iter().zip(&self.destinations) {
+        for ((bytes, &(address, layout)), &(position, _)) in
+            outputs.iter().zip(&self.destinations).zip(&self.spans)
+        {
+            // Restored context cells are immutable input storage. Their
+            // contents have already been checked against the guest outputs.
+            if readonly.contains(&position) {
+                continue;
+            }
             unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), address as *mut u8, layout.width) };
         }
         Ok(())
@@ -1066,7 +1190,82 @@ mod tests {
             target,
             arguments,
             returns: Return::Scalar(Scalar::from_kind(result).unwrap()),
+            work: callbacks::Work::Ordinary,
         }
+    }
+    #[test]
+    fn context_capability_restores_guest_payload_and_rejects_writeback_or_expiration() {
+        let mut memory = Memory::default();
+        memory.map(0x1000, 4096, READ | WRITE | EXECUTE).unwrap();
+        memory.map(STACK, 65536, READ | WRITE).unwrap();
+        let original = memory.virtual_alloc(0, 4096, 0x3000, 4).unwrap();
+        let mut code = vec![0x48, 0x8b, 0x01, 0x48, 0xba];
+        code.extend_from_slice(&original.to_le_bytes());
+        code.extend_from_slice(&[0x48, 0x39, 0xd0, 0x0f, 0x94, 0xc0, 0x0f, 0xb6, 0xc0, 0xc3]);
+        memory.write(0x1000, &code).unwrap();
+        memory
+            .write(0x1100, &[0x48, 0xc7, 0x01, 1, 0, 0, 0, 0x31, 0xc0, 0xc3])
+            .unwrap();
+        let mut runtime = Runtime64::new(
+            &mut memory,
+            0x140000000,
+            STACK,
+            65536,
+            "render-context-fixture",
+        )
+        .unwrap();
+        let scope = render_context::test_scope(original).unwrap();
+        let expected_token = render_context::test_token(&scope);
+        let mut native_value = expected_token;
+        let argument = &mut native_value as *mut u64 as u64;
+        let read = binding(
+            "ChangedNamespace::Context",
+            0x1000,
+            vec![Argument::RenderContext],
+            2,
+        );
+        let write = binding(
+            "OtherContext::Write",
+            0x1100,
+            vec![Argument::RenderContext],
+            2,
+        );
+        let (result, _) = callbacks::with_owner(&mut memory, &mut runtime, [0; 7], || {
+            assert_eq!(execute(&read, &[argument]).unwrap(), (1, 0));
+            assert!(execute(&write, &[argument]).is_err());
+            assert_eq!(native_value, render_context::test_token(&scope));
+            Ok::<_, String>(())
+        })
+        .unwrap();
+        result.unwrap();
+        let stack_scope = render_context::test_stack_scope(STACK + 1024, STACK + 64).unwrap();
+        let stack_token = render_context::test_token(&stack_scope);
+        let expired_stack_scope = render_context::test_stack_scope(STACK + 32, STACK + 64).unwrap();
+        let expired_token = render_context::test_token(&expired_stack_scope);
+        let (result, _) = callbacks::with_owner(&mut memory, &mut runtime, [0; 7], || {
+            assert_eq!(
+                unsafe { render_context::native_payload(&stack_token as *const u64 as usize) }
+                    .unwrap(),
+                STACK + 1024
+            );
+            assert!(unsafe {
+                render_context::native_payload(&expired_token as *const u64 as usize)
+            }
+            .is_err());
+            Ok::<_, String>(())
+        })
+        .unwrap();
+        result.unwrap();
+        drop(expired_stack_scope);
+        drop(stack_scope);
+        drop(scope);
+        let (result, _) = callbacks::with_owner(&mut memory, &mut runtime, [0; 7], || {
+            assert!(execute(&read, &[argument]).is_err());
+            assert_eq!(native_value, expected_token);
+            Ok::<_, String>(())
+        })
+        .unwrap();
+        result.unwrap();
     }
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
@@ -1406,7 +1605,7 @@ mod tests {
             std::slice::from_raw_parts(pointer as *const u8, 12)
         });
         let before = cell;
-        assert!(unsafe { frame.commit(&[vec![0; 8]]) }.is_err());
+        assert!(unsafe { frame.commit(&[vec![0; 8]], &[]) }.is_err());
         assert_eq!(cell, before);
         assert!(unsafe { ValueFrame::prepare(&[4, 8], &[Some(input), Some(input)]) }.is_err());
         assert!(unsafe { ValueFrame::prepare(&[0], &[Some(input)]) }.is_err());
@@ -1440,7 +1639,7 @@ mod tests {
         })
         .unwrap();
         let (_, bytes) = result.unwrap();
-        unsafe { frame.commit(&bytes) }.unwrap();
+        unsafe { frame.commit(&bytes, &[]) }.unwrap();
         assert_eq!(cell, [4.0, 2.0, 3.0, 4.0]);
         assert!(
             callbacks::with_owner(&mut memory, &mut runtime, [0; 7], || {

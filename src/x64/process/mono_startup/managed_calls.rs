@@ -58,6 +58,34 @@ pub(super) enum BufferOperation {
     Replicate,
     Stride,
 }
+enum EntryAbi {
+    StaticInternal,
+    InstanceRenderContext,
+    StaticManaged,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ExceptionClause {
+    flags: u32,
+    try_offset: u32,
+    try_len: u32,
+    handler_offset: u32,
+    handler_len: u32,
+    data: usize,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PointerSource {
+    Engine { nullable: bool },
+    CommandBuffer { nullable: bool },
+}
+impl PointerSource {
+    fn nullable(self) -> Self {
+        match self {
+            Self::Engine { .. } => Self::Engine { nullable: true },
+            Self::CommandBuffer { .. } => Self::CommandBuffer { nullable: true },
+        }
+    }
+}
 #[derive(Clone, Copy)]
 pub(super) struct Api {
     library: Object,
@@ -128,6 +156,14 @@ impl Api {
             unsafe extern "C" fn(Object) -> *const c_char
         );
         let intptr = sym!("mono_get_intptr_class", unsafe extern "C" fn() -> Object);
+        let clause_count = sym!(
+            "mono_method_header_get_num_clauses",
+            unsafe extern "C" fn(Object) -> i32
+        );
+        let clause_next = sym!(
+            "mono_method_header_get_clauses",
+            unsafe extern "C" fn(Object, Object, *mut Object, *mut ExceptionClause) -> i32
+        );
         let image = unsafe { (self.image)(owner) };
         let target = unsafe { token(method) };
         if target >> 24 != 6 || !images.contains(&image) {
@@ -173,10 +209,18 @@ impl Api {
             let converter = if code.is_null() || !(11..=128).contains(&length) || stack > 16 {
                 None
             } else {
-                engine_handle_tail(
-                    unsafe { std::slice::from_raw_parts(code, length as usize) },
-                    target,
-                )
+                let code = unsafe { std::slice::from_raw_parts(code, length as usize) };
+                engine_handle_tail(code, target).or_else(|| {
+                    if unsafe { clause_count(header) } != 1 {
+                        return None;
+                    }
+                    let mut iterator = ptr::null_mut();
+                    let mut clause = ExceptionClause::default();
+                    if unsafe { clause_next(header, wrapper, &mut iterator, &mut clause) } == 0 {
+                        return None;
+                    }
+                    engine_handle_finally_tail(code, target, clause)
+                })
             };
             unsafe { (self.free)(header) };
             let Some(converter) = converter else {
@@ -239,15 +283,15 @@ impl Api {
     }
     /// Infer engine-pointer arguments from ordinary generated wrappers. The
     /// wrapper loads its parameters in order and uses the actual closed
-    /// Object.MarshalledUnityObject.Marshal<T> helper. Other IntPtr sources and
-    /// wrappers with control flow stay outside this protocol.
+    /// Object.MarshalledUnityObject.Marshal<T> helper or an actual verified
+    /// owned-buffer marshaller. Bounded null guards preserve the same origins.
     pub(super) fn engine_pointer_arguments(
         self,
         method: Object,
         owner: Object,
         engine_base: Object,
         images: &[Object],
-    ) -> Result<Vec<Option<bool>>, String> {
+    ) -> Result<Vec<Option<PointerSource>>, String> {
         macro_rules! sym {
             ($name:literal, $ty:ty) => {{
                 let p = unsafe { libc::dlsym(self.library, concat!($name, "\0").as_ptr().cast()) };
@@ -275,6 +319,42 @@ impl Api {
             unsafe extern "C" fn(Object) -> Object
         );
         let intptr = sym!("mono_get_intptr_class", unsafe extern "C" fn() -> Object);
+        let object_class = sym!("mono_get_object_class", unsafe extern "C" fn() -> Object);
+        let string_class = sym!("mono_get_string_class", unsafe extern "C" fn() -> Object);
+        let void_class = sym!("mono_get_void_class", unsafe extern "C" fn() -> Object);
+        let find = sym!(
+            "mono_class_from_name",
+            unsafe extern "C" fn(Object, *const c_char, *const c_char) -> Object
+        );
+        let get_method = sym!(
+            "mono_class_get_method_from_name",
+            unsafe extern "C" fn(Object, *const c_char, i32) -> Object
+        );
+        let throw_owner = unsafe {
+            find(
+                (self.image)(engine_base),
+                c"UnityEngine.Bindings".as_ptr(),
+                c"ThrowHelper".as_ptr(),
+            )
+        };
+        let throw_method = if throw_owner.is_null() {
+            ptr::null_mut()
+        } else {
+            unsafe { get_method(throw_owner, c"ThrowArgumentNullException".as_ptr(), 2) }
+        };
+        let checked_throw = !throw_method.is_null()
+            && self
+                .fixed_typed_managed(
+                    throw_method,
+                    throw_owner,
+                    &[
+                        (1, unsafe { void_class() }, false),
+                        (0x1c, unsafe { object_class() }, false),
+                        (0xe, unsafe { string_class() }, false),
+                    ],
+                    images,
+                )
+                .is_ok();
         let image = unsafe { (self.image)(owner) };
         let target = unsafe { token(method) };
         let signature = unsafe { (self.signature)(method) };
@@ -330,77 +410,85 @@ impl Api {
             let inferred = if code.is_null() || !(6..=256).contains(&length) || stack > 16 {
                 None
             } else {
-                engine_pointer_prefix(
-                    unsafe { std::slice::from_raw_parts(code, length as usize) },
-                    target,
-                    arity,
-                    |position, converter| {
-                        let (source, reference) = arguments[position];
-                        if reference
-                            || source.is_null()
-                            || !images.contains(&unsafe { (self.image)(source) })
-                        {
-                            return None;
-                        }
-                        let converter = unsafe { resolve(image, converter, owner) };
-                        if converter.is_null() {
-                            return None;
-                        }
-                        let declaring = unsafe { (self.class)(converter) };
-                        if declaring.is_null()
-                            || unsafe { nesting(declaring) } != engine_base
-                            || !text_matches(
-                                unsafe { class_name(declaring) },
-                                c"MarshalledUnityObject",
-                            )
-                        {
-                            return None;
-                        }
-                        let nullable =
-                            if text_matches(unsafe { (self.name)(converter) }, c"Marshal") {
-                                true
-                            } else if text_matches(
-                                unsafe { (self.name)(converter) },
-                                c"MarshalNotNull",
-                            ) {
-                                false
-                            } else {
-                                return None;
-                            };
-                        let sig = unsafe { (self.signature)(converter) };
-                        let mut implementation = 0;
-                        let flags = unsafe { (self.flags)(converter, &mut implementation) };
-                        if sig.is_null()
-                            || flags & 0x10 == 0
-                            || flags & (0x400 | 0x2000) != 0
-                            || implementation & (0x1000 | 3) != 0
-                            || unsafe { (self.instance)(sig) } != 0
-                            || unsafe { (self.count)(sig) } != 1
-                        {
-                            return None;
-                        }
-                        let mut iter = ptr::null_mut();
-                        let ty = unsafe { (self.parameters)(sig, &mut iter) };
-                        let returns = unsafe { (self.returns)(sig) };
-                        if ty.is_null() || returns.is_null() {
-                            return None;
-                        }
-                        let expected = unsafe { (self.type_class)(ty) };
-                        if expected.is_null()
-                            || unsafe { (self.byref)(ty) } != 0
-                            || unsafe { (self.kind)(ty) } != 0x12
-                            || !images.contains(&unsafe { (self.image)(expected) })
-                            || unsafe { (self.assignable)(engine_base, expected) } == 0
-                            || unsafe { (self.assignable)(expected, source) } == 0
-                            || unsafe { (self.byref)(returns) } != 0
-                            || unsafe { (self.kind)(returns) } != 0x18
-                            || unsafe { (self.type_class)(returns) } != unsafe { intptr() }
-                        {
-                            return None;
-                        }
-                        Some(nullable)
-                    },
-                )
+                let mut marshal = |position: usize, converter| {
+                    let (source, reference) = arguments[position];
+                    if reference
+                        || source.is_null()
+                        || !images.contains(&unsafe { (self.image)(source) })
+                    {
+                        return None;
+                    }
+                    let converter = unsafe { resolve(image, converter, owner) };
+                    if converter.is_null() {
+                        return None;
+                    }
+                    if super::command_buffers::converter(source, converter) {
+                        return Some(PointerSource::CommandBuffer { nullable: false });
+                    }
+                    let declaring = unsafe { (self.class)(converter) };
+                    if declaring.is_null()
+                        || unsafe { nesting(declaring) } != engine_base
+                        || !text_matches(unsafe { class_name(declaring) }, c"MarshalledUnityObject")
+                    {
+                        return None;
+                    }
+                    let nullable = if text_matches(unsafe { (self.name)(converter) }, c"Marshal") {
+                        true
+                    } else if text_matches(unsafe { (self.name)(converter) }, c"MarshalNotNull") {
+                        false
+                    } else {
+                        return None;
+                    };
+                    let sig = unsafe { (self.signature)(converter) };
+                    let mut implementation = 0;
+                    let flags = unsafe { (self.flags)(converter, &mut implementation) };
+                    if sig.is_null()
+                        || flags & 0x10 == 0
+                        || flags & (0x400 | 0x2000) != 0
+                        || implementation & (0x1000 | 3) != 0
+                        || unsafe { (self.instance)(sig) } != 0
+                        || unsafe { (self.count)(sig) } != 1
+                    {
+                        return None;
+                    }
+                    let mut iter = ptr::null_mut();
+                    let ty = unsafe { (self.parameters)(sig, &mut iter) };
+                    let returns = unsafe { (self.returns)(sig) };
+                    if ty.is_null() || returns.is_null() {
+                        return None;
+                    }
+                    let expected = unsafe { (self.type_class)(ty) };
+                    if expected.is_null()
+                        || unsafe { (self.byref)(ty) } != 0
+                        || unsafe { (self.kind)(ty) } != 0x12
+                        || !images.contains(&unsafe { (self.image)(expected) })
+                        || unsafe { (self.assignable)(engine_base, expected) } == 0
+                        || unsafe { (self.assignable)(expected, source) } == 0
+                        || unsafe { (self.byref)(returns) } != 0
+                        || unsafe { (self.kind)(returns) } != 0x18
+                        || unsafe { (self.type_class)(returns) } != unsafe { intptr() }
+                    {
+                        return None;
+                    }
+                    Some(PointerSource::Engine { nullable })
+                };
+                let code = unsafe { std::slice::from_raw_parts(code, length as usize) };
+                engine_pointer_prefix(code, target, arity, &mut marshal)
+                    .or_else(|| {
+                        engine_pointer_flow(code, target, arity, &mut marshal, |called| {
+                            checked_throw
+                                && unsafe { resolve(image, called, owner) } == throw_method
+                        })
+                    })
+                    .or_else(|| {
+                        engine_pointer_nullable_prefix(
+                            code,
+                            target,
+                            arity,
+                            &mut marshal,
+                            PointerSource::nullable,
+                        )
+                    })
             };
             unsafe { (self.free)(header) };
             let Some(inferred) = inferred else { continue };
@@ -1540,7 +1628,34 @@ impl Api {
         images: &[Object],
         enum_storage: &[(Object, u32)],
     ) -> Result<(), String> {
-        self.fixed_typed_static(method, owner, specs, images, enum_storage, true)
+        self.fixed_typed_entry(
+            method,
+            owner,
+            specs,
+            images,
+            enum_storage,
+            EntryAbi::StaticInternal,
+        )
+    }
+    pub(super) fn fixed_typed_instance_icall_enum_storage(
+        self,
+        method: Object,
+        owner: Object,
+        specs: &[(u32, Object, bool)],
+        images: &[Object],
+        enum_storage: &[(Object, u32)],
+    ) -> Result<(), String> {
+        if !super::render_context::context_class(owner) {
+            return Err("instance engine value ABI has no render context protocol".into());
+        }
+        self.fixed_typed_entry(
+            method,
+            owner,
+            specs,
+            images,
+            enum_storage,
+            EntryAbi::InstanceRenderContext,
+        )
     }
     pub(super) fn fixed_typed_managed(
         self,
@@ -1549,7 +1664,7 @@ impl Api {
         specs: &[(u32, Object, bool)],
         images: &[Object],
     ) -> Result<(), String> {
-        self.fixed_typed_static(method, owner, specs, images, &[], false)?;
+        self.fixed_typed_entry(method, owner, specs, images, &[], EntryAbi::StaticManaged)?;
         let header = unsafe { (self.header)(method) };
         if header.is_null() {
             return Err("fixed managed entry has no IL header".into());
@@ -1563,15 +1678,51 @@ impl Api {
         }
         Ok(())
     }
-    fn fixed_typed_static(
+    /// An owned-pointer marshaller may expose only the actual verified m_Ptr
+    /// field. Complete IL boundaries prevent an operand from mimicking LDFLD.
+    pub(super) fn pointer_field_converter(
+        self,
+        method: Object,
+        field: Object,
+    ) -> Result<(), String> {
+        let token = unsafe { libc::dlsym(self.library, c"mono_class_get_field_token".as_ptr()) };
+        if token.is_null() || method.is_null() || field.is_null() {
+            return Err("owned-pointer converter lacks actual field metadata".into());
+        }
+        let token: unsafe extern "C" fn(Object) -> u32 = unsafe { std::mem::transmute(token) };
+        let token = unsafe { token(field) };
+        let header = unsafe { (self.header)(method) };
+        if header.is_null() {
+            return Err("owned-pointer converter has no IL".into());
+        }
+        let (mut length, mut stack) = (0, 0);
+        let code = unsafe { (self.code)(header, &mut length, &mut stack) };
+        let valid = !code.is_null()
+            && (7..=32).contains(&length)
+            && stack <= 8
+            && pointer_field_body(
+                unsafe { std::slice::from_raw_parts(code, length as usize) },
+                token,
+            );
+        unsafe { (self.free)(header) };
+        if !valid {
+            return Err(
+                "owned-pointer converter does not read only the actual pointer field".into(),
+            );
+        }
+        Ok(())
+    }
+    fn fixed_typed_entry(
         self,
         method: Object,
         owner: Object,
         specs: &[(u32, Object, bool)],
         images: &[Object],
         enum_storage: &[(Object, u32)],
-        internal: bool,
+        abi: EntryAbi,
     ) -> Result<(), String> {
+        let internal = !matches!(abi, EntryAbi::StaticManaged);
+        let instance = matches!(abi, EntryAbi::InstanceRenderContext);
         if method.is_null()
             || owner.is_null()
             || specs.is_empty()
@@ -1585,14 +1736,14 @@ impl Api {
         let flags = unsafe { (self.flags)(method, &mut implementation) };
         let sig = unsafe { (self.signature)(method) };
         if sig.is_null()
-            || flags & 0x10 == 0
+            || (flags & 0x10 == 0) != instance
             || flags & (0x400 | 0x2000) != 0
             || if internal {
                 implementation & 0x1000 == 0
             } else {
                 !managed_il_flags(flags, implementation, false)
             }
-            || unsafe { (self.instance)(sig) } != 0
+            || (unsafe { (self.instance)(sig) } != 0) != instance
             || unsafe { (self.count)(sig) } as usize != specs.len() - 1
             || unsafe { (self.generic)(method) } != 0
             || unsafe { (self.inflated)(method) } != 0
@@ -1770,8 +1921,81 @@ fn engine_handle_tail(code: &[u8], target: u32) -> Option<u32> {
         _ => None,
     }
 }
+/// A generated string wrapper unmarshals its saved native result in a finally
+/// handler before releasing the pin. Check actual EH ranges and local origins;
+/// merely finding a converter call elsewhere in the method is insufficient.
+fn engine_handle_finally_tail(code: &[u8], target: u32, clause: ExceptionClause) -> Option<u32> {
+    let instructions = engine_wrapper_instructions(code)?;
+    if clause.flags != 2
+        || instructions
+            .iter()
+            .filter(|&&(op, t)| op == 0x28 && t == target)
+            .count()
+            != 1
+    {
+        return None;
+    }
+    let local = |instruction: (u8, u32), store| match instruction {
+        (op @ 0x0a..=0x0d, _) if store => Some((op - 0x0a) as u32),
+        (0x13, n) if store => Some(n),
+        (op @ 0x06..=0x09, _) if !store => Some((op - 0x06) as u32),
+        (0x11, n) if !store => Some(n),
+        _ => None,
+    };
+    let start = instructions.iter().position(|&i| i == (0x28, target))?;
+    let tail = instructions.get(start..)?;
+    if tail.len() != 12 {
+        return None;
+    }
+    let mut offsets = Vec::new();
+    let mut at = 0;
+    for &(op, _) in &instructions {
+        offsets.push(at);
+        at += 1 + engine_wrapper_operand_width(op)?;
+    }
+    let native = local(tail[1], true)?;
+    let managed = local(tail[5], true)?;
+    let pin = local(tail[8], true)?;
+    let (leave, delta) = tail[2];
+    let delta = match leave {
+        0xde => delta as u8 as i8 as i64,
+        0xdd => delta as i32 as i64,
+        _ => return None,
+    };
+    let converter = match tail[4] {
+        (0x28, token) if token >> 24 == 0x2b => token,
+        _ => return None,
+    };
+    if native == managed
+        || native == pin
+        || managed == pin
+        || local(tail[3], false)? != native
+        || local(tail[10], false)? != managed
+        || tail[6] != (0x16, 0)
+        || tail[7] != (0xe0, 0)
+        || tail[9] != (0xdc, 0)
+        || tail[11] != (0x2a, 0)
+        || clause.handler_offset as usize != offsets[start + 3]
+        || clause.handler_offset.checked_add(clause.handler_len)? as usize != offsets[start + 10]
+        || clause.try_offset as usize > offsets[start]
+        || clause.try_offset.checked_add(clause.try_len)? as usize != offsets[start + 3]
+        || offsets[start + 3] as i64 + delta != offsets[start + 10] as i64
+    {
+        return None;
+    }
+    Some(converter)
+}
 fn text_matches(text: *const c_char, expected: &CStr) -> bool {
     !text.is_null() && unsafe { CStr::from_ptr(text) } == expected
+}
+fn engine_wrapper_operand_width(opcode: u8) -> Option<usize> {
+    Some(match opcode {
+        0x00 | 0x02..=0x0d | 0x14..=0x1e | 0x25 | 0x26 | 0x2a | 0xd3 | 0xdc | 0xe0 => 0,
+        0x0e..=0x13 | 0x1f | 0x2b..=0x37 | 0xde => 1,
+        0x20 | 0x22 | 0x28 | 0x38..=0x44 | 0x6f | 0x72 | 0x7b..=0x80 | 0xdd => 4,
+        0x21 | 0x23 => 8,
+        _ => return None,
+    })
 }
 fn engine_wrapper_instructions(code: &[u8]) -> Option<Vec<(u8, u32)>> {
     // Parse complete instruction boundaries in the small generated wrapper
@@ -1781,13 +2005,7 @@ fn engine_wrapper_instructions(code: &[u8]) -> Option<Vec<(u8, u32)>> {
     while at < code.len() {
         let opcode = code[at];
         at += 1;
-        let width = match opcode {
-            0x00 | 0x02..=0x0d | 0x14..=0x1e | 0x25 | 0x26 | 0x2a | 0xdc | 0xe0 => 0,
-            0x0e..=0x13 | 0x1f | 0x2b..=0x37 | 0xde => 1,
-            0x20 | 0x22 | 0x28 | 0x38..=0x44 | 0x6f | 0x7b..=0x80 | 0xdd => 4,
-            0x21 | 0x23 => 8,
-            _ => return None,
-        };
+        let width = engine_wrapper_operand_width(opcode)?;
         let operand = code.get(at..at.checked_add(width)?)?;
         let mut word = [0; 4];
         let copied = operand.len().min(4);
@@ -1797,12 +2015,25 @@ fn engine_wrapper_instructions(code: &[u8]) -> Option<Vec<(u8, u32)>> {
     }
     Some(instructions)
 }
-fn engine_pointer_prefix(
+fn pointer_field_body(code: &[u8], field: u32) -> bool {
+    if field >> 24 != 4 {
+        return false;
+    }
+    let Some(instructions) = engine_wrapper_instructions(code) else {
+        return false;
+    };
+    let instructions: Vec<_> = instructions
+        .into_iter()
+        .filter(|&(op, _)| op != 0)
+        .collect();
+    instructions == [(0x02, 0), (0x7b, field), (0x2a, 0)]
+}
+fn engine_pointer_prefix<T: Copy + Eq>(
     code: &[u8],
     target: u32,
     arity: usize,
-    mut marshal: impl FnMut(usize, u32) -> Option<bool>,
-) -> Option<Vec<Option<bool>>> {
+    mut marshal: impl FnMut(usize, u32) -> Option<T>,
+) -> Option<Vec<Option<T>>> {
     let instructions = engine_wrapper_instructions(code)?;
     if arity > 16
         || instructions
@@ -1832,7 +2063,7 @@ fn engine_pointer_prefix(
         at += 1;
         let pointer = if let Some(&(0x28, converter)) = instructions.get(at) {
             if converter != target {
-                if address || converter >> 24 != 0x2b {
+                if address || !matches!(converter >> 24, 6 | 0xa | 0x2b) {
                     return None;
                 }
                 let nullable = marshal(position, converter)?;
@@ -1850,6 +2081,269 @@ fn engine_pointer_prefix(
         at += 1;
     }
     (instructions.get(at) == Some(&(0x28, target))).then_some(arguments)
+}
+/// Generated nullable marshalling keeps argument order and has exactly two
+/// paths: the verified converter or literal native NULL. Validate both branch
+/// targets and their complete bodies; unrelated joins retain a missing entry.
+fn engine_pointer_nullable_prefix<T: Copy + Eq>(
+    code: &[u8],
+    target: u32,
+    arity: usize,
+    mut marshal: impl FnMut(usize, u32) -> Option<T>,
+    mut nullable: impl FnMut(T) -> T,
+) -> Option<Vec<Option<T>>> {
+    let instructions = engine_wrapper_instructions(code)?;
+    if arity > 16
+        || instructions
+            .iter()
+            .filter(|&&(op, token)| op == 0x28 && token == target)
+            .count()
+            != 1
+    {
+        return None;
+    }
+    let mut offsets = Vec::new();
+    let mut offset = 0;
+    for &(op, _) in &instructions {
+        offsets.push(offset);
+        offset += 1 + engine_wrapper_operand_width(op)?;
+    }
+    let branch = |at: usize| -> Option<usize> {
+        let &(op, word) = instructions.get(at)?;
+        let delta = match op {
+            0x2b | 0x2c => word as u8 as i8 as i64,
+            0x38 | 0x39 => word as i32 as i64,
+            _ => return None,
+        };
+        let end = offsets[at] + 1 + engine_wrapper_operand_width(op)?;
+        offsets
+            .binary_search(&usize::try_from(end as i64 + delta).ok()?)
+            .ok()
+    };
+    let skip_nops = |at: &mut usize| {
+        while instructions.get(*at).is_some_and(|&(op, _)| op == 0) {
+            *at += 1;
+        }
+    };
+    let argument = |at: usize, position: usize| -> Option<bool> {
+        match *instructions.get(at)? {
+            (op @ 0x02..=0x05, _) if (op - 2) as usize == position => Some(false),
+            (0x0e, index) if index as usize == position => Some(false),
+            (0x0f, index) if index as usize == position => Some(true),
+            _ => None,
+        }
+    };
+    let mut at = 0;
+    let mut result = Vec::new();
+    for position in 0..arity {
+        skip_nops(&mut at);
+        let address = argument(at, position)?;
+        at += 1;
+        let source = if instructions
+            .get(at)
+            .is_some_and(|&(op, _)| matches!(op, 0x2c | 0x39))
+        {
+            if address {
+                return None;
+            }
+            let null_start = branch(at)?;
+            at += 1;
+            skip_nops(&mut at);
+            if argument(at, position)? {
+                return None;
+            }
+            at += 1;
+            let &(0x28, converter) = instructions.get(at)? else {
+                return None;
+            };
+            if converter == target {
+                return None;
+            }
+            let source = marshal(position, converter)?;
+            at += 1;
+            if !instructions
+                .get(at)
+                .is_some_and(|&(op, _)| matches!(op, 0x2b | 0x38))
+            {
+                return None;
+            }
+            let join = branch(at)?;
+            at += 1;
+            if at != null_start {
+                return None;
+            }
+            skip_nops(&mut at);
+            if instructions.get(at..at + 2)? != [(0x16, 0), (0xd3, 0)] {
+                return None;
+            }
+            at += 2;
+            if at != join {
+                return None;
+            }
+            Some(nullable(source))
+        } else if let Some(&(0x28, converter)) = instructions.get(at) {
+            if converter != target {
+                if address {
+                    return None;
+                }
+                at += 1;
+                Some(marshal(position, converter)?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        result.push(source);
+    }
+    skip_nops(&mut at);
+    (instructions.get(at) == Some(&(0x28, target))).then_some(result)
+}
+/// Track argument origins across acyclic generated null guards. Every reachable
+/// incoming stack at a join must agree. Only verified Marshal conversions and
+/// the actual throwing helper are calls in this vocabulary; no arbitrary calls,
+/// locals, field writes or branch operands can manufacture pointer provenance.
+fn engine_pointer_flow<T: Copy + Eq>(
+    code: &[u8],
+    target: u32,
+    arity: usize,
+    mut marshal: impl FnMut(usize, u32) -> Option<T>,
+    mut throwing: impl FnMut(u32) -> bool,
+) -> Option<Vec<Option<T>>> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Origin<T> {
+        Argument(usize, bool),
+        Pointer(usize, T),
+        Literal,
+    }
+    let instructions = engine_wrapper_instructions(code)?;
+    if arity > 16
+        || instructions.len() > 256
+        || instructions
+            .iter()
+            .filter(|&&(op, token)| op == 0x28 && token == target)
+            .count()
+            != 1
+    {
+        return None;
+    }
+    let mut offsets = Vec::new();
+    let mut ends = Vec::new();
+    let mut offset = 0;
+    for &(op, _) in &instructions {
+        offsets.push(offset);
+        offset += 1 + engine_wrapper_operand_width(op)?;
+        ends.push(offset);
+    }
+    let mut states: Vec<Option<Vec<Origin<T>>>> = vec![None; instructions.len()];
+    let mut pending = vec![(0, Vec::new())];
+    let mut result = None;
+    while let Some((at, mut stack)) = pending.pop() {
+        let old = states.get_mut(at)?;
+        if let Some(prior) = old {
+            if *prior != stack {
+                return None;
+            }
+            continue;
+        }
+        *old = Some(stack.clone());
+        let (op, operand) = instructions[at];
+        let mut branch = None;
+        let mut fallthrough = true;
+        match op {
+            0 => {}
+            0x02..=0x05 => {
+                let index = (op - 2) as usize;
+                if index >= arity {
+                    return None;
+                }
+                stack.push(Origin::Argument(index, false));
+            }
+            0x0e | 0x0f => {
+                if operand as usize >= arity {
+                    return None;
+                }
+                stack.push(Origin::Argument(operand as usize, op == 0x0f));
+            }
+            0x14..=0x23 | 0x72 => stack.push(Origin::Literal),
+            0x25 => stack.push(*stack.last()?),
+            0x26 => {
+                stack.pop()?;
+            }
+            0x28 if operand == target => {
+                if stack.len() != arity {
+                    return None;
+                }
+                let origins: Vec<_> = stack
+                    .into_iter()
+                    .enumerate()
+                    .map(|(position, origin)| match origin {
+                        Origin::Argument(index, _) if index == position => Some(None),
+                        Origin::Pointer(index, nullable) if index == position => {
+                            Some(Some(nullable))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Option<_>>()?;
+                if result.as_ref().is_some_and(|prior| prior != &origins) {
+                    return None;
+                }
+                result = Some(origins);
+                continue;
+            }
+            0x28 if throwing(operand) => {
+                if stack.pop()? != Origin::Literal {
+                    return None;
+                }
+                match stack.pop()? {
+                    Origin::Argument(_, false) | Origin::Pointer(_, _) => {}
+                    _ => return None,
+                }
+                continue;
+            }
+            0x28 => {
+                let Origin::Argument(position, false) = stack.pop()? else {
+                    return None;
+                };
+                if position >= arity || !matches!(operand >> 24, 6 | 0xa | 0x2b) {
+                    return None;
+                }
+                stack.push(Origin::Pointer(position, marshal(position, operand)?));
+            }
+            0x2b..=0x2d | 0x38..=0x3a => {
+                let delta = if op < 0x38 {
+                    operand as u8 as i8 as i64
+                } else {
+                    operand as i32 as i64
+                };
+                let address = ends[at] as i64 + delta;
+                let next = offsets
+                    .binary_search(&usize::try_from(address).ok()?)
+                    .ok()?;
+                if next <= at {
+                    return None;
+                }
+                branch = Some(next);
+                if matches!(op, 0x2b | 0x38) {
+                    fallthrough = false;
+                } else {
+                    stack.pop()?;
+                }
+            }
+            0x2a => continue,
+            _ => return None,
+        }
+        if stack.len() > 16 {
+            return None;
+        }
+        if let Some(next) = branch {
+            pending.push((next, stack.clone()));
+        }
+        if fallthrough {
+            pending.push((at + 1, stack));
+        }
+    }
+    result
 }
 fn engine_utf16_locals(
     code: &[u8],
@@ -1966,6 +2460,35 @@ pub(super) struct Output {
     pub(super) word: u64,
 }
 impl Frame {
+    pub(super) fn scalar_argument(&self, index: usize, shape: Shape) -> Result<u64, String> {
+        let &(slot, indirect) = self
+            .arguments
+            .get(index)
+            .ok_or("scoped capability argument absent")?;
+        let storage = self
+            .slots
+            .get(slot)
+            .ok_or("scoped capability storage absent")?;
+        if !indirect
+            || storage.guest.is_some()
+            || storage.shape != shape
+            || !matches!(shape, Shape::Scalar { .. })
+        {
+            return Err("scoped capability requires an exact scalar input frame".into());
+        }
+        Ok(self.words[slot])
+    }
+    pub(super) fn replace_scalar_argument(
+        &mut self,
+        index: usize,
+        shape: Shape,
+        word: u64,
+    ) -> Result<(), String> {
+        self.scalar_argument(index, shape)?;
+        shape.validate(word)?;
+        self.words[self.arguments[index].0] = word;
+        Ok(())
+    }
     pub(super) fn prepare(
         memory: &Memory,
         descriptor: &Descriptor,
@@ -2148,6 +2671,134 @@ impl Frame {
 mod tests {
     use super::*;
     #[test]
+    fn engine_handle_finally_requires_actual_eh_and_separate_result_and_pin_locals() {
+        let target: u32 = 0x06005678;
+        let converter: u32 = 0x2b009abc;
+        let mut code = vec![0x12, 2, 0x28];
+        code.extend(target.to_le_bytes());
+        code.extend([0x13, 4, 0xde, 12, 0x11, 4, 0x28]);
+        code.extend(converter.to_le_bytes());
+        code.extend([0x0d, 0x16, 0xe0, 0x0b, 0xdc, 0x09, 0x2a]);
+        let clause = ExceptionClause {
+            flags: 2,
+            try_offset: 0,
+            try_len: 11,
+            handler_offset: 11,
+            handler_len: 12,
+            data: 0,
+        };
+        assert_eq!(
+            engine_handle_finally_tail(&code, target, clause),
+            Some(converter)
+        );
+        assert_eq!(engine_handle_finally_tail(&code, target + 1, clause), None);
+        for invalid in [
+            ExceptionClause { flags: 0, ..clause },
+            ExceptionClause {
+                handler_offset: 12,
+                ..clause
+            },
+            ExceptionClause {
+                handler_len: 11,
+                ..clause
+            },
+            ExceptionClause {
+                try_len: 12,
+                ..clause
+            },
+        ] {
+            assert_eq!(engine_handle_finally_tail(&code, target, invalid), None);
+        }
+        let mut changed = code.clone();
+        changed[12] = 3;
+        assert_eq!(engine_handle_finally_tail(&changed, target, clause), None);
+        changed = code.clone();
+        changed[21] = 0x0d;
+        assert_eq!(engine_handle_finally_tail(&changed, target, clause), None);
+        changed = code.clone();
+        changed[10] = 11;
+        assert_eq!(engine_handle_finally_tail(&changed, target, clause), None);
+        assert_eq!(std::mem::size_of::<ExceptionClause>(), 32);
+        assert_eq!(std::mem::align_of::<ExceptionClause>(), 8);
+    }
+    #[test]
+    fn owned_pointer_converter_requires_exact_field_read_and_complete_instruction_boundaries() {
+        let field: u32 = 0x04007654;
+        let mut code = vec![0x02, 0x7b];
+        code.extend(field.to_le_bytes());
+        code.push(0x2a);
+        assert!(pointer_field_body(&code, field));
+        assert!(!pointer_field_body(&code, field + 1));
+        assert!(!pointer_field_body(&code, 0x06007654));
+        let mut changed = code.clone();
+        changed[1] = 0x80;
+        assert!(!pointer_field_body(&changed, field));
+        changed = code.clone();
+        changed[0] = 0x03;
+        assert!(!pointer_field_body(&changed, field));
+        assert!(!pointer_field_body(&code[..code.len() - 1], field));
+        code.extend([0x03, 0x26]);
+        assert!(!pointer_field_body(&code, field));
+    }
+    #[test]
+    fn nullable_owned_pointer_preserves_source_argument_and_rejects_other_branch_bodies() {
+        let target: u32 = 0x06001234;
+        let converter: u32 = 0x06006789;
+        let mut code = vec![0x02, 0x03, 0x2c, 8, 0x03, 0x28];
+        code.extend(converter.to_le_bytes());
+        code.extend([0x2b, 3, 0x00, 0x16, 0xd3, 0x00, 0x28]);
+        code.extend(target.to_le_bytes());
+        code.push(0x2a);
+        let source = |p, t| {
+            (p == 1 && t == converter).then_some(PointerSource::CommandBuffer { nullable: false })
+        };
+        assert_eq!(
+            engine_pointer_nullable_prefix(&code, target, 2, source, PointerSource::nullable),
+            Some(vec![
+                None,
+                Some(PointerSource::CommandBuffer { nullable: true })
+            ])
+        );
+        let mut changed = code.clone();
+        changed[4] = 0x02;
+        assert!(engine_pointer_nullable_prefix(
+            &changed,
+            target,
+            2,
+            source,
+            PointerSource::nullable
+        )
+        .is_none());
+        changed = code.clone();
+        changed[3] = 9;
+        assert!(engine_pointer_nullable_prefix(
+            &changed,
+            target,
+            2,
+            source,
+            PointerSource::nullable
+        )
+        .is_none());
+        changed = code.clone();
+        changed[13] = 0x17;
+        assert!(engine_pointer_nullable_prefix(
+            &changed,
+            target,
+            2,
+            source,
+            PointerSource::nullable
+        )
+        .is_none());
+        assert!(engine_pointer_nullable_prefix::<PointerSource>(
+            &code,
+            target,
+            2,
+            |_, _| None,
+            PointerSource::nullable
+        )
+        .is_none());
+    }
+    #[test]
     fn utf16_span_origin_requires_verified_string_helper_and_matching_local_argument() {
         let target: u32 = 0x06009876;
         let helper: u32 = 0x0a001234;
@@ -2202,7 +2853,10 @@ mod tests {
             }),
             Some(vec![Some(true), None, None, None])
         );
-        assert_eq!(engine_pointer_prefix(&code, target, 4, |_, _| None), None);
+        assert_eq!(
+            engine_pointer_prefix::<bool>(&code, target, 4, |_, _| None),
+            None
+        );
         let mut reordered = code.clone();
         reordered[0] = 0x03;
         assert_eq!(
@@ -2224,6 +2878,54 @@ mod tests {
         );
         assert_eq!(
             engine_pointer_prefix(&code[..code.len() - 2], target, 4, |_, _| Some(true)),
+            None
+        );
+    }
+    #[test]
+    fn guarded_pointer_flow_tracks_actual_converters_and_rejects_ambiguous_paths() {
+        let target: u32 = 0x06001357;
+        let marshal: u32 = 0x2b004321;
+        let thrower: u32 = 0x06008765;
+        let mut code = vec![0x03, 0x2d, 11, 0x03, 0x72];
+        code.extend(0x70001234u32.to_le_bytes());
+        code.push(0x28);
+        code.extend(thrower.to_le_bytes());
+        code.extend([0, 0x02, 0x03, 0x28]);
+        code.extend(marshal.to_le_bytes());
+        code.extend([0x25, 0x2d, 11, 0x03, 0x72]);
+        code.extend(0x70001234u32.to_le_bytes());
+        code.push(0x28);
+        code.extend(thrower.to_le_bytes());
+        code.extend([0, 0x28]);
+        code.extend(target.to_le_bytes());
+        code.push(0x2a);
+        let infer = |bytes: &[u8], allow_throw: bool| {
+            engine_pointer_flow(
+                bytes,
+                target,
+                2,
+                |position, token| (position == 1 && token == marshal).then_some(false),
+                |token| allow_throw && token == thrower,
+            )
+        };
+        assert_eq!(infer(&code, true), Some(vec![None, Some(false)]));
+        assert_eq!(infer(&code, false), None);
+        assert_eq!(infer(&code[..code.len() - 2], true), None);
+        let mut invalid = code.clone();
+        invalid[2] = 9; // A branch into the ThrowHelper token operand.
+        assert_eq!(infer(&invalid, true), None);
+        invalid[2] = (-3i8) as u8; // Back edge to the first guard.
+        assert_eq!(infer(&invalid, true), None);
+        invalid = code.clone();
+        invalid[16] = 0x02; // Source changed to the first argument.
+        assert_eq!(infer(&invalid, true), None);
+        let mut conflict = vec![0x02, 0x2d, 3, 0x02, 0x2b, 6, 0x02, 0x28];
+        conflict.extend(marshal.to_le_bytes());
+        conflict.push(0x28);
+        conflict.extend(target.to_le_bytes());
+        conflict.push(0x2a);
+        assert_eq!(
+            engine_pointer_flow(&conflict, target, 1, |_, _| Some(true), |_| false),
             None
         );
     }
