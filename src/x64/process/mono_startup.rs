@@ -83,6 +83,7 @@ mod reentry;
 mod reference_arrays;
 mod reflection;
 mod resources;
+mod scalar_engine;
 mod screen;
 mod scriptable;
 mod services;
@@ -2337,6 +2338,16 @@ impl Probe {
                             .as_ref()
                             .ok_or("typed managed call before runtime")?
                             .library;
+                        if managed_calls::Api::load(library)?
+                            .describe_coroutine(
+                                method,
+                                self.image_registry.unique_native_image(CORE_MODULE)?,
+                                &self.image_registry.live_native_images()?,
+                            )?
+                            .is_some()
+                        {
+                            return Ok(false);
+                        }
                         match managed_calls::Api::load(library)?.describe(
                             method,
                             &self.image_registry.live_native_images()?,
@@ -3434,6 +3445,9 @@ impl Probe {
                 self.registry.exact_target(json::NAME, json::TARGET)?,
             )?;
         }
+        if !scalar_engine::installed() {
+            scalar_engine::install(library, &self.image_registry, &self.registry)?;
+        }
         if bridge_audit::requested() {
             let (audit, _) =
                 callbacks::with_owner(memory, runtime, self.callback_targets(), || {
@@ -3446,9 +3460,18 @@ impl Probe {
                 })?;
             audit?;
         }
-        let descriptor = call_api
-            .describe(method, &managed_images, &managed_images)?
-            .ok_or("managed entry is not an admitted ordinary IL call")?;
+        let coroutine = call_api.describe_coroutine(
+            method,
+            self.image_registry.unique_native_image(CORE_MODULE)?,
+            &managed_images,
+        )?;
+        let output_boolean = coroutine.as_ref().map(|entry| entry.boolean);
+        let descriptor = match coroutine {
+            Some(entry) => entry.call,
+            None => call_api
+                .describe(method, &managed_images, &managed_images)?
+                .ok_or("managed entry is not an admitted ordinary IL call")?,
+        };
         if descriptor.receiver.is_some() != (a[1] != 0) {
             return Err("managed static/instance receiver presence mismatch".into());
         }
@@ -3487,7 +3510,7 @@ impl Probe {
                         memory,
                     )?;
                 }
-                let frame = managed_calls::Frame::prepare(
+                let mut frame = managed_calls::Frame::prepare(
                     memory,
                     &descriptor,
                     a[2],
@@ -3498,6 +3521,11 @@ impl Probe {
                         Self::temporary_call_slot(memory, runtime, rsp, address, width)
                     },
                 )?;
+                if let Some(boolean) = output_boolean {
+                    frame.prepare_coroutine_output(memory, a[2], boolean, |address, width| {
+                        Self::temporary_call_slot(memory, runtime, rsp, address, width)
+                    })?;
+                }
                 Ok::<_, String>((frame, receiver, receiver_class))
             })
         })?;
@@ -3571,10 +3599,15 @@ impl Probe {
                 };
                 let result = unsafe { (call_api.invoke)(method, receiver, params, &mut exception) };
                 if !exception.is_null() {
-                    return Err(
-                        "typed managed call raised an exception; guest outputs left unchanged"
-                            .into(),
-                    );
+                    let diagnostic = call_api
+                        .exception_diagnostic(api, exception)
+                        .unwrap_or_else(|error| {
+                            format!("exception diagnostic unavailable: {error}")
+                        });
+                    return Err(format!(
+                        "{} raised {diagnostic}; guest outputs left unchanged",
+                        descriptor.name
+                    ));
                 }
                 Ok::<_, String>(result)
             },

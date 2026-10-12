@@ -8,6 +8,7 @@ pub(super) enum Shape {
     Scalar {
         class: Object,
         width: usize,
+        alignment: usize,
         boolean: bool,
     },
     Reference {
@@ -19,6 +20,12 @@ impl Shape {
     pub(super) fn width(self) -> usize {
         match self {
             Self::Scalar { width, .. } => width,
+            Self::Reference { .. } => 8,
+        }
+    }
+    fn alignment(self) -> usize {
+        match self {
+            Self::Scalar { alignment, .. } => alignment,
             Self::Reference { .. } => 8,
         }
     }
@@ -39,6 +46,17 @@ pub(super) struct Descriptor {
     pub(super) parameters: Vec<Parameter>,
     pub(super) returns: Option<Shape>,
     pub(super) name: String,
+}
+pub(super) struct CoroutineDescriptor {
+    pub(super) call: Descriptor,
+    pub(super) boolean: Object,
+}
+#[derive(Clone, Copy)]
+pub(super) enum BufferOperation {
+    Copy,
+    Compare,
+    Replicate,
+    Stride,
 }
 #[derive(Clone, Copy)]
 pub(super) struct Api {
@@ -72,6 +90,235 @@ pub(super) struct Api {
     closed: closed_types::Api,
 }
 impl Api {
+    /// Diagnostic reads only the actual Exception metadata/message field. A
+    /// private pinned root stays live; no ToString IL or native pointer is
+    /// published to the guest while reporting a failed invocation.
+    pub(super) fn exception_diagnostic(
+        self,
+        roots: super::instances::Api,
+        exception: Object,
+    ) -> Result<String, String> {
+        macro_rules! sym {
+            ($name:literal, $ty:ty) => {{
+                let p = unsafe { libc::dlsym(self.library, concat!($name, "\0").as_ptr().cast()) };
+                if p.is_null() {
+                    return Err(concat!("missing exception diagnostic API: ", $name).into());
+                }
+                unsafe { std::mem::transmute::<Object, $ty>(p) }
+            }};
+        }
+        let base = sym!("mono_get_exception_class", unsafe extern "C" fn() -> Object);
+        let class_name = sym!(
+            "mono_class_get_name",
+            unsafe extern "C" fn(Object) -> *const c_char
+        );
+        let namespace = sym!(
+            "mono_class_get_namespace",
+            unsafe extern "C" fn(Object) -> *const c_char
+        );
+        let field = sym!(
+            "mono_class_get_field_from_name",
+            unsafe extern "C" fn(Object, *const c_char) -> Object
+        );
+        let parent = sym!(
+            "mono_field_get_parent",
+            unsafe extern "C" fn(Object) -> Object
+        );
+        let field_type = sym!(
+            "mono_field_get_type",
+            unsafe extern "C" fn(Object) -> Object
+        );
+        let field_flags = sym!("mono_field_get_flags", unsafe extern "C" fn(Object) -> u32);
+        let field_get = sym!(
+            "mono_field_get_value",
+            unsafe extern "C" fn(Object, Object, Object)
+        );
+        let string_class = sym!("mono_get_string_class", unsafe extern "C" fn() -> Object);
+        let length = sym!("mono_string_length", unsafe extern "C" fn(Object) -> i32);
+        let chars = sym!(
+            "mono_string_chars",
+            unsafe extern "C" fn(Object) -> *const u16
+        );
+        let root = roots.worker_root(exception)?;
+        let exception = root.target()?;
+        let class = unsafe { (self.object_class)(exception) };
+        let base = unsafe { base() };
+        if class.is_null() || base.is_null() || unsafe { (self.assignable)(base, class) } == 0 {
+            return Err("invoke exception is not an actual System.Exception".into());
+        }
+        let text = |p: *const c_char| -> Result<String, String> {
+            if p.is_null() {
+                return Err("exception class identity absent".into());
+            }
+            Ok(unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
+        };
+        let identity = format!(
+            "{}.{}",
+            text(unsafe { namespace(class) })?,
+            text(unsafe { class_name(class) })?
+        );
+        let message_field = unsafe { field(base, c"_message".as_ptr()) };
+        if message_field.is_null() {
+            return Ok(identity);
+        }
+        let ty = unsafe { field_type(message_field) };
+        if unsafe { parent(message_field) } != base
+            || unsafe { field_flags(message_field) } & 0x10 != 0
+            || ty.is_null()
+            || unsafe { (self.kind)(ty) } != 14
+            || unsafe { (self.byref)(ty) } != 0
+            || unsafe { (self.type_class)(ty) } != unsafe { string_class() }
+        {
+            return Err("Exception message field metadata changed".into());
+        }
+        let mut message: Object = ptr::null_mut();
+        unsafe {
+            field_get(
+                exception,
+                message_field,
+                (&mut message as *mut Object).cast(),
+            )
+        };
+        if message.is_null() {
+            return Ok(identity);
+        }
+        if unsafe { (self.object_class)(message) } != unsafe { string_class() } {
+            return Err("Exception message has incompatible native class".into());
+        }
+        let length = unsafe { length(message) };
+        let data = unsafe { chars(message) };
+        if length < 0 || data.is_null() {
+            return Err("Exception message storage absent".into());
+        }
+        let message = String::from_utf16_lossy(unsafe {
+            std::slice::from_raw_parts(data, (length as usize).min(2048))
+        });
+        Ok(format!("{identity}: {message:?}"))
+    }
+    /// Unity's SetupCoroutine IL entry treats IntPtr as a Boolean output address.
+    /// Its native address is substituted with private storage by Frame, never
+    /// admitted to the general scalar/reference ABI.
+    pub(super) fn describe_coroutine(
+        self,
+        method: Object,
+        core: Object,
+        images: &[Object],
+    ) -> Result<Option<CoroutineDescriptor>, String> {
+        if method.is_null() {
+            return Err("NULL coroutine method".into());
+        }
+        let text = unsafe { (self.name)(method) };
+        if text.is_null() || unsafe { CStr::from_ptr(text) } != c"InvokeMoveNext" {
+            return Ok(None);
+        }
+        let find = unsafe { libc::dlsym(self.library, c"mono_class_from_name".as_ptr()) };
+        let corlib = unsafe { libc::dlsym(self.library, c"mono_get_corlib".as_ptr()) };
+        if find.is_null() || corlib.is_null() {
+            return Err("coroutine metadata API absent".into());
+        }
+        let find: unsafe extern "C" fn(Object, *const c_char, *const c_char) -> Object =
+            unsafe { std::mem::transmute(find) };
+        let corlib: unsafe extern "C" fn() -> Object = unsafe { std::mem::transmute(corlib) };
+        let owner = unsafe { find(core, c"UnityEngine".as_ptr(), c"SetupCoroutine".as_ptr()) };
+        if owner.is_null() || unsafe { (self.class)(method) } != owner {
+            return Ok(None);
+        }
+        let corlib = unsafe { corlib() };
+        let enumerator = unsafe {
+            find(
+                corlib,
+                c"System.Collections".as_ptr(),
+                c"IEnumerator".as_ptr(),
+            )
+        };
+        let intptr = unsafe { find(corlib, c"System".as_ptr(), c"IntPtr".as_ptr()) };
+        let boolean = unsafe { find(corlib, c"System".as_ptr(), c"Boolean".as_ptr()) };
+        let signature = unsafe { (self.signature)(method) };
+        let mut implementation = 0;
+        let flags = unsafe { (self.flags)(method, &mut implementation) };
+        if [core, corlib, enumerator, intptr, boolean, signature]
+            .iter()
+            .any(|p| p.is_null())
+            || !images.contains(&core)
+            || !images.contains(&corlib)
+            || unsafe { (self.image)(owner) } != core
+            || !managed_il_flags(flags, implementation, false)
+            || !concrete_method(
+                unsafe { (self.generic)(method) } != 0,
+                unsafe { (self.inflated)(method) } != 0,
+                false,
+                false,
+            )
+            || unsafe { (self.instance)(signature) } != 0
+            || unsafe { (self.count)(signature) } != 2
+        {
+            return Err("coroutine entry differs from static IL contract".into());
+        }
+        let mut iter = ptr::null_mut();
+        for (ty, expected_kind, expected_class) in [
+            (unsafe { (self.returns)(signature) }, 1, ptr::null_mut()),
+            (
+                unsafe { (self.parameters)(signature, &mut iter) },
+                0x12,
+                enumerator,
+            ),
+            (
+                unsafe { (self.parameters)(signature, &mut iter) },
+                0x18,
+                intptr,
+            ),
+        ] {
+            if ty.is_null()
+                || unsafe { (self.kind)(ty) } != expected_kind
+                || unsafe { (self.byref)(ty) } != 0
+                || (!expected_class.is_null() && unsafe { (self.type_class)(ty) } != expected_class)
+            {
+                return Err("coroutine exact IEnumerator/IntPtr/Void signature changed".into());
+            }
+        }
+        self.closed.concrete(owner)?;
+        let mut alignment = 0;
+        if unsafe { (self.size)(intptr, &mut alignment) } != 8 || alignment != 8 {
+            return Err("coroutine IntPtr is not 64-bit".into());
+        }
+        let header = unsafe { (self.header)(method) };
+        if header.is_null() {
+            return Err("coroutine IL body absent".into());
+        }
+        let (mut length, mut stack) = (0, 0);
+        let code = unsafe { (self.code)(header, &mut length, &mut stack) };
+        let valid = !code.is_null() && (1..=4096).contains(&length) && stack <= 16;
+        unsafe { (self.free)(header) };
+        if !valid {
+            return Err("coroutine IL body exceeds fixed bound".into());
+        }
+        Ok(Some(CoroutineDescriptor {
+            call: Descriptor {
+                receiver: None,
+                parameters: vec![
+                    Parameter {
+                        shape: Shape::Reference {
+                            class: enumerator,
+                            string: false,
+                        },
+                        byref: false,
+                    },
+                    Parameter {
+                        shape: Shape::Scalar {
+                            class: intptr,
+                            width: 8,
+                            alignment: 8,
+                            boolean: false,
+                        },
+                        byref: false,
+                    },
+                ],
+                returns: None,
+                name: "UnityEngine.SetupCoroutine::InvokeMoveNext".into(),
+            },
+            boolean,
+        }))
+    }
     pub(super) fn load(library: Object) -> Result<Self, String> {
         macro_rules! sym {
             ($name:literal, $ty:ty) => {{
@@ -187,20 +434,18 @@ impl Api {
         self.closed.concrete(class)?;
         let kind = unsafe { (self.kind)(ty) };
         let scalar = match kind {
-            2 | 4 | 5 => Some((1, kind == 2)),
-            3 | 6 | 7 => Some((2, false)),
-            8 | 9 | 0xc => Some((4, false)),
-            0xa | 0xb | 0xd => Some((8, false)),
+            2 | 4 | 5 => Some((1, 1, kind == 2)),
+            3 | 6 | 7 => Some((2, 2, false)),
+            8 | 9 | 0xc => Some((4, 4, false)),
+            0xa | 0xb | 0xd => Some((8, 8, false)),
             0x11 if unsafe { (self.is_enum)(class) } != 0 => {
                 let base = unsafe { (self.enum_base)(class) };
                 if base.is_null() {
                     return Err("managed enum lacks base type".into());
                 }
-                Some((
-                    super::value_layout::enum_width(unsafe { (self.kind)(base) })
-                        .ok_or("managed enum base is not integer")?,
-                    false,
-                ))
+                let width = super::value_layout::enum_width(unsafe { (self.kind)(base) })
+                    .ok_or("managed enum base is not integer")?;
+                Some((width, width, false))
             }
             0x11 => {
                 // Runtime invoke takes a pointer to value bytes. A small
@@ -209,25 +454,26 @@ impl Api {
                 let layout =
                     super::value_layout::Api::load(self.library, unsafe { (self.image)(class) })?
                         .layout_in(class, images)?;
-                let (width, _) = layout.scalar_inline()?;
+                let (width, alignment) = layout.scalar_inline()?;
                 if !matches!(width, 1 | 2 | 4 | 8) {
                     return Err("managed scalar aggregate exceeds native-stack word".into());
                 }
-                Some((width, false))
+                Some((width, alignment, false))
             }
             _ => None,
         };
-        if let Some((width, boolean)) = scalar {
+        if let Some((width, expected_alignment, boolean)) = scalar {
             let mut alignment = 0;
             if unsafe { (self.value)(class) } == 0
                 || unsafe { (self.size)(class, &mut alignment) } != width as i32
-                || alignment as usize != width
+                || alignment as usize != expected_alignment
             {
                 return Err("managed scalar size/alignment mismatch".into());
             }
             Ok(Shape::Scalar {
                 class,
                 width,
+                alignment: expected_alignment,
                 boolean,
             })
         } else if matches!(kind, 0xe | 0x12 | 0x15 | 0x1c | 0x1d)
@@ -664,24 +910,48 @@ impl Api {
             images,
         )
     }
-    pub(super) fn buffer_copy_icall(
+    /// Typed memory operations share one owned-span protocol. These are public
+    /// API signatures, verified against runtime metadata, not game method IDs.
+    /// Classes are Void, Int64 and Int32 respectively.
+    pub(super) fn buffer_memory_icall(
         self,
         method: Object,
         owner: Object,
-        classes: &[Object; 2],
+        operation: BufferOperation,
+        classes: &[Object; 3],
         images: &[Object],
     ) -> Result<(), String> {
-        self.fixed_buffer_icall(
-            method,
-            owner,
-            &[
+        let specs: &[(u32, Object)] = match operation {
+            BufferOperation::Copy => &[
                 (1, classes[0]),
                 (0xf, classes[0]),
                 (0xf, classes[0]),
                 (0xa, classes[1]),
             ],
-            images,
-        )
+            BufferOperation::Compare => &[
+                (8, classes[2]),
+                (0xf, classes[0]),
+                (0xf, classes[0]),
+                (0xa, classes[1]),
+            ],
+            BufferOperation::Replicate => &[
+                (1, classes[0]),
+                (0xf, classes[0]),
+                (0xf, classes[0]),
+                (8, classes[2]),
+                (8, classes[2]),
+            ],
+            BufferOperation::Stride => &[
+                (1, classes[0]),
+                (0xf, classes[0]),
+                (8, classes[2]),
+                (0xf, classes[0]),
+                (8, classes[2]),
+                (8, classes[2]),
+                (8, classes[2]),
+            ],
+        };
+        self.fixed_buffer_icall(method, owner, specs, images)
     }
     fn fixed_buffer_icall(
         self,
@@ -1020,6 +1290,12 @@ pub(super) struct Frame {
     words: [u64; 16],
     slots: Vec<Slot>,
     arguments: Vec<(usize, bool)>,
+    byte_output: Option<ByteOutput>,
+}
+struct ByteOutput {
+    buffer: Box<[u8; 16]>,
+    address: u64,
+    boolean: Object,
 }
 pub(super) struct Output {
     pub(super) address: u64,
@@ -1045,13 +1321,22 @@ impl Frame {
             words: [0; 16],
             slots: Vec::with_capacity(count),
             arguments: Vec::with_capacity(count),
+            byte_output: None,
         };
         for (index, parameter) in descriptor.parameters.iter().enumerate() {
             let argument = memory.read_int(arguments + index as u64 * 8, 8)?;
             let width = parameter.shape.width();
+            let alignment = parameter.shape.alignment();
+            if !matches!(width, 1 | 2 | 4 | 8)
+                || !matches!(alignment, 1 | 2 | 4 | 8)
+                || alignment > width
+                || !width.is_multiple_of(alignment)
+            {
+                return Err("managed value storage size/alignment outside word ABI".into());
+            }
             let reference = matches!(parameter.shape, Shape::Reference { .. });
             let word = if parameter.byref || !reference {
-                if argument == 0 || !argument.is_multiple_of(width as u64) {
+                if argument == 0 || !argument.is_multiple_of(alignment as u64) {
                     return Err("managed value argument address/alignment mismatch".into());
                 }
                 memory.read_int(argument, width)?
@@ -1112,6 +1397,48 @@ impl Frame {
         }
         Ok(frame)
     }
+    pub(super) fn prepare_coroutine_output(
+        &mut self,
+        memory: &Memory,
+        arguments: u64,
+        boolean: Object,
+        writable: impl FnOnce(u64, usize) -> bool,
+    ) -> Result<(), String> {
+        if self.byte_output.is_some()
+            || boolean.is_null()
+            || self.slots.len() != 2
+            || self.arguments != [(0, false), (1, true)]
+            || !matches!(
+                self.slots[1].shape,
+                Shape::Scalar {
+                    width: 8,
+                    boolean: false,
+                    ..
+                }
+            )
+        {
+            return Err("coroutine output requires exact private IEnumerator/IntPtr frame".into());
+        }
+        let address = self.words[1];
+        memory.check(address, 1, WRITE)?;
+        let pointer_argument = memory.read_int(arguments + 8, 8)?;
+        if address == 0
+            || !writable(address, 1)
+            || (address >= arguments && address - arguments < 16)
+            || (address >= pointer_argument && address - pointer_argument < 8)
+        {
+            return Err("coroutine Boolean output is not a disjoint live temporary byte".into());
+        }
+        let mut buffer = Box::new([0xa5; 16]);
+        buffer[0] = 0;
+        self.words[1] = buffer.as_mut_ptr() as u64;
+        self.byte_output = Some(ByteOutput {
+            buffer,
+            address,
+            boolean,
+        });
+        Ok(())
+    }
     pub(super) fn pointers(&mut self) -> Vec<Object> {
         self.arguments
             .iter()
@@ -1126,6 +1453,21 @@ impl Frame {
     }
     pub(super) fn outputs(&self) -> Result<Vec<Output>, String> {
         let mut outputs = Vec::new();
+        if let Some(output) = &self.byte_output {
+            if output.buffer[1..].iter().any(|&value| value != 0xa5) || output.buffer[0] > 1 {
+                return Err("coroutine output exceeds canonical Boolean byte/canary".into());
+            }
+            outputs.push(Output {
+                address: output.address,
+                shape: Shape::Scalar {
+                    class: output.boolean,
+                    width: 1,
+                    alignment: 1,
+                    boolean: true,
+                },
+                word: output.buffer[0] as u64,
+            });
+        }
         for (index, slot) in self.slots.iter().enumerate() {
             if let Some(address) = slot.guest {
                 slot.shape.validate(self.words[index])?;
@@ -1163,8 +1505,165 @@ mod tests {
         Shape::Scalar {
             class: 1usize as Object,
             width: 1,
+            alignment: 1,
             boolean: true,
         }
+    }
+    #[test]
+    fn word_sized_aggregate_uses_metadata_alignment_instead_of_total_width() {
+        let mut memory = Memory::default();
+        memory.map(0x1000, 4096, READ | WRITE).unwrap();
+        memory.write_int(0x1000, 8, 0x1084).unwrap();
+        memory.write_int(0x1084, 8, 0x1234567887654321).unwrap();
+        let mut descriptor = Descriptor {
+            receiver: None,
+            parameters: vec![Parameter {
+                shape: Shape::Scalar {
+                    class: 3usize as Object,
+                    width: 8,
+                    alignment: 4,
+                    boolean: false,
+                },
+                byref: true,
+            }],
+            returns: None,
+            name: "Aggregate".into(),
+        };
+        let mut frame = Frame::prepare(
+            &memory,
+            &descriptor,
+            0x1000,
+            |_, _| panic!("aggregate resolved as reference"),
+            |_, _| true,
+        )
+        .unwrap();
+        let pointers = frame.pointers();
+        assert_eq!(unsafe { *pointers[0].cast::<u64>() }, 0x1234567887654321);
+        unsafe { *pointers[0].cast::<u64>() = 0xabcdef0123456789 };
+        let output = frame.outputs().unwrap();
+        assert_eq!(output[0].address, 0x1084);
+        assert_eq!(output[0].word, 0xabcdef0123456789);
+        memory.write_int(0x1000, 8, 0x1082).unwrap();
+        assert!(Frame::prepare(
+            &memory,
+            &descriptor,
+            0x1000,
+            |_, _| unreachable!(),
+            |_, _| true
+        )
+        .is_err());
+        descriptor.parameters[0].shape = Shape::Scalar {
+            class: 3usize as Object,
+            width: 8,
+            alignment: 8,
+            boolean: false,
+        };
+        memory.write_int(0x1000, 8, 0x1084).unwrap();
+        assert!(Frame::prepare(
+            &memory,
+            &descriptor,
+            0x1000,
+            |_, _| unreachable!(),
+            |_, _| true
+        )
+        .is_err());
+    }
+    fn coroutine() -> Descriptor {
+        Descriptor {
+            receiver: None,
+            parameters: vec![
+                Parameter {
+                    shape: Shape::Reference {
+                        class: 2usize as Object,
+                        string: false,
+                    },
+                    byref: false,
+                },
+                Parameter {
+                    shape: Shape::Scalar {
+                        class: 3usize as Object,
+                        width: 8,
+                        alignment: 8,
+                        boolean: false,
+                    },
+                    byref: false,
+                },
+            ],
+            returns: None,
+            name: "UnityEngine.SetupCoroutine::InvokeMoveNext".into(),
+        }
+    }
+    #[test]
+    fn coroutine_output_uses_private_byte_and_rejects_overlap_invalid_bool_and_canary_damage() {
+        let mut memory = Memory::default();
+        memory.map(0x2000, 4096, READ | WRITE).unwrap();
+        memory.write_int(0x2000, 8, 17).unwrap();
+        memory.write_int(0x2008, 8, 0x2100).unwrap();
+        memory.write_int(0x2100, 8, 0x2201).unwrap();
+        memory.write_int(0x2201, 1, 9).unwrap();
+        let mut frame = Frame::prepare(
+            &memory,
+            &coroutine(),
+            0x2000,
+            |token, _| {
+                assert_eq!(token, 17);
+                Ok(0x999usize as Object)
+            },
+            |_, _| false,
+        )
+        .unwrap();
+        frame
+            .prepare_coroutine_output(&memory, 0x2000, 1usize as Object, |address, width| {
+                address == 0x2201 && width == 1
+            })
+            .unwrap();
+        let params = frame.pointers();
+        assert_eq!(params[0], 0x999usize as Object);
+        let native = unsafe { params[1].cast::<*mut u8>().read() };
+        assert_ne!(native as u64, 0x2201);
+        unsafe { native.write(1) };
+        let output = frame.outputs().unwrap();
+        assert_eq!(
+            (output[0].address, output[0].shape.width(), output[0].word),
+            (0x2201, 1, 1)
+        );
+        assert_eq!(memory.read_int(0x2201, 1).unwrap(), 9);
+        unsafe { native.add(1).write(0) };
+        assert!(frame.outputs().is_err());
+        unsafe {
+            native.add(1).write(0xa5);
+            native.write(2)
+        };
+        assert!(frame.outputs().is_err());
+        assert_eq!(memory.read_int(0x2201, 1).unwrap(), 9);
+        for address in [0, 0x2000, 0x200f, 0x2100, 0x2107, 0x3000] {
+            memory.write_int(0x2100, 8, address).unwrap();
+            let mut rejected = Frame::prepare(
+                &memory,
+                &coroutine(),
+                0x2000,
+                |_, _| Ok(0x999usize as Object),
+                |_, _| false,
+            )
+            .unwrap();
+            assert!(rejected
+                .prepare_coroutine_output(&memory, 0x2000, 1usize as Object, |_, _| true)
+                .is_err());
+            assert_eq!(rejected.words[1], address);
+        }
+        memory.write_int(0x2100, 8, 0x2201).unwrap();
+        let mut retired = Frame::prepare(
+            &memory,
+            &coroutine(),
+            0x2000,
+            |_, _| Ok(0x999usize as Object),
+            |_, _| false,
+        )
+        .unwrap();
+        assert!(retired
+            .prepare_coroutine_output(&memory, 0x2000, 1usize as Object, |_, _| false)
+            .is_err());
+        assert_eq!(retired.words[1], 0x2201);
     }
     fn string() -> Shape {
         Shape::Reference {

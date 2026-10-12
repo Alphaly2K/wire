@@ -1,6 +1,6 @@
-//! Finite, same-owner native IL buffers backed by actual Unity allocations.
-//! The two data addresses stay private to the typed allocator adapters. This
-//! is not a shared-memory alias or admission for pointer fields/other icalls.
+//! Native UnsafeUtility memory operations and engine-backed allocation owners.
+//! Pure native operations follow IL's unsafe-pointer contract, including stack
+//! and managed fields. Only an explicit owned export can enter guest Memory.
 use super::{bindings, callbacks, managed_calls, Object};
 use std::{
     alloc::{alloc_zeroed, dealloc, Layout},
@@ -14,44 +14,49 @@ use std::{
 };
 const CAPACITY: usize = 64 * 1024 * 1024;
 const COUNT: usize = 4096;
-const BINDINGS: [(&std::ffi::CStr, &std::ffi::CStr, u64); 7] = [
+const BINDINGS: [(&std::ffi::CStr, &std::ffi::CStr); 10] = [
     (
         c"Unity.Collections.LowLevel.Unsafe.UnsafeUtility::Malloc",
         c"Malloc",
-        0x180067690,
     ),
     (
         c"Unity.Collections.LowLevel.Unsafe.UnsafeUtility::Free",
         c"Free",
-        0x1800676e0,
     ),
     (
         c"Unity.Collections.LowLevel.Unsafe.UnsafeUtility::MemSet",
         c"MemSet",
-        0x180067980,
     ),
     (
         c"Unity.Collections.LowLevel.Unsafe.UnsafeUtility::MemCpy",
         c"MemCpy",
-        0x180067730,
     ),
     (
         c"Unity.Collections.LowLevel.Unsafe.UnsafeUtility::MemMove",
         c"MemMove",
-        0x180067730,
     ),
     (
         c"Unity.Collections.LowLevel.Unsafe.UnsafeUtility::MallocTracked",
         c"MallocTracked",
-        0x1800674d0,
     ),
     (
         c"Unity.Collections.LowLevel.Unsafe.UnsafeUtility::FreeTracked",
         c"FreeTracked",
-        0x1800675a0,
+    ),
+    (
+        c"Unity.Collections.LowLevel.Unsafe.UnsafeUtility::MemCmp",
+        c"MemCmp",
+    ),
+    (
+        c"Unity.Collections.LowLevel.Unsafe.UnsafeUtility::MemCpyReplicate",
+        c"MemCpyReplicate",
+    ),
+    (
+        c"Unity.Collections.LowLevel.Unsafe.UnsafeUtility::MemCpyStride",
+        c"MemCpyStride",
     ),
 ];
-static TARGETS: OnceLock<[u64; 7]> = OnceLock::new();
+static TARGETS: OnceLock<[u64; BINDINGS.len()]> = OnceLock::new();
 // The frozen runtime does not export mono_gc_is_finalizer_thread. Its public
 // profiler events bracket the actual managed finalizer invocation instead.
 // A foreign caller is admitted only inside this authenticated runtime scope.
@@ -146,6 +151,7 @@ impl Drop for InputSpan {
         });
     }
 }
+#[cfg(test)]
 fn input_span_contains(pointer: usize, size: usize) -> bool {
     INPUT_SPANS.with(|spans| {
         spans
@@ -380,6 +386,7 @@ struct Arena {
     cleanup_frees: usize,
     memsets: usize,
     copies: usize,
+    comparisons: usize,
     closed: bool,
 }
 impl Arena {
@@ -424,27 +431,84 @@ impl Arena {
         }
         Ok((base, allocation.guest + offset as u64))
     }
-    fn copy(&mut self, destination: usize, source: usize, size: usize) -> Result<(), String> {
-        // Validate both complete owned ranges before the first write. The
-        // frozen profile registers MemCpy and MemMove to the same implementation.
-        // The frozen CRT jump table for length zero points directly to RET
-        // (0x181b8a14e). Neither pointer is dereferenced, including NULL.
+    /// The native IL caller owns both valid native spans, as with cpblk/ldind.
+    /// This operation never translates or publishes an address to the guest.
+    unsafe fn copy(
+        &mut self,
+        destination: usize,
+        source: usize,
+        size: usize,
+    ) -> Result<(), String> {
         if size == 0 {
             self.copies += 1;
             return Ok(());
         }
-        if !input_span_contains(destination, size) {
-            self.range(destination, size)
-                .map_err(|e| format!("native copy destination: {e}; size={size}"))?;
-        }
-        if !input_span_contains(source, size) {
-            self.range(source, size)
-                .map_err(|e| format!("native copy source: {e}; size={size}"))?;
-        }
+        native_range(destination, size)
+            .map_err(|e| format!("native copy destination: {e}; size={size}"))?;
+        native_range(source, size).map_err(|e| format!("native copy source: {e}; size={size}"))?;
         if size != 0 {
             // Data stays wholly native. Overlap is handled as memmove; no
             // possibly pointer-bearing bytes are ever copied into guest Memory.
             unsafe { std::ptr::copy(source as *const u8, destination as *mut u8, size) };
+        }
+        self.copies += 1;
+        Ok(())
+    }
+    /// Caller guarantees both readable native spans. Managed stack/field
+    /// addresses are valid here; they need no engine-allocation counterpart.
+    unsafe fn compare(&mut self, left: usize, right: usize, size: usize) -> Result<i32, String> {
+        let result = if size == 0 {
+            0
+        } else {
+            native_range(left, size)?;
+            native_range(right, size)?;
+            unsafe { libc::memcmp(left as *const _, right as *const _, size) }
+        };
+        self.comparisons += 1;
+        Ok(result)
+    }
+    /// Caller guarantees a writable native span; no guest memory is touched.
+    unsafe fn fill(&mut self, pointer: usize, value: u8, size: usize) -> Result<(), String> {
+        if size != 0 {
+            native_range(pointer, size)?;
+            unsafe { libc::memset(pointer as *mut _, value.into(), size) };
+        }
+        self.memsets += 1;
+        Ok(())
+    }
+    /// Caller owns valid native spans covering the complete copy envelopes.
+    unsafe fn copy_elements(
+        &mut self,
+        destination: usize,
+        source: usize,
+        pattern: CopyPattern,
+    ) -> Result<(), String> {
+        let (destination_size, source_size) = pattern.spans()?;
+        if destination_size == 0 {
+            self.copies += 1;
+            return Ok(());
+        }
+        native_range(destination, destination_size)?;
+        native_range(source, source_size)?;
+        let destination_end = destination
+            .checked_add(destination_size)
+            .ok_or("strided destination address overflow")?;
+        let source_end = source
+            .checked_add(source_size)
+            .ok_or("strided source address overflow")?;
+        // These operations have memcpy semantics. Keep source bytes unchanged
+        // across every element; reject intersecting envelopes before any write.
+        if destination < source_end && source < destination_end {
+            return Err("replicated/strided copy requires disjoint source and destination".into());
+        }
+        for index in 0..pattern.count {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    (source + index * pattern.source_stride) as *const u8,
+                    (destination + index * pattern.destination_stride) as *mut u8,
+                    pattern.element_size,
+                );
+            }
         }
         self.copies += 1;
         Ok(())
@@ -477,6 +541,45 @@ impl Arena {
         self.retired.push(allocation.bytes);
         self.frees += 1;
         Ok(())
+    }
+}
+// Arithmetic validation does not infer allocation ownership. Pure native
+// UnsafeUtility calls have the same unsafe-pointer contract as Mono's native
+// ldind/cpblk implementation; exported guest spans still require Arena::range.
+fn native_range(pointer: usize, size: usize) -> Result<(), String> {
+    if pointer == 0 || pointer.checked_add(size).is_none() {
+        return Err("native memory operation has a null/overflowing range".into());
+    }
+    Ok(())
+}
+#[derive(Clone, Copy)]
+struct CopyPattern {
+    destination_stride: usize,
+    source_stride: usize,
+    element_size: usize,
+    count: usize,
+}
+impl CopyPattern {
+    fn spans(self) -> Result<(usize, usize), String> {
+        if self.count == 0 || self.element_size == 0 {
+            return Ok((0, 0));
+        }
+        // Bound both accessed memory and total work, even for zero strides.
+        if self
+            .element_size
+            .checked_mul(self.count)
+            .is_none_or(|n| n > CAPACITY)
+        {
+            return Err("replicated/strided copy exceeds work capacity".into());
+        }
+        let span = |stride: usize| {
+            (self.count - 1)
+                .checked_mul(stride)
+                .and_then(|n| n.checked_add(self.element_size))
+                .filter(|&n| n <= CAPACITY)
+                .ok_or_else(|| "replicated/strided copy exceeds span capacity".to_string())
+        };
+        Ok((span(self.destination_stride)?, span(self.source_stride)?))
     }
 }
 thread_local! { static ARENA: RefCell<Arena> = RefCell::new(Arena::default()); }
@@ -556,19 +659,21 @@ pub(super) fn install(
         system(c"IntPtr"),
     ];
     let api = managed_calls::Api::load(library)?;
-    let mut targets = [0; 7];
-    for (index, &(name, member, target)) in BINDINGS.iter().enumerate() {
-        targets[index] =
-            registry.exact_target(name.to_str().map_err(|e| e.to_string())?, target)?;
+    let mut targets = [0; BINDINGS.len()];
+    for (index, &(name, member)) in BINDINGS.iter().enumerate() {
+        targets[index] = registry
+            .registered_target(name.to_str().map_err(|e| e.to_string())?)?
+            .ok_or("native buffer operation absent from actual Unity registration")?;
         let method = unsafe {
             method(
                 owner,
                 member.as_ptr(),
                 match index {
-                    0 => 4,
+                    0 | 8 => 4,
                     1 => 2,
                     5 => 5,
                     6 => 2,
+                    9 => 6,
                     _ => 3,
                 },
             )
@@ -580,8 +685,20 @@ pub(super) fn install(
                 &[classes[0], system(c"Byte"), classes[1]],
                 images,
             )?;
-        } else if index == 3 || index == 4 {
-            api.buffer_copy_icall(method, owner, &[classes[0], classes[1]], images)?;
+        } else if matches!(index, 3 | 4 | 7 | 8 | 9) {
+            let operation = match index {
+                7 => managed_calls::BufferOperation::Compare,
+                8 => managed_calls::BufferOperation::Replicate,
+                9 => managed_calls::BufferOperation::Stride,
+                _ => managed_calls::BufferOperation::Copy,
+            };
+            api.buffer_memory_icall(
+                method,
+                owner,
+                operation,
+                &[classes[0], classes[1], classes[2]],
+                images,
+            )?;
         } else if index == 5 {
             api.tracked_allocator_icall(method, owner, &classes, images)?;
         } else {
@@ -622,8 +739,11 @@ pub(super) fn install(
         memcpy as *const () as Object,
         malloc_tracked as *const () as Object,
         free_tracked as *const () as Object,
+        memcmp as *const () as Object,
+        memcpy_replicate as *const () as Object,
+        memcpy_stride as *const () as Object,
     ];
-    for ((name, _, _), adapter) in BINDINGS.into_iter().zip(adapters) {
+    for ((name, _), adapter) in BINDINGS.into_iter().zip(adapters) {
         unsafe { add(name.as_ptr(), adapter) };
     }
     Ok(())
@@ -855,45 +975,13 @@ pub(super) fn drain_finalizers() -> Result<(), String> {
     }
     Ok(())
 }
-fn fill(pointer: usize, value: u8, size: i64) -> Result<(), String> {
+unsafe fn fill(pointer: usize, value: u8, size: i64) -> Result<(), String> {
     callbacks::with_service(|_, _| Ok(()))?;
     if !(0..=CAPACITY as i64).contains(&size) {
         return Err("native MemSet size exceeds the owned span contract".into());
     }
     let size = size as usize;
-    if size == 0 {
-        let targets = TARGETS
-            .get()
-            .ok_or("native buffer bindings not installed")?;
-        callbacks::guest_arguments(targets[2], &[0, u64::from(value), 0])?;
-        ARENA.with(|arena| arena.borrow_mut().memsets += 1);
-        return Ok(());
-    }
-    let (base, guest) = ARENA.with(|arena| arena.borrow().range(pointer, size))?;
-    let targets = TARGETS
-        .get()
-        .ok_or("native buffer bindings not installed")?;
-    // MemSet overwrites the complete declared span; no native bytes/pointers
-    // need to be published to the guest. Preserve the original engine checks.
-    callbacks::guest_arguments(targets[2], &[guest, u64::from(value), size as u64])?;
-    let mut result = vec![0; size];
-    callbacks::with_service(|memory, _| memory.read(guest, &mut result))?;
-    if result.iter().any(|&byte| byte != value) {
-        return Err("original Unity MemSet did not produce the requested bytes".into());
-    }
-    ARENA.with(|arena| -> Result<(), String> {
-        let mut arena = arena.borrow_mut();
-        // Engine reentry may have changed lifetime: validate again before the
-        // first native write, then copy only this exact checked subrange.
-        if arena.range(pointer, size)? != (base, guest) {
-            return Err("native MemSet backing changed during engine callback".into());
-        }
-        if size != 0 {
-            unsafe { std::ptr::copy_nonoverlapping(result.as_ptr(), pointer as *mut u8, size) };
-        }
-        arena.memsets += 1;
-        Ok(())
-    })?;
+    ARENA.with(|arena| unsafe { arena.borrow_mut().fill(pointer, value, size) })?;
     eprintln!("NATIVE_MONO_UNSAFE_BUFFER_MEMSET_VERIFIED: size={size}; value={value:#x}; native-address-private=true");
     Ok(())
 }
@@ -929,7 +1017,7 @@ unsafe extern "C" fn free_tracked(pointer: Object, allocator: i32) {
     checked(|| release_kind(pointer as usize, allocator, true));
 }
 unsafe extern "C" fn memset(pointer: Object, value: u8, size: i64) {
-    checked(|| fill(pointer as usize, value, size));
+    checked(|| unsafe { fill(pointer as usize, value, size) });
 }
 unsafe extern "C" fn memcpy(destination: Object, source: Object, size: i64) {
     checked(|| {
@@ -937,7 +1025,7 @@ unsafe extern "C" fn memcpy(destination: Object, source: Object, size: i64) {
         if !(0..=CAPACITY as i64).contains(&size) {
             return Err("native buffer copy exceeds the owned span contract".into());
         }
-        ARENA.with(|arena| {
+        ARENA.with(|arena| unsafe {
             arena
                 .borrow_mut()
                 .copy(destination as usize, source as usize, size as usize)
@@ -945,6 +1033,56 @@ unsafe extern "C" fn memcpy(destination: Object, source: Object, size: i64) {
         eprintln!(
             "NATIVE_MONO_UNSAFE_BUFFER_COPY_VERIFIED: size={size}; native-address-private=true"
         );
+        Ok(())
+    });
+}
+unsafe extern "C" fn memcmp(left: Object, right: Object, size: i64) -> i32 {
+    checked(|| {
+        callbacks::with_service(|_, _| Ok(()))?;
+        if !(0..=CAPACITY as i64).contains(&size) {
+            return Err("native buffer compare exceeds the owned span contract".into());
+        }
+        let result = ARENA.with(|arena| unsafe {
+            arena
+                .borrow_mut()
+                .compare(left as usize, right as usize, size as usize)
+        })?;
+        eprintln!("NATIVE_MONO_UNSAFE_BUFFER_COMPARE_VERIFIED: size={size}; result={result}; native-address-private=true");
+        Ok(result)
+    })
+}
+unsafe extern "C" fn memcpy_replicate(destination: Object, source: Object, size: i32, count: i32) {
+    memcpy_stride(destination, size, source, 0, size, count);
+}
+unsafe extern "C" fn memcpy_stride(
+    destination: Object,
+    destination_stride: i32,
+    source: Object,
+    source_stride: i32,
+    element_size: i32,
+    count: i32,
+) {
+    checked(|| {
+        callbacks::with_service(|_, _| Ok(()))?;
+        if [destination_stride, source_stride, element_size, count]
+            .iter()
+            .any(|&n| n < 0)
+        {
+            return Err("native strided copy requires nonnegative dimensions".into());
+        }
+        ARENA.with(|arena| unsafe {
+            arena.borrow_mut().copy_elements(
+                destination as usize,
+                source as usize,
+                CopyPattern {
+                    destination_stride: destination_stride as usize,
+                    source_stride: source_stride as usize,
+                    element_size: element_size as usize,
+                    count: count as usize,
+                },
+            )
+        })?;
+        eprintln!("NATIVE_MONO_UNSAFE_BUFFER_STRIDED_COPY_VERIFIED: element-size={element_size}; count={count}; native-address-private=true");
         Ok(())
     });
 }
@@ -1004,7 +1142,7 @@ pub(super) fn report() -> String {
     }).unwrap_or_default();
     ARENA.with(|arena| {
         let a = arena.borrow();
-        format!("native-unsafe-buffer-allocations={}\nnative-unsafe-buffer-frees={}\nnative-unsafe-buffer-memsets={}\nnative-unsafe-buffer-copies={}\nnative-unsafe-buffer-cleanup-frees={}\nnative-unsafe-buffer-live={}\nnative-unsafe-buffer-retained-bytes={}\nnative-unsafe-buffer-closed={}\n", a.allocations, a.frees, a.memsets, a.copies, a.cleanup_frees, a.live.len(), a.retained, a.closed) + &queue
+        format!("native-unsafe-buffer-allocations={}\nnative-unsafe-buffer-frees={}\nnative-unsafe-buffer-memsets={}\nnative-unsafe-buffer-copies={}\nnative-unsafe-buffer-comparisons={}\nnative-unsafe-buffer-cleanup-frees={}\nnative-unsafe-buffer-live={}\nnative-unsafe-buffer-retained-bytes={}\nnative-unsafe-buffer-closed={}\n", a.allocations, a.frees, a.memsets, a.copies, a.comparisons, a.cleanup_frees, a.live.len(), a.retained, a.closed) + &queue
     })
 }
 #[cfg(test)]
@@ -1035,27 +1173,156 @@ mod tests {
         assert!(request(80, 8, 2, 0).is_err());
     }
     #[test]
-    fn scoped_input_copy_owns_backing_checks_both_ranges_and_retires_capability() {
+    fn scoped_input_storage_checks_ranges_and_retires_snapshot_identity() {
         let mut source = InputSpan::new(20).unwrap();
         source.bytes_mut(20).unwrap().copy_from_slice(&[0x5a; 20]);
         let destination = InputSpan::new(20).unwrap();
         let mut arena = Arena::default();
-        arena
-            .copy(destination.pointer(), source.pointer(), 20)
-            .unwrap();
+        unsafe { arena.copy(destination.pointer(), source.pointer(), 20) }.unwrap();
         assert_eq!(destination.bytes(20).unwrap(), &[0x5a; 20]);
-        assert!(arena
-            .copy(destination.pointer(), source.pointer(), 21)
-            .is_err());
+        assert!(source.bytes(21).is_err());
         assert_eq!(destination.bytes(20).unwrap(), &[0x5a; 20]);
-        assert!(arena
-            .copy(destination.pointer() + 1, source.pointer(), 20)
-            .is_err());
+        assert!(!input_span_contains(destination.pointer() + 1, 20));
         let retired = source.pointer();
         drop(source);
-        assert!(arena.copy(destination.pointer(), retired, 20).is_err());
+        assert!(!input_span_contains(retired, 20));
         assert_eq!(destination.bytes(20).unwrap(), &[0x5a; 20]);
         assert!(arena.lookup(destination.pointer(), 4).is_err());
+    }
+    #[test]
+    fn memory_compare_handles_native_stack_values_unsigned_bytes_and_zero_length() {
+        let mut arena = Arena::default();
+        let left = [0u8, 0x80, 7, 5, 0, 0, 0, 0];
+        let right = [0u8, 0x7f, 7, 6, 0, 0, 0, 0];
+        let a = left.as_ptr() as usize;
+        let b = right.as_ptr() as usize;
+        assert!(arena.range(a, 8).is_err()); // Not an engine allocation.
+        unsafe {
+            assert_eq!(arena.compare(0, usize::MAX, 0).unwrap(), 0);
+            assert!(arena.compare(a, b, 8).unwrap() > 0);
+            assert!(arena.compare(b, a, 8).unwrap() < 0);
+            assert_eq!(arena.compare(a + 2, b + 2, 1).unwrap(), 0);
+            assert!(arena.compare(a + 3, b + 3, 1).unwrap() < 0);
+            assert!(arena.compare(0, b, 1).is_err());
+            assert!(arena.compare(a, usize::MAX, 1).is_err());
+        }
+        assert_eq!(right, [0, 0x7f, 7, 6, 0, 0, 0, 0]);
+        assert_eq!(arena.comparisons, 5);
+    }
+    #[test]
+    fn native_fill_accepts_stack_subranges_and_keeps_surrounding_bytes() {
+        let mut arena = Arena::default();
+        let mut value = [0xa5u8; 12];
+        let pointer = value.as_mut_ptr() as usize;
+        assert!(arena.range(pointer, value.len()).is_err());
+        unsafe {
+            arena.fill(pointer + 2, 0x80, 8).unwrap();
+            assert_eq!(
+                value,
+                [0xa5, 0xa5, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0xa5, 0xa5]
+            );
+            arena.fill(pointer + 4, 0, 4).unwrap();
+            assert_eq!(
+                value,
+                [0xa5, 0xa5, 0x80, 0x80, 0, 0, 0, 0, 0x80, 0x80, 0xa5, 0xa5]
+            );
+            arena.fill(0, 0xff, 0).unwrap();
+            assert!(arena.fill(0, 0, 1).is_err());
+            assert!(arena.fill(usize::MAX, 0, 1).is_err());
+        }
+        assert_eq!(arena.memsets, 3);
+    }
+    #[test]
+    fn strided_and_replicated_native_copy_preserve_gaps_and_reject_overlap_and_overflow() {
+        let mut arena = Arena::default();
+        let source = [1u8, 2, 0xee, 3, 4, 0xee, 5, 6];
+        let mut destination = [0xa5u8; 10];
+        let src = source.as_ptr() as usize;
+        let dst = destination.as_mut_ptr() as usize;
+        let pattern = CopyPattern {
+            destination_stride: 4,
+            source_stride: 3,
+            element_size: 2,
+            count: 3,
+        };
+        unsafe { arena.copy_elements(dst, src, pattern) }.unwrap();
+        assert_eq!(destination, [1, 2, 0xa5, 0xa5, 3, 4, 0xa5, 0xa5, 5, 6]);
+        let before = destination;
+        unsafe {
+            assert!(arena.copy_elements(0, src, pattern).is_err());
+            assert!(arena.copy_elements(dst, usize::MAX, pattern).is_err());
+            assert!(arena
+                .copy_elements(
+                    dst,
+                    dst + 1,
+                    CopyPattern {
+                        count: 2,
+                        ..pattern
+                    }
+                )
+                .is_err());
+            assert!(arena
+                .copy_elements(
+                    dst,
+                    src,
+                    CopyPattern {
+                        count: usize::MAX,
+                        ..pattern
+                    }
+                )
+                .is_err());
+        }
+        assert_eq!(destination, before);
+        unsafe {
+            arena
+                .copy_elements(
+                    dst,
+                    src,
+                    CopyPattern {
+                        destination_stride: 2,
+                        source_stride: 0,
+                        element_size: 2,
+                        count: 5,
+                    },
+                )
+                .unwrap();
+            assert_eq!(destination, [1, 2, 1, 2, 1, 2, 1, 2, 1, 2]);
+            arena
+                .copy_elements(
+                    0,
+                    usize::MAX,
+                    CopyPattern {
+                        count: 0,
+                        ..pattern
+                    },
+                )
+                .unwrap();
+            arena
+                .copy_elements(
+                    usize::MAX,
+                    0,
+                    CopyPattern {
+                        element_size: 0,
+                        ..pattern
+                    },
+                )
+                .unwrap();
+        }
+        assert!(CopyPattern {
+            destination_stride: usize::MAX,
+            ..pattern
+        }
+        .spans()
+        .is_err());
+        assert!(CopyPattern {
+            destination_stride: 0,
+            source_stride: 0,
+            element_size: 1,
+            count: CAPACITY + 1
+        }
+        .spans()
+        .is_err());
+        assert_eq!(arena.copies, 4);
     }
     #[test]
     fn tracked_release_identity_keeps_allocator_and_allocation_family() {
@@ -1133,12 +1400,14 @@ mod tests {
         assert_eq!(arena.retired.len(), 1);
     }
     #[test]
-    fn buffer_copy_preserves_overlap_and_rejects_both_bad_ranges_before_writes() {
+    fn native_copy_preserves_overlap_and_rejects_null_or_overflow_before_writes() {
         let mut empty = Arena::default();
-        empty.copy(0, 0, 0).unwrap();
-        empty.copy(usize::MAX, 1, 0).unwrap();
+        unsafe {
+            empty.copy(0, 0, 0).unwrap();
+            empty.copy(usize::MAX, 1, 0).unwrap();
+        }
         assert_eq!(empty.copies, 2);
-        assert!(empty.copy(0, 0, 1).is_err());
+        assert!(unsafe { empty.copy(0, 0, 1) }.is_err());
         let bytes = Bytes::new(8, 8).unwrap();
         bytes.initialize(&[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
         let mut arena = Arena::default();
@@ -1149,16 +1418,19 @@ mod tests {
                 bytes,
             })
             .unwrap();
-        arena.copy(pointer + 2, pointer, 6).unwrap();
+        unsafe { arena.copy(pointer + 2, pointer, 6) }.unwrap();
         let read = || unsafe { std::slice::from_raw_parts(pointer as *const u8, 8) }.to_vec();
         assert_eq!(read(), [1, 2, 1, 2, 3, 4, 5, 6]);
-        assert!(arena.copy(pointer, pointer + 7, 2).is_err());
-        assert!(arena.copy(pointer + 7, pointer, 2).is_err());
-        assert!(arena.copy(pointer, pointer, usize::MAX).is_err());
+        unsafe {
+            assert!(arena.copy(pointer, 0, 2).is_err());
+            assert!(arena.copy(0, pointer, 2).is_err());
+            assert!(arena.copy(pointer, pointer, usize::MAX).is_err());
+        }
         assert_eq!(read(), [1, 2, 1, 2, 3, 4, 5, 6]);
         assert_eq!(arena.copies, 1);
         arena.retire(pointer, 4).unwrap();
-        assert!(arena.copy(pointer, pointer, 1).is_err());
+        // Cross-domain export continues to reject a retired allocation.
+        assert!(arena.range(pointer, 1).is_err());
     }
     #[test]
     fn unsupported_allocator_context_and_reentrant_capacity_fail_before_mutation() {

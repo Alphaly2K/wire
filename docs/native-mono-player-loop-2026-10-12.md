@@ -318,3 +318,27 @@ AddMarker，未出现 InternalCall 缺失或 adapter reject。28.93 秒后到
 SetupCoroutine.InvokeMoveNext(IEnumerator, IntPtr) 的固定入口；其 IntPtr 是布尔
 输出槽，普通 IL ABI 按预期拒绝，下一步需要私有输出缓冲区及精确写回契约。
 这只是新的有限边界，full_game_backend=false，仍未到可交互界面。
+
+2026-10-13：SetupCoroutine 的 IEnumerator 参数复用真实 root；IntPtr 布尔输出
+替换为私有 16B native 缓冲区，执行后核对 canonical byte 与 canary，全部预检后
+写回 guest 的 live temporary byte。异常或 canary 错误不写输出。
+probe-158 确认普通 IL 执行进入协程，遇到 Quaternion icall 缺失；该异常现记录实际
+class/message，诊断私有 pinned root，不调用 ToString 或发布 native 指针。
+
+用户指出逐方法 Spec 的可推广问题后，新桥接改为运行时 metadata/registration 与
+4,096 槽预编译 ARM64 通用入口池。probe-160 自动安装 3,391 个入口，实际完成
+Quaternion 和 Transform 旋转读写、SetupCoroutine.InvokeMoveNext 的 Boolean 输出、
+IEnumerator.get_Current 和若干 Start IL。下一边界为普通 plain-value 参数的
+8B size / 4B alignment 被旧 size==alignment 规则拒绝；按通用布局规则修复中。
+完整回归 535 passed / 7 ignored，Clippy clean，guard denied=0。游戏尚未可交互。
+
+后续按 actual size/alignment 修复普通值参数，UnsafeUtility 的 allocator target
+也改为真实注册发现；新增 MemCmp、MemCpyReplicate、MemCpyStride。纯原生
+MemSet/Copy/Compare 遵循原生 IL 的 unsafe-pointer 契约，接受局部值/字段地址；
+跨架构导出仍核对 live owned allocation。没有按调用者构造函数增添例外。
+SetupCoroutine 改为按实际类与签名识别，删除冻结 MethodDef token。
+
+probe-163：6 次 MemCmp 实际完成；InvokePreSimulate / InvokePostSimulate 与
+NotifyBeforeUpdate 通过。29.66 秒，259 draws / 97 presents，guard denied=0。
+下一有限边界为 NativeInputSystem.NotifyUpdate 的 IntPtr 事件包。完整回归
+539 passed / 7 ignored，release build、all-target Clippy 与 8 项 Python 回归通过。

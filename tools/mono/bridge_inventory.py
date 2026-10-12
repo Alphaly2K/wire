@@ -35,6 +35,24 @@ def binding_key(name):
     return name.split('(', 1)[0].replace('/', '.')
 
 
+def abi_group(row):
+    """Classify representation, without admitting pointer/lifetime semantics."""
+    if row['kind'] == 'PInvoke':
+        return 'external-native-library'
+    if row.get('generic') == '1':
+        return 'generic-signature'
+    shapes = [row['return_shape']] + (row['parameter_shapes'].split(';') if row['parameter_shapes'] else [])
+    if any('raw-pointer' in shape or 'native-int' in shape for shape in shapes):
+        return 'pointer-or-capability-contract'
+    if any('unresolved' in shape or 'open-generic' in shape or 'recursive-or-deep' in shape for shape in shapes):
+        return 'unresolved-or-complex-layout'
+    if any('managed-reference' in shape or 'array:' in shape or 'string' in shape for shape in shapes):
+        return 'reference-string-array'
+    if any('value{' in shape or 'byref:' in shape for shape in shapes):
+        return 'value-or-byref'
+    return 'scalar'
+
+
 def join_declarations(declarations, lookups, registrations):
     lookup = {}
     for row in lookups:
@@ -134,6 +152,16 @@ def main():
                    for (assembly, owner), count in families.items()]
     family_rows.sort(key=lambda row: (-row['referenced_missing'], -row['missing_il_references'], row['class']))
     write_rows(output / 'families.tsv', list(family_rows[0]), family_rows)
+    groups = defaultdict(Counter)
+    for row in joined:
+        group = groups[abi_group(row)]
+        group['declarations'] += 1
+        group[row['lookup']] += 1
+        group['referenced_missing'] += row['lookup'] == 'missing' and int(row['il_references']) > 0
+    abi_rows = [{'abi': name, **{key: count[key] for key in
+                ('declarations', 'resolved', 'missing', 'referenced_missing', 'not_in_runtime_snapshot', 'not_resolved_by_audit')}}
+                for name, count in sorted(groups.items())]
+    write_rows(output / 'abi-groups.tsv', list(abi_rows[0]), abi_rows)
     original_bindings = Counter(row['name'] for row in registrations)
     metadata_bindings = Counter(row['binding'] for row in joined if row['kind'] == 'InternalCall')
     engine_rows = [{'binding': row['name'], 'guest_target': row['guest_target'],

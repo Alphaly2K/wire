@@ -57,3 +57,35 @@ AudioSettings/AudioListener、Cursor、Graphics/GL 与 GraphicsSettings 的纯�
 本次工具的 identity/重载/未知状态/ambiguous target 回归及既有 harness 共 7 项
 通过，Rust **531 passed / 7 ignored**，release build 与 all-target Clippy 通过。
 源码和扫描器进入版本控制；原始游戏 binary/程序集及全量结果只留在 wire-out。
+
+## 通用桥接复测
+
+固定标量 Spec 的 probe-158 曾新增 361 个 resolved。用户随后要求验证可推广机制，
+因此未把这批逐方法 Spec 提交；实现改为预编译 ARM64 入口池与运行时元数据描述符。
+实际引擎注册表提供地址，MethodDef/signature/enum/value-layout/ParamList 提供 ABI。
+engine-self 由 UnityEngine.Object 继承关系、exact IntPtr 与真实 `_unity_self` 参数
+共同识别。普通托管类不新增函数名单。
+
+probe-160：自动新增 **3,391** 个注册，resolved **4,526**、missing **6,923**、
+unknown **88**；原 11,537 个 icall/1,393 个 PInvoke 声明数量保持。实际执行
+Quaternion 与 Transform 的数学/旋转接口，协程输出也成功。完整回归 535 passed /
+7 ignored；guard denied=0。报告位于 `wire-out/native-mono-bridge-inventory-generic-2026-10-13`。
+
+新增 `parameter_modes`、`parameter_names` 与 `abi-groups.tsv`，按数据表示汇总：
+
+| ABI 类别 | 当前 missing |
+| --- | ---: |
+| scalar | 1,295 |
+| value / byref | 863 |
+| reference / string / array | 309 |
+| pointer / capability | 4,456 |
+
+pointer 类别包含引擎 self、输出句柄、span 内嵌指针和异步协议等不同语义；后续按
+统一协议处理。PInvoke 保持独立声明清单。细节和验收边界见
+`native-mono-generic-bridge-feasibility-2026-10-13.md`。
+
+probe-163 在统一原生内存语义修正后完成 6 次 MemCmp 和 PhysicsEvents 的普通
+值参数调用，进入 NativeInputSystem.NotifyUpdate 的输入事件 IntPtr 边界。
+本批新增的三个 UnsafeUtility memory 注册没有重新计入上方 probe-160 snapshot
+统计；实际运行和静态盘点分别保留原始采样编号。完整回归 539 passed / 7 ignored，
+build、Clippy、8 项 inventory/harness 回归通过。

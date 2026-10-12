@@ -55,6 +55,16 @@ impl Registry {
         }
         Ok(target)
     }
+    /// Resolve only the actual sealed registration, never a baked-in RVA or
+    /// an address supplied by managed IL. Signature ownership is the caller's
+    /// separate metadata contract.
+    pub(super) fn registered_target(&self, name: &str) -> Result<Option<u64>, String> {
+        if !self.sealed {
+            return Err("engine target lookup before registration seal".into());
+        }
+        let name = CString::new(name).map_err(|e| e.to_string())?;
+        Ok(self.entries.get(&name).copied())
+    }
     pub(super) fn len(&self) -> usize {
         self.entries.len()
     }
@@ -109,5 +119,10 @@ mod tests {
             .register(&memory, CString::new("Sample::Pending").unwrap(), 0x1002)
             .is_err());
         assert!(registry.tsv().contains("Sample::Pending\t0x1001\t0\t0"));
+        assert_eq!(
+            registry.registered_target("Sample::Pending").unwrap(),
+            Some(0x1001)
+        );
+        assert_eq!(registry.registered_target("Sample::Absent").unwrap(), None);
     }
 }

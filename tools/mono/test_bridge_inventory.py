@@ -1,5 +1,5 @@
 import unittest
-from bridge_inventory import join_declarations
+from bridge_inventory import abi_group, join_declarations
 
 
 class IdentityTests(unittest.TestCase):
@@ -28,3 +28,16 @@ class IdentityTests(unittest.TestCase):
             {'name': 'Type.Nested::Call(float)', 'guest_target': '0x180002000'}])
         self.assertEqual(joined[0]['guest_targets'], '0x180001000;0x180002000')
         self.assertEqual(joined[0]['lookup'], 'not_in_runtime_snapshot')
+
+    def test_abi_groups_do_not_treat_nested_pointers_as_plain_values(self):
+        row = dict(kind='InternalCall', generic='0', return_shape='void',
+                   parameter_shapes='byref:value{begin=raw-pointer,length=i32}')
+        self.assertEqual(abi_group(row), 'pointer-or-capability-contract')
+        row['parameter_shapes'] = 'byref:value{x=f32,y=f32,z=f32}'
+        self.assertEqual(abi_group(row), 'value-or-byref')
+        row['parameter_shapes'] = 'enum:i32;f32'
+        self.assertEqual(abi_group(row), 'scalar')
+        row['parameter_shapes'] = 'array:managed-reference'
+        self.assertEqual(abi_group(row), 'reference-string-array')
+        row['kind'] = 'PInvoke'
+        self.assertEqual(abi_group(row), 'external-native-library')

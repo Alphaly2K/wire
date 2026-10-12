@@ -98,7 +98,7 @@ class BridgeInventory {
         }
         int icalls = 0, pinvokes = 0;
         using (var declarations = new StreamWriter(Path.Combine(output, "managed-declarations.tsv"))) {
-            declarations.WriteLine("assembly\tclass\tmethod\ttoken\tkind\treturn\tparameters\treturn_shape\tparameter_shapes\tstatic\tgeneric\tlibrary\tentry\tpinvoke_flags\til_references\tscalar_candidate\tfull_signature");
+            declarations.WriteLine("assembly\tclass\tmethod\ttoken\tkind\treturn\tparameters\treturn_shape\tparameter_shapes\tstatic\tgeneric\tlibrary\tentry\tpinvoke_flags\til_references\tscalar_candidate\tfull_signature\tparameter_modes\tparameter_names");
             foreach (var assembly in assemblies) foreach (var type in Types(assembly.MainModule.Types))
                 foreach (var method in type.Methods) {
                     if (!method.IsInternalCall && !method.IsPInvokeImpl) continue;
@@ -117,7 +117,9 @@ class BridgeInventory {
                         pinvoke == null ? "" : pinvoke.Module.Name, pinvoke == null ? "" : pinvoke.EntryPoint,
                         pinvoke == null ? "" : "0x" + ((int)pinvoke.Attributes).ToString("x4"), refs.ToString(),
                         method.IsStatic && !method.HasGenericParameters && !type.HasGenericParameters && parameters.Length <= 4 && Scalar(result) && parameters.All(Scalar) ? "1" : "0",
-                        method.FullName
+                        method.FullName,
+                        String.Join(";", method.Parameters.Select(parameter => parameter.IsOut && !parameter.IsIn ? "out" : "inout").ToArray()),
+                        String.Join(";", method.Parameters.Select(parameter => parameter.Name).ToArray())
                     };
                     declarations.WriteLine(String.Join("\t", row.Select(Safe).ToArray()));
                 }

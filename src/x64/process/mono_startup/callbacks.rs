@@ -717,7 +717,22 @@ pub(super) fn guest_byte_arguments_at(
     args: &[u64],
     spans: &[(usize, &[u8], usize)],
 ) -> Result<GuestByteResult, String> {
-    guest_byte_arguments_impl(target, args, spans, None)
+    guest_byte_arguments_impl(target, args, spans, None, &[], &[])
+}
+/// Scalar/value ABI with positional floating inputs and exact byref aliases.
+/// Alias sources must be declared payloads; no native address reaches Win64.
+pub(super) fn guest_value_arguments(
+    target: u64,
+    args: &[u64],
+    floating: &[(usize, u64)],
+    spans: &[(usize, &[u8])],
+    aliases: &[(usize, usize)],
+) -> Result<GuestByteResult, String> {
+    let spans: Vec<_> = spans
+        .iter()
+        .map(|&(index, bytes)| (index, bytes, 0))
+        .collect();
+    guest_byte_arguments_impl(target, args, &spans, None, floating, aliases)
 }
 pub(super) fn guest_reference_pair(
     target: u64,
@@ -730,8 +745,14 @@ pub(super) fn guest_reference_pair(
     }
     let mut pair = [0; 16];
     pair[8..].copy_from_slice(&0x7ac3_d156_29be_048fu64.to_le_bytes());
-    let (_, outputs) =
-        guest_byte_arguments_impl(target, args, &[(index, &pair, 8)], Some(class as usize))?;
+    let (_, outputs) = guest_byte_arguments_impl(
+        target,
+        args,
+        &[(index, &pair, 8)],
+        Some(class as usize),
+        &[],
+        &[],
+    )?;
     if outputs[0][8..] != pair[8..] {
         return Err("component FastPath wrote beyond its reference output".into());
     }
@@ -742,6 +763,8 @@ fn guest_byte_arguments_impl(
     args: &[u64],
     spans: &[(usize, &[u8], usize)],
     reference_class: Option<usize>,
+    floating: &[(usize, u64)],
+    aliases: &[(usize, usize)],
 ) -> Result<GuestByteResult, String> {
     OWNER.with(|slot| {
         if slot.get().is_null() || args.len() > 8 || spans.len() > 8 {
@@ -767,6 +790,25 @@ fn guest_byte_arguments_impl(
                 .and_then(|n| n.checked_add(15))
                 .ok_or("typed byte span overflow")?
                 & !15;
+        }
+        let payload_positions = seen;
+        for &(index, source) in aliases {
+            if index >= args.len()
+                || source >= args.len()
+                || seen[index]
+                || !payload_positions[source]
+            {
+                return Err("typed byte callback alias is not an exact declared payload".into());
+            }
+            seen[index] = true;
+        }
+        if floating.iter().enumerate().any(|(i, &(index, _))| {
+            index >= args.len()
+                || index >= 4
+                || seen[index]
+                || floating[..i].iter().any(|&(previous, _)| previous == index)
+        }) {
+            return Err("typed byte callback floating position invalid".into());
         }
         let size = (offset.max(1) as u64 + 4095) & !4095;
         if size > 0x100000 || owner.depth.get() >= 8 {
@@ -817,7 +859,10 @@ fn guest_byte_arguments_impl(
             owner.memory.borrow_mut().write(address, bytes)?;
             args[index] = address + interior as u64;
         }
-        let result = execute_scalar_guest(owner, target, &args, &[])?;
+        for &(index, source) in aliases {
+            args[index] = args[source];
+        }
+        let result = execute_scalar_guest(owner, target, &args, floating)?;
         let mut outputs = Vec::new();
         for (&(_, bytes, _), &offset) in spans.iter().zip(&offsets) {
             let mut out = vec![0; bytes.len()];
