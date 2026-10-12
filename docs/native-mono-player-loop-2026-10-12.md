@@ -188,3 +188,30 @@ Clippy clean；probe-143 实际执行 Canvas 的 referencePixelsPerUnit 与 Tran
 GetParent，以及 Component 的 GetComponentsForListInternal。26.99 秒后在下一次
 组件 List backing array 写屏障处遭遇类型不匹配，检查在写入前拒绝；继续诊断
 实际 array class 与 List 字段的期望 class。未实际执行的成员仅算 ABI 安装。
+
+probe-144 的精确诊断确认：字段期望 `UnityEngine.CanvasGroup[]`，原引擎辅助
+函数提供的是 `UnityEngine.Component[]`。这不是 RuntimeType identity 丢失；
+保留原字段 assignability 检查，禁止把不兼容的 backing array 写进 native List。
+
+List 查询 adapter 现调用原 GameObject 的带类型数组查询，遍历顺序和层级/includeInactive/
+reverse 仍由原引擎产生。Component 路径先通过已校验的原 get_gameObject 获取实际
+所属 GameObject，再查询该对象；没有读取猜测的引擎 struct offset。结果按实际
+requested SZ array class 核对，全体元素须兼容目标 List<T> 的 Add 参数类型，随后
+调用其真实 metadata-qualified Clear/Add IL 并刷新 native container graph。所有
+native allocation/invoke 均不持有 Memory/Metadata 的 Rust 借用，List 有临时强 root。
+不再把 caller List 直接交给原引擎的不兼容 backing-array 操作。
+
+新增回归覆盖末尾元素类型错误时旧 List 不变、NULL 与顺序保持、空查询清空列表、
+Clear 失败时不执行 Add。完整回归 **527 passed / 7 ignored**，release build 与
+all-target Clippy clean。probe-145 实测这个 typed list 投影及后续 UI 初始化。
+
+probe-145 在执行前被旧 ordinary-method contract 拒绝：闭合 List<T> 的实例方法在
+Mono metadata 中是 inflated method。新增独立 `describe_constructed_instance` 入口，
+只接受闭合 constructed class 的非泛型实例 IL 方法；普通入口保持旧规则。image、
+完整参数/返回、method flags、IL body/stack 上限和递归 concrete type 检查都保留。
+新增回归验证它不准入静态入口、泛型方法或 non-inflated definition。
+
+probe-146 实际越过 List<CanvasGroup> 投影，执行到其元素的 enabled 和 interactable
+查询；后者缺 `CanvasGroup::get_interactable_Injected`。完整回归 **528 passed /
+7 ignored**，build 与 Clippy clean。`Component[]` 写入 `CanvasGroup[]` 的类型限制
+未放宽；成功来自原带类型数组查询与真实 List<T> IL。仍未到可交互界面。

@@ -907,6 +907,15 @@ impl Registry {
                 (owner == 0 || c.owner == owner) && matches!(c.shape, Shape::Reference(_))
             })
     }
+    pub(super) fn reference_class(&self, owner: u64, address: u64) -> Option<Object> {
+        if !self.has_reference(owner, address) {
+            return None;
+        }
+        match self.cells[&address].shape {
+            Shape::Reference(class) => Some(class),
+            _ => None,
+        }
+    }
     pub(super) fn store_reference(
         &mut self,
         root_api: instances::Api,

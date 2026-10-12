@@ -247,6 +247,25 @@ impl Api {
         images: &[Object],
         reference_images: &[Object],
     ) -> Result<Option<Descriptor>, String> {
+        self.describe_inner(method, images, reference_images, false)
+    }
+    /// Only non-generic instance methods of a closed constructed declaring
+    /// class. The complete declaring/argument shapes and IL are still checked.
+    pub(super) fn describe_constructed_instance(
+        self,
+        method: Object,
+        images: &[Object],
+        reference_images: &[Object],
+    ) -> Result<Option<Descriptor>, String> {
+        self.describe_inner(method, images, reference_images, true)
+    }
+    fn describe_inner(
+        self,
+        method: Object,
+        images: &[Object],
+        reference_images: &[Object],
+        constructed: bool,
+    ) -> Result<Option<Descriptor>, String> {
         if method.is_null() {
             return Err("NULL managed method".into());
         }
@@ -268,12 +287,20 @@ impl Api {
             || !images.contains(&unsafe { (self.image)(class) })
             || sig.is_null()
             || !managed_il_flags(flags, implementation, unsafe { (self.instance)(sig) } != 0)
-            || unsafe { (self.generic)(method) } != 0
-            || unsafe { (self.inflated)(method) } != 0
+            || !concrete_method(
+                unsafe { (self.generic)(method) } != 0,
+                unsafe { (self.inflated)(method) } != 0,
+                unsafe { (self.instance)(sig) } != 0,
+                constructed,
+            )
         {
             return Err("managed method outside owned concrete IL contract".into());
         }
-        self.closed.concrete(class)?;
+        if constructed {
+            self.closed.constructed(class)?;
+        } else {
+            self.closed.concrete(class)?;
+        }
         let receiver = if flags & 0x10 == 0 {
             if unsafe { (self.value)(class) } != 0 {
                 return Err("managed value receiver needs a separate unboxed ABI".into());
@@ -969,6 +996,14 @@ impl Api {
         Ok(class)
     }
 }
+fn concrete_method(generic: bool, inflated: bool, instance: bool, constructed: bool) -> bool {
+    !generic
+        && if constructed {
+            inflated && instance
+        } else {
+            !inflated
+        }
+}
 fn managed_il_flags(flags: u32, implementation: u32, instance: bool) -> bool {
     (flags & 0x10 == 0) == instance
         && flags & (0x400 | 0x2000) == 0
@@ -1108,6 +1143,22 @@ impl Frame {
 mod tests {
     use super::*;
     use crate::x64::memory::{READ, WRITE};
+    #[test]
+    fn constructed_instance_admission_keeps_generic_methods_and_static_entries_out() {
+        assert!(concrete_method(false, false, false, false));
+        assert!(concrete_method(false, false, true, false));
+        assert!(!concrete_method(false, true, true, false));
+        assert!(concrete_method(false, true, true, true));
+        assert!(!concrete_method(false, true, false, true));
+        assert!(!concrete_method(false, false, true, true));
+        for inflated in [false, true] {
+            for instance in [false, true] {
+                for constructed in [false, true] {
+                    assert!(!concrete_method(true, inflated, instance, constructed));
+                }
+            }
+        }
+    }
     fn boolean() -> Shape {
         Shape::Scalar {
             class: 1usize as Object,

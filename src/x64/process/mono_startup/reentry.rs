@@ -984,14 +984,53 @@ impl Metadata<'_> {
                     }
                 }
                 if roots.fields.has_reference(a[0], a[1]) {
-                    roots.fields.store_reference(
+                    let expected = roots.fields.reference_class(a[0], a[1]);
+                    let result = roots.fields.store_reference(
                         roots.api,
                         roots.roots,
                         memory,
                         a[0],
                         a[1],
                         a[2],
-                    )?;
+                    );
+                    if let Err(error) = result {
+                        let name = sym!(
+                            self.library,
+                            "mono_class_get_name",
+                            unsafe extern "C" fn(Object) -> *const c_char
+                        );
+                        let namespace = sym!(
+                            self.library,
+                            "mono_class_get_namespace",
+                            unsafe extern "C" fn(Object) -> *const c_char
+                        );
+                        let label = |class: Object| {
+                            if class.is_null() {
+                                return "NULL".to_owned();
+                            }
+                            let name = unsafe { name(class) };
+                            let namespace = unsafe { namespace(class) };
+                            if name.is_null() || namespace.is_null() {
+                                return "missing metadata name".to_owned();
+                            }
+                            format!(
+                                "{}.{}",
+                                unsafe { std::ffi::CStr::from_ptr(namespace) }.to_string_lossy(),
+                                unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy()
+                            )
+                        };
+                        let actual = roots
+                            .roots
+                            .class(roots.api, a[2])
+                            .map(label)
+                            .unwrap_or_else(|_| "unrooted/NULL".into());
+                        return Err(format!(
+                            "{error}; field-expected={}; value-actual={actual}",
+                            expected
+                                .map(label)
+                                .unwrap_or_else(|| "unknown field".into())
+                        ));
+                    }
                     let owner = roots
                         .roots
                         .interior_owner(a[1])
