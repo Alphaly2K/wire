@@ -277,6 +277,19 @@ impl Registry {
         class: Object,
         boxed: Option<usize>,
     ) -> Result<WorkerBorrow<'_>, String> {
+        let request = self.prepare_request(api, domain, class, boxed)?;
+        Ok(WorkerBorrow {
+            registry: self,
+            request,
+        })
+    }
+    pub(super) fn prepare_request(
+        &self,
+        api: Api,
+        domain: Object,
+        class: Object,
+        boxed: Option<usize>,
+    ) -> Result<WorkerRequest, String> {
         if self.released
             || self.views_retired
             || self.roots.len() >= LIMIT
@@ -286,17 +299,14 @@ impl Registry {
         {
             return Err("worker allocation outside live bounded domain/class/layout".into());
         }
-        Ok(WorkerBorrow {
-            registry: self,
-            request: WorkerRequest {
-                api,
-                domain,
-                class,
-                boxed,
-            },
+        Ok(WorkerRequest {
+            api,
+            domain,
+            class,
+            boxed,
         })
     }
-    fn adopt_allocation(&mut self, mut root: WorkerAllocation) -> Result<u64, String> {
+    pub(super) fn adopt_allocation(&mut self, mut root: WorkerAllocation) -> Result<u64, String> {
         let WorkerAllocation {
             api,
             handle,
@@ -797,6 +807,14 @@ pub(super) mod tests {
             strong: pin,
             target: identity,
             ..api()
+        }
+    }
+    pub(in crate::x64::process::mono_startup) fn allocation_api(
+        new: unsafe extern "C" fn(Object, Object, *mut u16) -> Object,
+    ) -> Api {
+        Api {
+            new,
+            ..identity_api()
         }
     }
     #[test]

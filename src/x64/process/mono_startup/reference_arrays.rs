@@ -34,6 +34,8 @@ fn validate_engine_handles(bytes: &[u8], mut live: impl FnMut(u64) -> bool) -> R
 }
 #[derive(Clone, Copy)]
 pub(super) struct Api {
+    library: Object,
+    owned_images: &'static [usize],
     new: unsafe extern "C" fn(Object, Object, usize) -> Object,
     class: unsafe extern "C" fn(Object) -> Object,
     array_class: unsafe extern "C" fn(Object, u32) -> Object,
@@ -50,7 +52,11 @@ pub(super) struct Api {
     values: [Option<value_layout::Api>; 6],
 }
 impl Api {
-    pub(super) fn load(library: Object, reference_images: [Object; 6]) -> Result<Self, String> {
+    pub(super) fn load(
+        library: Object,
+        reference_images: [Object; 6],
+        owned_images: &[Object],
+    ) -> Result<Self, String> {
         macro_rules! sym {
             ($name:literal, $ty:ty) => {{
                 let p = unsafe { libc::dlsym(library, concat!($name, "\0").as_ptr().cast()) };
@@ -65,7 +71,21 @@ impl Api {
             *api = Some(value_layout::Api::load(library, image)?);
         }
         let intptr = sym!("mono_get_intptr_class", unsafe extern "C" fn() -> Object);
+        static FAMILY: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
+        if owned_images.is_empty()
+            || owned_images.len() > 512
+            || owned_images.iter().any(|image| image.is_null())
+        {
+            return Err("typed array image family must be live, owned and bounded".into());
+        }
+        let family: Vec<_> = owned_images.iter().map(|image| *image as usize).collect();
+        let owned_images = FAMILY.get_or_init(|| family.clone());
+        if *owned_images != family {
+            return Err("typed array owned image family changed runtime identity".into());
+        }
         Ok(Self {
+            library,
+            owned_images,
             new: sym!(
                 "mono_array_new",
                 unsafe extern "C" fn(Object, Object, usize) -> Object
@@ -110,6 +130,9 @@ impl Api {
         })
     }
     fn element_layout(self, element: Object) -> Result<value_layout::Layout, String> {
+        if !self.library.is_null() {
+            super::closed_types::Api::load(self.library)?.concrete(element)?;
+        }
         if !element.is_null() && element == self.intptr {
             // Exact System.IntPtr SZ arrays carry original engine data handles.
             // This does not admit raw pointer fields or ordinary invoke args.
@@ -133,19 +156,43 @@ impl Api {
         }
         if !element.is_null()
             && unsafe { (self.value)(element) } == 0
-            && self
+            && (self
                 .reference_images
                 .contains(&unsafe { (self.image)(element) })
+                || self
+                    .owned_images
+                    .contains(&(unsafe { (self.image)(element) } as usize)))
         {
             Ok(value_layout::Layout::reference(element))
         } else {
-            self.values
+            let known = self
+                .values
                 .iter()
                 .flatten()
                 .copied()
-                .find(|api| api.owns(element))
-                .ok_or("value element outside owned image family")?
-                .layout(element)
+                .find(|api| api.owns(element));
+            let images: Vec<_> = self
+                .owned_images
+                .iter()
+                .map(|&image| image as Object)
+                .collect();
+            if let Some(api) = known {
+                if images.is_empty() {
+                    api.layout(element)
+                } else {
+                    api.layout_in(element, &images)
+                }
+            } else {
+                let image = if element.is_null() {
+                    ptr::null_mut()
+                } else {
+                    unsafe { (self.image)(element) }
+                };
+                if self.library.is_null() || !self.owned_images.contains(&(image as usize)) {
+                    return Err("value element outside owned image family".into());
+                }
+                value_layout::Api::load(self.library, image)?.layout_in(element, &images)
+            }
         }
     }
     pub(super) fn supports(self, element: Object) -> bool {
@@ -463,7 +510,9 @@ impl Registry {
                         };
                         data.copy_from_slice(&token.to_le_bytes());
                     }
-                    value_layout::Shape::Scalar { .. } | value_layout::Shape::Inline { .. } => unsafe {
+                    value_layout::Shape::Scalar { .. }
+                    | value_layout::Shape::Inline { .. }
+                    | value_layout::Shape::EngineAddress { .. } => unsafe {
                         ptr::copy_nonoverlapping(
                             base.add(slot.offset),
                             data.as_mut_ptr(),
@@ -929,6 +978,8 @@ mod tests {
     }
     fn api() -> Api {
         Api {
+            library: ptr::null_mut(),
+            owned_images: &[],
             new,
             class,
             array_class,

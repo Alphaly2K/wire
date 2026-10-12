@@ -31,7 +31,7 @@ struct Binding {
     find_targets: [u64; 2],
     game_object: usize,
     component: usize,
-    operations: [u64; 5],
+    operations: [u64; 7],
 }
 static BINDING: OnceLock<Binding> = OnceLock::new();
 thread_local! { static CALLS: Cell<usize> = const { Cell::new(0) }; }
@@ -170,8 +170,27 @@ pub(super) fn install(
                 (0xc, single, false),
             ],
         ),
+        (
+            "UnityEngine.Object::Internal_CloneSingle_Injected",
+            0x1800c36d0,
+            object,
+            c"Internal_CloneSingle_Injected",
+            vec![(0x18, intptr, false), (0x18, intptr, false)],
+        ),
+        (
+            "UnityEngine.Object::Internal_CloneSingleWithParent_Injected",
+            0x1800c3910,
+            object,
+            c"Internal_CloneSingleWithParent_Injected",
+            vec![
+                (0x18, intptr, false),
+                (0x18, intptr, false),
+                (0x18, intptr, false),
+                (2, boolean, false),
+            ],
+        ),
     ];
-    let mut operations = [0; 5];
+    let mut operations = [0; 7];
     for (index, (name, target, class, member, specs)) in operation_specs.iter().enumerate() {
         operations[index] = registry.exact_target(name, *target)?;
         api.fixed_typed_icall(
@@ -241,6 +260,8 @@ pub(super) fn install(
         dont_destroy as *const (),
         destroy_immediate as *const (),
         destroy as *const (),
+        clone_single as *const (),
+        clone_parent as *const (),
     ]) {
         let name = CString::new(*name).map_err(|e| e.to_string())?;
         unsafe { add(name.as_ptr(), adapter as Object) };
@@ -430,6 +451,41 @@ unsafe extern "C" fn destroy(pointer: usize, delay: f32) {
         CALLS.with(|calls| calls.set(calls.get() + 1));
         Ok(())
     });
+}
+fn clone_object(pointer: usize, parent: Option<(usize, u8)>) -> usize {
+    checked(|| {
+        let b = BINDING.get().ok_or("Unity object cloning absent")?;
+        let mut arguments = vec![engine_pointer(pointer)?];
+        let index = if let Some((parent, world_position_stays)) = parent {
+            if world_position_stays > 1 {
+                return Err("clone worldPositionStays Boolean is not canonical".into());
+            }
+            arguments.push(if parent == 0 {
+                0
+            } else {
+                engine_pointer(parent)?
+            });
+            arguments.push(u64::from(world_position_stays));
+            6
+        } else {
+            5
+        };
+        let handle = callbacks::guest_asset_arguments(b.operations[index], &arguments)?;
+        let object = native_handle(b, b.classes[3], handle)?;
+        CALLS.with(|calls| calls.set(calls.get() + 1));
+        eprintln!("NATIVE_MONO_ENGINE_OBJECT_CLONED: parent={}; actual-engine-handle={handle:#x}; native-v2-handle=true", parent.is_some());
+        Ok(object)
+    })
+}
+unsafe extern "C" fn clone_single(pointer: usize) -> usize {
+    clone_object(pointer, None)
+}
+unsafe extern "C" fn clone_parent(
+    pointer: usize,
+    parent: usize,
+    world_position_stays: u8,
+) -> usize {
+    clone_object(pointer, Some((parent, world_position_stays)))
 }
 unsafe extern "C" fn current() -> usize {
     get(0)

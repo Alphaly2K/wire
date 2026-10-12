@@ -208,7 +208,7 @@ impl Api {
                             unsafe { CStr::from_ptr(name) }.to_string_lossy()
                         };
                         let layout = value_layout::Api::load(self.library, image)?
-                            .layout(target)
+                            .layout_in(target, images)
                             .map_err(|e| format!("inline field {label}: {e}"))?;
                         match layout.scalar_inline() {
                             Ok(shape) => Some(shape),

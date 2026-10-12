@@ -23,8 +23,10 @@ const INCREMENTAL_SUPPORT: &str =
 const ATTRIBUTES_CANDIDATE: &str =
     "94a8252dfb4bf7aa3584be4b1888afd128431cc7ea70b7bd6773fc299cab0a5e";
 const ATTRIBUTES_SUPPORT: &str = "7cd421d0e370b09a865848a59e47aa2b1362fd9ff484804fe3b2c1b4a5bc8029";
-const OBJECTS_CANDIDATE: &str = "c152197b7cf1623a3d40a51a36e1e44d888b77f337b1378bb979598d2fad2eb0";
-const OBJECTS_SUPPORT: &str = "34705bafc092d1e644b2c7e0873340b398d1a81dd3e51c31af37a9ba0a29cea9";
+// Locked 23-patch build in the main checkout: fresh objects, audited inputs,
+// ordinary/incremental native fixtures and executable-memory guard verified.
+const OBJECTS_CANDIDATE: &str = "9c777efecc3066b3f574968e2566591cafa77a0d35306cb920dc77177f913b4c";
+const OBJECTS_SUPPORT: &str = "def3ecff994baa8542b1926b6b19875457224fe841dc13076a14670cf13c43c7";
 const EXE: &str = "94cccae89918110514672a6ec249a1252ffaeb28c0ae8d8633a9352988738f12";
 const UNITY: &str = "a2022611884470ddab23927a3eb7bbaef3924c18972d30ba7b5330a8fd25bcc4";
 const CORELIB_SUPPORT: &str = "b10bb3e59af90e92e240424ac88b1f96eb27906c3fa099958713d93801b4b078";
@@ -42,6 +44,7 @@ type Object = *mut c_void;
 mod animation;
 mod arrays;
 mod attributes;
+mod awaitables;
 mod binding_strings;
 mod bindings;
 mod burst_shared;
@@ -68,6 +71,7 @@ mod managed_calls;
 mod metadata;
 mod names;
 mod objects;
+mod player_loop;
 mod player_prefs;
 mod profiler_recorders;
 mod profiler_samples;
@@ -2041,10 +2045,11 @@ impl Probe {
             unsafe extern "C" fn(Object) -> Object
         );
         let image = unsafe { image(class) };
-        if !self.reference_images()?.contains(&image) {
+        let images = self.image_registry.live_native_images()?;
+        if !images.contains(&image) {
             return Err("boxed value outside fingerprinted image family".into());
         }
-        value_layout::Api::load(library, image)?.layout(class)
+        value_layout::Api::load(library, image)?.layout_in(class, &images)
     }
     fn reference_images(&self) -> Result<[Object; 6], String> {
         Ok([
@@ -3312,6 +3317,22 @@ impl Probe {
                 &self.registry,
             )?;
         }
+        if !awaitables::installed() {
+            awaitables::install(
+                library,
+                self.image_registry.unique_native_image(CORE_MODULE)?,
+                &managed_images,
+                &self.registry,
+            )?;
+        }
+        if !player_loop::installed() {
+            player_loop::install(
+                library,
+                self.image_registry.unique_native_image(CORE_MODULE)?,
+                &managed_images,
+                &self.registry,
+            )?;
+        }
         if !profiler_samples::installed() {
             profiler_samples::install(library, &managed_images, &self.registry)?;
         }
@@ -3427,6 +3448,13 @@ impl Probe {
             runtime,
             targets,
             reentry::Metadata {
+                gc: Some(
+                    self.native
+                        .as_ref()
+                        .ok_or("nested GC owner absent")?
+                        .gc
+                        .clone(),
+                ),
                 library,
                 domain,
                 thread_handle,
@@ -3636,6 +3664,13 @@ impl Probe {
                 runtime,
                 targets,
                 reentry::Metadata {
+                    gc: Some(
+                        self.native
+                            .as_ref()
+                            .ok_or("nested GC owner absent")?
+                            .gc
+                            .clone(),
+                    ),
                     library,
                     domain: native_domain,
                     thread_handle: self
@@ -3754,7 +3789,11 @@ impl Probe {
             let is_input = !input_image.is_null() && descriptor.image == input_image;
             if self.assets && self.reference_array_api.is_none() {
                 let (api, _) = callbacks::with_owner(memory, runtime, targets, || {
-                    reference_arrays::Api::load(library, self.reference_images()?)
+                    reference_arrays::Api::load(
+                        library,
+                        self.reference_images()?,
+                        &self.image_registry.live_native_images()?,
+                    )
                 })?;
                 self.reference_array_api = Some(api?);
             }
@@ -3765,6 +3804,13 @@ impl Probe {
                 runtime,
                 targets,
                 reentry::Metadata {
+                    gc: Some(
+                        self.native
+                            .as_ref()
+                            .ok_or("nested GC owner absent")?
+                            .gc
+                            .clone(),
+                    ),
                     library,
                     domain: native_domain,
                     thread_handle: self
@@ -3970,6 +4016,13 @@ impl Probe {
                     runtime,
                     targets,
                     reentry::Metadata {
+                        gc: Some(
+                            self.native
+                                .as_ref()
+                                .ok_or("nested GC owner absent")?
+                                .gc
+                                .clone(),
+                        ),
                         library,
                         domain: native_domain,
                         thread_handle: self

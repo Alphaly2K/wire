@@ -208,7 +208,7 @@ impl Api {
                 // native-stack word, with no pointer/padding/reference copying.
                 let layout =
                     super::value_layout::Api::load(self.library, unsafe { (self.image)(class) })?
-                        .layout(class)?;
+                        .layout_in(class, images)?;
                 let (width, _) = layout.scalar_inline()?;
                 if !matches!(width, 1 | 2 | 4 | 8) {
                     return Err("managed scalar aggregate exceeds native-stack word".into());

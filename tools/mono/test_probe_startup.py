@@ -38,7 +38,7 @@ class StorageTests(unittest.TestCase):
         self.original_inputs = {path: content for path, content in inputs.items()
                                 if path.is_relative_to(self.game.parent)}
 
-    def invoke(self, output, fail=False):
+    def invoke(self, output, fail=False, before_startup=False):
         argv = ['probe_startup.py', '--game', str(self.game), '--sandbox', str(self.sandbox),
                 '--runtime-output', str(self.runtime), '--wire', str(self.wire),
                 '--output', str(output)]
@@ -51,6 +51,8 @@ class StorageTests(unittest.TestCase):
             expected = frozen.read_bytes()
             self.wire.write_bytes(b'rebuilt wire')
             self.assertEqual(frozen.read_bytes(), expected)
+            if before_startup:
+                raise subprocess.TimeoutExpired(command, 180)
             log = self.sandbox / 'Users/wire/AppData/LocalLow/Game/Player.log'
             log.parent.mkdir(parents=True, exist_ok=True)
             log.write_text('actual guest log\n')
@@ -89,6 +91,17 @@ class StorageTests(unittest.TestCase):
         with self.assertRaises(subprocess.TimeoutExpired):
             self.invoke(output, fail=True)
         self.assert_retired(output)
+
+    def test_failure_before_startup_does_not_capture_previous_player_log(self):
+        log = self.sandbox / 'Users/wire/AppData/LocalLow/Game/Player.log'
+        log.parent.mkdir(parents=True)
+        log.write_text('previous probe only\n')
+        output = self.repo / 'wire-out/before-startup'
+        with self.assertRaises(subprocess.TimeoutExpired):
+            self.invoke(output, before_startup=True)
+        self.assertFalse((output / 'guest-logs').exists())
+        self.assertFalse(log.exists())
+        self.assertEqual(list(self.sandbox.parent.glob('wire-snapshot-*')), [])
 
     def test_symlink_to_original_cannot_be_used_as_sandbox(self):
         forbidden = self.repo / 'wire-out/original-link'

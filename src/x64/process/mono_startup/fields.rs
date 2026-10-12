@@ -94,12 +94,13 @@ enum Shape {
     Reference(Object),
     EnginePointer(u64),
     Inline { width: usize, alignment: usize },
+    EngineAddress { condition: bool },
 }
 impl Shape {
     fn width(self) -> usize {
         match self {
             Self::Scalar { width, .. } => width,
-            Self::Reference(_) | Self::EnginePointer(_) => 8,
+            Self::Reference(_) | Self::EnginePointer(_) | Self::EngineAddress { .. } => 8,
             Self::Inline { width, .. } => width,
         }
     }
@@ -440,6 +441,9 @@ impl Registry {
                 value_layout::Shape::Inline { width, alignment } => {
                     Shape::Inline { width, alignment }
                 }
+                value_layout::Shape::EngineAddress { condition } => {
+                    Shape::EngineAddress { condition }
+                }
             };
             records.push((slot.offset, slot.field, shape, value.to_vec()));
         }
@@ -491,6 +495,12 @@ impl Registry {
             if bytes != expected.to_le_bytes() {
                 return Err("guest resource pointer changed".into());
             }
+        }
+        if let Shape::EngineAddress { condition } = shape {
+            super::player_loop::check_address(
+                u64::from_le_bytes(bytes.try_into().unwrap()),
+                condition,
+            )?;
         }
         Ok(())
     }
@@ -592,6 +602,9 @@ impl Registry {
                 value_layout::Shape::Scalar { width, boolean } => Shape::Scalar { width, boolean },
                 value_layout::Shape::Inline { width, alignment } => {
                     Shape::Inline { width, alignment }
+                }
+                value_layout::Shape::EngineAddress { condition } => {
+                    Shape::EngineAddress { condition }
                 }
             };
             let address = owner + 16 + slot.offset as u64;

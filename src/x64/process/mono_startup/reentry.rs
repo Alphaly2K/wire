@@ -32,6 +32,7 @@ pub(super) struct ObjectRoots<'a> {
     pub(super) handles: (handles::Api, &'a mut handles::Registry),
 }
 pub(super) struct Metadata<'a> {
+    pub(super) gc: Option<super::gc_scopes::State>,
     pub(super) library: Object,
     pub(super) domain: Object,
     pub(super) thread_handle: Object,
@@ -43,7 +44,8 @@ pub(super) struct Metadata<'a> {
 pub(super) fn handles_allocation(function: &str) -> bool {
     matches!(
         function,
-        "mono_array_new"
+        "mono_object_new"
+            | "mono_array_new"
             | "mono_string_new"
             | "mono_string_new_len"
             | "mono_string_new_wrapper"
@@ -51,6 +53,7 @@ pub(super) fn handles_allocation(function: &str) -> bool {
     )
 }
 pub(super) enum PreparedAllocation {
+    Object(instances::WorkerRequest, Option<value_layout::Layout>),
     Array(Box<reference_arrays::WorkerRequest>),
     EmptyArray {
         api: arrays::Api,
@@ -67,6 +70,7 @@ pub(super) enum PreparedAllocation {
     },
 }
 pub(super) enum Allocated {
+    Object(instances::WorkerAllocation, Option<value_layout::Layout>),
     Array(reference_arrays::WorkerAllocation),
     EmptyArray(Object, instances::WorkerRoot),
     String(instances::WorkerRoot),
@@ -76,6 +80,7 @@ impl PreparedAllocation {
     /// profiler. No Metadata, Memory or Runtime RefCell is borrowed here.
     pub(super) fn execute(self) -> Result<Allocated, String> {
         match self {
+            Self::Object(request, layout) => Ok(Allocated::Object(request.execute()?, layout)),
             Self::Array(request) => Ok(Allocated::Array(request.execute()?)),
             Self::EmptyArray {
                 api,
@@ -103,6 +108,35 @@ impl PreparedAllocation {
     }
 }
 impl Metadata<'_> {
+    pub(super) fn prepare_virtual(
+        &mut self,
+        cpu: &Cpu64,
+        memory: &Memory,
+    ) -> Result<super::virtual_methods::WorkerRequest, String> {
+        memory.read_int(cpu.regs[4], 8)?;
+        let method = self.metadata.native(cpu.regs[2], metadata::Kind::Method)?;
+        let roots = self
+            .objects
+            .as_ref()
+            .ok_or("nested virtual resolution has no rooted object service")?;
+        let object = roots.roots.native(roots.api, cpu.regs[1])?;
+        let class = roots.roots.class(roots.api, cpu.regs[1])?;
+        super::virtual_methods::Api::load(self.library)?
+            .prepare_worker(roots.api, object, class, method)
+    }
+    pub(super) fn finish_virtual(
+        &mut self,
+        result: super::virtual_methods::WorkerResult,
+        memory: &mut Memory,
+    ) -> Result<u64, String> {
+        self.metadata.note_query();
+        let token = self.metadata.wrap(
+            memory,
+            metadata::Value::Handle(result.method(), metadata::Kind::Method),
+        )?;
+        eprintln!("NATIVE_MONO_NESTED_VIRTUAL_METHOD: metadata-result={token:#x}; rooted-receiver=true; no-invocation=true");
+        Ok(token)
+    }
     pub(super) fn prepare_allocation(
         &mut self,
         function: &str,
@@ -114,6 +148,40 @@ impl Metadata<'_> {
             .objects
             .as_mut()
             .ok_or("nested allocation has no owned root service")?;
+        if function == "mono_object_new" {
+            if a[0] != super::ROOT_TOKEN {
+                return Err("nested allocation has unknown domain".into());
+            }
+            let class = self.metadata.native(a[1], metadata::Kind::Class)?;
+            let image = sym!(
+                self.library,
+                "mono_class_get_image",
+                unsafe extern "C" fn(Object) -> Object
+            );
+            let image = unsafe { image(class) };
+            let images = self.images.live_native_images()?;
+            if !images.contains(&image) {
+                return Err("nested allocation class outside owned images".into());
+            }
+            super::closed_types::Api::load(self.library)?.concrete(class)?;
+            let value = sym!(
+                self.library,
+                "mono_class_is_valuetype",
+                unsafe extern "C" fn(Object) -> i32
+            );
+            let layout = if unsafe { value(class) } != 0 {
+                Some(value_layout::Api::load(self.library, image)?.layout_in(class, &images)?)
+            } else {
+                None
+            };
+            let request = roots.roots.prepare_request(
+                roots.api,
+                self.domain,
+                class,
+                layout.as_ref().map(|layout| layout.width),
+            )?;
+            return Ok(PreparedAllocation::Object(request, layout));
+        }
         if function == "mono_array_new" {
             if a[0] != super::ROOT_TOKEN {
                 return Err("nested array allocation has unknown domain".into());
@@ -213,6 +281,50 @@ impl Metadata<'_> {
             .as_mut()
             .ok_or("nested allocation completion has no owned root service")?;
         match allocation {
+            Allocated::Object(allocation, layout) => {
+                let token = roots.roots.adopt_allocation(allocation)?;
+                roots.roots.publish(memory, token)?;
+                let native = roots.roots.native(roots.api, token)?;
+                let class = roots.roots.class(roots.api, token)?;
+                let images = self.images.live_native_images()?;
+                let core = self.images.unique_native_image(super::CORE_MODULE)?;
+                let specs = if layout.is_some() {
+                    Vec::new()
+                } else if roots.api.engine_class(class) {
+                    field_layouts::specs(self.library, core, &images, native, class)?
+                } else {
+                    field_layouts::reference_storage_specs(
+                        self.library,
+                        core,
+                        &images,
+                        native,
+                        class,
+                    )?
+                };
+                roots.fields.install_with(
+                    self.library,
+                    roots.api,
+                    roots.roots,
+                    memory,
+                    specs,
+                    |registry, native| {
+                        roots
+                            .objects
+                            .borrow_reference(roots.strings, roots.api, registry, native)
+                    },
+                )?;
+                roots.objects.publish_pending(memory)?;
+                if let Some(layout) = layout {
+                    roots.fields.publish_boxed_payload(
+                        roots.api,
+                        roots.roots,
+                        memory,
+                        token,
+                        layout,
+                    )?;
+                }
+                Ok(token)
+            }
             Allocated::Array(allocation) => {
                 let (api, arrays) = roots
                     .arrays
@@ -484,6 +596,28 @@ impl Metadata<'_> {
         memory: &mut Memory,
         stack: (u64, u64),
     ) -> Result<(), String> {
+        if matches!(
+            function,
+            "mono_unity_gc_disable" | "mono_unity_gc_enable" | "mono_unity_gc_is_disabled"
+        ) {
+            if self.domain.is_null()
+                || self.thread_handle.is_null()
+                || memory.read_int(
+                    cpu.gs_base
+                        .checked_add(0x48)
+                        .ok_or("nested GC scope TEB overflow")?,
+                    8,
+                )? != 1
+            {
+                return Err("nested GC scope requires the live owned main thread".into());
+            }
+            let result = self
+                .gc
+                .as_ref()
+                .ok_or("nested GC scope state absent")?
+                .dispatch(self.library, function)?;
+            return cpu.return_integer(memory, result);
+        }
         if function == "mono_domain_get" {
             let get = sym!(
                 self.library,
@@ -517,88 +651,7 @@ impl Metadata<'_> {
             return cpu.return_integer(memory, super::THREAD_TOKEN);
         }
         if function == "mono_object_new" && self.objects.is_some() {
-            if cpu.regs[1] != super::ROOT_TOKEN {
-                return Err("nested allocation has unknown domain".into());
-            }
-            let class = self.metadata.native(cpu.regs[2], metadata::Kind::Class)?;
-            let image = sym!(
-                self.library,
-                "mono_class_get_image",
-                unsafe extern "C" fn(Object) -> Object
-            );
-            let images = self.images.live_native_images()?;
-            if !images.contains(&unsafe { image(class) }) {
-                return Err("nested allocation class outside owned images".into());
-            }
-            super::closed_types::Api::load(self.library)?.concrete(class)?;
-            let value = sym!(
-                self.library,
-                "mono_class_is_valuetype",
-                unsafe extern "C" fn(Object) -> i32
-            );
-            let layout = if unsafe { value(class) } != 0 {
-                Some(
-                    value_layout::Api::load(self.library, unsafe { image(class) })?
-                        .layout(class)?,
-                )
-            } else {
-                None
-            };
-            let roots = self
-                .objects
-                .as_mut()
-                .ok_or("nested allocation has no owned root service")?;
-            let token = if let Some(layout) = &layout {
-                roots
-                    .roots
-                    .allocate_boxed(roots.api, self.domain, class, layout.width)?
-            } else {
-                roots.roots.allocate(roots.api, self.domain, class)?
-            };
-            roots.roots.publish(memory, token)?;
-            let native = roots.roots.native(roots.api, token)?;
-            let specs = if layout.is_some() {
-                Vec::new()
-            } else if roots.api.engine_class(class) {
-                field_layouts::specs(
-                    self.library,
-                    self.images.unique_native_image(super::CORE_MODULE)?,
-                    &images,
-                    native,
-                    class,
-                )?
-            } else {
-                field_layouts::reference_storage_specs(
-                    self.library,
-                    self.images.unique_native_image(super::CORE_MODULE)?,
-                    &images,
-                    native,
-                    class,
-                )?
-            };
-            roots.fields.install_with(
-                self.library,
-                roots.api,
-                roots.roots,
-                memory,
-                specs,
-                |registry, native| {
-                    roots
-                        .objects
-                        .borrow_reference(roots.strings, roots.api, registry, native)
-                },
-            )?;
-            roots.objects.publish_pending(memory)?;
-            if let Some(layout) = layout {
-                roots.fields.publish_boxed_payload(
-                    roots.api,
-                    roots.roots,
-                    memory,
-                    token,
-                    layout,
-                )?;
-            }
-            return cpu.return_integer(memory, token);
+            return Err("nested object allocation requires prepare/execute/finish".into());
         }
         if function == "mono_object_unbox" && self.objects.is_some() {
             let token = cpu.regs[1];
@@ -616,10 +669,11 @@ impl Metadata<'_> {
                 unsafe extern "C" fn(Object) -> Object
             );
             let image = unsafe { image(class) };
-            if !self.images.live_native_images()?.contains(&image) {
+            let images = self.images.live_native_images()?;
+            if !images.contains(&image) {
                 return Err("nested box class outside owned image family".into());
             }
-            let layout = value_layout::Api::load(self.library, image)?.layout(class)?;
+            let layout = value_layout::Api::load(self.library, image)?.layout_in(class, &images)?;
             roots.fields.sync(roots.api, roots.roots)?;
             let address =
                 roots
@@ -944,7 +998,14 @@ impl Metadata<'_> {
                     return Err("nested barrier value has no owned root identity".into());
                 }
             }
-            checked_output(memory, cpu, stack, a[1], 8)?;
+            let temporary = self.objects.is_some()
+                && a[1].is_multiple_of(8)
+                && memory.owned_noncode_access(a[1], 8)
+                && (memory.guest_private_data_slot(a[1], 8)
+                    || super::callbacks::live_temporary_slot(a[1], 8)?);
+            if !temporary {
+                checked_output(memory, cpu, stack, a[1], 8)?;
+            }
             memory.write_int(a[1], 8, a[2])?;
             return cpu.return_integer(memory, 0);
         }
@@ -1667,6 +1728,7 @@ mod tests {
         let mut registry = metadata::Registry::default();
         let mut images = images::Registry::default();
         let mut route = Metadata {
+            gc: None,
             library: ptr::null_mut(),
             domain: ptr::null_mut(),
             thread_handle: ptr::null_mut(),
@@ -1735,6 +1797,7 @@ mod tests {
         let mut native_class = [0u64; 32];
         let owned = 0x6fff00000000;
         let mut route = Metadata {
+            gc: None,
             library: ptr::null_mut(),
             domain: ptr::null_mut(),
             thread_handle: ptr::null_mut(),
@@ -1844,6 +1907,7 @@ mod tests {
             .unwrap();
         let mut images = images::Registry::default();
         let mut route = Metadata {
+            gc: None,
             library: ptr::null_mut(),
             domain: ptr::null_mut(),
             thread_handle: ptr::null_mut(),

@@ -496,7 +496,14 @@ impl State {
             &mut super::callbacks::worker_profiler,
         )?;
         self.calls += 1;
-        eprintln!("NATIVE_MONO_WORKER_TLS: guest-thread={guest}; export={function}; opaque-result={result:#x}");
+        if !matches!(
+            function,
+            "mono_domain_get" | "mono_get_root_domain" | "mono_thread_current"
+        ) || self.calls <= 16
+            || self.calls.is_power_of_two()
+        {
+            eprintln!("NATIVE_MONO_WORKER_TLS: guest-thread={guest}; export={function}; opaque-result={result:#x}; calls={}", self.calls);
+        }
         Ok(result)
     }
     pub(super) fn metadata(

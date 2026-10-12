@@ -1,6 +1,7 @@
 //! Balance Unity's actual temporary BDWGC suppression, including probe unwind.
 //! No managed allocation/GC checks may claim success while collection is disabled.
 use super::Object;
+use std::{cell::RefCell, rc::Rc};
 #[derive(Clone, Copy)]
 struct Api {
     disable: unsafe extern "C" fn(),
@@ -25,15 +26,34 @@ impl Api {
         })
     }
 }
+#[derive(Default, Clone)]
+pub(super) struct State(Rc<RefCell<Inner>>);
+impl State {
+    pub(super) fn dispatch(&self, library: Object, function: &str) -> Result<u64, String> {
+        self.0
+            .try_borrow_mut()
+            .map_err(|_| "Unity GC scope state is already borrowed")?
+            .dispatch(library, function)
+    }
+    pub(super) fn restore(&self) -> Result<(), String> {
+        self.0
+            .try_borrow_mut()
+            .map_err(|_| "Unity GC scope restore is already borrowed")?
+            .restore()
+    }
+    pub(super) fn report(&self) -> String {
+        self.0.borrow().report()
+    }
+}
 #[derive(Default)]
-pub(super) struct State {
+struct Inner {
     api: Option<Api>,
     depth: usize,
     disables: usize,
     enables: usize,
     unwound: usize,
 }
-impl State {
+impl Inner {
     fn check(&self, api: Api) -> Result<(), String> {
         if (unsafe { (api.disabled)() } != 0) != (self.depth != 0) {
             return Err("Unity GC state differs from owned suppression scopes".into());
@@ -116,9 +136,9 @@ mod tests {
             enable,
             disabled,
         };
-        let mut state = State {
+        let mut state = Inner {
             api: Some(api),
-            ..State::default()
+            ..Inner::default()
         };
         assert!(state.apply(api, "mono_unity_gc_enable").is_err());
         state.apply(api, "mono_unity_gc_disable").unwrap();

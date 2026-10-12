@@ -34,6 +34,15 @@ def snapshot_player_logs(sandbox, output):
                 shutil.copy2(log, destination)
 
 
+def reset_player_logs(sandbox):
+    # A failure before Unity startup must not inherit the preceding run's log.
+    users = sandbox / 'Users'
+    if users.is_dir():
+        for name in ('Player.log', 'Player-prev.log'):
+            for log in users.rglob(name):
+                log.unlink()
+
+
 def main():
     # Input links and the small frozen wire executable retire even on timeout,
     # failed evidence checks or interruption. The game directory is reused.
@@ -44,7 +53,7 @@ def main():
 def run(cleanup):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--game', type=Path, required=True, help='read-only original EXE')
-    parser.add_argument('--runtime-output', type=Path, default=REPO / 'wire-out/native-mono-game-classlib')
+    parser.add_argument('--runtime-output', type=Path, default=REPO / 'wire-out/native-mono-m1')
     parser.add_argument('--output', type=Path, default=REPO / 'wire-out/native-mono-unity-startup-probe')
     parser.add_argument('--registration-reference', type=Path, default=REPO / 'wire-out/native-mono-probe-state/registration-reference.tsv', help='frozen original Unity registration trace')
     parser.add_argument('--wire', type=Path, default=REPO / 'target/release/wire')
@@ -140,6 +149,7 @@ def run(cleanup):
         'full_game_backend': False, 'timing_is_performance_comparison': False,
         'native_presenter_requested': args.window or args.capture_frame,
         'present_capture_requested': args.capture_frame}, indent=2) + '\n')
+    reset_player_logs(sandbox)
     start = time.monotonic()
     cleanup.callback(snapshot_player_logs, sandbox, output)
     with (output / 'startup.log').open('w') as stream:

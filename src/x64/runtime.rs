@@ -1221,6 +1221,14 @@ impl Runtime64 {
     pub(crate) fn register_image(&mut self, base: u64, size: u32, entry: u64) {
         self.guest_images.insert(base, (size, entry));
     }
+    pub(crate) fn module_image_bounds(&self, name: &str) -> Option<(u64, u64)> {
+        let (&base, _) = self
+            .modules
+            .iter()
+            .find(|(_, (module, _))| module.eq_ignore_ascii_case(name))?;
+        let &(size, _) = self.guest_images.get(&base)?;
+        Some((base, base.checked_add(u64::from(size))?))
+    }
     pub(crate) fn filesystem(&self) -> Result<crate::fs::GuestFs, String> {
         self.fs
             .clone()

@@ -16,6 +16,8 @@ Mono reproducibility build 和旧的大型 API 日志，移动保留存档而非
 当前 `.codex/worktrees` 约 34 MB，磁盘可用空间从约 120 GiB 增至 158 GiB。
 后续不再清理 `/tmp`，也不在 worktree 中重新构建或复制游戏。
 
-存储回归 3 项通过：连续两轮使用相同 sandbox inode；wire 输入重建不改变运行中
+存储回归 4 项通过：连续两轮使用相同 sandbox inode；wire 输入重建不改变运行中
 快照；超时仍保存 Player 日志并删除临时链接/快照。另验证指向原游戏的 sandbox
-在执行之前被拒绝。这些是 harness 验证，不代表游戏已进入可交互界面。
+在执行之前被拒绝，并在运行前清除旧 Player 日志，避免启动前失败留下上一轮的
+日志。实际 probe-132 退出后也清理了所有临时链接/快照。这些是 harness 验证，
+不代表游戏已进入可交互界面。

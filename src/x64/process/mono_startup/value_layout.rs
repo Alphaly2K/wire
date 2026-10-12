@@ -7,12 +7,13 @@ pub(super) enum Shape {
     Scalar { width: usize, boolean: bool },
     Reference(Object),
     Inline { width: usize, alignment: usize },
+    EngineAddress { condition: bool },
 }
 impl Shape {
     pub(super) fn width(self) -> usize {
         match self {
             Self::Scalar { width, .. } | Self::Inline { width, .. } => width,
-            Self::Reference(_) => 8,
+            Self::Reference(_) | Self::EngineAddress { .. } => 8,
         }
     }
     fn alignment(self) -> usize {
@@ -146,6 +147,13 @@ impl Layout {
                 Shape::Scalar { boolean: true, .. } if data[0] > 1 => {
                     return Err("typed value Boolean is not canonical".into())
                 }
+                Shape::EngineAddress { condition } => {
+                    super::player_loop::check_address(
+                        u64::from_le_bytes(data.try_into().unwrap()),
+                        condition,
+                    )?;
+                    None
+                }
                 _ => None,
             });
         }
@@ -265,13 +273,32 @@ impl Api {
         !class.is_null() && unsafe { (self.image)(class) } == self.owned_image
     }
     pub(super) fn layout(self, class: Object) -> Result<Layout, String> {
-        self.layout_inner(class, &mut Vec::new())
+        self.layout_inner(class, &mut Vec::new(), &[])
     }
-    fn layout_inner(self, class: Object, path: &mut Vec<Object>) -> Result<Layout, String> {
+    pub(super) fn layout_in(self, class: Object, images: &[Object]) -> Result<Layout, String> {
+        if !self.owns(class)
+            || images.is_empty()
+            || images.len() > 512
+            || images.iter().any(|image| image.is_null())
+            || !images.contains(&self.owned_image)
+        {
+            return Err("value layout image family must contain the owned root image".into());
+        }
+        self.layout_inner(class, &mut Vec::new(), images)
+    }
+    fn layout_inner(
+        self,
+        class: Object,
+        path: &mut Vec<Object>,
+        images: &[Object],
+    ) -> Result<Layout, String> {
         if path.len() >= 8 || path.contains(&class) {
             return Err("nested value layout exceeds acyclic depth bound".into());
         }
-        if !self.owns(class) || unsafe { (self.value)(class) } == 0 {
+        if class.is_null()
+            || !(self.owns(class) || images.contains(&unsafe { (self.image)(class) }))
+            || unsafe { (self.value)(class) } == 0
+        {
             return Err("value layout requires an owned metadata value class".into());
         }
         self.closed.concrete(class)?;
@@ -323,7 +350,7 @@ impl Api {
                 }
                 self.closed.concrete(target)?;
                 if unsafe { (self.value)(target) } != 0 && unsafe { (self.is_enum)(target) } == 0 {
-                    let child = self.layout_inner(target, path)?;
+                    let child = self.layout_inner(target, path, images)?;
                     let end = offset
                         .checked_add(child.width)
                         .ok_or("nested field range overflow")?;
@@ -377,6 +404,10 @@ impl Api {
                     }
                     shape
                 }
+            } else if let Some(condition) =
+                super::player_loop::address_slot(class, field, kind, offset)
+            {
+                Shape::EngineAddress { condition }
             } else {
                 let label = |name: *const libc::c_char| {
                     if name.is_null() {
@@ -465,9 +496,8 @@ mod tests {
     unsafe extern "C" fn test_name(_: Object) -> *const libc::c_char {
         c"test".as_ptr()
     }
-    #[test]
-    fn value_fields_admit_closed_generic_and_object_references_but_reject_pointers() {
-        let api = Api {
+    fn test_api() -> Api {
+        Api {
             closed: super::super::closed_types::tests::api(),
             image: test_image,
             value: test_value,
@@ -485,7 +515,11 @@ mod tests {
             class_name: test_name,
             field_name: test_name,
             owned_image: 1usize as Object,
-        };
+        }
+    }
+    #[test]
+    fn value_fields_admit_closed_generic_and_object_references_but_reject_pointers() {
+        let api = test_api();
         for kind in [0x15, 0x1c] {
             FIELD_KIND.with(|value| value.set(kind));
             let layout = api.layout(10usize as Object).unwrap();
@@ -516,6 +550,61 @@ mod tests {
             ..api
         };
         assert!(value_class.layout(10usize as Object).is_err());
+    }
+    thread_local! { static CROSS_CYCLE: Cell<bool> = const { Cell::new(false) }; }
+    unsafe extern "C" fn cross_image(class: Object) -> Object {
+        (if class == 10usize as Object { 1 } else { 2 }) as Object
+    }
+    unsafe extern "C" fn cross_fields(class: Object, iterator: *mut Object) -> Object {
+        if unsafe { *iterator }.is_null() {
+            unsafe { *iterator = 1usize as Object };
+            class
+        } else {
+            ptr::null_mut()
+        }
+    }
+    unsafe extern "C" fn cross_parent(field: Object) -> Object {
+        field
+    }
+    unsafe extern "C" fn cross_type(field: Object) -> Object {
+        (if field == 10usize as Object { 3 } else { 4 }) as Object
+    }
+    unsafe extern "C" fn cross_kind(ty: Object) -> u32 {
+        if ty == 3usize as Object || CROSS_CYCLE.with(Cell::get) {
+            0x11
+        } else {
+            0xb
+        }
+    }
+    unsafe extern "C" fn cross_class(_: Object) -> Object {
+        20usize as Object
+    }
+    #[test]
+    fn nested_values_only_cross_the_explicit_owned_image_family() {
+        let api = Api {
+            image: cross_image,
+            value: test_all_value,
+            fields: cross_fields,
+            parent: cross_parent,
+            ty: cross_type,
+            kind: cross_kind,
+            type_class: cross_class,
+            ..test_api()
+        };
+        let root = 10usize as Object;
+        let images = [1usize as Object, 2usize as Object];
+        assert!(api.layout(root).is_err());
+        assert!(api.layout_in(root, &images[..1]).is_err());
+        let layout = api.layout_in(root, &images).unwrap();
+        assert_eq!(layout.scalar_inline().unwrap(), (8, 8));
+        assert!(api.layout_in(20usize as Object, &images).is_err());
+        assert!(api.layout_in(root, &[]).is_err());
+        assert!(api.layout_in(root, &[ptr::null_mut(), images[0]]).is_err());
+        assert!(api.layout_in(root, &[images[0]; 513]).is_err());
+        CROSS_CYCLE.with(|cycle| cycle.set(true));
+        let error = api.layout_in(root, &images).err().unwrap();
+        assert!(error.contains("acyclic"));
+        CROSS_CYCLE.with(|cycle| cycle.set(false));
     }
     fn api_for_empty_refs() -> instances::Api {
         instances::tests::api()
@@ -580,6 +669,27 @@ mod tests {
         };
         assert!(scalar.scalar_inline().is_err());
         assert!(layout().scalar_inline().is_err());
+        let engine = Layout {
+            class: 2usize as Object,
+            width: 8,
+            alignment: 8,
+            value: true,
+            slots: vec![Slot {
+                nested: false,
+                offset: 0,
+                field: 1usize as Object,
+                shape: Shape::EngineAddress { condition: false },
+            }],
+        };
+        engine.check().unwrap();
+        assert!(engine.scalar_inline().is_err());
+        assert!(engine
+            .validate(
+                &99u64.to_le_bytes(),
+                api_for_empty_refs(),
+                &instances::Registry::default()
+            )
+            .is_err());
         let mut nested = Layout {
             class: 2usize as Object,
             width: 24,

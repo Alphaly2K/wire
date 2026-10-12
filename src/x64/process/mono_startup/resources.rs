@@ -237,9 +237,9 @@ unsafe fn load_result(
     let result = if index == 0 {
         callbacks::guest_string_span(b.loads[index], units.as_deref(), &[])?
     } else if index == 5 {
-        callbacks::guest_positioned_string_span(b.loads[index], units.as_deref(), &[token], &[])?
+        callbacks::guest_asset_string_span(b.loads[index], units.as_deref(), &[token], &[])?
     } else {
-        callbacks::guest_string_span(b.loads[index], units.as_deref(), &[token])?
+        callbacks::guest_asset_string_span(b.loads[index], units.as_deref(), &[], &[token])?
     };
     let native = if index == 3 {
         // ResourceRequest's actual marshaller constructs AsyncOperation(ptr).

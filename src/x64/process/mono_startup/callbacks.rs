@@ -11,6 +11,9 @@ const STACK_BASE: u64 = 0x6ffd00000000;
 const STACK_BYTES: u64 = 1024 * 1024;
 const RETURN: u64 = 0x6ffd00100000;
 const WORK_LIMIT: u64 = 2_000_000;
+// Resource loads and prefab clones deserialize entire checked object graphs.
+// Only their fixed, signature-verified adapters select this larger bound.
+const ASSET_WORK_LIMIT: u64 = 32_000_000;
 const STACK_SLICE: u64 = STACK_BYTES / 8;
 #[derive(Clone, Copy, Default)]
 pub(super) struct Stats {
@@ -42,6 +45,21 @@ impl Drop for Owner<'_> {
     }
 }
 thread_local! { static OWNER: Cell<*const Owner<'static>> = const { Cell::new(ptr::null()) }; }
+/// Query only the paused runtime's allocation ledger. The caller already owns
+/// its Memory borrow and must independently check permissions/code history.
+pub(super) fn live_temporary_slot(address: u64, width: u64) -> Result<bool, String> {
+    OWNER.with(|slot| {
+        if slot.get().is_null() {
+            return Ok(false);
+        }
+        let owner = unsafe { &*slot.get() };
+        let runtime = owner
+            .runtime
+            .try_borrow()
+            .map_err(|_| "temporary reference runtime is already borrowed")?;
+        Ok(runtime.live_data_slot(address, width))
+    })
+}
 struct Scope;
 impl Drop for Scope {
     fn drop(&mut self) {
@@ -206,6 +224,15 @@ fn execute_scalar_guest(
     args: &[u64],
     floating: &[(usize, u64)],
 ) -> Result<(u64, u64), String> {
+    execute_scalar_guest_bounded(owner, target, args, floating, WORK_LIMIT)
+}
+fn execute_scalar_guest_bounded(
+    owner: &Owner<'_>,
+    target: u64,
+    args: &[u64],
+    floating: &[(usize, u64)],
+    work_limit: u64,
+) -> Result<(u64, u64), String> {
     super::burst_shared::validate_handles()?;
     if floating
         .iter()
@@ -287,7 +314,9 @@ fn execute_scalar_guest(
     for &(index, bits) in floating {
         cpu.xmm[index][..8].copy_from_slice(&bits.to_le_bytes());
     }
-    while cpu.work < WORK_LIMIT {
+    let mono_start = owner.mono_reentries.get();
+    let managed_start = owner.managed_reentries.get();
+    loop {
         if cpu.rip == RETURN {
             if let Some(route) = owner.metadata.as_ref() {
                 route
@@ -298,6 +327,17 @@ fn execute_scalar_guest(
             return Ok((
                 cpu.regs[0],
                 u64::from_le_bytes(cpu.xmm[0][..8].try_into().unwrap()),
+            ));
+        }
+        if cpu.work >= work_limit {
+            return Err(format!(
+                "native callback work limit exceeded; target={target:#x}; rip={:#x}; work={}; limit={work_limit}; depth={}; mono-reentries={}; managed-reentries={}; registers={:x?}",
+                cpu.rip,
+                cpu.work,
+                depth + 1,
+                owner.mono_reentries.get() - mono_start,
+                owner.managed_reentries.get() - managed_start,
+                cpu.regs,
             ));
         }
         let binding = owner.runtime.borrow().gateways.binding(&cpu.rip);
@@ -334,6 +374,19 @@ fn execute_scalar_guest(
                     owner
                         .managed_reentries
                         .set(owner.managed_reentries.get() + 1);
+                } else if binding.original_function.as_ref() == "mono_object_get_virtual_method" {
+                    let request = route
+                        .try_borrow_mut()
+                        .map_err(|_| "nested virtual metadata is already borrowed")?
+                        .prepare_virtual(&cpu, &owner.memory.borrow())?;
+                    // Resolving generic virtual metadata may allocate. Keep the
+                    // pinned receiver but release all guest/registry borrows.
+                    let resolved = request.execute()?;
+                    let token = route
+                        .try_borrow_mut()
+                        .map_err(|_| "nested virtual completion metadata is already borrowed")?
+                        .finish_virtual(resolved, &mut owner.memory.borrow_mut())?;
+                    cpu.return_integer(&owner.memory.borrow(), token)?;
                 } else if super::reentry::handles_allocation(&binding.original_function) {
                     let prepared = route
                         .try_borrow_mut()
@@ -380,10 +433,9 @@ fn execute_scalar_guest(
             match control { Control::Returned=>{}, _=>return Err("native callback requested a scheduler/loader/control transition not yet admitted".into()) }
             cpu.work += 1;
         } else {
-            cpu.step_bounded(&mut owner.memory.borrow_mut(), WORK_LIMIT - cpu.work)?;
+            cpu.step_bounded(&mut owner.memory.borrow_mut(), work_limit - cpu.work)?;
         }
     }
-    Err("native callback work limit exceeded".into())
 }
 // Transfer only owned UTF16 and a guest-local span header. The native pinned
 // pointer never becomes a guest address. Null and Unity's empty sentinel differ.
@@ -402,6 +454,23 @@ pub(super) fn guest_positioned_string_span(
     units: Option<&[u16]>,
     leading: &[u64],
     trailing: &[u64],
+) -> Result<u64, String> {
+    guest_string_span_bounded(target, units, leading, trailing, WORK_LIMIT)
+}
+pub(super) fn guest_asset_string_span(
+    target: u64,
+    units: Option<&[u16]>,
+    leading: &[u64],
+    trailing: &[u64],
+) -> Result<u64, String> {
+    guest_string_span_bounded(target, units, leading, trailing, ASSET_WORK_LIMIT)
+}
+fn guest_string_span_bounded(
+    target: u64,
+    units: Option<&[u16]>,
+    leading: &[u64],
+    trailing: &[u64],
+    work_limit: u64,
 ) -> Result<u64, String> {
     if leading.len() + trailing.len() > 3 {
         return Err("string span callback arity exceeded".into());
@@ -448,7 +517,7 @@ pub(super) fn guest_positioned_string_span(
         let mut arguments = leading.to_vec();
         arguments.push(address);
         arguments.extend_from_slice(trailing);
-        execute_guest(owner, target, &arguments)
+        execute_scalar_guest_bounded(owner, target, &arguments, &[], work_limit).map(|r| r.0)
     })
 }
 /// Fixed scalar Win64 ABI: integer registers and positional XMM arguments;
@@ -471,6 +540,15 @@ pub(super) fn guest_arguments(target: u64, args: &[u64]) -> Result<u64, String> 
             return Err("guest argument callback has no owner".into());
         }
         execute_guest(unsafe { &*slot.get() }, target, args)
+    })
+}
+pub(super) fn guest_asset_arguments(target: u64, args: &[u64]) -> Result<u64, String> {
+    OWNER.with(|slot| {
+        if slot.get().is_null() {
+            return Err("asset callback has no owner".into());
+        }
+        execute_scalar_guest_bounded(unsafe { &*slot.get() }, target, args, &[], ASSET_WORK_LIMIT)
+            .map(|r| r.0)
     })
 }
 /// UTF16 span arguments share one scoped guest allocation. All positions are
@@ -934,6 +1012,52 @@ fn reject_profiler(reason: &str) -> ! {
 #[cfg(test)]
 mod tests {
     use super::super::super::super::memory::{EXECUTE, READ, WRITE};
+    #[test]
+    fn nested_temporary_heap_slots_exclude_padding_and_freed_allocations() {
+        let mut memory = Memory::default();
+        memory
+            .map(super::super::super::STACK, 65536, READ | WRITE)
+            .unwrap();
+        let mut runtime = Runtime64::new(
+            &mut memory,
+            0x140000000,
+            super::super::super::STACK,
+            65536,
+            "temporary-ledger",
+        )
+        .unwrap();
+        let call = |name: &str, args: &[u64], memory: &mut Memory, runtime: &mut Runtime64| {
+            let rsp = super::super::super::STACK + 65536 - 72;
+            memory.write_int(rsp, 8, 0x1000).unwrap();
+            let mut cpu = Cpu64::new(0, rsp);
+            for (&index, &word) in [1, 2, 8, 9].iter().zip(args) {
+                cpu.regs[index] = word;
+            }
+            runtime
+                .dispatch("kernel32.dll", name, &mut cpu, memory)
+                .unwrap();
+            cpu.regs[0]
+        };
+        let heap = call("GetProcessHeap", &[], &mut memory, &mut runtime);
+        let block = call("HeapAlloc", &[heap, 8, 24], &mut memory, &mut runtime);
+        assert_ne!(block, 0);
+        let (checked, _) = with_owner(&mut memory, &mut runtime, [0; 7], || {
+            assert!(live_temporary_slot(block + 16, 8)?);
+            assert!(!live_temporary_slot(block + 24, 8)?);
+            Ok::<_, String>(())
+        })
+        .unwrap();
+        checked.unwrap();
+        assert_eq!(
+            call("HeapFree", &[heap, 0, block], &mut memory, &mut runtime),
+            1
+        );
+        let (checked, _) = with_owner(&mut memory, &mut runtime, [0; 7], || {
+            live_temporary_slot(block, 8)
+        })
+        .unwrap();
+        assert!(!checked.unwrap());
+    }
     unsafe extern "C" fn allocating_string(
         _: super::super::Object,
         _: *const super::super::c_char,
@@ -942,6 +1066,17 @@ mod tests {
         // A heap expansion callback must execute real guest instructions while
         // the prepared native allocation holds no Rust memory/metadata borrow.
         unsafe { profiler_resize(ptr::null_mut(), 0x20000) };
+        4usize as super::super::Object
+    }
+    unsafe extern "C" fn allocating_object(
+        _: super::super::Object,
+        _: super::super::Object,
+        status: *mut u16,
+    ) -> super::super::Object {
+        unsafe {
+            profiler_resize(ptr::null_mut(), 0x30000);
+            *status = 0;
+        }
         4usize as super::super::Object
     }
     #[test]
@@ -979,15 +1114,109 @@ mod tests {
                     }
                     _ => return Err("allocation reply kind changed".into()),
                 }
+                let mut roots = super::super::instances::Registry::default();
+                let request = roots.prepare_request(
+                    super::super::instances::tests::allocation_api(allocating_object),
+                    1usize as super::super::Object,
+                    2usize as super::super::Object,
+                    None,
+                )?;
+                let allocation =
+                    super::super::reentry::PreparedAllocation::Object(request, None).execute()?;
+                match allocation {
+                    super::super::reentry::Allocated::Object(allocation, _) => {
+                        roots.adopt_allocation(allocation)?;
+                    }
+                    _ => return Err("object allocation reply kind changed".into()),
+                }
+                roots.release(super::super::instances::tests::identity_api());
                 Ok::<_, String>(())
             },
         )
         .unwrap();
         result.unwrap();
-        assert_eq!(stats.calls[4], 1);
+        assert_eq!(stats.calls[4], 2);
         assert!(memory.read_int(STACK_BASE, 8).is_err());
     }
     use super::*;
+    #[test]
+    fn callback_work_bound_preserves_exact_return_and_restores_after_exhaustion() {
+        let mut memory = Memory::default();
+        memory.map(0x1000, 4096, READ | WRITE | EXECUTE).unwrap();
+        // mov ecx,2; dec ecx; jne -4; ret -- exactly six work units.
+        memory
+            .write(0x1000, &[0xb9, 2, 0, 0, 0, 0xff, 0xc9, 0x75, 0xfc, 0xc3])
+            .unwrap();
+        memory.write(0x1100, &[0xeb, 0xfe]).unwrap();
+        memory
+            .map(super::super::super::STACK, 65536, READ | WRITE)
+            .unwrap();
+        let mut runtime = Runtime64::new(
+            &mut memory,
+            0x140000000,
+            super::super::super::STACK,
+            65536,
+            "callback-work-bound",
+        )
+        .unwrap();
+        let teb = runtime.teb();
+        let bounds = [
+            memory.read_int(teb + 8, 8).unwrap(),
+            memory.read_int(teb + 16, 8).unwrap(),
+        ];
+        let (result, _) = with_owner(&mut memory, &mut runtime, [0; 7], || {
+            OWNER.with(|slot| {
+                let owner = unsafe { &*slot.get() };
+                let error = execute_scalar_guest_bounded(owner, 0x1000, &[], &[], 5).unwrap_err();
+                assert!(error.contains("work=5; limit=5; depth=1"));
+                assert!(error.contains("rip=0x1009"));
+                assert_eq!(owner.depth.get(), 0);
+                assert_eq!(owner.memory.borrow().read_int(teb + 8, 8)?, bounds[0]);
+                assert_eq!(owner.memory.borrow().read_int(teb + 16, 8)?, bounds[1]);
+                execute_scalar_guest_bounded(owner, 0x1000, &[], &[], 6)?;
+                let error = execute_scalar_guest_bounded(owner, 0x1100, &[], &[], 11).unwrap_err();
+                assert!(error.contains("work=11; limit=11; depth=1"));
+                assert!(error.contains("rip=0x1100"));
+                assert_eq!(owner.depth.get(), 0);
+                Ok::<_, String>(())
+            })
+        })
+        .unwrap();
+        result.unwrap();
+        assert!(memory.read_int(STACK_BASE, 8).is_err());
+    }
+    #[test]
+    fn resource_work_bound_does_not_extend_ordinary_callbacks() {
+        let mut memory = Memory::default();
+        memory.map(0x1000, 4096, READ | WRITE | EXECUTE).unwrap();
+        // dec ecx; jne -4; ret -- exceeds the scalar budget, then returns.
+        memory
+            .write(0x1000, &[0xff, 0xc9, 0x75, 0xfc, 0xc3])
+            .unwrap();
+        memory
+            .map(super::super::super::STACK, 65536, READ | WRITE)
+            .unwrap();
+        let mut runtime = Runtime64::new(
+            &mut memory,
+            0x140000000,
+            super::super::super::STACK,
+            65536,
+            "resource-work-bound",
+        )
+        .unwrap();
+        let (result, _) = with_owner(&mut memory, &mut runtime, [0; 7], || {
+            let iterations = WORK_LIMIT / 2 + 1;
+            let before = guest_arguments(0x1000, &[iterations]).unwrap_err();
+            assert!(before.contains("work=2000000; limit=2000000"));
+            guest_asset_arguments(0x1000, &[iterations])?;
+            let after = guest_arguments(0x1000, &[iterations]).unwrap_err();
+            assert!(after.contains("work=2000000; limit=2000000"));
+            Ok::<_, String>(())
+        })
+        .unwrap();
+        result.unwrap();
+        assert!(memory.read_int(STACK_BASE, 8).is_err());
+    }
     #[test]
     fn utf16_arguments_preserve_two_spans_float_output_and_fault_cleanup() {
         let mut memory = Memory::default();
@@ -1475,6 +1704,7 @@ mod tests {
             &mut runtime,
             [0x1000; 7],
             super::super::reentry::Metadata {
+                gc: None,
                 library: ptr::null_mut(),
                 domain: ptr::null_mut(),
                 thread_handle: ptr::null_mut(),

@@ -55,6 +55,45 @@ pub(super) struct Registry {
     views_retired: bool,
 }
 impl Registry {
+    /// Transfer an actual managed-created strong v2 handle to an engine owner.
+    /// The native adapter resolves/roots its typed target before calling this;
+    /// the guest never supplies the native handle address.
+    pub(super) fn adopt_native(
+        &mut self,
+        api: Api,
+        native: Object,
+        object: Object,
+        token: u64,
+    ) -> Result<u64, String> {
+        if self.released
+            || self.views_retired
+            || self.issued >= 4096
+            || native.is_null()
+            || object.is_null()
+            || token == 0
+            || native as usize & 1 != 0
+            || self.entries.values().any(|entry| entry.native == native)
+            || unsafe { (api.target)(native) } != object
+        {
+            return Err("native handle transfer requires a unique live strong target".into());
+        }
+        let view = HostRegion::owned(8)?;
+        view.with_native(|dest| unsafe { dest.as_ptr().cast::<u64>().write_unaligned(token) })?;
+        let handle = 0x6ffea0000000 + self.issued as u64 * 16;
+        self.entries.insert(
+            handle,
+            Entry {
+                native,
+                object,
+                token,
+                view,
+                published: false,
+                weak: false,
+            },
+        );
+        self.issued += 1;
+        Ok(handle)
+    }
     pub(super) fn new_handle(
         &mut self,
         api: Api,
@@ -261,6 +300,35 @@ mod tests {
     }
     unsafe extern "C" fn free(_: Object) {
         ROOTS.with(|r| r.set(r.get() - 1));
+    }
+    #[test]
+    fn transferred_native_handle_is_freed_once_by_its_guest_owner() {
+        ROOTS.with(|r| r.set(0));
+        let api = Api {
+            new,
+            weak: new,
+            target,
+            free,
+        };
+        let object = 0x44usize as Object;
+        let native = unsafe { new(object, 0) };
+        let mut registry = Registry::default();
+        let guest = registry.adopt_native(api, native, object, 0x77).unwrap();
+        assert_ne!(guest, native as u64);
+        assert!(registry.adopt_native(api, native, object, 0x77).is_err());
+        assert!(registry
+            .adopt_native(api, 0x45usize as Object, object, 0x77)
+            .is_err());
+        assert_eq!(ROOTS.with(Cell::get), 1);
+        let mut memory = Memory::default();
+        registry.publish(&mut memory, guest).unwrap();
+        assert_eq!(memory.read_int(guest, 8).unwrap(), 0x77);
+        assert!(registry.free(api, guest).is_err());
+        registry.retire_view(&mut memory, guest).unwrap();
+        registry.free(api, guest).unwrap();
+        registry.release(api);
+        assert_eq!(ROOTS.with(Cell::get), 0);
+        assert!(registry.native_handle(api, guest).is_err());
     }
     #[test]
     fn external_handles_preserve_owned_identity_reject_forgery_and_release_once() {
