@@ -1,4 +1,4 @@
-//! Fixed Canvas / RectTransform / hierarchy ABIs, validated as a whole before
+//! Fixed UI, texture, sprite and hierarchy ABIs, validated as a whole before
 //! registration. The original Unity engine owns layout and rendering behavior.
 use super::{bindings, callbacks, engine_objects, managed_calls, value_layout, Object};
 use std::{
@@ -13,7 +13,7 @@ enum Scalar {
     Boolean,
     Integer,
     Float,
-    Enum(&'static CStr),
+    Enum(&'static CStr, &'static CStr),
 }
 #[derive(Clone, Copy)]
 enum Shape {
@@ -65,10 +65,13 @@ macro_rules! shape {
         Shape::Set(Scalar::Float)
     };
     (enum_get, $class:expr) => {
-        Shape::Get(Scalar::Enum($class))
+        Shape::Get(Scalar::Enum(c"UnityEngine", $class))
     };
     (enum_set, $class:expr) => {
-        Shape::Set(Scalar::Enum($class))
+        Shape::Set(Scalar::Enum(c"UnityEngine", $class))
+    };
+    (enum_get_in, $namespace:expr, $class:expr) => {
+        Shape::Get(Scalar::Enum($namespace, $class))
     };
     (value_get, $class:expr, $width:expr) => {
         Shape::ValueGet($class, $width)
@@ -127,6 +130,9 @@ macro_rules! adapter {
     };
     ($name:ident, enum_set, $class:expr) => {
         adapter!($name, int_set);
+    };
+    ($name:ident, enum_get_in, $namespace:expr, $class:expr) => {
+        adapter!($name, int_get);
     };
     ($name:ident, float_get) => {
         unsafe extern "C" fn $name(p: usize) -> f32 {
@@ -242,6 +248,53 @@ macro_rules! apis {
     };
 }
 apis! {
+    white_texture, c"Texture2D", c"get_whiteTexture_Injected", 0x1800a8260, (static_handle, c"Texture2D");
+    black_texture, c"Texture2D", c"get_blackTexture_Injected", 0x1800a82a0, (static_handle, c"Texture2D");
+    red_texture, c"Texture2D", c"get_redTexture_Injected", 0x1800a82e0, (static_handle, c"Texture2D");
+    gray_texture, c"Texture2D", c"get_grayTexture_Injected", 0x1800a8320, (static_handle, c"Texture2D");
+    linear_gray_texture, c"Texture2D", c"get_linearGrayTexture_Injected", 0x1800a8360, (static_handle, c"Texture2D");
+    normal_texture, c"Texture2D", c"get_normalTexture_Injected", 0x1800a83a0, (static_handle, c"Texture2D");
+    texture_width, c"Texture", c"GetDataWidth_Injected", 0x1800a78c0, (int_get);
+    texture_height, c"Texture", c"GetDataHeight_Injected", 0x1800a78d0, (int_get);
+    texture_dimension, c"Texture", c"GetDimension_Injected", 0x1800a78e0, (enum_get_in, c"UnityEngine.Rendering", c"TextureDimension");
+    texture_mipmaps, c"Texture", c"get_mipmapCount_Injected", 0x1800a7840, (int_get);
+    texture_readable, c"Texture", c"get_isReadable_Injected", 0x1800a7900, (bool_get);
+    texture_native, c"Texture", c"get_isNativeTexture_Injected", 0x1800a78f0, (bool_get);
+    texture_wrap, c"Texture", c"get_wrapMode_Injected", 0x180078e20, (enum_get, c"TextureWrapMode");
+    set_texture_wrap, c"Texture", c"set_wrapMode_Injected", 0x1800a7910, (enum_set, c"TextureWrapMode");
+    texture_wrap_u, c"Texture", c"get_wrapModeU_Injected", 0x180078e20, (enum_get, c"TextureWrapMode");
+    set_texture_wrap_u, c"Texture", c"set_wrapModeU_Injected", 0x1800a79a0, (enum_set, c"TextureWrapMode");
+    texture_wrap_v, c"Texture", c"get_wrapModeV_Injected", 0x180055880, (enum_get, c"TextureWrapMode");
+    set_texture_wrap_v, c"Texture", c"set_wrapModeV_Injected", 0x1800a7a20, (enum_set, c"TextureWrapMode");
+    texture_wrap_w, c"Texture", c"get_wrapModeW_Injected", 0x180078f30, (enum_get, c"TextureWrapMode");
+    set_texture_wrap_w, c"Texture", c"set_wrapModeW_Injected", 0x1800a7aa0, (enum_set, c"TextureWrapMode");
+    texture_filter, c"Texture", c"get_filterMode_Injected", 0x18007a520, (enum_get, c"FilterMode");
+    set_texture_filter, c"Texture", c"set_filterMode_Injected", 0x1800a7b20, (enum_set, c"FilterMode");
+    texture_aniso, c"Texture", c"get_anisoLevel_Injected", 0x180095580, (int_get);
+    set_texture_aniso, c"Texture", c"set_anisoLevel_Injected", 0x1800a7ba0, (int_set);
+    texture_bias, c"Texture", c"get_mipMapBias_Injected", 0x18009c230, (float_get);
+    set_texture_bias, c"Texture", c"set_mipMapBias_Injected", 0x1800a7c20, (float_set);
+    texture_texel, c"Texture", c"get_texelSize_Injected", 0x1800a7cb0, (value_get, c"Vector2", 8);
+    texture_format, c"Texture2D", c"get_format_Injected", 0x1800532e0, (enum_get, c"TextureFormat");
+    texture2d_readable, c"Texture2D", c"get_isReadable_Injected", 0x1800a7900, (bool_get);
+    sprite_pack_mode, c"Sprite", c"GetPackingMode_Injected", 0x18006a550, (int_get);
+    sprite_pack_rotation, c"Sprite", c"GetPackingRotation_Injected", 0x18006a560, (int_get);
+    sprite_packed, c"Sprite", c"GetPacked_Injected", 0x18006a570, (int_get);
+    sprite_texture_rect, c"Sprite", c"GetTextureRect_Injected", 0x18006a580, (value_get, c"Rect", 16);
+    sprite_texture_offset, c"Sprite", c"GetTextureRectOffset_Injected", 0x18006a590, (value_get, c"Vector2", 8);
+    sprite_inner_uv, c"Sprite", c"GetInnerUVs_Injected", 0x18006a5b0, (value_get, c"Vector4", 16);
+    sprite_outer_uv, c"Sprite", c"GetOuterUVs_Injected", 0x18006a5d0, (value_get, c"Vector4", 16);
+    sprite_padding, c"Sprite", c"GetPadding_Injected", 0x18006a5f0, (value_get, c"Vector4", 16);
+    sprite_bounds, c"Sprite", c"get_bounds_Injected", 0x18006a9f0, (value_get, c"Bounds", 24);
+    sprite_rect, c"Sprite", c"get_rect_Injected", 0x18006aa30, (value_get, c"Rect", 16);
+    sprite_border, c"Sprite", c"get_border_Injected", 0x18006aa40, (value_get, c"Vector4", 16);
+    sprite_texture, c"Sprite", c"get_texture_Injected", 0x18006aa50, (handle_get, c"Texture2D");
+    sprite_texture_count, c"Sprite", c"GetSecondaryTextureCount_Injected", 0x18006ab90, (int_get);
+    sprite_secondary_texture, c"Sprite", c"GetSecondaryTexture_Injected", 0x18006ab20, (handle_at, c"Texture2D");
+    sprite_pixel_ratio, c"Sprite", c"get_pixelsPerUnit_Injected", 0x18006abe0, (float_get);
+    sprite_atlas_scale, c"Sprite", c"get_spriteAtlasTextureScale_Injected", 0x18006abf0, (float_get);
+    sprite_alpha_texture, c"Sprite", c"get_associatedAlphaSplitTexture_Injected", 0x18006ac00, (handle_get, c"Texture2D");
+    sprite_pivot, c"Sprite", c"get_pivot_Injected", 0x18006acc0, (value_get, c"Vector2", 8);
     canvas_render, c"Canvas", c"get_renderMode_Injected", 0x1801a4e80, (enum_get, c"RenderMode");
     set_canvas_render, c"Canvas", c"set_renderMode_Injected", 0x1801a4ed0, (enum_set, c"RenderMode");
     root_canvas_state, c"Canvas", c"get_isRootCanvas_Injected", 0x1801a4ee0, (bool_get);
@@ -426,8 +479,8 @@ pub(super) fn install(
             Scalar::Boolean => (2, class(c"System", c"Boolean")?, false),
             Scalar::Integer => integer,
             Scalar::Float => (0xc, class(c"System", c"Single")?, false),
-            Scalar::Enum(name) => {
-                let c = class(c"UnityEngine", name)?;
+            Scalar::Enum(namespace, name) => {
+                let c = class(namespace, name)?;
                 let mut alignment = 0;
                 if unsafe { is_enum(c) } == 0
                     || unsafe { kind(enum_base(c)) } != 8

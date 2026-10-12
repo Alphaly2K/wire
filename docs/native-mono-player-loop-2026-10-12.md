@@ -260,3 +260,15 @@ probe-149 实际执行并完成 Component::GetComponentFastPath_Injected，继�
 ScriptableUIBehaviour::Awake，到 UnityEngine.UI.Image::OnEnable；当前缺
 Texture2D::get_whiteTexture_Injected。没有放宽 native local 或 guest reference
 输出准入。仍未到可交互界面，full_game_backend=false。
+
+纹理/Sprite 常用接口追加 47 项，UI 表现合计 161 项：六种 builtin texture、
+尺寸/mipmap/读取状态、TextureDimension/采样 enum、wrap/filter/aniso/bias 状态，
+Sprite packing、Rect/Bounds/UV/border/pivot、实际纹理引用等。仍整族核对 metadata
+与 exact registration target；Bounds/Vector4 复用完整 scalar layout 检查，不发布
+native texture pointers。完整 Rust 回归 **528 passed / 7 ignored**，build/Clippy 通过。
+
+probe-150 实际执行 whiteTexture 和 Sprite.get_texture，继续到 Naninovel 的
+CameraManager 构造和 PlayerLoop 查询。现有终点包括 RenderTexture.Internal_Create、
+GraphicsFormatUtility/SystemInfo 的格式能力接口，以及 PlayerLoop 重入调用的
+mono_type_get_object。后者须使用 prepare/execute/finish 的真实 RuntimeType 分配，
+避免在分配及 GC 重入时持有 Rust registry/memory 借用。尚未完成初始化服务。
