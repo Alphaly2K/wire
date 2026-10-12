@@ -89,3 +89,10 @@ probe-163 在统一原生内存语义修正后完成 6 次 MemCmp 和 PhysicsEve
 本批新增的三个 UnsafeUtility memory 注册没有重新计入上方 probe-160 snapshot
 统计；实际运行和静态盘点分别保留原始采样编号。完整回归 539 passed / 7 ignored，
 build、Clippy、8 项 inventory/harness 回归通过。
+
+probe-164 至 probe-166 接入同一 invoke 下的输入快照、engine-object SZARRAY 参数
+和 wrapper-derived v2 对象句柄返回，自动注册数 **3,391 → 3,438 → 3,501**。
+真实执行已通过两次输入更新、GetAllCamerasImpl_Injected、targetTexture/targetDisplay；
+下一实际缺口为 Display.RelativeMouseAtImpl。上方 missing 分组保留 probe-160 的
+全量快照，未将后续新增注册混入旧统计。本批完整回归 541 passed / 7 ignored，
+build、all-target Clippy 与 8 项 inventory/harness 回归通过。

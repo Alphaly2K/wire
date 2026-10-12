@@ -6,8 +6,9 @@ use crate::x64::runtime::Runtime64;
 use std::{ffi::CStr, ptr, sync::OnceLock};
 const LIMIT: usize = 1024 * 1024;
 struct Binding {
-    library: usize,
     update: usize,
+    update_type: usize,
+    intptr: usize,
     ioctl: u64,
 }
 static BINDING: OnceLock<Binding> = OnceLock::new();
@@ -22,6 +23,37 @@ macro_rules! sym {
 }
 pub(super) fn installed() -> bool {
     BINDING.get().is_some()
+}
+pub(super) fn describes(method: Object) -> bool {
+    BINDING.get().is_some_and(|b| b.update == method as usize)
+}
+pub(super) fn descriptor(method: Object) -> Option<managed_calls::Descriptor> {
+    let b = BINDING.get().filter(|b| b.update == method as usize)?;
+    Some(managed_calls::Descriptor {
+        receiver: None,
+        parameters: vec![
+            managed_calls::Parameter {
+                shape: managed_calls::Shape::Scalar {
+                    class: b.update_type as Object,
+                    width: 4,
+                    alignment: 4,
+                    boolean: false,
+                },
+                byref: false,
+            },
+            managed_calls::Parameter {
+                shape: managed_calls::Shape::Scalar {
+                    class: b.intptr as Object,
+                    width: 8,
+                    alignment: 8,
+                    boolean: false,
+                },
+                byref: false,
+            },
+        ],
+        returns: None,
+        name: "UnityEngineInternal.Input.NativeInputSystem::NotifyUpdate".into(),
+    })
 }
 pub(super) fn install(
     library: Object,
@@ -72,10 +104,9 @@ pub(super) fn install(
         ],
         images,
     )?;
-    let ioctl = registry.exact_target(
-        "UnityEngineInternal.Input.NativeInputSystem::IOCTL",
-        0x180132940,
-    )?;
+    let ioctl = registry
+        .registered_target("UnityEngineInternal.Input.NativeInputSystem::IOCTL")?
+        .ok_or("input command absent from actual Unity registration")?;
     api.fixed_typed_icall(
         unsafe { method(owner, c"IOCTL".as_ptr(), 4) },
         owner,
@@ -171,8 +202,9 @@ pub(super) fn install(
     }
     BINDING
         .set(Binding {
-            library: library as usize,
             update: update as usize,
+            update_type: update_type as usize,
+            intptr: intptr as usize,
             ioctl,
         })
         .map_err(|_| "input bindings already installed")?;
@@ -334,12 +366,11 @@ fn owned(
     Ok(())
 }
 pub(super) struct Prepared {
-    method: Object,
-    library: Object,
     guest: u64,
     initial: Header,
     update: u64,
     words: [u64; 3],
+    native_header: u64,
     payload: unsafe_buffers::InputSpan,
 }
 pub(super) fn prepare(
@@ -349,9 +380,9 @@ pub(super) fn prepare(
     arguments: u64,
     mut writable: impl FnMut(u64, usize) -> bool,
 ) -> Result<Option<Prepared>, String> {
-    let Some(b) = BINDING.get().filter(|b| b.update == method as usize) else {
+    if !describes(method) {
         return Ok(None);
-    };
+    }
     if arguments == 0 || !arguments.is_multiple_of(8) {
         return Err("input callback vector is not aligned".into());
     }
@@ -378,13 +409,13 @@ pub(super) fn prepare(
     } else {
         payload.pointer() as u64
     };
+    words[2] |= 0xa5a5a5a500000000;
     Ok(Some(Prepared {
-        method,
-        library: b.library as Object,
         guest,
         initial,
         update,
         words,
+        native_header: 0,
         payload,
     }))
 }
@@ -392,27 +423,27 @@ impl Prepared {
     pub(super) fn output_address(&self) -> u64 {
         self.guest
     }
-    pub(super) fn execute(&mut self) -> Result<Object, String> {
-        let mut pointer = self.words.as_mut_ptr() as u64;
-        let mut arguments = [
+    /// Form pointers only after Prepared reaches its final invocation location.
+    /// The ordinary runtime-invoke hook executes the call and reports exceptions.
+    pub(super) fn parameters(&mut self) -> Vec<Object> {
+        self.native_header = self.words.as_mut_ptr() as u64;
+        vec![
             (&mut self.update as *mut u64).cast(),
-            (&mut pointer as *mut u64).cast(),
-        ];
-        let mut exception = ptr::null_mut();
-        let result = unsafe {
-            (managed_calls::Api::load(self.library)?.invoke)(
-                self.method,
-                ptr::null_mut(),
-                arguments.as_mut_ptr(),
-                &mut exception,
-            )
-        };
-        if !exception.is_null() || !result.is_null() {
-            return Err("input update IL raised an exception or returned an object".into());
-        }
-        Ok(result)
+            (&mut self.native_header as *mut u64).cast(),
+        ]
+    }
+    pub(super) fn overlaps(&self, address: u64, width: usize) -> bool {
+        address.checked_add(width as u64).is_none_or(|end| {
+            (address < self.guest + 20 && self.guest < end)
+                || (self.initial.capacity != 0
+                    && address < self.initial.pointer + self.initial.capacity as u64
+                    && self.initial.pointer < end)
+        })
     }
     pub(super) fn finish(&self, memory: &mut Memory, runtime: &Runtime64) -> Result<(), String> {
+        if self.words[2] >> 32 != 0xa5a5a5a5 {
+            return Err("input callback wrote beyond its 20B header".into());
+        }
         let bytes = unsafe { std::slice::from_raw_parts(self.words.as_ptr().cast::<u8>(), 20) };
         let output = header(bytes)?;
         let (pointer, data) = if output.pointer == self.payload.pointer() as u64 {
@@ -490,5 +521,50 @@ mod tests {
         command_size(0x4b424c54, 256).unwrap();
         assert!(command_size(0x51454e42, 8).is_err());
         assert!(command_size(0x50545221, 8).is_err());
+    }
+    #[test]
+    fn input_parameters_use_final_native_header_and_failed_outputs_leave_guest_unchanged() {
+        let mut memory = Memory::default();
+        memory.map(0x1000, 4096, READ | WRITE).unwrap();
+        let runtime =
+            Runtime64::new(&mut memory, 0x140000000, 0x70000000, 65536, "input-hook").unwrap();
+        let prepared = Prepared {
+            guest: 0x1080,
+            initial: Header {
+                pointer: 0,
+                count: 0,
+                size: 0,
+                capacity: 0,
+            },
+            update: 1,
+            words: [0, 0, 0xa5a5a5a500000000],
+            native_header: 0,
+            payload: unsafe_buffers::InputSpan::new(1).unwrap(),
+        };
+        let mut prepared = Box::new(prepared); // Move before capturing pointers.
+        let parameters = prepared.parameters();
+        assert_eq!(unsafe { parameters[0].cast::<u32>().read() }, 1);
+        let native = unsafe { parameters[1].cast::<u64>().read() };
+        assert_eq!(native, prepared.words.as_ptr() as u64);
+        assert_ne!(native, prepared.guest);
+        assert!(prepared.overlaps(0x1078, 16));
+        assert!(prepared.overlaps(0x1093, 1));
+        assert!(!prepared.overlaps(0x1094, 8));
+        assert!(prepared.overlaps(u64::MAX, 8));
+        memory.write(0x1080, &[0x5a; 20]).unwrap();
+        prepared.words[2] = 0;
+        assert!(prepared.finish(&mut memory, &runtime).is_err());
+        let mut actual = [0; 20];
+        memory.read(0x1080, &mut actual).unwrap();
+        assert_eq!(actual, [0x5a; 20]);
+        prepared.words[2] = 0xa5a5a5a500000000;
+        prepared.words[0] = 1; // No owned native buffer may be exported.
+        assert!(prepared.finish(&mut memory, &runtime).is_err());
+        memory.read(0x1080, &mut actual).unwrap();
+        assert_eq!(actual, [0x5a; 20]);
+        prepared.words[0] = 0;
+        prepared.finish(&mut memory, &runtime).unwrap();
+        memory.read(0x1080, &mut actual).unwrap();
+        assert_eq!(actual, [0; 20]);
     }
 }

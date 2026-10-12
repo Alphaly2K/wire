@@ -1,7 +1,8 @@
 //! Metadata-discovered scalar/value engine bridge. The signed binary contains
 //! one fixed ARM64 register-capture entry pool, independent of method names,
 //! MethodDef tokens, assembly hashes, signature combinations and guest RVAs.
-//! Pointer/callback/lifetime protocols remain outside this ordinary value ABI.
+//! Engine reference arrays use the existing rooted container protocol. Other
+//! pointer/callback/lifetime shapes stay outside the ordinary value ABI.
 use super::{bindings, callbacks, engine_objects, images, managed_calls, value_layout, Object};
 use std::{
     cell::RefCell,
@@ -13,32 +14,31 @@ use std::{
 const POOL_CAPACITY: usize = 4096;
 // A semantic policy, not per-method ABI specifications. These families operate
 // on ordinary numeric state; capability-like Int64/IntPtr APIs are not inferred.
-const FAMILIES: &[(&CStr, &CStr, bool)] = &[
-    (c"UnityEngine", c"Application", false),
-    (c"UnityEngine", c"SystemInfo", false),
-    (c"UnityEngine", c"QualitySettings", false),
-    (c"UnityEngine", c"Time", false),
-    (c"UnityEngine", c"Screen", false),
-    (c"UnityEngine", c"Cursor", false),
-    (c"UnityEngine", c"AudioSettings", false),
-    (c"UnityEngine", c"AudioListener", false),
-    (c"UnityEngine", c"Input", false),
-    (c"UnityEngine", c"Mathf", true),
-    (c"UnityEngine", c"GL", false),
-    (c"UnityEngine", c"Graphics", false),
-    (c"UnityEngine", c"Canvas", false),
-    (c"UnityEngine", c"UISystemProfilerApi", false),
-    (c"UnityEngine.Rendering", c"GraphicsSettings", false),
-    (c"UnityEngine.Rendering", c"SplashScreen", false),
+const FAMILIES: &[(&CStr, &CStr)] = &[
+    (c"UnityEngine", c"Application"),
+    (c"UnityEngine", c"SystemInfo"),
+    (c"UnityEngine", c"QualitySettings"),
+    (c"UnityEngine", c"Time"),
+    (c"UnityEngine", c"Screen"),
+    (c"UnityEngine", c"Cursor"),
+    (c"UnityEngine", c"AudioSettings"),
+    (c"UnityEngine", c"AudioListener"),
+    (c"UnityEngine", c"Input"),
+    (c"UnityEngine", c"Mathf"),
+    (c"UnityEngine", c"GL"),
+    (c"UnityEngine", c"Graphics"),
+    (c"UnityEngine", c"Canvas"),
+    (c"UnityEngine", c"UISystemProfilerApi"),
+    (c"UnityEngine.Rendering", c"GraphicsSettings"),
+    (c"UnityEngine.Rendering", c"SplashScreen"),
     (
         c"UnityEngine.Experimental.Rendering",
         c"GraphicsFormatUtility",
-        false,
     ),
-    (c"UnityEngine", c"Bounds", true),
-    (c"UnityEngine", c"Matrix4x4", true),
-    (c"UnityEngine", c"Vector3", true),
-    (c"UnityEngine", c"Quaternion", true),
+    (c"UnityEngine", c"Bounds"),
+    (c"UnityEngine", c"Matrix4x4"),
+    (c"UnityEngine", c"Vector3"),
+    (c"UnityEngine", c"Quaternion"),
 ];
 #[derive(Clone, Copy, Debug)]
 struct Scalar {
@@ -83,12 +83,23 @@ enum Argument {
     Scalar(Scalar),
     Value(Payload),
     EngineSelf,
+    EngineArray { class: usize },
 }
 struct Binding {
+    library: usize,
     name: CString,
     target: u64,
     arguments: Vec<Argument>,
-    returns: Scalar,
+    returns: Return,
+}
+enum Return {
+    Scalar(Scalar),
+    EngineHandle { class: usize },
+}
+impl Return {
+    fn floating(&self) -> bool {
+        matches!(self, Self::Scalar(scalar) if scalar.floating())
+    }
 }
 static BINDINGS: OnceLock<Vec<Binding>> = OnceLock::new();
 thread_local! { static SEEN: RefCell<BTreeSet<usize>> = const { RefCell::new(BTreeSet::new()) }; }
@@ -205,7 +216,7 @@ fn decode(binding: &Binding, capture: &Capture) -> Result<Vec<u64>, String> {
                 integer += 1;
                 value
             }
-            Argument::Value(_) | Argument::EngineSelf => {
+            Argument::Value(_) | Argument::EngineSelf | Argument::EngineArray { .. } => {
                 let value = capture.integer[integer];
                 integer += 1;
                 Ok(value)
@@ -274,6 +285,11 @@ pub(super) fn install(
         "mono_class_is_assignable_from",
         unsafe extern "C" fn(Object, Object) -> i32
     );
+    let element_class = sym!(
+        "mono_class_get_element_class",
+        unsafe extern "C" fn(Object) -> Object
+    );
+    let rank = sym!("mono_class_get_rank", unsafe extern "C" fn(Object) -> u32);
     let corlib = sym!("mono_get_corlib", unsafe extern "C" fn() -> Object);
     let free = sym!("mono_free", unsafe extern "C" fn(Object));
     let signature = sym!(
@@ -344,7 +360,7 @@ pub(super) fn install(
     let engine_base = engine_bases[0];
     let mut visited = BTreeSet::new();
     let mut owners = Vec::new();
-    for &(namespace, owner_name, values) in FAMILIES {
+    for &(namespace, owner_name) in FAMILIES {
         for &image in &family {
             let owner = unsafe { find(image, namespace.as_ptr(), owner_name.as_ptr()) };
             if owner.is_null() || !visited.insert(owner as usize) {
@@ -357,7 +373,6 @@ pub(super) fn install(
                     namespace.to_str().unwrap(),
                     owner_name.to_str().unwrap()
                 ),
-                values,
                 unsafe { assignable(engine_base, owner) } != 0,
             ));
         }
@@ -401,12 +416,12 @@ pub(super) fn install(
                 .map_err(|e| e.to_string());
             unsafe { free(text.cast()) };
             visited.insert(owner as usize);
-            owners.push((owner, name?, true, true));
+            owners.push((owner, name?, true));
         }
     }
     let mut discovered = Vec::new();
     let mut deferred = 0;
-    for (owner, owner_name, values, engine_object) in owners {
+    for (owner, owner_name, engine_object) in owners {
         let owner_image = unsafe { image_of(owner) };
         if !family.contains(&owner_image) {
             return Err("engine declaring image is not owned".into());
@@ -488,7 +503,17 @@ pub(super) fn install(
                 }
                 let reference = unsafe { byref(ty) } != 0;
                 signature_types.push((type_kind, class, reference));
-                if engine_object
+                if index == 0 && type_kind == 0x18 && !reference {
+                    let Some(class) =
+                        api.engine_handle_result(method, owner, engine_base, &family)?
+                    else {
+                        supported = false;
+                        break;
+                    };
+                    result = Some(Return::EngineHandle {
+                        class: class as usize,
+                    });
+                } else if engine_object
                     && index == 1
                     && type_kind == 0x18
                     && !reference
@@ -497,8 +522,21 @@ pub(super) fn install(
                     && unsafe { CStr::from_ptr(names[0]) } == c"_unity_self"
                 {
                     arguments.push(Argument::EngineSelf);
+                } else if !reference && type_kind == 0x1d && index != 0 {
+                    let element = unsafe { element_class(class) };
+                    if element.is_null()
+                        || unsafe { rank(class) } != 1
+                        || !family.contains(&unsafe { image_of(element) })
+                        || unsafe { assignable(engine_base, element) } == 0
+                    {
+                        supported = false;
+                        break;
+                    }
+                    arguments.push(Argument::EngineArray {
+                        class: class as usize,
+                    });
                 } else if reference {
-                    if !values || index == 0 {
+                    if index == 0 {
                         supported = false;
                         break;
                     }
@@ -513,6 +551,10 @@ pub(super) fn install(
                                 break;
                             }
                         };
+                    if !(1..=256).contains(&width) || !matches!(alignment, 1 | 2 | 4 | 8) {
+                        supported = false;
+                        break;
+                    }
                     // Read actual Param flags from this method's bounded
                     // ParamList. No precomputed token or direction table.
                     let method_token = unsafe { token(method) };
@@ -575,7 +617,7 @@ pub(super) fn install(
                         break;
                     };
                     if index == 0 {
-                        result = Some(scalar);
+                        result = Some(Return::Scalar(scalar));
                     } else if scalar.width == 0 {
                         supported = false;
                         break;
@@ -601,6 +643,7 @@ pub(super) fn install(
                 continue;
             }
             discovered.push(Binding {
+                library: library as usize,
                 name: CString::new(name).map_err(|e| e.to_string())?,
                 target,
                 arguments,
@@ -629,9 +672,32 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
         return Err("engine argument arity changed".into());
     }
     let mut checked = arguments.to_vec();
+    let mut array_pins = Vec::new();
     for (argument, value) in binding.arguments.iter().zip(&mut checked) {
         if matches!(argument, Argument::EngineSelf) {
             *value = engine_objects::engine_pointer(*value as usize)?;
+        } else if let Argument::EngineArray { class } = argument {
+            let native = managed_calls::Api::load(binding.library as Object)?.compatible(
+                *value as Object,
+                managed_calls::Shape::Reference {
+                    class: *class as Object,
+                    string: false,
+                },
+            )?;
+            if native.is_null() {
+                *value = 0;
+                continue;
+            }
+            let (token, pin) = callbacks::with_metadata_service(|route, memory| {
+                let token = route.root_container(native, memory)?;
+                let roots = route
+                    .objects
+                    .as_ref()
+                    .ok_or("engine array has no root service")?;
+                Ok((token, roots.api.worker_root(native)?))
+            })?;
+            *value = token;
+            array_pins.push(pin);
         }
     }
     let arguments = checked.as_slice();
@@ -675,11 +741,23 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
             Vec::new(),
         )
     };
-    let word = binding.returns.normalize(if binding.returns.floating() {
-        value.1
-    } else {
-        value.0
-    })?;
+    let word = match binding.returns {
+        Return::Scalar(scalar) => {
+            scalar.normalize(if scalar.floating() { value.1 } else { value.0 })?
+        }
+        Return::EngineHandle { class } => {
+            engine_objects::engine_handle(binding.library as Object, class as Object, value.0)?
+                as u64
+        }
+    };
+    if !array_pins.is_empty() {
+        // Existing typed-array synchronization validates element identity and
+        // uses the real Mono reference barrier. The canonical array stays rooted.
+        callbacks::with_metadata_service(|route, memory| route.sync_guest(memory))?;
+        for pin in &array_pins {
+            pin.target()?;
+        }
+    }
     // Validate the result and every output before changing any native slot.
     if let Some(frame) = frame {
         unsafe { frame.commit(&outputs) }?;
@@ -788,10 +866,11 @@ mod tests {
     }
     fn binding(name: &str, target: u64, arguments: Vec<Argument>, result: u32) -> Binding {
         Binding {
+            library: 0,
             name: CString::new(name).unwrap(),
             target,
             arguments,
-            returns: Scalar::from_kind(result).unwrap(),
+            returns: Return::Scalar(Scalar::from_kind(result).unwrap()),
         }
     }
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

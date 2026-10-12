@@ -298,6 +298,7 @@ def run(cleanup):
         'native_unsafe_buffer_memsets': count_marker('native-unsafe-buffer-memsets'),
         'native_unsafe_buffer_copies': count_marker('native-unsafe-buffer-copies'),
         'native_unsafe_buffer_comparisons': count_marker('native-unsafe-buffer-comparisons'),
+        'native_input_event_updates': len(re.findall(r'^NATIVE_MONO_INPUT_EVENTS:', content, re.M)),
         'native_unsafe_buffer_cleanup_frees': count_marker('native-unsafe-buffer-cleanup-frees'),
         'native_unsafe_buffer_live': count_marker('native-unsafe-buffer-live'),
         'native_unsafe_buffer_retained_bytes': count_marker('native-unsafe-buffer-retained-bytes'),

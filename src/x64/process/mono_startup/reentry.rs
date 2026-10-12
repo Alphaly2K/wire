@@ -1301,11 +1301,7 @@ impl Metadata<'_> {
                         .is_some_and(|end| end <= stack.1)
             })?
         {
-            if cpu.regs[2] != 0
-                || (exception_slot != 0
-                    && input.output_address() < exception_slot + 8
-                    && exception_slot < input.output_address() + 20)
-            {
+            if cpu.regs[2] != 0 || (exception_slot != 0 && input.overlaps(exception_slot, 8)) {
                 return Err("input callback receiver/exception output mismatch".into());
             }
             return Ok(PreparedInvoke {
@@ -1472,9 +1468,6 @@ impl PreparedInvoke {
         Ok(())
     }
     pub(super) fn execute(&mut self) -> Result<Object, String> {
-        if let Some(input) = self.input.as_mut() {
-            return input.execute();
-        }
         if let Some((core, object, token)) = self.constructor {
             animation::execute_nested_managed(self.library, core, self.method, object, token)?;
             eprintln!("NATIVE_MONO_NESTED_CONSTRUCTOR_VERIFIED: receiver={token:#x}; metadata-qualified=true");
@@ -1485,11 +1478,14 @@ impl PreparedInvoke {
             "mono_runtime_invoke",
             unsafe extern "C" fn(Object, Object, *mut Object, *mut Object) -> Object
         );
-        let mut parameters = self
-            .frame
-            .as_mut()
-            .map(|frame| frame.pointers())
-            .unwrap_or_default();
+        let mut parameters = match self.input.as_mut() {
+            Some(input) => input.parameters(),
+            None => self
+                .frame
+                .as_mut()
+                .map(|frame| frame.pointers())
+                .unwrap_or_default(),
+        };
         let mut exception = std::ptr::null_mut();
         let result = unsafe {
             invoke(
@@ -1505,6 +1501,12 @@ impl PreparedInvoke {
         };
         if !exception.is_null() {
             return Err("nested IL invoke raised an exception".into());
+        }
+        if self.input.is_some() {
+            if !result.is_null() {
+                return Err("input update IL returned an object".into());
+            }
+            return Ok(result);
         }
         if let Some(step) = self.step {
             if !result.is_null() {

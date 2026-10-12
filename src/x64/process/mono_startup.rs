@@ -2333,6 +2333,9 @@ impl Probe {
                 Ok(Some(_)) => return Ok(false),
                 Ok(None) => {
                     if self.assets {
+                        if input_events::describes(method) {
+                            return Ok(false);
+                        }
                         let library = self
                             .native
                             .as_ref()
@@ -3466,11 +3469,14 @@ impl Probe {
             &managed_images,
         )?;
         let output_boolean = coroutine.as_ref().map(|entry| entry.boolean);
-        let descriptor = match coroutine {
-            Some(entry) => entry.call,
-            None => call_api
-                .describe(method, &managed_images, &managed_images)?
-                .ok_or("managed entry is not an admitted ordinary IL call")?,
+        let descriptor = match input_events::descriptor(method) {
+            Some(entry) => entry,
+            None => match coroutine {
+                Some(entry) => entry.call,
+                None => call_api
+                    .describe(method, &managed_images, &managed_images)?
+                    .ok_or("managed entry is not an admitted ordinary IL call")?,
+            },
         };
         if descriptor.receiver.is_some() != (a[1] != 0) {
             return Err("managed static/instance receiver presence mismatch".into());
@@ -3510,28 +3516,52 @@ impl Probe {
                         memory,
                     )?;
                 }
-                let mut frame = managed_calls::Frame::prepare(
-                    memory,
-                    &descriptor,
-                    a[2],
-                    |token, shape| {
-                        call_api.compatible(self.rooted_call_argument(api, token)?, shape)
-                    },
-                    |address, width| {
-                        Self::temporary_call_slot(memory, runtime, rsp, address, width)
-                    },
-                )?;
-                if let Some(boolean) = output_boolean {
-                    frame.prepare_coroutine_output(memory, a[2], boolean, |address, width| {
+                let input =
+                    input_events::prepare(method, memory, runtime, a[2], |address, width| {
                         Self::temporary_call_slot(memory, runtime, rsp, address, width)
                     })?;
+                let mut frame = if input.is_none() {
+                    Some(managed_calls::Frame::prepare(
+                        memory,
+                        &descriptor,
+                        a[2],
+                        |token, shape| {
+                            call_api.compatible(self.rooted_call_argument(api, token)?, shape)
+                        },
+                        |address, width| {
+                            Self::temporary_call_slot(memory, runtime, rsp, address, width)
+                        },
+                    )?)
+                } else {
+                    None
+                };
+                if let Some(boolean) = output_boolean {
+                    frame
+                        .as_mut()
+                        .ok_or("coroutine cannot use the input buffer protocol")?
+                        .prepare_coroutine_output(memory, a[2], boolean, |address, width| {
+                            Self::temporary_call_slot(memory, runtime, rsp, address, width)
+                        })?;
                 }
-                Ok::<_, String>((frame, receiver, receiver_class))
+                Ok::<_, String>((frame, input, receiver, receiver_class))
             })
         })?;
-        let (mut frame, receiver, receiver_class) = prepared?;
-        let mut parameters = frame.pointers();
-        let initial_outputs = frame.outputs()?;
+        let (mut frame, mut input, receiver, receiver_class) = prepared?;
+        let mut parameters = match input.as_mut() {
+            Some(input) => input.parameters(),
+            None => frame
+                .as_mut()
+                .ok_or("managed invocation frame absent")?
+                .pointers(),
+        };
+        let initial_outputs = frame
+            .as_ref()
+            .map(managed_calls::Frame::outputs)
+            .transpose()?
+            .unwrap_or_default();
+        if a[3] != 0 && input.as_ref().is_some_and(|input| input.overlaps(a[3], 8)) {
+            return Err("managed exception slot overlaps the input event buffer".into());
+        }
         if a[3] != 0
             && initial_outputs.iter().any(|out| {
                 out.address < a[3] + 8
@@ -3645,7 +3675,12 @@ impl Probe {
                 }
             };
             let mut outputs = Vec::new();
-            for out in frame.outputs()? {
+            for out in frame
+                .as_ref()
+                .map(managed_calls::Frame::outputs)
+                .transpose()?
+                .unwrap_or_default()
+            {
                 let (word, width) = match out.shape {
                     shape @ managed_calls::Shape::Reference { .. } => {
                         let native = call_api.compatible(out.word as Object, shape)?;
@@ -3682,6 +3717,13 @@ impl Probe {
                         );
                     }
                 }
+                if let Some(input) = input.as_ref() {
+                    if !Self::temporary_call_slot(memory, runtime, rsp, input.output_address(), 20)
+                    {
+                        return Err("input event header retired during native call".into());
+                    }
+                    input.finish(memory, runtime)?;
+                }
                 for &(address, width, word) in &outputs {
                     memory.write_int(address, width, word)?;
                 }
@@ -3699,7 +3741,7 @@ impl Probe {
             "instance"
         } else {
             self.static_invokes += 1;
-            self.static_output_writes += outputs;
+            self.static_output_writes += outputs + usize::from(input.is_some());
             "static"
         };
         self.events.push(format!("metadata-qualified {kind} managed entry: {}; params={}; byref-outputs={outputs}; actual IL and typed return", descriptor.name, descriptor.parameters.len()));

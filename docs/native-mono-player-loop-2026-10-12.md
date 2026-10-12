@@ -1,5 +1,11 @@
 # 配置克隆、Awaitable 与 PlayerLoop 接入
 
+2026-10-13 当前进展：输入事件快照同时接入顶层与嵌套普通 invoke；真实游戏两次
+更新消费了 2 个事件 / 100B。通用 entry pool 已从 metadata/实际 registration 自动
+接入 3,501 个引擎调用，Camera 数组与对象句柄 getter 通过；主循环仍在加载页，
+下一缺口为 Display.RelativeMouseAtImpl。完整回归 541 passed / 7 ignored，build 与
+all-target Clippy clean。详见 `native-mono-generic-bridge-feasibility-2026-10-13.md`。
+
 在本地 main 继续，上一批已提交为 `45c153a`。目标仍是 Alice 的可交互游戏界面，
 不能把配置加载、过渡背景或 Present 当作完成。
 

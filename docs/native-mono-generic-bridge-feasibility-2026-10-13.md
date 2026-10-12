@@ -27,7 +27,7 @@ ARM64 signed executable 预编译一个 4,096 槽的入口池。每个槽只有�
 整数/浮点寄存器分配与 Win64 的参数位置/stack ABI。返回通过 RAX/XMM0 位模式再
 转换至 x0/d0。入口池不会在运行时生成、修补或新增可执行映射；描述符只是私有数据。
 
-支持范围为最多 8 参数的静态 primitive/enum 调用，以及审核数学族的 plain-value
+支持范围为最多 8 参数的静态 primitive/enum 调用，以及已准入类族的 plain-value
 `ref/out`。后者要求 actual metadata 中每个字节都被非 Boolean 标量覆盖，无 reference、
 pointer、padding 或重叠字段。native payload 复制到作用域内的 guest buffer，输出
 全部预检后写回；相同地址/布局的 alias 保持同一 guest 地址，不同布局或部分重叠拒绝。
@@ -36,7 +36,8 @@ pointer、padding 或重叠字段。native payload 复制到作用域内的 gues
 UnityEngine.Object 的子类型由实际 TypeDef 和继承关系发现。其静态 binding 的第一个
 参数若为 corlib 的 exact IntPtr，且真实 Param 名为 `_unity_self`，可准入 engine-self
 协议；执行前核对 live original guest engine allocation。于是 Transform、Camera 等
-普通状态/值类型接口共用同一机制，无各类方法列表。其他 IntPtr 参数/返回保持待处理。
+普通状态/值类型接口共用同一机制，无各类方法列表。对象返回句柄按下述包装协议推导，
+其他 IntPtr 参数/返回保持待处理。
 
 类族列表只是语义准入策略，没有每个方法的实现或签名值。IntPtr、裸指针、引用、
 allocator/GCHandle 类 Int64、callback 和异步协议没有由纯 ABI 推断为安全可用。
@@ -116,3 +117,34 @@ NativeInputSystem.NotifyUpdate 的 IntPtr 输入事件包，下一步复用输�
 Clippy（`-D warnings`）和 8 项 inventory/harness 回归通过。新增原生栈/值内存测试
 覆盖无符号字节比较、填充子范围、复制 overlap、重复/步长复制的 gap，以及零长度、
 NULL/整数溢出的处理；跨架构 owned export 的退休检查继续通过。
+
+## 输入、数组与对象句柄共用运行时入口
+
+NotifyUpdate 的现有输入快照协议现同时接入顶层与嵌套 mono_runtime_invoke，复用
+普通 invoke、异常处理、GC 重入与图同步；不再另写一套执行路径。私有参数指针在
+最终 Frame 位置生成，20B header 后有 canary；输出先验证 lifetime、span 与异常
+槽不交叠，再写回 guest。IOCTL 目标来自本次实际注册。
+
+SZARRAY 参数的实际元素类型若继承 UnityEngine.Object，则复用 canonical container
+投影、真实 worker root 和 Mono array reference barrier。相同数组使用同一身份，
+不增加 Camera 等具体方法 adapter。probe-165 实际通过 GetAllCamerasImpl_Injected。
+
+IntPtr 返回仅在当前 managed wrapper 的完整指令边界尾部为
+`call <当前 icall>; call UnmarshalUnityObject<T>(IntPtr); ret` 时识别为对象句柄。
+MethodDef/MethodSpec 与闭合返回类型由本次实际 metadata 解析，converter 要属于
+同 image 的 UnityEngine.Bindings.Unmarshal，T 要继承 UnityEngine.Object；多 wrapper
+推导冲突则保留缺口。结果复用原有 live guest handle → native v2 handle 协议，
+零句柄直接返回零。解析不执行 wrapper，也不含冻结 token 或目标地址。
+
+probe-166 自动注册 **3,501** 个入口，实际完成两次输入更新（2 个事件 / 100B，
+第二次全部消费），Camera 数组、targetTexture 与 targetDisplay 查询通过。33.62 秒，
+262 draws / 99 presents，guard checks=333 / denied=0；本次与测试并发运行，未作性能
+对照。随后 DoSendMouseEvents 在 Display.RelativeMouseAtImpl 缺失处抛出异常，
+最后画面仍为加载页，尚未达到可交互游戏。下一步按现有 numeric/value 协议成批
+审查常用引擎类族，而非增加单方法 adapter。
+
+本批完整 release feature 回归 **541 passed / 7 ignored**，release build、all-target
+Clippy（`-D warnings`）与 8 项 inventory/harness 回归通过。新回归覆盖移动后的输入
+header 指针、canary 与失败输出不写回，以及变化后的 MethodDef/MethodSpec、截断 IL
+与 operand 内伪 CALL 的拒绝。整个 startup provider 的冻结前置规格与第二游戏验收
+仍列入待办。

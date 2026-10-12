@@ -90,6 +90,152 @@ pub(super) struct Api {
     closed: closed_types::Api,
 }
 impl Api {
+    /// Derive the private v2 object-handle result from the actual Unity wrapper:
+    /// call <this icall>; call UnmarshalUnityObject<T>(IntPtr); ret. Method IDs,
+    /// the result class and MethodSpec signatures all come from current metadata.
+    pub(super) fn engine_handle_result(
+        self,
+        method: Object,
+        owner: Object,
+        engine_base: Object,
+        images: &[Object],
+    ) -> Result<Option<Object>, String> {
+        macro_rules! sym {
+            ($name:literal, $ty:ty) => {{
+                let p = unsafe { libc::dlsym(self.library, concat!($name, "\0").as_ptr().cast()) };
+                if p.is_null() {
+                    return Err(concat!("missing engine handle metadata API: ", $name).into());
+                }
+                unsafe { std::mem::transmute::<Object, $ty>(p) }
+            }};
+        }
+        let methods = sym!(
+            "mono_class_get_methods",
+            unsafe extern "C" fn(Object, *mut Object) -> Object
+        );
+        let token = sym!("mono_method_get_token", unsafe extern "C" fn(Object) -> u32);
+        let resolve = sym!(
+            "mono_get_method",
+            unsafe extern "C" fn(Object, u32, Object) -> Object
+        );
+        let class_name = sym!(
+            "mono_class_get_name",
+            unsafe extern "C" fn(Object) -> *const c_char
+        );
+        let namespace = sym!(
+            "mono_class_get_namespace",
+            unsafe extern "C" fn(Object) -> *const c_char
+        );
+        let intptr = sym!("mono_get_intptr_class", unsafe extern "C" fn() -> Object);
+        let image = unsafe { (self.image)(owner) };
+        let target = unsafe { token(method) };
+        if target >> 24 != 6 || !images.contains(&image) {
+            return Err("engine handle source method lacks owned MethodDef".into());
+        }
+        let mut result = None;
+        let mut iterator = ptr::null_mut();
+        loop {
+            let wrapper = unsafe { methods(owner, &mut iterator) };
+            if wrapper.is_null() {
+                break;
+            }
+            let mut implementation = 0;
+            let flags = unsafe { (self.flags)(wrapper, &mut implementation) };
+            let signature = unsafe { (self.signature)(wrapper) };
+            if implementation & (0x1000 | 3) != 0
+                || flags & (0x400 | 0x2000) != 0
+                || signature.is_null()
+                || unsafe { (self.generic)(wrapper) } != 0
+            {
+                continue;
+            }
+            let returns = unsafe { (self.returns)(signature) };
+            if returns.is_null()
+                || unsafe { (self.byref)(returns) } != 0
+                || unsafe { (self.kind)(returns) } != 0x12
+            {
+                continue;
+            }
+            let expected = unsafe { (self.type_class)(returns) };
+            if expected.is_null()
+                || !images.contains(&unsafe { (self.image)(expected) })
+                || unsafe { (self.assignable)(engine_base, expected) } == 0
+            {
+                continue;
+            }
+            let header = unsafe { (self.header)(wrapper) };
+            if header.is_null() {
+                continue;
+            }
+            let (mut length, mut stack) = (0, 0);
+            let code = unsafe { (self.code)(header, &mut length, &mut stack) };
+            let converter = if code.is_null() || !(11..=128).contains(&length) || stack > 16 {
+                None
+            } else {
+                engine_handle_tail(
+                    unsafe { std::slice::from_raw_parts(code, length as usize) },
+                    target,
+                )
+            };
+            unsafe { (self.free)(header) };
+            let Some(converter) = converter else {
+                continue;
+            };
+            if converter >> 24 != 0x2b {
+                continue;
+            }
+            let converter = unsafe { resolve(image, converter, owner) };
+            if converter.is_null() {
+                continue;
+            }
+            let converter_owner = unsafe { (self.class)(converter) };
+            let text_is = |text: *const c_char, expected: &CStr| {
+                !text.is_null() && unsafe { CStr::from_ptr(text) } == expected
+            };
+            if converter_owner.is_null()
+                || unsafe { (self.image)(converter_owner) } != image
+                || !text_is(
+                    unsafe { namespace(converter_owner) },
+                    c"UnityEngine.Bindings",
+                )
+                || !text_is(unsafe { class_name(converter_owner) }, c"Unmarshal")
+                || !text_is(unsafe { (self.name)(converter) }, c"UnmarshalUnityObject")
+            {
+                continue;
+            }
+            let mut implementation = 0;
+            let flags = unsafe { (self.flags)(converter, &mut implementation) };
+            let signature = unsafe { (self.signature)(converter) };
+            if signature.is_null()
+                || flags & 0x10 == 0
+                || flags & (0x400 | 0x2000) != 0
+                || implementation & (0x1000 | 3) != 0
+                || unsafe { (self.instance)(signature) } != 0
+                || unsafe { (self.count)(signature) } != 1
+            {
+                continue;
+            }
+            let mut parameter = ptr::null_mut();
+            let argument = unsafe { (self.parameters)(signature, &mut parameter) };
+            let returns = unsafe { (self.returns)(signature) };
+            if argument.is_null()
+                || returns.is_null()
+                || unsafe { (self.byref)(argument) } != 0
+                || unsafe { (self.kind)(argument) } != 0x18
+                || unsafe { (self.type_class)(argument) } != unsafe { intptr() }
+                || unsafe { (self.byref)(returns) } != 0
+                || unsafe { (self.kind)(returns) } != 0x12
+                || unsafe { (self.type_class)(returns) } != expected
+            {
+                continue;
+            }
+            if result.is_some_and(|prior| prior != expected) {
+                return Ok(None);
+            }
+            result = Some(expected);
+        }
+        Ok(result)
+    }
     /// Diagnostic reads only the actual Exception metadata/message field. A
     /// private pinned root stays live; no ToString IL or native pointer is
     /// published to the guest while reporting a failed invocation.
@@ -1274,6 +1420,39 @@ fn concrete_method(generic: bool, inflated: bool, instance: bool, constructed: b
             !inflated
         }
 }
+fn engine_handle_tail(code: &[u8], target: u32) -> Option<u32> {
+    // Parse complete instruction boundaries in the small generated wrapper
+    // vocabulary. Unknown opcodes defer; operands cannot impersonate CALLs.
+    let mut at = 0;
+    let mut instructions = Vec::new();
+    while at < code.len() {
+        let opcode = code[at];
+        at += 1;
+        let width = match opcode {
+            0x00 | 0x02..=0x0d | 0x14..=0x1e | 0x25 | 0x26 | 0x2a => 0,
+            0x0e..=0x13 | 0x1f | 0x2b..=0x37 => 1,
+            0x20 | 0x22 | 0x28 | 0x38..=0x44 | 0x6f | 0x7b..=0x80 => 4,
+            0x21 | 0x23 => 8,
+            _ => return None,
+        };
+        let operand = code.get(at..at.checked_add(width)?)?;
+        instructions.push((
+            opcode,
+            if opcode == 0x28 {
+                Some(u32::from_le_bytes(operand.try_into().ok()?))
+            } else {
+                None
+            },
+        ));
+        at += width;
+    }
+    match instructions.as_slice() {
+        [.., (0x28, Some(called)), (0x28, Some(converter)), (0x2a, None)] if *called == target => {
+            Some(*converter)
+        }
+        _ => None,
+    }
+}
 fn managed_il_flags(flags: u32, implementation: u32, instance: bool) -> bool {
     (flags & 0x10 == 0) == instance
         && flags & (0x400 | 0x2000) == 0
@@ -1484,6 +1663,34 @@ impl Frame {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn engine_handle_wrapper_uses_current_tokens_and_rejects_calls_inside_operands() {
+        let mut code = vec![
+            0x02, 0x28, 0x52, 0, 0, 0x2b, 0x25, 0x2d, 6, 0x02, 0x28, 0x98, 0x2c, 0, 6, 0,
+        ];
+        let tail = |target: u32, converter: u32| {
+            let mut bytes = vec![0x28];
+            bytes.extend_from_slice(&target.to_le_bytes());
+            bytes.push(0x28);
+            bytes.extend_from_slice(&converter.to_le_bytes());
+            bytes.push(0x2a);
+            bytes
+        };
+        code.extend(tail(0x06000826, 0x2b000056));
+        assert_eq!(engine_handle_tail(&code, 0x06000826), Some(0x2b000056));
+        assert_eq!(engine_handle_tail(&code, 0x06000827), None);
+        assert_eq!(
+            engine_handle_tail(&tail(0x06001234, 0x2b009876), 0x06001234),
+            Some(0x2b009876)
+        );
+        assert_eq!(
+            engine_handle_tail(&code[..code.len() - 1], 0x06000826),
+            None
+        );
+        let mut disguised = vec![0x21]; // ldc.i8 operand spans the apparent CALL.
+        disguised.extend(tail(0x06000826, 0x2b000056));
+        assert_eq!(engine_handle_tail(&disguised, 0x06000826), None);
+    }
     use crate::x64::memory::{READ, WRITE};
     #[test]
     fn constructed_instance_admission_keeps_generic_methods_and_static_entries_out() {
