@@ -4,12 +4,12 @@
 use super::{bindings, callbacks, managed_calls, Object};
 use std::{
     alloc::{alloc_zeroed, dealloc, Layout},
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::BTreeMap,
     marker::PhantomData,
     ptr::NonNull,
     rc::Rc,
-    sync::OnceLock,
+    sync::{Mutex, OnceLock},
     thread::{self, ThreadId},
 };
 const CAPACITY: usize = 64 * 1024 * 1024;
@@ -42,6 +42,148 @@ const BINDINGS: [(&std::ffi::CStr, &std::ffi::CStr, u64); 5] = [
     ),
 ];
 static TARGETS: OnceLock<[u64; 5]> = OnceLock::new();
+// The frozen runtime does not export mono_gc_is_finalizer_thread. Its public
+// profiler events bracket the actual managed finalizer invocation instead.
+// A foreign caller is admitted only inside this authenticated runtime scope.
+thread_local! {
+    static FINALIZING: Cell<usize> = const { Cell::new(0) };
+    static FINALIZER_EXECUTION: RefCell<Option<super::burst_shared::Execution>> = const { RefCell::new(None) };
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReleaseState {
+    Live,
+    Queued,
+    Releasing,
+    Retired,
+}
+struct ReleaseRecord {
+    allocator: i32,
+    state: ReleaseState,
+}
+struct Releases {
+    owner: ThreadId,
+    records: BTreeMap<usize, ReleaseRecord>,
+    queued: usize,
+    drained: usize,
+    closed: bool,
+}
+impl Releases {
+    fn new() -> Self {
+        Self {
+            owner: thread::current().id(),
+            records: BTreeMap::new(),
+            queued: 0,
+            drained: 0,
+            closed: false,
+        }
+    }
+    fn register(&mut self, pointer: usize, allocator: i32) -> Result<(), String> {
+        if self.owner != thread::current().id()
+            || self.closed
+            || self.records.len() >= COUNT
+            || self.records.contains_key(&pointer)
+        {
+            return Err("native buffer release registry owner/capacity mismatch".into());
+        }
+        self.records.insert(
+            pointer,
+            ReleaseRecord {
+                allocator,
+                state: ReleaseState::Live,
+            },
+        );
+        Ok(())
+    }
+    fn queue(&mut self, pointer: usize, allocator: i32, finalizing: bool) -> Result<(), String> {
+        if self.closed || self.owner == thread::current().id() || !finalizing {
+            return Err(
+                "foreign native buffer Free requires an actual Mono finalizer scope".into(),
+            );
+        }
+        let record = self
+            .records
+            .get_mut(&pointer)
+            .filter(|r| r.allocator == allocator && r.state == ReleaseState::Live)
+            .ok_or("finalizer Free requires exact live base/allocator and one release")?;
+        record.state = ReleaseState::Queued;
+        self.queued += 1;
+        Ok(())
+    }
+    fn begin(&mut self, pointer: usize, allocator: i32, queued: bool) -> Result<(), String> {
+        if self.owner != thread::current().id() {
+            return Err("guest Free must execute on the native buffer owner".into());
+        }
+        let expected = if queued {
+            ReleaseState::Queued
+        } else {
+            ReleaseState::Live
+        };
+        let record = self
+            .records
+            .get_mut(&pointer)
+            .filter(|r| r.allocator == allocator && r.state == expected)
+            .ok_or("native buffer Free is duplicate, pending or retired")?;
+        record.state = ReleaseState::Releasing;
+        Ok(())
+    }
+    fn complete(&mut self, pointer: usize, queued: bool) -> Result<(), String> {
+        let record = self
+            .records
+            .get_mut(&pointer)
+            .filter(|r| r.state == ReleaseState::Releasing)
+            .ok_or("native buffer release completion state mismatch")?;
+        record.state = ReleaseState::Retired;
+        self.drained += usize::from(queued);
+        Ok(())
+    }
+    fn live(&self, pointer: usize) -> bool {
+        self.records
+            .get(&pointer)
+            .is_some_and(|r| r.state == ReleaseState::Live)
+    }
+}
+static RELEASES: OnceLock<Mutex<Releases>> = OnceLock::new();
+unsafe extern "C" fn finalizing(_: Object, object: Object) {
+    checked(|| {
+        FINALIZING.with(|scope| -> Result<(), String> {
+            if object.is_null() || scope.replace(object as usize) != 0 {
+                return Err("nested/NULL Mono finalizer profiler scope".into());
+            }
+            Ok(())
+        })?;
+        let execution = super::burst_shared::execution()?;
+        FINALIZER_EXECUTION.with(|slot| {
+            *slot.borrow_mut() = Some(execution);
+        });
+        Ok(())
+    });
+}
+unsafe extern "C" fn finalized(_: Object, object: Object) {
+    checked(|| {
+        FINALIZING.with(|scope| -> Result<(), String> {
+            if object.is_null() || scope.replace(0) != object as usize {
+                return Err("Mono finalizer profiler scope completion mismatch".into());
+            }
+            Ok(())
+        })?;
+        FINALIZER_EXECUTION.with(|slot| {
+            drop(slot.borrow_mut().take());
+        });
+        Ok(())
+    });
+}
+fn ensure_live(pointer: usize) -> Result<(), String> {
+    if let Some(releases) = RELEASES.get() {
+        if !releases
+            .lock()
+            .map_err(|_| "native release registry poisoned")?
+            .live(pointer)
+        {
+            return Err("native buffer span has a pending/retired release".into());
+        }
+    }
+    Ok(())
+}
 struct Bytes {
     pointer: NonNull<u8>,
     layout: Layout,
@@ -130,6 +272,7 @@ impl Arena {
             .range(..=pointer)
             .next_back()
             .ok_or("native buffer span has no live owner")?;
+        ensure_live(base)?;
         let offset = pointer
             .checked_sub(base)
             .ok_or("native buffer span underflow")?;
@@ -297,6 +440,29 @@ pub(super) fn install(
             api.allocator_icall(method, owner, index == 1, &classes, images)?;
         }
     }
+    let create_profiler = sym!(
+        "mono_profiler_create",
+        unsafe extern "C" fn(Object) -> Object
+    );
+    let set_begin = sym!(
+        "mono_profiler_set_gc_finalizing_object_callback",
+        unsafe extern "C" fn(Object, unsafe extern "C" fn(Object, Object))
+    );
+    let set_end = sym!(
+        "mono_profiler_set_gc_finalized_object_callback",
+        unsafe extern "C" fn(Object, unsafe extern "C" fn(Object, Object))
+    );
+    RELEASES
+        .set(Mutex::new(Releases::new()))
+        .map_err(|_| "native buffer release registry already installed")?;
+    let profiler = unsafe { create_profiler(std::ptr::null_mut()) };
+    if profiler.is_null() {
+        return Err("native buffer finalizer profiler creation failed".into());
+    }
+    unsafe {
+        set_begin(profiler, finalizing);
+        set_end(profiler, finalized);
+    }
     TARGETS
         .set(targets)
         .map_err(|_| "native buffer bindings already installed")?;
@@ -380,13 +546,20 @@ fn allocate(size: i64, alignment: i32, allocator: i32, context: usize) -> Result
             memory.read(guest, &mut initial)
         })?;
         bytes.initialize(&initial)?;
-        ARENA.with(|arena| {
+        let pointer = ARENA.with(|arena| {
             arena.borrow_mut().insert(Allocation {
                 guest,
                 allocator,
                 bytes,
             })
-        })
+        })?;
+        RELEASES
+            .get()
+            .ok_or("native buffer release registry absent")?
+            .lock()
+            .map_err(|_| "native release registry poisoned")?
+            .register(pointer, allocator)?;
+        Ok(pointer)
     })();
     match prepared {
         Ok(pointer) => {
@@ -400,6 +573,30 @@ fn allocate(size: i64, alignment: i32, allocator: i32, context: usize) -> Result
     }
 }
 fn release(pointer: usize, allocator: i32) -> Result<(), String> {
+    let releases = RELEASES
+        .get()
+        .ok_or("native buffer release registry absent")?;
+    let owner = releases
+        .lock()
+        .map_err(|_| "native release registry poisoned")?
+        .owner;
+    if owner != thread::current().id() {
+        // The finalizer never borrows guest Memory, touches native bytes or
+        // waits for the owner (Mono cleanup may be waiting for this thread).
+        releases
+            .lock()
+            .map_err(|_| "native release registry poisoned")?
+            .queue(
+                pointer,
+                allocator,
+                FINALIZING.with(|scope| scope.get() != 0),
+            )?;
+        eprintln!("NATIVE_MONO_UNSAFE_BUFFER_FINALIZER_QUEUED: allocator={allocator}; runtime-finalizer-scope=true");
+        return Ok(());
+    }
+    release_owned(pointer, allocator, false)
+}
+fn release_owned(pointer: usize, allocator: i32, queued: bool) -> Result<(), String> {
     callbacks::with_service(|_, _| Ok(()))?;
     let targets = TARGETS
         .get()
@@ -409,9 +606,47 @@ fn release(pointer: usize, allocator: i32) -> Result<(), String> {
         return Ok(());
     }
     let guest = ARENA.with(|arena| arena.borrow().lookup(pointer, allocator).map(|a| a.guest))?;
+    let releases = RELEASES
+        .get()
+        .ok_or("native buffer release registry absent")?;
+    releases
+        .lock()
+        .map_err(|_| "native release registry poisoned")?
+        .begin(pointer, allocator, queued)?;
+    // No arena or release lock crosses engine execution or native IL reentry.
     callbacks::guest_arguments(targets[1], &[guest, allocator as u32 as u64])?;
     ARENA.with(|arena| arena.borrow_mut().retire(pointer, allocator))?;
-    eprintln!("NATIVE_MONO_UNSAFE_BUFFER_FREED: allocator={allocator}; original-engine-allocation={guest:#x}; native-address-private=true");
+    releases
+        .lock()
+        .map_err(|_| "native release registry poisoned")?
+        .complete(pointer, queued)?;
+    eprintln!("NATIVE_MONO_UNSAFE_BUFFER_FREED: allocator={allocator}; original-engine-allocation={guest:#x}; finalizer-queue={queued}; native-address-private=true");
+    Ok(())
+}
+/// Drain at owner entry/exit, and after Mono has joined its finalizers. Bytes
+/// stay allocated until VM cleanup even after logical release. No guest API is
+/// executed by a foreign thread and no lock is held across the engine callback.
+pub(super) fn drain_finalizers() -> Result<(), String> {
+    let Some(releases) = RELEASES.get() else {
+        return Ok(());
+    };
+    let queued = {
+        let releases = releases
+            .lock()
+            .map_err(|_| "native release registry poisoned")?;
+        if releases.owner != thread::current().id() {
+            return Err("native finalizer release drain on foreign owner".into());
+        }
+        releases
+            .records
+            .iter()
+            .filter(|(_, r)| r.state == ReleaseState::Queued)
+            .map(|(&p, r)| (p, r.allocator))
+            .collect::<Vec<_>>()
+    };
+    for (pointer, allocator) in queued {
+        release_owned(pointer, allocator, true)?;
+    }
     Ok(())
 }
 fn fill(pointer: usize, value: u8, size: i64) -> Result<(), String> {
@@ -499,6 +734,7 @@ unsafe extern "C" fn memcpy(destination: Object, source: Object, size: i64) {
 /// still use these private addresses. This is finite diagnostic teardown, not
 /// a replacement for the production allocator/scheduler/shared-buffer contract.
 pub(super) fn retire_after_vm_cleanup() -> Result<(), String> {
+    drain_finalizers()?;
     let remaining = ARENA.with(|arena| -> Result<Vec<(usize, i32)>, String> {
         let mut arena = arena.borrow_mut();
         if arena.reserved != 0 || arena.pending_count != 0 {
@@ -520,17 +756,67 @@ pub(super) fn retire_after_vm_cleanup() -> Result<(), String> {
         arena.retired.clear();
         arena.retained = 0;
     });
+    if let Some(releases) = RELEASES.get() {
+        let mut releases = releases
+            .lock()
+            .map_err(|_| "native release registry poisoned")?;
+        if releases
+            .records
+            .values()
+            .any(|r| r.state != ReleaseState::Retired)
+        {
+            return Err("native buffer cleanup left pending release records".into());
+        }
+        releases.closed = true;
+    }
     Ok(())
 }
 pub(super) fn report() -> String {
+    let queue = RELEASES.get().map(|r| {
+        let r = r.lock().unwrap();
+        format!("native-unsafe-buffer-finalizer-queued={}\nnative-unsafe-buffer-finalizer-drained={}\nnative-unsafe-buffer-finalizer-pending={}\n",
+            r.queued, r.drained, r.records.values().filter(|r| r.state == ReleaseState::Queued).count())
+    }).unwrap_or_default();
     ARENA.with(|arena| {
         let a = arena.borrow();
-        format!("native-unsafe-buffer-allocations={}\nnative-unsafe-buffer-frees={}\nnative-unsafe-buffer-memsets={}\nnative-unsafe-buffer-copies={}\nnative-unsafe-buffer-cleanup-frees={}\nnative-unsafe-buffer-live={}\nnative-unsafe-buffer-retained-bytes={}\nnative-unsafe-buffer-closed={}\n", a.allocations, a.frees, a.memsets, a.copies, a.cleanup_frees, a.live.len(), a.retained, a.closed)
+        format!("native-unsafe-buffer-allocations={}\nnative-unsafe-buffer-frees={}\nnative-unsafe-buffer-memsets={}\nnative-unsafe-buffer-copies={}\nnative-unsafe-buffer-cleanup-frees={}\nnative-unsafe-buffer-live={}\nnative-unsafe-buffer-retained-bytes={}\nnative-unsafe-buffer-closed={}\n", a.allocations, a.frees, a.memsets, a.copies, a.cleanup_frees, a.live.len(), a.retained, a.closed) + &queue
     })
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn finalizer_queue_checks_origin_identity_duplicate_and_owner_drain() {
+        let mut releases = Releases::new();
+        releases.register(0x1000, 4).unwrap();
+        assert!(releases.queue(0x1000, 4, true).is_err()); // owner is synchronous
+        let releases = std::sync::Arc::new(Mutex::new(releases));
+        let foreign = releases.clone();
+        std::thread::spawn(move || {
+            let mut r = foreign.lock().unwrap();
+            assert!(r.queue(0x1000, 4, false).is_err());
+            assert!(r.queue(0x1001, 4, true).is_err());
+            assert!(r.queue(0x1000, 3, true).is_err());
+            assert!(r.queue(0, 4, true).is_err());
+            assert_eq!(r.queued, 0);
+            r.queue(0x1000, 4, true).unwrap();
+            assert!(r.queue(0x1000, 4, true).is_err());
+            assert!(r.begin(0x1000, 4, true).is_err());
+        })
+        .join()
+        .unwrap();
+        let mut r = releases.lock().unwrap();
+        assert!(!r.live(0x1000));
+        assert!(r.begin(0x1000, 4, false).is_err());
+        r.begin(0x1000, 4, true).unwrap();
+        assert!(r.begin(0x1000, 4, true).is_err());
+        r.complete(0x1000, true).unwrap();
+        assert_eq!((r.queued, r.drained), (1, 1));
+        assert!(r.register(0x1000, 4).is_err());
+        assert!(r.begin(0x1000, 4, false).is_err());
+        r.closed = true;
+        assert!(r.register(0x2000, 4).is_err());
+    }
     #[test]
     fn buffer_alignment_private_storage_exact_free_and_no_address_reuse() {
         let bytes = Bytes::new(33, 64).unwrap();

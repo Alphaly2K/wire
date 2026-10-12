@@ -74,6 +74,29 @@ pub(super) enum Value {
     Text(CString),
     Scalar(u64),
 }
+/// Audited frozen-source getters only: immutable metadata access without a
+/// current-domain lookup, managed allocation, lazy setup or managed invocation.
+/// They may be serialized on the process owner for an actually attached worker.
+pub(super) fn thread_neutral_leaf(function: &str) -> bool {
+    matches!(
+        function,
+        "mono_class_get_name"
+            | "mono_class_get_namespace"
+            | "mono_method_get_name"
+            | "mono_field_get_name"
+            | "mono_class_get_parent"
+            | "mono_class_get_element_class"
+            | "mono_class_get_nesting_type"
+            | "mono_class_get_type"
+            | "mono_class_get_type_token"
+            | "mono_class_get_rank"
+            | "mono_method_get_class"
+            | "mono_field_get_parent"
+            | "mono_signature_get_return_type"
+            | "mono_signature_get_param_count"
+            | "mono_signature_is_instance"
+    )
+}
 impl Registry {
     pub(super) fn native(&self, token: u64, kind: Kind) -> Result<Object, String> {
         if self.retired {

@@ -157,6 +157,56 @@ impl Runtime64 {
     pub(crate) fn active_thread(&self) -> u64 {
         self.threads.active
     }
+    /// Terminal native-probe teardown is a main-owner operation, even when a
+    /// worker gateway caused the failure. Validate the original main TEB and
+    /// return the previous identity; this never executes or relabels worker IL.
+    #[cfg(feature = "native-mono-backend")]
+    pub(crate) fn activate_main_for_native_cleanup(
+        &mut self,
+        memory: &Memory,
+    ) -> Result<u64, String> {
+        let main = self
+            .threads
+            .entries
+            .get(&1)
+            .ok_or("native cleanup lost guest main owner")?;
+        if memory.read_int(main.teb + 0x48, 8)? != 1 {
+            return Err("native cleanup main TEB identity mismatch".into());
+        }
+        let previous = self.threads.active;
+        self.activate_thread(1);
+        Ok(previous)
+    }
+    #[cfg(feature = "native-mono-backend")]
+    pub(crate) fn native_worker_stack_bounds(
+        &self,
+        memory: &Memory,
+        cpu: &Cpu64,
+    ) -> Result<(u64, u64), String> {
+        let worker = self
+            .threads
+            .entries
+            .get(&self.threads.active)
+            .filter(|worker| self.threads.active > 1 && worker.exit.is_none())
+            .ok_or("native worker stack requires a live guest worker")?;
+        let (base, size, _) = worker
+            .resources
+            .as_ref()
+            .ok_or("native worker stack has no retained thread resources")?;
+        let end = base
+            .checked_add(*size)
+            .ok_or("native worker stack overflow")?;
+        if cpu.gs_base != worker.teb
+            || cpu.regs[4] < *base
+            || cpu.regs[4] >= end
+            || memory.read_int(worker.teb + 0x48, 8)? != self.threads.active
+            || memory.read_int(worker.teb + 8, 8)? != end
+            || memory.read_int(worker.teb + 16, 8)? != *base
+        {
+            return Err("native worker stack differs from its retained resources/TEB".into());
+        }
+        Ok((*base, end))
+    }
     pub(crate) fn active_suspended(&self) -> bool {
         self.threads.entries[&self.threads.active].suspended != 0
     }
@@ -487,5 +537,60 @@ impl Runtime64 {
             parameter: args[3],
         });
         Ok(handle)
+    }
+}
+
+#[cfg(all(test, feature = "native-mono-backend"))]
+mod native_cleanup_tests {
+    use super::*;
+    #[test]
+    fn terminal_cleanup_validates_main_teb_and_preserves_worker_identity_and_apartment() {
+        let mut memory = Memory::default();
+        let stack = 0x200000;
+        memory.map(stack, 65536, READ | WRITE).unwrap();
+        let mut runtime = Runtime64::new(&mut memory, 0x140000000, stack, 65536, "test").unwrap();
+        runtime.enable_scheduler();
+        let handle = runtime
+            .create_thread(&mut memory, &[0, 0, 0x1000, 0, 0, 0])
+            .unwrap();
+        let worker = runtime.threads.handles[&handle];
+        runtime.apartment = Some(0);
+        runtime.com_refs = 3;
+        runtime.activate_thread(worker);
+        runtime.apartment = Some(2);
+        runtime.com_refs = 7;
+        let worker_cpu = &runtime.threads.pending[0].cpu;
+        let (base, end) = runtime
+            .native_worker_stack_bounds(&memory, worker_cpu)
+            .unwrap();
+        assert!(worker_cpu.regs[4] >= base && worker_cpu.regs[4] < end);
+        let mut other_cpu = worker_cpu.clone();
+        other_cpu.gs_base = runtime.threads.entries[&1].teb;
+        assert!(runtime
+            .native_worker_stack_bounds(&memory, &other_cpu)
+            .is_err());
+        other_cpu = worker_cpu.clone();
+        other_cpu.regs[4] = end;
+        assert!(runtime
+            .native_worker_stack_bounds(&memory, &other_cpu)
+            .is_err());
+        memory.write_int(runtime.teb() + 8, 8, end + 4096).unwrap();
+        assert!(runtime
+            .native_worker_stack_bounds(&memory, worker_cpu)
+            .is_err());
+        memory.write_int(runtime.teb() + 8, 8, end).unwrap();
+        let previous = runtime.activate_main_for_native_cleanup(&memory).unwrap();
+        assert_eq!(previous, worker);
+        assert_eq!(runtime.active_thread(), 1);
+        assert_eq!(memory.read_int(runtime.teb() + 0x48, 8).unwrap(), 1);
+        assert_eq!((runtime.apartment, runtime.com_refs), (Some(0), 3));
+        runtime.activate_thread(previous);
+        assert_eq!(runtime.active_thread(), worker);
+        assert_eq!((runtime.apartment, runtime.com_refs), (Some(2), 7));
+        memory
+            .write_int(runtime.threads.entries[&1].teb + 0x48, 8, worker)
+            .unwrap();
+        assert!(runtime.activate_main_for_native_cleanup(&memory).is_err());
+        assert_eq!(runtime.active_thread(), worker);
     }
 }

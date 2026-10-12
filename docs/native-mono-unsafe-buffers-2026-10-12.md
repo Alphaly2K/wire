@@ -1,7 +1,8 @@
 # 有限启动诊断的 private native IL buffers
 
 这不是完整backend准入，也不是`src/mono/buffers.rs`的生产共享内存接入。
-`mono_startup/unsafe_buffers.rs`只服务冻结runtime、实际owned image和同一主线程的同步IL诊断。
+`mono_startup/unsafe_buffers.rs`只服务冻结runtime、实际owned image和主线程同步IL诊断；
+真实 finalizer 的 Free 已通过 profiler-authenticated owner queue 接通。
 游戏原始程序集和冻结runtime不改，不生成JIT或动态trampoline。
 
 ## ABI 与两个地址
@@ -44,7 +45,8 @@ Unity Free清理剩余guest分配记录，随后drop全部private storage。repo
 cleanup frees，记录live/retained/closed。真实成功probe还需检查GC disable/enable、final GC、
 noexec guard和engine resource teardown，不能以一个Malloc局部成功代替。
 
-该路径没有BackendSession的生产scheduler/SharedBacking lease，也没有跨线程访问准入。
+该 private buffer 路径没有BackendSession的生产scheduler/SharedBacking lease。foreign finalizer
+仅提交exact释放记录，不能访问bytes；一般跨线程buffer访问仍未准入。
 不得因此将full_game_backend设true，或替换整个Mono allocator。要供真实game loop使用，仍需
 在实际owner/session和typed pointer graph上接入共享buffer或者明确的copy边界。
 
@@ -83,3 +85,19 @@ guest地址给native IL，也不能用当前private Malloc mirror冒充shared me
 其错误路径还遇到DebugLogHandler.Internal_Log_Injected及foreign finalizer Free拒绝。
 probe-62..71的局部进展仍未取得新的整轮GC/guard/cleanup验收，完整成功基线仍probe-41。
 full_game_backend=false，没有正式游戏窗口或端到端性能收益声明。
+
+## 真实 finalizer owner queue 已接通
+
+上述probe-70/71是旧失败终点。冻结runtime不导出mono_gc_is_finalizer_thread，桥通过公开的
+gc_finalizing_object/gc_finalized_object profiler事件建立实际managed finalizer scope，
+只在该scope中接受exact live base/matching allocator的一次释放请求。
+记录状态为Live→Queued→Releasing→Retired；pending/retired span拒绝访问。
+
+foreign线程不借用Memory/Runtime、不读写native bytes、不等待owner。owner入口/出口及
+shutdown drain执行原始Unity Free；不持registry/arena锁跨callback，native storage仍留到
+VM cleanup返回。probe-75/76均实际queued1/drained1/pending0，并有序错误退出。
+这已修复此前foreign finalizer Free拒绝，但失败probe未执行全部最终强制GC对象检查。
+
+另新增的SharedStatic不是private Malloc mirror：它用exact overlay让native IL与guest
+engine访问同一backing，并持完整invocation/finalizer leases。设计、job注册和worker TLS
+边界见 `native-mono-burst-shared-static-2026-10-12.md`，不能混淆两个buffer契约。

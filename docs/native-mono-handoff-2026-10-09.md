@@ -2,16 +2,25 @@
 
 用户已授权自主决策、自己测试修复和本地提交，继续推进原生 Mono 计划；不 push。
 此前为避开其他 agent 使用独立 worktree，导致主目录一度只有文档。累计实现已经合入
-main（包括 acc3d3a），后续已验证代码提交也立即合流。完整游戏 native backend/Admission
+main（包括 acc3d3a）。用户最新要求直接在 main 开发、提交，不再使用 Python 修改文件；
+项目编辑使用 apply_patch。完整游戏 native backend/Admission
 仍为 false；以下旧章节保留历史状态，不能把其中“主代码未合并”当作当前状态。
 
 ## 当前工作区与历史记录
 
-- Worktree：`/Users/alphaly/.codex/worktrees/native-mono-shared-memory/wire`
-- 分支：`codex/native-mono-shared-memory`
-- 主目录：`/Users/alphaly/Projects/wire`（与实施分支同步已验证代码）
+- 当前实施目录：`/Users/alphaly/Projects/wire`，分支 `main`
+- 历史材料 worktree：`/Users/alphaly/.codex/worktrees/native-mono-shared-memory/wire`
+  （冻结 runtime/注册表/IL 仍保留；旧 tracked 改动不是当前实施路径，勿重复合入）
 - 最近已合入实现：`10731e1`（真实对象分配）和 `0d391b1`（回调栈性能）；后续代码与证据见本文末尾。
 - 实施计划输入：主checkout `wire-out/unity-native-mono-plan-2026-10-09/plan.md`
+
+当前进展覆盖本文后面的历史终点：已实现 SharedStatic exact shared backing、真实 job
+reflection 注册、profiler-authenticated finalizer owner Free 队列以及独立 native worker TLS。
+probe-75完成28个shared槽/28个job records；probe-78实际worker domain=NULL→root attach、
+受检Thread保存与不可变class name查询，真实GC后worker强根身份通过，退出detach/join配对。
+当前接worker field enumeration；其lazy setup使用真实TLS，不能按纯getter借用主线程。
+设计、证据和未准入范围见 `native-mono-burst-shared-static-2026-10-12.md`。
+完整成功的对象/fields/arrays最终GC检查点仍probe-41；窗口/游戏loop/端到端性能尚未验收。
 
 已有阶段提交：
 

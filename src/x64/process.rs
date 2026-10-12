@@ -485,7 +485,17 @@ impl Process64 {
     #[cfg(feature = "native-mono-backend")]
     pub fn finish_native_mono_startup_probe(&mut self) -> Result<(), String> {
         if let Some(probe) = self.loader.mono_startup.as_mut() {
-            probe.finish_owned(&mut self.memory, &mut self.runtime)?;
+            if !probe.stopped() {
+                // The cooperative run has stopped. Keep its CPU contexts and
+                // original error intact while owner-scoped shutdown uses the
+                // actual guest main TEB. Resume is prohibited after cleanup.
+                let previous = self
+                    .runtime
+                    .activate_main_for_native_cleanup(&self.memory)?;
+                let result = probe.finish_owned(&mut self.memory, &mut self.runtime);
+                self.runtime.activate_thread(previous);
+                result?;
+            }
         }
         Ok(())
     }
@@ -814,9 +824,7 @@ impl Process64 {
         let result = self.run_inner(budget);
         #[cfg(feature = "native-mono-backend")]
         if !matches!(result, Ok(Outcome::Budget)) {
-            if let Some(probe) = self.loader.mono_startup.as_mut() {
-                probe.finish_owned(&mut self.memory, &mut self.runtime)?;
-            }
+            self.finish_native_mono_startup_probe()?;
         }
         result
     }
@@ -975,9 +983,27 @@ impl Process64 {
                 if dll == "mono-2.0-bdwgc.dll" {
                     if let Some(probe) = self.loader.mono_startup.as_mut() {
                         if self.runtime.active_thread() != 1 {
-                            return Err(
-                                "native root probe requires guest main-thread ownership".into()
-                            );
+                            let args = [
+                                self.cpu.regs[1],
+                                self.cpu.regs[2],
+                                self.cpu.regs[8],
+                                self.cpu.regs[9],
+                            ];
+                            probe
+                                .dispatch_worker(
+                                    function,
+                                    &mut self.cpu,
+                                    &mut self.memory,
+                                    &mut self.runtime,
+                                )
+                                .map_err(|error| {
+                                    self.runtime.inventory_failure(dll, function);
+                                    format!("{name}: {error}")
+                                })?;
+                            self.cpu.work += 1;
+                            self.runtime
+                                .complete_call(dll, function, &args, self.cpu.regs[0]);
+                            continue;
                         }
                         if probe.stop_before(function, &self.cpu)? {
                             probe.observe_stop(function, &self.cpu);

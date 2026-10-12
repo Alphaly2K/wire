@@ -676,6 +676,12 @@ impl Memory {
     // Shared backings have no owned Page. Former code pages remain excluded
     // even while NX, so a successful store cannot invalidate this sequence.
     pub(crate) fn owned_noncode_access(&self, address: u64, size: usize) -> bool {
+        #[cfg(feature = "native-mono-memory")]
+        if !self.shared.is_empty()
+            && self.shared_overlaps(address, address.saturating_add(size as u64))
+        {
+            return false;
+        }
         size as u64 <= PAGE - (address & (PAGE - 1))
             && self
                 .pages
@@ -948,6 +954,10 @@ impl Memory {
             addr,
             usize::try_from(len).map_err(|_| "protection too large")?,
         )?;
+        #[cfg(feature = "native-mono-memory")]
+        if self.shared_overlaps(range.start, range.end) {
+            return Err("owned page protection overlaps retained shared bytes".into());
+        }
         if range
             .clone()
             .step_by(PAGE as usize)
@@ -1000,6 +1010,10 @@ impl Memory {
             return Err("invalid AMD64 unmap".into());
         }
         let range = Self::range(addr, usize::try_from(len).map_err(|_| "unmap too large")?)?;
+        #[cfg(feature = "native-mono-memory")]
+        if self.shared_overlaps(range.start, range.end) {
+            return Err("owned page release overlaps retained shared bytes".into());
+        }
         if self
             .allocations
             .get(&addr)

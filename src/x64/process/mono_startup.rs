@@ -43,6 +43,7 @@ mod animation;
 mod arrays;
 mod attributes;
 mod bindings;
+mod burst_shared;
 mod callbacks;
 mod closed_types;
 mod constructors;
@@ -55,6 +56,7 @@ mod handles;
 mod images;
 mod instances;
 mod invoke;
+mod jobs;
 mod json;
 mod logging;
 mod managed_calls;
@@ -73,6 +75,7 @@ mod unitytls;
 mod unsafe_buffers;
 mod value_layout;
 mod virtual_methods;
+mod workers;
 macro_rules! symbol {
     ($library:expr, $name:literal, $ty:ty) => {{
         let pointer = unsafe { libc::dlsym($library, concat!($name, "\0").as_ptr().cast()) };
@@ -92,6 +95,7 @@ struct Native {
     extra_profilers: Vec<Object>,
     thread_handle: Object,
     gc: gc_scopes::State,
+    workers: workers::State,
     closed: bool,
     _owner_only: PhantomData<Rc<()>>,
 }
@@ -153,6 +157,7 @@ impl Native {
             extra_profilers: Vec::new(),
             thread_handle: ptr::null_mut(),
             gc: gc_scopes::State::default(),
+            workers: workers::State::default(),
             closed: false,
             _owner_only: PhantomData,
         })
@@ -163,6 +168,7 @@ impl Native {
         }
         if !self.closed {
             self.gc.restore()?;
+            self.workers.close()?;
             self.closed = true;
             if !self.domain.is_null() {
                 if !self.thread_handle.is_null() {
@@ -181,6 +187,7 @@ impl Native {
                     "mono_jit_cleanup",
                     unsafe extern "C" fn(Object)
                 );
+                burst_shared::prepare_vm_cleanup()?;
                 unsafe {
                     cleanup(self.domain);
                 }
@@ -1317,6 +1324,120 @@ impl Probe {
                 .push(format!("guest startup boundary {function} -> {result:#x}"));
         }
         Ok(ready)
+    }
+    pub(super) fn dispatch_worker(
+        &mut self,
+        function: &str,
+        cpu: &mut Cpu64,
+        memory: &mut Memory,
+        runtime: &mut Runtime64,
+    ) -> Result<(), String> {
+        let guest = runtime.active_thread();
+        if self.stopped
+            || !self.assets
+            || !self.main_thread_ready
+            || (!workers::State::handles(function)
+                && function != "mono_gc_wbarrier_set_field"
+                && !metadata::thread_neutral_leaf(function))
+        {
+            return Err(format!("native Mono worker boundary: guest-thread={guest}; export={function}; args={:#x?}; worker managed IL/domain switching and other callbacks are not admitted", [cpu.regs[1], cpu.regs[2], cpu.regs[8], cpu.regs[9]]));
+        }
+        if cpu.gs_base != runtime.teb() || memory.read_int(cpu.gs_base + 0x48, 8)? != guest {
+            return Err("Mono worker gateway guest TEB identity mismatch".into());
+        }
+        memory.read_int(cpu.regs[4], 8)?;
+        cpu.regs[4]
+            .checked_add(8)
+            .ok_or("Mono worker return stack overflow")?;
+        let targets = self.callback_targets();
+        let native = self
+            .native
+            .as_mut()
+            .ok_or("Mono worker gateway before runtime")?;
+        if native.owner != thread::current().id() || native.closed || native.domain.is_null() {
+            return Err("Mono worker gateway outside live native process owner".into());
+        }
+        if metadata::thread_neutral_leaf(function) {
+            let a = [cpu.regs[1], cpu.regs[2], cpu.regs[8]];
+            let (domain, stats) =
+                callbacks::with_worker_registration_owner(memory, runtime, targets, || {
+                    native.workers.dispatch(
+                        native.library,
+                        native.domain,
+                        guest,
+                        "mono_domain_get",
+                        0,
+                    )
+                })?;
+            self.gc_events_verified |= stats.gc_events;
+            if domain? != ROOT_TOKEN {
+                return Err("worker metadata leaf requires its actual attached root domain".into());
+            }
+            let (value, stats) =
+                callbacks::with_worker_registration_owner(memory, runtime, targets, || {
+                    self.metadata_registry
+                        .query(native.library, function, a[0], a[1], a[2])
+                })?;
+            self.gc_events_verified |= stats.gc_events;
+            let value = value?;
+            let class = matches!(value, metadata::Value::Handle(_, metadata::Kind::Class));
+            let result = self.metadata_registry.wrap(memory, value)?;
+            if class && result != 0 {
+                self.metadata_registry
+                    .publish_class_elements(native.library, memory, result)?;
+            }
+            self.events.push(format!("worker {guest} immutable metadata leaf {function} served by process owner: {result:#x}; actual worker TLS retained"));
+            return cpu.return_integer(memory, result);
+        }
+        if function == "mono_gc_wbarrier_set_field" {
+            let a = [cpu.regs[1], cpu.regs[2], cpu.regs[8], cpu.regs[9]];
+            let (stack_base, stack_end) = runtime.native_worker_stack_bounds(memory, cpu)?;
+            let end = a[1]
+                .checked_add(8)
+                .ok_or("worker reference slot overflow")?;
+            let first = cpu.regs[4]
+                .checked_add(40)
+                .ok_or("worker reference stack overflow")?;
+            if a[0] != 0
+                || !a[1].is_multiple_of(8)
+                || !((a[1] >= first && a[1] >= stack_base && end <= stack_end)
+                    || runtime.live_data_slot(a[1], 8)
+                    || memory.guest_private_data_slot(a[1], 8))
+                || !memory.owned_noncode_access(a[1], 8)
+            {
+                return Err(format!(
+                    "worker Thread reference requires a live owned C++ slot: args={a:#x?}"
+                ));
+            }
+            memory.check(a[1], 8, super::super::memory::WRITE)?;
+            if a[2] != 0 {
+                let (current, stats) =
+                    callbacks::with_worker_registration_owner(memory, runtime, targets, || {
+                        native.workers.dispatch(
+                            native.library,
+                            native.domain,
+                            guest,
+                            "mono_thread_current",
+                            0,
+                        )
+                    })?;
+                self.gc_events_verified |= stats.gc_events;
+                if current? != a[2] {
+                    return Err("worker Thread reference is not its exact live strong token".into());
+                }
+            }
+            memory.write_int(a[1], 8, a[2])?;
+            self.events.push(format!("worker {guest} stored an actual strong Thread token {:#x} in checked C++ slot {:#x}; no native pointer/barrier destination", a[2], a[1]));
+            return cpu.return_integer(memory, 0);
+        }
+        let (result, stats) =
+            callbacks::with_worker_registration_owner(memory, runtime, targets, || {
+                native
+                    .workers
+                    .dispatch(native.library, native.domain, guest, function, cpu.regs[1])
+            })?;
+        self.gc_events_verified |= stats.gc_events;
+        cpu.return_integer(memory, result?)
     }
     fn callback_targets(&self) -> [u64; 7] {
         let mut targets = [0; 7];
@@ -2548,6 +2669,15 @@ impl Probe {
             )?;
         }
         let managed_images = self.image_registry.live_native_images()?;
+        if !logging::debug_installed() {
+            logging::install_debug(
+                library,
+                self.image_registry.unique_native_image(CORE_MODULE)?,
+                &managed_images,
+                self.registry
+                    .exact_target(logging::DEBUG_NAME, logging::DEBUG_TARGET)?,
+            )?;
+        }
         if !engine_scalars::installed() {
             engine_scalars::install(
                 library,
@@ -2561,6 +2691,23 @@ impl Probe {
         }
         if !unsafe_buffers::installed() {
             unsafe_buffers::install(library, &managed_images, &self.registry)?;
+        }
+        if !burst_shared::installed() {
+            burst_shared::install(
+                library,
+                self.image_registry.unique_native_image(CORE_MODULE)?,
+                &managed_images,
+                self.registry
+                    .exact_target(burst_shared::NAME, burst_shared::TARGET)?,
+            )?;
+        }
+        if !jobs::installed() {
+            jobs::install(
+                library,
+                self.image_registry.unique_native_image(CORE_MODULE)?,
+                &managed_images,
+                self.registry.exact_target(jobs::NAME, jobs::TARGET)?,
+            )?;
         }
         if !json::installed() {
             json::install(
@@ -4043,6 +4190,8 @@ impl Probe {
         }
         if let Some(native) = &mut self.native {
             native.gc.restore()?;
+            native.workers.verify_gc()?;
+            native.workers.close()?;
         }
         if let Some(constructor) = &mut self.curves_constructor {
             constructor.cleanup()?;
@@ -4078,6 +4227,7 @@ impl Probe {
             // Raw native IL pointers remain owned until the VM can no longer
             // execute IL/finalizers. Only then release original guest records.
             unsafe_buffers::retire_after_vm_cleanup()?;
+            burst_shared::retire_after_vm_cleanup()?;
             if self.tls_table.is_some() {
                 let clear = symbol!(
                     native.library,
@@ -4147,6 +4297,10 @@ impl Probe {
             + &json::report()
             + &profiler_samples::report()
             + &unsafe_buffers::report()
+            + &logging::debug_report()
+            + &burst_shared::report()
+            + &jobs::report()
+            + &self.native.as_ref().map_or_else(String::new, |n| n.workers.report())
     }
     pub(super) fn stopped(&self) -> bool {
         self.stopped

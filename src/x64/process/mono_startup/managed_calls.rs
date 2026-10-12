@@ -697,6 +697,78 @@ impl Api {
         }
         Ok(())
     }
+    /// Exact metadata for fixed, precompiled injected/pointer adapters only.
+    /// This does not admit these shapes to ordinary managed-call payloads.
+    pub(super) fn fixed_typed_icall(
+        self,
+        method: Object,
+        owner: Object,
+        specs: &[(u32, Object, bool)],
+        images: &[Object],
+    ) -> Result<(), String> {
+        if method.is_null()
+            || owner.is_null()
+            || specs.is_empty()
+            || specs.len() > 6
+            || !images.contains(&unsafe { (self.image)(owner) })
+            || unsafe { (self.class)(method) } != owner
+        {
+            return Err("fixed typed icall owner/arity mismatch".into());
+        }
+        let mut implementation = 0;
+        let flags = unsafe { (self.flags)(method, &mut implementation) };
+        let sig = unsafe { (self.signature)(method) };
+        if sig.is_null()
+            || flags & 0x10 == 0
+            || flags & (0x400 | 0x2000) != 0
+            || implementation & 0x1000 == 0
+            || unsafe { (self.instance)(sig) } != 0
+            || unsafe { (self.count)(sig) } as usize != specs.len() - 1
+            || unsafe { (self.generic)(method) } != 0
+            || unsafe { (self.inflated)(method) } != 0
+        {
+            return Err("fixed typed entry is not a concrete static InternalCall".into());
+        }
+        let mut iterator = ptr::null_mut();
+        for (index, &(kind, expected, byref)) in specs.iter().enumerate() {
+            let ty = unsafe {
+                if index == 0 {
+                    (self.returns)(sig)
+                } else {
+                    (self.parameters)(sig, &mut iterator)
+                }
+            };
+            if ty.is_null()
+                || expected.is_null()
+                || unsafe { (self.kind)(ty) } != kind
+                || (unsafe { (self.byref)(ty) } != 0) != byref
+            {
+                return Err("fixed typed icall kind/byref mismatch".into());
+            }
+            let element = if kind == 0xf {
+                unsafe { (self.pointer_type)(ty) }
+            } else {
+                ty
+            };
+            if element.is_null()
+                || unsafe { (self.type_class)(element) } != expected
+                || !images.contains(&unsafe { (self.image)(expected) })
+            {
+                return Err("fixed typed icall exact owned type mismatch".into());
+            }
+            if kind == 0x11 && !byref {
+                let mut alignment = 0;
+                if unsafe { (self.is_enum)(expected) } == 0
+                    || unsafe { (self.kind)((self.enum_base)(expected)) } != 8
+                    || unsafe { (self.size)(expected, &mut alignment) } != 4
+                    || alignment != 4
+                {
+                    return Err("fixed typed enum requires actual Int32 storage".into());
+                }
+            }
+        }
+        Ok(())
+    }
     pub(super) fn json_from_icall(
         self,
         method: Object,

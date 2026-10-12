@@ -239,6 +239,10 @@ impl Memory {
         found
     }
     fn commit(&mut self, start: u64, end: u64, protection: u32) -> Result<(), u32> {
+        #[cfg(feature = "native-mono-memory")]
+        if self.shared_overlaps(start, end) {
+            return Err(5);
+        }
         let permissions = Self::protection_permissions(protection)?;
         if end - start > 256 * 1024 * 1024 {
             return Err(8);
@@ -332,6 +336,10 @@ impl Memory {
             if !allocation.guest {
                 return Err(487);
             }
+            #[cfg(feature = "native-mono-memory")]
+            if self.shared_overlaps(address, allocation.end) {
+                return Err(5);
+            }
             self.pages.retain(|&p, page| {
                 let keep = p < address || p >= allocation.end;
                 executable_changed |= !keep && page.permissions & EXECUTE != 0;
@@ -349,6 +357,10 @@ impl Memory {
             };
             if !self.containing(start, end)?.1.guest {
                 return Err(487);
+            }
+            #[cfg(feature = "native-mono-memory")]
+            if self.shared_overlaps(start, end) {
+                return Err(5);
             }
             self.pages.retain(|&p, page| {
                 let keep = p < start || p >= end;
@@ -389,6 +401,10 @@ impl Memory {
     ) -> Result<u32, u32> {
         Self::protection_permissions(protection)?;
         let (start, end) = Self::rounded(address, size, PAGE)?;
+        #[cfg(feature = "native-mono-memory")]
+        if self.shared_overlaps(start, end) {
+            return Err(5);
+        }
         if self.containing(start, end)?.1.protection_locked && protection != 2 {
             return Err(5);
         }

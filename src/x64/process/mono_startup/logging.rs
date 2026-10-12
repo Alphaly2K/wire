@@ -1,9 +1,18 @@
 //! Locked Unity logger ABI: fixed ARM64 adapter, pinned native UTF16 input and
 //! a bounded owned copy for the original Win64 engine callback.
 use super::{c_char, callbacks, Object};
-use std::{cell::RefCell, ffi::CStr, ptr, sync::OnceLock};
+use std::{
+    cell::{Cell, RefCell},
+    ffi::CStr,
+    ptr,
+    sync::OnceLock,
+};
 pub(super) const NAME: &str = "UnityEngine.UnityLogWriter::WriteStringToUnityLogImpl_Injected";
 pub(super) const TARGET: u64 = 0x1800b0b80;
+pub(super) const DEBUG_NAME: &str = "UnityEngine.DebugLogHandler::Internal_Log_Injected";
+pub(super) const DEBUG_TARGET: u64 = 0x180079570;
+static DEBUG_PC: OnceLock<u64> = OnceLock::new();
+thread_local! { static DEBUG_CALLS: Cell<usize> = const { Cell::new(0) }; }
 static TARGET_PC: OnceLock<u64> = OnceLock::new();
 thread_local! { static RECORDS: RefCell<Vec<Option<Vec<u16>>>> = const { RefCell::new(Vec::new()) }; }
 #[repr(C)]
@@ -177,6 +186,89 @@ pub(super) fn install(library: Object, image: Object, target: u64) -> Result<(),
     }
     eprintln!("NATIVE_MONO_LOGGING_ABI: ref span size=16 align=8 begin=0 length=8; fixed owned UTF16 adapter");
     Ok(())
+}
+pub(super) fn debug_installed() -> bool {
+    DEBUG_PC.get().is_some()
+}
+pub(super) fn install_debug(
+    library: Object,
+    core: Object,
+    images: &[Object],
+    target: u64,
+) -> Result<(), String> {
+    if target != DEBUG_TARGET || !images.contains(&core) {
+        return Err("Unity debug logger target/image mismatch".into());
+    }
+    let api = Api::load(library)?;
+    let find = |namespace: &std::ffi::CStr, name: &std::ffi::CStr| unsafe {
+        (api.class)(core, namespace.as_ptr(), name.as_ptr())
+    };
+    let owner = find(c"UnityEngine", c"DebugLogHandler");
+    let span = find(c"UnityEngine.Bindings", c"ManagedSpanWrapper");
+    if owner.is_null() || span.is_null() {
+        return Err("Unity debug logger metadata absent".into());
+    }
+    let corlib = sym!(library, "mono_get_corlib", unsafe extern "C" fn() -> Object);
+    let corlib = unsafe { corlib() };
+    let system =
+        |name: &std::ffi::CStr| unsafe { (api.class)(corlib, c"System".as_ptr(), name.as_ptr()) };
+    let method = unsafe { (api.method)(owner, c"Internal_Log_Injected".as_ptr(), 4) };
+    if method.is_null() || unsafe { (api.token)(method) } != 0x06000945 {
+        return Err("Unity debug logger method/token mismatch".into());
+    }
+    super::managed_calls::Api::load(library)?.fixed_typed_icall(
+        method,
+        owner,
+        &[
+            (1, system(c"Void"), false),
+            (0x11, find(c"UnityEngine", c"LogType"), false),
+            (0x11, find(c"UnityEngine", c"LogOption"), false),
+            (0x11, span, true),
+            (0x18, system(c"IntPtr"), false),
+        ],
+        images,
+    )?;
+    validate_span_layout(library, span)?;
+    let add = sym!(
+        library,
+        "mono_add_internal_call",
+        unsafe extern "C" fn(*const c_char, Object)
+    );
+    DEBUG_PC
+        .set(target)
+        .map_err(|_| "Unity debug logger already installed")?;
+    unsafe {
+        add(
+            c"UnityEngine.DebugLogHandler::Internal_Log_Injected".as_ptr(),
+            debug_log as *const () as Object,
+        );
+    }
+    Ok(())
+}
+unsafe extern "C" fn debug_log(kind: i32, option: i32, span: *const Span, context: usize) {
+    let result = std::panic::catch_unwind(|| -> Result<(), String> {
+        callbacks::with_service(|_, _| Ok(()))?;
+        if !(0..=4).contains(&kind) || !matches!(option, 0 | 1) || context != 0 {
+            return Err(format!("debug logger requires known enums and NULL context: type={kind}; option={option}; context={context:#x}"));
+        }
+        let units = unsafe { owned_span(span) }?;
+        callbacks::guest_positioned_string_span(
+            *DEBUG_PC.get().ok_or("Unity debug logger not installed")?,
+            units.as_deref(),
+            &[kind as u32 as u64, option as u32 as u64],
+            &[0],
+        )?;
+        DEBUG_CALLS.with(|calls| calls.set(calls.get() + 1));
+        eprintln!(
+            "NATIVE_MONO_DEBUG_LOG_FORWARDED: type={kind}; option={option}; message={:?}",
+            units.as_deref().map(String::from_utf16_lossy)
+        );
+        Ok(())
+    });
+    if !matches!(result, Ok(Ok(()))) {
+        eprintln!("NATIVE_MONO_DEBUG_LOG_REJECT: {result:?}");
+        std::process::abort();
+    }
 }
 /// Shared static void(ref ManagedSpanWrapper) ABI for fixed compiled adapters.
 /// The member's owning image/target are checked separately by its installer.
@@ -400,6 +492,10 @@ pub(super) fn verify(library: Object, image: Object) -> Result<(), String> {
     })?;
     eprintln!("NATIVE_MONO_LOGGING_VERIFIED: actual managed null/empty/Unicode/Console routes=4");
     Ok(())
+}
+
+pub(super) fn debug_report() -> String {
+    format!("native-debug-log-calls={}\n", DEBUG_CALLS.with(Cell::get))
 }
 
 #[cfg(test)]

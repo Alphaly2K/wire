@@ -10,6 +10,8 @@ use std::{
     sync::{Arc, Condvar, Mutex},
     thread::{self, ThreadId},
 };
+#[cfg(feature = "native-mono-backend")]
+use std::{marker::PhantomData, rc::Rc};
 
 struct GateState {
     owner: Option<ThreadId>,
@@ -37,6 +39,20 @@ impl Drop for Lease<'_> {
             state.owner = None;
             self.0.changed.notify_one();
         }
+    }
+}
+/// Retain a reentrant lease across an entire native invocation, including
+/// adapters that allocate a region after invocation entry. It cannot cross
+/// threads and retains its storage independently of registry/mapping owners.
+#[cfg(feature = "native-mono-backend")]
+pub(crate) struct ExecutionLease {
+    region: HostRegion,
+    _owner_only: PhantomData<Rc<()>>,
+}
+#[cfg(feature = "native-mono-backend")]
+impl Drop for ExecutionLease {
+    fn drop(&mut self) {
+        drop(Lease(&self.region.0));
     }
 }
 struct OwnedBytes {
@@ -139,6 +155,17 @@ impl HostRegion {
         state.depth += 1;
         Ok(Lease(&self.0))
     }
+    #[cfg(feature = "native-mono-backend")]
+    pub(crate) fn execution_lease(&self) -> Result<ExecutionLease, String> {
+        let lease = self.lease()?;
+        // Move the gate depth into an owned, same-thread lease. Its Drop
+        // performs precisely the matching release and retains the Arc owner.
+        std::mem::forget(lease);
+        Ok(ExecutionLease {
+            region: self.clone(),
+            _owner_only: PhantomData,
+        })
+    }
     /// Serialize native access while permitting a callback on this same thread.
     /// The pointer is a data pointer; dereferencing it remains an unsafe act.
     pub fn with_native<T>(&self, call: impl FnOnce(NonNull<u8>) -> T) -> Result<T, String> {
@@ -198,6 +225,8 @@ pub(super) struct SharedMapping {
     region: HostRegion,
     permissions: u8,
     maximum: u8,
+    #[cfg(feature = "native-mono-backend")]
+    overlay: bool,
     guards: Box<[Cell<bool>]>,
 }
 impl SharedMapping {
@@ -265,12 +294,98 @@ impl Memory {
                 region,
                 permissions,
                 maximum,
+                #[cfg(feature = "native-mono-backend")]
+                overlay: false,
                 guards: (address / PAGE..=(end - 1) / PAGE)
                     .map(|_| Cell::new(false))
                     .collect(),
             },
         );
         self.invalidate_mapping(false);
+        Ok(())
+    }
+    /// Replace only an explicitly validated original engine byte interval.
+    /// Owned neighbour bytes/pages remain owned, but all accesses touching this
+    /// exact interval route through the retained HostRegion. Page fast paths
+    /// and VM protection/release are barred until the owner restores it.
+    #[cfg(feature = "native-mono-backend")]
+    pub(crate) fn map_shared_overlay(
+        &mut self,
+        address: u64,
+        region: HostRegion,
+    ) -> Result<(), String> {
+        let end = address
+            .checked_add(region.len() as u64)
+            .ok_or("overlay overflow")?;
+        if region.len() > PAGE as usize
+            || address >= USER_END
+            || end > USER_END
+            || !self.owned_noncode_access(address, region.len())
+            || self.shared_overlaps(address, end)
+        {
+            return Err(
+                "overlay requires exact owned noncode bytes without existing aliases".into(),
+            );
+        }
+        self.check(address, region.len(), READ | WRITE)?;
+        if self.committed_bytes() + region.len() as u64 > 512 * 1024 * 1024 {
+            return Err("overlay exceeds mapping capacity".into());
+        }
+        region.check_live()?;
+        self.shared_bytes += region.len() as u64;
+        self.shared.insert(
+            address,
+            SharedMapping {
+                base: address,
+                end,
+                region,
+                permissions: READ | WRITE,
+                maximum: READ | WRITE,
+                overlay: true,
+                guards: (address / PAGE..=(end - 1) / PAGE)
+                    .map(|_| Cell::new(false))
+                    .collect(),
+            },
+        );
+        self.invalidate_mapping(false);
+        Ok(())
+    }
+    /// Only after native IL/finalizers stop: restore the actual final bytes to
+    /// the engine allocation, revoke the backing and remove the exact overlay.
+    #[cfg(feature = "native-mono-backend")]
+    pub(crate) fn restore_shared_overlay(
+        &mut self,
+        address: u64,
+        region: &HostRegion,
+    ) -> Result<(), String> {
+        let mapping = self
+            .shared
+            .get(&address)
+            .filter(|m| m.overlay && m.region.same_storage(region))
+            .ok_or("overlay restoration owner mismatch")?;
+        let len = mapping.region.len();
+        let base = address & !(PAGE - 1);
+        let page = self
+            .pages
+            .get(&base)
+            .ok_or("overlay lost its engine page")?;
+        if page.generation != 0
+            || page.permissions != READ | WRITE
+            || page.protection.get() & crate::mem::PAGE_GUARD != 0
+        {
+            return Err("overlay engine page ownership/protection changed".into());
+        }
+        let mut bytes = vec![0; len];
+        region.with_native(|pointer| unsafe {
+            std::ptr::copy_nonoverlapping(pointer.as_ptr(), bytes.as_mut_ptr(), len);
+        })?;
+        region.revoke()?;
+        let mapping = self.shared.remove(&address).unwrap();
+        self.shared_bytes -= len as u64;
+        let offset = (address - base) as usize;
+        self.pages.get_mut(&base).unwrap().data[offset..offset + len].copy_from_slice(&bytes);
+        self.invalidate_mapping(false);
+        drop(mapping);
         Ok(())
     }
     /// Exact-region protection for the isolated native backend prototype.
@@ -285,6 +400,10 @@ impl Memory {
             .shared
             .get_mut(&address)
             .ok_or("unmapped shared region")?;
+        #[cfg(feature = "native-mono-backend")]
+        if mapping.overlay {
+            return Err("engine overlay protection is lifetime locked".into());
+        }
         if permissions & !mapping.maximum != 0 || permissions & EXECUTE != 0 {
             return Err("shared protection exceeds native ownership".into());
         }
@@ -304,6 +423,10 @@ impl Memory {
             .is_some_and(|mapping| mapping.region.same_storage(region))
     }
     pub fn unmap_shared_data(&mut self, address: u64) -> Result<HostRegion, String> {
+        #[cfg(feature = "native-mono-backend")]
+        if self.shared.get(&address).is_some_and(|m| m.overlay) {
+            return Err("engine overlay must be restored by its owner".into());
+        }
         let mapping = self
             .shared
             .remove(&address)
@@ -430,6 +553,57 @@ impl Memory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "native-mono-backend")]
+    #[test]
+    fn engine_overlay_has_one_backing_blocks_page_mutation_and_restores_final_bytes() {
+        let mut memory = Memory::default();
+        let page = memory.virtual_alloc(0, PAGE, 0x3000, 4).unwrap();
+        let address = page + 32;
+        memory.write_int(address, 8, 7).unwrap();
+        memory.write_int(address - 1, 1, 91).unwrap();
+        let region = HostRegion::owned_retained(8, 8, Arc::new(())).unwrap();
+        region
+            .with_native(|p| unsafe {
+                p.as_ptr().cast::<u64>().write(7);
+            })
+            .unwrap();
+        memory.map_shared_overlay(address, region.clone()).unwrap();
+        let _execution = region.execution_lease().unwrap();
+        region
+            .with_native(|p| unsafe {
+                p.as_ptr().cast::<u64>().write(23);
+            })
+            .unwrap();
+        assert_eq!(memory.read_int(address, 8).unwrap(), 23);
+        memory.modify_int(address, 8, |value| value + 2).unwrap();
+        assert_eq!(
+            region
+                .with_native(|p| unsafe { p.as_ptr().cast::<u64>().read() })
+                .unwrap(),
+            25
+        );
+        assert!(!memory.owned_noncode_access(address, 8));
+        assert!(memory.owned_noncode_access(address - 1, 1));
+        assert_eq!(memory.read_int(address - 1, 1).unwrap(), 91);
+        assert!(memory.read_int(address - 1, 8).is_err());
+        assert!(memory.fetch(address, &mut [0; 8]).is_err());
+        assert!(memory.virtual_protect(page, PAGE, 0x40).is_err());
+        assert!(memory.virtual_alloc(page, PAGE, 0x1000, 4).is_err());
+        assert!(memory.virtual_free(page, 0, 0x8000).is_err());
+        assert!(memory.virtual_free(page, PAGE, 0x4000).is_err());
+        assert!(memory.protect(page, PAGE, READ).is_err());
+        assert!(memory.unmap_shared_data(address).is_err());
+        assert!(memory
+            .restore_shared_overlay(address, &HostRegion::owned(8).unwrap())
+            .is_err());
+        assert_eq!(memory.read_int(address, 8).unwrap(), 25);
+        drop(_execution);
+        memory.restore_shared_overlay(address, &region).unwrap();
+        assert_eq!(memory.read_int(address, 8).unwrap(), 25);
+        assert!(memory.owned_noncode_access(address, 8));
+        assert!(region.with_native(|_| ()).is_err());
+        memory.virtual_free(page, 0, 0x8000).unwrap();
+    }
     #[test]
     fn shared_rmw_preserves_alias_permissions_guards_and_native_lease() {
         let mut memory = Memory::default();

@@ -5,6 +5,10 @@
 执行原始程序集 IL。没有生成 JIT、动态 trampoline 或修改游戏/冻结 runtime。
 当前仍是有限启动诊断，完整 backend 准入为 false，尚无正式窗口和端到端性能验收。
 
+最新后续已接SharedStatic同一backing、真实job reflection注册、finalizer Free owner队列
+和独立native worker TLS；详见 `native-mono-burst-shared-static-2026-10-12.md`。
+这些固定typed边界没有恢复普通managed方法/构造函数名单，也没有扩大Frame的raw-pointer准入。
+
 ## 入口与参数
 
 普通入口必须位于实际 provider-owned live image registry：持有 native image 引用、记录 SHA256、

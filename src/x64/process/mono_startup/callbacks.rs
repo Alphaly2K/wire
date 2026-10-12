@@ -54,7 +54,23 @@ pub(super) fn with_owner<T>(
     targets: [u64; 7],
     operation: impl FnOnce() -> T,
 ) -> Result<(T, Stats), String> {
-    with_routes(memory, runtime, targets, None, operation)
+    with_routes(memory, runtime, targets, None, false, operation)
+}
+// Worker registration C APIs may raise GC profiler events. The worker owns its
+// real Mono TLS; only these owned scalar events reenter the paused guest thread.
+// No metadata route or worker managed invocation is installed here.
+pub(super) fn with_worker_registration_owner<T>(
+    memory: &mut Memory,
+    runtime: &mut Runtime64,
+    targets: [u64; 7],
+    operation: impl FnOnce() -> T,
+) -> Result<(T, Stats), String> {
+    let guest = runtime.active_thread();
+    if guest <= 1 || memory.read_int(runtime.teb() + 0x48, 8)? != guest {
+        return Err("worker registration callback owner TEB identity mismatch".into());
+    }
+    let restricted = [0, 0, 0, targets[3], targets[4], 0, 0];
+    with_routes(memory, runtime, restricted, None, true, operation)
 }
 pub(super) fn with_metadata_owner<'a, T>(
     memory: &'a mut Memory,
@@ -63,16 +79,17 @@ pub(super) fn with_metadata_owner<'a, T>(
     metadata: super::reentry::Metadata<'a>,
     operation: impl FnOnce() -> T,
 ) -> Result<(T, Stats), String> {
-    with_routes(memory, runtime, targets, Some(metadata), operation)
+    with_routes(memory, runtime, targets, Some(metadata), false, operation)
 }
 fn with_routes<'a, T>(
     memory: &'a mut Memory,
     runtime: &'a mut Runtime64,
     targets: [u64; 7],
     metadata: Option<super::reentry::Metadata<'a>>,
+    worker_registration: bool,
     operation: impl FnOnce() -> T,
 ) -> Result<(T, Stats), String> {
-    if runtime.active_thread() != 1 {
+    if runtime.active_thread() != 1 && !worker_registration {
         return Err("native callback owner must be guest main thread".into());
     }
     if OWNER.with(|slot| !slot.get().is_null()) {
@@ -94,7 +111,15 @@ fn with_routes<'a, T>(
     // stack owner and its exclusive Memory/Runtime borrows can be released.
     OWNER.with(|slot| slot.set((&owner as *const Owner<'_>).cast::<Owner<'static>>()));
     let scope = Scope;
+    let _execution = super::burst_shared::execution()?;
+    if !worker_registration {
+        super::unsafe_buffers::drain_finalizers()?;
+    }
     let result = operation();
+    super::burst_shared::validate_handles()?;
+    if !worker_registration {
+        super::unsafe_buffers::drain_finalizers()?;
+    }
     drop(scope);
     let stats = Stats {
         calls: owner.calls.get(),
@@ -172,13 +197,14 @@ fn execute_scalar_guest(
     args: &[u64],
     floating: &[(usize, u64)],
 ) -> Result<(u64, u64), String> {
+    super::burst_shared::validate_handles()?;
     if floating
         .iter()
         .any(|&(index, _)| index >= args.len() || index >= 4)
     {
         return Err("guest floating argument position outside ABI".into());
     }
-    if target == 0 || args.len() > 4 {
+    if target == 0 || args.len() > 8 {
         return Err("guest callback target/arity not admitted".into());
     }
     let depth = owner.depth.get();
@@ -240,8 +266,14 @@ fn execute_scalar_guest(
     owner.memory.borrow_mut().write_int(rsp, 8, RETURN)?;
     let mut cpu = Cpu64::new(target, rsp);
     cpu.gs_base = teb;
-    for (index, value) in args.iter().enumerate() {
+    for (index, value) in args.iter().take(4).enumerate() {
         cpu.regs[[1, 2, 8, 9][index]] = *value;
+    }
+    for (index, value) in args.iter().skip(4).enumerate() {
+        owner
+            .memory
+            .borrow_mut()
+            .write_int(rsp + 40 + index as u64 * 8, 8, *value)?;
     }
     for &(index, bits) in floating {
         cpu.xmm[index][..8].copy_from_slice(&bits.to_le_bytes());
@@ -338,7 +370,15 @@ pub(super) fn guest_string_span(
     units: Option<&[u16]>,
     trailing: &[u64],
 ) -> Result<u64, String> {
-    if trailing.len() > 3 {
+    guest_positioned_string_span(target, units, &[], trailing)
+}
+pub(super) fn guest_positioned_string_span(
+    target: u64,
+    units: Option<&[u16]>,
+    leading: &[u64],
+    trailing: &[u64],
+) -> Result<u64, String> {
+    if leading.len() + trailing.len() > 3 {
         return Err("string span callback arity exceeded".into());
     }
     OWNER.with(|pointer| {
@@ -380,7 +420,8 @@ pub(super) fn guest_string_span(
             .memory
             .borrow_mut()
             .write_int(address + 8, 4, units_len as u64)?;
-        let mut arguments = vec![address];
+        let mut arguments = leading.to_vec();
+        arguments.push(address);
         arguments.extend_from_slice(trailing);
         execute_guest(owner, target, &arguments)
     })
@@ -405,6 +446,46 @@ pub(super) fn guest_arguments(target: u64, args: &[u64]) -> Result<u64, String> 
             return Err("guest argument callback has no owner".into());
         }
         execute_guest(unsafe { &*slot.get() }, target, args)
+    })
+}
+/// Owned 16B Hash128 in the first Win64 register. Return the copied ref value
+/// too, so an engine mutation cannot be silently dropped at this boundary.
+pub(super) fn guest_hash128(
+    target: u64,
+    initial: &[u8; 16],
+    trailing: &[u64],
+) -> Result<(u64, [u8; 16]), String> {
+    if trailing.len() > 3 {
+        return Err("Hash128 callback arity exceeded".into());
+    }
+    OWNER.with(|slot| {
+        if slot.get().is_null() {
+            return Err("Hash128 callback has no same-thread owner".into());
+        }
+        let owner = unsafe { &*slot.get() };
+        let address = 0x6ff900000000 + owner.depth.get() as u64 * 4096;
+        owner.memory.borrow_mut().map(
+            address,
+            4096,
+            super::super::super::memory::READ | super::super::super::memory::WRITE,
+        )?;
+        struct Hash<'a, 'b>(&'a Owner<'b>, u64);
+        impl Drop for Hash<'_, '_> {
+            fn drop(&mut self) {
+                if let Err(error) = self.0.memory.borrow_mut().unmap(self.1, 4096) {
+                    eprintln!("native Hash128 payload cleanup: {error}");
+                    std::process::abort();
+                }
+            }
+        }
+        let _hash = Hash(owner, address);
+        owner.memory.borrow_mut().write(address, initial)?;
+        let mut args = vec![address];
+        args.extend_from_slice(trailing);
+        let result = execute_guest(owner, target, &args)?;
+        let mut hash = [0; 16];
+        owner.memory.borrow().read(address, &mut hash)?;
+        Ok((result, hash))
     })
 }
 /// A locked injected span contains guest addresses only. The native IL pinned
@@ -600,6 +681,11 @@ pub(super) unsafe extern "C" fn profiler_gc(prof: *mut c_void, event: i32, gener
     if !prof.is_null() || !matches!(event, 0 | 5 | 6 | 7 | 8 | 9 | 10 | 11) || generation < 0 {
         reject_profiler("unverified profiler event/context");
     }
+    match super::workers::forward_profiler(super::workers::Profiler::Gc(event, generation)) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => reject_profiler(&error),
+    }
     scalar(3, &[0, event as u32 as u64, generation as u32 as u64]);
     OWNER.with(|pointer| {
         let owner = unsafe { &*pointer.get() };
@@ -610,7 +696,37 @@ pub(super) unsafe extern "C" fn profiler_resize(prof: *mut c_void, size: i64) {
     if !prof.is_null() || size < 0 {
         reject_profiler("unverified profiler resize/context");
     }
+    match super::workers::forward_profiler(super::workers::Profiler::Resize(size)) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => reject_profiler(&error),
+    }
     scalar(4, &[0, size as u64]);
+}
+pub(super) fn worker_profiler(event: super::workers::Profiler) -> Result<(), String> {
+    if OWNER.with(|slot| slot.get().is_null()) {
+        return Err("queued worker profiler event has no live execution owner".into());
+    }
+    OWNER.with(|slot| {
+        let owner = unsafe { &*slot.get() };
+        match event {
+            super::workers::Profiler::Gc(event, generation)
+                if matches!(event, 0 | 5 | 6 | 7 | 8 | 9 | 10 | 11) && generation >= 0 =>
+            {
+                execute(
+                    owner,
+                    3,
+                    &[0, event as u32 as u64, generation as u32 as u64],
+                )?;
+                owner.gc_events.set(owner.gc_events.get() | (1 << event));
+            }
+            super::workers::Profiler::Resize(size) if size >= 0 => {
+                execute(owner, 4, &[0, size as u64])?;
+            }
+            _ => return Err("queued worker profiler event outside verified contract".into()),
+        }
+        Ok(())
+    })
 }
 fn reject_profiler(reason: &str) -> ! {
     eprintln!("NATIVE_MONO_PROFILER_REJECT: {reason}");
@@ -620,6 +736,88 @@ fn reject_profiler(reason: &str) -> ! {
 mod tests {
     use super::super::super::super::memory::{EXECUTE, READ, WRITE};
     use super::*;
+    #[test]
+    fn worker_registration_preserves_guest_identity_and_restricts_callbacks() {
+        let mut memory = Memory::default();
+        memory.map(0x1000, 4096, READ | WRITE | EXECUTE).unwrap();
+        // mov rax, gs:[0x48]; ret -- observe the actual callback guest TEB.
+        memory
+            .write(0x1000, &[0x65, 0x48, 0x8b, 0x04, 0x25, 0x48, 0, 0, 0, 0xc3])
+            .unwrap();
+        memory
+            .map(super::super::super::STACK, 65536, READ | WRITE)
+            .unwrap();
+        let mut runtime = Runtime64::new(
+            &mut memory,
+            0x140000000,
+            super::super::super::STACK,
+            65536,
+            "worker",
+        )
+        .unwrap();
+        runtime.enable_scheduler();
+        let rsp = super::super::super::STACK + 65536 - 72;
+        memory.write_int(rsp, 8, 0x1500).unwrap();
+        let mut cpu = Cpu64::new(0, rsp);
+        cpu.gs_base = runtime.teb();
+        cpu.regs[8] = 0x1000;
+        runtime
+            .dispatch("kernel32.dll", "CreateThread", &mut cpu, &mut memory)
+            .unwrap();
+        // Resolve the actual created identity through the existing scheduler.
+        let worker = runtime.take_threads().pop().unwrap().id;
+        assert_ne!(cpu.regs[0], 0);
+        runtime.activate_thread(worker);
+        let (actual, stats) =
+            with_worker_registration_owner(&mut memory, &mut runtime, [0x1000; 7], || {
+                worker_profiler(super::super::workers::Profiler::Gc(0, 0)).unwrap();
+                assert!(reference(0, &[]).is_err());
+                reference(3, &[0, 0, 0])
+            })
+            .unwrap();
+        assert_eq!(actual.unwrap(), worker);
+        assert_eq!(stats.calls[3], 2);
+        assert_eq!(stats.gc_events, 1);
+        assert_eq!(runtime.active_thread(), worker);
+        memory.write_int(runtime.teb() + 0x48, 8, 1).unwrap();
+        assert!(
+            with_worker_registration_owner(&mut memory, &mut runtime, [0x1000; 7], || ()).is_err()
+        );
+    }
+    #[test]
+    fn win64_stack_arguments_follow_shadow_space_and_keep_eight_argument_bound() {
+        use super::super::super::super::memory::{EXECUTE, READ, WRITE};
+        let mut memory = Memory::default();
+        memory.map(0x1000, 4096, READ | WRITE | EXECUTE).unwrap();
+        memory
+            .map(super::super::super::STACK, 65536, READ | WRITE)
+            .unwrap();
+        // Original Win64 instructions read arguments five and eight from
+        // the caller's stack above the return slot and 32B home area.
+        memory
+            .write(
+                0x1000,
+                &[
+                    0x48, 0x8b, 0x44, 0x24, 0x28, 0x48, 0x03, 0x44, 0x24, 0x40, 0xc3,
+                ],
+            )
+            .unwrap();
+        let mut runtime = Runtime64::new(
+            &mut memory,
+            0x140000000,
+            super::super::super::STACK,
+            65536,
+            "test",
+        )
+        .unwrap();
+        let (result, _) = with_owner(&mut memory, &mut runtime, [0; 7], || {
+            assert!(guest_arguments(0x1000, &[1; 9]).is_err());
+            guest_arguments(0x1000, &[1, 2, 3, 4, 51, 6, 7, 83])
+        })
+        .unwrap();
+        assert_eq!(result.unwrap(), 134);
+        assert!(memory.read_int(STACK_BASE, 8).is_err());
+    }
     #[test]
     fn marker_span_forwards_scalar_arguments_and_revokes_owned_utf16_payload() {
         let mut memory = Memory::default();
