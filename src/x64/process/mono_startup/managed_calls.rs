@@ -42,6 +42,7 @@ pub(super) struct Descriptor {
 }
 #[derive(Clone, Copy)]
 pub(super) struct Api {
+    library: Object,
     class: unsafe extern "C" fn(Object) -> Object,
     image: unsafe extern "C" fn(Object) -> Object,
     name: unsafe extern "C" fn(Object) -> *const c_char,
@@ -82,6 +83,7 @@ impl Api {
             }};
         }
         Ok(Self {
+            library,
             class: sym!(
                 "mono_method_get_class",
                 unsafe extern "C" fn(Object) -> Object
@@ -199,6 +201,19 @@ impl Api {
                         .ok_or("managed enum base is not integer")?,
                     false,
                 ))
+            }
+            0x11 => {
+                // Runtime invoke takes a pointer to value bytes. A small
+                // aggregate with complete scalar coverage fits the existing
+                // native-stack word, with no pointer/padding/reference copying.
+                let layout =
+                    super::value_layout::Api::load(self.library, unsafe { (self.image)(class) })?
+                        .layout(class)?;
+                let (width, _) = layout.scalar_inline()?;
+                if !matches!(width, 1 | 2 | 4 | 8) {
+                    return Err("managed scalar aggregate exceeds native-stack word".into());
+                }
+                Some((width, false))
             }
             _ => None,
         };
@@ -706,6 +721,18 @@ impl Api {
         specs: &[(u32, Object, bool)],
         images: &[Object],
     ) -> Result<(), String> {
+        self.fixed_typed_icall_enum_storage(method, owner, specs, images, &[])
+    }
+    /// A compiled adapter may explicitly declare a different integer enum ABI.
+    /// Existing adapters keep their Int32 contract; overrides name exact classes.
+    pub(super) fn fixed_typed_icall_enum_storage(
+        self,
+        method: Object,
+        owner: Object,
+        specs: &[(u32, Object, bool)],
+        images: &[Object],
+        enum_storage: &[(Object, u32)],
+    ) -> Result<(), String> {
         if method.is_null()
             || owner.is_null()
             || specs.is_empty()
@@ -757,13 +784,23 @@ impl Api {
                 return Err("fixed typed icall exact owned type mismatch".into());
             }
             if kind == 0x11 && !byref {
+                let base_kind = enum_storage
+                    .iter()
+                    .find(|(class, _)| *class == expected)
+                    .map_or(8, |(_, kind)| *kind);
+                let width = super::value_layout::enum_width(base_kind)
+                    .ok_or("fixed typed enum storage must be integer")?;
+                if unsafe { (self.is_enum)(expected) } == 0 {
+                    return Err("fixed typed value requires an enum".into());
+                }
                 let mut alignment = 0;
-                if unsafe { (self.is_enum)(expected) } == 0
-                    || unsafe { (self.kind)((self.enum_base)(expected)) } != 8
-                    || unsafe { (self.size)(expected, &mut alignment) } != 4
-                    || alignment != 4
+                let base = unsafe { (self.enum_base)(expected) };
+                if base.is_null()
+                    || unsafe { (self.kind)(base) } != base_kind
+                    || unsafe { (self.size)(expected, &mut alignment) } != width as i32
+                    || alignment != width as u32
                 {
-                    return Err("fixed typed enum requires actual Int32 storage".into());
+                    return Err("fixed typed enum does not match compiled integer storage".into());
                 }
             }
         }

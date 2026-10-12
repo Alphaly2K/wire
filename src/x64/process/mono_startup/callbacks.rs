@@ -114,11 +114,13 @@ fn with_routes<'a, T>(
     let _execution = super::burst_shared::execution()?;
     if !worker_registration {
         super::unsafe_buffers::drain_finalizers()?;
+        super::profiler_recorders::drain_finalizers()?;
     }
     let result = operation();
     super::burst_shared::validate_handles()?;
     if !worker_registration {
         super::unsafe_buffers::drain_finalizers()?;
+        super::profiler_recorders::drain_finalizers()?;
     }
     drop(scope);
     let stats = Stats {
@@ -448,6 +450,71 @@ pub(super) fn guest_arguments(target: u64, args: &[u64]) -> Result<u64, String> 
         execute_guest(unsafe { &*slot.get() }, target, args)
     })
 }
+/// Fixed adapters marshal declared byref value bytes into private guest slots.
+/// Native addresses never enter the Win64 argument list; output bytes are
+/// returned only after the original engine call and all nested reentries finish.
+pub(super) type GuestByteResult = ((u64, u64), Vec<Vec<u8>>);
+pub(super) fn guest_byte_arguments(
+    target: u64,
+    args: &[u64],
+    spans: &[(usize, &[u8])],
+) -> Result<GuestByteResult, String> {
+    OWNER.with(|slot| {
+        if slot.get().is_null() || args.len() > 8 || spans.len() > 8 {
+            return Err("typed byte callback owner/arity absent".into());
+        }
+        let owner = unsafe { &*slot.get() };
+        let mut seen = [false; 8];
+        let mut offset = 0usize;
+        let mut offsets = Vec::new();
+        for &(index, bytes) in spans {
+            if index >= args.len() || seen[index] || bytes.is_empty() || bytes.len() > 65536 {
+                return Err("typed byte callback span/argument invalid".into());
+            }
+            seen[index] = true;
+            offsets.push(offset);
+            offset = offset
+                .checked_add(bytes.len())
+                .and_then(|n| n.checked_add(15))
+                .ok_or("typed byte span overflow")?
+                & !15;
+        }
+        let size = (offset.max(1) as u64 + 4095) & !4095;
+        if size > 0x100000 || owner.depth.get() >= 8 {
+            return Err("typed byte callback capacity exceeded".into());
+        }
+        let base = 0x6ff900000000 + owner.depth.get() as u64 * 0x100000;
+        owner.memory.borrow_mut().map(
+            base,
+            size,
+            super::super::super::memory::READ | super::super::super::memory::WRITE,
+        )?;
+        struct Payload<'a, 'b>(&'a Owner<'b>, u64, u64);
+        impl Drop for Payload<'_, '_> {
+            fn drop(&mut self) {
+                if let Err(error) = self.0.memory.borrow_mut().unmap(self.1, self.2) {
+                    eprintln!("native typed byte callback cleanup: {error}");
+                    std::process::abort();
+                }
+            }
+        }
+        let _payload = Payload(owner, base, size);
+        let mut args = args.to_vec();
+        for (&(index, bytes), &offset) in spans.iter().zip(&offsets) {
+            let address = base + offset as u64;
+            owner.memory.borrow_mut().write(address, bytes)?;
+            args[index] = address;
+        }
+        let result = execute_scalar_guest(owner, target, &args, &[])?;
+        let mut outputs = Vec::new();
+        for (&(_, bytes), &offset) in spans.iter().zip(&offsets) {
+            let mut out = vec![0; bytes.len()];
+            owner.memory.borrow().read(base + offset as u64, &mut out)?;
+            outputs.push(out);
+        }
+        Ok((result, outputs))
+    })
+}
 /// Owned 16B Hash128 in the first Win64 register. Return the copied ref value
 /// too, so an engine mutation cannot be silently dropped at this boundary.
 pub(super) fn guest_hash128(
@@ -736,6 +803,45 @@ fn reject_profiler(reason: &str) -> ! {
 mod tests {
     use super::super::super::super::memory::{EXECUTE, READ, WRITE};
     use super::*;
+    #[test]
+    fn byte_arguments_preserve_positions_and_revoke_private_spans() {
+        let mut memory = Memory::default();
+        memory.map(0x1000, 4096, READ | WRITE | EXECUTE).unwrap();
+        // mov rax,[rcx]; add rax,rdx; add rax,r8; mov [r9],rax; ret
+        memory
+            .write(
+                0x1000,
+                &[
+                    0x48, 0x8b, 0x01, 0x48, 0x01, 0xd0, 0x4c, 0x01, 0xc0, 0x49, 0x89, 0x01, 0xc3,
+                ],
+            )
+            .unwrap();
+        memory
+            .map(super::super::super::STACK, 65536, READ | WRITE)
+            .unwrap();
+        let mut runtime = Runtime64::new(
+            &mut memory,
+            0x140000000,
+            super::super::super::STACK,
+            65536,
+            "byte-arguments",
+        )
+        .unwrap();
+        let (result, _) = with_owner(&mut memory, &mut runtime, [0; 7], || {
+            let input = 11u64.to_le_bytes();
+            let result = guest_byte_arguments(0x1000, &[0, 2, 3, 0], &[(0, &input), (3, &[0; 8])])?;
+            assert_eq!(result.0 .0, 16);
+            assert_eq!(result.1[0], input);
+            assert_eq!(result.1[1], 16u64.to_le_bytes());
+            assert!(with_service(|memory, _| memory.read_int(0x6ff900000000, 8)).is_err());
+            assert!(guest_byte_arguments(0x1000, &[0; 4], &[(4, &input)]).is_err());
+            assert!(guest_byte_arguments(0x1000, &[0; 4], &[(0, &input), (0, &input)]).is_err());
+            Ok::<_, String>(())
+        })
+        .unwrap();
+        result.unwrap();
+        assert!(memory.read_int(0x6ff900000000, 8).is_err());
+    }
     #[test]
     fn worker_registration_preserves_guest_identity_and_restricts_callbacks() {
         let mut memory = Memory::default();

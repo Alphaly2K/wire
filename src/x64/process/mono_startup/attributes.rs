@@ -160,6 +160,93 @@ struct Array {
     view: HostRegion,
     published: bool,
 }
+enum WorkerOperation {
+    Query {
+        class: Object,
+        field: Option<Object>,
+    },
+    Has {
+        info: Object,
+        class: Object,
+    },
+    Free {
+        info: Object,
+    },
+}
+/// Private non-moving image metadata/info capabilities only. No constructor or
+/// unrooted managed object is admitted by these worker commands.
+pub(super) struct WorkerRequest {
+    api: Api,
+    operation: WorkerOperation,
+}
+unsafe impl Send for WorkerRequest {}
+pub(super) enum WorkerResult {
+    Info(Object),
+    Scalar(u64),
+}
+// CustomAttrInfo is owned native image metadata, not a movable managed object.
+unsafe impl Send for WorkerResult {}
+impl WorkerRequest {
+    pub(super) fn execute(self) -> Result<WorkerResult, String> {
+        match self.operation {
+            WorkerOperation::Query { class, field } => {
+                query_info(self.api, class, field).map(WorkerResult::Info)
+            }
+            WorkerOperation::Has { info, class } => {
+                Ok(WorkerResult::Scalar(
+                    unsafe { (self.api.has)(info, class) } as u32 as u64,
+                ))
+            }
+            WorkerOperation::Free { info } => {
+                unsafe { (self.api.free_info)(info) };
+                Ok(WorkerResult::Scalar(0))
+            }
+        }
+    }
+}
+pub(super) struct WorkerBorrow<'a> {
+    registry: &'a mut Registry,
+    request: WorkerRequest,
+    freed: Option<u64>,
+}
+impl WorkerBorrow<'_> {
+    pub(super) fn run(
+        self,
+        execute: impl FnOnce(WorkerRequest) -> Result<WorkerResult, String>,
+    ) -> Result<u64, String> {
+        let result = execute(self.request)?;
+        match result {
+            WorkerResult::Info(info) => {
+                self.registry.queries += 1;
+                self.registry.adopt_info(info)
+            }
+            WorkerResult::Scalar(value) => {
+                if let Some(token) = self.freed {
+                    self.registry.infos.remove(&token);
+                }
+                Ok(value)
+            }
+        }
+    }
+}
+fn query_info(api: Api, class: Object, field: Option<Object>) -> Result<Object, String> {
+    if let Some(field) = field {
+        if unsafe { (api.field_parent)(field) } != class {
+            return Err("attribute field query requires exact declaring class".into());
+        }
+    }
+    let mut status = 65535;
+    let info = unsafe {
+        match field {
+            Some(field) => (api.from_field)(class, field, &mut status),
+            None => (api.from_class)(class, &mut status),
+        }
+    };
+    if status != 0 {
+        return Err(format!("native checked attribute metadata error={status}"));
+    }
+    Ok(info)
+}
 #[derive(Default)]
 pub(super) struct Registry {
     infos: BTreeMap<u64, Object>,
@@ -175,6 +262,48 @@ pub(super) struct Registry {
     released: bool,
 }
 impl Registry {
+    /// Caller resolves class/field through the live typed metadata registry.
+    /// This borrow prevents info release while the actual OS worker uses it;
+    /// only profiler scalars can reenter the owner during this synchronous wait.
+    pub(super) fn prepare_worker(
+        &mut self,
+        api: Api,
+        function: &str,
+        token: u64,
+        class: Object,
+        field: Option<Object>,
+    ) -> Result<WorkerBorrow<'_>, String> {
+        if self.released {
+            return Err("attribute worker command after retirement".into());
+        }
+        let (operation, freed) = match function {
+            "mono_custom_attrs_from_class" | "mono_custom_attrs_from_field" => {
+                if self.issued >= 65536 || class.is_null() {
+                    return Err("attribute worker query capacity/class invalid".into());
+                }
+                (WorkerOperation::Query { class, field }, None)
+            }
+            "mono_custom_attrs_has_attr" if !class.is_null() => (
+                WorkerOperation::Has {
+                    info: self.info(token)?,
+                    class,
+                },
+                None,
+            ),
+            "mono_custom_attrs_free" => (
+                WorkerOperation::Free {
+                    info: self.info(token)?,
+                },
+                Some(token),
+            ),
+            _ => return Err("untyped worker attribute metadata operation".into()),
+        };
+        Ok(WorkerBorrow {
+            registry: self,
+            request: WorkerRequest { api, operation },
+            freed,
+        })
+    }
     pub(super) fn contains(&self, token: u64) -> bool {
         !self.released
             && !self.views_retired
@@ -222,22 +351,11 @@ impl Registry {
         if self.released || self.issued >= 65536 {
             return Err("attribute info registry outside live capacity".into());
         }
-        if let Some(field) = field {
-            if unsafe { (api.field_parent)(field) } != class {
-                return Err("attribute field query requires exact declaring class".into());
-            }
-        }
-        let mut status = 65535;
-        let info = unsafe {
-            match field {
-                Some(field) => (api.from_field)(class, field, &mut status),
-                None => (api.from_class)(class, &mut status),
-            }
-        };
-        if status != 0 {
-            return Err(format!("native checked attribute metadata error={status}"));
-        }
+        let info = query_info(api, class, field)?;
         self.queries += 1;
+        self.adopt_info(info)
+    }
+    fn adopt_info(&mut self, info: Object) -> Result<u64, String> {
         if info.is_null() {
             return Ok(0);
         }

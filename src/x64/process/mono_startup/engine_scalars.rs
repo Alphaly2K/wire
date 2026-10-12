@@ -12,7 +12,7 @@ struct Spec {
     argument: Option<(&'static CStr, &'static CStr)>,
     adapter: Object,
 }
-const COUNT: usize = 27;
+const COUNT: usize = 29;
 static TARGETS: OnceLock<[u64; COUNT]> = OnceLock::new();
 thread_local! { static CALLS: RefCell<[usize; COUNT]> = const { RefCell::new([0; COUNT]) }; }
 pub(super) fn installed() -> bool {
@@ -229,6 +229,12 @@ unsafe extern "C" fn adapter_25() -> u8 {
 unsafe extern "C" fn adapter_26(value: u8) {
     call::<26>(&[u64::from(value)], &[]);
 }
+unsafe extern "C" fn adapter_27() -> i32 {
+    call::<27>(&[], &[]).0 as i32
+}
+unsafe extern "C" fn adapter_28() -> i32 {
+    call::<28>(&[], &[]).0 as i32
+}
 fn specs() -> [Spec; COUNT] {
     [
     Spec { binding: c"UnityEngine.Application::get_isFocused", namespace: c"UnityEngine", owner: c"Application", method: c"get_isFocused", target: 0x18006d380, returns: (c"System", c"Boolean"), argument: None, adapter: adapter_0 as *const () as Object },
@@ -258,5 +264,7 @@ fn specs() -> [Spec; COUNT] {
     Spec { binding: c"Unity.Jobs.LowLevel.Unsafe.JobsUtility::set_JobCompilerEnabled", namespace: c"Unity.Jobs.LowLevel.Unsafe", owner: c"JobsUtility", method: c"set_JobCompilerEnabled", target: 0x18005ff00, returns: (c"System", c"Void"), argument: Some((c"System", c"Boolean")), adapter: adapter_24 as *const () as Object },
     Spec { binding: c"Unity.Jobs.LowLevel.Unsafe.JobsUtility::get_JobDebuggerEnabled", namespace: c"Unity.Jobs.LowLevel.Unsafe", owner: c"JobsUtility", method: c"get_JobDebuggerEnabled", target: 0x18005fed0, returns: (c"System", c"Boolean"), argument: None, adapter: adapter_25 as *const () as Object },
     Spec { binding: c"Unity.Jobs.LowLevel.Unsafe.JobsUtility::set_JobDebuggerEnabled", namespace: c"Unity.Jobs.LowLevel.Unsafe", owner: c"JobsUtility", method: c"set_JobDebuggerEnabled", target: 0x18005fee0, returns: (c"System", c"Void"), argument: Some((c"System", c"Boolean")), adapter: adapter_26 as *const () as Object },
+    Spec { binding: c"UnityEngine.QualitySettings::get_activeColorSpace", namespace: c"UnityEngine", owner: c"QualitySettings", method: c"get_activeColorSpace", target: 0x180088390, returns: (c"UnityEngine", c"ColorSpace"), argument: None, adapter: adapter_27 as *const () as Object },
+    Spec { binding: c"UnityEngine.QualitySettings::get_desiredColorSpace", namespace: c"UnityEngine", owner: c"QualitySettings", method: c"get_desiredColorSpace", target: 0x180088390, returns: (c"UnityEngine", c"ColorSpace"), argument: None, adapter: adapter_28 as *const () as Object },
 ]
 }

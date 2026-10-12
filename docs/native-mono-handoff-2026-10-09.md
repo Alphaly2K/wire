@@ -14,13 +14,18 @@ main（包括 acc3d3a）。用户最新要求直接在 main 开发、提交，�
 - 最近已合入实现：`10731e1`（真实对象分配）和 `0d391b1`（回调栈性能）；后续代码与证据见本文末尾。
 - 实施计划输入：主checkout `wire-out/unity-native-mono-plan-2026-10-09/plan.md`
 
-当前进展覆盖本文后面的历史终点：已实现 SharedStatic exact shared backing、真实 job
-reflection 注册、profiler-authenticated finalizer owner Free 队列以及独立 native worker TLS。
-probe-75完成28个shared槽/28个job records；probe-78实际worker domain=NULL→root attach、
-受检Thread保存与不可变class name查询，真实GC后worker强根身份通过，退出detach/join配对。
-当前接worker field enumeration；其lazy setup使用真实TLS，不能按纯getter借用主线程。
-设计、证据和未准入范围见 `native-mono-burst-shared-static-2026-10-12.md`。
-完整成功的对象/fields/arrays最终GC检查点仍probe-41；窗口/游戏loop/端到端性能尚未验收。
+当前进展覆盖本文后面的历史终点：SharedStatic、job reflection、实际worker TLS、metadata/
+attributes lazy queries、IntPtr[]显示器列表、小型纯scalar结构体、真实ProfilerRecorder及
+GraphicsSettings对象getter已经接入。probe-81为新的整轮GC/root/shutdown成功检查点。
+probe-88首次开启真实宿主window/Present capture，1024×720，5draw/1Present；frame.png
+可视确认完整Unity Logo。尚未游戏可玩验收，full_game_backend=false。
+
+probe-89资源worker26实际分配托管对象并移交强根；probe-90完成外部handle。
+probe-91的SharedStatic锁交接死锁由sample定位并修复；probe-92实际执行多个metadata-qualified
+零参数reference-instance constructor，达到9draw/3Present，止于worker虚方法查询。
+已接私有pinned receiver与actual worker resolver，正在继续复测；constructor/interface入口
+没有新增类名名单，也不在owner代执行worker IL。最新证据与边界见
+`native-mono-worker-metadata-2026-10-12.md`。继续到游戏画面及可交互循环，不以Logo或提交收工。
 
 已有阶段提交：
 

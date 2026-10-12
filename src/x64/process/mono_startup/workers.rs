@@ -1,6 +1,7 @@
-//! Bounded diagnostic Mono TLS workers. Commands contain scalars only; each
-//! native Thread object and strong handle stays on its actual OS thread.
-//! Managed worker IL, fast domain switching and engine callbacks are not admitted.
+//! Bounded diagnostic Mono TLS workers. Commands contain scalars or checked
+//! non-moving metadata capabilities; managed Thread roots stay on their OS thread.
+//! Zero-argument metadata-qualified instance IL uses rooted receivers. Fast
+//! domain switching and ordinary worker engine callbacks are not admitted.
 use super::{Object, ROOT_TOKEN};
 use std::{
     cell::Cell,
@@ -99,10 +100,22 @@ enum Command {
     Current,
     Attach,
     Detach(u64),
+    Metadata(super::metadata::WorkerRequest),
+    Attributes(super::attributes::WorkerRequest),
+    Allocation(super::instances::WorkerRequest),
+    Invoke(super::constructors::WorkerRequest),
+    Virtual(super::virtual_methods::WorkerRequest),
     Close,
 }
+enum Reply {
+    Scalar(u64),
+    Metadata(super::metadata::WorkerResult),
+    Attributes(super::attributes::WorkerResult),
+    Allocation(super::instances::WorkerAllocation),
+    Virtual(super::virtual_methods::WorkerResult),
+}
 struct Completion {
-    result: Result<u64, String>,
+    result: Result<Reply, String>,
     attaches: usize,
     detaches: usize,
     attached: bool,
@@ -124,6 +137,7 @@ pub(super) fn forward_profiler(event: Profiler) -> Result<bool, String> {
         }
         let send = unsafe { &*slot.get() };
         let (reply, receive) = mpsc::sync_channel(1);
+        let _shared_wait = super::burst_shared::suspend();
         send.send(Event::Profiler(event, reply))
             .map_err(|_| "native worker profiler owner closed")?;
         receive
@@ -168,7 +182,31 @@ impl Attachment {
         }
         Ok(())
     }
-    fn execute(&mut self, command: &Command) -> Result<u64, String> {
+    fn execute(&mut self, command: Command) -> Result<Reply, String> {
+        if matches!(
+            command,
+            Command::Metadata(_)
+                | Command::Attributes(_)
+                | Command::Allocation(_)
+                | Command::Invoke(_)
+                | Command::Virtual(_)
+        ) {
+            self.current()?;
+            if unsafe { (self.api.domain)() } as usize != self.root {
+                return Err("worker metadata requires its actual attached root domain".into());
+            }
+            return match command {
+                Command::Metadata(request) => request.execute().map(Reply::Metadata),
+                Command::Attributes(request) => request.execute().map(Reply::Attributes),
+                Command::Allocation(request) => request.execute().map(Reply::Allocation),
+                Command::Invoke(request) => request.execute().map(|()| Reply::Scalar(0)),
+                Command::Virtual(request) => request.execute().map(Reply::Virtual),
+                _ => unreachable!(),
+            };
+        }
+        self.lifecycle(&command).map(Reply::Scalar)
+    }
+    fn lifecycle(&mut self, command: &Command) -> Result<u64, String> {
         match command {
             Command::Domain => {
                 let actual = unsafe { (self.api.domain)() };
@@ -223,6 +261,13 @@ impl Attachment {
                 self.detach()?;
                 Ok(0)
             }
+            Command::Metadata(_)
+            | Command::Attributes(_)
+            | Command::Allocation(_)
+            | Command::Invoke(_) => {
+                unreachable!()
+            }
+            Command::Virtual(_) => unreachable!(),
         }
     }
 }
@@ -246,7 +291,7 @@ fn run(
     let mut next = receive.recv();
     while let Ok(command) = next {
         let closing = matches!(command, Command::Close);
-        let result = state.execute(&command);
+        let result = state.execute(command);
         // Keep the marker at this stable address for the whole channel wait.
         let mut marker = ptr::null_mut();
         let safe = (!state.handle.is_null()).then(|| SafeWait::enter(api, &mut marker));
@@ -316,12 +361,14 @@ impl Worker {
         api: Api,
         command: Command,
         callback: &mut impl FnMut(Profiler) -> Result<(), String>,
-    ) -> Result<u64, String> {
+    ) -> Result<Reply, String> {
+        let _shared_wait = super::burst_shared::suspend();
         let mut marker = ptr::null_mut();
         let _safe = SafeWait::enter(api, &mut marker);
         self.send
             .send(command)
             .map_err(|_| "native Mono TLS worker command closed")?;
+        let mut callback_error = None;
         loop {
             match self
                 .receive
@@ -333,14 +380,32 @@ impl Worker {
                     self.attaches = completion.attaches;
                     self.detaches = completion.detaches;
                     self.token = completion.token;
-                    return completion.result;
+                    // Rooted allocation replies may be dropped on callback
+                    // failure. Leave GC Safe before freeing their actual roots.
+                    drop(_safe);
+                    // Always wait for command completion before releasing a
+                    // registry capability, even when a profiler reply failed.
+                    return callback_error.map_or(completion.result, Err);
                 }
                 Event::Profiler(event, reply) => {
                     let result = callback(event);
                     let _ = reply.send(result.clone());
-                    result?;
+                    if let Err(error) = result {
+                        callback_error.get_or_insert(error);
+                    }
                 }
             }
+        }
+    }
+    fn scalar(
+        &mut self,
+        api: Api,
+        command: Command,
+        callback: &mut impl FnMut(Profiler) -> Result<(), String>,
+    ) -> Result<u64, String> {
+        match self.request(api, command, callback)? {
+            Reply::Scalar(value) => Ok(value),
+            _ => Err("worker lifecycle received non-scalar result".into()),
         }
     }
 }
@@ -420,7 +485,7 @@ impl State {
             let worker = Worker::start(api, self.root, self.workers.len())?;
             self.workers.insert(guest, worker);
         }
-        let result = self.workers.get_mut(&guest).unwrap().request(
+        let result = self.workers.get_mut(&guest).unwrap().scalar(
             api,
             command,
             &mut super::callbacks::worker_profiler,
@@ -428,6 +493,144 @@ impl State {
         self.calls += 1;
         eprintln!("NATIVE_MONO_WORKER_TLS: guest-thread={guest}; export={function}; opaque-result={result:#x}");
         Ok(result)
+    }
+    pub(super) fn metadata(
+        &mut self,
+        guest: u64,
+        request: super::metadata::WorkerRequest,
+    ) -> Result<super::metadata::WorkerResult, String> {
+        if self.closed || self.owner != Some(thread::current().id()) {
+            return Err("worker metadata command outside live process owner".into());
+        }
+        let api = self.api.ok_or("worker metadata before native TLS setup")?;
+        let worker = self
+            .workers
+            .get_mut(&guest)
+            .ok_or("worker metadata before worker creation")?;
+        if !worker.attached {
+            return Err("worker metadata before actual root attachment".into());
+        }
+        match worker.request(
+            api,
+            Command::Metadata(request),
+            &mut super::callbacks::worker_profiler,
+        )? {
+            Reply::Metadata(value) => {
+                self.calls += 1;
+                Ok(value)
+            }
+            _ => Err("worker metadata received mismatched result".into()),
+        }
+    }
+    pub(super) fn attributes(
+        &mut self,
+        guest: u64,
+        request: super::attributes::WorkerRequest,
+    ) -> Result<super::attributes::WorkerResult, String> {
+        if self.closed || self.owner != Some(thread::current().id()) {
+            return Err("worker attributes outside live process owner".into());
+        }
+        let api = self
+            .api
+            .ok_or("worker attributes before native TLS setup")?;
+        let worker = self
+            .workers
+            .get_mut(&guest)
+            .ok_or("worker attributes before worker creation")?;
+        if !worker.attached {
+            return Err("worker attributes before actual root attachment".into());
+        }
+        match worker.request(
+            api,
+            Command::Attributes(request),
+            &mut super::callbacks::worker_profiler,
+        )? {
+            Reply::Attributes(value) => {
+                self.calls += 1;
+                Ok(value)
+            }
+            _ => Err("worker attributes received mismatched result".into()),
+        }
+    }
+    pub(super) fn allocate(
+        &mut self,
+        guest: u64,
+        request: super::instances::WorkerRequest,
+    ) -> Result<super::instances::WorkerAllocation, String> {
+        if self.closed || self.owner != Some(thread::current().id()) {
+            return Err("worker allocation outside live process owner".into());
+        }
+        let api = self
+            .api
+            .ok_or("worker allocation before native TLS setup")?;
+        let worker = self
+            .workers
+            .get_mut(&guest)
+            .filter(|w| w.attached)
+            .ok_or("worker allocation before actual root attachment")?;
+        match worker.request(
+            api,
+            Command::Allocation(request),
+            &mut super::callbacks::worker_profiler,
+        )? {
+            Reply::Allocation(value) => {
+                self.calls += 1;
+                Ok(value)
+            }
+            _ => Err("worker allocation received mismatched result".into()),
+        }
+    }
+    pub(super) fn invoke(
+        &mut self,
+        guest: u64,
+        request: super::constructors::WorkerRequest,
+    ) -> Result<(), String> {
+        if self.closed || self.owner != Some(thread::current().id()) {
+            return Err("worker invocation outside live process owner".into());
+        }
+        let api = self
+            .api
+            .ok_or("worker invocation before native TLS setup")?;
+        let worker = self
+            .workers
+            .get_mut(&guest)
+            .filter(|w| w.attached)
+            .ok_or("worker invocation before actual root attachment")?;
+        worker.scalar(
+            api,
+            Command::Invoke(request),
+            &mut super::callbacks::worker_profiler,
+        )?;
+        self.calls += 1;
+        Ok(())
+    }
+    pub(super) fn resolve_virtual(
+        &mut self,
+        guest: u64,
+        request: super::virtual_methods::WorkerRequest,
+    ) -> Result<super::virtual_methods::WorkerResult, String> {
+        if self.closed || self.owner != Some(thread::current().id()) {
+            return Err("worker virtual resolution outside live process owner".into());
+        }
+        let api = self
+            .api
+            .ok_or("worker virtual resolution before native TLS setup")?;
+        let worker = self
+            .workers
+            .get_mut(&guest)
+            .filter(|w| w.attached)
+            .ok_or("worker virtual resolution before actual root attachment")?;
+        match worker.request(
+            api,
+            Command::Virtual(request),
+            &mut super::callbacks::worker_profiler,
+        )? {
+            Reply::Virtual(value) => {
+                self.calls += 1;
+                Ok(value)
+            }
+            _ => Err("worker virtual resolution received mismatched result".into()),
+        }
     }
     pub(super) fn close(&mut self) -> Result<(), String> {
         if self.closed {
@@ -441,7 +644,7 @@ impl State {
         }
         if let Some(api) = self.api {
             for worker in self.workers.values_mut() {
-                worker.request(api, Command::Close, &mut super::callbacks::worker_profiler)?;
+                worker.scalar(api, Command::Close, &mut super::callbacks::worker_profiler)?;
                 if worker.attached || worker.attaches != worker.detaches {
                     return Err("native Mono TLS worker attachment teardown is incomplete".into());
                 }
@@ -466,7 +669,7 @@ impl State {
         unsafe { (api.collect)((api.max_generation)()) };
         for worker in self.workers.values_mut().filter(|w| w.attached) {
             let expected = worker.token;
-            let current = worker.request(
+            let current = worker.scalar(
                 api,
                 Command::Current,
                 &mut super::callbacks::worker_profiler,
@@ -589,49 +792,47 @@ mod tests {
             Ok(())
         };
         assert_eq!(
-            first.request(api, Command::Domain, &mut callback).unwrap(),
+            first.scalar(api, Command::Domain, &mut callback).unwrap(),
             0
         );
         assert_eq!(
-            first.request(api, Command::Root, &mut callback).unwrap(),
+            first.scalar(api, Command::Root, &mut callback).unwrap(),
             ROOT_TOKEN
         );
-        assert!(first.request(api, Command::Current, &mut callback).is_err());
-        let old = first.request(api, Command::Attach, &mut callback).unwrap();
-        let other = second.request(api, Command::Attach, &mut callback).unwrap();
+        assert!(first.scalar(api, Command::Current, &mut callback).is_err());
+        let old = first.scalar(api, Command::Attach, &mut callback).unwrap();
+        let other = second.scalar(api, Command::Attach, &mut callback).unwrap();
         assert_ne!(old, other);
         assert_eq!(
-            first.request(api, Command::Domain, &mut callback).unwrap(),
+            first.scalar(api, Command::Domain, &mut callback).unwrap(),
             ROOT_TOKEN
         );
         assert_eq!(
-            first.request(api, Command::Current, &mut callback).unwrap(),
+            first.scalar(api, Command::Current, &mut callback).unwrap(),
             old
         );
         assert!(first
-            .request(api, Command::Detach(other), &mut callback)
+            .scalar(api, Command::Detach(other), &mut callback)
             .is_err());
         assert!(first.attached);
         first
-            .request(api, Command::Detach(old), &mut callback)
+            .scalar(api, Command::Detach(old), &mut callback)
             .unwrap();
         assert_eq!(
-            first.request(api, Command::Domain, &mut callback).unwrap(),
+            first.scalar(api, Command::Domain, &mut callback).unwrap(),
             0
         );
         assert_eq!(
-            second
-                .request(api, Command::Current, &mut callback)
-                .unwrap(),
+            second.scalar(api, Command::Current, &mut callback).unwrap(),
             other
         );
-        let new = first.request(api, Command::Attach, &mut callback).unwrap();
+        let new = first.scalar(api, Command::Attach, &mut callback).unwrap();
         assert_ne!(old, new);
         assert!(first
-            .request(api, Command::Detach(old), &mut callback)
+            .scalar(api, Command::Detach(old), &mut callback)
             .is_err());
         for worker in [&mut first, &mut second] {
-            worker.request(api, Command::Close, &mut callback).unwrap();
+            worker.scalar(api, Command::Close, &mut callback).unwrap();
             worker.join.take().unwrap().join().unwrap();
             assert!(!worker.attached);
             assert_eq!(worker.attaches, worker.detaches);

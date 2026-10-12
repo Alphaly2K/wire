@@ -143,6 +143,9 @@ impl Releases {
     }
 }
 static RELEASES: OnceLock<Mutex<Releases>> = OnceLock::new();
+pub(super) fn actual_finalizer_scope() -> bool {
+    FINALIZING.with(|scope| scope.get() != 0)
+}
 unsafe extern "C" fn finalizing(_: Object, object: Object) {
     checked(|| {
         FINALIZING.with(|scope| -> Result<(), String> {

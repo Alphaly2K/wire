@@ -485,7 +485,7 @@ impl Process64 {
     #[cfg(feature = "native-mono-backend")]
     pub fn finish_native_mono_startup_probe(&mut self) -> Result<(), String> {
         if let Some(probe) = self.loader.mono_startup.as_mut() {
-            if !probe.stopped() {
+            if !probe.shutdown_complete() {
                 // The cooperative run has stopped. Keep its CPU contexts and
                 // original error intact while owner-scoped shutdown uses the
                 // actual guest main TEB. Resume is prohibited after cleanup.

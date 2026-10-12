@@ -103,7 +103,7 @@ impl Metadata<'_> {
             roots.roots.sync_from_guest(roots.api, memory)?;
             roots.fields.sync(roots.api, roots.roots)?;
             if let Some((api, arrays)) = roots.arrays.as_mut() {
-                arrays.sync(*api, roots.api, roots.roots)?;
+                arrays.sync(*api, roots.api, roots.roots, memory)?;
             }
         }
         Ok(())

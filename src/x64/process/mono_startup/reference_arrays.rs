@@ -5,6 +5,20 @@ use crate::x64::memory::{shared::HostRegion, READ, WRITE};
 use std::{collections::BTreeMap, ptr};
 const BASE: u64 = 0x6ffeb0000000;
 const STRIDE: u64 = 65536;
+fn validate_engine_handles(bytes: &[u8], mut live: impl FnMut(u64) -> bool) -> Result<(), String> {
+    if !bytes.len().is_multiple_of(8) {
+        return Err("IntPtr payload width mismatch".into());
+    }
+    for data in bytes.as_chunks::<8>().0 {
+        let value = u64::from_le_bytes(*data);
+        if value != 0 && !live(value) {
+            return Err(format!(
+                "IntPtr array value is not NULL or a live guest engine data handle: {value:#x}"
+            ));
+        }
+    }
+    Ok(())
+}
 #[derive(Clone, Copy)]
 pub(super) struct Api {
     new: unsafe extern "C" fn(Object, Object, usize) -> Object,
@@ -18,6 +32,7 @@ pub(super) struct Api {
     value: unsafe extern "C" fn(Object) -> i32,
     element: unsafe extern "C" fn(Object) -> Object,
     rank: unsafe extern "C" fn(Object) -> u32,
+    intptr: Object,
     reference_images: [Object; 6],
     values: [Option<value_layout::Api>; 6],
 }
@@ -36,6 +51,7 @@ impl Api {
         for (api, image) in values.iter_mut().zip(reference_images) {
             *api = Some(value_layout::Api::load(library, image)?);
         }
+        let intptr = sym!("mono_get_intptr_class", unsafe extern "C" fn() -> Object);
         Ok(Self {
             new: sym!(
                 "mono_array_new",
@@ -75,11 +91,33 @@ impl Api {
                 unsafe extern "C" fn(Object) -> Object
             ),
             rank: sym!("mono_class_get_rank", unsafe extern "C" fn(Object) -> u32),
+            intptr: unsafe { intptr() },
             reference_images,
             values,
         })
     }
     fn element_layout(self, element: Object) -> Result<value_layout::Layout, String> {
+        if !element.is_null() && element == self.intptr {
+            // Exact System.IntPtr SZ arrays carry original engine data handles.
+            // This does not admit raw pointer fields or ordinary invoke args.
+            let layout = value_layout::Layout {
+                class: element,
+                width: 8,
+                alignment: 8,
+                slots: vec![value_layout::Slot {
+                    nested: false,
+                    offset: 0,
+                    field: ptr::null_mut(),
+                    shape: value_layout::Shape::Scalar {
+                        width: 8,
+                        boolean: false,
+                    },
+                }],
+                value: true,
+            };
+            layout.check()?;
+            return Ok(layout);
+        }
         if !element.is_null()
             && unsafe { (self.value)(element) } == 0
             && self
@@ -111,6 +149,7 @@ struct Entry {
     payload: HostRegion,
     committed: Vec<u8>,
     published: bool,
+    engine_handles: bool,
 }
 #[derive(Default)]
 pub(super) struct Registry {
@@ -197,6 +236,7 @@ impl Registry {
             payload: HostRegion::owned(payload_size)?,
             committed: vec![0; payload_size],
             published: false,
+            engine_handles: element == api.intptr,
         };
         Self::layout(api, &entry)?;
         // Only admitted fields are read; native padding is never published.
@@ -285,6 +325,7 @@ impl Registry {
             payload: HostRegion::owned(payload_size.max(1))?,
             committed: vec![0; payload_size],
             published: false,
+            engine_handles: element == api.intptr,
         };
         Self::layout(api, &entry)?;
         let bytes = Self::native_values(api, root_api, roots, &entry, reference)?;
@@ -336,6 +377,20 @@ impl Registry {
             entry
                 .layout
                 .validate(&bytes[start..start + entry.layout.width], root_api, roots)?;
+        }
+        if entry.engine_handles
+            && bytes.as_chunks::<8>().0.iter().any(|data| {
+                let value = u64::from_le_bytes(*data);
+                value != 0
+                    && !entry
+                        .committed
+                        .as_chunks::<8>()
+                        .0
+                        .iter()
+                        .any(|known| known == data)
+            })
+        {
+            return Err("native IntPtr array returned an unadmitted engine handle".into());
         }
         Ok(bytes)
     }
@@ -502,6 +557,7 @@ impl Registry {
         api: Api,
         root_api: instances::Api,
         roots: &instances::Registry,
+        memory: &Memory,
     ) -> Result<(), String> {
         if self.retired {
             return Err("typed array sync after retirement".into());
@@ -513,6 +569,9 @@ impl Registry {
             }
             Self::layout(api, entry)?;
             let bytes = Self::values(entry)?;
+            if entry.engine_handles {
+                validate_engine_handles(&bytes, |value| memory.guest_private_data_slot(value, 1))?;
+            }
             for index in 0..entry.length {
                 let start = index * entry.layout.width;
                 let refs = entry.layout.validate(
@@ -581,7 +640,7 @@ impl Registry {
         let changed = entry.committed[offset..offset + 8] != value.to_le_bytes();
         let slot_offset = slot.offset;
         memory.write_int(address, 8, value)?;
-        self.sync(api, root_api, roots)?;
+        self.sync(api, root_api, roots, memory)?;
         if !changed {
             let entry = &self.entries[&token];
             unsafe {
@@ -679,6 +738,21 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn intptr_arrays_accept_only_null_and_live_guest_data_handles() {
+        let valid = [0u64, 0x30001000];
+        let bytes: Vec<_> = valid.into_iter().flat_map(u64::to_le_bytes).collect();
+        validate_engine_handles(&bytes, |value| value == 0x30001000).unwrap();
+        for value in [
+            0x180001000u64,
+            0x6ffe40000000,
+            0xffffffffffffffff,
+            0x100000000,
+        ] {
+            assert!(validate_engine_handles(&value.to_le_bytes(), |_| false).is_err());
+        }
+        assert!(validate_engine_handles(&[0; 7], |_| true).is_err());
+    }
     unsafe extern "C" fn test_image(_: Object) -> Object {
         1usize as Object
     }
@@ -735,6 +809,7 @@ mod tests {
             element_size: size,
             address,
             barrier,
+            intptr: ptr::null_mut(),
             image: test_image,
             value: test_value,
             element: test_element,
@@ -931,6 +1006,7 @@ mod tests {
                 payload: HostRegion::owned(24).unwrap(),
                 committed: vec![0; 24],
                 published: false,
+                engine_handles: false,
             },
         );
         let mut memory = Memory::default();
@@ -938,11 +1014,11 @@ mod tests {
         memory.write_int(token + 32, 8, value).unwrap();
         memory.write_int(token + 40, 4, 0x80000001).unwrap();
         memory.write_int(token + 48, 8, 99).unwrap();
-        assert!(registry.sync(api, root_api, &roots).is_err());
+        assert!(registry.sync(api, root_api, &roots, &memory).is_err());
         assert_eq!(WRITES.with(Cell::get), 0);
         assert_eq!(data[5], 0);
         memory.write_int(token + 48, 8, 0).unwrap();
-        registry.sync(api, root_api, &roots).unwrap();
+        registry.sync(api, root_api, &roots, &memory).unwrap();
         assert_eq!(data[4], 4);
         assert_eq!(data[5], 0x80000001);
         assert_eq!(WRITES.with(Cell::get), 1);
@@ -1003,10 +1079,10 @@ mod tests {
             .is_err());
         memory.write_int(a + 32, 8, value).unwrap();
         memory.write_int(b + 32, 8, 0x1234).unwrap();
-        assert!(registry.sync(api, root_api, &roots).is_err());
+        assert!(registry.sync(api, root_api, &roots, &memory).is_err());
         assert_eq!(WRITES.with(Cell::get), 0);
         memory.write_int(b + 32, 8, 0).unwrap();
-        registry.sync(api, root_api, &roots).unwrap();
+        registry.sync(api, root_api, &roots, &memory).unwrap();
         assert_eq!(WRITES.with(Cell::get), 1);
         registry
             .store(api, root_api, &roots, &mut memory, [a, a + 32, value])

@@ -74,30 +74,256 @@ pub(super) enum Value {
     Text(CString),
     Scalar(u64),
 }
+/// Only registry-validated, non-moving Mono metadata may cross this queue.
+/// No managed object, guest address, Memory/Runtime borrow or executable PC is
+/// included. WorkerBorrow keeps the registry exclusively borrowed until the
+/// synchronous command completes; the process owner cannot retire images or
+/// the root domain during that wait. Workers are joined before image teardown.
+pub(super) struct WorkerRequest {
+    library: Object,
+    function: String,
+    arguments: [u64; 3],
+    operands: Vec<(u64, Kind, Object)>,
+    iterator: Option<Object>,
+}
+// Mono metadata belongs to retained image/domain pools, is not GC-movable, and
+// these public APIs synchronize their lazy setup. Construction is private to
+// the checked registry; execution is serialized on an actually attached worker.
+unsafe impl Send for WorkerRequest {}
+pub(super) struct WorkerResult {
+    value: Value,
+    iterator: Option<Object>,
+}
+// Contains only owned text/scalars or non-moving metadata returned by the
+// admitted C API, including its opaque metadata iterator. Never a managed root.
+unsafe impl Send for WorkerResult {}
+impl WorkerRequest {
+    pub(super) fn execute(self) -> Result<WorkerResult, String> {
+        let mut local = Registry::default();
+        for (token, kind, native) in self.operands {
+            local.handles.insert(
+                token,
+                Entry {
+                    kind,
+                    native,
+                    userdata: None,
+                    element: None,
+                },
+            );
+        }
+        let [a, b, c] = self.arguments;
+        if let Some(mut iterator) = self.iterator {
+            let parent = local.native(a, iteration_shape(&self.function)?.0)?;
+            let get = sym!(
+                self.library,
+                self.function.as_str(),
+                unsafe extern "C" fn(Object, *mut Object) -> Object
+            );
+            let value = unsafe { get(parent, &mut iterator) };
+            Ok(WorkerResult {
+                value: Value::Handle(value, iteration_shape(&self.function)?.1),
+                iterator: Some(iterator),
+            })
+        } else {
+            Ok(WorkerResult {
+                value: local.query(self.library, &self.function, a, b, c)?,
+                iterator: None,
+            })
+        }
+    }
+}
+pub(super) struct WorkerBorrow<'a> {
+    registry: &'a mut Registry,
+    request: WorkerRequest,
+    iteration: Option<(u64, u64)>,
+}
+impl WorkerBorrow<'_> {
+    pub(super) fn run(
+        self,
+        execute: impl FnOnce(WorkerRequest) -> Result<WorkerResult, String>,
+    ) -> Result<(Value, Option<u64>), String> {
+        let Self {
+            registry,
+            request,
+            iteration,
+        } = self;
+        let function = request.function.clone();
+        let result = execute(request)?;
+        let token = if let Some((parent, token)) = iteration {
+            let native = result
+                .iterator
+                .ok_or("worker metadata iterator result missing")?;
+            let token = if token == 0 {
+                ITER_BASE + registry.iterators.len() as u64 * 256
+            } else {
+                token
+            };
+            registry.iterators.insert(
+                token,
+                Iterator {
+                    parent,
+                    function,
+                    native,
+                },
+            );
+            Some(token)
+        } else {
+            if result.iterator.is_some() {
+                return Err("unexpected worker metadata iterator result".into());
+            }
+            None
+        };
+        registry.queries += 1;
+        Ok((result.value, token))
+    }
+}
+fn iteration_shape(function: &str) -> Result<(Kind, Kind), String> {
+    match function {
+        "mono_class_get_fields" => Ok((Kind::Class, Kind::Field)),
+        "mono_class_get_methods" => Ok((Kind::Class, Kind::Method)),
+        "mono_class_get_interfaces" | "mono_class_get_nested_types" => {
+            Ok((Kind::Class, Kind::Class))
+        }
+        "mono_signature_get_params" => Ok((Kind::Signature, Kind::Type)),
+        _ => Err("untyped worker metadata iterator".into()),
+    }
+}
+fn worker_query_shape(function: &str) -> Option<(Kind, Option<Kind>)> {
+    if let Some((kind, _)) = predicate_shape(function) {
+        return Some((kind, None));
+    }
+    Some(match function {
+        "mono_field_get_type"
+        | "mono_field_get_flags"
+        | "mono_field_get_offset"
+        | "mono_field_get_parent"
+        | "mono_field_get_name" => (Kind::Field, None),
+        "mono_method_signature"
+        | "mono_method_get_name"
+        | "mono_method_get_class"
+        | "unity_mono_method_is_inflated"
+        | "unity_mono_method_is_generic" => (Kind::Method, None),
+        "mono_signature_get_return_type"
+        | "mono_signature_get_param_count"
+        | "mono_signature_is_instance" => (Kind::Signature, None),
+        "mono_type_get_class"
+        | "mono_class_from_mono_type"
+        | "mono_ptr_class_get"
+        | "mono_type_get_type"
+        | "mono_type_is_byref" => (Kind::Type, None),
+        "mono_metadata_type_equal" => (Kind::Type, Some(Kind::Type)),
+        "mono_class_is_assignable_from" | "mono_class_is_subclass_of" => {
+            (Kind::Class, Some(Kind::Class))
+        }
+        "mono_class_get_name"
+        | "mono_class_get_namespace"
+        | "mono_class_get_parent"
+        | "mono_class_get_element_class"
+        | "mono_class_get_nesting_type"
+        | "mono_class_get_type"
+        | "mono_class_get_flags"
+        | "mono_class_is_valuetype"
+        | "mono_class_is_enum"
+        | "mono_class_is_generic"
+        | "mono_class_is_inflated"
+        | "mono_unity_class_is_abstract"
+        | "mono_unity_class_is_interface"
+        | "mono_unity_class_has_failure"
+        | "mono_class_get_rank"
+        | "mono_class_num_fields"
+        | "mono_class_num_methods"
+        | "mono_class_get_type_token"
+        | "mono_class_instance_size"
+        | "mono_class_array_element_size"
+        | "mono_array_element_size"
+        | "mono_class_enum_basetype"
+        | "mono_array_class_get"
+        | "mono_bounded_array_class_get" => (Kind::Class, None),
+        _ => return None,
+    })
+}
+pub(super) fn worker_handles(function: &str) -> bool {
+    CORE_CLASSES.contains(&function)
+        || iteration_shape(function).is_ok()
+        || worker_query_shape(function).is_some()
+}
 /// Audited frozen-source getters only: immutable metadata access without a
 /// current-domain lookup, managed allocation, lazy setup or managed invocation.
 /// They may be serialized on the process owner for an actually attached worker.
 pub(super) fn thread_neutral_leaf(function: &str) -> bool {
-    matches!(
-        function,
-        "mono_class_get_name"
-            | "mono_class_get_namespace"
-            | "mono_method_get_name"
-            | "mono_field_get_name"
-            | "mono_class_get_parent"
-            | "mono_class_get_element_class"
-            | "mono_class_get_nesting_type"
-            | "mono_class_get_type"
-            | "mono_class_get_type_token"
-            | "mono_class_get_rank"
-            | "mono_method_get_class"
-            | "mono_field_get_parent"
-            | "mono_signature_get_return_type"
-            | "mono_signature_get_param_count"
-            | "mono_signature_is_instance"
-    )
+    CORE_CLASSES.contains(&function)
+        || matches!(
+            function,
+            "mono_class_get_name"
+                | "mono_class_get_namespace"
+                | "mono_method_get_name"
+                | "mono_field_get_name"
+                | "mono_class_get_parent"
+                | "mono_class_get_element_class"
+                | "mono_class_get_nesting_type"
+                | "mono_class_get_type"
+                | "mono_class_get_type_token"
+                | "mono_class_get_rank"
+                | "mono_method_get_class"
+                | "mono_field_get_parent"
+                | "mono_signature_get_return_type"
+                | "mono_signature_get_param_count"
+                | "mono_signature_is_instance"
+        )
 }
 impl Registry {
+    pub(super) fn prepare_worker(
+        &mut self,
+        library: Object,
+        function: &str,
+        arguments: [u64; 3],
+        iterator_token: Option<u64>,
+    ) -> Result<WorkerBorrow<'_>, String> {
+        let [a, b, _] = arguments;
+        let mut operands = Vec::new();
+        let (iterator, iteration) = if let Ok((kind, _)) = iteration_shape(function) {
+            let token = iterator_token.ok_or("worker metadata iterator slot missing")?;
+            operands.push((a, kind, self.native(a, kind)?));
+            let native = if token == 0 {
+                if self.iterators.len() >= 65536 {
+                    return Err("metadata iterator capacity exceeded".into());
+                }
+                ptr::null_mut()
+            } else {
+                let item = self
+                    .iterators
+                    .get(&token)
+                    .ok_or("unknown metadata iterator token")?;
+                if item.parent != a || item.function != function {
+                    return Err("metadata iterator parent/kind mismatch".into());
+                }
+                item.native
+            };
+            (Some(native), Some((a, token)))
+        } else {
+            if iterator_token.is_some() {
+                return Err("unexpected worker metadata iterator slot".into());
+            }
+            let (kind, second) =
+                worker_query_shape(function).ok_or("untyped worker metadata query")?;
+            operands.push((a, kind, self.native(a, kind)?));
+            if let Some(kind) = second {
+                operands.push((b, kind, self.native(b, kind)?));
+            }
+            (None, None)
+        };
+        Ok(WorkerBorrow {
+            registry: self,
+            request: WorkerRequest {
+                library,
+                function: function.into(),
+                arguments,
+                operands,
+                iterator,
+            },
+            iteration,
+        })
+    }
     pub(super) fn native(&self, token: u64, kind: Kind) -> Result<Object, String> {
         if self.retired {
             return Err("metadata registry retired".into());
@@ -922,6 +1148,119 @@ pub(super) fn handles(function: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn worker_metadata_capabilities_reject_wrong_kinds_and_bind_iterator_state() {
+        use super::*;
+        let mut memory = Memory::default();
+        let mut registry = Registry::default();
+        let mut native = [0u64; 32];
+        let class = registry
+            .wrap(
+                &mut memory,
+                Value::Handle(native.as_mut_ptr().cast(), Kind::Class),
+            )
+            .unwrap();
+        let other = registry
+            .wrap(
+                &mut memory,
+                Value::Handle(native.as_mut_ptr().cast(), Kind::Method),
+            )
+            .unwrap();
+        assert!(registry
+            .prepare_worker(
+                ptr::null_mut(),
+                "mono_class_get_fields",
+                [other, 0, 0],
+                Some(0)
+            )
+            .is_err());
+        assert!(registry
+            .prepare_worker(ptr::null_mut(), "mono_field_get_type", [class, 0, 0], None)
+            .is_err());
+        assert!(registry
+            .prepare_worker(
+                ptr::null_mut(),
+                "mono_class_get_fields",
+                [class, 0, 0],
+                Some(123)
+            )
+            .is_err());
+        assert!(registry
+            .prepare_worker(
+                ptr::null_mut(),
+                "mono_object_get_class",
+                [class, 0, 0],
+                None
+            )
+            .is_err());
+        let before = registry.iterators.len();
+        assert!(registry
+            .prepare_worker(
+                ptr::null_mut(),
+                "mono_class_get_fields",
+                [class, 0, 0],
+                Some(0)
+            )
+            .unwrap()
+            .run(|_| Err("actual worker failed".into()))
+            .is_err());
+        assert_eq!(registry.iterators.len(), before);
+        let (value, token) = registry
+            .prepare_worker(
+                ptr::null_mut(),
+                "mono_class_get_fields",
+                [class, 0, 0],
+                Some(0),
+            )
+            .unwrap()
+            .run(|request| {
+                assert_eq!(request.operands.len(), 1);
+                assert_eq!(request.operands[0].2, native.as_mut_ptr().cast());
+                assert_eq!(request.iterator, Some(ptr::null_mut()));
+                Ok(WorkerResult {
+                    value: Value::Handle(ptr::null_mut(), Kind::Field),
+                    iterator: Some(native.as_mut_ptr().cast()),
+                })
+            })
+            .unwrap();
+        assert!(matches!(value, Value::Handle(p, Kind::Field) if p.is_null()));
+        let token = token.unwrap();
+        assert!(registry
+            .prepare_worker(
+                ptr::null_mut(),
+                "mono_class_get_methods",
+                [class, 0, 0],
+                Some(token)
+            )
+            .is_err());
+        assert!(registry
+            .prepare_worker(
+                ptr::null_mut(),
+                "mono_class_get_fields",
+                [other, 0, 0],
+                Some(token)
+            )
+            .is_err());
+        let request = registry
+            .prepare_worker(
+                ptr::null_mut(),
+                "mono_class_get_fields",
+                [class, 0, 0],
+                Some(token),
+            )
+            .unwrap();
+        assert_eq!(request.request.iterator, Some(native.as_mut_ptr().cast()));
+        drop(request);
+        registry.retire(&mut memory).unwrap();
+        assert!(registry
+            .prepare_worker(
+                ptr::null_mut(),
+                "mono_class_get_fields",
+                [class, 0, 0],
+                Some(token)
+            )
+            .is_err());
+    }
     #[test]
     fn unity_class_tokens_reject_wrong_table_nil_row_out_of_range_and_truncation() {
         assert_eq!(

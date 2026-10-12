@@ -1,6 +1,28 @@
 //! Resolve metadata against an already rooted reference object. No method is
 //! invoked and no vtable/code address is published to the guest.
 use super::Object;
+pub(super) struct WorkerRequest {
+    api: Api,
+    receiver: super::instances::WorkerRoot,
+    class: Object,
+    method: Object,
+}
+// Root ownership and retained nonmoving metadata only; never guest storage.
+unsafe impl Send for WorkerRequest {}
+pub(super) struct WorkerResult(Object);
+unsafe impl Send for WorkerResult {}
+impl WorkerResult {
+    pub(super) fn method(self) -> Object {
+        self.0
+    }
+}
+impl WorkerRequest {
+    pub(super) fn execute(self) -> Result<WorkerResult, String> {
+        self.api
+            .resolve(self.receiver.target()?, self.class, self.method)
+            .map(WorkerResult)
+    }
+}
 #[derive(Clone, Copy)]
 pub(super) struct Api {
     object_class: unsafe extern "C" fn(Object) -> Object,
@@ -11,6 +33,21 @@ pub(super) struct Api {
     resolve: unsafe extern "C" fn(Object, Object) -> Object,
 }
 impl Api {
+    pub(super) fn prepare_worker(
+        self,
+        roots: super::instances::Api,
+        object: Object,
+        class: Object,
+        method: Object,
+    ) -> Result<WorkerRequest, String> {
+        self.compatible_method(class, method)?;
+        Ok(WorkerRequest {
+            api: self,
+            receiver: roots.worker_root(object)?,
+            class,
+            method,
+        })
+    }
     pub(super) fn load(library: Object) -> Result<Self, String> {
         macro_rules! sym {
             ($name:literal, $ty:ty) => {{

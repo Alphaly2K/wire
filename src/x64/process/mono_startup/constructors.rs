@@ -37,7 +37,112 @@ pub(super) struct Descriptor {
     pub(super) callback: Option<Object>,
     method: Object,
 }
+/// An already metadata-qualified zero-argument entry, with its own actual v2
+/// receiver root. Images/domain remain retained by the synchronous owner wait.
+pub(super) struct WorkerRequest {
+    api: Api,
+    descriptor: Descriptor,
+    strong: Object,
+    target: unsafe extern "C" fn(Object) -> Object,
+    free: unsafe extern "C" fn(Object),
+    invoke: unsafe extern "C" fn(Object, Object, *mut Object, *mut Object) -> Object,
+}
+// Only nonmoving method/class capabilities and an owned v2 GC root cross.
+// No guest storage, Memory/Runtime borrow or unrooted managed pointer is sent.
+unsafe impl Send for WorkerRequest {}
+impl Drop for WorkerRequest {
+    fn drop(&mut self) {
+        unsafe { (self.free)(self.strong) };
+    }
+}
+impl WorkerRequest {
+    pub(super) fn execute(self) -> Result<(), String> {
+        let _execution = super::burst_shared::execution()?;
+        let object = unsafe { (self.target)(self.strong) };
+        if object.is_null() {
+            return Err("worker receiver strong root lost identity".into());
+        }
+        let class = unsafe { (self.api.object_class)(object) };
+        self.api.receiver(&self.descriptor, object, class)?;
+        let mut exception = std::ptr::null_mut();
+        eprintln!("NATIVE_MONO_WORKER_MANAGED_ENTRY: class={}; zero-argument-instance=true; actual-worker-tls=true", self.descriptor.name);
+        let result = unsafe {
+            (self.invoke)(
+                self.descriptor.method,
+                object,
+                std::ptr::null_mut(),
+                &mut exception,
+            )
+        };
+        if !exception.is_null() {
+            let class = unsafe { (self.api.object_class)(exception) };
+            let name = unsafe { (self.api.class_name)(class) };
+            let name = if name.is_null() {
+                "unknown".into()
+            } else {
+                unsafe { CStr::from_ptr(name) }
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            return Err(format!("actual worker managed entry raised {name}"));
+        }
+        if !result.is_null() {
+            return Err("worker void managed entry returned an object".into());
+        }
+        Ok(())
+    }
+}
 impl Api {
+    pub(super) fn prepare_worker(
+        self,
+        library: Object,
+        method: Object,
+        images: &[Object],
+        object: Object,
+        class: Object,
+    ) -> Result<WorkerRequest, String> {
+        let descriptor = self
+            .describe(method, images)?
+            .ok_or("worker entry outside metadata-qualified constructor/interface contract")?;
+        self.receiver(&descriptor, object, class)?;
+        macro_rules! sym {
+            ($name:literal, $ty:ty) => {{
+                let p = unsafe { libc::dlsym(library, concat!($name, "\0").as_ptr().cast()) };
+                if p.is_null() {
+                    return Err(concat!("missing worker invoke API: ", $name).into());
+                }
+                unsafe { std::mem::transmute::<Object, $ty>(p) }
+            }};
+        }
+        let strong = sym!(
+            "mono_gchandle_new_v2",
+            unsafe extern "C" fn(Object, i32) -> Object
+        );
+        let target = sym!(
+            "mono_gchandle_get_target_v2",
+            unsafe extern "C" fn(Object) -> Object
+        );
+        let free = sym!("mono_gchandle_free_v2", unsafe extern "C" fn(Object));
+        let invoke = sym!(
+            "mono_runtime_invoke",
+            unsafe extern "C" fn(Object, Object, *mut Object, *mut Object) -> Object
+        );
+        let root = unsafe { strong(object, 1) };
+        if root.is_null() || unsafe { target(root) } != object {
+            if !root.is_null() {
+                unsafe { free(root) };
+            }
+            return Err("worker managed receiver root identity mismatch".into());
+        }
+        Ok(WorkerRequest {
+            api: self,
+            descriptor,
+            strong: root,
+            target,
+            free,
+            invoke,
+        })
+    }
     pub(super) fn load(library: Object) -> Result<Self, String> {
         macro_rules! sym {
             ($name:literal,$ty:ty) => {{

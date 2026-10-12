@@ -18,7 +18,11 @@ const COUNT: usize = 256;
 static TARGET_PC: OnceLock<u64> = OnceLock::new();
 static STORAGE: OnceLock<Mutex<Storage>> = OnceLock::new();
 thread_local! {
-    static EXECUTION: RefCell<Option<Vec<ExecutionLease>>> = const { RefCell::new(None) };
+    static EXECUTION: RefCell<Vec<Frame>> = const { RefCell::new(Vec::new()) };
+}
+struct Frame {
+    regions: Vec<HostRegion>,
+    leases: Vec<ExecutionLease>,
 }
 struct Entry {
     guest: u64,
@@ -70,12 +74,76 @@ impl Storage {
 }
 
 pub(super) struct Execution {
-    previous: Option<Vec<ExecutionLease>>,
+    depth: usize,
 }
 impl Drop for Execution {
     fn drop(&mut self) {
         EXECUTION.with(|slot| {
-            drop(slot.replace(self.previous.take()));
+            let mut frames = slot.borrow_mut();
+            assert_eq!(frames.len(), self.depth);
+            drop(frames.pop());
+        });
+    }
+}
+/// A synchronous channel wait freezes this thread's native stack. Release all
+/// nested leases before the peer executes, retaining their backing and scope
+/// identities. The peer must finish (or pause for a reply) before restoration.
+pub(super) struct Suspension {
+    depth: usize,
+    suspended: Vec<bool>,
+}
+pub(super) fn suspend() -> Suspension {
+    EXECUTION.with(|slot| {
+        let mut frames = slot.borrow_mut();
+        let suspended = frames
+            .iter_mut()
+            .map(|frame| {
+                let active = !frame.leases.is_empty();
+                frame.leases.clear();
+                active
+            })
+            .collect();
+        Suspension {
+            depth: frames.len(),
+            suspended,
+        }
+    })
+}
+impl Drop for Suspension {
+    fn drop(&mut self) {
+        let regions = EXECUTION.with(|slot| {
+            let frames = slot.borrow();
+            assert_eq!(frames.len(), self.depth);
+            frames
+                .iter()
+                .zip(&self.suspended)
+                .map(|(frame, active)| {
+                    assert!(frame.leases.is_empty());
+                    if *active {
+                        frame.regions.clone()
+                    } else {
+                        Vec::new()
+                    }
+                })
+                .collect::<Vec<_>>()
+        });
+        let leases = regions
+            .iter()
+            .map(|regions| {
+                regions
+                    .iter()
+                    .map(HostRegion::execution_lease)
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>();
+        let leases = leases.unwrap_or_else(|error| {
+            eprintln!("NATIVE_MONO_SHARED_STATIC_RESUME_REJECT: {error}");
+            std::process::abort();
+        });
+        EXECUTION.with(|slot| {
+            for (frame, leases) in slot.borrow_mut().iter_mut().zip(leases) {
+                frame.leases = leases;
+            }
         });
     }
 }
@@ -94,13 +162,19 @@ pub(super) fn execution() -> Result<Execution, String> {
     } else {
         Vec::new()
     };
+    execution_regions(regions)
+}
+fn execution_regions(regions: Vec<HostRegion>) -> Result<Execution, String> {
     let leases = regions
         .iter()
         .map(HostRegion::execution_lease)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(Execution {
-        previous: EXECUTION.with(|slot| slot.replace(Some(leases))),
-    })
+    let depth = EXECUTION.with(|slot| {
+        let mut frames = slot.borrow_mut();
+        frames.push(Frame { regions, leases });
+        frames.len()
+    });
+    Ok(Execution { depth })
 }
 /// Cleanup waits for finalizers, so it must release the owner's execution
 /// leases first. Finalizers retain/lease the backing until their real return.
@@ -115,8 +189,8 @@ pub(super) fn prepare_vm_cleanup() -> Result<(), String> {
         storage.stopping = true;
     }
     EXECUTION.with(|slot| {
-        if let Some(leases) = slot.borrow_mut().as_mut() {
-            leases.clear();
+        for frame in slot.borrow_mut().iter_mut() {
+            frame.leases.clear();
         }
     });
     Ok(())
@@ -373,9 +447,11 @@ fn get(key: [u8; 16], size: u32, alignment: u32) -> Result<Object, String> {
         })?;
         EXECUTION.with(|slot| -> Result<(), String> {
             let mut slot = slot.borrow_mut();
-            slot.as_mut()
-                .ok_or("SharedStatic allocation has no native execution lease scope")?
-                .push(lease);
+            let frame = slot
+                .last_mut()
+                .ok_or("SharedStatic allocation has no native execution lease scope")?;
+            frame.regions.push(region.clone());
+            frame.leases.push(lease);
             Ok(())
         })?;
         callbacks::with_service(|memory, _| memory.map_shared_overlay(guest, region.clone()))?;
@@ -459,6 +535,61 @@ pub(super) fn report() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn nested_native_scopes_handoff_and_worker_callback_restore_all_leases() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let region = HostRegion::owned(8).unwrap();
+        let outer = execution_regions(vec![region.clone()]).unwrap();
+        let inner = execution_regions(vec![region.clone()]).unwrap();
+        let (requests, incoming) = mpsc::sync_channel(1);
+        let (replies, outgoing) = mpsc::sync_channel(1);
+        let (completed, completion) = mpsc::sync_channel(1);
+        let wait = suspend();
+        let worker_region = region.clone();
+        let worker = thread::spawn(move || {
+            let _execution = execution_regions(vec![worker_region.clone()]).unwrap();
+            worker_region
+                .with_native(|pointer| unsafe {
+                    pointer.cast::<u64>().as_ptr().write(41);
+                })
+                .unwrap();
+            {
+                let _callback_wait = suspend();
+                requests.send(()).unwrap();
+                outgoing.recv_timeout(Duration::from_secs(2)).unwrap();
+            }
+            let value = worker_region
+                .with_native(|pointer| unsafe { pointer.cast::<u64>().as_ptr().read() })
+                .unwrap();
+            assert_eq!(value, 42);
+            drop(_execution);
+            completed.send(()).unwrap();
+        });
+        incoming.recv_timeout(Duration::from_secs(2)).unwrap();
+        {
+            let _callback = execution_regions(vec![region.clone()]).unwrap();
+            region
+                .with_native(|pointer| unsafe {
+                    pointer.cast::<u64>().as_ptr().write(42);
+                })
+                .unwrap();
+        }
+        replies.send(()).unwrap();
+        completion.recv_timeout(Duration::from_secs(2)).unwrap();
+        worker.join().unwrap();
+        drop(wait);
+        EXECUTION.with(|slot| {
+            let frames = slot.borrow();
+            assert_eq!(frames.len(), 2);
+            assert!(frames.iter().all(|frame| frame.leases.len() == 1));
+        });
+        drop(inner);
+        drop(outer);
+        region.revoke().unwrap();
+        assert!(execution_regions(vec![region]).is_err());
+        EXECUTION.with(|slot| assert!(slot.borrow().is_empty()));
+    }
     #[test]
     fn shared_static_request_and_reentrant_capacity_are_bounded() {
         assert_eq!(request(8, 0).unwrap(), (8, 4));

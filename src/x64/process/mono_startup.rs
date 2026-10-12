@@ -47,6 +47,7 @@ mod burst_shared;
 mod callbacks;
 mod closed_types;
 mod constructors;
+mod engine_objects;
 mod engine_scalars;
 mod errors;
 mod field_layouts;
@@ -63,6 +64,7 @@ mod managed_calls;
 mod metadata;
 mod names;
 mod objects;
+mod profiler_recorders;
 mod profiler_samples;
 mod reentry;
 mod reference_arrays;
@@ -1333,12 +1335,39 @@ impl Probe {
         runtime: &mut Runtime64,
     ) -> Result<(), String> {
         let guest = runtime.active_thread();
+        // Frozen-source getters only: these read retained immutable image
+        // metadata, with no current-domain lookup, lazy setup or managed IL.
+        let immutable_image_leaf = matches!(
+            function,
+            "mono_get_corlib"
+                | "mono_class_get_image"
+                | "mono_image_get_name"
+                | "mono_image_get_table_rows"
+        );
         if self.stopped
             || !self.assets
             || !self.main_thread_ready
             || (!workers::State::handles(function)
                 && function != "mono_gc_wbarrier_set_field"
-                && !metadata::thread_neutral_leaf(function))
+                && !matches!(function, "mono_object_new" | "mono_object_get_class")
+                && function != "mono_runtime_invoke"
+                && function != "mono_object_get_virtual_method"
+                && !immutable_image_leaf
+                && !matches!(
+                    function,
+                    "mono_gchandle_new_v2"
+                        | "mono_gchandle_new_weakref_v2"
+                        | "mono_gchandle_get_target_v2"
+                        | "mono_gchandle_free_v2"
+                )
+                && !matches!(
+                    function,
+                    "mono_custom_attrs_from_class"
+                        | "mono_custom_attrs_from_field"
+                        | "mono_custom_attrs_has_attr"
+                        | "mono_custom_attrs_free"
+                )
+                && !metadata::worker_handles(function))
         {
             return Err(format!("native Mono worker boundary: guest-thread={guest}; export={function}; args={:#x?}; worker managed IL/domain switching and other callbacks are not admitted", [cpu.regs[1], cpu.regs[2], cpu.regs[8], cpu.regs[9]]));
         }
@@ -1350,6 +1379,185 @@ impl Probe {
             .checked_add(8)
             .ok_or("Mono worker return stack overflow")?;
         let targets = self.callback_targets();
+        if function == "mono_object_get_virtual_method" {
+            let api = self
+                .instance_api
+                .ok_or("worker virtual resolution before roots")?;
+            let method = self
+                .metadata_registry
+                .native(cpu.regs[2], metadata::Kind::Method)?;
+            let native = self
+                .native
+                .as_mut()
+                .ok_or("worker virtual resolution before runtime")?;
+            let library = native.library;
+            let (result, stats) =
+                callbacks::with_worker_registration_owner(memory, runtime, targets, || {
+                    let object = self.instance_registry.native(api, cpu.regs[1])?;
+                    let class = self.instance_registry.class(api, cpu.regs[1])?;
+                    let request = virtual_methods::Api::load(library)?
+                        .prepare_worker(api, object, class, method)?;
+                    native.workers.resolve_virtual(guest, request)
+                })?;
+            self.gc_events_verified |= stats.gc_events;
+            let token = self.metadata_registry.wrap(
+                memory,
+                metadata::Value::Handle(result?.method(), metadata::Kind::Method),
+            )?;
+            self.virtual_resolutions += 1;
+            return cpu.return_integer(memory, token);
+        }
+        if function == "mono_runtime_invoke" {
+            let a = [cpu.regs[1], cpu.regs[2], cpu.regs[8], cpu.regs[9]];
+            if a[1] == 0 || a[2] != 0 {
+                return Err(
+                    "worker instance entry requires rooted receiver and zero parameters".into(),
+                );
+            }
+            let (stack_base, stack_end) = runtime.native_worker_stack_bounds(memory, cpu)?;
+            if a[3] != 0 {
+                let end = a[3]
+                    .checked_add(8)
+                    .ok_or("worker exception slot overflow")?;
+                if !a[3].is_multiple_of(8)
+                    || !memory.owned_noncode_access(a[3], 8)
+                    || !((a[3] >= cpu.regs[4].saturating_add(8)
+                        && a[3] >= stack_base
+                        && end <= stack_end)
+                        || runtime.live_data_slot(a[3], 8)
+                        || memory.guest_private_data_slot(a[3], 8))
+                {
+                    return Err("worker exception output requires a live owned C++ slot".into());
+                }
+                memory.check(a[3], 8, super::super::memory::WRITE)?;
+            }
+            let library = self
+                .native
+                .as_ref()
+                .ok_or("worker invoke before runtime")?
+                .library;
+            let api = self.instance_api.ok_or("worker invoke before root API")?;
+            let method = self
+                .metadata_registry
+                .native(a[0], metadata::Kind::Method)?;
+            let images = self.constructor_images()?;
+            eprintln!(
+                "NATIVE_MONO_WORKER_INVOKE: {}",
+                self.metadata_registry.describe_method(library, a[0])?
+            );
+            let (prepared, _) =
+                callbacks::with_worker_registration_owner(memory, runtime, targets, || {
+                    callbacks::with_service(|memory, _| {
+                        self.instance_registry.sync_from_guest(api, memory)?;
+                        self.field_registry.sync(api, &self.instance_registry)?;
+                        if let Some(array_api) = self.reference_array_api {
+                            self.reference_array_registry.sync(
+                                array_api,
+                                api,
+                                &self.instance_registry,
+                                memory,
+                            )?;
+                        }
+                        Ok::<_, String>(())
+                    })?;
+                    let object = self.instance_registry.native(api, a[1])?;
+                    let class = self.instance_registry.class(api, a[1])?;
+                    let request = constructors::Api::load(library)?
+                        .prepare_worker(library, method, &images, object, class)?;
+                    Ok::<_, String>((request, object, class))
+                })?;
+            let (request, object, class) = prepared?;
+            let native = self.native.as_mut().ok_or("worker invoke lost runtime")?;
+            let (result, stats) =
+                callbacks::with_worker_registration_owner(memory, runtime, targets, || {
+                    native.workers.invoke(guest, request)
+                })?;
+            self.gc_events_verified |= stats.gc_events;
+            result?;
+            let (refreshed, _) =
+                callbacks::with_worker_registration_owner(memory, runtime, targets, || {
+                    self.refresh_managed_graph(library, api)?;
+                    if !self.field_registry.has_owner(a[1]) {
+                        let specs =
+                            field_layouts::specs(library, images[0], &images, object, class)?;
+                        self.install_fields(library, api, specs)?;
+                    }
+                    let references = self.field_registry.native_references(
+                        api,
+                        &self.instance_registry,
+                        a[1],
+                    )?;
+                    self.publish_container_graph(library, api, references)
+                })?;
+            refreshed?;
+            if a[3] != 0 {
+                memory.write_int(a[3], 8, 0)?;
+            }
+            self.component_invokes += 1;
+            self.events.push(format!("worker {guest} actual metadata-qualified zero-argument instance IL completed; receiver-root and graph refreshed"));
+            return cpu.return_integer(memory, 0);
+        }
+        if matches!(
+            function,
+            "mono_gchandle_new_v2"
+                | "mono_gchandle_new_weakref_v2"
+                | "mono_gchandle_get_target_v2"
+                | "mono_gchandle_free_v2"
+        ) {
+            let native = self
+                .native
+                .as_mut()
+                .ok_or("worker handles before runtime")?;
+            let library = native.library;
+            let (domain, stats) =
+                callbacks::with_worker_registration_owner(memory, runtime, targets, || {
+                    native
+                        .workers
+                        .dispatch(library, native.domain, guest, "mono_domain_get", 0)
+                })?;
+            self.gc_events_verified |= stats.gc_events;
+            if domain? != ROOT_TOKEN {
+                return Err("worker handles before actual root attachment".into());
+            }
+            return self.dispatch_handles(function, cpu, memory, runtime, library, true);
+        }
+        let allocation = if function == "mono_object_new" {
+            if cpu.regs[1] != ROOT_TOKEN {
+                return Err("worker allocation requires owned root domain".into());
+            }
+            let library = self
+                .native
+                .as_ref()
+                .ok_or("worker allocation before runtime")?
+                .library;
+            let class = self
+                .metadata_registry
+                .native(cpu.regs[2], metadata::Kind::Class)?;
+            let api = match self.instance_api {
+                Some(api) => api,
+                None => {
+                    let api = instances::Api::load(
+                        library,
+                        self.image_registry.unique_native_image(CORE_MODULE)?,
+                    )?;
+                    self.instance_api = Some(api);
+                    api
+                }
+            };
+            let value = symbol!(
+                library,
+                "mono_class_is_valuetype",
+                unsafe extern "C" fn(Object) -> i32
+            );
+            let boxed = if unsafe { value(class) } != 0 {
+                Some(self.boxed_layout(library, class)?.width)
+            } else {
+                None
+            };
+            Some((api, class, boxed))
+        } else {
+            None
+        };
         let native = self
             .native
             .as_mut()
@@ -1357,7 +1565,139 @@ impl Probe {
         if native.owner != thread::current().id() || native.closed || native.domain.is_null() {
             return Err("Mono worker gateway outside live native process owner".into());
         }
-        if metadata::thread_neutral_leaf(function) {
+        if let Some((api, class, boxed)) = allocation {
+            let request =
+                self.instance_registry
+                    .prepare_worker(api, native.domain, class, boxed)?;
+            let (result, stats) =
+                callbacks::with_worker_registration_owner(memory, runtime, targets, || {
+                    request.run(|request| native.workers.allocate(guest, request))
+                })?;
+            self.gc_events_verified |= stats.gc_events;
+            let token = result?;
+            self.instance_registry.publish(memory, token)?;
+            self.events.push(format!("worker {guest} actual checked allocation -> {token:#x}; strong root transferred to process owner"));
+            return cpu.return_integer(memory, token);
+        }
+        if function == "mono_object_get_class" {
+            let (domain, stats) =
+                callbacks::with_worker_registration_owner(memory, runtime, targets, || {
+                    native.workers.dispatch(
+                        native.library,
+                        native.domain,
+                        guest,
+                        "mono_domain_get",
+                        0,
+                    )
+                })?;
+            self.gc_events_verified |= stats.gc_events;
+            if domain? != ROOT_TOKEN {
+                return Err("worker object class query before actual attachment".into());
+            }
+            let class = self.instance_registry.class(
+                self.instance_api
+                    .ok_or("worker object class query has no root API")?,
+                cpu.regs[1],
+            )?;
+            let token = self.metadata_registry.wrap(
+                memory,
+                metadata::Value::Handle(class, metadata::Kind::Class),
+            )?;
+            self.metadata_registry
+                .publish_class_elements(native.library, memory, token)?;
+            return cpu.return_integer(memory, token);
+        }
+        if matches!(
+            function,
+            "mono_custom_attrs_from_class"
+                | "mono_custom_attrs_from_field"
+                | "mono_custom_attrs_has_attr"
+                | "mono_custom_attrs_free"
+        ) {
+            let a = [cpu.regs[1], cpu.regs[2]];
+            let api = match self.attribute_api {
+                Some(api) => api,
+                None => {
+                    let api = attributes::Api::load(native.library)?;
+                    self.attribute_api = Some(api);
+                    api
+                }
+            };
+            let class = if function == "mono_custom_attrs_free" {
+                ptr::null_mut()
+            } else {
+                self.metadata_registry.native(
+                    if function == "mono_custom_attrs_has_attr" {
+                        a[1]
+                    } else {
+                        a[0]
+                    },
+                    metadata::Kind::Class,
+                )?
+            };
+            let field = if function == "mono_custom_attrs_from_field" {
+                Some(self.metadata_registry.native(a[1], metadata::Kind::Field)?)
+            } else {
+                None
+            };
+            let request = self
+                .attribute_registry
+                .prepare_worker(api, function, a[0], class, field)?;
+            let (result, stats) =
+                callbacks::with_worker_registration_owner(memory, runtime, targets, || {
+                    request.run(|request| native.workers.attributes(guest, request))
+                })?;
+            self.gc_events_verified |= stats.gc_events;
+            return cpu.return_integer(memory, result?);
+        }
+        if metadata::worker_handles(function) && !metadata::thread_neutral_leaf(function) {
+            let a = [cpu.regs[1], cpu.regs[2], cpu.regs[8]];
+            let is_iterator = matches!(
+                function,
+                "mono_class_get_fields"
+                    | "mono_class_get_methods"
+                    | "mono_class_get_interfaces"
+                    | "mono_class_get_nested_types"
+                    | "mono_signature_get_params"
+            );
+            let iterator = if is_iterator {
+                // Native C API receives a private local iterator, never this
+                // writable guest address. Validate output before dispatch.
+                memory.check(
+                    a[1],
+                    8,
+                    super::super::memory::READ | super::super::memory::WRITE,
+                )?;
+                Some(memory.read_int(a[1], 8)?)
+            } else {
+                None
+            };
+            let request =
+                self.metadata_registry
+                    .prepare_worker(native.library, function, a, iterator)?;
+            let (value, stats) =
+                callbacks::with_worker_registration_owner(memory, runtime, targets, || {
+                    request.run(|request| native.workers.metadata(guest, request))
+                })?;
+            self.gc_events_verified |= stats.gc_events;
+            let (value, iterator) = value?;
+            let class = matches!(value, metadata::Value::Handle(_, metadata::Kind::Class));
+            let result = self.metadata_registry.wrap(memory, value)?;
+            if class && result != 0 {
+                self.metadata_registry
+                    .publish_class_elements(native.library, memory, result)?;
+            }
+            if let Some(token) = iterator {
+                memory.write_int(a[1], 8, token)?;
+            }
+            if self.metadata_registry.count() <= 64 {
+                self.events.push(format!(
+                    "worker {guest} actual native metadata {function} -> {result:#x}"
+                ));
+            }
+            return cpu.return_integer(memory, result);
+        }
+        if metadata::thread_neutral_leaf(function) || immutable_image_leaf {
             let a = [cpu.regs[1], cpu.regs[2], cpu.regs[8]];
             let (domain, stats) =
                 callbacks::with_worker_registration_owner(memory, runtime, targets, || {
@@ -1375,8 +1715,43 @@ impl Probe {
             }
             let (value, stats) =
                 callbacks::with_worker_registration_owner(memory, runtime, targets, || {
-                    self.metadata_registry
-                        .query(native.library, function, a[0], a[1], a[2])
+                    if function == "mono_get_corlib" {
+                        let get = symbol!(
+                            native.library,
+                            "mono_get_corlib",
+                            unsafe extern "C" fn() -> Object
+                        );
+                        let image = unsafe { get() };
+                        if image != self.image_registry.unique_native_image(CORELIB)? {
+                            return Err(
+                                "worker corlib getter differs from retained fingerprinted image"
+                                    .into(),
+                            );
+                        }
+                        self.metadata_registry.note_query();
+                        Ok(metadata::Value::Scalar(
+                            self.image_registry.borrow_registered(image)?,
+                        ))
+                    } else if function == "mono_class_get_image" {
+                        let class = self.metadata_registry.native(a[0], metadata::Kind::Class)?;
+                        let get = symbol!(
+                            native.library,
+                            "mono_class_get_image",
+                            unsafe extern "C" fn(Object) -> Object
+                        );
+                        let image = self
+                            .image_registry
+                            .borrow_registered(unsafe { get(class) })?;
+                        self.metadata_registry.note_query();
+                        Ok(metadata::Value::Scalar(image))
+                    } else if immutable_image_leaf {
+                        let image = self.image_registry.native_image(a[0])?;
+                        self.metadata_registry
+                            .query_image(native.library, function, image, a[1])
+                    } else {
+                        self.metadata_registry
+                            .query(native.library, function, a[0], a[1], a[2])
+                    }
                 })?;
             self.gc_events_verified |= stats.gc_events;
             let value = value?;
@@ -1423,11 +1798,14 @@ impl Probe {
                     })?;
                 self.gc_events_verified |= stats.gc_events;
                 if current? != a[2] {
-                    return Err("worker Thread reference is not its exact live strong token".into());
+                    let api = self
+                        .instance_api
+                        .ok_or("worker object reference has no root API")?;
+                    self.instance_registry.native(api, a[2])?;
                 }
             }
             memory.write_int(a[1], 8, a[2])?;
-            self.events.push(format!("worker {guest} stored an actual strong Thread token {:#x} in checked C++ slot {:#x}; no native pointer/barrier destination", a[2], a[1]));
+            self.events.push(format!("worker {guest} stored an actual strong object/Thread token {:#x} in checked C++ slot {:#x}; no native pointer/barrier destination", a[2], a[1]));
             return cpu.return_integer(memory, 0);
         }
         let (result, stats) =
@@ -1438,6 +1816,78 @@ impl Probe {
             })?;
         self.gc_events_verified |= stats.gc_events;
         cpu.return_integer(memory, result?)
+    }
+    /// Frozen BDWGC v2 handles use process-wide locked tables. Non-NULL
+    /// targets carry their own domain; these calls do not execute managed IL or
+    /// change worker TLS. Serialize canonical publication on the process owner.
+    fn dispatch_handles(
+        &mut self,
+        function: &str,
+        cpu: &mut Cpu64,
+        memory: &mut Memory,
+        runtime: &mut Runtime64,
+        library: Object,
+        worker: bool,
+    ) -> Result<(), String> {
+        let a = [cpu.regs[1], cpu.regs[2]];
+        let api = match self.handle_api {
+            Some(api) => api,
+            None => {
+                let api = handles::Api::load(library)?;
+                self.handle_api = Some(api);
+                api
+            }
+        };
+        if function == "mono_gchandle_free_v2" {
+            self.handle_registry.retire_view(memory, a[0])?;
+        }
+        let targets = self.callback_targets();
+        let operation = || match function {
+            "mono_gchandle_new_v2" | "mono_gchandle_new_weakref_v2" => {
+                let object = if self.array_registry.contains(a[0]) {
+                    self.array_registry
+                        .native(self.array_api.ok_or("empty array API absent")?, a[0])?
+                } else if self.object_registry.contains(a[0]) {
+                    self.object_registry
+                        .native_string(self.object_api.ok_or("String API absent")?, a[0])?
+                } else if self.reflection_registry.contains(a[0]) {
+                    self.reflection_registry
+                        .native(self.reflection_api.ok_or("reflection API absent")?, a[0])?
+                } else if self.instance_registry.contains(a[0]) {
+                    self.instance_registry
+                        .native(self.instance_api.ok_or("ordinary object API absent")?, a[0])?
+                } else if self.attribute_registry.contains(a[0]) {
+                    self.attribute_registry
+                        .native(self.attribute_api.ok_or("attribute API absent")?, a[0])?
+                } else {
+                    return Err(
+                        "external strong root requires a live owned managed object token".into(),
+                    );
+                };
+                if function == "mono_gchandle_new_weakref_v2" {
+                    self.handle_registry
+                        .new_weak_handle(api, object, a[0], a[1])
+                } else {
+                    self.handle_registry.new_handle(api, object, a[0], a[1])
+                }
+            }
+            "mono_gchandle_get_target_v2" => self.handle_registry.target(api, a[0]),
+            "mono_gchandle_free_v2" => self.handle_registry.free(api, a[0]).map(|()| 0),
+            _ => Err("unknown external handle operation".into()),
+        };
+        let (result, _) = if worker {
+            callbacks::with_worker_registration_owner(memory, runtime, targets, operation)?
+        } else {
+            callbacks::with_owner(memory, runtime, targets, operation)?
+        };
+        let result = result?;
+        if matches!(
+            function,
+            "mono_gchandle_new_v2" | "mono_gchandle_new_weakref_v2"
+        ) {
+            self.handle_registry.publish(memory, result)?;
+        }
+        cpu.return_integer(memory, result)
     }
     fn callback_targets(&self) -> [u64; 7] {
         let mut targets = [0; 7];
@@ -1458,6 +1908,11 @@ impl Probe {
         if self.assets {
             images.push(self.image_registry.unique_native_image(INPUT_SYSTEM)?);
             images.push(self.image_registry.unique_native_image(URP_2D)?);
+            for image in self.image_registry.live_native_images()? {
+                if !images.contains(&image) {
+                    images.push(image);
+                }
+            }
         }
         Ok(images)
     }
@@ -2322,59 +2777,7 @@ impl Probe {
                 | "mono_gchandle_get_target_v2"
                 | "mono_gchandle_free_v2"
         ) {
-            let api = match self.handle_api {
-                Some(api) => api,
-                None => {
-                    let api = handles::Api::load(library)?;
-                    self.handle_api = Some(api);
-                    api
-                }
-            };
-            if function == "mono_gchandle_free_v2" {
-                self.handle_registry.retire_view(memory, a[0])?;
-            }
-            let targets = self.callback_targets();
-            let (result, _) = callbacks::with_owner(memory, runtime, targets, || match function {
-                "mono_gchandle_new_v2" | "mono_gchandle_new_weakref_v2" => {
-                    let object = if self.array_registry.contains(a[0]) {
-                        self.array_registry
-                            .native(self.array_api.ok_or("empty array API absent")?, a[0])?
-                    } else if self.object_registry.contains(a[0]) {
-                        self.object_registry
-                            .native_string(self.object_api.ok_or("String API absent")?, a[0])?
-                    } else if self.reflection_registry.contains(a[0]) {
-                        self.reflection_registry
-                            .native(self.reflection_api.ok_or("RuntimeType API absent")?, a[0])?
-                    } else if self.instance_registry.contains(a[0]) {
-                        self.instance_registry
-                            .native(self.instance_api.ok_or("ordinary object API absent")?, a[0])?
-                    } else if self.attribute_registry.contains(a[0]) {
-                        self.attribute_registry
-                            .native(self.attribute_api.ok_or("attribute API absent")?, a[0])?
-                    } else {
-                        return Err(
-                            "external strong root requires a live owned managed object token"
-                                .into(),
-                        );
-                    };
-                    if function == "mono_gchandle_new_weakref_v2" {
-                        self.handle_registry
-                            .new_weak_handle(api, object, a[0], a[1])
-                    } else {
-                        self.handle_registry.new_handle(api, object, a[0], a[1])
-                    }
-                }
-                "mono_gchandle_get_target_v2" => self.handle_registry.target(api, a[0]),
-                _ => self.handle_registry.free(api, a[0]).map(|()| 0),
-            })?;
-            let result = result?;
-            if matches!(
-                function,
-                "mono_gchandle_new_v2" | "mono_gchandle_new_weakref_v2"
-            ) {
-                self.handle_registry.publish(memory, result)?;
-            }
-            cpu.return_integer(memory, result)?;
+            self.dispatch_handles(function, cpu, memory, runtime, library, false)?;
             return Ok(false);
         }
         if function == "mono_array_new" && self.assets && a[2] != 0 {
@@ -2686,8 +3089,24 @@ impl Probe {
                 &self.registry,
             )?;
         }
+        if !engine_objects::installed() {
+            engine_objects::install(
+                library,
+                self.image_registry.unique_native_image(CORE_MODULE)?,
+                &managed_images,
+                &self.registry,
+            )?;
+        }
         if !profiler_samples::installed() {
             profiler_samples::install(library, &managed_images, &self.registry)?;
+        }
+        if !profiler_recorders::installed() {
+            profiler_recorders::install(
+                library,
+                self.image_registry.unique_native_image(CORE_MODULE)?,
+                &managed_images,
+                &self.registry,
+            )?;
         }
         if !unsafe_buffers::installed() {
             unsafe_buffers::install(library, &managed_images, &self.registry)?;
@@ -2751,8 +3170,12 @@ impl Probe {
                 self.instance_registry.sync_from_guest(api, memory)?;
                 self.field_registry.sync(api, &self.instance_registry)?;
                 if let Some(array_api) = self.reference_array_api {
-                    self.reference_array_registry
-                        .sync(array_api, api, &self.instance_registry)?;
+                    self.reference_array_registry.sync(
+                        array_api,
+                        api,
+                        &self.instance_registry,
+                        memory,
+                    )?;
                 }
                 let frame = managed_calls::Frame::prepare(
                     memory,
@@ -3082,13 +3505,18 @@ impl Probe {
             ];
             let (prepared, _) = callbacks::with_owner(memory, runtime, targets, || {
                 callbacks::with_service(|memory, _| {
-                    self.instance_registry.sync_from_guest(api, memory)
+                    self.instance_registry.sync_from_guest(api, memory)?;
+                    self.field_registry.sync(api, &self.instance_registry)?;
+                    if let Some(array_api) = self.reference_array_api {
+                        self.reference_array_registry.sync(
+                            array_api,
+                            api,
+                            &self.instance_registry,
+                            memory,
+                        )?;
+                    }
+                    Ok::<_, String>(())
                 })?;
-                self.field_registry.sync(api, &self.instance_registry)?;
-                if let Some(array_api) = self.reference_array_api {
-                    self.reference_array_registry
-                        .sync(array_api, api, &self.instance_registry)?;
-                }
                 Ok::<_, String>((
                     self.instance_registry.native(api, a[1])?,
                     self.instance_registry.class(api, a[1])?,
@@ -3440,8 +3868,10 @@ impl Probe {
                     self.metadata_registry.describe_class(library, cpu.regs[2])
                 })?;
             self.events.push(format!(
-                "pending typed nonempty array: length={} element={}",
-                cpu.regs[8], description?
+                "pending typed nonempty array: length={} element={}; guest-caller={:#x}",
+                cpu.regs[8],
+                description?,
+                memory.read_int(cpu.regs[4], 8)?
             ));
             return Ok(());
         }
@@ -4018,6 +4448,7 @@ impl Probe {
                                 array_api,
                                 api,
                                 &self.instance_registry,
+                                memory,
                             )?;
                         }
                         Ok::<_, String>(())
@@ -4227,6 +4658,7 @@ impl Probe {
             // Raw native IL pointers remain owned until the VM can no longer
             // execute IL/finalizers. Only then release original guest records.
             unsafe_buffers::retire_after_vm_cleanup()?;
+            profiler_recorders::retire_after_vm_cleanup()?;
             burst_shared::retire_after_vm_cleanup()?;
             if self.tls_table.is_some() {
                 let clear = symbol!(
@@ -4296,6 +4728,8 @@ impl Probe {
             + &engine_scalars::report()
             + &json::report()
             + &profiler_samples::report()
+            + &profiler_recorders::report()
+            + &engine_objects::report()
             + &unsafe_buffers::report()
             + &logging::debug_report()
             + &burst_shared::report()
@@ -4324,6 +4758,9 @@ impl Probe {
             || (self.attributes_ready && !self.attribute_arrays)
             || (self.attribute_arrays_ready && !self.assembly_lookup)
             || self.assembly_lookup_ready
+    }
+    pub(super) fn shutdown_complete(&self) -> bool {
+        self.stopped
     }
 }
 fn store_stack_token(
@@ -4562,7 +4999,11 @@ mod tests {
         assert_eq!(cpu.rip, 0x12345);
         assert_eq!(cpu.regs[0], 0xabcdef);
         assert!(probe.native.is_none());
+        probe.assembly_lookup_ready = true;
+        assert!(probe.stopped());
+        assert!(!probe.shutdown_complete());
         probe.finish().unwrap();
+        assert!(probe.shutdown_complete());
         assert!(probe
             .dispatch(
                 "mono_unity_install_memory_callbacks",

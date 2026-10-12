@@ -76,7 +76,9 @@ impl Api {
         }
         path.push(class);
         let result = match unsafe { (self.kind)(ty) } {
-            2..=0xe | 0x11 | 0x12 | 0x1c => Ok(()),
+            // Native integers are concrete CLI primitives. This only proves
+            // type closure; invoke/value-layout pointer admission stays separate.
+            2..=0xe | 0x11 | 0x12 | 0x18 | 0x19 | 0x1c => Ok(()),
             0x14 | 0x1d => self.walk(unsafe { (self.element)(class) }, path, visited),
             0x15 => {
                 let count = unsafe { (self.count)(class) };
@@ -106,6 +108,8 @@ pub(super) mod tests {
         match p as usize {
             2 => 0x15,
             3 if MODE.with(Cell::get) == 1 => 0x13,
+            3 if MODE.with(Cell::get) == 5 => 0x18,
+            3 if MODE.with(Cell::get) == 6 => 0xf,
             3 => 8,
             4 => 0x1d,
             _ => 0x12,
@@ -153,5 +157,11 @@ pub(super) mod tests {
         MODE.with(|m| m.set(0));
         assert!(api.constructed(3usize as Object).is_err());
         assert!(api.constructed(std::ptr::null_mut()).is_err());
+        MODE.with(|m| m.set(5));
+        api.concrete(4usize as Object).unwrap();
+        api.constructed(2usize as Object).unwrap();
+        MODE.with(|m| m.set(6));
+        assert!(api.concrete(4usize as Object).is_err());
+        assert!(api.constructed(2usize as Object).is_err());
     }
 }

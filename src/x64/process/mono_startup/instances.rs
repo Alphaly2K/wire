@@ -111,6 +111,114 @@ struct Root {
     cached: Option<HostRegion>,
     published: bool,
 }
+/// Private pinned receiver ownership for synchronous actual-worker requests.
+/// The caller must first resolve an existing canonical registry root.
+pub(super) struct WorkerRoot {
+    api: Api,
+    handle: Object,
+}
+unsafe impl Send for WorkerRoot {}
+impl Drop for WorkerRoot {
+    fn drop(&mut self) {
+        unsafe { (self.api.free)(self.handle) };
+    }
+}
+impl WorkerRoot {
+    pub(super) fn target(&self) -> Result<Object, String> {
+        let object = unsafe { (self.api.target)(self.handle) };
+        if object.is_null() {
+            return Err("worker receiver root lost its target".into());
+        }
+        Ok(object)
+    }
+}
+impl Api {
+    pub(super) fn worker_root(self, object: Object) -> Result<WorkerRoot, String> {
+        if object.is_null() {
+            return Err("worker receiver cannot be NULL".into());
+        }
+        let handle = unsafe { (self.strong)(object, 1) };
+        if handle.is_null() {
+            return Err("worker receiver pin allocation failed".into());
+        }
+        let root = WorkerRoot { api: self, handle };
+        if root.target()? != object {
+            return Err("worker receiver pin identity mismatch".into());
+        }
+        Ok(root)
+    }
+}
+/// Private nonmoving metadata capabilities and typed allocation APIs only.
+/// The exclusively borrowed owner registry retains the image/domain lifetime.
+pub(super) struct WorkerRequest {
+    api: Api,
+    domain: Object,
+    class: Object,
+    boxed: Option<usize>,
+}
+unsafe impl Send for WorkerRequest {}
+/// The actual v2 strong root survives the worker wait and ownership transfer.
+/// BDWGC does not move the object; no naked managed pointer crosses the queue.
+pub(super) struct WorkerAllocation {
+    api: Api,
+    handle: Object,
+    class: Object,
+    boxed: bool,
+}
+unsafe impl Send for WorkerAllocation {}
+impl Drop for WorkerAllocation {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            unsafe { (self.api.free)(self.handle) };
+        }
+    }
+}
+impl WorkerRequest {
+    pub(super) fn execute(self) -> Result<WorkerAllocation, String> {
+        let mut status = 65535;
+        let handle = if let Some(size) = self.boxed {
+            let mut zero = [0u64; 32];
+            if !(1..=256).contains(&size) {
+                return Err("worker boxed layout exceeds bounded stack value".into());
+            }
+            let object =
+                unsafe { (self.api.value_box)(self.domain, self.class, zero.as_mut_ptr().cast()) };
+            if object.is_null() {
+                return Err("worker zero boxing returned NULL".into());
+            }
+            status = 0;
+            unsafe { (self.api.strong)(object, 1) }
+        } else {
+            unsafe { (self.api.new)(self.domain, self.class, &mut status) }
+        };
+        let root = WorkerAllocation {
+            api: self.api,
+            handle,
+            class: self.class,
+            boxed: self.boxed.is_some(),
+        };
+        if status != 0 {
+            return Err(format!("checked native object allocation error={status}"));
+        }
+        if handle.is_null() {
+            return Err("checked allocation returned no strong root".into());
+        }
+        Ok(root)
+    }
+}
+pub(super) struct WorkerBorrow<'a> {
+    registry: &'a mut Registry,
+    request: WorkerRequest,
+}
+impl WorkerBorrow<'_> {
+    pub(super) fn run(
+        self,
+        execute: impl FnOnce(WorkerRequest) -> Result<WorkerAllocation, String>,
+    ) -> Result<u64, String> {
+        let Self { registry, request } = self;
+        registry.adopt_allocation(execute(request)?)
+    }
+}
 #[derive(Default)]
 pub(super) struct Registry {
     roots: BTreeMap<u64, Root>,
@@ -138,13 +246,52 @@ impl Registry {
         if self.released || self.roots.len() >= LIMIT || domain.is_null() || class.is_null() {
             return Err("ordinary allocation outside live bounded domain/class contract".into());
         }
-        let mut status = 65535;
-        let handle = unsafe { (api.new)(domain, class, &mut status) };
-        let result = (|| {
-            if status != 0 {
-                return Err(format!("checked native object allocation error={status}"));
+        self.adopt_allocation(
+            WorkerRequest {
+                api,
+                domain,
+                class,
+                boxed: None,
             }
-            if handle.is_null() {
+            .execute()?,
+        )
+    }
+    pub(super) fn prepare_worker(
+        &mut self,
+        api: Api,
+        domain: Object,
+        class: Object,
+        boxed: Option<usize>,
+    ) -> Result<WorkerBorrow<'_>, String> {
+        if self.released
+            || self.views_retired
+            || self.roots.len() >= LIMIT
+            || domain.is_null()
+            || class.is_null()
+            || boxed.is_some_and(|size| !(1..=256).contains(&size))
+        {
+            return Err("worker allocation outside live bounded domain/class/layout".into());
+        }
+        Ok(WorkerBorrow {
+            registry: self,
+            request: WorkerRequest {
+                api,
+                domain,
+                class,
+                boxed,
+            },
+        })
+    }
+    fn adopt_allocation(&mut self, mut root: WorkerAllocation) -> Result<u64, String> {
+        let WorkerAllocation {
+            api,
+            handle,
+            class,
+            boxed,
+        } = root;
+        let result = (|| {
+            if self.released || self.views_retired || self.roots.len() >= LIMIT || handle.is_null()
+            {
                 return Err("checked allocation returned no strong root".into());
             }
             let native = unsafe { (api.target)(handle) };
@@ -154,7 +301,7 @@ impl Registry {
             if self.reverse.contains_key(&(native as usize)) {
                 return Err("ordinary allocation reused a live object identity".into());
             }
-            let cached = if unsafe { (api.assignable)(api.unity_base, class) } != 0 {
+            let cached = if !boxed && unsafe { (api.assignable)(api.unity_base, class) } != 0 {
                 let mut initial = 0u64;
                 unsafe {
                     (api.field_get)(native, api.cached_field, (&mut initial as *mut u64).cast());
@@ -181,12 +328,13 @@ impl Registry {
                 },
             );
             self.reverse.insert(native as usize, token);
+            if boxed {
+                self.boxed.insert(token);
+            }
             Ok(token)
         })();
-        if result.is_err() && !handle.is_null() {
-            unsafe {
-                (api.free)(handle);
-            }
+        if result.is_ok() {
+            root.handle = ptr::null_mut();
         }
         result
     }
@@ -609,6 +757,54 @@ pub(super) mod tests {
             target: identity,
             ..api()
         }
+    }
+    #[test]
+    fn worker_allocation_transfers_a_strong_root_and_drops_failed_replies() {
+        unsafe extern "C" fn worker_new(domain: Object, class: Object, status: *mut u16) -> Object {
+            assert_eq!(std::thread::current().name(), Some("wire-test-allocation"));
+            unsafe { new(domain, class, status) }
+        }
+        let api = Api {
+            new: worker_new,
+            ..api()
+        };
+        let execute = |request: WorkerRequest| {
+            std::thread::Builder::new()
+                .name("wire-test-allocation".into())
+                .spawn(move || request.execute())
+                .unwrap()
+                .join()
+                .unwrap()
+        };
+        let mut registry = Registry::default();
+        assert!(registry
+            .prepare_worker(api, ptr::null_mut(), 2usize as Object, None)
+            .is_err());
+        assert!(registry
+            .prepare_worker(api, 1usize as Object, 2usize as Object, Some(257))
+            .is_err());
+        let request = registry
+            .prepare_worker(api, 1usize as Object, 2usize as Object, None)
+            .unwrap();
+        assert!(request
+            .run(|request| {
+                drop(execute(request)?);
+                Err("owner profiler callback failed".into())
+            })
+            .is_err());
+        assert_eq!(registry.count(), 0);
+        assert_eq!(FREES.with(Cell::get), 1);
+        let request = registry
+            .prepare_worker(api, 1usize as Object, 2usize as Object, None)
+            .unwrap();
+        let token = request.run(execute).unwrap();
+        assert_eq!(registry.native(api, token).unwrap(), 4usize as Object);
+        registry.verify(api).unwrap();
+        registry.release(api);
+        assert_eq!(FREES.with(Cell::get), 2);
+        assert!(registry
+            .prepare_worker(api, 1usize as Object, 2usize as Object, None)
+            .is_err());
     }
     #[test]
     fn canonical_empty_array_alias_keeps_identity_without_publishing_native_header() {

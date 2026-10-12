@@ -22,6 +22,8 @@ def main():
     parser.add_argument('--wire', type=Path, default=REPO / 'target/release/wire')
     parser.add_argument('--graphics-backend', type=Path, help='existing native graphics backend')
     parser.add_argument('--moltenvk', type=Path, help='existing MoltenVK paired with graphics backend')
+    parser.add_argument('--window', action='store_true', help='show actual guest windows through the native presenter')
+    parser.add_argument('--capture-frame', action='store_true', help='capture an actual Present to frame.ppm; enables the native presenter')
     parser.add_argument('--managed-trace', action='store_true', help='debug-only native managed call trace; timing is not a performance result')
     parser.add_argument('--max-instr', type=int, default=30000000, help='bounded guest work budget')
     parser.add_argument('--skip-etw', action='store_true', help='explicit diagnostic platform divergence')
@@ -80,12 +82,18 @@ def main():
                '--api-trace', str(output / 'api.tsv')]
     if args.graphics_backend:
         command.extend(['--graphics-backend', str(paths['graphics_backend']), '--moltenvk', str(paths['moltenvk'])])
+    if args.window:
+        command.append('--window')
+    if args.capture_frame:
+        command.extend(['--capture-frame', str(output / 'frame.ppm')])
     if args.skip_etw:
         command.append('--native-mono-probe-skip-etw')
     command.extend(['--native-mono-probe-boundary', args.boundary])
     (output / 'command.json').write_text(json.dumps({'command': command, 'cwd': str(clone),
         'environment': {key: env[key] for key in ('DYLD_INSERT_LIBRARIES', 'MONO_THREADS_SUSPEND', 'WIRE_NATIVE_MONO_MANAGED_TRACE') if key in env},
-        'full_game_backend': False, 'timing_is_performance_comparison': False}, indent=2) + '\n')
+        'full_game_backend': False, 'timing_is_performance_comparison': False,
+        'native_presenter_requested': args.window or args.capture_frame,
+        'present_capture_requested': args.capture_frame}, indent=2) + '\n')
     start = time.monotonic()
     with (output / 'startup.log').open('w') as stream:
         usage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
@@ -207,6 +215,14 @@ def main():
         'native_object_find_by_type_calls': count_marker('native-object-find-by-type-calls'),
         'native_scriptable_factory_calls': count_marker('native-scriptable-factory-calls'),
         'native_engine_scalar_calls': count_marker('native-engine-scalar-calls'),
+        'native_engine_object_getter_calls': count_marker('native-engine-object-getter-calls'),
+        'native_profiler_recorder_calls': count_marker('native-profiler-recorder-calls'),
+        'native_profiler_recorders_created': count_marker('native-profiler-recorders-created'),
+        'native_profiler_recorders_released': count_marker('native-profiler-recorders-released'),
+        'native_profiler_recorders_live': count_marker('native-profiler-recorders-live'),
+        'native_profiler_recorder_finalizers_queued': count_marker('native-profiler-recorder-finalizers-queued'),
+        'native_profiler_recorder_finalizers_drained': count_marker('native-profiler-recorder-finalizers-drained'),
+        'native_profiler_recorders_closed': 'native-profiler-recorders-closed=true' in content,
         'native_json_deserialize_calls': count_marker('native-json-deserialize-calls'),
         'native_profiler_marker_calls': count_marker('native-profiler-marker-calls'),
         'native_profiler_sample_begins': count_marker('native-profiler-sample-begins'),
@@ -258,6 +274,11 @@ def main():
         'etw_explicitly_disabled': args.skip_etw, 'native_guard':
         {'checks': int(guard_result[1]), 'denied': int(guard_result[2])} if guard_result else None,
         'timing_is_performance_comparison': False}
+    graphics = re.search(r'^Win64 native GPU draws: (\d+); presents: (\d+)$', content, re.M)
+    evidence['gpu_draws'] = int(graphics[1]) if graphics else 0
+    evidence['gpu_presents'] = int(graphics[2]) if graphics else 0
+    frame = output / 'frame.ppm'
+    evidence['present_frame'] = {'path': str(frame), 'sha256': sha256(frame)} if frame.is_file() else None
     (output / 'results.json').write_text(json.dumps(evidence, indent=2) + '\n')
     print(json.dumps(evidence, indent=2))
     if original_attach:
@@ -310,6 +331,12 @@ def main():
         raise RuntimeError('actual component constructor/field/GC lifecycle incomplete')
     if evidence['native_profiler_sample_begins'] != evidence['native_profiler_sample_ends'] or evidence['native_profiler_sample_depth'] != 0:
         raise RuntimeError('native profiler samples did not close in owner order')
+    if evidence['native_profiler_recorders_created'] and (
+            evidence['native_profiler_recorders_created'] != evidence['native_profiler_recorders_released']
+            or evidence['native_profiler_recorders_live'] != 0
+            or evidence['native_profiler_recorder_finalizers_queued'] != evidence['native_profiler_recorder_finalizers_drained']
+            or not evidence['native_profiler_recorders_closed']):
+        raise RuntimeError('native profiler recorder references/finalizers did not retire after VM cleanup')
     if evidence['native_unsafe_buffer_allocations'] and (evidence['native_unsafe_buffer_frees'] != evidence['native_unsafe_buffer_allocations'] or evidence['native_unsafe_buffer_live'] != 0 or evidence['native_unsafe_buffer_retained_bytes'] != 0 or not evidence['native_unsafe_buffer_closed']):
         raise RuntimeError('native private buffers did not retire guest records and actual storage after VM cleanup')
     if evidence['native_gc_scope_depth'] != 0:
