@@ -266,7 +266,7 @@ unsafe extern "C" fn end() -> usize {
     producer(7, &[], &[])
 }
 unsafe extern "C" fn from_operation(pointer: usize) -> usize {
-    let pointer = checked(|| engine_objects::engine_pointer(pointer));
+    let pointer = checked(|| super::async_operations::pointer(pointer));
     producer(8, &[pointer], &[])
 }
 unsafe extern "C" fn wireup() {

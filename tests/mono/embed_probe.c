@@ -110,6 +110,62 @@ static void run_native_thread(void *(*entry)(void *)) {
     require(pthread_create(&thread, NULL, entry, NULL) == 0, "GC thread create");
     require(pthread_join(thread, NULL) == 0, "GC thread join");
 }
+static MonoGCHandle invocation_delegate(const char *factory) {
+    MonoMethod *method = mono_class_get_method_from_name(fixture, factory, 0);
+    MonoObject *exception = NULL;
+    MonoObject *object = mono_runtime_invoke(method, NULL, NULL, &exception);
+    require(object && !exception && mono_class_is_delegate(mono_object_get_class(object)), "actual closed delegate factory");
+    MonoGCHandle root = mono_gchandle_new_v2(object, 1);
+    mono_gc_collect(mono_gc_max_generation());
+    require(mono_gchandle_get_target_v2(root) == object, "delegate closure retained through GC");
+    return root;
+}
+static MonoObject *invoke_delegate(MonoGCHandle root, void **args, MonoObject **exception) {
+    MonoObject *object = mono_gchandle_get_target_v2(root);
+    MonoMethod *method = mono_class_get_method_from_name(mono_object_get_class(object), "Invoke", -1);
+    uint32_t implementation = 0;
+    uint32_t flags = mono_method_get_flags(method, &implementation);
+    require((implementation & 3) == 3 && !(flags & (0x10 | 0x400 | 0x2000)), "delegate Invoke is a managed instance runtime method");
+    // This is precisely the same embedding API and actual runtime method used
+    // by wire's typed invoke route. Never call a delegate's machine address.
+    return mono_runtime_invoke(method, object, args, exception);
+}
+static void run_delegate_invokes(void) {
+    const char *factories[] = { "InvocationStatic", "InvocationClosure", "InvocationMulticast" };
+    const int expected[] = { 52, 59, 14 };
+    for (int i = 0; i < 3; i++) {
+        MonoGCHandle root = invocation_delegate(factories[i]);
+        int value = 7;
+        void *args[] = { &value };
+        MonoObject *exception = NULL;
+        MonoObject *result = invoke_delegate(root, args, &exception);
+        require(result && !exception && *(int *)mono_object_unbox(result) == expected[i], "static/closure/multicast runtime invoke result");
+        if (i == 2) {
+            mono_gc_collect(mono_gc_max_generation());
+            value = 11;
+            result = invoke_delegate(root, args, &exception);
+            require(result && !exception && *(int *)mono_object_unbox(result) == 29, "multicast order and captured state preserved");
+        }
+        mono_gchandle_free_v2(root);
+    }
+    MonoGCHandle root = invocation_delegate("InvocationException");
+    int value = 3;
+    void *args[] = { &value };
+    MonoObject *exception = NULL;
+    MonoObject *result = invoke_delegate(root, args, &exception);
+    require(!result && exception && !strcmp(mono_class_get_name(mono_object_get_class(exception)), "ArgumentException"), "delegate exception returned without FFI unwind");
+    mono_gchandle_free_v2(root);
+    root = invocation_delegate("InvocationReference");
+    MonoString *text = mono_string_new(domain, "wire");
+    void *references[] = { text };
+    exception = NULL;
+    result = invoke_delegate(root, references, &exception);
+    require(result && !exception && mono_object_get_class(result) == mono_get_string_class(), "delegate reference input/result");
+    char *utf8 = mono_string_to_utf8((MonoString *)result);
+    require(!strcmp(utf8, "wire_native"), "delegate reference result bytes");
+    mono_free(utf8);
+    mono_gchandle_free_v2(root);
+}
 
 extern MonoCustomAttrInfo *wire_mono_custom_attrs_from_class_checked(MonoClass *, uint16_t *);
 extern MonoCustomAttrInfo *wire_mono_custom_attrs_from_field_checked(MonoClass *, MonoClassField *, uint16_t *);
@@ -236,7 +292,7 @@ static void run_attrs(MonoImage *image) {
 }
 
 int main(int argc, char **argv) {
-    require(argc == 5, "usage: embed_probe classlib-root fixture.exe core|interop|threads|gc|layout|remoting|collation|static-roots|attrs|objects|reference-locals interp|interp-only");
+    require(argc == 5, "usage: embed_probe classlib-root fixture.exe core|interop|threads|gc|layout|remoting|collation|static-roots|attrs|objects|reference-locals|delegate-invoke interp|interp-only");
     mono_set_dirs(argv[1], argv[1]);
     mono_config_parse(NULL);
     mono_jit_set_aot_mode(strcmp(argv[4], "interp-only") == 0 ? MONO_AOT_MODE_INTERP_ONLY : MONO_AOT_MODE_INTERP);
@@ -259,7 +315,9 @@ int main(int argc, char **argv) {
     require(reference_pair_template != NULL, "reference local template");
     reenter = mono_class_get_method_from_name(fixture, "Reenter", 1);
     require(reenter != NULL, "nested target");
-    if (strcmp(argv[3], "reference-locals") == 0) {
+    if (strcmp(argv[3], "delegate-invoke") == 0) {
+        run_delegate_invokes();
+    } else if (strcmp(argv[3], "reference-locals") == 0) {
         require(invoke_int("ReferenceLocals", NULL) == 0, "generic local references survive GC with NULL and assignable values");
         require(retired_reference_slot && wire_mono_interp_reference_pair_checked(reference_pair_template,
                 mono_get_object_class(), retired_reference_slot, NULL, 1) != 0, "retired frame slot rejected");

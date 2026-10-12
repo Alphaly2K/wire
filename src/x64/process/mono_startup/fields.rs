@@ -197,13 +197,26 @@ impl Registry {
         roots: &mut instances::Registry,
         memory: &mut Memory,
         specs: Vec<Spec>,
+        reference: impl FnMut(&mut instances::Registry, Object) -> Result<u64, String>,
+    ) -> Result<(), String> {
+        if self.retired || specs.len() > 256 || self.cells.len() + specs.len() > 32768 {
+            return Err("initialized field views outside single bounded installation".into());
+        }
+        self.api = Some(Api::load(library)?);
+        self.install_specs(root_api, roots, memory, specs, reference)
+    }
+    fn install_specs(
+        &mut self,
+        root_api: instances::Api,
+        roots: &mut instances::Registry,
+        memory: &mut Memory,
+        specs: Vec<Spec>,
         mut reference: impl FnMut(&mut instances::Registry, Object) -> Result<u64, String>,
     ) -> Result<(), String> {
         if self.retired || specs.len() > 256 || self.cells.len() + specs.len() > 32768 {
             return Err("initialized field views outside single bounded installation".into());
         }
-        let api = Api::load(library)?;
-        self.api = Some(api);
+        let api = self.api.ok_or("initialized fields lack native API")?;
         for spec in specs {
             let owner = roots.borrow(root_api, spec.owner)?;
             let class = roots.class(root_api, owner)?;
@@ -230,7 +243,7 @@ impl Registry {
             if let Some(layout) = spec.nested {
                 if spec.inline.is_some()
                     || spec.guest_pointer.is_some()
-                    || spec.kind != 0x11
+                    || !matches!(spec.kind, 0x11 | 0x15)
                     || spec.type_class != Some(layout.class)
                     || unsafe { (api.type_class)(ty) } != layout.class
                     || unsafe { (api.is_value)(layout.class) } == 0
@@ -255,7 +268,7 @@ impl Registry {
             }
             let shape = if let Some((width, alignment)) = spec.inline {
                 let mut actual_alignment = 0;
-                if spec.kind != 0x11
+                if !matches!(spec.kind, 0x11 | 0x15)
                     || spec.type_class.is_none()
                     || spec.guest_pointer.is_some()
                     || !(1..=256).contains(&width)
@@ -901,6 +914,13 @@ impl Registry {
     pub(super) fn has_owner(&self, owner: u64) -> bool {
         !self.retired && self.cells.values().any(|c| c.owner == owner)
     }
+    pub(super) fn has_field(&self, owner: u64, field: Object) -> bool {
+        !self.retired
+            && self
+                .cells
+                .values()
+                .any(|cell| cell.owner == owner && cell.field == field)
+    }
     pub(super) fn has_reference(&self, owner: u64, address: u64) -> bool {
         !self.retired
             && self.cells.get(&address).is_some_and(|c| {
@@ -1349,7 +1369,7 @@ mod tests {
     use super::*;
     use std::cell::{Cell as Counter, RefCell};
     #[test]
-    fn nested_instance_fields_keep_padding_private_and_barrier_complete_owner() {
+    fn closed_generic_instance_fields_keep_padding_private_and_barrier_complete_owner() {
         let (fixture, _, _, _, _) = fixture();
         let api = instances::tests::identity_api();
         let mut roots = instances::Registry::default();
@@ -1401,15 +1421,48 @@ mod tests {
             api: fixture.api,
             ..Registry::default()
         };
+        let fields_api = fields.api.as_mut().unwrap();
+        fields_api.find = {
+            unsafe extern "C" fn find(_: Object, _: *const c_char) -> Object {
+                10usize as Object
+            }
+            find
+        };
+        fields_api.kind = {
+            unsafe extern "C" fn kind(_: Object) -> u32 {
+                0x15
+            }
+            kind
+        };
+        fields_api.is_value = {
+            unsafe extern "C" fn is_value(_: Object) -> i32 {
+                1
+            }
+            is_value
+        };
+        fields_api.value_size = {
+            unsafe extern "C" fn size(_: Object, alignment: *mut u32) -> i32 {
+                unsafe { alignment.write(8) };
+                24
+            }
+            size
+        };
         let mut memory = Memory::default();
         fields
-            .install_inline(
+            .install_specs(
                 api,
                 &mut roots,
                 &mut memory,
-                (owner, field),
-                layout.clone(),
-                &mut |roots, native| roots.borrow(api, native),
+                vec![Spec {
+                    owner: native,
+                    name: c"ClosedGenericValue".to_owned(),
+                    kind: 0x15,
+                    type_class: Some(class),
+                    guest_pointer: None,
+                    inline: None,
+                    nested: Some(layout.clone()),
+                }],
+                |roots, native| roots.borrow(api, native),
             )
             .unwrap();
         let initial = fields.read(owner, field).unwrap();

@@ -153,6 +153,9 @@ fn with_routes<'a, T>(
         super::unsafe_buffers::drain_finalizers()?;
         super::profiler_recorders::drain_finalizers()?;
         super::logging::drain_finalizers()?;
+        if owner.metadata.is_some() {
+            super::async_operations::drain_finalizers()?;
+        }
     }
     let result = operation();
     super::burst_shared::validate_handles()?;
@@ -160,6 +163,9 @@ fn with_routes<'a, T>(
         super::unsafe_buffers::drain_finalizers()?;
         super::profiler_recorders::drain_finalizers()?;
         super::logging::drain_finalizers()?;
+        if owner.metadata.is_some() {
+            super::async_operations::drain_finalizers()?;
+        }
     }
     temporary.verify()?;
     drop(scope);
@@ -258,7 +264,7 @@ fn execute_scalar_guest_bounded(
     {
         return Err("guest floating argument position outside ABI".into());
     }
-    if target == 0 || args.len() > 8 {
+    if target == 0 || args.len() > 16 {
         return Err("guest callback target/arity not admitted".into());
     }
     let depth = owner.depth.get();
@@ -289,9 +295,11 @@ fn execute_scalar_guest_bounded(
     }
     let _depth = Depth(&owner.depth, depth);
     // Win64 caller reserves 32B shadow space above the return slot.
-    // Leave 64B for shadow/home saves and maintain callee RSP = 8 (mod 16).
+    // Reserve every positional stack argument as well as shadow/home storage;
+    // maintain callee RSP = 8 (mod 16) for signatures up to sixteen arguments.
     let stack_top = STACK_BASE + STACK_BYTES - depth as u64 * STACK_SLICE;
-    let rsp = stack_top - 72;
+    let call_bytes = (40 + args.len().saturating_sub(4) as u64 * 8).max(72);
+    let rsp = stack_top - ((call_bytes + 7) & !15) - 8;
     let teb = owner.runtime.borrow().teb();
     let previous = [
         owner.memory.borrow().read_int(teb + 8, 8)?,
@@ -597,11 +605,11 @@ pub(super) fn guest_span_arguments(
     output: Option<usize>,
 ) -> Result<GuestSpanResult, String> {
     OWNER.with(|slot| {
-        if slot.get().is_null() || args.len() > 8 || spans.len() > 8 {
+        if slot.get().is_null() || args.len() > 16 || spans.len() > 16 {
             return Err("UTF16 callback owner/arity absent".into());
         }
         let owner = unsafe { &*slot.get() };
-        let mut seen = [false; 8];
+        let mut seen = [false; 16];
         let mut offset = 0usize;
         let mut offsets = Vec::new();
         for &(index, units) in spans {
@@ -717,7 +725,7 @@ pub(super) fn guest_byte_arguments_at(
     args: &[u64],
     spans: &[(usize, &[u8], usize)],
 ) -> Result<GuestByteResult, String> {
-    guest_byte_arguments_impl(target, args, spans, None, &[], &[])
+    guest_byte_arguments_impl(target, args, spans, None, &[], &[], &[])
 }
 /// Scalar/value ABI with positional floating inputs and exact byref aliases.
 /// Alias sources must be declared payloads; no native address reaches Win64.
@@ -728,11 +736,22 @@ pub(super) fn guest_value_arguments(
     spans: &[(usize, &[u8])],
     aliases: &[(usize, usize)],
 ) -> Result<GuestByteResult, String> {
+    guest_value_span_arguments(target, args, floating, spans, aliases, &[])
+}
+/// Input strings and byref values share one checked positional payload scope.
+pub(super) fn guest_value_span_arguments(
+    target: u64,
+    args: &[u64],
+    floating: &[(usize, u64)],
+    spans: &[(usize, &[u8])],
+    aliases: &[(usize, usize)],
+    utf16: &[(usize, Option<&[u16]>)],
+) -> Result<GuestByteResult, String> {
     let spans: Vec<_> = spans
         .iter()
         .map(|&(index, bytes)| (index, bytes, 0))
         .collect();
-    guest_byte_arguments_impl(target, args, &spans, None, floating, aliases)
+    guest_byte_arguments_impl(target, args, &spans, None, floating, aliases, utf16)
 }
 pub(super) fn guest_reference_pair(
     target: u64,
@@ -752,6 +771,7 @@ pub(super) fn guest_reference_pair(
         Some(class as usize),
         &[],
         &[],
+        &[],
     )?;
     if outputs[0][8..] != pair[8..] {
         return Err("component FastPath wrote beyond its reference output".into());
@@ -765,13 +785,14 @@ fn guest_byte_arguments_impl(
     reference_class: Option<usize>,
     floating: &[(usize, u64)],
     aliases: &[(usize, usize)],
+    utf16: &[(usize, Option<&[u16]>)],
 ) -> Result<GuestByteResult, String> {
     OWNER.with(|slot| {
-        if slot.get().is_null() || args.len() > 8 || spans.len() > 8 {
+        if slot.get().is_null() || args.len() > 16 || spans.len() + utf16.len() > 16 {
             return Err("typed byte callback owner/arity absent".into());
         }
         let owner = unsafe { &*slot.get() };
-        let mut seen = [false; 8];
+        let mut seen = [false; 16];
         let mut offset = 0usize;
         let mut offsets = Vec::new();
         for &(index, bytes, interior) in spans {
@@ -801,6 +822,15 @@ fn guest_byte_arguments_impl(
                 return Err("typed byte callback alias is not an exact declared payload".into());
             }
             seen[index] = true;
+        }
+        let mut string_offsets = Vec::new();
+        for &(index, units) in utf16 {
+            if index >= args.len() || seen[index] || units.is_some_and(|u| u.len() > 65536) {
+                return Err("typed UTF16 input overlaps another payload or exceeds bound".into());
+            }
+            seen[index] = true;
+            string_offsets.push(offset);
+            offset = (offset + 16 + units.map_or(0, |u| u.len() * 2) + 15) & !15;
         }
         if floating.iter().enumerate().any(|(i, &(index, _))| {
             index >= args.len()
@@ -861,6 +891,25 @@ fn guest_byte_arguments_impl(
         }
         for &(index, source) in aliases {
             args[index] = args[source];
+        }
+        for (&(index, units), &offset) in utf16.iter().zip(&string_offsets) {
+            let address = base + offset as u64;
+            let begin = match units {
+                None => 0,
+                Some([]) => 1,
+                Some(units) => {
+                    let bytes: Vec<_> = units.iter().flat_map(|u| u.to_le_bytes()).collect();
+                    owner.memory.borrow_mut().write(address + 16, &bytes)?;
+                    address + 16
+                }
+            };
+            owner.memory.borrow_mut().write_int(address, 8, begin)?;
+            owner.memory.borrow_mut().write_int(
+                address + 8,
+                4,
+                units.map_or(0, |u| u.len()) as u64,
+            )?;
+            args[index] = address;
         }
         let result = execute_scalar_guest(owner, target, &args, floating)?;
         let mut outputs = Vec::new();
@@ -1597,6 +1646,17 @@ mod tests {
             .write(0x1100, &[0x49, 0x89, 0x48, 0xf8, 0xc3])
             .unwrap();
         memory.write(0x1200, &[0x0f, 0x0b]).unwrap();
+        // Preserve XMM1 bits alongside a scalar value and a UTF16 header;
+        // the last byref argument deliberately aliases the first value.
+        memory
+            .write(
+                0x1300,
+                &[
+                    0x66, 0x0f, 0x7e, 0xc8, 0x03, 0x01, 0x41, 0x03, 0x40, 0x08, 0x41, 0x89, 0x01,
+                    0xc3,
+                ],
+            )
+            .unwrap();
         let mut runtime = Runtime64::new(
             &mut memory,
             0x140000000,
@@ -1634,6 +1694,26 @@ mod tests {
             }
             assert!(guest_byte_arguments_at(0x1200, &[0; 3], &[(2, &pair, 8)]).is_err());
             assert_eq!(pair[..8], [0; 8]);
+            assert!(with_service(|memory, _| memory.read_int(0x6ff900000000, 8)).is_err());
+            let input = 11u32.to_le_bytes();
+            let (_, bytes) = guest_value_span_arguments(
+                0x1300,
+                &[0; 4],
+                &[(1, 512)],
+                &[(0, &input)],
+                &[(3, 0)],
+                &[(2, Some(&[0x4e00, 0xd83d, 0xde00]))],
+            )?;
+            assert_eq!(bytes, [526u32.to_le_bytes().to_vec()]);
+            assert!(guest_value_span_arguments(
+                0x1300,
+                &[0; 4],
+                &[],
+                &[(0, &input)],
+                &[(2, 0)],
+                &[(2, None)]
+            )
+            .is_err());
             assert!(with_service(|memory, _| memory.read_int(0x6ff900000000, 8)).is_err());
             Ok::<_, String>(())
         })
@@ -1690,7 +1770,7 @@ mod tests {
         );
     }
     #[test]
-    fn win64_stack_arguments_follow_shadow_space_and_keep_eight_argument_bound() {
+    fn win64_stack_arguments_follow_shadow_space_and_keep_sixteen_argument_bound() {
         use super::super::super::super::memory::{EXECUTE, READ, WRITE};
         let mut memory = Memory::default();
         memory.map(0x1000, 4096, READ | WRITE | EXECUTE).unwrap();
@@ -1707,6 +1787,15 @@ mod tests {
                 ],
             )
             .unwrap();
+        // The sixteenth argument also needs reserved caller stack space.
+        memory
+            .write(
+                0x1100,
+                &[
+                    0x48, 0x8b, 0x44, 0x24, 0x28, 0x48, 0x03, 0x84, 0x24, 0x80, 0, 0, 0, 0xc3,
+                ],
+            )
+            .unwrap();
         let mut runtime = Runtime64::new(
             &mut memory,
             0x140000000,
@@ -1716,7 +1805,14 @@ mod tests {
         )
         .unwrap();
         let (result, _) = with_owner(&mut memory, &mut runtime, [0; 7], || {
-            assert!(guest_arguments(0x1000, &[1; 9]).is_err());
+            assert!(guest_arguments(0x1000, &[1; 17]).is_err());
+            assert_eq!(
+                guest_arguments(
+                    0x1100,
+                    &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+                )?,
+                21
+            );
             guest_arguments(0x1000, &[1, 2, 3, 4, 51, 6, 7, 83])
         })
         .unwrap();

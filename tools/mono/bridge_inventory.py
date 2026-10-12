@@ -46,6 +46,8 @@ def abi_group(row):
         return 'pointer-or-capability-contract'
     if any('unresolved' in shape or 'open-generic' in shape or 'recursive-or-deep' in shape for shape in shapes):
         return 'unresolved-or-complex-layout'
+    if any('delegate' in shape for shape in shapes):
+        return 'callback-lifetime-contract'
     if any('managed-reference' in shape or 'array:' in shape or 'string' in shape for shape in shapes):
         return 'reference-string-array'
     if any('value{' in shape or 'byref:' in shape for shape in shapes):
@@ -95,6 +97,25 @@ def export_candidates(sample, observed):
     return [{'export': name, 'source_dispatch_candidate': int(name in candidates),
              'observed_completed': hits[name], 'semantics_verified_by_inventory': 0}
             for name in sorted(PE(sample.read_bytes()).exports()) if not name.startswith('#')]
+
+
+def field_protocols(fields):
+    """Group all layouts separately from fields eligible for serialization.
+
+    Public fields on a nonserializable helper are not Unity serialization
+    roots. Direct embedding access may still require an explicit field view.
+    Counts include concrete closed owners; they are not method coverage.
+    """
+    groups = defaultdict(Counter)
+    for row in fields:
+        count = groups[row['protocol']]
+        count['fields'] += 1
+        count['instance_fields'] += row['static'] == '0'
+        count['serialization_candidates'] += row['serialization_candidate'] == '1'
+        count['graph_candidates'] += (row['serialization_candidate'] == '1'
+                                      and row['graph_policy'] in ('serializable-data', 'engine-object'))
+        count['closed_generic_fields'] += '<' in row['owner'] and 'open-generic' not in row['shape']
+    return [{'protocol': protocol, **dict(count)} for protocol, count in sorted(groups.items())]
 
 
 def main():
@@ -170,9 +191,17 @@ def main():
     write_rows(output / 'engine-bindings.tsv', list(engine_rows[0]), engine_rows)
     exports = export_candidates(args.sample_mono, rows(args.observed_api) if args.observed_api else [])
     write_rows(output / 'mono-exports.tsv', list(exports[0]), exports)
+    managed_fields = rows(output / 'managed-fields.tsv')
+    protocols = field_protocols(managed_fields)
+    write_rows(output / 'field-protocols.tsv', ['protocol', 'fields', 'instance_fields',
+               'serialization_candidates', 'graph_candidates', 'closed_generic_fields'], protocols)
+    managed_types = rows(output / 'managed-types.tsv')
+    callbacks = rows(output / 'managed-callbacks.tsv')
+    unsafe_uses = rows(output / 'unsafe-il.tsv')
+    wrappers = rows(output / 'native-wrappers.tsv')
     status = Counter(row['lookup'] for row in joined if row['kind'] == 'InternalCall')
     errors = rows(output / 'metadata-errors.tsv')
-    summary = {'schema': 1, 'assemblies': len(inputs), 'metadata_errors': errors,
+    summary = {'schema': 2, 'assemblies': len(inputs), 'metadata_errors': errors,
                'internal_calls': sum(row['kind'] == 'InternalCall' for row in joined),
                'pinvokes': sum(row['kind'] == 'PInvoke' for row in joined),
                'internal_call_lookup': dict(status), 'engine_bindings': len(original_bindings),
@@ -180,6 +209,11 @@ def main():
                'referenced_missing_icalls': sum(row['lookup'] == 'missing' and int(row['il_references']) > 0 for row in joined),
                'missing_scalar_candidates': sum(row['lookup'] == 'missing' and row['scalar_candidate'] == '1' for row in joined),
                'mono_exports': len(exports), 'game_methods_executed_by_inventory': 0,
+               'managed_types': len(managed_types), 'managed_type_status': dict(Counter(row['status'] for row in managed_types)),
+               'managed_fields': len(managed_fields), 'field_protocols': protocols,
+               'managed_graph_policy': dict(Counter(row['graph_policy'] for row in managed_types)),
+               'delegate_signatures': len(callbacks), 'unsafe_il_sites': len(unsafe_uses),
+               'native_wrapper_call_sites': len(wrappers),
                'semantics_verified_by_inventory': False,
                'input_hashes': {str(path): sha256(path) for path in
                    [runtime / 'runtime-lookup.tsv', runtime / 'engine-registrations.tsv',
@@ -188,10 +222,15 @@ def main():
                           'Static IL references count call sites, not execution frequency or reachability',
                           'PInvoke declarations are never resolved or executed by this audit',
                           'Source dispatch matches are candidates, not complete Mono export contracts',
-                          'Not-in-snapshot methods remain unknown; they are not classified as implemented']}
+                          'Not-in-snapshot methods remain unknown; they are not classified as implemented',
+                          'Closed types are substituted from static metadata and IL; dynamically constructed types remain runtime work',
+                          'Field offsets/sizes are metadata declarations, not native runtime ABI layouts',
+                          'Serialization candidates still require an admitted root and actual engine selection']}
     (output / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
     print(json.dumps({key: summary[key] for key in ('assemblies', 'internal_calls', 'pinvokes',
-          'internal_call_lookup', 'referenced_missing_icalls', 'missing_scalar_candidates', 'mono_exports')}, indent=2))
+          'internal_call_lookup', 'referenced_missing_icalls', 'missing_scalar_candidates', 'mono_exports',
+          'managed_types', 'managed_type_status', 'managed_fields', 'field_protocols',
+          'delegate_signatures', 'unsafe_il_sites')}, indent=2))
 
 
 if __name__ == '__main__':

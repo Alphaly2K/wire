@@ -5,6 +5,12 @@ use crate::x64::memory::{shared::HostRegion, READ, WRITE};
 use std::{collections::BTreeMap, ptr};
 const BASE: u64 = 0x6ffeb0000000;
 const STRIDE: u64 = 65536;
+const CAPACITY: usize = 4096;
+const PAYLOAD_LIMIT: usize = 64 * 1024 * 1024;
+pub(super) fn canonical_token(token: u64) -> bool {
+    (BASE..BASE + CAPACITY as u64 * STRIDE).contains(&token)
+        && (token - BASE).is_multiple_of(STRIDE)
+}
 fn bounded_payload(layout: &value_layout::Layout, length: usize) -> Result<usize, String> {
     let bytes = layout
         .width
@@ -268,6 +274,7 @@ impl WorkerRequest {
 #[derive(Default)]
 pub(super) struct Registry {
     entries: BTreeMap<u64, Entry>,
+    payload_bytes: usize,
     retired: bool,
     writes: usize,
     verified: usize,
@@ -281,6 +288,18 @@ pub(super) struct Refresh {
     pub(super) references: Vec<Object>,
 }
 impl Registry {
+    fn admit(&self, payload: usize) -> Result<(), String> {
+        if self.retired
+            || self.entries.len() >= CAPACITY
+            || self
+                .payload_bytes
+                .checked_add(payload.max(1))
+                .is_none_or(|size| size > PAYLOAD_LIMIT)
+        {
+            return Err("typed array registry count/payload budget exhausted or retired".into());
+        }
+        Ok(())
+    }
     fn layout(api: Api, entry: &Entry) -> Result<(), String> {
         let native = entry.native;
         entry.layout.check()?;
@@ -332,11 +351,12 @@ impl Registry {
         length: u64,
     ) -> Result<WorkerRequest, String> {
         let layout = api.element_layout(element)?;
-        bounded_payload(
+        let payload = bounded_payload(
             &layout,
             usize::try_from(length).map_err(|_| "typed array length overflow")?,
         )?;
-        if self.retired || self.entries.len() >= 256 || domain.is_null() {
+        self.admit(payload)?;
+        if domain.is_null() {
             return Err("typed array outside bounded allocation contract".into());
         }
         Ok(WorkerRequest {
@@ -354,9 +374,6 @@ impl Registry {
         roots: &mut instances::Registry,
         allocation: WorkerAllocation,
     ) -> Result<u64, String> {
-        if self.retired || self.entries.len() >= 256 {
-            return Err("worker array reply reached retired/full registry".into());
-        }
         let WorkerAllocation {
             root,
             element,
@@ -368,6 +385,7 @@ impl Registry {
             .width
             .checked_mul(length)
             .ok_or("worker array reply size overflow")?;
+        self.admit(payload_size)?;
         let token = BASE + self.entries.len() as u64 * STRIDE;
         roots.adopt_reference_array(root_api, token, native)?;
         let class = unsafe { (api.array_class)(element, 1) };
@@ -408,6 +426,7 @@ impl Registry {
             }
         }
         self.entries.insert(token, entry);
+        self.payload_bytes += payload_size.max(1);
         Ok(token)
     }
     /// Root first, then convert declared slots from an existing native SZ array.
@@ -442,9 +461,7 @@ impl Registry {
             }
             return Ok(token);
         }
-        if self.entries.len() >= 256 {
-            return Err("borrowed array capacity exceeded".into());
-        }
+        self.admit(0)?;
         let token = roots.borrow(root_api, native)?;
         let class = roots.class(root_api, token)?;
         if unsafe { (api.rank)(class) } != 1 {
@@ -454,6 +471,7 @@ impl Registry {
         let layout = api.element_layout(element)?;
         let length = unsafe { (api.length)(native) };
         let payload_size = bounded_payload(&layout, length)?;
+        self.admit(payload_size)?;
         let header = HostRegion::owned(16)?;
         header.with_native(|p| unsafe {
             p.as_ptr()
@@ -480,6 +498,7 @@ impl Registry {
         })?;
         entry.committed = bytes;
         self.entries.insert(token, entry);
+        self.payload_bytes += payload_size.max(1);
         self.borrowed += 1;
         Ok(token)
     }
@@ -886,6 +905,28 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn expanded_array_identities_remain_disjoint_and_payload_budget_is_checked_before_publish() {
+        assert!(canonical_token(BASE + 256 * STRIDE));
+        assert!(canonical_token(BASE + (CAPACITY as u64 - 1) * STRIDE));
+        assert!(!canonical_token(BASE + CAPACITY as u64 * STRIDE));
+        assert!(!canonical_token(BASE - 1));
+        assert!(!canonical_token(BASE + 1));
+        assert_eq!(BASE + CAPACITY as u64 * STRIDE, 0x6ffec0000000);
+        let mut registry = Registry {
+            payload_bytes: PAYLOAD_LIMIT - 4,
+            ..Registry::default()
+        };
+        assert!(registry.admit(4).is_ok());
+        assert!(registry.admit(5).is_err());
+        assert!(registry.admit(usize::MAX).is_err());
+        registry.payload_bytes = PAYLOAD_LIMIT;
+        assert!(registry.admit(0).is_err());
+        registry.payload_bytes = 0;
+        registry.retired = true;
+        assert!(registry.admit(1).is_err());
+        assert!(registry.entries.is_empty());
+    }
     #[test]
     fn scalar_assets_fit_identity_slot_without_expanding_reference_traversal() {
         let scalar = value_layout::Layout {

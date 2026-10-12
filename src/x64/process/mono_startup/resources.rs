@@ -242,13 +242,8 @@ unsafe fn load_result(
         callbacks::guest_asset_string_span(b.loads[index], units.as_deref(), &[], &[token])?
     };
     let native = if index == 3 {
-        // ResourceRequest's actual marshaller constructs AsyncOperation(ptr).
-        // This is an opaque original engine pointer, not a GC handle.
-        if result == 0 {
-            0
-        } else {
-            engine_objects::engine_pointer(result as usize)? as usize
-        }
+        // ResourceRequest shares the actual AsyncOperation attachment/lifetime.
+        super::async_operations::adopt(result, false)?
     } else if index == 2 {
         let native = callbacks::with_metadata_service(|route, memory| {
             route.sync_guest(memory)?;
@@ -309,11 +304,7 @@ unsafe extern "C" fn unload_unused() -> usize {
     operation(|| {
         let b = BINDING.get().ok_or("resource unloading absent")?;
         let handle = callbacks::guest_arguments(b.loads[6], &[])?;
-        if handle == 0 {
-            Ok(0)
-        } else {
-            engine_objects::engine_pointer(handle as usize).map(|p| p as usize)
-        }
+        super::async_operations::adopt(handle, false)
     })
 }
 fn find_result(ty: Object, options: Option<(i32, i32)>) -> Result<Object, String> {

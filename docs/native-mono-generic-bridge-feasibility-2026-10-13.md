@@ -22,12 +22,12 @@ Alice 的冻结样本。相同 Unity 版本的不同游戏也可能采用不同�
 值类型布局和 ParamList 的 in/out 属性，目标地址来自 sealed 的实际引擎注册表。
 不匹配、未注册、同名 icall 重载歧义和未支持的形状保留缺口。
 
-ARM64 signed executable 预编译一个 4,096 槽的入口池。每个槽只有固定的 slot index
+ARM64 signed executable 预编译一个 8,192 槽的入口池（初版 4,096）。每个槽只有固定的 slot index
 和到共同入口的分支；共同入口保存 x0–x7/d0–d7，按数据描述符转换 ARM64 的独立
 整数/浮点寄存器分配与 Win64 的参数位置/stack ABI。返回通过 RAX/XMM0 位模式再
 转换至 x0/d0。入口池不会在运行时生成、修补或新增可执行映射；描述符只是私有数据。
 
-支持范围为最多 8 参数的静态 primitive/enum 调用，以及已准入类族的 plain-value
+支持范围为最多 16 参数的静态 primitive/enum 调用，以及已准入类族的 plain-value
 `ref/out`。后者要求 actual metadata 中每个字节都被非 Boolean 标量覆盖，无 reference、
 pointer、padding 或重叠字段。native payload 复制到作用域内的 guest buffer，输出
 全部预检后写回；相同地址/布局的 alias 保持同一 guest 地址，不同布局或部分重叠拒绝。
@@ -176,3 +176,149 @@ Transform.set_position。33.09 秒后在资源字段投影的 generic value 分�
 Clippy（`-D warnings`）通过。新回归覆盖动态 token、有序加载、未验证 converter、
 分支/重复调用/截断拒绝，以及 nullable NULL 转发、required NULL 和伪造宿主指针
 失败时保持 native 输出。纯 scalar ABI 继续拒绝 capability-like Int64/IntPtr。
+
+## 闭合泛型值与对象图边界
+
+GENERICINST value 现与普通 value 共用实际闭合 `value_layout`，含引用、Boolean、
+padding 的布局走 nested leaf 与完整 owner 的 Mono barrier；只有完整非 Boolean
+标量覆盖才允许 inline。whole-field store、refresh、失败批次与 retire 使用已有
+验证协议，未引入 InputSystem 类型名或游戏 token 特例。
+
+probe-169 实际越过泛型值字段，完成多个 InputActionMap/InputAction 构造与
+OnAfterDeserialize，以及 InputSystem 内部 UnsafeUtility 状态内存分配/复制/释放，
+继续创建 EventSystem。39.06 秒后在递归图的 `UnmanagedMemory.basePtr` 分类中止，
+returncode=-6；最终帧仍为加载页，未正常收尾的 guard/GPU 统计没有采集。
+
+全量字段盘点确认该对象的实际声明者 InputActionState 没有 Serializable 标志。
+普通对象图不再因为 helper 有 public 字段就展开其 runtime storage；非序列化
+helper 和委托保持 canonical root，不发布内部裸指针。实际可序列化 reference
+及显式 generic 容器继续投影。此规则共用在顶层/嵌套图中；explicit field ABI 仍
+要求 checked typed view，unsupported 指针仍是拒绝边界。
+
+本批 **543 passed / 7 ignored**，release build、all-target Clippy 与 11 项
+inventory/harness 回归通过。完整协议盘点与批量工作方式见
+`native-mono-bridge-gap-inventory-2026-10-13.md`。整个 provider 的早期冻结规格、
+可交互游戏和第二游戏验收仍未完成。
+
+probe-170 验收通过上述对象图边界，实际完成 InputSystem 状态分配/复制/释放与
+EventSystem 构造。36.27 秒后正常停在 `.UpdateFunction::Invoke` 的 Runtime 方法
+准入边界：401,301,993 retired instructions，245 draws / 93 presents，guard
+checks=336 / denied=0，GC scope depth=0，全部 32 个 UnsafeUtility 分配已释放。
+最后帧仍为加载页。日志还记录 Naninovel 的异步初始化在
+`Object.Internal_InstantiateAsyncWithParams_Injected` 缺失处抛出并记录异常；后续委托
+准入通过也需修复异步实例化，才能完成初始化。
+
+委托 `Invoke` 现按实际 `mono_class_is_delegate`、Runtime implementation flags、
+closed declaring/parameter types 准入，复用既有 mono_runtime_invoke、canonical roots、
+参数/输出/异常协议。普通 runtime/native/PInvoke/synchronized 方法仍不准入；
+构造函数继续走原分配路由。generic delegate 的 inflated Invoke 要求闭合实例和
+非 generic method，不按 PlayerLoop.UpdateFunction 类型名写特例。
+
+原生 fixture 使用冻结的 24-patch runtime 与既有 corelib support 验证静态目标、
+捕获闭包、多播顺序/状态、引用参数/返回、GC 后调用与异常返回。
+`wire-out/native-mono-delegate-invoke/renamed-run.log` 为 PASS，guard checks=32 /
+denied=0。fixture 采用独立程序集名，避免与旧 NativeProbe 的 AOT support 身份冲突；
+没有重建 runtime 或 corelib support。
+
+显式 mono_field_get_value/set_value 现按实际 field identity 单独建立视图，静态、
+literal、shadowed、裸指针字段继续拒绝；同对象其他 runtime storage 不会随之展开。
+这使 native-only reference 能保留 opaque 身份，并在确实出现 embedding field
+访问时复用统一 typed field 协议。
+
+异步下一批统一审查 AsyncOperation、AsyncInstantiateOperation 和 Awaitable：真实
+operation 数据指针、InstantiateParameters 的引用叶子、Vector3/Quaternion spans、
+managed-object attachment、completion/cancellation，以及 owner-thread destroy 和
+GC/finalizer cleanup 的顺序。原 managed wrapper 把运行时数据传给原引擎，不以
+伪造完成状态或改游戏 IL 绕过初始化。
+
+## 成批引用、委托与异步生命周期接入
+
+上述委托/按需字段批次的最终完整回归为 **545 passed / 7 ignored**。probe-171
+实际执行了 Runtime delegate Invoke，继续到 Canvas 更新；35.36 秒，266 draws /
+100 presents，guard checks=337 / denied=0，GC scope depth=0。当时仍缺 Mesh 创建
+与异常日志入口，异步实例化异常也仍在日志中，最后画面保持加载页。
+
+直接 CLASS/closed GENERICINST 引用参数若实际继承 UnityEngine.Object，现共用
+canonical 对象根、actual assignability、worker pin 和 checked m_CachedPtr 投影。
+原引擎收到 guest Mono 身份并执行绑定，回调后同步真实 native Mono 字段；不把宿主
+对象地址传给 Win64。实际 System.Exception 引用保持 opaque，原引擎的格式化过程
+通过统一 metadata/invoke/explicit-field 路由读取它，保留原异常堆栈。
+
+异步模块一次接入 AsyncOperation 的绑定、状态/进度/优先级/场景激活与析构，
+AsyncInstantiateOperation 的等待、取消和 integration budget，共 **13 个配套接口**，
+以及 Object 的异步实例化入口。方法的完整语义签名由实际 metadata 核对，目标从
+sealed registration 获取，不含 MethodDef token、程序集 SHA 或目标 RVA。Resources
+异步加载、UnloadUnusedAssets 和 Awaitable.from_operation 共用同一 operation registry。
+
+operation identity 永不复用，原 engine pointer 留在私有 registry；重复绑定、伪造
+身份、跨线程查询和重复释放均拒绝。构造函数先 InternalSetManagedObject、再写 m_Ptr
+的真实顺序得到保留。InstantiateParameters 按 actual layout 转换引用/Boolean/标量叶子，
+padding 写零；Vector3/Quaternion span 从实际 native IL 存储复制为 owned guest snapshot，
+宿主指针不会进入原引擎。输入快照总量有 64MiB 上限，保留至 VM shutdown 回调结束，
+避免异步 engine work 持有已经撤销的临时地址。纯 stack/local span 不要求 UnsafeUtility
+分配池身份，但仍要求非 NULL、对齐、长度与整数运算有效。
+
+退出增加明确的 owner quiescence：停止新 producer、取消尚未完成的 instantiate、
+将已绑定对象的真实 m_Ptr 置零并调用原 InternalDestroy，再退休 Mono handle/root 服务。
+foreign finalizer 只将已签发 identity 排队，在有 metadata 服务的 owner scope 中释放。
+已进入的 late finalizer 仅对明确处于退出释放过程的记录去重；未知身份与正常期间的
+重复析构仍拒绝。所有 retained input mappings 在 VM cleanup 后撤销。
+
+probe-172 实际完成异步创建、托管绑定、Mesh.Internal_Create、Mesh 清理/可访问查询
+和 Internal_LogException。35.89 秒，265 draws / 99 presents，guard checks=336 /
+denied=0。异步 **created=1 / released=1 / live=0 / retained-bytes=0 / closed=true**，
+GC scope depth=0；原引擎异常日志保留了 Mesh 上传等缺口的完整托管堆栈。
+最终停止在反射探针的 BuiltinUpdate 缺口，最后帧仍为加载页。
+
+## 字符串来源、数据数组与更长签名
+
+Mesh 数据上传实际为 9 参数，因此共享 ABI 上限扩至 16。编译期入口保存原 ARM64
+调用栈地址；整数/浮点寄存器分别分配，耗尽后的参数遵守 Darwin 的自然对齐与窄
+标量栈布局，再转换为 Win64 的按位置 8B stack slots。guest callback 为所有栈参数
+预留存储，保持 callee RSP 的 16B ABI 对齐。入口池仍完全由 signed binary 预编译。
+
+System.Array 及已验证的 plain-value SZARRAY 输入复用实际 array identity、布局、
+canonical root、字段/数组同步与 GC barrier；运行时核对 actual rank-one SZARRAY、
+元素 stride 和完整非 Boolean 标量布局。IntPtr、引用/指针/含 padding 的元素不会
+按 GPU 数据数组导出。不会逐 Mesh channel 或数组元素类型写 adapter。
+
+ManagedSpanWrapper 同时用于字符串和数值数据，不能按结构名推断 UTF16。字符串
+输入从 actual wrapper IL 追踪：实际 StringMarshaller.TryMarshalEmptyOrNullString
+将对应 String argument 写入 local，目标 icall 从同一 local 取地址。解析完整指令
+边界，核对实际 helper identity/signature、参数顺序和唯一目标调用；重赋值、复杂
+参数来源、多包装推导冲突及数值 span 保留缺口。字符串与普通 byref value 可共用
+同一 scoped guest payload，精确保留 NULL/empty/Unicode、位置、浮点位和 value alias。
+
+上述 ABI/输入协议完整回归为 **549 passed / 7 ignored**，release build 和修正后的
+all-target Clippy（`-D warnings`）通过。probe-173 实际执行 Object.SetName 和
+Mesh.SetArrayForChannelImpl，34.89 秒后因重叠值字段拒绝而 abort；原 out-of-sync
+消息来自此前查表，不是当前终点。最后帧仍为加载页，abort 没有最终 guard/GPU 数据。
+
+## 显式 union 与统一数组预算
+
+actual metadata 声明为 ExplicitLayout，且所有字段均为对齐、有界、非 Boolean
+普通数值，并覆盖完整 payload 时，重叠字段合并为一个 inline cell。原数值位模式
+完整保留；引用、Boolean、指针、未覆盖字节与非显式重叠布局保持拒绝。该规则共用
+于值字段、byref 和 typed arrays，不按 Color32 或 InputSystem 类型名增加 adapter。
+回归同时使用可变 actual metadata API、payload snapshot 和非法布局验收；完整
+release feature 回归 **550 passed / 7 ignored**。
+
+probe-174 的全量 snapshot 已更新为 resolved=5,139 / missing=6,310 / unknown=88。
+实际 Mesh 上传越过 explicit union，36.74 秒后到达旧 256-entry array prototype
+上限，returncode=-6；最后帧仍为加载页。typed array registry 随后改为 4,096 个
+canonical 身份与 64MiB 累计 payload 双预算，分配和发布前检查容量，原 token
+对齐、rank/stride、实际 layout、根/屏障与 retirement 顺序继续验证。
+
+数组预算批次完整回归 **551 passed / 7 ignored**，release build、all-target Clippy
+（`-D warnings`）与 **16 项** metadata/harness/build-tool 回归通过。FontEngine 的
+普通数值/输入字符串/引擎对象参数同时纳入共用描述符策略；有原生指针的 font
+buffers、复杂 reference outputs 与后台 lifetime 仍按独立协议处理。
+
+probe-175 自动安装 **4,020** 个入口，实际通过 Mesh 颜色/索引上传、BuiltinUpdate
+与更多 Canvas 更新，正常退出配置边界：43.64 秒、408,246,343 retired instructions，
+236 draws / 90 presents，guard checks=338 / denied=0，GC depth=0。typed arrays
+共 275 个，超过旧 256 上限；async created=1 / released=1 / live=0 / closed=true。
+最后帧仍为加载页。新的边界是 RenderPipelineManager.DoRenderLoop_Internal 的
+render-context IntPtr 参数；Player.log 另记录 Material.CreateWithMaterial 的包装
+来源含显式 null guards，简单直线来源分析尚未覆盖。下一批按渲染上下文/命令及
+受检查的对象包装协议推进，保持原实际 render loop。

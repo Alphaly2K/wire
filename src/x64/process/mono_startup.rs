@@ -43,6 +43,7 @@ static USED: AtomicBool = AtomicBool::new(false);
 type Object = *mut c_void;
 mod animation;
 mod arrays;
+mod async_operations;
 mod attributes;
 mod awaitables;
 mod binding_strings;
@@ -2239,19 +2240,16 @@ impl Probe {
             if unsafe { assignable(unity, class) } != 0 && !self.field_registry.has_owner(owner) {
                 continue;
             }
-            let specs = if let Some(specs) =
-                field_layouts::storage_specs(library, core, corlib, object, class)?
-            {
-                specs
-            } else if self
-                .constructor_images()?
-                .contains(&unsafe { image_of(class) })
-            {
-                field_layouts::specs(library, core, &self.constructor_images()?, object, class)?
-            } else {
-                continue;
-            };
             if !self.field_registry.has_owner(owner) {
+                let images = self.constructor_images()?;
+                if !images.contains(&unsafe { image_of(class) }) {
+                    continue;
+                }
+                let Some(specs) =
+                    field_layouts::graph_specs(library, core, corlib, &images, object, class)?
+                else {
+                    continue;
+                };
                 self.install_fields(library, api, specs)?;
             }
             queue.extend(self.field_registry.native_references(
@@ -3395,6 +3393,14 @@ impl Probe {
         }
         if !awaitables::installed() {
             awaitables::install(
+                library,
+                self.image_registry.unique_native_image(CORE_MODULE)?,
+                &managed_images,
+                &self.registry,
+            )?;
+        }
+        if !async_operations::installed() {
+            async_operations::install(
                 library,
                 self.image_registry.unique_native_image(CORE_MODULE)?,
                 &managed_images,
@@ -5020,6 +5026,60 @@ impl Probe {
             self.error_registry.retire();
             return result;
         }
+        if async_operations::installed() {
+            // Original async destruction releases Mono handles and can reenter
+            // managed code. Keep every normal route alive during quiescence.
+            let native = self
+                .native
+                .as_ref()
+                .ok_or("async shutdown runtime absent")?;
+            let (result, _) = callbacks::with_metadata_owner(
+                memory,
+                runtime,
+                self.callback_targets(),
+                reentry::Metadata {
+                    gc: Some(native.gc.clone()),
+                    library: native.library,
+                    domain: native.domain,
+                    thread_handle: native.thread_handle,
+                    metadata: &mut self.metadata_registry,
+                    images: &mut self.image_registry,
+                    rooted_instance: None,
+                    objects: Some(reentry::ObjectRoots {
+                        api: self
+                            .instance_api
+                            .ok_or("async shutdown object API absent")?,
+                        roots: &mut self.instance_registry,
+                        strings: self.object_api.ok_or("async shutdown string API absent")?,
+                        objects: &mut self.object_registry,
+                        fields: &mut self.field_registry,
+                        handles: (
+                            self.handle_api.ok_or("async shutdown handle API absent")?,
+                            &mut self.handle_registry,
+                        ),
+                        reflection: (
+                            self.reflection_api
+                                .ok_or("async shutdown reflection API absent")?,
+                            &mut self.reflection_registry,
+                        ),
+                        empty_arrays: (
+                            self.array_api.ok_or("async shutdown array API absent")?,
+                            &mut self.array_registry,
+                        ),
+                        attributes: (
+                            self.attribute_api
+                                .ok_or("async shutdown attributes API absent")?,
+                            &mut self.attribute_registry,
+                        ),
+                        arrays: self
+                            .reference_array_api
+                            .map(|api| (api, &mut self.reference_array_registry)),
+                    }),
+                },
+                async_operations::quiesce,
+            )?;
+            result?;
+        }
         let targets = self.callback_targets();
         let (result, stats) = callbacks::with_owner(memory, runtime, targets, || self.finish())?;
         result?;
@@ -5090,6 +5150,7 @@ impl Probe {
         if let Some(native) = &mut self.native {
             native.cleanup()?;
             logging::retire_after_vm_cleanup()?;
+            async_operations::retire_after_vm_cleanup()?;
             // Raw native IL pointers remain owned until the VM can no longer
             // execute IL/finalizers. Only then release original guest records.
             unsafe_buffers::retire_after_vm_cleanup()?;
@@ -5161,6 +5222,7 @@ impl Probe {
             + &format!("native-instance-managed-invokes={}\nnative-instance-byref-output-writes={}\n", self.instance_invokes, self.instance_output_writes)
             + &subsystems::report()
             + &resources::report()
+            + &async_operations::report()
             + &scriptable::report()
             + &engine_scalars::report()
             + &engine_components::report()

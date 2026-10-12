@@ -60,6 +60,24 @@ public static class NativeProbe {
 
     private static T Identity<T>(T value) { return value; }
     public static int Reflected(int value) { return value * 7 + 3; }
+    public static Func<int, int> InvocationStatic() { return Reflected; }
+    public static Func<int, int> InvocationClosure() {
+        int bias = 52;
+        return value => value + bias;
+    }
+    private static int invocationTotal;
+    public static Func<int, int> InvocationMulticast() {
+        invocationTotal = 0;
+        Func<int, int> first = value => { invocationTotal += value; return -1; };
+        Func<int, int> last = value => invocationTotal + value;
+        return first + last;
+    }
+    public static Func<int, int> InvocationException() {
+        return value => { throw new ArgumentException("delegate invocation boundary"); };
+    }
+    public static Func<string, string> InvocationReference() {
+        return value => value + "_native";
+    }
     public static int Reenter(int value) {
         if (value < 0) throw new ArgumentException("owned boundary exception");
         return value + 11;

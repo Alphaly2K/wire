@@ -1,5 +1,5 @@
 //! Generate serialization cells from actual declarations and attributes.
-//! Neither class names nor serialized field names appear in the rules. This
+//! Neither class names nor serialized field names appear in the rules.
 //! Nested values expose only metadata-checked leaves; raw pointers are rejected.
 use super::{c_char, fields::Spec, value_layout, Object};
 use std::{ffi::CStr, ptr};
@@ -9,6 +9,7 @@ struct Api {
     fields: unsafe extern "C" fn(Object, *mut Object) -> Object,
     parent: unsafe extern "C" fn(Object) -> Object,
     image: unsafe extern "C" fn(Object) -> Object,
+    class_flags: unsafe extern "C" fn(Object) -> u32,
     field_parent: unsafe extern "C" fn(Object) -> Object,
     name: unsafe extern "C" fn(Object) -> *const c_char,
     flags: unsafe extern "C" fn(Object) -> u32,
@@ -71,6 +72,7 @@ impl Api {
                 "mono_class_get_image",
                 unsafe extern "C" fn(Object) -> Object
             ),
+            class_flags: sym!("mono_class_get_flags", unsafe extern "C" fn(Object) -> u32),
             field_parent: sym!(
                 "mono_field_get_parent",
                 unsafe extern "C" fn(Object) -> Object
@@ -119,12 +121,47 @@ impl Api {
     fn specs(self, images: &[Object], object: Object, class: Object) -> Result<Vec<Spec>, String> {
         self.describe(images, object, class, false)
     }
+    fn graph_admitted(self, class: Object, delegate: Object) -> Result<bool, String> {
+        if class.is_null() || delegate.is_null() {
+            return Err("reference graph class/delegate declaration absent".into());
+        }
+        // TypeAttributes.Serializable applies to this actual class, not its
+        // parents. Public fields alone do not make a native helper serializable.
+        if unsafe { (self.class_flags)(class) } & 0x2000 == 0 {
+            return Ok(false);
+        }
+        let mut cursor = class;
+        let mut seen = Vec::new();
+        while !cursor.is_null() {
+            // Delegates have their own retained invocation/thread protocol.
+            // Serializability never authorizes mirroring their runtime fields.
+            if cursor == delegate {
+                return Ok(false);
+            }
+            if seen.contains(&cursor) || seen.len() >= 64 {
+                return Err("reference graph class chain exceeds acyclic bound".into());
+            }
+            seen.push(cursor);
+            cursor = unsafe { (self.parent)(cursor) };
+        }
+        Ok(true)
+    }
     fn describe(
         self,
         images: &[Object],
         object: Object,
         class: Object,
         storage: bool,
+    ) -> Result<Vec<Spec>, String> {
+        self.describe_selected(images, object, class, storage, None)
+    }
+    fn describe_selected(
+        self,
+        images: &[Object],
+        object: Object,
+        class: Object,
+        storage: bool,
+        selected: Option<Object>,
     ) -> Result<Vec<Spec>, String> {
         let mut result = Vec::new();
         let mut declaring = class;
@@ -147,6 +184,9 @@ impl Api {
                 }
                 if unsafe { (self.field_parent)(field) } != declaring {
                     return Err("enumerated field belongs to another class".into());
+                }
+                if selected.is_some_and(|requested| requested != field) {
+                    continue;
                 }
                 let flags = unsafe { (self.flags)(field) };
                 if flags
@@ -190,11 +230,10 @@ impl Api {
                 if target.is_some_and(|c| c.is_null()) {
                     return Err("serialized field type class absent".into());
                 }
-                if kind == 0x15 && unsafe { (self.is_value)(target.unwrap()) } != 0 {
-                    return Err("serialized generic value requires a reference-aware layout".into());
-                }
                 let mut nested = None;
-                let inline = if kind == 0x11 {
+                let inline = if kind == 0x11
+                    || kind == 0x15 && unsafe { (self.is_value)(target.unwrap()) } != 0
+                {
                     let target = target.unwrap();
                     if unsafe { (self.is_enum)(target) } == 0 {
                         let image = unsafe { (self.image)(target) };
@@ -275,6 +314,59 @@ pub(super) fn specs(
 ) -> Result<Vec<Spec>, String> {
     Api::load(library, core)?.specs(images, object, class)
 }
+/// Discover only the serialization/backing graph of an admitted reference.
+/// Nonserializable helpers and delegates remain rooted opaque identities. An
+/// explicit embedding field operation still needs a checked typed field view;
+/// this policy never turns a rejected pointer into copied integer storage.
+pub(super) fn graph_specs(
+    library: Object,
+    core: Object,
+    corlib: Object,
+    images: &[Object],
+    object: Object,
+    class: Object,
+) -> Result<Option<Vec<Spec>>, String> {
+    let api = Api::load(library, core)?;
+    let find: unsafe extern "C" fn(Object, *const c_char, *const c_char) -> Object = unsafe {
+        let pointer = libc::dlsym(library, c"mono_class_from_name".as_ptr());
+        if pointer.is_null() {
+            return Err("reference graph class lookup absent".into());
+        }
+        std::mem::transmute(pointer)
+    };
+    let delegate = unsafe { find(corlib, c"System".as_ptr(), c"Delegate".as_ptr()) };
+    if !api.graph_admitted(class, delegate)? {
+        return Ok(None);
+    }
+    if let Some(specs) = storage_specs(library, core, corlib, object, class)? {
+        return Ok(Some(specs));
+    }
+    Ok(Some(api.specs(images, object, class)?))
+}
+/// An explicit embedding operation admits only the requested field. An opaque
+/// helper's unrelated private pointers are not an obligation to mirror.
+pub(super) fn explicit_field(
+    library: Object,
+    core: Object,
+    images: &[Object],
+    object: Object,
+    class: Object,
+    field: Object,
+) -> Result<Vec<Spec>, String> {
+    let api = Api::load(library, core)?;
+    let specs = api.describe_selected(images, object, class, true, Some(field))?;
+    let find: unsafe extern "C" fn(Object, *const c_char) -> Object = unsafe {
+        let pointer = libc::dlsym(library, c"mono_class_get_field_from_name".as_ptr());
+        if pointer.is_null() {
+            return Err("explicit field lookup absent".into());
+        }
+        std::mem::transmute(pointer)
+    };
+    if specs.len() != 1 || unsafe { find(class, specs[0].name.as_ptr()) } != field {
+        return Err("explicit field is absent, static, literal or shadowed".into());
+    }
+    Ok(specs)
+}
 /// Ordinary reference results read directly by engine code need actual storage,
 /// including private fields. This leaves serialized-field selection unchanged.
 pub(super) fn reference_storage_specs(
@@ -333,9 +425,10 @@ mod tests {
         static ENUM_KIND: Cell<u32> = const { Cell::new(0) };
         static WRONG_ENUM_SIZE: Cell<bool> = const { Cell::new(false) };
         static GENERIC_REFERENCE: Cell<bool> = const { Cell::new(false) };
-        static GENERIC_VALUE: Cell<bool> = const { Cell::new(false) };
         static REFERENCE_ATTRIBUTE: Cell<bool> = const { Cell::new(false) };
         static INFOS: Cell<usize> = const { Cell::new(0) };
+        static CLASS_FLAGS: Cell<u32> = const { Cell::new(0x2000) };
+        static CLASS_PARENT: Cell<usize> = const { Cell::new(0) };
     }
     unsafe extern "C" fn enumerate(_: Object, iterator: *mut Object) -> Object {
         let index = unsafe { iterator.read() } as usize + 1;
@@ -349,7 +442,10 @@ mod tests {
         }
     }
     unsafe extern "C" fn parent(_: Object) -> Object {
-        ptr::null_mut()
+        CLASS_PARENT.with(Cell::get) as Object
+    }
+    unsafe extern "C" fn class_flags(_: Object) -> u32 {
+        CLASS_FLAGS.with(Cell::get)
     }
     unsafe extern "C" fn image(_: Object) -> Object {
         200usize as Object
@@ -396,7 +492,7 @@ mod tests {
         i32::from(ENUM_KIND.with(Cell::get) != 0)
     }
     unsafe extern "C" fn is_value(_: Object) -> i32 {
-        i32::from(GENERIC_VALUE.with(Cell::get))
+        0
     }
     unsafe extern "C" fn size(_: Object, alignment: *mut u32) -> i32 {
         let width = value_layout::enum_width(ENUM_KIND.with(Cell::get)).unwrap_or(0) as u32;
@@ -438,14 +534,16 @@ mod tests {
         ENUM_KIND.with(|c| c.set(0));
         WRONG_ENUM_SIZE.with(|c| c.set(false));
         GENERIC_REFERENCE.with(|c| c.set(false));
-        GENERIC_VALUE.with(|c| c.set(false));
         INFOS.with(|c| c.set(0));
         REFERENCE_ATTRIBUTE.with(|c| c.set(false));
+        CLASS_FLAGS.with(|c| c.set(0x2000));
+        CLASS_PARENT.with(|c| c.set(0));
         Api {
             library: ptr::null_mut(),
             fields: enumerate,
             parent,
             image,
+            class_flags,
             field_parent: owner,
             name,
             flags,
@@ -463,6 +561,50 @@ mod tests {
             serialize: 300usize as Object,
             serialize_reference: 301usize as Object,
         }
+    }
+    #[test]
+    fn runtime_helpers_and_delegates_stay_opaque_without_weakening_explicit_fields() {
+        let api = api();
+        let class = 100usize as Object;
+        let delegate = 300usize as Object;
+        UNSAFE_SHAPE.with(|c| c.set(true));
+        CLASS_FLAGS.with(|c| c.set(0));
+        assert!(!api.graph_admitted(class, delegate).unwrap());
+        // Direct storage access still rejects the pointer. It is not silently
+        // omitted or exposed as a scalar to make the game pass.
+        assert!(api
+            .describe(&[200usize as Object], 400usize as Object, class, true)
+            .is_err());
+        CLASS_FLAGS.with(|c| c.set(0x2000));
+        assert!(api.graph_admitted(class, delegate).unwrap());
+        assert!(api
+            .specs(&[200usize as Object], 400usize as Object, class)
+            .is_err());
+        CLASS_PARENT.with(|c| c.set(delegate as usize));
+        assert!(!api.graph_admitted(class, delegate).unwrap());
+        CLASS_PARENT.with(|c| c.set(class as usize));
+        assert!(api.graph_admitted(class, delegate).is_err());
+    }
+    #[test]
+    fn explicit_scalar_field_does_not_project_unrelated_pointer_storage() {
+        let api = api();
+        UNSAFE_SHAPE.with(|c| c.set(true));
+        CLASS_FLAGS.with(|c| c.set(0));
+        let describe = |selected| {
+            api.describe_selected(
+                &[200usize as Object],
+                400usize as Object,
+                100usize as Object,
+                true,
+                Some(selected),
+            )
+        };
+        let specs = describe(1usize as Object).unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].kind, 8);
+        assert!(describe(2usize as Object).is_err());
+        assert!(describe(99usize as Object).unwrap().is_empty());
+        assert_eq!(INFOS.with(Cell::get), 0);
     }
     #[test]
     fn previously_unknown_fields_are_selected_without_constructor_execution() {
@@ -520,7 +662,7 @@ mod tests {
         assert_eq!(INFOS.with(Cell::get), 0);
     }
     #[test]
-    fn generic_reference_identity_is_admitted_but_generic_value_is_not() {
+    fn generic_reference_identity_keeps_the_reference_protocol() {
         let api = api();
         GENERIC_REFERENCE.with(|c| c.set(true));
         let describe = || {
@@ -534,8 +676,6 @@ mod tests {
         assert_eq!(fields[1].kind, 0x15);
         assert_eq!(fields[1].type_class, Some(100usize as Object));
         assert!(fields[1].inline.is_none());
-        GENERIC_VALUE.with(|c| c.set(true));
-        assert!(describe().is_err());
         assert_eq!(INFOS.with(Cell::get), 0);
     }
     #[test]

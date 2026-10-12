@@ -75,6 +75,7 @@ pub(super) struct Api {
     type_class: unsafe extern "C" fn(Object) -> Object,
     pointer_type: unsafe extern "C" fn(Object) -> Object,
     value: unsafe extern "C" fn(Object) -> i32,
+    delegate: unsafe extern "C" fn(Object) -> i32,
     is_enum: unsafe extern "C" fn(Object) -> i32,
     enum_base: unsafe extern "C" fn(Object) -> Object,
     size: unsafe extern "C" fn(Object, *mut u32) -> i32,
@@ -281,7 +282,7 @@ impl Api {
             return Err("engine pointer source lacks owned MethodDef/signature".into());
         }
         let arity = unsafe { (self.count)(signature) } as usize;
-        if arity > 8 {
+        if arity > 16 {
             return Err("engine pointer argument bound exceeded".into());
         }
         let mut result = None;
@@ -409,6 +410,159 @@ impl Api {
             result = Some(inferred);
         }
         Ok(result.unwrap_or_else(|| vec![None; arity]))
+    }
+    /// ManagedSpanWrapper also carries numeric buffers. Admit UTF16 only when
+    /// the actual wrapper passes a local prepared by the actual StringMarshaller
+    /// from the corresponding String argument. Ambiguous/complex flows defer.
+    pub(super) fn engine_utf16_arguments(
+        self,
+        method: Object,
+        owner: Object,
+        span: Object,
+        images: &[Object],
+    ) -> Result<Vec<bool>, String> {
+        macro_rules! sym {
+            ($name:literal, $ty:ty) => {{
+                let p = unsafe { libc::dlsym(self.library, concat!($name, "\0").as_ptr().cast()) };
+                if p.is_null() {
+                    return Err(concat!("missing string wrapper metadata API: ", $name).into());
+                }
+                unsafe { std::mem::transmute::<Object, $ty>(p) }
+            }};
+        }
+        let find = sym!(
+            "mono_class_from_name",
+            unsafe extern "C" fn(Object, *const c_char, *const c_char) -> Object
+        );
+        let member = sym!(
+            "mono_class_get_method_from_name",
+            unsafe extern "C" fn(Object, *const c_char, i32) -> Object
+        );
+        let methods = sym!(
+            "mono_class_get_methods",
+            unsafe extern "C" fn(Object, *mut Object) -> Object
+        );
+        let token = sym!("mono_method_get_token", unsafe extern "C" fn(Object) -> u32);
+        let resolve = sym!(
+            "mono_get_method",
+            unsafe extern "C" fn(Object, u32, Object) -> Object
+        );
+        let corlib = sym!("mono_get_corlib", unsafe extern "C" fn() -> Object);
+        let corlib = unsafe { corlib() };
+        let string = unsafe { find(corlib, c"System".as_ptr(), c"String".as_ptr()) };
+        let boolean = unsafe { find(corlib, c"System".as_ptr(), c"Boolean".as_ptr()) };
+        let helper_class = unsafe {
+            find(
+                (self.image)(span),
+                c"UnityEngine.Bindings".as_ptr(),
+                c"StringMarshaller".as_ptr(),
+            )
+        };
+        if string.is_null() || boolean.is_null() || helper_class.is_null() {
+            return Err("string wrapper actual helper classes absent".into());
+        }
+        let helper = unsafe { member(helper_class, c"TryMarshalEmptyOrNullString".as_ptr(), 2) };
+        self.fixed_typed_managed(
+            helper,
+            helper_class,
+            &[
+                (2, boolean, false),
+                (0xe, string, false),
+                (0x11, span, true),
+            ],
+            images,
+        )?;
+        let image = unsafe { (self.image)(owner) };
+        let target = unsafe { token(method) };
+        let signature = unsafe { (self.signature)(method) };
+        if target >> 24 != 6 || signature.is_null() || !images.contains(&image) {
+            return Err("string wrapper source lacks owned MethodDef/signature".into());
+        }
+        let arity = unsafe { (self.count)(signature) } as usize;
+        if arity > 16 {
+            return Err("string wrapper arity exceeds bound".into());
+        }
+        let mut span_positions = Vec::new();
+        let mut parameter = ptr::null_mut();
+        for position in 0..arity {
+            let ty = unsafe { (self.parameters)(signature, &mut parameter) };
+            if ty.is_null() {
+                return Err("string wrapper target parameter absent".into());
+            }
+            if unsafe { (self.type_class)(ty) } == span && unsafe { (self.byref)(ty) } != 0 {
+                span_positions.push(position);
+            }
+        }
+        let mut result = None;
+        let mut iterator = ptr::null_mut();
+        loop {
+            let wrapper = unsafe { methods(owner, &mut iterator) };
+            if wrapper.is_null() {
+                break;
+            }
+            let mut implementation = 0;
+            let flags = unsafe { (self.flags)(wrapper, &mut implementation) };
+            let signature = unsafe { (self.signature)(wrapper) };
+            if signature.is_null()
+                || !managed_il_flags(
+                    flags,
+                    implementation,
+                    unsafe { (self.instance)(signature) } != 0,
+                )
+                || unsafe { (self.generic)(wrapper) } != 0
+                || unsafe { (self.inflated)(wrapper) } != 0
+            {
+                continue;
+            }
+            let mut string_arguments = Vec::new();
+            if unsafe { (self.instance)(signature) } != 0 {
+                string_arguments.push(false);
+            }
+            let mut parameter = ptr::null_mut();
+            for _ in 0..unsafe { (self.count)(signature) } {
+                let ty = unsafe { (self.parameters)(signature, &mut parameter) };
+                if ty.is_null() {
+                    return Err("string wrapper source parameter absent".into());
+                }
+                string_arguments.push(
+                    unsafe { (self.kind)(ty) } == 0xe
+                        && unsafe { (self.byref)(ty) } == 0
+                        && unsafe { (self.type_class)(ty) } == string,
+                );
+            }
+            if string_arguments.len() != arity {
+                continue;
+            }
+            let header = unsafe { (self.header)(wrapper) };
+            if header.is_null() {
+                continue;
+            }
+            let (mut length, mut stack) = (0, 0);
+            let code = unsafe { (self.code)(header, &mut length, &mut stack) };
+            let inferred = if code.is_null() || !(6..=512).contains(&length) || stack > 32 {
+                None
+            } else {
+                engine_utf16_locals(
+                    unsafe { std::slice::from_raw_parts(code, length as usize) },
+                    target,
+                    arity,
+                    &span_positions,
+                    |position, called| {
+                        string_arguments.get(position) == Some(&true)
+                            && unsafe { resolve(image, called, owner) } == helper
+                    },
+                )
+            };
+            unsafe { (self.free)(header) };
+            let Some(inferred) = inferred else {
+                continue;
+            };
+            if result.as_ref().is_some_and(|prior| prior != &inferred) {
+                return Ok(vec![false; arity]);
+            }
+            result = Some(inferred);
+        }
+        Ok(result.unwrap_or_else(|| vec![false; arity]))
     }
     /// Diagnostic reads only the actual Exception metadata/message field. A
     /// private pinned root stays live; no ToString IL or native pointer is
@@ -701,6 +855,10 @@ impl Api {
                 "mono_class_is_valuetype",
                 unsafe extern "C" fn(Object) -> i32
             ),
+            delegate: sym!(
+                "mono_class_is_delegate",
+                unsafe extern "C" fn(Object) -> i32
+            ),
             is_enum: sym!("mono_class_is_enum", unsafe extern "C" fn(Object) -> i32),
             enum_base: sym!(
                 "mono_class_enum_basetype",
@@ -849,15 +1007,24 @@ impl Api {
         }
         let class = unsafe { (self.class)(method) };
         let sig = unsafe { (self.signature)(method) };
+        // Delegate Invoke is a runtime method rather than a CIL body. Mono's
+        // existing runtime_invoke routes it through its interpreter wrapper;
+        // we retain the same rooted receiver, argument and exception protocol.
+        let delegate = !class.is_null()
+            && !sig.is_null()
+            && name == c"Invoke"
+            && unsafe { (self.delegate)(class) } != 0
+            && delegate_invoke_flags(flags, implementation, unsafe { (self.instance)(sig) } != 0);
         if class.is_null()
             || !images.contains(&unsafe { (self.image)(class) })
             || sig.is_null()
-            || !managed_il_flags(flags, implementation, unsafe { (self.instance)(sig) } != 0)
+            || (!delegate
+                && !managed_il_flags(flags, implementation, unsafe { (self.instance)(sig) } != 0))
             || !concrete_method(
                 unsafe { (self.generic)(method) } != 0,
                 unsafe { (self.inflated)(method) } != 0,
                 unsafe { (self.instance)(sig) } != 0,
-                constructed,
+                constructed || delegate && unsafe { (self.inflated)(method) } != 0,
             )
         {
             return Err("managed method outside owned concrete IL contract".into());
@@ -899,16 +1066,18 @@ impl Api {
             }
             parameters.push(Parameter { shape, byref });
         }
-        let header = unsafe { (self.header)(method) };
-        if header.is_null() {
-            return Err("managed method has no IL body".into());
-        }
-        let mut length = 0;
-        let mut stack = 0;
-        let code = unsafe { (self.code)(header, &mut length, &mut stack) };
-        unsafe { (self.free)(header) };
-        if code.is_null() || !(1..=65536).contains(&length) || stack > 256 {
-            return Err("managed IL body exceeds bounds".into());
+        if !delegate {
+            let header = unsafe { (self.header)(method) };
+            if header.is_null() {
+                return Err("managed method has no IL body".into());
+            }
+            let mut length = 0;
+            let mut stack = 0;
+            let code = unsafe { (self.code)(header, &mut length, &mut stack) };
+            unsafe { (self.free)(header) };
+            if code.is_null() || !(1..=65536).contains(&length) || stack > 256 {
+                return Err("managed IL body exceeds bounds".into());
+            }
         }
         Ok(Some(Descriptor {
             receiver,
@@ -1406,7 +1575,7 @@ impl Api {
         if method.is_null()
             || owner.is_null()
             || specs.is_empty()
-            || specs.len() > 9
+            || specs.len() > 17
             || !images.contains(&unsafe { (self.image)(owner) })
             || unsafe { (self.class)(method) } != owner
         {
@@ -1613,9 +1782,9 @@ fn engine_wrapper_instructions(code: &[u8]) -> Option<Vec<(u8, u32)>> {
         let opcode = code[at];
         at += 1;
         let width = match opcode {
-            0x00 | 0x02..=0x0d | 0x14..=0x1e | 0x25 | 0x26 | 0x2a => 0,
-            0x0e..=0x13 | 0x1f | 0x2b..=0x37 => 1,
-            0x20 | 0x22 | 0x28 | 0x38..=0x44 | 0x6f | 0x7b..=0x80 => 4,
+            0x00 | 0x02..=0x0d | 0x14..=0x1e | 0x25 | 0x26 | 0x2a | 0xdc | 0xe0 => 0,
+            0x0e..=0x13 | 0x1f | 0x2b..=0x37 | 0xde => 1,
+            0x20 | 0x22 | 0x28 | 0x38..=0x44 | 0x6f | 0x7b..=0x80 | 0xdd => 4,
             0x21 | 0x23 => 8,
             _ => return None,
         };
@@ -1635,7 +1804,7 @@ fn engine_pointer_prefix(
     mut marshal: impl FnMut(usize, u32) -> Option<bool>,
 ) -> Option<Vec<Option<bool>>> {
     let instructions = engine_wrapper_instructions(code)?;
-    if arity > 8
+    if arity > 16
         || instructions
             .iter()
             .filter(|&&(op, token)| op == 0x28 && token == target)
@@ -1682,10 +1851,96 @@ fn engine_pointer_prefix(
     }
     (instructions.get(at) == Some(&(0x28, target))).then_some(arguments)
 }
+fn engine_utf16_locals(
+    code: &[u8],
+    target: u32,
+    arity: usize,
+    span_positions: &[usize],
+    mut is_string_helper: impl FnMut(usize, u32) -> bool,
+) -> Option<Vec<bool>> {
+    let instructions = engine_wrapper_instructions(code)?;
+    if arity > 16 || span_positions.is_empty() || span_positions.iter().any(|&p| p >= arity) {
+        return None;
+    }
+    let calls: Vec<_> = instructions
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &(op, called))| (op == 0x28 && called == target).then_some(i))
+        .collect();
+    if calls.len() != 1 {
+        return None;
+    }
+    let call = calls[0];
+    let argument_index = |op: u8, operand: u32| match op {
+        0x02..=0x05 => Some((op - 2) as usize),
+        0x0e => Some(operand as usize),
+        _ => None,
+    };
+    let mut locals = std::collections::BTreeMap::new();
+    for i in 2..call {
+        let (op, called) = instructions[i];
+        if op != 0x28 {
+            continue;
+        }
+        let (op, argument) = instructions[i - 2];
+        let (address, local) = instructions[i - 1];
+        if address != 0x12 {
+            continue;
+        }
+        let Some(argument) = argument_index(op, argument) else {
+            continue;
+        };
+        if !is_string_helper(argument, called) {
+            continue;
+        }
+        if locals.insert(local, argument).is_some() {
+            return None;
+        }
+    }
+    // A by-value reassignment of a header breaks the established origin.
+    if instructions[..call].iter().any(|&(op, operand)| {
+        let local = match op {
+            0x0a..=0x0d => Some((op - 0x0a) as u32),
+            0x13 => Some(operand),
+            _ => None,
+        };
+        local.is_some_and(|local| locals.contains_key(&local))
+    }) {
+        return None;
+    }
+    let first = *span_positions.iter().min()?;
+    let mut at = call;
+    let mut result = vec![false; arity];
+    for position in (first..arity).rev() {
+        while at > 0 && instructions[at - 1].0 == 0 {
+            at -= 1;
+        }
+        at = at.checked_sub(1)?;
+        let (op, operand) = instructions[at];
+        if span_positions.contains(&position) {
+            if op != 0x12 || locals.get(&operand) != Some(&position) {
+                return None;
+            }
+            result[position] = true;
+        } else if argument_index(op, operand) == Some(position)
+            || (op == 0x0f && operand as usize == position)
+        {
+            // Plain positional inputs after a header do not obscure its origin.
+        } else {
+            return None;
+        }
+    }
+    Some(result)
+}
 fn managed_il_flags(flags: u32, implementation: u32, instance: bool) -> bool {
     (flags & 0x10 == 0) == instance
         && flags & (0x400 | 0x2000) == 0
         && implementation & (0x3 | 0x4 | 0x20 | 0x1000) == 0
+}
+fn delegate_invoke_flags(flags: u32, implementation: u32, instance: bool) -> bool {
+    instance
+        && flags & (0x10 | 0x400 | 0x2000) == 0
+        && implementation & (0x3 | 0x4 | 0x20 | 0x1000) == 3
 }
 struct Slot {
     shape: Shape,
@@ -1892,6 +2147,46 @@ impl Frame {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn utf16_span_origin_requires_verified_string_helper_and_matching_local_argument() {
+        let target: u32 = 0x06009876;
+        let helper: u32 = 0x0a001234;
+        let mut code = vec![0x03, 0x12, 2, 0x28];
+        code.extend(helper.to_le_bytes());
+        code.extend([0x2d, 0, 0x12, 2, 0x04, 0x28]);
+        code.extend(target.to_le_bytes());
+        code.push(0x2a);
+        let valid = |p, t| p == 1 && t == helper;
+        assert_eq!(
+            engine_utf16_locals(&code, target, 3, &[1], valid),
+            Some(vec![false, true, false])
+        );
+        assert_eq!(
+            engine_utf16_locals(&code, target, 3, &[1], |_, _| false),
+            None
+        );
+        assert_eq!(engine_utf16_locals(&code, target, 3, &[2], valid), None);
+        let mut changed = code.clone();
+        changed[1] = 0x11;
+        assert_eq!(engine_utf16_locals(&changed, target, 3, &[1], valid), None);
+        let mut overwritten = code.clone();
+        overwritten.splice(8..8, [0x13, 2]);
+        assert_eq!(
+            engine_utf16_locals(&overwritten, target, 3, &[1], valid),
+            None
+        );
+        assert_eq!(
+            engine_utf16_locals(&code[..code.len() - 3], target, 3, &[1], valid),
+            None
+        );
+        let mut duplicated = code.clone();
+        duplicated.push(0x28);
+        duplicated.extend(target.to_le_bytes());
+        assert_eq!(
+            engine_utf16_locals(&duplicated, target, 3, &[1], valid),
+            None
+        );
+    }
     #[test]
     fn engine_pointer_wrappers_require_ordered_loads_and_verified_marshal_calls() {
         let target: u32 = 0x06001234;
@@ -2272,6 +2567,17 @@ mod tests {
         for implementation in [1, 3, 4, 0x20, 0x1000] {
             assert!(!managed_il_flags(0x96, implementation, false));
             assert!(!managed_il_flags(0x86, implementation, true));
+        }
+    }
+    #[test]
+    fn delegate_invoke_admits_only_managed_instance_runtime_implementation() {
+        assert!(delegate_invoke_flags(0x1c6, 3, true));
+        assert!(!delegate_invoke_flags(0x1c6, 3, false));
+        for flags in [0x1d6, 0x5c6, 0x21c6] {
+            assert!(!delegate_invoke_flags(flags, 3, true));
+        }
+        for implementation in [0, 1, 2, 7, 0x23, 0x1003] {
+            assert!(!delegate_invoke_flags(0x1c6, implementation, true));
         }
     }
 }

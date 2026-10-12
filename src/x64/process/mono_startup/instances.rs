@@ -540,9 +540,7 @@ impl Registry {
         token: u64,
         native: Object,
     ) -> Result<(), String> {
-        if !(0x6ffeb0000000..0x6ffeb1000000).contains(&token)
-            || !(token - 0x6ffeb0000000).is_multiple_of(65536)
-        {
+        if !super::reference_arrays::canonical_token(token) {
             return Err("reference array alias outside canonical arena".into());
         }
         self.adopt_canonical(api, token, native)

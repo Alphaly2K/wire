@@ -1,7 +1,7 @@
 //! Metadata-discovered scalar/value engine bridge. The signed binary contains
 //! one fixed ARM64 register-capture entry pool, independent of method names,
 //! MethodDef tokens, assembly hashes, signature combinations and guest RVAs.
-//! Engine reference arrays use the existing rooted container protocol. Other
+//! Engine references/arrays use the existing rooted container protocol. Other
 //! pointer/callback/lifetime shapes stay outside the ordinary value ABI.
 use super::{bindings, callbacks, engine_objects, images, managed_calls, value_layout, Object};
 use std::{
@@ -11,7 +11,8 @@ use std::{
     ptr,
     sync::OnceLock,
 };
-const POOL_CAPACITY: usize = 4096;
+const POOL_CAPACITY: usize = 8192;
+const ARGUMENT_CAPACITY: usize = 16;
 // A semantic policy, not per-method ABI specifications. These families operate
 // on ordinary numeric state; capability-like Int64/IntPtr APIs are not inferred.
 const FAMILIES: &[(&CStr, &CStr)] = &[
@@ -33,6 +34,7 @@ const FAMILIES: &[(&CStr, &CStr)] = &[
     (c"UnityEngine", c"HumanTrait"),
     (c"UnityEngine", c"DynamicGI"),
     (c"UnityEngine", c"Debug"),
+    (c"UnityEngine", c"DebugLogHandler"),
     (c"UnityEngine", c"GUI"),
     (c"UnityEngine", c"GUIUtility"),
     (c"UnityEngine", c"Mathf"),
@@ -40,8 +42,13 @@ const FAMILIES: &[(&CStr, &CStr)] = &[
     (c"UnityEngine", c"Graphics"),
     (c"UnityEngine", c"Canvas"),
     (c"UnityEngine", c"UISystemProfilerApi"),
+    (c"UnityEngine.TextCore.LowLevel", c"FontEngine"),
     (c"UnityEngine.Rendering", c"GraphicsSettings"),
     (c"UnityEngine.Rendering", c"SplashScreen"),
+    (
+        c"UnityEngine.Experimental.Rendering",
+        c"BuiltinRuntimeReflectionSystem",
+    ),
     (
         c"UnityEngine.Experimental.Rendering",
         c"GraphicsFormatUtility",
@@ -95,7 +102,11 @@ enum Argument {
     Value(Payload),
     EngineSelf,
     EnginePointer { nullable: bool },
+    EngineObject { class: usize },
     EngineArray { class: usize },
+    Exception { class: usize },
+    DataArray { class: usize },
+    Utf16Span,
 }
 struct Binding {
     library: usize,
@@ -120,6 +131,7 @@ thread_local! { static SEEN: RefCell<BTreeSet<usize>> = const { RefCell::new(BTr
 struct Capture {
     integer: [u64; 8],
     floating: [u64; 8],
+    stack: usize,
 }
 #[repr(C)]
 #[derive(Debug)]
@@ -145,7 +157,7 @@ mod native_pool {
         .set wire_engine_slot, wire_engine_slot + 1
         .endr
     Lwire_engine_capture:
-        sub sp, sp, #160
+        sub sp, sp, #176
         stp x29, x30, [sp]
         mov x29, sp
         stp x0, x1, [sp, #16]
@@ -156,12 +168,14 @@ mod native_pool {
         stp d2, d3, [sp, #96]
         stp d4, d5, [sp, #112]
         stp d6, d7, [sp, #128]
+        add x17, sp, #176
+        str x17, [sp, #144]
         mov x0, x16
         add x1, sp, #16
         bl _wire_mono_engine_pool_dispatch
         fmov d0, x1
         ldp x29, x30, [sp]
-        add sp, sp, #160
+        add sp, sp, #176
         ret
     "#, capacity = const POOL_CAPACITY);
     extern "C" {
@@ -192,7 +206,7 @@ unsafe extern "C" fn wire_mono_engine_pool_dispatch(
         if capture.is_null() {
             return Err("engine register capture absent".into());
         }
-        let arguments = decode(binding, unsafe { &*capture })?;
+        let arguments = unsafe { decode(binding, &*capture) }?;
         let result = execute(binding, &arguments)?;
         if SEEN.with(|seen| seen.borrow_mut().insert(index)) {
             eprintln!("NATIVE_MONO_SCALAR_ENGINE_VERIFIED: binding={:?}; metadata-discovered=true; original-engine=true", binding.name);
@@ -204,38 +218,68 @@ unsafe extern "C" fn wire_mono_engine_pool_dispatch(
     }) {
         Ok(Ok(value)) => value,
         other => {
-            eprintln!("NATIVE_MONO_SCALAR_ENGINE_REJECT: slot={index}; {other:?}");
+            let name = BINDINGS
+                .get()
+                .and_then(|bindings| bindings.get(index))
+                .map(|binding| &binding.name);
+            eprintln!(
+                "NATIVE_MONO_SCALAR_ENGINE_REJECT: slot={index}; binding={name:?}; {other:?}"
+            );
             std::process::abort();
         }
     }
 }
-fn decode(binding: &Binding, capture: &Capture) -> Result<Vec<u64>, String> {
-    if binding.arguments.len() > 8 {
+// Darwin ARM64 packs spilled scalar arguments at their natural alignment;
+// Win64 always uses positional eight-byte stack slots. The verified Mono call
+// owns this stack span for the complete synchronous register-capture dispatch.
+unsafe fn decode(binding: &Binding, capture: &Capture) -> Result<Vec<u64>, String> {
+    if binding.arguments.len() > ARGUMENT_CAPACITY {
         return Err("engine signature exceeds compiled register capture".into());
     }
-    let (mut integer, mut floating) = (0, 0);
+    let (mut integer, mut floating, mut stack_offset) = (0, 0, 0usize);
     binding
         .arguments
         .iter()
-        .map(|argument| match argument {
-            Argument::Scalar(scalar) if scalar.floating() => {
-                let value = scalar.normalize(capture.floating[floating]);
-                floating += 1;
-                value
+        .map(|argument| {
+            let scalar = match argument {
+                Argument::Scalar(s) => Some(*s),
+                _ => None,
+            };
+            if scalar.is_some_and(|s| s.width == 0) {
+                return Err("void is not an engine argument".into());
             }
-            Argument::Scalar(scalar) => {
-                let value = scalar.normalize(capture.integer[integer]);
-                integer += 1;
-                value
-            }
-            Argument::Value(_)
-            | Argument::EngineSelf
-            | Argument::EnginePointer { .. }
-            | Argument::EngineArray { .. } => {
-                let value = capture.integer[integer];
-                integer += 1;
-                Ok(value)
-            }
+            let floating_lane = scalar.is_some_and(Scalar::floating);
+            let lane = if floating_lane {
+                &mut floating
+            } else {
+                &mut integer
+            };
+            let word = if *lane < 8 {
+                let word = if floating_lane {
+                    capture.floating[*lane]
+                } else {
+                    capture.integer[*lane]
+                };
+                *lane += 1;
+                word
+            } else {
+                let width = scalar.map_or(8, |s| s.width);
+                stack_offset = (stack_offset + width - 1) & !(width - 1);
+                if capture.stack == 0 || stack_offset + width > ARGUMENT_CAPACITY * 8 {
+                    return Err("engine spilled argument stack absent or exceeds bound".into());
+                }
+                let address = capture
+                    .stack
+                    .checked_add(stack_offset)
+                    .ok_or("engine stack argument overflow")?;
+                let mut bytes = [0; 8];
+                unsafe {
+                    ptr::copy_nonoverlapping(address as *const u8, bytes.as_mut_ptr(), width)
+                };
+                stack_offset += width;
+                u64::from_le_bytes(bytes)
+            };
+            scalar.map_or(Ok(word), |s| s.normalize(word))
         })
         .collect()
 }
@@ -362,6 +406,8 @@ pub(super) fn install(
     let family = images.live_native_images()?;
     let api = managed_calls::Api::load(library)?;
     let intptr = unsafe { find(corlib(), c"System".as_ptr(), c"IntPtr".as_ptr()) };
+    let exception = unsafe { find(corlib(), c"System".as_ptr(), c"Exception".as_ptr()) };
+    let array = unsafe { find(corlib(), c"System".as_ptr(), c"Array".as_ptr()) };
     let mut engine_bases: Vec<_> = family
         .iter()
         .map(|&image| unsafe { find(image, c"UnityEngine".as_ptr(), c"Object".as_ptr()) })
@@ -369,10 +415,20 @@ pub(super) fn install(
         .collect();
     engine_bases.sort_unstable();
     engine_bases.dedup();
-    if engine_bases.len() != 1 || intptr.is_null() {
-        return Err("engine Object/IntPtr metadata identity is not unique".into());
+    if engine_bases.len() != 1 || intptr.is_null() || exception.is_null() {
+        return Err("engine Object/IntPtr/Exception metadata identity absent or ambiguous".into());
     }
     let engine_base = engine_bases[0];
+    let span = unsafe {
+        find(
+            image_of(engine_base),
+            c"UnityEngine.Bindings".as_ptr(),
+            c"ManagedSpanWrapper".as_ptr(),
+        )
+    };
+    if array.is_null() || span.is_null() {
+        return Err("engine Array/ManagedSpanWrapper metadata absent".into());
+    }
     let mut visited = BTreeSet::new();
     let mut owners = Vec::new();
     for &(namespace, owner_name) in FAMILIES {
@@ -487,7 +543,7 @@ pub(super) fn install(
                 return Err("engine signature absent".into());
             }
             let arity = unsafe { count(sig) } as usize;
-            if arity > 8 {
+            if arity > ARGUMENT_CAPACITY {
                 deferred += 1;
                 continue;
             }
@@ -495,10 +551,11 @@ pub(super) fn install(
             let mut signature_types = Vec::new();
             let mut enum_storage = Vec::new();
             let mut arguments = Vec::new();
-            let mut names = [ptr::null(); 8];
+            let mut names = [ptr::null(); ARGUMENT_CAPACITY];
             unsafe { param_names(method, names.as_mut_ptr()) };
             let mut result = None;
             let mut engine_arguments = None;
+            let mut utf16_arguments = None;
             let mut supported = true;
             for index in 0..=arity {
                 let ty = unsafe {
@@ -552,19 +609,63 @@ pub(super) fn install(
                         break;
                     };
                     arguments.push(Argument::EnginePointer { nullable });
+                } else if index != 0
+                    && !reference
+                    && matches!(type_kind, 0x12 | 0x15)
+                    && unsafe { assignable(engine_base, class) } != 0
+                {
+                    arguments.push(Argument::EngineObject {
+                        class: class as usize,
+                    });
                 } else if !reference && type_kind == 0x1d && index != 0 {
                     let element = unsafe { element_class(class) };
                     if element.is_null()
                         || unsafe { rank(class) } != 1
                         || !family.contains(&unsafe { image_of(element) })
-                        || unsafe { assignable(engine_base, element) } == 0
                     {
                         supported = false;
                         break;
                     }
-                    arguments.push(Argument::EngineArray {
+                    if unsafe { assignable(engine_base, element) } != 0 {
+                        arguments.push(Argument::EngineArray {
+                            class: class as usize,
+                        });
+                    } else if element != intptr
+                        && value_layout::Api::load(library, unsafe { image_of(element) })?
+                            .layout_in(element, &family)
+                            .and_then(|layout| layout.scalar_inline())
+                            .is_ok()
+                    {
+                        arguments.push(Argument::DataArray {
+                            class: class as usize,
+                        });
+                    } else {
+                        supported = false;
+                        break;
+                    }
+                } else if index != 0
+                    && !reference
+                    && type_kind == 0x12
+                    && unsafe { assignable(exception, class) } != 0
+                {
+                    arguments.push(Argument::Exception {
                         class: class as usize,
                     });
+                } else if index != 0 && !reference && type_kind == 0x12 && class == array {
+                    arguments.push(Argument::DataArray {
+                        class: class as usize,
+                    });
+                } else if index != 0 && reference && type_kind == 0x11 && class == span {
+                    if utf16_arguments.is_none() {
+                        utf16_arguments =
+                            Some(api.engine_utf16_arguments(method, owner, span, &family)?);
+                    }
+                    if !utf16_arguments.as_ref().unwrap()[index - 1] {
+                        supported = false;
+                        break;
+                    }
+                    super::logging::validate_span_layout(library, span)?;
+                    arguments.push(Argument::Utf16Span);
                 } else if reference {
                     if index == 0 {
                         supported = false;
@@ -608,7 +709,11 @@ pub(super) fn install(
                     } else {
                         param_rows as u32 + 1
                     };
-                    if first == 0 || end < first || end - first > 9 || end > param_rows as u32 + 1 {
+                    if first == 0
+                        || end < first
+                        || end - first > (ARGUMENT_CAPACITY + 1) as u32
+                        || end > param_rows as u32 + 1
+                    {
                         return Err("engine ParamList range invalid".into());
                     }
                     let mut attrs = None;
@@ -702,7 +807,7 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
         return Err("engine argument arity changed".into());
     }
     let mut checked = arguments.to_vec();
-    let mut array_pins = Vec::new();
+    let mut object_pins = Vec::new();
     for (argument, value) in binding.arguments.iter().zip(&mut checked) {
         if matches!(
             argument,
@@ -711,7 +816,11 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
             if *value != 0 || !matches!(argument, Argument::EnginePointer { nullable: true }) {
                 *value = engine_objects::engine_pointer(*value as usize)?;
             }
-        } else if let Argument::EngineArray { class } = argument {
+        } else if let Argument::EngineArray { class }
+        | Argument::EngineObject { class }
+        | Argument::Exception { class }
+        | Argument::DataArray { class } = argument
+        {
             let native = managed_calls::Api::load(binding.library as Object)?.compatible(
                 *value as Object,
                 managed_calls::Shape::Reference {
@@ -724,18 +833,42 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
                 continue;
             }
             let (token, pin) = callbacks::with_metadata_service(|route, memory| {
-                let token = route.root_container(native, memory)?;
+                // Exceptions keep runtime stack/unmanaged state in Mono.
+                // Engine formatting uses normal metadata/invoke/field hooks.
+                let token = if matches!(argument, Argument::Exception { .. }) {
+                    route.root_reference(native, memory)?
+                } else if matches!(argument, Argument::DataArray { .. }) {
+                    route.root_blittable_array(native, memory)?.0
+                } else {
+                    route.root_container(native, memory)?
+                };
                 let roots = route
                     .objects
-                    .as_ref()
-                    .ok_or("engine array has no root service")?;
+                    .as_mut()
+                    .ok_or("engine reference has no root service")?;
+                if matches!(argument, Argument::EngineObject { .. }) {
+                    roots
+                        .roots
+                        .publish_engine_object(roots.api, memory, token)?;
+                }
                 Ok((token, roots.api.worker_root(native)?))
             })?;
             *value = token;
-            array_pins.push(pin);
+            object_pins.push(pin);
         }
     }
     let arguments = checked.as_slice();
+    let utf16: Vec<_> = binding
+        .arguments
+        .iter()
+        .zip(arguments)
+        .enumerate()
+        .filter(|(_, (kind, _))| matches!(kind, Argument::Utf16Span))
+        .map(|(index, (_, &address))| {
+            unsafe { super::logging::owned_span(address as *const super::logging::Span) }
+                .map(|units| (index, units))
+        })
+        .collect::<Result<_, _>>()?;
     let layouts: Vec<_> = binding
         .arguments
         .iter()
@@ -761,14 +894,40 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
             .iter()
             .map(|(position, bytes)| (*position, bytes.as_slice()))
             .collect();
-        let (value, outputs) = callbacks::guest_value_arguments(
-            binding.target,
-            arguments,
-            &floating,
-            &spans,
-            &frame.aliases,
-        )?;
+        let strings: Vec<_> = utf16
+            .iter()
+            .map(|(position, units)| (*position, units.as_deref()))
+            .collect();
+        let (value, outputs) = if strings.is_empty() {
+            callbacks::guest_value_arguments(
+                binding.target,
+                arguments,
+                &floating,
+                &spans,
+                &frame.aliases,
+            )?
+        } else {
+            callbacks::guest_value_span_arguments(
+                binding.target,
+                arguments,
+                &floating,
+                &spans,
+                &frame.aliases,
+                &strings,
+            )?
+        };
         (value, Some(frame), outputs)
+    } else if !utf16.is_empty() {
+        let strings: Vec<_> = utf16
+            .iter()
+            .map(|(position, units)| (*position, units.as_deref()))
+            .collect();
+        (
+            callbacks::guest_span_arguments(binding.target, arguments, &floating, &strings, None)?
+                .0,
+            None,
+            Vec::new(),
+        )
     } else {
         (
             callbacks::guest_scalars(binding.target, arguments, &floating)?,
@@ -785,11 +944,12 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
                 as u64
         }
     };
-    if !array_pins.is_empty() {
-        // Existing typed-array synchronization validates element identity and
-        // uses the real Mono reference barrier. The canonical array stays rooted.
+    if !object_pins.is_empty() {
+        // The original engine may bind m_CachedPtr or update array elements.
+        // Synchronize only checked cells through the existing Mono barriers;
+        // canonical identities remain rooted throughout the callback.
         callbacks::with_metadata_service(|route, memory| route.sync_guest(memory))?;
-        for pin in &array_pins {
+        for pin in &object_pins {
             pin.target()?;
         }
     }
@@ -941,6 +1101,15 @@ mod tests {
                         .collect(),
                     1,
                 ),
+                binding(
+                    "PackedStack",
+                    0x1d00,
+                    vec![scalar(8); 8]
+                        .into_iter()
+                        .chain([scalar(7), scalar(2), scalar(12), scalar(8)])
+                        .collect(),
+                    1,
+                ),
             ])
             .unwrap_or_else(|_| panic!("fixture bridge already installed"));
         let mut memory = Memory::default();
@@ -1062,8 +1231,48 @@ mod tests {
         .unwrap();
         assert_eq!(matrix[0], 21.0);
         assert!(matrix[1..].iter().all(|&value| value == 0.0));
+        let mut code = vec![0x49, 0xba]; // mov r10, output
+        code.extend_from_slice(&0x2100u64.to_le_bytes());
+        for index in 0..4 {
+            code.extend([0x8b, 0x44, 0x24, 0x48 + index * 8]); // arg 8..11
+            code.extend([0x41, 0x89, 0x42, index * 4]);
+        }
+        code.push(0xc3);
+        memory.write(0x1d00, &code).unwrap();
+        let packed = unsafe {
+            std::mem::transmute::<
+                Object,
+                unsafe extern "C" fn(i32, i32, i32, i32, i32, i32, i32, i32, u16, u8, f32, i32),
+            >(native_pool::entry(5).unwrap())
+        };
+        callbacks::with_owner(&mut memory, &mut runtime, [0; 7], || unsafe {
+            packed(
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                0x1234,
+                1,
+                f32::from_bits(0x7fc01234),
+                -7,
+            )
+        })
+        .unwrap();
+        for (index, expected) in [0x1234, 1, 0x7fc01234, (-7i32) as u32]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(
+                memory.read_int(0x2100 + index as u64 * 4, 4).unwrap(),
+                expected as u64
+            );
+        }
         assert!(native_pool::entry(POOL_CAPACITY).is_err());
-        assert_eq!(std::mem::size_of::<Capture>(), 128);
+        assert_eq!(std::mem::size_of::<Capture>(), 136);
         assert_eq!(std::mem::size_of::<Registers>(), 16);
         assert_eq!(runtime.active_thread(), 1);
     }
@@ -1075,7 +1284,7 @@ mod tests {
         let boolean = binding("Boolean", 0x1000, vec![scalar(2)], 2);
         let mut capture = Capture::default();
         capture.integer[0] = 2;
-        assert!(decode(&boolean, &capture).is_err());
+        assert!(unsafe { decode(&boolean, &capture) }.is_err());
         let mut memory = Memory::default();
         memory.map(0x1000, 4096, READ | WRITE | EXECUTE).unwrap();
         memory.map(STACK, 65536, READ | WRITE).unwrap();
@@ -1144,6 +1353,36 @@ mod tests {
         .unwrap();
         assert!(result.is_err());
         assert_eq!(output, [9.0; 3]);
+    }
+    #[test]
+    fn direct_reference_lanes_preserve_float_and_integer_argument_order() {
+        let descriptor = binding(
+            "ReferenceProtocol",
+            0x1000,
+            vec![
+                Argument::EngineObject { class: 1 },
+                scalar(12),
+                Argument::Exception { class: 2 },
+                scalar(8),
+                Argument::EngineArray { class: 3 },
+            ],
+            1,
+        );
+        let capture = Capture {
+            integer: [0x1100, 0x2200, (-7i32) as u32 as u64, 0x3300, 0, 0, 0, 0],
+            floating: [(-0.0f32).to_bits() as u64, 0, 0, 0, 0, 0, 0, 0],
+            stack: 0,
+        };
+        assert_eq!(
+            unsafe { decode(&descriptor, &capture) }.unwrap(),
+            [
+                0x1100,
+                (-0.0f32).to_bits() as u64,
+                0x2200,
+                (-7i32) as u32 as u64,
+                0x3300
+            ]
+        );
     }
     #[test]
     fn value_aliases_remain_shared_and_partial_overlap_rejects_before_dereference() {

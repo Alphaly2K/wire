@@ -645,12 +645,10 @@ impl Metadata<'_> {
                 return Err("nested container class has no live image owner".into());
             }
             if !roots.fields.has_owner(token) {
-                let specs = if let Some(specs) =
-                    field_layouts::storage_specs(self.library, core, corlib, native, class)?
-                {
-                    specs
-                } else {
-                    field_layouts::specs(self.library, core, &images, native, class)?
+                let Some(specs) =
+                    field_layouts::graph_specs(self.library, core, corlib, &images, native, class)?
+                else {
+                    continue;
                 };
                 roots.fields.install_with(
                     self.library,
@@ -1693,10 +1691,36 @@ impl Metadata<'_> {
                 .ok_or("nested fields have no object service")?;
             roots.roots.sync_from_guest(roots.api, memory)?;
             roots.fields.sync(roots.api, roots.roots)?;
-            if function == "mono_field_set_value" {
+            if !roots.attributes.1.contains(a[0]) && !roots.fields.has_field(a[0], field) {
+                let native = roots.roots.native(roots.api, a[0])?;
+                let class = roots.roots.class(roots.api, a[0])?;
+                let specs = field_layouts::explicit_field(
+                    library,
+                    self.images.unique_native_image(super::CORE_MODULE)?,
+                    &self.images.live_native_images()?,
+                    native,
+                    class,
+                    field,
+                )?;
+                roots.fields.install_with(
+                    library,
+                    roots.api,
+                    roots.roots,
+                    memory,
+                    specs,
+                    |registry, native| {
+                        roots
+                            .objects
+                            .borrow_reference(roots.strings, roots.api, registry, native)
+                    },
+                )?;
+                roots.objects.publish_pending(memory)?;
+            }
+            let output = if function == "mono_field_set_value" {
                 roots
                     .fields
                     .store_value(roots.api, roots.roots, memory, a[0], field, a[2])?;
+                None
             } else {
                 let bytes = if roots.attributes.1.contains(a[0]) {
                     roots
@@ -1707,6 +1731,22 @@ impl Metadata<'_> {
                     roots.fields.read(a[0], field)?
                 };
                 checked_output(memory, cpu, stack, a[2], bytes.len())?;
+                Some(bytes)
+            };
+            let references = if roots.attributes.1.contains(a[0]) {
+                Vec::new()
+            } else {
+                roots
+                    .fields
+                    .native_references(roots.api, roots.roots, a[0])?
+            };
+            // A newly requested reference field may point at a typed array or
+            // serializable child. Publish that admitted graph before its token
+            // reaches an engine embedding caller which can read it directly.
+            if !references.is_empty() {
+                self.publish_container_graph(memory, references)?;
+            }
+            if let Some(bytes) = output {
                 memory.write(a[2], &bytes)?;
             }
             return cpu.return_integer(memory, 0);

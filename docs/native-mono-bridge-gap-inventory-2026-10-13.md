@@ -101,3 +101,96 @@ build、all-target Clippy 与 8 项 inventory/harness 回归通过。
 达到 **3,852**。Display、相机射线与 3D/2D Raycast 已实际执行，继续到资源字段中的
 GENERICINST value 边界。完整回归 542 passed / 7 ignored，release build 和 all-target
 Clippy 通过。全量静态 snapshot 仍使用上方明确编号的旧采样，未重算 missing 分组。
+
+## 成批盘点对象与内存协议
+
+扫描器现同时输出 actual TypeDef/闭合类型字段、委托 Invoke 签名、unsafe IL 使用点
+和 native wrapper 调用/转换器。闭合 generic value 的字段先代入实际 T，再递归计算
+shape；同一类型的 Module/AssemblyRef 归一到 resolved module 身份，避免重复计数。
+展开有深度、文本长度与类型总数上限；unknown/open-generic 保持显式记录。
+扫描仍只读 metadata/IL，不执行游戏方法。
+
+报告目录：`wire-out/native-mono-protocol-inventory-2026-10-13`，复现沿用上方命令，
+`--runtime-audit` 指向 probe-160；icall resolved/missing 数量仍来自该旧快照。
+新增文件：
+
+| 文件 | 用途 |
+| --- | --- |
+| managed-types.tsv | 类型、闭合实例、Serializable、layout 声明、对象图策略 |
+| managed-fields.tsv | actual 字段类型、generic substitution、pointer/ref/delegate 形状 |
+| managed-callbacks.tsv | 完整委托签名，按类型闭合参数 |
+| native-wrappers.tsv | 原生边界调用点及同包装 IL 中的转换器 |
+| unsafe-il.tsv | 指针字段/操作数、ldind/stind、cpblk/initblk、calli 与函数地址 |
+| field-protocols.tsv | 按共用协议统计，区分 public 候选与 admitted graph 候选 |
+
+本样本得到 **47,350** 个类型记录、**185,429** 个字段记录（含闭合实例）、
+**3,583** 个委托签名、**20,428** 个 native wrapper 调用点和 **71,179** 个 unsafe IL
+使用点。类型策略中 32,464 为 native-only，9,274 为 serializable-data，1,329 为
+engine-object，3,584 为 opaque-delegate，699 unresolved。布局 offset/size 来自
+metadata 声明；运行时 ABI 仍由实际 Mono 布局验证，不拿离线 offset 直接执行。
+
+这次找到的是共性过度投影：`InputActionState` 本身不可序列化，公开的
+`UnmanagedMemory.memory/basePtr` 不应因 public 标志进入资源对象图。它与委托内部
+状态留在原生 Mono，以 canonical GC root 身份跨边界。顶层和嵌套引用图均采用
+相同规则；明确的 embedding field 操作继续要求 typed view，裸指针仍拒绝。
+实际 Serializable reference 和显式容器保留原字段/数组同步与写屏障。
+
+批量实施单位改为布局、引用/屏障、owned memory/句柄、callback/thread 四类协议。
+同类缺口在离线清单里一起审查和实现，然后做完整回归与游戏验收。动态创建的类型、
+原生插件和实际线程/lifetime 仍在运行时核对，静态清单不把这些行为自动判成已支持。
+字段协议的 pointer graph 候选为 17 个闭合记录（9 个独立字段声明），callback graph
+候选为 27 个独立声明；不把所有 native-only 指针字段都当成跨架构工作量。
+
+本批完整 release feature 回归 **543 passed / 7 ignored**，release build、all-target
+Clippy（`-D warnings`）和 **11 项** inventory/harness 回归通过。Cecil fixture 实际
+验证闭合嵌套 generic/数组、委托签名、NonSerialized、native-only 策略和身份去重，
+fixture 的方法不执行。
+
+随后同批接入 actual delegate Invoke 的运行时方法准入和按需 embedding field view，
+整组委托复用普通 invoke 参数/GC/异常协议；scalar/enum/value/reference 字段按实际
+field identity 描述，其他字段不随显式访问展开。字段返回引用前，数组与已准入子图
+先完成投影。原生委托 fixture 覆盖闭包、多播顺序、GC 和异常，guard denied=0。
+
+这批后续最终完整回归为 **545 passed / 7 ignored**。probe-171 已真实通过 Runtime
+delegate Invoke，继续至 Canvas；新增实际缺口属于直接引擎对象、异常引用与异步
+operation 协议，而不是更多托管构造函数白名单。
+
+随后整组接入直接引擎引用、opaque Exception，以及 AsyncOperation / instantiate
+生命周期（13 个配套接口和创建入口），共用实际 registry target 和 metadata 签名。
+probe-172 实际完成 async 创建/绑定与 Mesh 创建；退出 operation created=1 /
+released=1 / live=0，guard denied=0，GC scope depth=0。仍有字符串 span、Mesh 数组
+上传和 BuiltinUpdate 缺口，最后帧为加载页；不能将此阶段记为完整游戏验收。
+
+后续批次按这些共用形状扩展：16 参数跨 ARM64/Win64 ABI、actual scalar array
+protocol、wrapper-derived UTF16 输入与混合 byref payload。此处原 lookup missing
+统计仍来自 probe-160 快照，不将新的安装数或实际调用结果混入旧快照。异步清理
+顺序、来源追踪规则与每轮实际验收详见 `native-mono-generic-bridge-feasibility-2026-10-13.md`。
+
+## 最新全量 snapshot 与显式数值布局
+
+probe-174 对全部已加载程序集重新进行 lookup；同一报告目录已刷新为该 snapshot，
+上文 probe-160 的历史数字仍保留对应编号。最新 **resolved=5,139 / missing=6,310 /
+unknown=88**，153 个程序集、11,537 个 icall、1,393 个 PInvoke 和静态类型/字段
+总数不变。`summary.json` 的 input hashes 指向 probe-174；observed API 使用正常
+收尾的 probe-172，避免从 abort 的采样取得未落盘 trace。
+
+本次 scalar/value 与字符串/数组协议最终完整回归为 **550 passed / 7 ignored**。
+probe-173 实际通过 SetName 与 SetArrayForChannelImpl，随后拒绝重叠值字段；probe-174
+通过显式数值 union 后到达原型数组数量上限。两次 returncode=-6，不能使用缺失的
+最终 guard/GPU 统计；最后帧仍为加载页。
+
+显式 union 以 actual TypeAttributes.ExplicitLayout 和全部实际字段验证为准：每个
+字段必须为有界、对齐、非 Boolean 数值，所有 payload 字节均被覆盖。通过后折叠为
+一个完整 inline payload，避免将整数视图和字节视图重复同步。重叠引用、指针、
+Boolean、padding、普通非显式布局继续拒绝。静态清单中有 48 个全数值 explicit
+候选；实际尺寸、对齐、覆盖与 closed-type 检查仍在 runtime 进行，无 Color32 特例。
+
+typed array registry 的旧 256 个原型上限改为 4,096 个身份和 64MiB 累计 payload
+双预算；canonical token 范围与对象根服务使用同一个规则，数组 arena 与后续 arena
+不交叠。按实际 rank/stride/layout 检查与保守 reference traversal bound 保持。
+
+这批最终 **551 passed / 7 ignored**，release build、all-target Clippy 与 **16 项**
+metadata/harness/build-tool 回归通过。probe-175 自动注册 4,020 个入口，275 个
+typed arrays 正常验收，Mesh 上传与 BuiltinUpdate 已实际执行；guard denied=0、
+async live=0、GC depth=0。新的整组协议边界是 render-context / command-buffer
+生命周期，以及带实际 null guards 的对象 marshal 包装；当前游戏仍为加载页。

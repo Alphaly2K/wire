@@ -39,6 +39,50 @@ pub(super) struct Layout {
     pub(super) value: bool,
 }
 impl Layout {
+    /// Explicit scalar unions have several field views of the same bytes.
+    /// Collapse those views only when every byte is ordinary numeric data;
+    /// reference/Boolean/pointer overlaps never enter this raw-byte protocol.
+    fn canonicalize_scalar_union(&mut self, explicit: bool) -> Result<(), String> {
+        if !explicit || !self.value || !(1..=256).contains(&self.width) {
+            return Err("overlapping value requires explicit scalar layout".into());
+        }
+        let mut covered = vec![false; self.width];
+        for slot in &self.slots {
+            let width = slot.shape.width();
+            let alignment = slot.shape.alignment();
+            let end = slot
+                .offset
+                .checked_add(width)
+                .ok_or("union field range overflow")?;
+            if !matches!(
+                slot.shape,
+                Shape::Scalar { boolean: false, .. } | Shape::Inline { .. }
+            ) || width == 0
+                || !matches!(alignment, 1 | 2 | 4 | 8)
+                || alignment > self.alignment
+                || !width.is_multiple_of(alignment)
+                || !slot.offset.is_multiple_of(alignment)
+                || end > self.width
+            {
+                return Err("union field is not bounded aligned numeric data".into());
+            }
+            covered[slot.offset..end].fill(true);
+        }
+        if covered.iter().any(|&byte| !byte) {
+            return Err("scalar union has uncovered bytes".into());
+        }
+        // This synthetic leaf describes the payload, not an embedding field.
+        self.slots = vec![Slot {
+            nested: true,
+            offset: 0,
+            field: ptr::null_mut(),
+            shape: Shape::Inline {
+                width: self.width,
+                alignment: self.alignment,
+            },
+        }];
+        self.check()
+    }
     pub(super) fn reference(class: Object) -> Self {
         Self {
             class,
@@ -120,6 +164,44 @@ impl Layout {
         }
         Ok((self.width, self.alignment))
     }
+    /// Snapshot a verified native IL value for a semantic engine protocol.
+    /// The caller owns readable native storage; reference conversion must root
+    /// and type-check each actual object. Native padding and pointers never leak.
+    pub(super) unsafe fn encode_native(
+        &self,
+        address: usize,
+        mut reference: impl FnMut(Object, Object) -> Result<u64, String>,
+    ) -> Result<Vec<u8>, String> {
+        self.check()?;
+        if !self.value
+            || address == 0
+            || !address.is_multiple_of(self.alignment)
+            || address.checked_add(self.width).is_none()
+            || self
+                .slots
+                .iter()
+                .any(|slot| matches!(slot.shape, Shape::EngineAddress { .. }))
+        {
+            return Err("native typed snapshot storage/layout invalid".into());
+        }
+        let mut bytes = vec![0; self.width];
+        for slot in &self.slots {
+            let source = unsafe { (address as *const u8).add(slot.offset) };
+            let output = &mut bytes[slot.offset..slot.offset + slot.shape.width()];
+            if let Shape::Reference(class) = slot.shape {
+                let native = unsafe { source.cast::<Object>().read_unaligned() };
+                output.copy_from_slice(&reference(native, class)?.to_le_bytes());
+            } else {
+                if matches!(slot.shape, Shape::Scalar { boolean: true, .. })
+                    && unsafe { source.read() } > 1
+                {
+                    return Err("native typed snapshot Boolean is not canonical".into());
+                }
+                unsafe { ptr::copy_nonoverlapping(source, output.as_mut_ptr(), output.len()) };
+            }
+        }
+        Ok(bytes)
+    }
     pub(super) fn validate(
         &self,
         bytes: &[u8],
@@ -175,6 +257,7 @@ pub(super) struct Api {
     size: unsafe extern "C" fn(Object, *mut u32) -> i32,
     fields: unsafe extern "C" fn(Object, *mut Object) -> Object,
     flags: unsafe extern "C" fn(Object) -> u32,
+    class_flags: unsafe extern "C" fn(Object) -> u32,
     parent: unsafe extern "C" fn(Object) -> Object,
     offset: unsafe extern "C" fn(Object) -> i32,
     ty: unsafe extern "C" fn(Object) -> Object,
@@ -238,6 +321,7 @@ impl Api {
                 unsafe extern "C" fn(Object, *mut Object) -> Object
             ),
             flags: sym!("mono_field_get_flags", unsafe extern "C" fn(Object) -> u32),
+            class_flags: sym!("mono_class_get_flags", unsafe extern "C" fn(Object) -> u32),
             parent: sym!(
                 "mono_field_get_parent",
                 unsafe extern "C" fn(Object) -> Object
@@ -318,6 +402,7 @@ impl Api {
         let mut iterator = ptr::null_mut();
         let mut count = 0;
         let mut ranges = Vec::new();
+        let mut overlap = false;
         loop {
             let field = unsafe { (self.fields)(class, &mut iterator) };
             if field.is_null() {
@@ -354,12 +439,9 @@ impl Api {
                     let end = offset
                         .checked_add(child.width)
                         .ok_or("nested field range overflow")?;
-                    if ranges
+                    overlap |= ranges
                         .iter()
-                        .any(|&(start, stop)| offset < stop && start < end)
-                    {
-                        return Err("nested value field envelopes overlap".into());
-                    }
+                        .any(|&(start, stop)| offset < stop && start < end);
                     ranges.push((offset, end));
                     if let Ok((width, alignment)) = child.scalar_inline() {
                         layout.slots.push(Slot {
@@ -427,12 +509,9 @@ impl Api {
             let end = offset
                 .checked_add(shape.width())
                 .ok_or("value field range overflow")?;
-            if ranges
+            overlap |= ranges
                 .iter()
-                .any(|&(start, stop)| offset < stop && start < end)
-            {
-                return Err("value field envelopes overlap".into());
-            }
+                .any(|&(start, stop)| offset < stop && start < end);
             ranges.push((offset, end));
             layout.slots.push(Slot {
                 nested: false,
@@ -441,7 +520,12 @@ impl Api {
                 shape,
             });
         }
-        layout.check()?;
+        if overlap {
+            layout
+                .canonicalize_scalar_union(unsafe { (self.class_flags)(class) } & 0x18 == 0x10)?;
+        } else {
+            layout.check()?;
+        }
         path.pop();
         Ok(layout)
     }
@@ -450,6 +534,68 @@ impl Api {
 mod tests {
     use super::*;
     use std::cell::Cell;
+    #[test]
+    fn native_snapshot_replaces_references_zeroes_padding_and_checks_boolean_before_export() {
+        let layout = Layout {
+            class: 1usize as Object,
+            width: 24,
+            alignment: 8,
+            value: true,
+            slots: vec![
+                Slot {
+                    nested: false,
+                    offset: 0,
+                    field: ptr::null_mut(),
+                    shape: Shape::Reference(2usize as Object),
+                },
+                Slot {
+                    nested: true,
+                    offset: 8,
+                    field: ptr::null_mut(),
+                    shape: Shape::Scalar {
+                        width: 4,
+                        boolean: false,
+                    },
+                },
+                Slot {
+                    nested: false,
+                    offset: 12,
+                    field: ptr::null_mut(),
+                    shape: Shape::Scalar {
+                        width: 1,
+                        boolean: true,
+                    },
+                },
+            ],
+        };
+        let mut native = [0xababababababababu64; 3];
+        native[0] = 0x12340000;
+        native[1] = 0xeeeeee01deadbeef;
+        let mut seen = Vec::new();
+        let bytes = unsafe {
+            layout.encode_native(native.as_ptr() as usize, |object, class| {
+                seen.push((object as usize, class as usize));
+                Ok(0x6fff00010000)
+            })
+        }
+        .unwrap();
+        assert_eq!(seen, [(0x12340000, 2)]);
+        assert_eq!(&bytes[..8], &0x6fff00010000u64.to_le_bytes());
+        assert_eq!(&bytes[8..13], &[0xef, 0xbe, 0xad, 0xde, 1]);
+        assert!(bytes[13..].iter().all(|&b| b == 0));
+        native[1] = 0xeeeeee02deadbeef;
+        assert!(unsafe { layout.encode_native(native.as_ptr() as usize, |_, _| Ok(0)) }.is_err());
+        assert!(unsafe { layout.encode_native(0, |_, _| Ok(0)) }.is_err());
+        assert!(
+            unsafe { layout.encode_native(native.as_ptr() as usize + 1, |_, _| Ok(0)) }.is_err()
+        );
+        assert!(unsafe {
+            layout.encode_native(native.as_ptr() as usize, |_, _| {
+                Err("incompatible class".into())
+            })
+        }
+        .is_err());
+    }
     thread_local! { static FIELD_KIND: Cell<u32> = const { Cell::new(0x15) }; }
     unsafe extern "C" fn test_image(_: Object) -> Object {
         1usize as Object
@@ -504,6 +650,7 @@ mod tests {
             size: test_size,
             fields: test_fields,
             flags: test_zero,
+            class_flags: test_zero,
             parent: test_parent,
             offset: test_offset,
             ty: test_type,
@@ -516,6 +663,108 @@ mod tests {
             field_name: test_name,
             owned_image: 1usize as Object,
         }
+    }
+    unsafe extern "C" fn union_size(_: Object, alignment: *mut u32) -> i32 {
+        unsafe { *alignment = 4 };
+        4
+    }
+    unsafe extern "C" fn union_fields(_: Object, iterator: *mut Object) -> Object {
+        let next = unsafe { *iterator } as usize + 1;
+        unsafe { *iterator = next as Object };
+        if next <= 5 {
+            next as Object
+        } else {
+            ptr::null_mut()
+        }
+    }
+    unsafe extern "C" fn union_offset(field: Object) -> i32 {
+        16 + (field as usize).saturating_sub(2) as i32
+    }
+    unsafe extern "C" fn union_kind(ty: Object) -> u32 {
+        if ty as usize == 1 {
+            8
+        } else {
+            5
+        }
+    }
+    unsafe extern "C" fn union_flags(_: Object) -> u32 {
+        0x10
+    }
+    unsafe extern "C" fn union_type(field: Object) -> Object {
+        field
+    }
+    #[test]
+    fn actual_explicit_numeric_union_becomes_one_payload_with_identical_bytes() {
+        let api = Api {
+            size: union_size,
+            fields: union_fields,
+            offset: union_offset,
+            kind: union_kind,
+            ty: union_type,
+            class_flags: union_flags,
+            ..test_api()
+        };
+        let layout = api.layout(10usize as Object).unwrap();
+        assert_eq!(layout.scalar_inline().unwrap(), (4, 4));
+        assert_eq!(layout.slots.len(), 1);
+        assert!(layout.slots[0].nested);
+        let native = 0xa1b2c3d4u32;
+        assert_eq!(
+            unsafe {
+                layout
+                    .encode_native(&native as *const u32 as usize, |_, _| {
+                        panic!("numeric union must not contain a reference")
+                    })
+                    .unwrap()
+            },
+            native.to_le_bytes()
+        );
+        let ordinary = Api {
+            class_flags: test_zero,
+            ..api
+        };
+        assert!(ordinary.layout(10usize as Object).is_err());
+        let mut original = layout.clone();
+        original.slots = vec![
+            Slot {
+                nested: false,
+                offset: 0,
+                field: 1usize as Object,
+                shape: Shape::Scalar {
+                    width: 4,
+                    boolean: false,
+                },
+            },
+            Slot {
+                nested: false,
+                offset: 0,
+                field: 2usize as Object,
+                shape: Shape::Scalar {
+                    width: 1,
+                    boolean: true,
+                },
+            },
+        ];
+        assert!(original.clone().canonicalize_scalar_union(true).is_err());
+        original.slots[1].shape = Shape::Reference(2usize as Object);
+        assert!(original.clone().canonicalize_scalar_union(true).is_err());
+        original.slots[1].shape = Shape::EngineAddress { condition: false };
+        assert!(original.clone().canonicalize_scalar_union(true).is_err());
+        original.slots[1].shape = Shape::Inline {
+            width: 2,
+            alignment: 2,
+        };
+        original.slots[0].shape = Shape::Scalar {
+            width: 2,
+            boolean: false,
+        };
+        assert!(original.clone().canonicalize_scalar_union(true).is_err());
+        original.slots[0].shape = Shape::Scalar {
+            width: 4,
+            boolean: false,
+        };
+        original.slots[1].offset = 3;
+        assert!(original.canonicalize_scalar_union(true).is_err());
     }
     #[test]
     fn value_fields_admit_closed_generic_and_object_references_but_reject_pointers() {
