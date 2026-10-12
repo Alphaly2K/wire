@@ -51,6 +51,7 @@ mod burst_shared;
 mod callbacks;
 mod closed_types;
 mod constructors;
+mod engine_component_queries;
 mod engine_components;
 mod engine_objects;
 mod engine_scalars;
@@ -3278,6 +3279,14 @@ impl Probe {
                 &self.registry,
             )?;
         }
+        if !engine_component_queries::installed() {
+            engine_component_queries::install(
+                library,
+                self.image_registry.unique_native_image(CORE_MODULE)?,
+                &managed_images,
+                &self.registry,
+            )?;
+        }
         if !input_events::installed() {
             input_events::install(library, &managed_images, &self.registry)?;
         }
@@ -5018,6 +5027,7 @@ impl Probe {
             + &scriptable::report()
             + &engine_scalars::report()
             + &engine_components::report()
+            + &engine_component_queries::report()
             + &json::report()
             + &profiler_samples::report()
             + &profiler_recorders::report()

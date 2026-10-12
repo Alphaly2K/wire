@@ -389,6 +389,19 @@ impl Metadata<'_> {
         roots.objects.publish_pending(memory)?;
         Ok(token)
     }
+    /// Native IL containers require their real backing arrays and fields before
+    /// an engine callback can inspect or mutate them. Refresh existing views
+    /// first so stale guest cells cannot overwrite intervening managed writes.
+    pub(super) fn root_container(
+        &mut self,
+        native: Object,
+        memory: &mut Memory,
+    ) -> Result<u64, String> {
+        self.refresh_native(memory)?;
+        let token = self.root_reference(native, memory)?;
+        self.publish_container_graph(memory, vec![native])?;
+        Ok(token)
+    }
     pub(super) fn rooted_native(&self, token: u64) -> Result<Object, String> {
         if token == 0 {
             return Ok(std::ptr::null_mut());

@@ -156,3 +156,20 @@ conversion/open status、notify/font/window 等 API 成组支持无上下文的�
 当前这批整体验证为 **526 passed / 7 ignored**，all-target Clippy、格式检查及
 harness 4 项回归通过。协作等待回归还覆盖整个 worker TEB 被撤销时的错误返回，
 确保 main 身份恢复且 worker context 没丢失。probe-141 使用这份冻结 executable。
+
+probe-141 再次实际加载初始化 UI；`Behaviour::get_isActiveAndEnabled_Injected` 和
+`Component::get_gameObject_Injected` 均执行并通过原引擎结果检查。随后停在
+`GameObject::GetComponentsInternal_Injected` 缺失，尚未完成 UI 克隆或游戏验收。
+
+组件查询这批以游戏自带 CoreModule 的真实 metadata/IL 为依据，成组核对数组查询、
+List 查询、按 Type/名称查询、父子组件查询以及 count/index 共 8 个声明和注册地址。
+System.Type 复用 RuntimeType root；List 必须来自冻结 corlib 的闭合 List<T> 声明，
+经现有元数据字段/数组图发布实际 backing storage。发布前刷新已有 native 修改，
+防止旧 guest 镜像反向覆盖 IL 写入；回调后执行字段、数组和 root 同步。
+数组结果按真实 requested type 或 Component 的 SZ array 检查，NULL 仅在有 resultList
+时准入。普通组件结果复用原 v2 handle 类型检查。安装和真实游戏验证分开记录。
+
+probe-142 实际越过 `GetComponentsInternal_Injected`，将原生 IL 的 List<T> backing
+字段和数组交给原引擎，结果回到 native Mono，继续到 Canvas 的像素比例查询。
+23.55 秒后缺 `Canvas::get_referencePixelsPerUnit_Injected`，尚未完成 UI 克隆。
+当前完整回归仍为 **526 passed / 7 ignored**，release build、Clippy 均通过。
