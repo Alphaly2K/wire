@@ -31,6 +31,7 @@ pub(crate) struct BoundImport {
     pub dwords: &'static [usize],
     pub groups: u32,
     pub hot: HotImport,
+    pub guid: Option<crate::win32::catalog::GuidApi>,
     pub valid: bool,
 }
 impl BoundImport {
@@ -43,7 +44,12 @@ impl BoundImport {
         Self::build(dll, original, &format!("{dll}!{original}"), true)
     }
     fn build(dll: &str, original: &str, export: &str, valid: bool) -> Self {
+        use crate::win32::catalog::{resolve, Architecture, Resolution};
         let name = super::normalize_symbol(dll, original);
+        let contract = match resolve(Architecture::X64, dll, name) {
+            Resolution::Bound(contract) => Some(contract),
+            Resolution::WrongDll(_) | Resolution::Legacy => None,
+        };
         let hot = match name {
             "GetCurrentThreadId" => HotImport::ThreadId,
             "GetCurrentProcessId" => HotImport::ProcessId,
@@ -66,11 +72,12 @@ impl BoundImport {
             original_function: original.into(),
             name: name.into(),
             trace_export: format!("{dll}!{name}").into(),
-            arity: super::import_arity(name),
+            arity: contract.map_or_else(|| super::import_arity(name), |c| Some(c.parameters.len())),
             supported: valid && super::import_supported(dll, name),
-            dwords: super::import_dwords(name),
+            dwords: contract.map_or_else(|| super::import_dwords(name), |c| c.win64_dwords()),
             groups: super::import_groups(name),
             hot,
+            guid: contract.map(|c| c.id),
             valid,
         }
     }

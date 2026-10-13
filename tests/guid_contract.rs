@@ -182,3 +182,45 @@ fn catalog_keeps_dll_scopes_distinct_from_known_abi_and_legacy_entries() {
         Resolution::Legacy
     ));
 }
+
+#[test]
+fn changed_public_entries_and_replaced_gateways_rebind_before_execution() {
+    let mut v = x86::Vm::new();
+    v.wide(x86::DATA, TEXT);
+    // Bind a formatter first, then change the legacy public view to a parser.
+    let stub = v.api.register("ole32.dll", Some("StringFromGUID2"), None);
+    let index = v.api.stub_index(stub).unwrap();
+    v.api.entries[index].name = "CLSIDFromString".into();
+    assert_eq!(
+        v.call(
+            "ole32.dll",
+            "StringFromGUID2",
+            &[x86::DATA, x86::DATA + 0x100]
+        ),
+        0
+    );
+    let mut output = [0; 16];
+    v.mem.read_bytes(x86::DATA + 0x100, &mut output).unwrap();
+    assert_eq!(output, GUID);
+    assert_eq!(
+        v.cpu.esp(),
+        wire::loader::STACK_BASE + wire::loader::STACK_SIZE - 244
+    );
+
+    let (mut mem, mut cpu, mut runtime) = x64::startup();
+    let stub = runtime.register("kernel32.dll", "GetCurrentThreadId");
+    runtime
+        .gateways
+        .insert(stub, "ole32.dll!CLSIDFromString".into());
+    let sp = x64::STACK + 0x1f88;
+    mem.write_int(sp, 8, x64::BASE).unwrap();
+    cpu.regs[4] = sp;
+    cpu.regs[1] = 0;
+    cpu.regs[2] = x64::STACK + 0x100;
+    cpu.rip = stub;
+    runtime.dispatch_gateway(&mut cpu, &mut mem).unwrap();
+    mem.read(x64::STACK + 0x100, &mut output).unwrap();
+    assert_eq!(output, [0; 16]);
+    assert_eq!(cpu.regs[0], 0);
+    assert_eq!(cpu.rip, x64::BASE);
+}

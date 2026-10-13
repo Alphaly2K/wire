@@ -82,6 +82,78 @@ pub(crate) fn allocate_bstr(
     state.bstrs.insert(base + 4, base);
     Ok(base + 4)
 }
+pub(crate) fn bound_guid_call(
+    id: crate::win32::catalog::GuidApi,
+    a: &Args,
+    mem: &mut GuestMem,
+    state: &mut ApiState,
+) -> (u32, String, bool) {
+    use crate::win32::catalog::GuidApi;
+    let result = (|| -> Result<u32, u32> {
+        match id {
+            GuidApi::StringFromGuid2 => {
+                if (a[2] as i32) < 39 {
+                    return Ok(0);
+                }
+                let text = guid_text(mem, a[0])?;
+                let mut bytes: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+                bytes.extend([0, 0]);
+                Ok(if mem.write_bytes(a[1], &bytes).is_ok() {
+                    39
+                } else {
+                    0
+                })
+            }
+            GuidApi::ClsidFromString | GuidApi::IidFromString => {
+                mem.ptr(a[1], 16, true).map_err(|_| 0x80004003u32)?;
+                let mut guid = [0; 16];
+                if a[0] != 0 {
+                    let text = mem.read_wstr(a[0], 39).map_err(|_| 0x800401f3u32)?;
+                    let b = text.as_bytes();
+                    if b.len() != 38
+                        || b[0] != b'{'
+                        || b[37] != b'}'
+                        || [9, 14, 19, 24].iter().any(|&i| b[i] != b'-')
+                    {
+                        return Err(0x800401f3);
+                    }
+                    let digit = |c: u8| -> Result<u8, u32> {
+                        match c {
+                            b'0'..=b'9' => Ok(c - b'0'),
+                            b'a'..=b'f' => Ok(c - b'a' + 10),
+                            b'A'..=b'F' => Ok(c - b'A' + 10),
+                            _ => Err(0x800401f3),
+                        }
+                    };
+                    let mut raw = Vec::new();
+                    for (start, end) in [(1, 9), (10, 14), (15, 19), (20, 24), (25, 37)] {
+                        for pair in b[start..end].as_chunks::<2>().0 {
+                            raw.push(digit(pair[0])? * 16 + digit(pair[1])?);
+                        }
+                    }
+                    guid.copy_from_slice(&raw);
+                    guid[..4].reverse();
+                    guid[4..6].reverse();
+                    guid[6..8].reverse();
+                }
+                mem.write_bytes(a[1], &guid).map_err(|_| 0x80004003u32)?;
+                Ok(0)
+            }
+        }
+    })();
+    match result {
+        Ok(value) => (
+            value,
+            "common process/string/COM allocation contract".into(),
+            true,
+        ),
+        Err(error) => {
+            state.last_error = error;
+            (error, format!("common API error {error:#x}"), true)
+        }
+    }
+}
+
 pub(crate) fn dispatch(
     dll: &str,
     name: &str,
@@ -131,9 +203,6 @@ pub(crate) fn dispatch(
                     | "CoUninitialize"
                     | "StringFromCLSID"
                     | "StringFromIID"
-                    | "StringFromGUID2"
-                    | "CLSIDFromString"
-                    | "IIDFromString"
             ))
         && !(dll == "oleaut32.dll"
             && matches!(
@@ -334,20 +403,10 @@ pub(crate) fn dispatch(
                 };
                 Ok(i32::try_from(result).map_or(u32::MAX, |n| n as u32))
             }
-            "StringFromCLSID" | "StringFromIID" | "StringFromGUID2" => {
-                if name == "StringFromGUID2" && (a[2] as i32) < 39 {
-                    return Ok(0);
-                }
+            "StringFromCLSID" | "StringFromIID" => {
                 let text = guid_text(mem, a[0])?;
                 let mut bytes: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
                 bytes.extend([0, 0]);
-                if name == "StringFromGUID2" {
-                    return Ok(if mem.write_bytes(a[1], &bytes).is_ok() {
-                        39
-                    } else {
-                        0
-                    });
-                }
                 mem.write_u32(a[1], 0).map_err(|_| 0x80004003u32)?;
                 let p = state
                     .heap
@@ -360,41 +419,6 @@ pub(crate) fn dispatch(
                     state.heap.free(state.process_heap, p);
                     return Err(0x80004003);
                 }
-                Ok(0)
-            }
-            "CLSIDFromString" | "IIDFromString" => {
-                mem.ptr(a[1], 16, true).map_err(|_| 0x80004003u32)?;
-                let mut guid = [0; 16];
-                if a[0] != 0 {
-                    let text = mem.read_wstr(a[0], 39).map_err(|_| 0x800401f3u32)?;
-                    let b = text.as_bytes();
-                    if b.len() != 38
-                        || b[0] != b'{'
-                        || b[37] != b'}'
-                        || [9, 14, 19, 24].iter().any(|&i| b[i] != b'-')
-                    {
-                        return Err(0x800401f3);
-                    }
-                    let digit = |c: u8| -> Result<u8, u32> {
-                        match c {
-                            b'0'..=b'9' => Ok(c - b'0'),
-                            b'a'..=b'f' => Ok(c - b'a' + 10),
-                            b'A'..=b'F' => Ok(c - b'A' + 10),
-                            _ => Err(0x800401f3),
-                        }
-                    };
-                    let mut raw = Vec::new();
-                    for (start, end) in [(1, 9), (10, 14), (15, 19), (20, 24), (25, 37)] {
-                        for pair in b[start..end].as_chunks::<2>().0 {
-                            raw.push(digit(pair[0])? * 16 + digit(pair[1])?);
-                        }
-                    }
-                    guid.copy_from_slice(&raw);
-                    guid[..4].reverse();
-                    guid[4..6].reverse();
-                    guid[6..8].reverse();
-                }
-                mem.write_bytes(a[1], &guid).map_err(|_| 0x80004003u32)?;
                 Ok(0)
             }
             "CoCreateGuid" => {

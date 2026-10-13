@@ -17,14 +17,14 @@ pub type Args = [u32; 16];
 use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 pub const STUB_BASE: u32 = 0x6fff_0000;
 pub const STUB_STRIDE: u32 = 16;
 pub const STUB_CAPACITY: usize = 4096;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiEntry {
     pub dll: String,  // lowercased, includes ".dll" (or pseudo-module "wire")
     pub name: String, // export name, or "#<ordinal>"
@@ -33,9 +33,36 @@ pub struct ApiEntry {
 
 pub struct ApiTable {
     pub entries: Vec<ApiEntry>,
+    bindings: Vec<Arc<BoundEntry>>,
     by_key: HashMap<(String, String), u32>,
     data_exports: HashMap<(String, String), u32>,
     next_data: u32,
+}
+
+/// Immutable call metadata. The public entry view remains compatible; edits to
+/// that view invalidate this snapshot before the next call (including reentry).
+struct BoundEntry {
+    entry: ApiEntry,
+    guid: Option<&'static crate::win32::catalog::Contract>,
+    stack_bytes: Option<u32>,
+}
+impl BoundEntry {
+    fn new(entry: ApiEntry) -> Self {
+        use crate::win32::catalog::{resolve, Architecture, Resolution};
+        let guid = match resolve(Architecture::X86, &entry.dll, &entry.name) {
+            Resolution::Bound(contract) => Some(contract),
+            Resolution::WrongDll(_) | Resolution::Legacy => None,
+        };
+        let stack_bytes = guid.map_or_else(
+            || legacy_stack_args_bytes(&entry.dll, &entry.name),
+            |c| Some(c.stdcall_bytes()),
+        );
+        Self {
+            entry,
+            guid,
+            stack_bytes,
+        }
+    }
 }
 
 impl Default for ApiTable {
@@ -48,6 +75,7 @@ impl ApiTable {
     pub fn new() -> ApiTable {
         let mut t = ApiTable {
             entries: Vec::new(),
+            bindings: Vec::new(),
             by_key: HashMap::new(),
             data_exports: HashMap::new(),
             next_data: 0,
@@ -79,9 +107,25 @@ impl ApiTable {
         let idx = self.entries.len();
         assert!(idx < STUB_CAPACITY, "API stub table overflow");
         let addr = STUB_BASE + idx as u32 * STUB_STRIDE;
-        self.entries.push(ApiEntry { dll, name, ordinal });
+        let entry = ApiEntry { dll, name, ordinal };
+        self.bindings.push(Arc::new(BoundEntry::new(entry.clone())));
+        self.entries.push(entry);
         self.by_key.insert(key, addr);
         addr
+    }
+
+    fn binding(&mut self, index: usize) -> Arc<BoundEntry> {
+        // Legacy callers can mutate/append/reorder the public entries vector.
+        // Resolve only on a changed identity, never on an unchanged call.
+        while self.bindings.len() <= index {
+            let next = self.bindings.len();
+            self.bindings
+                .push(Arc::new(BoundEntry::new(self.entries[next].clone())));
+        }
+        if self.bindings[index].entry != self.entries[index] {
+            self.bindings[index] = Arc::new(BoundEntry::new(self.entries[index].clone()));
+        }
+        self.bindings[index].clone()
     }
 
     pub fn stub_index(&self, addr: u32) -> Option<usize> {
@@ -539,6 +583,14 @@ pub fn native_export(dll: &str, name: &str) -> bool {
 /// stdcall stack cleanup in bytes. Unknown functions retain the existing
 /// cdecl/zero-cleanup diagnostic path.
 fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
+    use crate::win32::catalog::{resolve, Architecture, Resolution};
+    if let Resolution::Bound(contract) = resolve(Architecture::X86, dll, name) {
+        return Some(contract.stdcall_bytes());
+    }
+    legacy_stack_args_bytes(dll, name)
+}
+
+fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
     if dll == "dsound.dll" && name.contains('.') {
         return crate::dsound::stack_bytes(name);
     }
@@ -1326,7 +1378,6 @@ fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("OleUninitialize", 0),
                 ("CreateStreamOnHGlobal", 12),
                 ("GetHGlobalFromStream", 8),
-                ("CLSIDFromString", 8),
                 ("StringFromCLSID", 8),
             ],
         );
@@ -1462,7 +1513,6 @@ fn stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
         add(
             "ole32.dll",
             &[
-                ("StringFromGUID2", 12),
                 ("CreateItemMoniker", 12),
                 ("GetRunningObjectTable", 8),
                 ("CoFreeUnusedLibraries", 0),
@@ -1652,7 +1702,8 @@ pub fn dispatch(
     sched: &mut Sched,
     max_instr: u64,
 ) -> Result<(), String> {
-    let entry = api.entries[idx].clone();
+    let binding = api.binding(idx);
+    let entry = &binding.entry;
     crate::platform::poll(mem, state, sched);
     let dll = entry.dll.as_str();
     let name = entry.name.as_str();
@@ -1680,7 +1731,7 @@ pub fn dispatch(
             .map_err(|e| e.to_string())?;
     }
     let mut args = [0u32; 16];
-    let stack_bytes = stack_args_bytes(dll, name);
+    let stack_bytes = binding.stack_bytes;
     let cdecl = dll.contains("crt") || dll.starts_with("msvcr");
     let count = if dll == "user32.dll" && matches!(name, "wsprintfA" | "wsprintfW") {
         2 // cdecl varargs are read on demand by the formatter
@@ -1710,6 +1761,10 @@ pub fn dispatch(
     let mut yield_after_return = false;
     let ret: u32;
     match (dll, name) {
+        _ if binding.guid.is_some() => {
+            (ret, note, implemented) =
+                crate::common_api::bound_guid_call(binding.guid.unwrap().id, &args, mem, state);
+        }
         (
             "winmm.dll",
             "mciSendCommandA" | "mciSendCommandW" | "mciSendStringA" | "mciSendStringW",
@@ -3017,7 +3072,7 @@ pub fn dispatch(
                         implemented = false;
                         state.last_error = 120;
                         ret = if dll == "ole32.dll" { 0x80004001 } else { 0 };
-                        if stack_args_bytes(dll, name).is_none() {
+                        if stack_bytes.is_none() {
                             note = "unknown stdcall arity, assuming cdecl/0-byte cleanup".into();
                         }
                     }
@@ -3025,8 +3080,7 @@ pub fn dispatch(
             }
         }
     }
-
-    let stack_args = stack_args_bytes(dll, name).unwrap_or(0);
+    let stack_args = stack_bytes.unwrap_or(0);
     let nargs = (stack_args / 4).min(6) as usize;
     log.log_call(
         idx,

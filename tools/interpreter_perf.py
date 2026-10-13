@@ -181,6 +181,10 @@ def main():
     if args.cases and 'gateway-thread-id' in args.cases:
         data, meta = gateway_fixture(args.work)
         entries.append(('gateway-thread-id', data, meta))
+    if args.cases and 'gateway-guid' in args.cases:
+        from perf.fixtures.guid_gateway import fixture
+        data, meta = fixture(args.work)
+        entries.append(('gateway-guid', data, meta))
     if args.cases:
         if set(args.cases) - {name for name, _, _ in entries}:
             p.error('unknown fixture name')

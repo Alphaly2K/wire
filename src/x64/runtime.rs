@@ -214,7 +214,13 @@ fn com_export(dll: &str, name: &str) -> bool {
 /// Whether a Win64 import has a dispatch route and known ABI. This does not
 /// certify every argument, COM method or optional backend capability.
 pub fn import_supported(dll: &str, name: &str) -> bool {
+    use crate::win32::catalog::{resolve, Architecture, Resolution};
     let name = automation::symbol(dll, dxgi::symbol(dll, sockets::symbol(dll, name)));
+    match resolve(Architecture::X64, dll, name) {
+        Resolution::Bound(_) => return true,
+        Resolution::WrongDll(_) => return false,
+        Resolution::Legacy => {}
+    }
     if import_arity(name).is_none() {
         return false;
     }
@@ -318,7 +324,8 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
     true
 }
 fn kernel_export(name: &str) -> bool {
-    if identity::user(name)
+    if crate::win32::catalog::by_name(name).is_some()
+        || identity::user(name)
         || devices::arity(name).is_some()
         || automation::arity(name).is_some()
         || winhttp::arity(name).is_some()
@@ -369,6 +376,9 @@ fn kernel_export(name: &str) -> bool {
     import_arity(name).is_some()
 }
 fn import_arity(name: &str) -> Option<usize> {
+    if let Some(contract) = crate::win32::catalog::by_name(name) {
+        return Some(contract.parameters.len());
+    }
     Some(match name {
         name if identity::arity(name).is_some() => identity::arity(name).unwrap(),
         name if automation::arity(name).is_some() => automation::arity(name).unwrap(),
@@ -638,6 +648,9 @@ fn normalize_symbol<'a>(dll: &str, name: &'a str) -> &'a str {
     automation::symbol(dll, dxgi::symbol(dll, sockets::symbol(dll, name)))
 }
 fn import_dwords(name: &str) -> &'static [usize] {
+    if let Some(contract) = crate::win32::catalog::by_name(name) {
+        return contract.win64_dwords();
+    }
     match name {
         name if identity::arity(name).is_some() => {
             if name.contains("Ex") {
@@ -651,7 +664,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         name if sockets::arity(name).is_some() => sockets::dwords(name),
         name if devices::arity(name).is_some() => devices::dwords(name),
         name if winrt::arity(name).is_some() => winrt::dwords(name),
-        "StringFromGUID2" => &[2],
         "GetCPInfoExA" | "GetCPInfoExW" => &[0, 1],
         name if dxgi::arity(name).is_some() => dxgi::dwords(name),
         "FindFirstFileExA" | "FindFirstFileExW" => &[1, 3, 5],
@@ -1490,6 +1502,7 @@ impl Runtime64 {
             });
         }
         let ret = match name {
+            _ if binding.guid.is_some() => guid::bound_guid_call(mem, binding.guid.unwrap(), args)?,
             _ if binding.groups & (1 << 0) != 0 => self.automation_call(mem, name, args)?,
             _ if binding.groups & (1 << 1) != 0 => self.winhttp_call(mem, name, args)?,
             _ if binding.groups & (1 << 2) != 0 => self.device_call(mem, name, args)?,
@@ -4953,6 +4966,14 @@ impl Runtime64 {
                         || (provider == "dxgi.dll" && dxgi::export(&function))
                         || (provider == "d3d12.dll" && dxgi::d3d12_export(&function))
                         || (provider == "d3d11.dll" && dxgi::d3d11_export(&function))
+                        || matches!(
+                            crate::win32::catalog::resolve(
+                                crate::win32::catalog::Architecture::X64,
+                                &provider,
+                                &function
+                            ),
+                            crate::win32::catalog::Resolution::Bound(_)
+                        )
                         || guid::export(&provider, &function)
                         || identity::export(&provider, &function)
                         || devices::export(&provider, &function)
