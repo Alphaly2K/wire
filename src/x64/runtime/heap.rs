@@ -20,35 +20,6 @@ pub(super) struct Heap {
     slabs: BTreeMap<u64, Slab>,
 }
 impl Runtime64 {
-    /// Exact live guest heap / owned buffer bounds, excluding freed slab slots
-    /// and page padding. Used only for token stores in C++ temporary storage.
-    #[cfg(feature = "native-mono-backend")]
-    pub(crate) fn live_data_slot(&self, address: u64, width: u64) -> bool {
-        let Some(end) = address.checked_add(width) else {
-            return false;
-        };
-        if width == 0 {
-            return false;
-        }
-        if let Some((&base, block)) = self.guest_heap.blocks.range(..=address).next_back() {
-            if base
-                .checked_add(block.size as u64)
-                .is_some_and(|limit| end <= limit)
-            {
-                return true;
-            }
-        }
-        self.allocations
-            .range(..=address)
-            .next_back()
-            .is_some_and(|(&base, &(size, _))| {
-                !self.guest_heap.slabs.contains_key(&base)
-                    && !self.guest_heap.blocks.contains_key(&base)
-                    && base
-                        .checked_add(size as u64)
-                        .is_some_and(|limit| end <= limit)
-            })
-    }
     fn guest_heap_allocate(
         &mut self,
         mem: &mut Memory,
@@ -201,30 +172,5 @@ impl Runtime64 {
             self.guest_heap_free(mem, a[2])?;
         }
         Ok(p)
-    }
-}
-
-#[cfg(all(test, feature = "native-mono-backend"))]
-mod native_slot_tests {
-    use super::*;
-    use crate::x64::memory::{READ, WRITE};
-    #[test]
-    fn temporary_slots_reject_padding_freed_slab_blocks_and_span_overflow() {
-        let mut memory = Memory::default();
-        let stack = 0x7ff000000000;
-        memory.map(stack, 65536, READ | WRITE).unwrap();
-        let mut runtime = Runtime64::new(&mut memory, 0x140000000, stack, 65536, "slot").unwrap();
-        let a = runtime.guest_heap_allocate(&mut memory, 25, true).unwrap();
-        let b = runtime.guest_heap_allocate(&mut memory, 25, true).unwrap();
-        assert!(runtime.live_data_slot(a + 16, 8));
-        assert!(!runtime.live_data_slot(a + 24, 8));
-        assert!(!runtime.live_data_slot(b + 32, 1));
-        assert!(!runtime.live_data_slot(u64::MAX - 3, 8));
-        runtime.guest_heap_free(&mut memory, a).unwrap();
-        assert!(!runtime.live_data_slot(a, 8));
-        assert!(runtime.live_data_slot(b, 8));
-        let owned = runtime.heap_alloc(&mut memory, 25).unwrap();
-        assert!(runtime.live_data_slot(owned + 16, 8));
-        assert!(!runtime.live_data_slot(owned + 24, 8));
     }
 }

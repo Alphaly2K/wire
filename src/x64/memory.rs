@@ -5,8 +5,6 @@ use std::{
 };
 mod diagnostics;
 mod pages;
-#[cfg(feature = "native-mono-memory")]
-pub mod shared;
 mod vm;
 pub use diagnostics::TranslationDiagnosticsSummary;
 pub const PAGE: u64 = 4096;
@@ -227,10 +225,6 @@ struct Allocation {
 }
 #[derive(Default)]
 pub struct Memory {
-    #[cfg(feature = "native-mono-memory")]
-    shared: BTreeMap<u64, shared::SharedMapping>,
-    #[cfg(feature = "native-mono-memory")]
-    shared_bytes: u64,
     pages: pages::Pages,
     // Ordered addresses are only needed by VirtualQuery over reserved holes.
     // Checked reads/writes use the hash table; neither index owns host pointers.
@@ -244,15 +238,6 @@ pub struct Memory {
     code_images: BTreeMap<u64, String>,
 }
 impl Memory {
-    #[cfg(feature = "native-mono-memory")]
-    fn shared_bytes(&self) -> u64 {
-        self.shared_bytes
-    }
-    #[cfg(feature = "native-mono-memory")]
-    fn committed_bytes(&self) -> u64 {
-        self.pages.len() as u64 * PAGE + self.shared_bytes()
-    }
-
     /// Select an experimental layout before execution; never reinterpret live slots.
     pub fn set_translation_cache_layout(
         &mut self,
@@ -673,63 +658,14 @@ impl Memory {
         self.record_executions(true, work);
         work != 0
     }
-    // Shared backings have no owned Page. Former code pages remain excluded
-    // even while NX, so a successful store cannot invalidate this sequence.
+    // Former code pages remain excluded even while NX, so a successful store
+    // cannot invalidate this sequence.
     pub(crate) fn owned_noncode_access(&self, address: u64, size: usize) -> bool {
-        #[cfg(feature = "native-mono-memory")]
-        if !self.shared.is_empty()
-            && self.shared_overlaps(address, address.saturating_add(size as u64))
-        {
-            return false;
-        }
         size as u64 <= PAGE - (address & (PAGE - 1))
             && self
                 .pages
                 .get(&(address & !(PAGE - 1)))
                 .is_some_and(|p| p.generation == 0)
-    }
-    /// Guest VirtualAlloc storage used by Unity's own C++ allocator. Require a
-    /// live private allocation, committed writable owned page, and no code history.
-    #[cfg(feature = "native-mono-backend")]
-    pub(crate) fn guest_private_data_slot(&self, address: u64, size: usize) -> bool {
-        let Some(end) = address.checked_add(size as u64) else {
-            return false;
-        };
-        size != 0
-            && self.owned_noncode_access(address, size)
-            && self
-                .allocations
-                .range(..=address)
-                .next_back()
-                .is_some_and(|(_, a)| a.guest && a.kind == crate::mem::MEM_PRIVATE && end <= a.end)
-            && self.check(address, size, WRITE).is_ok()
-    }
-    /// A numeric engine buffer may span pages, but must remain within one live
-    /// private allocation. Every page must be owned, writable and never code.
-    #[cfg(feature = "native-mono-backend")]
-    pub(crate) fn guest_private_data_range(&self, address: u64, size: usize) -> bool {
-        let Some(end) = address.checked_add(size as u64) else {
-            return false;
-        };
-        if size == 0
-            || !self
-                .allocations
-                .range(..=address)
-                .next_back()
-                .is_some_and(|(_, a)| a.guest && a.kind == crate::mem::MEM_PRIVATE && end <= a.end)
-            || self.check(address, size, WRITE).is_err()
-        {
-            return false;
-        }
-        let mut cursor = address;
-        while cursor < end {
-            let length = (PAGE - (cursor & (PAGE - 1))).min(end - cursor) as usize;
-            if !self.owned_noncode_access(cursor, length) {
-                return false;
-            }
-            cursor += length as u64;
-        }
-        true
     }
     #[inline(never)]
     pub(crate) fn try_checked_segment(
@@ -865,15 +801,6 @@ impl Memory {
         Self::range(addr, len as usize).is_ok_and(|range| self.free_range(range.start, range.end))
     }
     pub fn merge(&mut self, mut other: Memory) -> Result<(), String> {
-        #[cfg(feature = "native-mono-memory")]
-        let shared_overlap = other
-            .shared
-            .values()
-            .any(|mapping| !self.free_range(mapping.base(), mapping.end()));
-        #[cfg(feature = "native-mono-memory")]
-        let exceeds_capacity =
-            self.committed_bytes() + other.committed_bytes() > 512 * 1024 * 1024 || shared_overlap;
-        #[cfg(not(feature = "native-mono-memory"))]
         let exceeds_capacity =
             (self.pages.len() + other.pages.len()) as u64 * PAGE > 512 * 1024 * 1024;
         if exceeds_capacity
@@ -891,8 +818,6 @@ impl Memory {
         }
         self.page_addresses.append(&mut other.page_addresses);
         self.allocations.append(&mut other.allocations);
-        #[cfg(feature = "native-mono-memory")]
-        self.shared_merge(&mut other.shared);
         self.invalidate_mapping(executable_changed);
         Ok(())
     }
@@ -915,9 +840,6 @@ impl Memory {
             return Err("invalid AMD64 mapping".into());
         }
         let range = Self::range(addr, usize::try_from(len).map_err(|_| "mapping too large")?)?;
-        #[cfg(feature = "native-mono-memory")]
-        let used = self.committed_bytes();
-        #[cfg(not(feature = "native-mono-memory"))]
         let used = self.pages.len() as u64 * PAGE;
         if len > 256 * 1024 * 1024 || used + len > 512 * 1024 * 1024 {
             return Err("AMD64 mapping capacity exceeded".into());
@@ -981,10 +903,6 @@ impl Memory {
             addr,
             usize::try_from(len).map_err(|_| "protection too large")?,
         )?;
-        #[cfg(feature = "native-mono-memory")]
-        if self.shared_overlaps(range.start, range.end) {
-            return Err("owned page protection overlaps retained shared bytes".into());
-        }
         if range
             .clone()
             .step_by(PAGE as usize)
@@ -1004,10 +922,6 @@ impl Memory {
     }
     pub fn check(&self, addr: u64, len: usize, access: u8) -> Result<(), String> {
         let range = Self::range(addr, len)?;
-        #[cfg(feature = "native-mono-memory")]
-        if !self.shared.is_empty() && self.shared_check(addr, len, access)? {
-            return Ok(());
-        }
         if range.is_empty() {
             return Ok(());
         }
@@ -1037,10 +951,6 @@ impl Memory {
             return Err("invalid AMD64 unmap".into());
         }
         let range = Self::range(addr, usize::try_from(len).map_err(|_| "unmap too large")?)?;
-        #[cfg(feature = "native-mono-memory")]
-        if self.shared_overlaps(range.start, range.end) {
-            return Err("owned page release overlaps retained shared bytes".into());
-        }
         if self
             .allocations
             .get(&addr)
@@ -1069,13 +979,8 @@ impl Memory {
     }
     /// Diagnostic data read. Reject guarded/unreadable ranges without consuming
     /// their faults, changing guest state, or partially changing the output.
-    /// Shared storage still uses its retained owner's execution lease.
     pub fn observe(&self, addr: u64, out: &mut [u8]) -> Result<(), String> {
         let range = Self::range(addr, out.len())?;
-        #[cfg(feature = "native-mono-memory")]
-        if !self.shared.is_empty() && self.shared_observe(addr, out)? {
-            return Ok(());
-        }
         if out.is_empty() {
             return Ok(());
         }
@@ -1110,10 +1015,6 @@ impl Memory {
             self.diagnostic_data(0, addr, out.len());
         }
         Self::range(addr, out.len())?;
-        #[cfg(feature = "native-mono-memory")]
-        if !self.shared.is_empty() && self.shared_read(addr, out, access)? {
-            return Ok(());
-        }
         if out.is_empty() {
             return Ok(());
         }
@@ -1143,10 +1044,6 @@ impl Memory {
     pub fn write(&mut self, addr: u64, bytes: &[u8]) -> Result<(), String> {
         self.diagnostic_data(1, addr, bytes.len());
         Self::range(addr, bytes.len())?;
-        #[cfg(feature = "native-mono-memory")]
-        if !self.shared.is_empty() && self.shared_write(addr, bytes)? {
-            return Ok(());
-        }
         if bytes.is_empty() {
             return Ok(());
         }
@@ -1210,13 +1107,6 @@ impl Memory {
             return Err("invalid AMD64 scalar width".into());
         }
         Self::range(addr, size)?;
-        #[cfg(feature = "native-mono-memory")]
-        if !self.shared.is_empty() {
-            let mut bytes = [0; 8];
-            if self.shared_read(addr, &mut bytes[..size], READ)? {
-                return Ok(u64::from_le_bytes(bytes));
-            }
-        }
         let base = addr & !(PAGE - 1);
         let start = (addr - base) as usize;
         if size <= 4096 - start {
@@ -1252,10 +1142,6 @@ impl Memory {
             return Err("invalid AMD64 scalar width".into());
         }
         Self::range(addr, size)?;
-        #[cfg(feature = "native-mono-memory")]
-        if !self.shared.is_empty() && self.shared_contains_range(addr, size)? {
-            return self.shared_modify_int(addr, size, update);
-        }
 
         let base = addr & !(PAGE - 1);
         let start = (addr - base) as usize;
@@ -1304,10 +1190,6 @@ impl Memory {
             return Err("invalid AMD64 scalar width".into());
         }
         Self::range(addr, size)?;
-        #[cfg(feature = "native-mono-memory")]
-        if !self.shared.is_empty() && self.shared_write(addr, &value.to_le_bytes()[..size])? {
-            return Ok(());
-        }
         let base = addr & !(PAGE - 1);
         let start = (addr - base) as usize;
         if size <= 4096 - start {
@@ -1590,28 +1472,5 @@ mod reuse_tests {
                 .flatten()
                 .all(|s| s.link == (u64::MAX, usize::MAX, 0)));
         }
-    }
-}
-
-#[cfg(all(test, feature = "native-mono-backend"))]
-mod native_temporary_slot_tests {
-    use super::*;
-    #[test]
-    fn guest_virtual_slots_require_live_committed_private_writable_noncode_pages() {
-        let mut memory = Memory::default();
-        let base = memory.virtual_alloc(0, 8192, 0x3000, 4).unwrap();
-        assert!(memory.guest_private_data_slot(base + 16, 8));
-        assert!(!memory.guest_private_data_slot(base + 8188, 8));
-        assert!(!memory.guest_private_data_slot(u64::MAX - 3, 8));
-        memory.virtual_protect(base, 4096, 2).unwrap();
-        assert!(!memory.guest_private_data_slot(base + 16, 8));
-        memory.virtual_protect(base, 4096, 0x40).unwrap();
-        assert!(!memory.guest_private_data_slot(base + 16, 8));
-        memory.virtual_protect(base, 4096, 4).unwrap();
-        assert!(!memory.guest_private_data_slot(base + 16, 8));
-        memory.virtual_free(base, 0, 0x8000).unwrap();
-        assert!(!memory.guest_private_data_slot(base + 4096, 8));
-        let reserved = memory.virtual_alloc(0, 4096, 0x2000, 4).unwrap();
-        assert!(!memory.guest_private_data_slot(reserved, 8));
     }
 }

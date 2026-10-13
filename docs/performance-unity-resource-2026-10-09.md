@@ -147,7 +147,7 @@ ScalarIr 符号减少就声称 IR 执行成本几乎消失。旧基线只采样�
 下一步通用 CPU 方向仍是 translation miss/冲突、真实重新解码及 cold fallback。
 原生 Mono 可能消除其 VM 和托管方法体的 x64 解释成本，但这个 profile 没有 guest 模块/
 托管方法归因，不能从宿主解释器热点推定它会带来几倍收益。
-计划复核及原型验收边界见 [Mono 复核](native-mono-plan-review-2026-10-09.md)。
+2026-10-14 原生 Mono 实验已撤回，通用性能优化保留，见 [撤回记录](mono-native-rollback-2026-10-14.md)。
 原始栈与汇总/flame.svg 分别在 `after-profile/alice-startup/`、`after-summary/`。
 
 ## 复现

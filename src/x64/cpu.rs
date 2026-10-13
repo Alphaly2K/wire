@@ -400,7 +400,7 @@ impl Cpu64 {
     }
     /// Diagnostic oracle: reuse checked decoding, but never execute lowered IR
     /// or segments, including when decoding has just populated the IR cache.
-    #[cfg(any(test, feature = "native-mono-backend"))]
+    #[cfg(test)]
     pub(crate) fn step_reference(&mut self, mem: &mut Memory) -> Result<(), String> {
         let i = self.decode(mem)?;
         self.execute_decoded(i, mem)

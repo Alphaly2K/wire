@@ -1,5 +1,8 @@
 # 测试目录复用与清理
 
+2026-10-14 原生 Mono probe 工具随实验路径撤回，下文保留当时的存储管理记录。
+后续测试仍复用已有隔离目录，通过软链接访问素材，不复制或硬链接整个游戏。
+
 不再每轮复制整个游戏，也不使用硬链接。Alice 复用主 checkout 的
 `wire-out/native-mono-probe-state/runtime`；这是已有的隔离副本，原始游戏保持只读。
 每次测试通过临时软链接使用该目录、graphics、MoltenVK 和 registration reference。

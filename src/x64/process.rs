@@ -10,10 +10,6 @@ use std::{
     path::Path,
 };
 mod exception;
-#[cfg(feature = "native-mono-backend")]
-mod mono_scheduler;
-#[cfg(feature = "native-mono-backend")]
-mod mono_startup;
 mod mono_trace;
 const STACK: u64 = 0x7ff000000000;
 const RETURN: u64 = 0x7ffe10000000;
@@ -71,8 +67,6 @@ struct Modules {
     ranges: Vec<(u64, u64)>,
     pending: Vec<Image>,
     mono_trace: Option<mono_trace::MonoTrace>,
-    #[cfg(feature = "native-mono-backend")]
-    mono_startup: Option<mono_startup::Probe>,
 }
 fn provider(name: &str) -> bool {
     crate::modules::native_module(name)
@@ -144,28 +138,6 @@ impl Modules {
                     .checked_add(size.div_ceil(65536) * 65536)
                     .filter(|&a| a + size < 1 << 47)
                     .ok_or("AMD64 module address space exhausted")?;
-            }
-        }
-        #[cfg(feature = "native-mono-backend")]
-        if name == "mono-2.0-bdwgc.dll" {
-            if let Some(probe) = self.mono_startup.as_mut() {
-                if main {
-                    return Err("native root probe cannot use Mono as the main image".into());
-                }
-                let mut exports = pe.exports(&bytes, base)?;
-                probe.replace(&bytes, &mut exports, runtime)?;
-                mem.reserve_runtime(base, size)?;
-                mem.reserve_runtime(0x6ffe00000000, PAGE)?;
-                self.ranges.push((base, base + size));
-                self.exports.insert(name.clone(), exports);
-                let registered = Exports64 {
-                    names: self.exports[&name].names.clone(),
-                    ordinals: self.exports[&name].ordinals.clone(),
-                };
-                runtime.register_module(&name, base, registered);
-                runtime.register_module_path(base, fs.guest_path(path));
-                runtime.register_image(base, pe.size_of_image, 0);
-                return Ok(base);
             }
         }
         self.ranges.push((base, base + size));
@@ -253,38 +225,9 @@ pub enum Outcome {
     Returned(u64),
     Exited(u32),
     Budget,
-    #[cfg(feature = "native-mono-backend")]
-    NativeMonoRootReady,
-}
-#[cfg(feature = "native-mono-backend")]
-impl Drop for Process64 {
-    fn drop(&mut self) {
-        if let Err(error) = self.finish_native_mono_startup_probe() {
-            eprintln!("native Mono process owner cleanup failed: {error}");
-            std::process::abort();
-        }
-    }
 }
 impl Process64 {
     pub fn load(path: &Path, dll_only: bool) -> Result<Self, String> {
-        Self::load_inner(path, dll_only, Modules::default())
-    }
-    #[cfg(feature = "native-mono-backend")]
-    pub fn load_native_mono_startup_probe(
-        path: &Path,
-        library: &Path,
-        skip_etw: bool,
-        boundary: &str,
-    ) -> Result<Self, String> {
-        let path = path.canonicalize().map_err(|e| e.to_string())?;
-        let probe = mono_startup::Probe::new(&path, library, skip_etw, boundary)?;
-        let loaded = Modules {
-            mono_startup: Some(probe),
-            ..Modules::default()
-        };
-        Self::load_inner(&path, false, loaded)
-    }
-    fn load_inner(path: &Path, dll_only: bool, mut loaded: Modules) -> Result<Self, String> {
         let path = path.canonicalize().map_err(|e| e.to_string())?;
         let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
         let pe = Pe64::parse(&bytes)?;
@@ -319,6 +262,7 @@ impl Process64 {
         runtime.install_gateways(Default::default());
         let fs = crate::fs::GuestFs::new(path.parent().ok_or("missing game directory")?)
             .map_err(|e| e.to_string())?;
+        let mut loaded = Modules::default();
         let main_base = loaded.load(&path, true, &fs, &mut memory, &mut runtime, (0, None))?;
         runtime.set_main_base(&mut memory, main_base)?;
         let mut calls = VecDeque::new();
@@ -453,51 +397,6 @@ impl Process64 {
                 trace.register(name, exports)?;
             }
             self.loader.mono_trace = Some(trace);
-        }
-        Ok(())
-    }
-    #[cfg(feature = "native-mono-backend")]
-    pub fn native_mono_startup_report(&self) -> Option<String> {
-        self.loader
-            .mono_startup
-            .as_ref()
-            .map(|probe| probe.report())
-    }
-    #[cfg(feature = "native-mono-backend")]
-    pub fn native_mono_bindings_tsv(&self) -> Option<String> {
-        self.loader
-            .mono_startup
-            .as_ref()
-            .map(|probe| probe.bindings_tsv())
-    }
-    #[cfg(feature = "native-mono-backend")]
-    pub fn native_mono_images_tsv(&self) -> Option<String> {
-        self.loader
-            .mono_startup
-            .as_ref()
-            .map(|probe| probe.images_tsv())
-    }
-    #[cfg(feature = "native-mono-backend")]
-    pub fn native_mono_unitytls_tsv(&self) -> Option<String> {
-        self.loader
-            .mono_startup
-            .as_ref()
-            .and_then(|probe| probe.unitytls_tsv())
-    }
-    #[cfg(feature = "native-mono-backend")]
-    pub fn finish_native_mono_startup_probe(&mut self) -> Result<(), String> {
-        if let Some(probe) = self.loader.mono_startup.as_mut() {
-            if !probe.shutdown_complete() {
-                // The cooperative run has stopped. Keep its CPU contexts and
-                // original error intact while owner-scoped shutdown uses the
-                // actual guest main TEB. Resume is prohibited after cleanup.
-                let previous = self
-                    .runtime
-                    .activate_main_for_native_cleanup(&self.memory)?;
-                let result = probe.finish_owned(&mut self.memory, &mut self.runtime);
-                self.runtime.activate_thread(previous);
-                result?;
-            }
         }
         Ok(())
     }
@@ -823,23 +722,6 @@ impl Process64 {
         Ok(())
     }
     pub fn run(&mut self, budget: u64) -> Result<Outcome, String> {
-        let result = self.run_inner(budget);
-        #[cfg(feature = "native-mono-backend")]
-        if !matches!(result, Ok(Outcome::Budget)) {
-            self.finish_native_mono_startup_probe()?;
-        }
-        result
-    }
-    fn run_inner(&mut self, budget: u64) -> Result<Outcome, String> {
-        #[cfg(feature = "native-mono-backend")]
-        if self
-            .loader
-            .mono_startup
-            .as_ref()
-            .is_some_and(|probe| probe.stopped())
-        {
-            return Err("native Mono startup probe cannot resume after cleanup".into());
-        }
         // The caller may have suspended the active context between slices.
         // Within this cooperative loop only a native gateway can change its
         // suspension state; ordinary guest instructions cannot do so.
@@ -981,109 +863,6 @@ impl Process64 {
                 }
                 let (dll, function) = (&*binding.dll, &*binding.original_function);
                 let name = &binding.export;
-                #[cfg(feature = "native-mono-backend")]
-                if dll == "mono-2.0-bdwgc.dll" {
-                    if let Some(probe) = self.loader.mono_startup.as_mut() {
-                        if self.runtime.active_thread() != 1 {
-                            let args = [
-                                self.cpu.regs[1],
-                                self.cpu.regs[2],
-                                self.cpu.regs[8],
-                                self.cpu.regs[9],
-                            ];
-                            probe
-                                .dispatch_worker(
-                                    function,
-                                    &mut self.cpu,
-                                    &mut self.memory,
-                                    &mut self.runtime,
-                                )
-                                .map_err(|error| {
-                                    self.runtime.inventory_failure(dll, function);
-                                    format!("{name}: {error}")
-                                })?;
-                            self.cpu.work += 1;
-                            self.runtime
-                                .complete_call(dll, function, &args, self.cpu.regs[0]);
-                            continue;
-                        }
-                        if probe.stop_before(function, &self.cpu)? {
-                            probe.observe_stop(function, &self.cpu);
-                            probe.inspect_pending(
-                                function,
-                                &self.cpu,
-                                &mut self.memory,
-                                &mut self.runtime,
-                            )?;
-                            probe.validate_scalar_callbacks(&mut self.memory, &mut self.runtime)?;
-                            probe
-                                .validate_profiler_callbacks(&mut self.memory, &mut self.runtime)?;
-                            probe.validate_unitytls(&mut self.memory, &mut self.runtime)?;
-                            return Ok(Outcome::NativeMonoRootReady);
-                        }
-                        let fs = self.runtime.filesystem()?;
-                        let args = [
-                            self.cpu.regs[1],
-                            self.cpu.regs[2],
-                            self.cpu.regs[8],
-                            self.cpu.regs[9],
-                        ];
-                        let ready = mono_scheduler::with_scheduler(
-                            &mut self.contexts,
-                            self.loader_owner,
-                            || {
-                                if probe.handles_invoke(function) {
-                                    probe.dispatch_invoke(
-                                        &mut self.cpu,
-                                        &mut self.memory,
-                                        &mut self.runtime,
-                                    )
-                                } else if probe.handles_object(function) {
-                                    probe.dispatch_object(
-                                        function,
-                                        &mut self.cpu,
-                                        &mut self.memory,
-                                        &mut self.runtime,
-                                    )
-                                } else if probe.handles_metadata(function) {
-                                    probe.dispatch_metadata(
-                                        function,
-                                        &mut self.cpu,
-                                        &mut self.memory,
-                                        &mut self.runtime,
-                                    )
-                                } else if probe.handles_image(function) {
-                                    probe.dispatch_image(
-                                        function,
-                                        &mut self.cpu,
-                                        &mut self.memory,
-                                        &mut self.runtime,
-                                        &fs,
-                                    )
-                                } else {
-                                    probe.dispatch(
-                                        function,
-                                        &mut self.cpu,
-                                        &mut self.memory,
-                                        &fs,
-                                        &mut self.runtime,
-                                    )
-                                }
-                            },
-                        )?
-                        .map_err(|error| {
-                            self.runtime.inventory_failure(dll, function);
-                            format!("{name}: {error}")
-                        })?;
-                        self.cpu.work += 1;
-                        self.runtime
-                            .complete_call(dll, function, &args, self.cpu.regs[0]);
-                        if ready {
-                            return Ok(Outcome::NativeMonoRootReady);
-                        }
-                        continue;
-                    }
-                }
                 let control = self
                     .runtime
                     .dispatch_bound(&binding, &mut self.cpu, &mut self.memory)

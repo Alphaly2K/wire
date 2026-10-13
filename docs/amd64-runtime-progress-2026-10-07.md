@@ -33,8 +33,8 @@ SleepConditionVariableSRW。GetSystemTimes 和 Logo 透明混合已修正，保�
 详见 [资源加载性能记录](performance-unity-resource-2026-10-09.md)。
 当前版本逐阶段捕获确认约 2 秒的 Unity Logo 淡入淡出；加载页只有首帧后就遇到 SRW
 未实现错误，不能把它视为沙漏动画或可玩性验收。背景颜色不再列为待修复项。
-原生 Mono 计划已复核，尚未接入或构建；结论与 M1/M2 需要补的边界见
-[Mono 计划复核](native-mono-plan-review-2026-10-09.md)。
+2026-10-14 已撤回后续原生 Mono 实验，保留通用性能优化；当前继续执行原始 guest Mono。
+范围与当前接续见 [撤回记录](mono-native-rollback-2026-10-14.md)。
 下述 pass152 的 SRV 失败是历史检查点，已越过。
 
 AliceToPapa隔离副本的 **pass152 已实际执行398次guest GPU Draw、144次DXGI Present**。
