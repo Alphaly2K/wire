@@ -945,3 +945,43 @@ native closure 在内层 callback checkpoint 之后再写入的情形。SharedSt
 完整 release **597 passed / 8 ignored**，all-target Clippy 与 release build 通过。
 下一步共用原 attribute ownership 和 scoped MonoError，接入 nested checked
 attribute array construction；游戏与 IL2CPP 均不修改。
+
+probe-217 使用最终 snapshot revision 优化，在 **69.94 秒**到达同一组件属性
+构造边界（probe-216 为 124.65 秒）。这是同段诊断等待的对照，尚无完整游戏
+帧率收益数据；加载画面仍为蓝底沙漏首帧。
+
+## 嵌套属性构造和引用字段
+
+嵌套 mono_unity_custom_attrs_construct 与 mono_custom_attrs_get_attr 采用
+prepare / execute / finish：先验证真实 info token、Class capability 和 scoped
+MonoError，再释放 Metadata/Memory/Runtime 借用，执行冻结 Mono 中的原构造器。
+完成时重新核对 callback stack 范围，交回真实 status 和原生结果。Info 使用独立
+Arc lease，guest free 立即撤销其 token，在途构造保留 metadata 到最后一个 lease
+结束；实际 free 恰好一次。成功结果先建立私有 pinned root，再转移到原 attribute
+registry；丢弃或后续类型验证失败均释放 pin。Single getter 的无匹配结果为 NULL。
+
+Attribute[] 仍采用真实 Attribute subtype/SZ header/length 校验和只读 token view。
+嵌套 mono_array_length 和 mono_array_addr_with_size 共用该 view 的已发布身份，
+检查 8B stride、index、lifetime。模块 release **193 passed / 1 ignored**，
+all-target release Clippy（-D warnings）与 release build 通过。
+
+probe-218 在 **72.14 秒**通过原组件创建中的属性构造，返回真实成功数组及单个
+属性对象，继续创建相机和组件。下一处拒绝为 mono_field_get_value 请求引用字段，
+旧 adapter 仅支持 primitive/enum。当前已接入 metadata-derived managed-reference
+field shape：真实 declaring class / field flags / byref / declared reference class
+必须匹配；指针与任意 value storage 仍拒绝。native reference 建立私有 pin，guest
+只接收复用对象、字符串、RuntimeType 或已支持 array/container 协议的 canonical
+token；输出完整校验与 publication 后才写回。GC 验证比较实际 field 与其私有
+root target，NULL 独立处理；重复读取替换旧 pin，cleanup 释放剩余 pin。
+该部分最终验证和下一次窗口结果另记。
+
+以上修改均位于 Mono 桥接和数据身份协议，没有修改 IL2CPP、游戏 IL、冻结 native
+Mono runtime，也没有固定属性类、MethodDef token、Spec 或 Unity 地址。
+
+引用字段批次的模块 release **195 passed / 1 ignored**，完整 release **602 passed /
+8 ignored**，all-target release Clippy 与 release build 通过。probe-219 在 73.10 秒
+运行到 Naninovel resource provider 初始化和后续相机 Render Graph；属性构造与
+引用字段边界已越过。真实 managed 日志发现 CreateFileW P/Invoke 缺失导致本地资源
+枚举异常，以及 JobsUtility.get_ThreadIndexCount 缺失导致 Render Graph error。
+随后发生 native SIGSEGV，下一轮收集原生栈并继续补协议；画面 hash 仍为加载首帧，
+此轮异常退出未保留正常 guard/GPU 汇总。

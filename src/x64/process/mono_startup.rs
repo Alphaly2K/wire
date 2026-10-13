@@ -2640,10 +2640,62 @@ impl Probe {
                 let (width, _) =
                     callbacks::with_owner(memory, runtime, targets, || api.field_width(field))?;
                 memory.check(a[2], width?, super::super::memory::WRITE)?;
-                let (bytes, _) = callbacks::with_owner(memory, runtime, targets, || {
+                let (value, _) = callbacks::with_owner(memory, runtime, targets, || {
                     self.attribute_registry.read_field(api, a[0], field)
                 })?;
-                memory.write(a[2], &bytes?)?;
+                let bytes = match value? {
+                    attributes::FieldValue::Scalar(bytes) => bytes,
+                    attributes::FieldValue::Reference(native) if native.is_null() => {
+                        0u64.to_le_bytes().to_vec()
+                    }
+                    attributes::FieldValue::Reference(native) => {
+                        let reflection = self
+                            .reflection_api
+                            .ok_or("attribute reference before reflection service")?;
+                        let strings = self
+                            .object_api
+                            .ok_or("attribute reference before string service")?;
+                        let (result, _) = callbacks::with_owner(memory, runtime, targets, || {
+                            if reflection.runtime_type(native) {
+                                let rooted = if let Some(roots) = self.instance_api {
+                                    self.reflection_registry.root_type_in(
+                                        reflection,
+                                        roots,
+                                        &mut self.instance_registry,
+                                        native,
+                                    )?
+                                } else {
+                                    self.reflection_registry.root_type(reflection, native)?
+                                };
+                                Ok((rooted.0, Some(rooted.1)))
+                            } else if let Some(roots) = self.instance_api {
+                                let token = self.object_registry.borrow_reference(
+                                    strings,
+                                    roots,
+                                    &mut self.instance_registry,
+                                    native,
+                                )?;
+                                self.publish_container_graph(library, roots, vec![native])?;
+                                Ok((token, None))
+                            } else {
+                                self.object_registry
+                                    .root_string(strings, native)
+                                    .map(|token| (token, None))
+                            }
+                        })?;
+                        let (token, ty) = result?;
+                        if let Some(ty) = ty {
+                            let ty = self
+                                .metadata_registry
+                                .wrap(memory, metadata::Value::Handle(ty, metadata::Kind::Type))?;
+                            self.reflection_registry.publish(memory, token, ty)?;
+                        } else {
+                            self.object_registry.publish_pending(memory)?;
+                        }
+                        token.to_le_bytes().to_vec()
+                    }
+                };
+                memory.write(a[2], &bytes)?;
                 0
             }
             _ => return Err("unadmitted custom-attribute operation".into()),

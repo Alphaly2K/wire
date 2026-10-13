@@ -92,22 +92,24 @@ impl Registry {
         Ok(0)
     }
     pub(super) fn prepare(&self, memory: &Memory, cpu: &Cpu64, address: u64) -> Result<(), String> {
-        if self.live(
+        self.prepare_in(
             memory,
             cpu,
             address,
-            (super::super::STACK, super::super::STACK + 64 * 1024 * 1024),
-        )? != 0
-        {
-            return Err("nonempty MonoError passed to checked operation".into());
-        }
-        Self::stack(
-            memory,
-            cpu,
-            address,
-            WRITE,
             (super::super::STACK, super::super::STACK + 64 * 1024 * 1024),
         )
+    }
+    pub(super) fn prepare_in(
+        &self,
+        memory: &Memory,
+        cpu: &Cpu64,
+        address: u64,
+        bounds: (u64, u64),
+    ) -> Result<(), String> {
+        if self.live(memory, cpu, address, bounds)? != 0 {
+            return Err("nonempty MonoError passed to checked operation".into());
+        }
+        Self::stack(memory, cpu, address, WRITE, bounds)
     }
     pub(super) fn complete(
         &mut self,
@@ -116,7 +118,23 @@ impl Registry {
         address: u64,
         status: u16,
     ) -> Result<(), String> {
-        self.prepare(memory, cpu, address)?;
+        self.complete_in(
+            memory,
+            cpu,
+            address,
+            status,
+            (super::super::STACK, super::super::STACK + 64 * 1024 * 1024),
+        )
+    }
+    pub(super) fn complete_in(
+        &mut self,
+        memory: &mut Memory,
+        cpu: &Cpu64,
+        address: u64,
+        status: u16,
+        bounds: (u64, u64),
+    ) -> Result<(), String> {
+        self.prepare_in(memory, cpu, address, bounds)?;
         if status == 65535 {
             return Err("checked runtime did not produce an error status".into());
         }
@@ -216,6 +234,24 @@ mod tests {
             )
             .is_err());
         let mut hidden = [0; 100];
+        assert!(errors.prepare(&memory, &cpu, address).is_err());
+        errors.prepare_in(&memory, &cpu, address, bounds).unwrap();
+        errors
+            .complete_in(&mut memory, &cpu, address, 7, bounds)
+            .unwrap();
+        assert_eq!(
+            errors
+                .query_in(
+                    &mut memory,
+                    &cpu,
+                    "mono_error_get_error_code",
+                    address,
+                    bounds
+                )
+                .unwrap(),
+            7
+        );
+        assert!(errors.prepare_in(&memory, &cpu, address, bounds).is_err());
         memory.read(address + 4, &mut hidden).unwrap();
         assert_eq!(hidden, [0x5a; 100]);
         errors

@@ -576,6 +576,29 @@ fn execute_scalar_guest_bounded_inner(
                     owner
                         .managed_reentries
                         .set(owner.managed_reentries.get() + 1);
+                } else if matches!(
+                    binding.original_function.as_ref(),
+                    "mono_unity_custom_attrs_construct" | "mono_custom_attrs_get_attr"
+                ) {
+                    let prepared = route
+                        .try_borrow_mut()
+                        .map_err(|_| "nested attributes metadata is already borrowed")?
+                        .prepare_attributes(
+                            &binding.original_function,
+                            &cpu,
+                            &owner.memory.borrow(),
+                            (stack_top - STACK_SLICE, stack_top),
+                        )?;
+                    let constructed = prepared.execute();
+                    route
+                        .try_borrow_mut()
+                        .map_err(|_| "nested attributes completion metadata is already borrowed")?
+                        .finish_attributes(
+                            prepared,
+                            constructed,
+                            &mut cpu,
+                            &mut owner.memory.borrow_mut(),
+                        )?;
                 } else if binding.original_function.as_ref() == "mono_object_get_virtual_method" {
                     let request = route
                         .try_borrow_mut()

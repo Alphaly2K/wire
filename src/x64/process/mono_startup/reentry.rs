@@ -44,6 +44,16 @@ pub(super) struct Metadata<'a> {
     pub(super) rooted_instance: Option<(u64, Object)>,
     pub(super) objects: Option<ObjectRoots<'a>>,
 }
+pub(super) struct AttributeConstruction {
+    request: attributes::ConstructRequest,
+    error: Option<u64>,
+    stack: (u64, u64),
+}
+impl AttributeConstruction {
+    pub(super) fn execute(&self) -> Result<attributes::Constructed, String> {
+        self.request.execute()
+    }
+}
 pub(super) fn handles_allocation(function: &str) -> bool {
     matches!(
         function,
@@ -136,6 +146,75 @@ impl PreparedAllocation {
     }
 }
 impl Metadata<'_> {
+    pub(super) fn prepare_attributes(
+        &mut self,
+        function: &str,
+        cpu: &Cpu64,
+        memory: &Memory,
+        stack: (u64, u64),
+    ) -> Result<AttributeConstruction, String> {
+        memory.read_int(cpu.regs[4], 8)?;
+        let error = (function == "mono_unity_custom_attrs_construct").then_some(cpu.regs[2]);
+        if let Some(error) = error {
+            self.errors.prepare_in(memory, cpu, error, stack)?;
+        } else if function != "mono_custom_attrs_get_attr" {
+            return Err("unknown nested attribute construction operation".into());
+        }
+        let roots = self
+            .objects
+            .as_ref()
+            .ok_or("nested attribute construction has no object service")?;
+        let request = if error.is_some() {
+            roots
+                .attributes
+                .1
+                .prepare_construct(roots.attributes.0, cpu.regs[1])?
+        } else {
+            roots.attributes.1.prepare_get(
+                roots.attributes.0,
+                cpu.regs[1],
+                self.metadata.native(cpu.regs[2], metadata::Kind::Class)?,
+            )?
+        };
+        Ok(AttributeConstruction {
+            request,
+            error,
+            stack,
+        })
+    }
+    pub(super) fn finish_attributes(
+        &mut self,
+        prepared: AttributeConstruction,
+        result: Result<attributes::Constructed, String>,
+        cpu: &mut Cpu64,
+        memory: &mut Memory,
+    ) -> Result<(), String> {
+        if let Some(error) = prepared.error {
+            self.errors.prepare_in(memory, cpu, error, prepared.stack)?;
+        }
+        let roots = self
+            .objects
+            .as_mut()
+            .ok_or("nested attribute completion has no object service")?;
+        let (token, status) = roots
+            .attributes
+            .1
+            .finish_construct(prepared.request, result)?;
+        if prepared.error.is_none() && status != 0 {
+            return Err(format!(
+                "native checked nested attribute getter error={status}"
+            ));
+        }
+        if token != 0 && prepared.error.is_some() {
+            roots.attributes.1.publish_array(memory, token)?;
+        }
+        if let Some(error) = prepared.error {
+            self.errors
+                .complete_in(memory, cpu, error, status, prepared.stack)?;
+        }
+        eprintln!("NATIVE_MONO_NESTED_ATTRIBUTES: array={token:#x}; status={status}; owned-info-lease=true; original-constructors=true");
+        cpu.return_integer(memory, token)
+    }
     pub(super) fn prepare_virtual(
         &mut self,
         cpu: &Cpu64,
@@ -1013,7 +1092,9 @@ impl Metadata<'_> {
                     }
                 }
                 "mono_array_length" => {
-                    if roots.empty_arrays.1.contains(a[0]) {
+                    if roots.attributes.1.contains_array(a[0]) {
+                        roots.attributes.1.array_length(roots.attributes.0, a[0])?
+                    } else if roots.empty_arrays.1.contains(a[0]) {
                         roots.empty_arrays.1.native(roots.empty_arrays.0, a[0])?;
                         0
                     } else {
@@ -1024,12 +1105,18 @@ impl Metadata<'_> {
                         arrays.length(*api, roots.api, roots.roots, a[0])?
                     }
                 }
-                "mono_array_addr_with_size" => roots
-                    .arrays
-                    .as_ref()
-                    .ok_or("nested typed array service absent")?
-                    .1
-                    .address(a[0], a[1], a[2])?,
+                "mono_array_addr_with_size" => {
+                    if roots.attributes.1.contains_array(a[0]) {
+                        roots.attributes.1.array_address(a[0], a[1], a[2])?
+                    } else {
+                        roots
+                            .arrays
+                            .as_ref()
+                            .ok_or("nested typed array service absent")?
+                            .1
+                            .address(a[0], a[1], a[2])?
+                    }
+                }
                 "mono_gc_wbarrier_set_arrayref" => {
                     let (api, arrays) = roots
                         .arrays
@@ -1770,9 +1857,35 @@ impl Metadata<'_> {
                 .objects
                 .as_mut()
                 .ok_or("nested fields have no object service")?;
+            if roots.attributes.1.contains(a[0]) {
+                if function != "mono_field_get_value" {
+                    return Err(
+                        "attribute fields are exposed through read-only embedding operations"
+                            .into(),
+                    );
+                }
+                let width = roots.attributes.0.field_width(field)?;
+                checked_output(memory, cpu, stack, a[2], width)?;
+                let value = roots
+                    .attributes
+                    .1
+                    .read_field(roots.attributes.0, a[0], field)?;
+                let bytes = match value {
+                    attributes::FieldValue::Scalar(bytes) => bytes,
+                    attributes::FieldValue::Reference(native) => {
+                        let token = self.root_reference(native, memory)?;
+                        if !native.is_null() {
+                            self.publish_container_graph(memory, vec![native])?;
+                        }
+                        token.to_le_bytes().to_vec()
+                    }
+                };
+                memory.write(a[2], &bytes)?;
+                return cpu.return_integer(memory, 0);
+            }
             roots.roots.sync_from_guest(roots.api, memory)?;
             roots.fields.sync(roots.api, roots.roots)?;
-            if !roots.attributes.1.contains(a[0]) && !roots.fields.has_field(a[0], field) {
+            if !roots.fields.has_field(a[0], field) {
                 let native = roots.roots.native(roots.api, a[0])?;
                 let class = roots.roots.class(roots.api, a[0])?;
                 let specs = field_layouts::explicit_field(
@@ -1803,24 +1916,13 @@ impl Metadata<'_> {
                     .store_value(roots.api, roots.roots, memory, a[0], field, a[2])?;
                 None
             } else {
-                let bytes = if roots.attributes.1.contains(a[0]) {
-                    roots
-                        .attributes
-                        .1
-                        .read_field(roots.attributes.0, a[0], field)?
-                } else {
-                    roots.fields.read(a[0], field)?
-                };
+                let bytes = roots.fields.read(a[0], field)?;
                 checked_output(memory, cpu, stack, a[2], bytes.len())?;
                 Some(bytes)
             };
-            let references = if roots.attributes.1.contains(a[0]) {
-                Vec::new()
-            } else {
-                roots
-                    .fields
-                    .native_references(roots.api, roots.roots, a[0])?
-            };
+            let references = roots
+                .fields
+                .native_references(roots.api, roots.roots, a[0])?;
             // A newly requested reference field may point at a typed array or
             // serializable child. Publish that admitted graph before its token
             // reaches an engine embedding caller which can read it directly.
