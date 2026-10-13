@@ -1,9 +1,15 @@
 # Watari-Is-a-Runtime-Environment (wire)
 
-非 JIT x86 解释 + Win32 兼容层可行性验证（spike）。目标：在 Apple Silicon（最终 iOS）上
-运行真实 VN 引擎的原始 32 位 Windows 二进制。许可证 LGPL-2.1（与 Wine 一致，见 LICENSE）。
+非 JIT x86/AMD64 解释 + Win32 兼容层。目标：在 Apple Silicon（最终 iOS）上运行
+Windows VN 引擎的原始二进制。许可证 LGPL-2.1（与 Wine 一致，见 LICENSE）。
 
-## 里程碑状态
+当前能力、限制和验证命令见 [项目状态](docs/status.md)，架构与历史记录见
+[文档入口](docs/index.md)。解释执行是主路径；原生 Mono 替换实验已撤回。
+AMD64 启动使用实验性 `wire probe64 --startup`，尚未验收完整游戏可玩性。
+
+## 早期里程碑记录
+
+以下为 M0/M1/M2 初期记录，保留其历史上下文；最新进度以 [项目状态](docs/status.md) 为准。
 
 - [x] **M0** PE 装载器 + API 调用日志
 - [x] **M1** x86 解释器核心 + 差分测试（Unicorn 参照，当前 34 族全绿）
