@@ -145,6 +145,26 @@ impl Registry {
         }
         Ok(entry.native)
     }
+    pub(super) fn adopt_early_roots(
+        &self,
+        api: Api,
+        root_api: super::instances::Api,
+        roots: &mut super::instances::Registry,
+    ) -> Result<(), String> {
+        if self.released || self.retired {
+            return Err("early empty array adoption after retirement".into());
+        }
+        let mut pending = Vec::with_capacity(self.entries.len());
+        for (&token, entry) in &self.entries {
+            let native = self.native(api, token)?;
+            Self::validate(api, native, entry.class)?;
+            pending.push((token, native));
+        }
+        for (token, native) in pending {
+            roots.adopt_empty_array(root_api, token, native)?;
+        }
+        Ok(())
+    }
     pub(super) fn publish(&mut self, memory: &mut Memory, token: u64) -> Result<(), String> {
         if !self.contains(token) {
             return Err("empty array publication after retirement".into());
@@ -228,6 +248,53 @@ mod tests {
     }
     unsafe extern "C" fn length(p: Object) -> usize {
         unsafe { p.cast::<u8>().add(24).cast::<usize>().read_unaligned() }
+    }
+    #[test]
+    fn bootstrap_empty_arrays_reuse_graph_identity_and_reject_changed_headers() {
+        let api = Api {
+            new,
+            strong,
+            target,
+            free,
+            class,
+            array_class,
+            length,
+        };
+        let root_api = super::super::instances::tests::identity_api();
+        let mut raw = [[0usize; 4]; 2];
+        let mut registry = Registry::default();
+        let mut roots = super::super::instances::Registry::default();
+        let tokens: Vec<_> = raw
+            .iter_mut()
+            .map(|bytes| {
+                registry
+                    .root_empty(api, bytes.as_mut_ptr().cast(), 0x11usize as Object)
+                    .unwrap()
+            })
+            .collect();
+        raw[1][3] = 1;
+        assert!(registry
+            .adopt_early_roots(api, root_api, &mut roots)
+            .is_err());
+        assert_eq!(roots.count(), 0);
+        raw[1][3] = 0;
+        registry
+            .adopt_early_roots(api, root_api, &mut roots)
+            .unwrap();
+        registry
+            .adopt_early_roots(api, root_api, &mut roots)
+            .unwrap();
+        for (&token, bytes) in tokens.iter().zip(&mut raw) {
+            let native = bytes.as_mut_ptr().cast();
+            assert_eq!(roots.borrow(root_api, native).unwrap(), token);
+            assert_eq!(roots.native(root_api, token).unwrap(), native);
+        }
+        roots.release(root_api);
+        registry.release(api);
+        assert!(registry
+            .adopt_early_roots(api, root_api, &mut roots)
+            .is_err());
+        assert_eq!(ROOTS.with(Cell::get), 0);
     }
     #[test]
     fn empty_array_roots_check_real_header_and_revoke_only_the_readonly_view() {

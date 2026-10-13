@@ -2,6 +2,9 @@
 //! slots are copied; padding is owned zero bytes, never native heap contents.
 use super::{instances, Object};
 use std::{ffi::CStr, ptr};
+pub(super) const MAX_VALUE_BYTES: usize = 4096;
+mod numeric;
+pub(super) use numeric::NumericLayout;
 #[derive(Clone, Copy)]
 pub(super) enum Shape {
     Scalar { width: usize, boolean: bool },
@@ -43,7 +46,7 @@ impl Layout {
     /// Collapse those views only when every byte is ordinary numeric data;
     /// reference/Boolean/pointer overlaps never enter this raw-byte protocol.
     fn canonicalize_scalar_union(&mut self, explicit: bool) -> Result<(), String> {
-        if !explicit || !self.value || !(1..=256).contains(&self.width) {
+        if !explicit || !self.value || !(1..=MAX_VALUE_BYTES).contains(&self.width) {
             return Err("overlapping value requires explicit scalar layout".into());
         }
         let mut covered = vec![false; self.width];
@@ -120,7 +123,7 @@ impl Layout {
     }
     pub(super) fn check(&self) -> Result<(), String> {
         if self.class.is_null()
-            || !(1..=256).contains(&self.width)
+            || !(1..=MAX_VALUE_BYTES).contains(&self.width)
             || !matches!(self.alignment, 1 | 2 | 4 | 8)
             || !self.width.is_multiple_of(self.alignment)
             || self.slots.is_empty()
@@ -133,7 +136,7 @@ impl Layout {
             let width = slot.shape.width();
             let alignment = slot.shape.alignment();
             if width == 0
-                || width > 256
+                || width > MAX_VALUE_BYTES
                 || !matches!(alignment, 1 | 2 | 4 | 8)
                 || alignment > self.alignment
                 || !width.is_multiple_of(alignment)
@@ -268,6 +271,8 @@ pub(super) struct Api {
     enum_base: unsafe extern "C" fn(Object) -> Object,
     class_name: unsafe extern "C" fn(Object) -> *const libc::c_char,
     field_name: unsafe extern "C" fn(Object) -> *const libc::c_char,
+    fixed_buffer: unsafe extern "C" fn(u32, Object, Object, *mut Object, *mut u32) -> i32,
+    unsafe_value: unsafe extern "C" fn(u32, Object) -> i32,
     owned_image: Object,
 }
 pub(super) fn enum_width(kind: u32) -> Option<usize> {
@@ -350,6 +355,14 @@ impl Api {
                 "mono_field_get_name",
                 unsafe extern "C" fn(Object) -> *const libc::c_char
             ),
+            fixed_buffer: sym!(
+                "wire_mono_field_fixed_buffer",
+                unsafe extern "C" fn(u32, Object, Object, *mut Object, *mut u32) -> i32
+            ),
+            unsafe_value: sym!(
+                "wire_mono_class_is_unsafe_value",
+                unsafe extern "C" fn(u32, Object) -> i32
+            ),
             owned_image,
         })
     }
@@ -386,10 +399,13 @@ impl Api {
             return Err("value layout requires an owned metadata value class".into());
         }
         self.closed.concrete(class)?;
+        if unsafe { (self.unsafe_value)(1, class) } != 0 {
+            return Err("unsafe value storage requires its declaring fixed-buffer protocol".into());
+        }
         path.push(class);
         let mut alignment = 0;
         let width = unsafe { (self.size)(class, &mut alignment) };
-        if !(1..=256).contains(&width) {
+        if !(1..=MAX_VALUE_BYTES as i32).contains(&width) {
             return Err("value layout exceeds bounded payload".into());
         }
         let mut layout = Layout {
@@ -428,6 +444,44 @@ impl Api {
                 return Err("value field points into native object header".into());
             }
             let offset = (offset - 16) as usize;
+            let mut fixed_type = ptr::null_mut();
+            let mut fixed_count = 0;
+            match unsafe { (self.fixed_buffer)(1, class, field, &mut fixed_type, &mut fixed_count) }
+            {
+                0 if fixed_type.is_null() && fixed_count == 0 => {}
+                1 => {
+                    if !matches!(kind, 0x11 | 0x15)
+                        || fixed_type.is_null()
+                        || unsafe { (self.byref)(fixed_type) } != 0
+                    {
+                        return Err(
+                            "fixed-buffer attribute must describe inline value storage".into()
+                        );
+                    }
+                    let storage = unsafe { (self.type_class)(ty) };
+                    let child =
+                        self.fixed_storage(storage, fixed_type, fixed_count as usize, images)?;
+                    let end = offset
+                        .checked_add(child.width)
+                        .ok_or("fixed-buffer field range overflow")?;
+                    overlap |= ranges
+                        .iter()
+                        .any(|&(start, stop)| offset < stop && start < end);
+                    ranges.push((offset, end));
+                    if let Ok((width, alignment)) = child.scalar_inline() {
+                        layout.slots.push(Slot {
+                            nested: false,
+                            offset,
+                            field,
+                            shape: Shape::Inline { width, alignment },
+                        });
+                    } else {
+                        layout.append_nested(offset, child)?;
+                    }
+                    continue;
+                }
+                _ => return Err("fixed-buffer metadata query rejected".into()),
+            }
             if matches!(kind, 0x11 | 0x15) {
                 let target = unsafe { (self.type_class)(ty) };
                 if target.is_null() {
@@ -527,6 +581,92 @@ impl Api {
             layout.check()?;
         }
         path.pop();
+        Ok(layout)
+    }
+    fn fixed_storage(
+        self,
+        class: Object,
+        element: Object,
+        count: usize,
+        images: &[Object],
+    ) -> Result<Layout, String> {
+        if class.is_null()
+            || !(self.owns(class) || images.contains(&unsafe { (self.image)(class) }))
+            || unsafe { (self.value)(class) } == 0
+            || unsafe { (self.unsafe_value)(1, class) } != 1
+            || !(1..=4096).contains(&count)
+        {
+            return Err("fixed-buffer storage class/lifetime/count invalid".into());
+        }
+        self.closed.concrete(class)?;
+        let shape = scalar(unsafe { (self.kind)(element) })
+            .ok_or("fixed-buffer element is not a numeric primitive")?;
+        let width = count
+            .checked_mul(shape.width())
+            .filter(|n| *n <= MAX_VALUE_BYTES)
+            .ok_or("fixed-buffer byte length outside bound")?;
+        let mut alignment = 0;
+        if unsafe { (self.size)(class, &mut alignment) } != width as i32
+            || alignment as usize != shape.alignment()
+        {
+            return Err(
+                "fixed-buffer actual storage size/alignment differs from declaration".into(),
+            );
+        }
+        let mut iterator = ptr::null_mut();
+        let mut leaf = None;
+        loop {
+            let field = unsafe { (self.fields)(class, &mut iterator) };
+            if field.is_null() {
+                break;
+            }
+            if unsafe { (self.flags)(field) } & (0x10 | 0x40) != 0 {
+                continue;
+            }
+            let ty = unsafe { (self.ty)(field) };
+            if leaf.is_some()
+                || unsafe { (self.parent)(field) } != class
+                || unsafe { (self.offset)(field) } != 16
+                || ty.is_null()
+                || unsafe { (self.byref)(ty) } != 0
+                || unsafe { (self.kind)(ty) } != unsafe { (self.kind)(element) }
+            {
+                return Err("fixed-buffer actual element field differs from declaration".into());
+            }
+            leaf = Some(field);
+        }
+        let field = leaf.ok_or("fixed-buffer storage has no declared element field")?;
+        let slots = if matches!(shape, Shape::Scalar { boolean: true, .. }) {
+            if count > 64 {
+                return Err("fixed Boolean buffer exceeds typed slot bound".into());
+            }
+            (0..count)
+                .map(|offset| Slot {
+                    nested: true,
+                    offset,
+                    field,
+                    shape,
+                })
+                .collect()
+        } else {
+            vec![Slot {
+                nested: true,
+                offset: 0,
+                field,
+                shape: Shape::Inline {
+                    width,
+                    alignment: alignment as usize,
+                },
+            }]
+        };
+        let layout = Layout {
+            class,
+            width,
+            alignment: alignment as usize,
+            slots,
+            value: true,
+        };
+        layout.check()?;
         Ok(layout)
     }
 }
@@ -642,6 +782,22 @@ mod tests {
     unsafe extern "C" fn test_name(_: Object) -> *const libc::c_char {
         c"test".as_ptr()
     }
+    unsafe extern "C" fn no_fixed(
+        _: u32,
+        _: Object,
+        _: Object,
+        element: *mut Object,
+        count: *mut u32,
+    ) -> i32 {
+        unsafe {
+            *element = ptr::null_mut();
+            *count = 0;
+        }
+        0
+    }
+    unsafe extern "C" fn safe_value(_: u32, _: Object) -> i32 {
+        0
+    }
     fn test_api() -> Api {
         Api {
             closed: super::super::closed_types::tests::api(),
@@ -661,8 +817,117 @@ mod tests {
             enum_base: test_type,
             class_name: test_name,
             field_name: test_name,
+            fixed_buffer: no_fixed,
+            unsafe_value: safe_value,
             owned_image: 1usize as Object,
         }
+    }
+    #[test]
+    fn fixed_storage_expands_all_declared_elements_and_rejects_standalone_or_mismatched_storage() {
+        unsafe extern "C" fn size(class: Object, alignment: *mut u32) -> i32 {
+            unsafe {
+                *alignment = 4;
+            }
+            if class as usize == 10 {
+                100
+            } else {
+                96
+            }
+        }
+        unsafe extern "C" fn unsafe_value(_: u32, class: Object) -> i32 {
+            i32::from(class as usize == 20)
+        }
+        unsafe extern "C" fn fields(class: Object, iterator: *mut Object) -> Object {
+            let next = unsafe { *iterator } as usize + 1;
+            unsafe {
+                *iterator = next as Object;
+            }
+            match (class as usize, next) {
+                (10, 1) => 1usize as Object,
+                (10, 2) => 3usize as Object,
+                (20, 1) => 2usize as Object,
+                _ => ptr::null_mut(),
+            }
+        }
+        unsafe extern "C" fn parent(field: Object) -> Object {
+            (if field as usize == 2 { 20 } else { 10 }) as Object
+        }
+        unsafe extern "C" fn ty(field: Object) -> Object {
+            field
+        }
+        unsafe extern "C" fn kind(ty: Object) -> u32 {
+            match ty as usize {
+                1 => 0x11,
+                3 => 2,
+                _ => 0xc,
+            }
+        }
+        unsafe extern "C" fn target(_: Object) -> Object {
+            20usize as Object
+        }
+        unsafe extern "C" fn offset(field: Object) -> i32 {
+            if field as usize == 3 {
+                112
+            } else {
+                16
+            }
+        }
+        unsafe extern "C" fn fixed(
+            _: u32,
+            _: Object,
+            field: Object,
+            element: *mut Object,
+            count: *mut u32,
+        ) -> i32 {
+            unsafe {
+                *element = if field as usize == 1 {
+                    4usize as Object
+                } else {
+                    ptr::null_mut()
+                };
+                *count = if field as usize == 1 { 24 } else { 0 };
+            }
+            i32::from(field as usize == 1)
+        }
+        let api = Api {
+            value: test_all_value,
+            size,
+            unsafe_value,
+            fields,
+            parent,
+            ty,
+            kind,
+            type_class: target,
+            offset,
+            fixed_buffer: fixed,
+            ..test_api()
+        };
+        let layout = api.layout(10usize as Object).unwrap();
+        assert_eq!(layout.slots[0].shape.width(), 96);
+        let codec = layout.numeric().unwrap();
+        let mut source = vec![0xa5; 100];
+        source[96] = 1;
+        let bytes = codec.snapshot(&source).unwrap();
+        assert_eq!(&bytes[..96], &source[..96]);
+        assert_eq!(&bytes[96..], &[1, 0, 0, 0]);
+        source[96] = 2;
+        assert!(codec.snapshot(&source).is_err());
+        assert!(api.layout(20usize as Object).is_err());
+        assert!(api
+            .fixed_storage(20usize as Object, 4usize as Object, 23, &[])
+            .is_err());
+        assert!(api
+            .fixed_storage(20usize as Object, 3usize as Object, 96, &[])
+            .is_err());
+        assert!(api
+            .fixed_storage(20usize as Object, 4usize as Object, 4097, &[])
+            .is_err());
+        assert!(Api {
+            unsafe_value: safe_value,
+            ..api
+        }
+        .fixed_storage(20usize as Object, 4usize as Object, 24, &[])
+        .is_err());
     }
     unsafe extern "C" fn union_size(_: Object, alignment: *mut u32) -> i32 {
         unsafe { *alignment = 4 };

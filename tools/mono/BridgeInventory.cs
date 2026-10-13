@@ -82,10 +82,12 @@ class BridgeInventory {
             }
             if (Delegate(definition)) return "delegate";
             if (!definition.IsValueType) return "managed-reference";
+            if (definition.CustomAttributes.Any(attribute => attribute.AttributeType.FullName == "System.Runtime.CompilerServices.UnsafeValueTypeAttribute"))
+                return "unresolved-unsafe-storage";
             var fields = new List<string>();
             int length = 0;
             foreach (var field in definition.Fields.Where(field => !field.IsStatic)) {
-                var shape = field.Name + "=" + Shape(Close(field.FieldType, type), owned, new HashSet<string>(seen), depth + 1);
+                var shape = field.Name + "=" + FieldShape(field, type, owned, new HashSet<string>(seen), depth + 1);
                 length += shape.Length + 1;
                 if (length > 8192) return "recursive-or-deep";
                 fields.Add(shape);
@@ -96,6 +98,20 @@ class BridgeInventory {
     static bool Scalar(string shape) {
         if (shape.StartsWith("enum:")) shape = shape.Substring(5);
         return new[] {"void", "bool", "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "f32", "f64"}.Contains(shape);
+    }
+    static string FieldShape(FieldDefinition field, TypeReference owner, HashSet<string> owned, HashSet<string> seen, int depth) {
+        var attributes = field.CustomAttributes.Where(attribute => attribute.AttributeType.FullName == "System.Runtime.CompilerServices.FixedBufferAttribute").ToArray();
+        if (attributes.Length == 0) return Shape(Close(field.FieldType, owner), owned, seen, depth);
+        try {
+            if (attributes.Length != 1 || attributes[0].ConstructorArguments.Count != 2 || attributes[0].HasFields || attributes[0].HasProperties)
+                return "unresolved-fixed-buffer";
+            var element = attributes[0].ConstructorArguments[0].Value as TypeReference;
+            int count = (int)attributes[0].ConstructorArguments[1].Value;
+            if (element == null || count <= 0 || count > 4096) return "unresolved-fixed-buffer";
+            var shape = Shape(element, owned, seen, depth + 1);
+            if (!Scalar(shape) || shape == "void" || shape.StartsWith("enum:")) return "unresolved-fixed-buffer";
+            return "fixed[" + count + "]:" + shape;
+        } catch { return "unresolved-fixed-buffer"; }
     }
     static void Row(StreamWriter stream, params string[] cells) {
         stream.WriteLine(String.Join("\t", cells.Select(Safe).ToArray()));
@@ -173,7 +189,8 @@ class BridgeInventory {
                             }
                         } else if (field != null) {
                             seed(field.DeclaringType); seed(field.FieldType);
-                            shape = Shape(Close(field.FieldType, field.DeclaringType), owned, new HashSet<string>(), 0);
+                            try { shape = FieldShape(field.Resolve(), field.DeclaringType, owned, new HashSet<string>(), 0); }
+                            catch { shape = "unresolved"; }
                         } else if (operandType != null) {
                             seed(operandType);
                             shape = Shape(operandType, owned, new HashSet<string>(), 0);
@@ -230,7 +247,7 @@ class BridgeInventory {
                 if (definition.BaseType != null) queue.Enqueue(Tuple.Create(Close(definition.BaseType, type), item.Item2 + 1));
                 foreach (var field in definition.Fields) {
                     var actual = Close(field.FieldType, type);
-                    var shape = Shape(actual, owned, new HashSet<string>(), 0);
+                    var shape = FieldShape(field, type, owned, new HashSet<string>(), 0);
                     bool selected = !field.IsStatic && !field.IsLiteral && !field.IsInitOnly && !field.IsNotSerialized
                         && (field.IsPublic || Attribute(field, "UnityEngine.SerializeField") || Attribute(field, "UnityEngine.SerializeReference"));
                     Row(fields, file, type.FullName, definition.FullName, field.Name,

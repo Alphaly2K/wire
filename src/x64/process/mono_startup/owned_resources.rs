@@ -1,7 +1,9 @@
 //! Owned engine resources share typed, never-reused identities and owner-thread
 //! release. Their ordinary methods use the metadata-derived ABI pool. These
 //! handles remain separate from UnityEngine.Object and borrowed render contexts.
-use super::{bindings, callbacks, engine_objects, managed_calls, Object};
+use super::{
+    animation, bindings, callbacks, engine_objects, logging, managed_calls, value_layout, Object,
+};
 use std::{
     collections::BTreeMap,
     ffi::{CStr, CString},
@@ -46,28 +48,51 @@ const POLICIES: &[(&CStr, &CStr, &CStr, &CStr)] = &[
         c"Internal_Create",
         c"Internal_Destroy",
     ),
+    (
+        c"UnityEngine",
+        c"AnimationCurve",
+        c"Internal_Create_Injected",
+        c"Internal_Destroy",
+    ),
 ];
+#[derive(Clone, Copy)]
+struct SpanLayout {
+    stride: usize,
+    alignment: usize,
+}
 struct Binding {
     class: usize,
     converter: usize,
     create: u64,
     release: u64,
     label: String,
+    input: Option<SpanLayout>,
+    bootstrap_curves: bool,
 }
 static BINDING: OnceLock<Vec<Binding>> = OnceLock::new();
-const CREATE_ADAPTERS: [Object; 5] = [
+const CREATE_ADAPTERS: [Object; 6] = [
     create_resource::<0> as Object,
     create_resource::<1> as Object,
     create_resource::<2> as Object,
     create_resource::<3> as Object,
     create_resource::<4> as Object,
+    create_resource::<5> as Object,
 ];
-const RELEASE_ADAPTERS: [Object; 5] = [
+const SPAN_ADAPTERS: [Object; 6] = [
+    create_span_resource::<0> as Object,
+    create_span_resource::<1> as Object,
+    create_span_resource::<2> as Object,
+    create_span_resource::<3> as Object,
+    create_span_resource::<4> as Object,
+    create_span_resource::<5> as Object,
+];
+const RELEASE_ADAPTERS: [Object; 6] = [
     release_resource::<0> as Object,
     release_resource::<1> as Object,
     release_resource::<2> as Object,
     release_resource::<3> as Object,
     release_resource::<4> as Object,
+    release_resource::<5> as Object,
 ];
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
@@ -303,12 +328,36 @@ pub(super) fn install(
         if class.is_null() {
             continue;
         }
-        let create = unsafe { method(class, factory.as_ptr(), 0) };
+        let curve = label == c"AnimationCurve" && namespace == c"UnityEngine";
+        let create = unsafe { method(class, factory.as_ptr(), i32::from(curve)) };
         let release = unsafe { method(class, destructor.as_ptr(), 1) };
         if create.is_null() || release.is_null() {
             continue;
         }
-        api.fixed_typed_icall(create, class, &[(0x18, intptr, false)], images)?;
+        let input = if curve {
+            let span = unsafe {
+                find(
+                    core,
+                    c"UnityEngine.Bindings".as_ptr(),
+                    c"ManagedSpanWrapper".as_ptr(),
+                )
+            };
+            let keyframe = unsafe { find(core, c"UnityEngine".as_ptr(), c"Keyframe".as_ptr()) };
+            logging::validate_span_layout(library, span)?;
+            let (stride, alignment) = value_layout::Api::load(library, core)?
+                .layout_in(keyframe, images)?
+                .scalar_inline()?;
+            api.fixed_typed_icall(
+                create,
+                class,
+                &[(0x18, intptr, false), (0x11, span, true)],
+                images,
+            )?;
+            Some(SpanLayout { stride, alignment })
+        } else {
+            api.fixed_typed_icall(create, class, &[(0x18, intptr, false)], images)?;
+            None
+        };
         api.fixed_typed_icall(
             release,
             class,
@@ -317,7 +366,11 @@ pub(super) fn install(
         )?;
         // Existing lifecycle adapters own their own token protocol. Never mix
         // their fields with this registry or replace half of a lifecycle pair.
-        if !unsafe { lookup(create) }.is_null() || !unsafe { lookup(release) }.is_null() {
+        let create_adapter = unsafe { lookup(create) };
+        let release_adapter = unsafe { lookup(release) };
+        let bootstrap_curves =
+            curve && animation::legacy_lifecycle(create_adapter, release_adapter);
+        if (!create_adapter.is_null() || !release_adapter.is_null()) && !bootstrap_curves {
             continue;
         }
         let pointer = unsafe { field(class, c"m_Ptr".as_ptr()) };
@@ -387,8 +440,17 @@ pub(super) fn install(
             create: create_target?,
             release: release_target?,
             label: owner,
+            input,
+            bootstrap_curves,
         });
-        registrations.push((create_name, CREATE_ADAPTERS[slot]));
+        registrations.push((
+            create_name,
+            if input.is_some() {
+                SPAN_ADAPTERS[slot]
+            } else {
+                CREATE_ADAPTERS[slot]
+            },
+        ));
         registrations.push((release_name, RELEASE_ADAPTERS[slot]));
     }
     BINDING
@@ -407,6 +469,18 @@ pub(super) fn pointer(token: usize, class: usize) -> Result<u64, String> {
         .get()
         .and_then(|bindings| bindings.iter().position(|b| b.class == class))
         .ok_or("owned resource class not installed")?;
+    if BINDING.get().unwrap()[kind].bootstrap_curves {
+        if let Some(pointer) = animation::legacy_pointer(token as u64) {
+            state(|s| {
+                s.owner()?;
+                if s.closing {
+                    return Err("bootstrap curve use during shutdown".into());
+                }
+                Ok(())
+            })?;
+            return engine_objects::engine_pointer(pointer as usize);
+        }
+    }
     let record = state(|s| s.live(token as u64, kind))?;
     engine_objects::engine_pointer(record.pointer as usize)
 }
@@ -424,73 +498,150 @@ fn checked<T>(action: impl FnOnce() -> Result<T, String>) -> T {
     }
 }
 unsafe extern "C" fn create_resource<const KIND: usize>() -> usize {
-    checked(|| {
-        state(|s| {
-            s.owner()?;
-            if s.closing {
-                return Err("owned resource creation during shutdown".into());
-            }
-            Ok(())
-        })?;
-        let b = BINDING
-            .get()
-            .and_then(|b| b.get(KIND))
-            .ok_or("owned resource creation absent")?;
-        let pointer = callbacks::guest_arguments(b.create, &[])?;
-        if pointer == 0 {
-            return Ok(0);
+    checked(|| create_owned(KIND, None))
+}
+unsafe extern "C" fn create_span_resource<const KIND: usize>(span: *const logging::Span) -> usize {
+    checked(|| unsafe { create_span_owned(KIND, span) })
+}
+unsafe fn create_span_owned(kind: usize, span: *const logging::Span) -> Result<usize, String> {
+    state(|s| {
+        s.owner()?;
+        if s.closing {
+            return Err("owned resource creation during shutdown".into());
         }
-        engine_objects::engine_pointer(pointer as usize)?;
-        let token = match state(|s| s.insert(pointer, KIND)) {
-            Ok(token) => token,
-            Err(error) => {
-                // A duplicate engine result belongs to an existing live
-                // identity. Releasing it would invalidate that owner.
-                if state(|s| {
-                    Ok(!s
-                        .records
-                        .values()
-                        .any(|r| r.pointer == pointer && r.phase != Phase::Released))
-                })? {
-                    callbacks::guest_arguments(b.release, &[pointer])?;
-                }
-                return Err(error);
+        Ok(())
+    })?;
+    let binding = BINDING
+        .get()
+        .and_then(|b| b.get(kind))
+        .ok_or("resource span binding absent")?;
+    let layout = binding
+        .input
+        .ok_or("resource factory has no span protocol")?;
+    let (count, bytes) = unsafe { owned_numeric_span(span, layout) }?;
+    create_owned(kind, Some((count, bytes)))
+}
+/// mono_add_internal_call does not invalidate already compiled managed call
+/// sites. The verified bootstrap pair forwards those cached entries here once
+/// the common lifecycle has been installed, without mutating executable code.
+pub(super) unsafe fn cached_span_factory(
+    span: *const logging::Span,
+) -> Option<Result<usize, String>> {
+    let kind = BINDING.get()?.iter().position(|b| b.bootstrap_curves)?;
+    Some(unsafe { create_span_owned(kind, span) })
+}
+pub(super) fn cached_release(token: usize) -> Option<Result<(), String>> {
+    let kind = BINDING.get()?.iter().position(|b| b.bootstrap_curves)?;
+    Some(release_owned(kind, token))
+}
+unsafe fn owned_numeric_span(
+    span: *const logging::Span,
+    layout: SpanLayout,
+) -> Result<(usize, Vec<u8>), String> {
+    if span.is_null() || !(span as usize).is_multiple_of(8) {
+        return Err("numeric resource requires an aligned native span".into());
+    }
+    let span = unsafe { span.read() };
+    let count = usize::try_from(span.length).map_err(|_| "negative numeric span count")?;
+    let bytes = count
+        .checked_mul(layout.stride)
+        .ok_or("numeric span byte size overflow")?;
+    if count > 4096
+        || bytes > 0x20000
+        || (count > 0
+            && (span.begin as usize <= 1
+                || !(span.begin as usize).is_multiple_of(layout.alignment)))
+    {
+        return Err("numeric resource span pointer/count/layout mismatch".into());
+    }
+    let data = if count == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(span.begin.cast::<u8>(), bytes) }.to_vec()
+    };
+    Ok((count, data))
+}
+fn create_owned(kind: usize, input: Option<(usize, Vec<u8>)>) -> Result<usize, String> {
+    state(|s| {
+        s.owner()?;
+        if s.closing {
+            return Err("owned resource creation during shutdown".into());
+        }
+        Ok(())
+    })?;
+    let b = BINDING
+        .get()
+        .and_then(|b| b.get(kind))
+        .ok_or("owned resource creation absent")?;
+    let pointer = match (b.input, input) {
+        (None, None) => callbacks::guest_arguments(b.create, &[])?,
+        (Some(layout), Some((count, bytes))) => {
+            callbacks::guest_numeric_resource_span(b.create, count, layout.stride, &bytes)?
+        }
+        _ => return Err("owned resource factory input protocol mismatch".into()),
+    };
+    if pointer == 0 {
+        return Ok(0);
+    }
+    engine_objects::engine_pointer(pointer as usize)?;
+    let token = match state(|s| s.insert(pointer, kind)) {
+        Ok(token) => token,
+        Err(error) => {
+            // A duplicate engine result belongs to an existing live
+            // identity. Releasing it would invalidate that owner.
+            if state(|s| {
+                Ok(!s
+                    .records
+                    .values()
+                    .any(|r| r.pointer == pointer && r.phase != Phase::Released))
+            })? {
+                callbacks::guest_arguments(b.release, &[pointer])?;
             }
-        };
-        eprintln!(
-            "NATIVE_MONO_OWNED_RESOURCE_CREATED: class={}; token={token:#x}; original-engine=true",
-            b.label
-        );
-        Ok(token as usize)
-    })
+            return Err(error);
+        }
+    };
+    eprintln!(
+        "NATIVE_MONO_OWNED_RESOURCE_CREATED: class={}; token={token:#x}; original-engine=true",
+        b.label
+    );
+    Ok(token as usize)
 }
 unsafe extern "C" fn release_resource<const KIND: usize>(token: usize) {
-    checked(|| {
-        if token == 0 {
-            return Ok(());
-        }
-        if !callbacks::has_owner() {
-            return state(|s| {
-                s.queue(
-                    token as u64,
-                    KIND,
-                    super::unsafe_buffers::actual_finalizer_scope(),
-                )
-            });
-        }
-        // Quiescence released these exact identities while VM/finalizer routes
-        // were still active. Late shutdown callbacks may retire their fields.
-        if state(|s| {
-            s.owner()?;
-            Ok(s.closing
-                && s.records
-                    .get(&(token as u64))
-                    .is_some_and(|r| r.kind == KIND && r.phase == Phase::Released))
-        })? {
-            return Ok(());
-        }
-        release(token as u64, Some(KIND))
-    });
+    checked(|| release_owned(KIND, token));
+}
+fn release_owned(kind: usize, token: usize) -> Result<(), String> {
+    if token == 0 {
+        return Ok(());
+    }
+    let binding = BINDING
+        .get()
+        .and_then(|b| b.get(kind))
+        .ok_or("resource release binding absent")?;
+    if binding.bootstrap_curves && animation::legacy_pointer(token as u64).is_some() {
+        state(|s| s.owner())?;
+        return animation::release_legacy(token as u64);
+    }
+    if !callbacks::has_owner() {
+        return state(|s| {
+            s.queue(
+                token as u64,
+                kind,
+                super::unsafe_buffers::actual_finalizer_scope(),
+            )
+        });
+    }
+    // Quiescence released these exact identities while VM/finalizer routes
+    // were still active. Late shutdown callbacks may retire their fields.
+    if state(|s| {
+        s.owner()?;
+        Ok(s.closing
+            && s.records
+                .get(&(token as u64))
+                .is_some_and(|r| r.kind == kind && r.phase == Phase::Released))
+    })? {
+        return Ok(());
+    }
+    release(token as u64, Some(kind))
 }
 fn release(token: u64, expected: Option<usize>) -> Result<(), String> {
     let record = state(|s| {
@@ -567,6 +718,7 @@ pub(super) fn report() -> String {
         for (class, marker) in [
             ("UnityEngine.Rendering.CommandBuffer", "command-buffers"),
             ("UnityEngine.MaterialPropertyBlock", "material-property-blocks"),
+            ("UnityEngine.AnimationCurve", "animation-curves"),
         ] {
             let kind = BINDING.get().unwrap().iter().position(|b| b.label == class);
             let records: Vec<_> = s.records.values().filter(|r| Some(r.kind) == kind).collect();
@@ -578,6 +730,42 @@ pub(super) fn report() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn numeric_span_owns_input_bytes_and_rejects_unaligned_or_oversized_pinned_ranges() {
+        let mut input = [0x3f800000u32, 0x40000000];
+        let mut span = logging::Span {
+            begin: input.as_ptr().cast(),
+            length: 2,
+        };
+        let layout = SpanLayout {
+            stride: 4,
+            alignment: 4,
+        };
+        let (count, bytes) = unsafe { owned_numeric_span(&span, layout) }.unwrap();
+        input.fill(0);
+        assert_eq!(count, 2);
+        assert_eq!(bytes, [0, 0, 128, 63, 0, 0, 0, 64]);
+        span.begin = unsafe { input.as_ptr().cast::<u8>().add(1).cast() };
+        assert!(unsafe { owned_numeric_span(&span, layout) }.is_err());
+        span.length = -1;
+        assert!(unsafe { owned_numeric_span(&span, layout) }.is_err());
+        span.length = 4096;
+        assert!(unsafe {
+            owned_numeric_span(
+                &span,
+                SpanLayout {
+                    stride: 256,
+                    alignment: 8,
+                },
+            )
+        }
+        .is_err());
+        span.length = 0;
+        assert!(unsafe { owned_numeric_span(&span, layout) }
+            .unwrap()
+            .1
+            .is_empty());
+    }
     #[test]
     fn ownership_rejects_forgery_reuse_foreign_threads_and_duplicate_release() {
         let mut s = State::new();

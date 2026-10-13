@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import resource
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -64,6 +65,7 @@ def run(cleanup):
     parser.add_argument('--capture-frame', action='store_true', help='capture an actual Present to frame.ppm; enables the native presenter')
     parser.add_argument('--managed-trace', action='store_true', help='debug-only native managed call trace; timing is not a performance result')
     parser.add_argument('--bridge-audit', action='store_true', help='diagnostic metadata/icall lookup inventory; no game methods are executed by the audit')
+    parser.add_argument('--lldb', action='store_true', help='capture a stopped native fault and backtrace using the same ephemeral game sandbox')
     parser.add_argument('--max-instr', type=int, default=30000000, help='bounded guest work budget')
     parser.add_argument('--skip-etw', action='store_true', help='explicit diagnostic platform divergence')
     parser.add_argument('--boundary', choices=('root', 'main-thread', 'pre-bindings', 'bindings', 'profiler', 'pre-images', 'images', 'metadata', 'strings', 'managed-types', 'classlib', 'logging', 'exceptions', 'synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup', 'objects', 'curves', 'fields', 'components', 'assets'), default='root', help='finite diagnostic initialization boundary')
@@ -146,12 +148,30 @@ def run(cleanup):
     if args.skip_etw:
         command.append('--native-mono-probe-skip-etw')
     command.extend(['--native-mono-probe-boundary', args.boundary])
+    if args.lldb:
+        debugger = shutil.which('lldb')
+        if not debugger:
+            raise RuntimeError('lldb is unavailable')
+        # Pass the guard explicitly: macOS may strip DYLD variables when
+        # launching the system debugger. No shell evaluates these arguments.
+        debug_env = [f'{key}={value}' for key, value in env.items()
+                     if key == 'DYLD_INSERT_LIBRARIES' or key == 'MONO_THREADS_SUSPEND'
+                     or key.startswith('WIRE_NATIVE_MONO_')]
+        command = [debugger, '--batch', '-o', 'settings set target.env-vars ' +
+                   ' '.join(shlex.quote(value) for value in debug_env),
+                   '-o', 'process handle SIGUSR1 SIGUSR2 SIGPIPE -s false -n false -p true',
+                   '-o', 'process handle SIGSEGV SIGBUS SIGABRT -s true -n true -p false',
+                   '-o', 'run', '-k', 'thread backtrace all', '-k', 'register read',
+                   '-k', 'frame variable ptr ip frame->imethod->method->name frame->imethod->method->klass->name frame->imethod->method->klass->name_space',
+                   '-k', 'frame variable frame->parent->imethod->method->name frame->parent->imethod->method->klass->name frame->parent->parent->imethod->method->name frame->parent->parent->imethod->method->klass->name',
+                   '-k', 'image lookup -v -a $pc', '--', *command]
     (output / 'command.json').write_text(json.dumps({'command': command, 'cwd': str(clone),
         'game_sandbox': str(sandbox),
         'storage_policy': 'one reused sandbox; ephemeral symlinks and wire snapshot; logs retained',
         'environment': {key: env[key] for key in ('DYLD_INSERT_LIBRARIES', 'MONO_THREADS_SUSPEND', 'WIRE_NATIVE_MONO_MANAGED_TRACE', 'WIRE_NATIVE_MONO_BRIDGE_AUDIT', 'WIRE_NATIVE_MONO_CALLBACK_REFERENCE_INTERPRETER', 'WIRE_NATIVE_MONO_CALLBACK_DIAGNOSTICS') if key in env},
         'full_game_backend': False, 'timing_is_performance_comparison': False,
         'native_presenter_requested': args.window or args.capture_frame,
+        'debugger_requested': args.lldb,
         'present_capture_requested': args.capture_frame}, indent=2) + '\n')
     reset_player_logs(sandbox)
     start = time.monotonic()
@@ -298,6 +318,9 @@ def run(cleanup):
         'native_material_property_blocks_created': count_marker('native-material-property-blocks-created'),
         'native_material_property_blocks_live': count_marker('native-material-property-blocks-live'),
         'native_material_property_blocks_closed': 'native-material-property-blocks-closed=true' in content,
+        'native_animation_curves_created': count_marker('native-animation-curves-created'),
+        'native_animation_curves_live': count_marker('native-animation-curves-live'),
+        'native_animation_curves_closed': 'native-animation-curves-closed=true' in content,
         'native_async_operations_released': count_marker('native-async-operations-released'),
         'native_async_operations_live': count_marker('native-async-operations-live'),
         'native_async_operation_finalizers_queued': count_marker('native-async-operations-finalizers-queued'),

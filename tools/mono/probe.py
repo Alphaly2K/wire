@@ -40,9 +40,11 @@ def execute(args, env, output, label, expected=0, timeout=120):
     return record
 
 
-def compile_fixtures(root, sdk, support_builder=None, classlib_input=None):
-    output = root / "probe"
-    output.mkdir(exist_ok=True)
+def compile_fixtures(root, sdk, support_builder=None, classlib_input=None, fixture_output=None):
+    # Game probes retain a frozen corelib/support pair in root/probe. SDK
+    # fixtures must never overwrite it, even when both share the same runtime.
+    output = fixture_output or root / "fixtures"
+    output.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     # Bootstrap/compiler invocations never inherit the runtime noexec guard.
     for name in ("DYLD_INSERT_LIBRARIES", "MONO_ENV_OPTIONS", "MONO_PATH"):
@@ -75,7 +77,18 @@ def compile_fixtures(root, sdk, support_builder=None, classlib_input=None):
     # bodies remain IL; the game is not AOT-compiled or executed by this tool.
     aot_env = dict(env, MONO_PATH=str(classlib))
     support_builder = support_builder or root / "build-aot-tool/mono/mini/mono-boehm"
-    for assembly in (classlib / "mscorlib.dll", output / "NativeProbe.exe"):
+    header = output / "engine-header-probe"
+    header.mkdir(exist_ok=True)
+    records.append(execute([sdk / "bin/mono", sdk / "lib/mono/4.5/mcs.exe", "-unsafe",
+                            "-optimize+", "-target:library", "-nostdlib",
+                            "-r:" + str(classlib / "mscorlib.dll"),
+                            "-out:" + str(header / "EngineHeaderProbe.dll"),
+                            FIXTURES / "EngineHeaderProbe.cs"], env, output, "compile-engine-header-il"))
+    records.append(execute(["clang", "-std=c11", "-O2", "-g", "-I" + str(source),
+                            FIXTURES / "engine_header_probe.c", "-L" + str(runtime_lib),
+                            "-lmonoboehm-2.0", "-o", header / "engine_header_probe"],
+                           env, output, "compile-engine-header-embedding"))
+    for assembly in (classlib / "mscorlib.dll", output / "NativeProbe.exe", header / "EngineHeaderProbe.dll"):
         records.append(execute([support_builder,
                                 "--aot=interp", assembly], aot_env, output,
                                "aot-support-" + assembly.stem, timeout=300))
@@ -86,8 +99,8 @@ def compile_fixtures(root, sdk, support_builder=None, classlib_input=None):
     (output / "build-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
 
-def run_probes(root, cases, incremental=False):
-    output = root / "probe"
+def run_probes(root, cases, incremental=False, fixture_output=None):
+    output = fixture_output or root / "fixtures"
     env = os.environ.copy()
     env.pop("MONO_ENV_OPTIONS", None)
     env.update(DYLD_LIBRARY_PATH=str(root / "build-runtime/mono/mini/.libs") + os.pathsep + str(output),
@@ -104,8 +117,12 @@ def run_probes(root, cases, incremental=False):
         records.append(execute([output / "guard_selftest", route], env, output,
                                "guard-" + route, expected=86))
     for case in cases:
-        records.append(execute([output / "embed_probe", output / "classlib",
-                                output / "NativeProbe.exe", case, "interp"],
+        if case == "engine-header":
+            header = output / "engine-header-probe"
+            command = [header / "engine_header_probe", output / "classlib", header / "EngineHeaderProbe.dll"]
+        else:
+            command = [output / "embed_probe", output / "classlib", output / "NativeProbe.exe", case, "interp"]
+        records.append(execute(command,
                                env, output, "run-" + case + suffix))
         content = (output / ("run-" + case + suffix + ".log")).read_text()
         if f"PASS {case}" not in content or "WIRE_NOEXEC_GUARD checks=" not in content:
@@ -118,18 +135,22 @@ def main():
     parser.add_argument("stage", choices=("compile", "run", "all"))
     parser.add_argument("--output", type=Path, default=REPO / "wire-out/native-mono-m1")
     parser.add_argument("--sdk", type=Path, default=DEFAULT_SDK)
-    parser.add_argument("--cases", nargs="+", choices=("core", "interop", "threads", "gc", "layout", "remoting", "collation", "static-roots", "attrs", "objects", "reference-locals", "delegate-invoke"), default=["core", "interop", "threads", "gc", "layout", "remoting", "collation", "static-roots", "attrs", "objects", "reference-locals", "delegate-invoke"])
+    parser.add_argument("--cases", nargs="+", choices=("core", "interop", "threads", "gc", "layout", "remoting", "collation", "static-roots", "attrs", "objects", "reference-locals", "delegate-invoke", "engine-header"), default=["core", "interop", "threads", "gc", "layout", "remoting", "collation", "static-roots", "attrs", "objects", "reference-locals", "engine-header"])
     parser.add_argument("--incremental", action="store_true", help="initialize with the real Unity --gc-params=incremental=3 profile")
     parser.add_argument("--support-builder", type=Path, help="existing read-only development AOT tool input")
     parser.add_argument("--classlib-input", type=Path, help="existing read-only managed class libraries (copied to ignored output)")
+    parser.add_argument("--fixture-output", type=Path, help="separate fixture directory under wire-out; defaults to runtime-output/fixtures, never game probe support")
     args = parser.parse_args()
     root = args.output.resolve()
     if not root.is_relative_to(REPO / "wire-out"):
         parser.error("Output must be below this repository's ignored wire-out directory")
+    fixture_output = args.fixture_output.resolve() if args.fixture_output else root / "fixtures"
+    if not fixture_output.is_relative_to(REPO / "wire-out") or fixture_output == root / "probe":
+        parser.error("Fixture output must be below wire-out and separate from frozen game root/probe support")
     if args.stage in ("compile", "all"):
-        compile_fixtures(root, args.sdk.resolve(), args.support_builder.resolve() if args.support_builder else None, args.classlib_input.resolve() if args.classlib_input else None)
+        compile_fixtures(root, args.sdk.resolve(), args.support_builder.resolve() if args.support_builder else None, args.classlib_input.resolve() if args.classlib_input else None, fixture_output)
     if args.stage in ("run", "all"):
-        run_probes(root, args.cases, args.incremental)
+        run_probes(root, args.cases, args.incremental, fixture_output)
 
 
 if __name__ == "__main__":

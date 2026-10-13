@@ -198,6 +198,30 @@ impl Registry {
             roots.borrow(root_api, native)
         }
     }
+    /// Bootstrap can publish strings before the ordinary graph API exists.
+    /// Adopt their original identities before any generic reference is rooted.
+    pub(super) fn adopt_early_roots(
+        &self,
+        api: Api,
+        root_api: super::instances::Api,
+        roots: &mut super::instances::Registry,
+    ) -> Result<(), String> {
+        if self.roots_released || self.retired {
+            return Err("early string adoption after retirement".into());
+        }
+        let mut pending = Vec::with_capacity(self.entries.len());
+        for (&token, entry) in &self.entries {
+            let native = self.native_string(api, token)?;
+            if Self::payload(api, native)? != entry.payload {
+                return Err("early string immutable payload changed".into());
+            }
+            pending.push((token, native));
+        }
+        for (token, native) in pending {
+            roots.adopt_string(root_api, token, native)?;
+        }
+        Ok(())
+    }
     pub(super) fn publish_pending(&mut self, memory: &mut Memory) -> Result<(), String> {
         let tokens: Vec<_> = self
             .entries
@@ -298,6 +322,79 @@ mod tests {
     }
     unsafe extern "C" fn string_class() -> Object {
         0x55usize as Object
+    }
+    #[test]
+    fn bootstrap_strings_join_the_graph_with_original_tokens_and_validate_before_adoption() {
+        let api = Api {
+            new_string,
+            strong,
+            target,
+            free,
+            length,
+            chars,
+            class,
+            string_class,
+        };
+        let root_api = super::super::instances::tests::identity_api();
+        let mut strings = Registry::default();
+        let mut roots = super::super::instances::Registry::default();
+        let mut raw = [vec![0u8; 24], vec![0u8; 24]];
+        raw[1][16..20].copy_from_slice(&1i32.to_le_bytes());
+        raw[1][20..22].copy_from_slice(&65u16.to_le_bytes());
+        let tokens: Vec<_> = raw
+            .iter_mut()
+            .map(|bytes| strings.root_string(api, bytes.as_mut_ptr().cast()).unwrap())
+            .collect();
+        assert_eq!(roots.count(), 0);
+        raw[1][20] = 66;
+        assert!(strings
+            .adopt_early_roots(api, root_api, &mut roots)
+            .is_err());
+        assert_eq!(roots.count(), 0);
+        raw[1][20] = 65;
+        strings
+            .adopt_early_roots(api, root_api, &mut roots)
+            .unwrap();
+        strings
+            .adopt_early_roots(api, root_api, &mut roots)
+            .unwrap();
+        for (&token, bytes) in tokens.iter().zip(&mut raw) {
+            let native = bytes.as_mut_ptr().cast();
+            assert_eq!(roots.native(root_api, token).unwrap(), native);
+            assert_eq!(
+                roots.token_for_native(root_api, native).unwrap(),
+                Some(token)
+            );
+            assert_eq!(
+                strings
+                    .borrow_reference(api, root_api, &mut roots, native)
+                    .unwrap(),
+                token
+            );
+        }
+        assert_eq!(roots.count(), 2);
+        unsafe extern "C" fn lost(_: Object) -> Object {
+            ptr::null_mut()
+        }
+        assert!(strings
+            .adopt_early_roots(
+                Api {
+                    target: lost,
+                    ..api
+                },
+                root_api,
+                &mut roots
+            )
+            .is_err());
+        roots.release(root_api);
+        assert!(strings
+            .adopt_early_roots(api, root_api, &mut roots)
+            .is_err());
+        strings.release_roots(api);
+        assert!(strings
+            .adopt_early_roots(api, root_api, &mut roots)
+            .is_err());
+        assert_eq!(ROOTS.with(Cell::get), 0);
     }
     #[test]
     fn field_and_array_reference_conversion_reuses_canonical_string_before_publication() {

@@ -3,6 +3,10 @@
 use super::{c_char, closed_types, Memory, Object};
 use crate::x64::memory::{READ, WRITE};
 use std::{ffi::CStr, ptr};
+mod engine_headers;
+mod engine_spans;
+pub(super) use engine_headers::HeaderRead;
+pub(super) use engine_spans::NumericSpanLayout;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Shape {
     Scalar {
@@ -60,7 +64,7 @@ pub(super) enum BufferOperation {
 }
 enum EntryAbi {
     StaticInternal,
-    InstanceRenderContext,
+    InstanceEngineValue,
     StaticManaged,
 }
 #[repr(C)]
@@ -325,6 +329,14 @@ impl Api {
         let object_class = sym!("mono_get_object_class", unsafe extern "C" fn() -> Object);
         let string_class = sym!("mono_get_string_class", unsafe extern "C" fn() -> Object);
         let void_class = sym!("mono_get_void_class", unsafe extern "C" fn() -> Object);
+        let call_conv = sym!(
+            "mono_signature_get_call_conv",
+            unsafe extern "C" fn(Object) -> u32
+        );
+        let explicit_this = sym!(
+            "mono_signature_explicit_this",
+            unsafe extern "C" fn(Object) -> u32
+        );
         let find = sym!(
             "mono_class_from_name",
             unsafe extern "C" fn(Object, *const c_char, *const c_char) -> Object
@@ -481,10 +493,43 @@ impl Api {
                 let code = unsafe { std::slice::from_raw_parts(code, length as usize) };
                 engine_pointer_prefix(code, target, arity, &mut marshal)
                     .or_else(|| {
-                        engine_pointer_flow(code, target, arity, &mut marshal, |called| {
-                            checked_throw
-                                && unsafe { resolve(image, called, owner) } == throw_method
-                        })
+                        engine_pointer_flow_with_calls(
+                            code,
+                            target,
+                            arity,
+                            &mut marshal,
+                            |called| {
+                                checked_throw
+                                    && unsafe { resolve(image, called, owner) } == throw_method
+                            },
+                            |called| {
+                                let called = unsafe { resolve(image, called, owner) };
+                                if called.is_null() {
+                                    return None;
+                                }
+                                let class = unsafe { (self.class)(called) };
+                                if class.is_null()
+                                    || !images.contains(&unsafe { (self.image)(class) })
+                                {
+                                    return None;
+                                }
+                                let signature = unsafe { (self.signature)(called) };
+                                if signature.is_null()
+                                    || unsafe { call_conv(signature) } != 0
+                                    || unsafe { explicit_this(signature) } != 0
+                                {
+                                    return None;
+                                }
+                                let returns = unsafe { (self.returns)(signature) };
+                                if returns.is_null() {
+                                    return None;
+                                }
+                                let count = unsafe { (self.count)(signature) } as usize
+                                    + usize::from(unsafe { (self.instance)(signature) } != 0);
+                                (count <= 16)
+                                    .then_some((count, unsafe { (self.kind)(returns) } != 1))
+                            },
+                        )
                     })
                     .or_else(|| {
                         engine_pointer_nullable_prefix(
@@ -577,6 +622,7 @@ impl Api {
             return Err("string wrapper arity exceeds bound".into());
         }
         let mut span_positions = Vec::new();
+        let mut trailing_value = None;
         let mut parameter = ptr::null_mut();
         for position in 0..arity {
             let ty = unsafe { (self.parameters)(signature, &mut parameter) };
@@ -586,6 +632,17 @@ impl Api {
             if unsafe { (self.type_class)(ty) } == span && unsafe { (self.byref)(ty) } != 0 {
                 span_positions.push(position);
             }
+            if position + 1 == arity
+                && unsafe { (self.kind)(ty) } == 0x11
+                && unsafe { (self.byref)(ty) } != 0
+                && unsafe { (self.type_class)(ty) } != span
+            {
+                trailing_value = Some(unsafe { (self.type_class)(ty) });
+            }
+        }
+        let target_return = unsafe { (self.returns)(signature) };
+        if target_return.is_null() || unsafe { (self.kind)(target_return) } != 1 {
+            trailing_value = None;
         }
         let mut result = None;
         let mut iterator = ptr::null_mut();
@@ -624,7 +681,15 @@ impl Api {
                         && unsafe { (self.type_class)(ty) } == string,
                 );
             }
-            if string_arguments.len() != arity {
+            let output = string_arguments.len() + 1 == arity
+                && trailing_value.is_some_and(|class| {
+                    let ret = unsafe { (self.returns)(signature) };
+                    !ret.is_null()
+                        && unsafe { (self.kind)(ret) } == 0x11
+                        && unsafe { (self.type_class)(ret) } == class
+                        && unsafe { (self.byref)(ret) } == 0
+                });
+            if string_arguments.len() != arity && !output {
                 continue;
             }
             let header = unsafe { (self.header)(wrapper) };
@@ -636,11 +701,12 @@ impl Api {
             let inferred = if code.is_null() || !(6..=512).contains(&length) || stack > 32 {
                 None
             } else {
-                engine_utf16_locals(
+                engine_utf16_locals_with_output(
                     unsafe { std::slice::from_raw_parts(code, length as usize) },
                     target,
                     arity,
                     &span_positions,
+                    output,
                     |position, called| {
                         string_arguments.get(position) == Some(&true)
                             && unsafe { resolve(image, called, owner) } == helper
@@ -658,9 +724,158 @@ impl Api {
         }
         Ok(result.unwrap_or_else(|| vec![false; arity]))
     }
-    /// Diagnostic reads only the actual Exception metadata/message field. A
-    /// private pinned root stays live; no ToString IL or native pointer is
-    /// published to the guest while reporting a failed invocation.
+    /// Prove the output allocator protocol from the complete generated wrapper
+    /// and its real finally clause. Span names and widths alone cannot establish
+    /// whether an IntPtr contains UTF16, numeric data or borrowed memory.
+    pub(super) fn engine_utf16_output(
+        self,
+        method: Object,
+        owner: Object,
+        span: Object,
+        images: &[Object],
+    ) -> Result<bool, String> {
+        macro_rules! sym {
+            ($name:literal, $ty:ty) => {{
+                let p = unsafe { libc::dlsym(self.library, concat!($name, "\0").as_ptr().cast()) };
+                if p.is_null() {
+                    return Err(concat!("missing output wrapper metadata API: ", $name).into());
+                }
+                unsafe { std::mem::transmute::<Object, $ty>(p) }
+            }};
+        }
+        let find = sym!(
+            "mono_class_from_name",
+            unsafe extern "C" fn(Object, *const c_char, *const c_char) -> Object
+        );
+        let member = sym!(
+            "mono_class_get_method_from_name",
+            unsafe extern "C" fn(Object, *const c_char, i32) -> Object
+        );
+        let methods = sym!(
+            "mono_class_get_methods",
+            unsafe extern "C" fn(Object, *mut Object) -> Object
+        );
+        let token = sym!("mono_method_get_token", unsafe extern "C" fn(Object) -> u32);
+        let resolve = sym!(
+            "mono_get_method",
+            unsafe extern "C" fn(Object, u32, Object) -> Object
+        );
+        let string = sym!("mono_get_string_class", unsafe extern "C" fn() -> Object);
+        let locals = sym!(
+            "mono_method_header_get_locals",
+            unsafe extern "C" fn(Object, *mut u32, *mut i32) -> *const Object
+        );
+        let clause_count = sym!(
+            "mono_method_header_get_num_clauses",
+            unsafe extern "C" fn(Object) -> i32
+        );
+        let clause_next = sym!(
+            "mono_method_header_get_clauses",
+            unsafe extern "C" fn(Object, Object, *mut Object, *mut ExceptionClause) -> i32
+        );
+        let helper_class = unsafe {
+            find(
+                (self.image)(span),
+                c"UnityEngine.Bindings".as_ptr(),
+                c"OutStringMarshaller".as_ptr(),
+            )
+        };
+        let helper = unsafe { member(helper_class, c"GetStringAndDispose".as_ptr(), 1) };
+        let string = unsafe { string() };
+        if helper_class.is_null() || helper.is_null() || string.is_null() {
+            return Ok(false);
+        }
+        let signature = unsafe { (self.signature)(helper) };
+        let mut implementation = 0;
+        let flags = unsafe { (self.flags)(helper, &mut implementation) };
+        if signature.is_null()
+            || !managed_il_flags(flags, implementation, false)
+            || unsafe { (self.class)(helper) } != helper_class
+            || unsafe { (self.generic)(helper) } != 0
+            || unsafe { (self.inflated)(helper) } != 0
+            || unsafe { (self.instance)(signature) } != 0
+            || unsafe { (self.count)(signature) } != 1
+        {
+            return Ok(false);
+        }
+        let ret = unsafe { (self.returns)(signature) };
+        let mut iterator = ptr::null_mut();
+        let input = unsafe { (self.parameters)(signature, &mut iterator) };
+        let exact = |ty: Object, kind, class| {
+            !ty.is_null()
+                && unsafe { (self.kind)(ty) } == kind
+                && unsafe { (self.type_class)(ty) } == class
+                && unsafe { (self.byref)(ty) } == 0
+        };
+        if !exact(ret, 0xe, string) || !exact(input, 0x11, span) {
+            return Ok(false);
+        }
+        let image = unsafe { (self.image)(owner) };
+        let target = unsafe { token(method) };
+        if !images.contains(&image) || target >> 24 != 6 {
+            return Ok(false);
+        }
+        let mut iterator = ptr::null_mut();
+        loop {
+            let wrapper = unsafe { methods(owner, &mut iterator) };
+            if wrapper.is_null() {
+                break;
+            }
+            let signature = unsafe { (self.signature)(wrapper) };
+            let mut implementation = 0;
+            let flags = unsafe { (self.flags)(wrapper, &mut implementation) };
+            if signature.is_null()
+                || !managed_il_flags(
+                    flags,
+                    implementation,
+                    unsafe { (self.instance)(signature) } != 0,
+                )
+                || unsafe { (self.generic)(wrapper) } != 0
+                || unsafe { (self.inflated)(wrapper) } != 0
+                || !exact(unsafe { (self.returns)(signature) }, 0xe, string)
+            {
+                continue;
+            }
+            let header = unsafe { (self.header)(wrapper) };
+            if header.is_null() {
+                continue;
+            }
+            let (mut length, mut stack, mut count, mut init) = (0, 0, 0, 0);
+            let code = unsafe { (self.code)(header, &mut length, &mut stack) };
+            let types = unsafe { locals(header, &mut count, &mut init) };
+            let mut iterator = ptr::null_mut();
+            let mut clause = ExceptionClause::default();
+            let valid = if code.is_null()
+                || !(10..=512).contains(&length)
+                || stack > 32
+                || count > 32
+                || types.is_null()
+                || init == 0
+                || unsafe { clause_count(header) } != 1
+                || unsafe { clause_next(header, wrapper, &mut iterator, &mut clause) } == 0
+            {
+                false
+            } else if let Some((native, result, converter)) = engine_owned_output_tail(
+                unsafe { std::slice::from_raw_parts(code, length as usize) },
+                target,
+                clause,
+            ) {
+                native < count
+                    && result < count
+                    && exact(unsafe { *types.add(native as usize) }, 0x11, span)
+                    && exact(unsafe { *types.add(result as usize) }, 0xe, string)
+                    && unsafe { resolve(image, converter, owner) } == helper
+            } else {
+                false
+            };
+            unsafe { (self.free)(header) };
+            if valid {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    /// Read actual Exception metadata/message without executing ToString IL.
     pub(super) fn exception_diagnostic(
         self,
         roots: super::instances::Api,
@@ -1651,8 +1866,8 @@ impl Api {
         images: &[Object],
         enum_storage: &[(Object, u32)],
     ) -> Result<(), String> {
-        if !super::render_context::context_class(owner) {
-            return Err("instance engine value ABI has no render context protocol".into());
+        if !super::render_context::context_class(owner) && !super::keyword_views::space(owner) {
+            return Err("instance engine value ABI has no typed capability protocol".into());
         }
         self.fixed_typed_entry(
             method,
@@ -1660,7 +1875,7 @@ impl Api {
             specs,
             images,
             enum_storage,
-            EntryAbi::InstanceRenderContext,
+            EntryAbi::InstanceEngineValue,
         )
     }
     pub(super) fn fixed_typed_managed(
@@ -1728,7 +1943,7 @@ impl Api {
         abi: EntryAbi,
     ) -> Result<(), String> {
         let internal = !matches!(abi, EntryAbi::StaticManaged);
-        let instance = matches!(abi, EntryAbi::InstanceRenderContext);
+        let instance = matches!(abi, EntryAbi::InstanceEngineValue);
         if method.is_null()
             || owner.is_null()
             || specs.is_empty()
@@ -1994,6 +2209,69 @@ fn engine_handle_finally_tail(code: &[u8], target: u32, clause: ExceptionClause)
 fn text_matches(text: *const c_char, expected: &CStr) -> bool {
     !text.is_null() && unsafe { CStr::from_ptr(text) } == expected
 }
+fn engine_owned_output_tail(
+    code: &[u8],
+    target: u32,
+    clause: ExceptionClause,
+) -> Option<(u32, u32, u32)> {
+    let instructions = engine_wrapper_instructions(code)?;
+    if clause.flags != 2
+        || instructions
+            .iter()
+            .filter(|&&(op, t)| op == 0x28 && t == target)
+            .count()
+            != 1
+    {
+        return None;
+    }
+    let at = instructions.iter().position(|&i| i == (0x28, target))?;
+    let &(0x12, native) = instructions.get(at.checked_sub(1)?)? else {
+        return None;
+    };
+    let tail = instructions.get(at..)?;
+    if tail.len() != 8 {
+        return None;
+    }
+    let load = |instruction: (u8, u32)| match instruction {
+        (op @ 0x06..=0x09, _) => Some((op - 6) as u32),
+        (0x11, n) => Some(n),
+        _ => None,
+    };
+    let result = match tail[4] {
+        (op @ 0x0a..=0x0d, _) => (op - 0x0a) as u32,
+        (0x13, n) => n,
+        _ => return None,
+    };
+    let converter = match tail[3] {
+        (0x28, t) if matches!(t >> 24, 6 | 0xa) => t,
+        _ => return None,
+    };
+    let delta = match tail[1] {
+        (0xde, n) => n as u8 as i8 as i64,
+        (0xdd, n) => n as i32 as i64,
+        _ => return None,
+    };
+    let mut offsets = Vec::new();
+    let mut offset = 0;
+    for &(op, _) in &instructions {
+        offsets.push(offset);
+        offset += 1 + engine_wrapper_operand_width(op)?;
+    }
+    if native == result
+        || load(tail[2]) != Some(native)
+        || load(tail[6]) != Some(result)
+        || tail[5] != (0xdc, 0)
+        || tail[7] != (0x2a, 0)
+        || clause.handler_offset as usize != offsets[at + 2]
+        || clause.handler_offset.checked_add(clause.handler_len)? as usize != offsets[at + 6]
+        || clause.try_offset as usize > offsets[at - 1]
+        || clause.try_offset.checked_add(clause.try_len)? as usize != offsets[at + 2]
+        || offsets[at + 2] as i64 + delta != offsets[at + 6] as i64
+    {
+        return None;
+    }
+    Some((native, result, converter))
+}
 fn engine_wrapper_operand_width(opcode: u8) -> Option<usize> {
     Some(match opcode {
         0x00 | 0x02..=0x0d | 0x14..=0x1e | 0x25 | 0x26 | 0x2a | 0xd3 | 0xdc | 0xe0 => 0,
@@ -2209,17 +2487,48 @@ fn engine_pointer_nullable_prefix<T: Copy + Eq>(
 /// incoming stack at a join must agree. Only verified Marshal conversions and
 /// the actual throwing helper are calls in this vocabulary; no arbitrary calls,
 /// locals, field writes or branch operands can manufacture pointer provenance.
+#[cfg(test)]
 fn engine_pointer_flow<T: Copy + Eq>(
+    code: &[u8],
+    target: u32,
+    arity: usize,
+    marshal: impl FnMut(usize, u32) -> Option<T>,
+    throwing: impl FnMut(u32) -> bool,
+) -> Option<Vec<Option<T>>> {
+    engine_pointer_flow_with_calls(code, target, arity, marshal, throwing, |_| None)
+}
+fn engine_pointer_flow_with_calls<T: Copy + Eq>(
+    code: &[u8],
+    target: u32,
+    arity: usize,
+    marshal: impl FnMut(usize, u32) -> Option<T>,
+    throwing: impl FnMut(u32) -> bool,
+    call_effect: impl FnMut(u32) -> Option<(usize, bool)>,
+) -> Option<Vec<Option<T>>> {
+    engine_argument_flow(
+        code,
+        target,
+        arity,
+        marshal,
+        throwing,
+        call_effect,
+        |_, _| None,
+    )
+}
+fn engine_argument_flow<T: Copy + Eq>(
     code: &[u8],
     target: u32,
     arity: usize,
     mut marshal: impl FnMut(usize, u32) -> Option<T>,
     mut throwing: impl FnMut(u32) -> bool,
+    mut call_effect: impl FnMut(u32) -> Option<(usize, bool)>,
+    mut local_address: impl FnMut(usize, u32) -> Option<(usize, T)>,
 ) -> Option<Vec<Option<T>>> {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Origin<T> {
         Argument(usize, bool),
         Pointer(usize, T),
+        Local(usize, T),
         Literal,
     }
     let instructions = engine_wrapper_instructions(code)?;
@@ -2271,6 +2580,20 @@ fn engine_pointer_flow<T: Copy + Eq>(
                 }
                 stack.push(Origin::Argument(operand as usize, op == 0x0f));
             }
+            0x12 => stack.push(match local_address(at, operand) {
+                Some((position, value)) => Origin::Local(position, value),
+                None => Origin::Literal,
+            }),
+            0x06..=0x09 | 0x11 => stack.push(Origin::Literal),
+            0x0a..=0x0d | 0x13 => {
+                stack.pop()?;
+            }
+            0xd3 | 0xe0 => {
+                if matches!(stack.pop()?, Origin::Pointer(..) | Origin::Local(..)) {
+                    return None;
+                }
+                stack.push(Origin::Literal);
+            }
             0x14..=0x23 | 0x72 => stack.push(Origin::Literal),
             0x25 => stack.push(*stack.last()?),
             0x26 => {
@@ -2285,9 +2608,12 @@ fn engine_pointer_flow<T: Copy + Eq>(
                     .enumerate()
                     .map(|(position, origin)| match origin {
                         Origin::Argument(index, _) if index == position => Some(None),
-                        Origin::Pointer(index, nullable) if index == position => {
+                        Origin::Pointer(index, nullable) | Origin::Local(index, nullable)
+                            if index == position =>
+                        {
                             Some(Some(nullable))
                         }
+                        Origin::Literal => Some(None),
                         _ => None,
                     })
                     .collect::<Option<_>>()?;
@@ -2307,14 +2633,33 @@ fn engine_pointer_flow<T: Copy + Eq>(
                 }
                 continue;
             }
-            0x28 => {
-                let Origin::Argument(position, false) = stack.pop()? else {
-                    return None;
-                };
-                if position >= arity || !matches!(operand >> 24, 6 | 0xa | 0x2b) {
+            0x28 | 0x6f => {
+                if !matches!(operand >> 24, 6 | 0xa | 0x2b) {
                     return None;
                 }
-                stack.push(Origin::Pointer(position, marshal(position, operand)?));
+                let converted = match stack.last().copied() {
+                    Some(Origin::Argument(position, false)) if position < arity && op == 0x28 => {
+                        marshal(position, operand).map(|source| (position, source))
+                    }
+                    _ => None,
+                };
+                if let Some((position, source)) = converted {
+                    stack.pop()?;
+                    stack.push(Origin::Pointer(position, source));
+                } else {
+                    let (count, returns) = call_effect(operand)?;
+                    let remaining = stack.len().checked_sub(count)?;
+                    if stack[remaining..]
+                        .iter()
+                        .any(|value| matches!(value, Origin::Local(..)))
+                    {
+                        return None;
+                    }
+                    stack.truncate(remaining);
+                    if returns {
+                        stack.push(Origin::Literal);
+                    }
+                }
             }
             0x2b..=0x2d | 0x38..=0x3a => {
                 let delta = if op < 0x38 {
@@ -2351,11 +2696,22 @@ fn engine_pointer_flow<T: Copy + Eq>(
     }
     result
 }
+#[cfg(test)]
 fn engine_utf16_locals(
     code: &[u8],
     target: u32,
     arity: usize,
     span_positions: &[usize],
+    is_string_helper: impl FnMut(usize, u32) -> bool,
+) -> Option<Vec<bool>> {
+    engine_utf16_locals_with_output(code, target, arity, span_positions, false, is_string_helper)
+}
+fn engine_utf16_locals_with_output(
+    code: &[u8],
+    target: u32,
+    arity: usize,
+    span_positions: &[usize],
+    trailing_output: bool,
     mut is_string_helper: impl FnMut(usize, u32) -> bool,
 ) -> Option<Vec<bool>> {
     let instructions = engine_wrapper_instructions(code)?;
@@ -2424,6 +2780,7 @@ fn engine_utf16_locals(
             result[position] = true;
         } else if argument_index(op, operand) == Some(position)
             || (op == 0x0f && operand as usize == position)
+            || (trailing_output && position + 1 == arity && op == 0x12)
         {
             // Plain positional inputs after a header do not obscure its origin.
         } else {
@@ -2676,6 +3033,143 @@ impl Frame {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mixed_wrappers_preserve_provenance_across_metadata_typed_calls_and_branch_joins() {
+        let target: u32 = 0x06000010;
+        let marshal: u32 = 0x2b000020;
+        let helper: u32 = 0x06000030;
+        let as_span: u32 = 0x0a000040;
+        let pin: u32 = 0x0a000050;
+        let length: u32 = 0x0a000060;
+        let constructor: u32 = 0x06000070;
+        let mut code = vec![0x02, 0x28];
+        code.extend(marshal.to_le_bytes());
+        code.extend([0x03, 0x12, 2, 0x28]);
+        code.extend(helper.to_le_bytes());
+        let branch = code.len();
+        code.extend([0x2d, 0]);
+        code.extend([0x03, 0x28]);
+        code.extend(as_span.to_le_bytes());
+        code.push(0x0a);
+        code.extend([0x12, 0, 0x28]);
+        code.extend(pin.to_le_bytes());
+        code.push(0x0b);
+        code.extend([0x12, 2, 0x07, 0xd3, 0x12, 0, 0x28]);
+        code.extend(length.to_le_bytes());
+        code.push(0x28);
+        code.extend(constructor.to_le_bytes());
+        code[branch + 1] = (code.len() - branch - 2) as u8;
+        code.extend([0x12, 2, 0x28]);
+        code.extend(target.to_le_bytes());
+        code.push(0x2a);
+        let effects = |t| {
+            if t == helper {
+                Some((2, true))
+            } else if [as_span, pin, length, marshal].contains(&t) {
+                Some((1, true))
+            } else if t == constructor {
+                Some((3, false))
+            } else {
+                None
+            }
+        };
+        let source =
+            |p, t| (p == 0 && t == marshal).then_some(PointerSource::Engine { nullable: true });
+        assert_eq!(
+            engine_pointer_flow_with_calls(&code, target, 2, source, |_| false, effects),
+            Some(vec![Some(PointerSource::Engine { nullable: true }), None])
+        );
+        // An arbitrary IntPtr-returning method has stack effects but cannot
+        // manufacture the provenance of an actual Marshal<T> conversion.
+        assert_eq!(
+            engine_pointer_flow_with_calls::<PointerSource>(
+                &code,
+                target,
+                2,
+                |_, _| None,
+                |_| false,
+                effects
+            ),
+            Some(vec![None, None])
+        );
+        assert_eq!(
+            engine_pointer_flow(&code, target, 2, source, |_| false),
+            None
+        );
+        assert_eq!(
+            engine_pointer_flow_with_calls(
+                &code,
+                target,
+                2,
+                source,
+                |_| false,
+                |t| if t == helper {
+                    Some((3, true))
+                } else {
+                    effects(t)
+                }
+            ),
+            None
+        );
+        let mut wrong = code.clone();
+        wrong[branch + 1] = (-2i8) as u8;
+        assert_eq!(
+            engine_pointer_flow_with_calls(&wrong, target, 2, source, |_| false, effects),
+            None
+        );
+        assert_eq!(
+            engine_utf16_locals(&code, target, 2, &[1], |p, t| p == 1 && t == helper),
+            Some(vec![false, true])
+        );
+    }
+    #[test]
+    fn output_strings_require_the_same_span_local_and_actual_disposal_finally() {
+        let target: u32 = 0x06000123;
+        let converter: u32 = 0x06000456;
+        let mut code = vec![0x02, 0x12, 0, 0x28];
+        code.extend(target.to_le_bytes());
+        code.extend([0xde, 8, 0x06, 0x28]);
+        code.extend(converter.to_le_bytes());
+        code.extend([0x0b, 0xdc, 0x07, 0x2a]);
+        let clause = ExceptionClause {
+            flags: 2,
+            try_offset: 0,
+            try_len: 10,
+            handler_offset: 10,
+            handler_len: 8,
+            data: 0,
+        };
+        assert_eq!(
+            engine_owned_output_tail(&code, target, clause),
+            Some((0, 1, converter))
+        );
+        for changed in [
+            ExceptionClause { flags: 0, ..clause },
+            ExceptionClause {
+                handler_len: 7,
+                ..clause
+            },
+            ExceptionClause {
+                try_len: 9,
+                ..clause
+            },
+        ] {
+            assert_eq!(engine_owned_output_tail(&code, target, changed), None);
+        }
+        let mut changed = code.clone();
+        changed[10] = 0x08;
+        assert_eq!(engine_owned_output_tail(&changed, target, clause), None);
+        changed = code.clone();
+        changed[8] = 0x2b;
+        assert_eq!(engine_owned_output_tail(&changed, target, clause), None);
+        changed = code.clone();
+        changed[16] = 0x0a;
+        assert_eq!(engine_owned_output_tail(&changed, target, clause), None);
+        assert_eq!(
+            engine_owned_output_tail(&code[..code.len() - 1], target, clause),
+            None
+        );
+    }
     #[test]
     fn engine_handle_finally_requires_actual_eh_and_separate_result_and_pin_locals() {
         let target: u32 = 0x06005678;

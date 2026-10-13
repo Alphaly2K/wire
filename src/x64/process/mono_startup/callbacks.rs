@@ -202,6 +202,89 @@ fn with_routes<'a, T>(
 pub(super) fn has_owner() -> bool {
     OWNER.with(|slot| !slot.get().is_null())
 }
+
+/// A paused native engine call can let the existing cooperative scheduler run
+/// a guest worker. A NULL-owner barrier to a private C++ temporary is a token
+/// store, not a write into the native managed heap. The supplied Memory and
+/// Runtime are already borrowed by the scheduler; borrow only the root route.
+pub(super) fn cooperative_worker_leaf(
+    function: &str,
+    cpu: &mut Cpu64,
+    memory: &mut Memory,
+    runtime: &Runtime64,
+) -> Result<bool, String> {
+    if !matches!(
+        function,
+        "mono_gc_wbarrier_set_field"
+            | "mono_get_root_domain"
+            | "mono_domain_get"
+            | "mono_thread_current"
+    ) {
+        return Ok(false);
+    }
+    OWNER.with(|slot| {
+        if slot.get().is_null() {
+            return Err("cooperative reference store has no paused owner".into());
+        }
+        let owner = unsafe { &*slot.get() };
+        let route = owner
+            .metadata
+            .as_ref()
+            .ok_or("cooperative reference store has no root route")?
+            .try_borrow()
+            .map_err(|_| "cooperative root route is already borrowed")?;
+        if function == "mono_gc_wbarrier_set_field" {
+            store_worker_reference(cpu, memory, runtime, |token| {
+                route.validate_temporary_reference(runtime.active_thread(), token)
+            })?;
+        } else {
+            runtime.native_worker_stack_bounds(memory, cpu)?;
+            let workers = route
+                .objects
+                .as_ref()
+                .ok_or("cooperative worker lifecycle has no attachment service")?
+                .workers;
+            let result =
+                workers.observed_lifecycle(route.domain, runtime.active_thread(), function)?;
+            cpu.return_integer(memory, result)?;
+        }
+        owner.mono_reentries.set(owner.mono_reentries.get() + 1);
+        Ok(true)
+    })
+}
+
+fn store_worker_reference(
+    cpu: &mut Cpu64,
+    memory: &mut Memory,
+    runtime: &Runtime64,
+    root: impl FnOnce(u64) -> Result<(), String>,
+) -> Result<(), String> {
+    let (base, end) = runtime.native_worker_stack_bounds(memory, cpu)?;
+    let address = cpu.regs[2];
+    let first = cpu.regs[4]
+        .checked_add(40)
+        .ok_or("cooperative stack slot overflow")?;
+    let stop = address
+        .checked_add(8)
+        .ok_or("cooperative reference slot overflow")?;
+    let live = if address >= base && address < end {
+        address >= first && stop <= end
+    } else {
+        runtime.live_data_slot(address, 8) || memory.guest_private_data_slot(address, 8)
+    };
+    if cpu.regs[1] != 0
+        || !address.is_multiple_of(8)
+        || !live
+        || !memory.owned_noncode_access(address, 8)
+    {
+        return Err("cooperative reference store requires a live private C++ temporary".into());
+    }
+    memory.check(address, 8, super::super::super::memory::WRITE)?;
+    memory.read_int(cpu.regs[4], 8)?;
+    root(cpu.regs[8])?;
+    memory.write_int(address, 8, cpu.regs[8])?;
+    cpu.return_integer(memory, 0)
+}
 pub(super) fn with_service<T>(
     operation: impl FnOnce(&mut Memory, &mut Runtime64) -> Result<T, String>,
 ) -> Result<T, String> {
@@ -830,10 +913,70 @@ pub(super) fn guest_value_span_arguments(
     utf16: &[(usize, Option<&[u16]>)],
     work: Work,
 ) -> Result<GuestByteResult, String> {
+    guest_value_numeric_span_arguments(target, args, floating, spans, aliases, utf16, &[], work)
+}
+pub(super) struct NumericSpan<'a> {
+    pub(super) position: usize,
+    pub(super) count: usize,
+    pub(super) stride: usize,
+    pub(super) bytes: &'a [u8],
+    /// Prior numeric span with the same native element range and exact layout.
+    pub(super) alias: Option<usize>,
+}
+struct ManagedInput<'a> {
+    position: usize,
+    bytes: Option<&'a [u8]>,
+    count: usize,
+    numeric: bool,
+    alias: Option<usize>,
+}
+/// UTF16, pinned numeric arrays and byref values use the same revoked scope.
+/// Numeric outputs follow ordinary byref outputs in their declaration order.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn guest_value_numeric_span_arguments(
+    target: u64,
+    args: &[u64],
+    floating: &[(usize, u64)],
+    spans: &[(usize, &[u8])],
+    aliases: &[(usize, usize)],
+    utf16: &[(usize, Option<&[u16]>)],
+    numeric: &[NumericSpan<'_>],
+    work: Work,
+) -> Result<GuestByteResult, String> {
     let spans: Vec<_> = spans
         .iter()
         .map(|&(index, bytes)| (index, bytes, 0))
         .collect();
+    let mut inputs: Vec<_> = utf16
+        .iter()
+        .map(|&(position, units)| ManagedInput {
+            position,
+            bytes: units.map(|units| unsafe {
+                std::slice::from_raw_parts(units.as_ptr().cast(), units.len() * 2)
+            }),
+            count: units.map_or(0, <[u16]>::len),
+            numeric: false,
+            alias: None,
+        })
+        .collect();
+    let first_numeric = inputs.len();
+    for (ordinal, span) in numeric.iter().enumerate() {
+        if !(1..=256).contains(&span.stride)
+            || span.count > 65536
+            || span.count.checked_mul(span.stride) != Some(span.bytes.len())
+            || span.bytes.len() > 0x20000
+            || span.alias.is_some_and(|source| source >= ordinal)
+        {
+            return Err("numeric managed span count/stride/alias invalid".into());
+        }
+        inputs.push(ManagedInput {
+            position: span.position,
+            bytes: Some(span.bytes),
+            count: span.count,
+            numeric: true,
+            alias: span.alias.map(|i| first_numeric + i),
+        });
+    }
     guest_byte_arguments_impl(
         target,
         args,
@@ -844,7 +987,7 @@ pub(super) fn guest_value_span_arguments(
         },
         floating,
         aliases,
-        utf16,
+        &inputs,
     )
 }
 pub(super) fn guest_reference_pair(
@@ -882,10 +1025,10 @@ fn guest_byte_arguments_impl(
     policy: BytePolicy,
     floating: &[(usize, u64)],
     aliases: &[(usize, usize)],
-    utf16: &[(usize, Option<&[u16]>)],
+    inputs: &[ManagedInput<'_>],
 ) -> Result<GuestByteResult, String> {
     OWNER.with(|slot| {
-        if slot.get().is_null() || args.len() > 16 || spans.len() + utf16.len() > 16 {
+        if slot.get().is_null() || args.len() > 16 || spans.len() + inputs.len() > 16 {
             return Err("typed byte callback owner/arity absent".into());
         }
         let owner = unsafe { &*slot.get() };
@@ -920,14 +1063,34 @@ fn guest_byte_arguments_impl(
             }
             seen[index] = true;
         }
-        let mut string_offsets = Vec::new();
-        for &(index, units) in utf16 {
-            if index >= args.len() || seen[index] || units.is_some_and(|u| u.len() > 65536) {
-                return Err("typed UTF16 input overlaps another payload or exceeds bound".into());
+        let mut input_offsets = Vec::new();
+        for (ordinal, input) in inputs.iter().enumerate() {
+            let index = input.position;
+            if index >= args.len()
+                || seen[index]
+                || input.count > 65536
+                || input.bytes.is_some_and(|b| b.len() > 0x20000)
+                || input.alias.is_some_and(|source| {
+                    source >= ordinal
+                        || !input.numeric
+                        || !inputs[source].numeric
+                        || input.count != inputs[source].count
+                        || input.bytes.map(<[u8]>::len) != inputs[source].bytes.map(<[u8]>::len)
+                })
+            {
+                return Err("managed input span overlaps another payload or exceeds bound".into());
             }
             seen[index] = true;
-            string_offsets.push(offset);
-            offset = (offset + 16 + units.map_or(0, |u| u.len() * 2) + 15) & !15;
+            input_offsets.push(offset);
+            offset = (offset
+                + 16
+                + if input.alias.is_none() {
+                    input.bytes.map_or(0, <[u8]>::len)
+                } else {
+                    0
+                }
+                + 15)
+                & !15;
         }
         if floating.iter().enumerate().any(|(i, &(index, _))| {
             index >= args.len()
@@ -989,24 +1152,28 @@ fn guest_byte_arguments_impl(
         for &(index, source) in aliases {
             args[index] = args[source];
         }
-        for (&(index, units), &offset) in utf16.iter().zip(&string_offsets) {
+        let mut begins = Vec::new();
+        for (input, &offset) in inputs.iter().zip(&input_offsets) {
             let address = base + offset as u64;
-            let begin = match units {
-                None => 0,
-                Some([]) => 1,
-                Some(units) => {
-                    let bytes: Vec<_> = units.iter().flat_map(|u| u.to_le_bytes()).collect();
-                    owner.memory.borrow_mut().write(address + 16, &bytes)?;
-                    address + 16
+            let begin = if let Some(source) = input.alias {
+                begins[source]
+            } else {
+                match input.bytes {
+                    None => 0,
+                    Some([]) => u64::from(!input.numeric),
+                    Some(bytes) => {
+                        owner.memory.borrow_mut().write(address + 16, bytes)?;
+                        address + 16
+                    }
                 }
             };
+            begins.push(begin);
             owner.memory.borrow_mut().write_int(address, 8, begin)?;
-            owner.memory.borrow_mut().write_int(
-                address + 8,
-                4,
-                units.map_or(0, |u| u.len()) as u64,
-            )?;
-            args[index] = address;
+            owner
+                .memory
+                .borrow_mut()
+                .write_int(address + 8, 4, input.count as u64)?;
+            args[input.position] = address;
         }
         let result =
             execute_scalar_guest_bounded(owner, target, &args, floating, policy.work.limit())?;
@@ -1014,6 +1181,22 @@ fn guest_byte_arguments_impl(
         for (&(_, bytes, _), &offset) in spans.iter().zip(&offsets) {
             let mut out = vec![0; bytes.len()];
             owner.memory.borrow().read(base + offset as u64, &mut out)?;
+            outputs.push(out);
+        }
+        for ((input, &offset), &begin) in inputs.iter().zip(&input_offsets).zip(&begins) {
+            if !input.numeric {
+                continue;
+            }
+            let address = base + offset as u64;
+            if owner.memory.borrow().read_int(address, 8)? != begin
+                || owner.memory.borrow().read_int(address + 8, 8)? != input.count as u64
+            {
+                return Err("engine changed a pinned numeric span header".into());
+            }
+            let mut out = vec![0; input.bytes.unwrap().len()];
+            if !out.is_empty() {
+                owner.memory.borrow().read(begin, &mut out)?;
+            }
             outputs.push(out);
         }
         Ok((result, outputs))
@@ -1064,6 +1247,23 @@ pub(super) fn guest_hash128(
 pub(super) fn guest_keyframe_span(target: u64, count: usize, bytes: &[u8]) -> Result<u64, String> {
     if count > 4096 || bytes.len() != count * super::animation::KEYFRAME_BYTES {
         return Err("Keyframe span exceeds checked stride/count".into());
+    }
+    guest_numeric_resource_span(target, count, super::animation::KEYFRAME_BYTES, bytes)
+}
+/// The actual metadata establishes a complete scalar element layout. Bound the
+/// copied bytes as well as the count so nested payload arenas never overlap.
+pub(super) fn guest_numeric_resource_span(
+    target: u64,
+    count: usize,
+    stride: usize,
+    bytes: &[u8],
+) -> Result<u64, String> {
+    if count > 4096
+        || !(1..=256).contains(&stride)
+        || bytes.len() > 0x20000
+        || count.checked_mul(stride) != Some(bytes.len())
+    {
+        return Err("numeric resource span exceeds checked layout/count/arena".into());
     }
     guest_resource_span(target, count, bytes, &[], false)
 }
@@ -1462,8 +1662,8 @@ mod tests {
             code.extend([0x48 | (register >> 3), 0xb8 | (register & 7)]);
             code.extend(value.to_le_bytes());
         }
-        for mode in 0..3 {
-            let reject_worker_mono = mode == 1;
+        for mode in 0..4 {
+            let reject_worker_mono = mode == 1 || mode == 3;
             let mut memory = Memory::default();
             memory.map(0x1000, 4096, READ | WRITE | EXECUTE).unwrap();
             memory.map(0x2000, 4096, READ | WRITE).unwrap();
@@ -1482,7 +1682,14 @@ mod tests {
             let wait = runtime.register("api-ms-win-core-synch-l1-2-0.dll", "WaitOnAddress");
             let wake = runtime.register("api-ms-win-core-synch-l1-2-0.dll", "WakeByAddressSingle");
             let get_id = runtime.register("kernel32.dll", "GetCurrentThreadId");
-            let mono = runtime.register("mono-2.0-bdwgc.dll", "mono_thread_current");
+            let mono = runtime.register(
+                "mono-2.0-bdwgc.dll",
+                if mode == 3 {
+                    "mono_thread_attach"
+                } else {
+                    "mono_thread_current"
+                },
+            );
             let mut code = vec![0x48, 0x83, 0xec, 0x28];
             for (register, value) in [
                 (1, 0x2000),
@@ -1560,7 +1767,11 @@ mod tests {
                 assert_eq!(contexts[&worker].cpu.work, 0);
             } else if reject_worker_mono {
                 assert!(contexts[&worker].cpu.work > 0);
-                assert!(result.unwrap_err().contains("typed worker reentry"));
+                assert!(result.unwrap_err().contains(if mode == 3 {
+                    "typed worker reentry"
+                } else {
+                    "no root route"
+                }));
                 assert_eq!(contexts[&worker].cpu.rip, mono);
                 assert_eq!(memory.read_int(0x2000, 4).unwrap(), 0);
             } else {
@@ -1833,6 +2044,84 @@ mod tests {
         .unwrap();
         result.unwrap();
         assert!(memory.read_int(0x6ff900000000, 8).is_err());
+    }
+    #[test]
+    fn cooperative_worker_reference_store_checks_teb_roots_and_stack_shadow_space() {
+        let mut memory = Memory::default();
+        let stack = super::super::super::STACK;
+        memory.map(stack, 65536, READ | WRITE).unwrap();
+        memory.map(0x1000, 4096, READ | WRITE | EXECUTE).unwrap();
+        let mut runtime = Runtime64::new(
+            &mut memory,
+            0x140000000,
+            stack,
+            65536,
+            "cooperative-reference",
+        )
+        .unwrap();
+        runtime.enable_scheduler();
+        let rsp = stack + 65536 - 72;
+        memory.write_int(rsp, 8, 0x1500).unwrap();
+        let mut main = Cpu64::new(0, rsp);
+        main.gs_base = runtime.teb();
+        main.regs[8] = 0x1000;
+        runtime
+            .dispatch("kernel32.dll", "CreateThread", &mut main, &mut memory)
+            .unwrap();
+        let spawn = runtime.take_threads().pop().unwrap();
+        runtime.activate_thread(spawn.id);
+        let mut cpu = spawn.cpu;
+        cpu.regs[4] -= 256;
+        let rsp = cpu.regs[4];
+        let destination = rsp + 64;
+        memory.write_int(rsp, 8, 0x1234).unwrap();
+        cpu.regs[2] = destination;
+        cpu.regs[8] = 7;
+        store_worker_reference(&mut cpu, &mut memory, &runtime, |token| {
+            if token == 7 {
+                Ok(())
+            } else {
+                Err("unrooted reference".into())
+            }
+        })
+        .unwrap();
+        assert_eq!(memory.read_int(destination, 8).unwrap(), 7);
+        assert_eq!(cpu.rip, 0x1234);
+        assert_eq!(cpu.regs[4], rsp + 8);
+        let valid = cpu.clone();
+        for (owner, address, token, gs) in [
+            (1, destination, 7, valid.gs_base),
+            (0, destination + 1, 7, valid.gs_base),
+            (0, rsp + 8, 7, valid.gs_base),
+            (0, rsp - 8, 7, valid.gs_base),
+            (0, destination, 9, valid.gs_base),
+            (0, destination, 7, 0),
+            (0, 0x1000, 7, valid.gs_base),
+        ] {
+            cpu = valid.clone();
+            cpu.regs[4] = rsp;
+            cpu.regs[1] = owner;
+            cpu.regs[2] = address;
+            cpu.regs[8] = token;
+            cpu.gs_base = gs;
+            memory.write_int(destination, 8, 0xaaaa).unwrap();
+            assert!(
+                store_worker_reference(&mut cpu, &mut memory, &runtime, |value| {
+                    if value == 7 {
+                        Ok(())
+                    } else {
+                        Err("unrooted reference".into())
+                    }
+                })
+                .is_err()
+            );
+            assert_eq!(memory.read_int(destination, 8).unwrap(), 0xaaaa);
+            assert_eq!(cpu.regs[4], rsp);
+        }
+        runtime.activate_thread(1);
+        cpu = valid;
+        cpu.regs[4] = rsp;
+        assert!(store_worker_reference(&mut cpu, &mut memory, &runtime, |_| Ok(())).is_err());
     }
     #[test]
     fn worker_registration_preserves_guest_identity_and_restricts_callbacks() {

@@ -425,6 +425,47 @@ pub(super) struct State {
     closed: bool,
 }
 impl State {
+    pub(super) fn observed_lifecycle(
+        &self,
+        domain: Object,
+        guest: u64,
+        function: &str,
+    ) -> Result<u64, String> {
+        if self.closed
+            || guest <= 1
+            || domain.is_null()
+            || self.root != 0 && self.root != domain as usize
+            || self
+                .owner
+                .is_some_and(|owner| owner != thread::current().id())
+        {
+            return Err("cooperative worker lifecycle outside retained domain/owner".into());
+        }
+        let token = self
+            .workers
+            .get(&guest)
+            .filter(|worker| self.owns_thread_token(guest, worker.token))
+            .map(|worker| worker.token);
+        match function {
+            "mono_get_root_domain" => Ok(ROOT_TOKEN),
+            "mono_domain_get" => Ok(if token.is_some() { ROOT_TOKEN } else { 0 }),
+            "mono_thread_current" => token
+                .ok_or_else(|| "cooperative current-thread query before actual attachment".into()),
+            _ => Err("cooperative worker lifecycle is not a read-only query".into()),
+        }
+    }
+    /// Attachment receipts are updated only by synchronous owner commands.
+    /// Borrowing State freezes detach/re-attach until the temporary store ends;
+    /// no managed Thread pointer or native TLS query crosses this boundary.
+    pub(super) fn owns_thread_token(&self, guest: u64, token: u64) -> bool {
+        !self.closed
+            && guest > 1
+            && token != 0
+            && self.owner == Some(thread::current().id())
+            && self.workers.get(&guest).is_some_and(|worker| {
+                worker.attached && worker.token == token && worker.join.is_some()
+            })
+    }
     pub(super) fn handles(function: &str) -> bool {
         matches!(
             function,
@@ -881,5 +922,92 @@ mod tests {
         assert_eq!(DOMAIN.with(Cell::get), 0);
         assert_eq!(SAFE_MARKER.with(Cell::get), 0);
         assert!(!forward_profiler(Profiler::Resize(1)).unwrap());
+    }
+    #[test]
+    fn temporary_thread_tokens_follow_exact_guest_attachment_generation_and_owner() {
+        let api = api();
+        let mut state = State {
+            api: Some(api),
+            owner: Some(thread::current().id()),
+            root: ROOT,
+            ..State::default()
+        };
+        state
+            .workers
+            .insert(3, Worker::start(api, ROOT, 0).unwrap());
+        state
+            .workers
+            .insert(7, Worker::start(api, ROOT, 1).unwrap());
+        assert_eq!(
+            state
+                .observed_lifecycle(ROOT as Object, 3, "mono_domain_get")
+                .unwrap(),
+            0
+        );
+        assert!(state
+            .observed_lifecycle(ROOT as Object, 3, "mono_thread_current")
+            .is_err());
+        assert_eq!(
+            state
+                .observed_lifecycle(ROOT as Object, 3, "mono_get_root_domain")
+                .unwrap(),
+            ROOT_TOKEN
+        );
+        let mut callback = |_| Ok(());
+        let token = state
+            .workers
+            .get_mut(&3)
+            .unwrap()
+            .scalar(api, Command::Attach, &mut callback)
+            .unwrap();
+        assert!(state.owns_thread_token(3, token));
+        assert_eq!(
+            state
+                .observed_lifecycle(ROOT as Object, 3, "mono_thread_current")
+                .unwrap(),
+            token
+        );
+        assert_eq!(
+            state
+                .observed_lifecycle(ROOT as Object, 3, "mono_domain_get")
+                .unwrap(),
+            ROOT_TOKEN
+        );
+        assert!(state
+            .observed_lifecycle((ROOT + 1) as Object, 3, "mono_thread_current")
+            .is_err());
+        assert!(state
+            .observed_lifecycle(ROOT as Object, 1, "mono_domain_get")
+            .is_err());
+        assert!(state
+            .observed_lifecycle(ROOT as Object, 3, "mono_thread_detach")
+            .is_err());
+        for (guest, value) in [(1, token), (7, token), (3, token + 8), (3, 0)] {
+            assert!(!state.owns_thread_token(guest, value));
+        }
+        state.owner = None;
+        assert!(!state.owns_thread_token(3, token));
+        state.owner = Some(thread::current().id());
+        state
+            .workers
+            .get_mut(&3)
+            .unwrap()
+            .scalar(api, Command::Detach(token), &mut callback)
+            .unwrap();
+        assert!(!state.owns_thread_token(3, token));
+        let current = state
+            .workers
+            .get_mut(&3)
+            .unwrap()
+            .scalar(api, Command::Attach, &mut callback)
+            .unwrap();
+        assert_ne!(token, current);
+        assert!(!state.owns_thread_token(3, token));
+        assert!(state.owns_thread_token(3, current));
+        state.close().unwrap();
+        assert!(!state.owns_thread_token(3, current));
+        assert!(state
+            .observed_lifecycle(ROOT as Object, 3, "mono_get_root_domain")
+            .is_err());
     }
 }

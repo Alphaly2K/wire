@@ -23,10 +23,10 @@ const INCREMENTAL_SUPPORT: &str =
 const ATTRIBUTES_CANDIDATE: &str =
     "94a8252dfb4bf7aa3584be4b1888afd128431cc7ea70b7bd6773fc299cab0a5e";
 const ATTRIBUTES_SUPPORT: &str = "7cd421d0e370b09a865848a59e47aa2b1362fd9ff484804fe3b2c1b4a5bc8029";
-// Locked 24-patch build in the main checkout: audited objects and inputs,
+// Locked 27-patch build in the main checkout: audited objects and inputs,
 // ordinary/incremental native fixtures and executable-memory guard verified.
-const OBJECTS_CANDIDATE: &str = "813ba7548520c706de1de76ae8bd7b5b2f31cf1daadbf51e0d4f230bbe173c69";
-const OBJECTS_SUPPORT: &str = "6bb5f274387eb907ecc97ddc963bc832d249adf52a452b58b1d417fa50424e0e";
+const OBJECTS_CANDIDATE: &str = "3058346e80d719110015eca91887b0c2021118e7150637a70666e809a054f8c2";
+const OBJECTS_SUPPORT: &str = "09c81365daa1bcbcbd792c7d00b47aa765dd23a7ae6cd53d2f7770bdce5bc6fd";
 const EXE: &str = "94cccae89918110514672a6ec249a1252ffaeb28c0ae8d8633a9352988738f12";
 const UNITY: &str = "a2022611884470ddab23927a3eb7bbaef3924c18972d30ba7b5330a8fd25bcc4";
 const CORELIB_SUPPORT: &str = "b10bb3e59af90e92e240424ac88b1f96eb27906c3fa099958713d93801b4b078";
@@ -55,6 +55,7 @@ mod closed_types;
 mod constructors;
 mod engine_component_queries;
 mod engine_components;
+mod engine_headers;
 mod engine_objects;
 mod engine_scalars;
 mod errors;
@@ -71,6 +72,7 @@ mod instances;
 mod invoke;
 mod jobs;
 mod json;
+mod keyword_views;
 mod logging;
 mod managed_calls;
 mod metadata;
@@ -100,6 +102,15 @@ mod unsafe_buffers;
 mod value_layout;
 mod virtual_methods;
 mod workers;
+
+pub(super) fn cooperative_worker_leaf(
+    function: &str,
+    cpu: &mut Cpu64,
+    memory: &mut Memory,
+    runtime: &Runtime64,
+) -> Result<bool, String> {
+    callbacks::cooperative_worker_leaf(function, cpu, memory, runtime)
+}
 macro_rules! symbol {
     ($library:expr, $name:literal, $ty:ty) => {{
         let pointer = unsafe { libc::dlsym($library, concat!($name, "\0").as_ptr().cast()) };
@@ -1622,14 +1633,8 @@ impl Probe {
                         library,
                         self.image_registry.unique_native_image(CORE_MODULE)?,
                     )?;
+                    self.adopt_early_instance_roots(api)?;
                     self.instance_api = Some(api);
-                    if let Some(reflection_api) = self.reflection_api {
-                        self.reflection_registry.adopt_early_roots(
-                            reflection_api,
-                            api,
-                            &mut self.instance_registry,
-                        )?;
-                    }
                     api
                 }
             };
@@ -2039,6 +2044,24 @@ impl Probe {
             targets[5..].copy_from_slice(&table.leaf_targets());
         }
         targets
+    }
+    fn adopt_early_instance_roots(&mut self, api: instances::Api) -> Result<(), String> {
+        if let Some(strings) = self.object_api {
+            self.object_registry
+                .adopt_early_roots(strings, api, &mut self.instance_registry)?;
+        }
+        if let Some(reflection) = self.reflection_api {
+            self.reflection_registry.adopt_early_roots(
+                reflection,
+                api,
+                &mut self.instance_registry,
+            )?;
+        }
+        if let Some(arrays) = self.array_api {
+            self.array_registry
+                .adopt_early_roots(arrays, api, &mut self.instance_registry)?;
+        }
+        Ok(())
     }
     fn constructor_images(&self) -> Result<Vec<Object>, String> {
         let mut images = vec![
@@ -2731,14 +2754,8 @@ impl Probe {
                             instances::Api::load(library, image)
                         })?;
                     let api = api?;
+                    self.adopt_early_instance_roots(api)?;
                     self.instance_api = Some(api);
-                    if let Some(reflection_api) = self.reflection_api {
-                        self.reflection_registry.adopt_early_roots(
-                            reflection_api,
-                            api,
-                            &mut self.instance_registry,
-                        )?;
-                    }
                     api
                 }
             };
@@ -3267,6 +3284,13 @@ impl Probe {
             .native(a[0], metadata::Kind::Method)?;
         let call_api = managed_calls::Api::load(library)?;
         let managed_images = self.image_registry.live_native_images()?;
+        if !engine_headers::installed() {
+            engine_headers::install(
+                library,
+                self.image_registry.unique_native_image(CORE_MODULE)?,
+                &managed_images,
+            )?;
+        }
         if !resources::installed() {
             resources::install(
                 library,
@@ -3474,6 +3498,14 @@ impl Probe {
             )?;
         }
         if !scalar_engine::installed() {
+            if !keyword_views::installed() {
+                keyword_views::install(
+                    library,
+                    self.image_registry.unique_native_image(CORE_MODULE)?,
+                    &managed_images,
+                    &self.registry,
+                )?;
+            }
             scalar_engine::install(library, &self.image_registry, &self.registry)?;
         }
         if bridge_audit::requested() {
@@ -3627,6 +3659,7 @@ impl Probe {
                 rooted_instance: descriptor.receiver.map(|_| (a[1], receiver_class)),
                 objects: Some(reentry::ObjectRoots {
                     api,
+                    workers: &self.native.as_ref().ok_or("nested workers absent")?.workers,
                     roots: &mut self.instance_registry,
                     strings,
                     objects: &mut self.object_registry,
@@ -5072,6 +5105,7 @@ impl Probe {
                     images: &mut self.image_registry,
                     rooted_instance: None,
                     objects: Some(reentry::ObjectRoots {
+                        workers: &native.workers,
                         api: self
                             .instance_api
                             .ok_or("async shutdown object API absent")?,
@@ -5181,6 +5215,7 @@ impl Probe {
             logging::retire_after_vm_cleanup()?;
             async_operations::retire_after_vm_cleanup()?;
             owned_resources::retire_after_vm_cleanup()?;
+            keyword_views::retire_after_vm_cleanup();
             // Raw native IL pointers remain owned until the VM can no longer
             // execute IL/finalizers. Only then release original guest records.
             unsafe_buffers::retire_after_vm_cleanup()?;
@@ -5264,6 +5299,7 @@ impl Probe {
             + &profiler_samples::report()
             + &profiler_recorders::report()
             + &engine_objects::report()
+            + &engine_headers::report()
             + &unsafe_buffers::report()
             + &logging::debug_report()
             + &burst_shared::report()

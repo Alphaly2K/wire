@@ -323,6 +323,16 @@ pub(super) unsafe fn publish(bytes: &[u8], span: *mut logging::Span) -> Result<u
     if bytes.len() != 16 || span.is_null() || !(span as usize).is_multiple_of(8) {
         return Err("output string requires a 16B aligned native span".into());
     }
+    let (result, length) = prepare_output(bytes)?;
+    unsafe { ptr::copy_nonoverlapping(result.as_ptr(), span.cast(), 16) };
+    Ok(length)
+}
+/// Validate/copy an engine allocation without changing native byref storage.
+/// Shared pool adapters stage all output conversions before their final commit.
+pub(super) fn prepare_output(bytes: &[u8]) -> Result<([u8; 16], usize), String> {
+    if bytes.len() != 16 {
+        return Err("output string requires exact span bytes".into());
+    }
     let guest = u64::from_le_bytes(bytes[..8].try_into().unwrap());
     let length = usize::try_from(i32::from_le_bytes(bytes[8..12].try_into().unwrap()))
         .map_err(|_| "negative output string length")?;
@@ -335,8 +345,7 @@ pub(super) unsafe fn publish(bytes: &[u8], span: *mut logging::Span) -> Result<u
     let mut result = [0u8; 16];
     result[..8].copy_from_slice(&(native as u64).to_le_bytes());
     result[8..12].copy_from_slice(&(length as i32).to_le_bytes());
-    unsafe { ptr::copy_nonoverlapping(result.as_ptr(), span.cast(), 16) };
-    Ok(length)
+    Ok((result, length))
 }
 unsafe extern "C" fn free_string(pointer: Object) {
     checked(|| {

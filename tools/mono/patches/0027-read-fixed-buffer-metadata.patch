@@ -1,0 +1,115 @@
+--- a/mono/metadata/custom-attrs.c
++++ b/mono/metadata/custom-attrs.c
+@@ -1934,5 +1934,112 @@
+ 	return mono_custom_attrs_from_index_checked (m_class_get_image (klass), idx, FALSE, error);
+ }
+ 
++/* Read fixed-buffer metadata without constructing an attribute or running IL.
++ * The caller retains image lifetimes; only a nonmoving MonoType capability and
++ * the declared element count cross the ABI. Outputs change only on success. */
++MONO_API int
++wire_mono_field_fixed_buffer (guint32 version, MonoClass *klass, MonoClassField *field,
++                             MonoType **element_out, guint32 *count_out)
++{
++    if (version != 1 || !klass || !field || !element_out || !count_out ||
++        mono_field_get_parent (field) != klass ||
++        (mono_field_get_flags (field) & (FIELD_ATTRIBUTE_STATIC | FIELD_ATTRIBUTE_LITERAL)) ||
++        image_is_dynamic (m_class_get_image (klass)))
++        return -1;
++    ERROR_DECL (error);
++    MonoCustomAttrInfo *info = mono_custom_attrs_from_field_checked (klass, field, error);
++    if (!is_ok (error)) {
++        mono_error_cleanup (error);
++        if (info) mono_custom_attrs_free (info);
++        return -1;
++    }
++    MonoClass *attribute = mono_class_from_name_checked (mono_defaults.corlib,
++        "System.Runtime.CompilerServices", "FixedBufferAttribute", error);
++    int result = -1;
++    MonoType *element = NULL;
++    guint32 count = 0;
++    if (!is_ok (error) || !attribute)
++        goto done;
++    if (!info) {
++        result = 0;
++        goto done;
++    }
++    if (info->num_attrs < 0 || info->num_attrs > 128)
++        goto done;
++    MonoCustomAttrEntry *match = NULL;
++    for (int i = 0; i < info->num_attrs; ++i) {
++        MonoCustomAttrEntry *entry = &info->attrs [i];
++        if (!entry->ctor)
++            goto done;
++        if (entry->ctor->klass == attribute) {
++            if (match)
++                goto done;
++            match = entry;
++        }
++    }
++    if (!match) {
++        result = 0;
++        goto done;
++    }
++    MonoMethodSignature *sig = mono_method_signature_checked (match->ctor, error);
++    if (!is_ok (error) || !sig || !sig->hasthis || sig->param_count != 2 ||
++        sig->ret->type != MONO_TYPE_VOID ||
++        strcmp (match->ctor->name, ".ctor") ||
++        sig->params [0]->byref || sig->params [1]->byref ||
++        mono_class_from_mono_type_internal (sig->params [0]) != mono_defaults.systemtype_class ||
++        sig->params [1]->type != MONO_TYPE_I4 ||
++        !mono_verifier_verify_cattr_content (info->image, match->ctor, match->data,
++                                            match->data_size, error))
++        goto done;
++    const char *p = (const char *)match->data;
++    const char *end = p + match->data_size;
++    if (match->data_size < 8 || read16 (p) != 1)
++        goto done;
++    p += 2;
++    element = (MonoType *)load_cattr_value (info->image, sig->params [0], NULL, p, end, &p, error);
++    if (!is_ok (error) || !element)
++        goto done;
++    gpointer length = load_cattr_value (info->image, sig->params [1], NULL, p, end, &p, error);
++    if (!is_ok (error) || !length) {
++        g_free (length);
++        goto done;
++    }
++    gint32 declared = *(gint32 *)length;
++    g_free (length);
++    if (declared <= 0 || declared > 4096 || end - p != 2 || read16 (p) != 0)
++        goto done;
++    count = (guint32)declared;
++    result = 1;
++done:
++    mono_error_cleanup (error);
++    if (info) mono_custom_attrs_free (info);
++    if (result >= 0) {
++        *element_out = element;
++        *count_out = count;
++    }
++    return result;
++}
++
++/* Standalone compiler unsafe storage has unclassified bytes until an owning
++ * fixed-buffer field proves their element type and count. No attribute IL runs. */
++MONO_API int
++wire_mono_class_is_unsafe_value (guint32 version, MonoClass *klass)
++{
++    if (version != 1 || !klass || image_is_dynamic (m_class_get_image (klass)))
++        return -1;
++    ERROR_DECL (error);
++    MonoCustomAttrInfo *info = mono_custom_attrs_from_class_checked (klass, error);
++    int result = -1;
++    if (is_ok (error)) {
++        MonoClass *attribute = mono_class_from_name_checked (mono_defaults.corlib,
++            "System.Runtime.CompilerServices", "UnsafeValueTypeAttribute", error);
++        if (is_ok (error) && attribute)
++            result = info && mono_custom_attrs_has_attr (info, attribute) ? 1 : 0;
++    }
++    mono_error_cleanup (error);
++    if (info) mono_custom_attrs_free (info);
++    return result;
++}
++
+ /**
+  * mono_custom_attrs_from_param:

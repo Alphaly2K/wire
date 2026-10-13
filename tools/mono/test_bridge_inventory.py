@@ -80,6 +80,7 @@ namespace UnityEngine {
 public struct Cell<T> { public T value; }
 public delegate Cell<int> Handler(Cell<string> input);
 public unsafe class State { public void* address; public Handler callback; }
+public unsafe struct FixedState { public fixed float planes[24]; public bool visible; }
 [Serializable] public class Root {
   [UnityEngine.SerializeField] private Cell<Cell<int>[]> cells;
   [NonSerialized] public State runtime;
@@ -117,6 +118,10 @@ public unsafe class State { public void* address; public Handler callback; }
             state = {row['field']: row for row in fields if row['owner'] == 'State'}
             self.assertEqual(state['address']['protocol'], 'pointer-lifetime')
             self.assertEqual(state['callback']['protocol'], 'callback-lifetime')
+            fixed = {row['field']: row for row in fields if row['owner'] == 'FixedState'}
+            self.assertEqual(fixed['planes']['shape'], 'fixed[24]:f32')
+            self.assertEqual(fixed['planes']['protocol'], 'scalar-value')
+            self.assertEqual(fixed['visible']['shape'], 'bool')
             with (output / 'managed-types.tsv').open() as stream:
                 types = {row['type']: row for row in csv.DictReader(stream, delimiter='\t')}
             self.assertEqual(types['State']['serializable'], '0')

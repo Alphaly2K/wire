@@ -4,8 +4,8 @@
 //! Engine references/arrays use the existing rooted container protocol. Other
 //! pointer/callback/lifetime shapes stay outside the ordinary value ABI.
 use super::{
-    bindings, callbacks, engine_objects, images, managed_calls, owned_resources, render_context,
-    value_layout, Object,
+    bindings, callbacks, engine_objects, images, keyword_views, managed_calls, owned_resources,
+    render_context, value_layout, Object,
 };
 use std::{
     cell::RefCell,
@@ -14,6 +14,8 @@ use std::{
     ptr,
     sync::OnceLock,
 };
+mod numeric_spans;
+use numeric_spans::NumericFrame;
 const POOL_CAPACITY: usize = 8192;
 const ARGUMENT_CAPACITY: usize = 16;
 // A semantic policy, not per-method ABI specifications. These families operate
@@ -49,6 +51,10 @@ const FAMILIES: &[(&CStr, &CStr)] = &[
     (c"UnityEngine.Rendering", c"GraphicsSettings"),
     (c"UnityEngine.Rendering", c"ScriptableRenderContext"),
     (c"UnityEngine.Rendering", c"CommandBuffer"),
+    (c"UnityEngine.Rendering", c"GlobalKeyword"),
+    (c"UnityEngine.Rendering", c"LocalKeyword"),
+    (c"UnityEngine.Rendering", c"LocalKeywordSpace"),
+    (c"UnityEngine.Rendering", c"ShaderKeyword"),
     (c"UnityEngine.Rendering", c"SplashScreen"),
     (
         c"UnityEngine.Experimental.Rendering",
@@ -112,8 +118,11 @@ enum Argument {
     Exception { class: usize },
     DataArray { class: usize },
     Utf16Span,
+    Utf16Output,
+    NumericSpan(managed_calls::NumericSpanLayout),
     RenderContext,
     OwnedResource { class: usize, nullable: bool },
+    KeywordValue { class: usize, payload: Payload },
     ReferenceContainer { class: usize },
 }
 struct Binding {
@@ -123,6 +132,8 @@ struct Binding {
     arguments: Vec<Argument>,
     returns: Return,
     work: callbacks::Work,
+    keyword_producer: Option<usize>,
+    numeric_values: Vec<(usize, value_layout::NumericLayout)>,
 }
 enum Return {
     Scalar(Scalar),
@@ -567,7 +578,8 @@ pub(super) fn install(
             let (method, method_flags) = candidates[0];
             let instance = method_flags & 0x10 == 0;
             let context_owner = render_context::context_class(owner);
-            if instance && !context_owner {
+            let keyword_owner = keyword_views::space(owner);
+            if instance && !context_owner && !keyword_owner {
                 deferred += 1;
                 continue;
             }
@@ -588,14 +600,29 @@ pub(super) fn install(
             let mut signature_types = Vec::new();
             let mut enum_storage = Vec::new();
             let mut arguments = Vec::new();
+            let mut numeric_values = Vec::new();
             if instance {
-                arguments.push(Argument::RenderContext);
+                arguments.push(if keyword_owner {
+                    let layout =
+                        keyword_views::layout(owner).ok_or("keyword instance layout absent")?;
+                    Argument::KeywordValue {
+                        class: owner as usize,
+                        payload: Payload {
+                            width: layout.width,
+                            alignment: layout.alignment,
+                            output: false,
+                        },
+                    }
+                } else {
+                    Argument::RenderContext
+                });
             }
             let mut names = [ptr::null(); ARGUMENT_CAPACITY];
             unsafe { param_names(method, names.as_mut_ptr()) };
             let mut result = None;
             let mut engine_arguments = None;
             let mut utf16_arguments = None;
+            let mut numeric_arguments = None;
             let mut supported = true;
             for index in 0..=arity {
                 let ty = unsafe {
@@ -714,12 +741,27 @@ pub(super) fn install(
                         utf16_arguments =
                             Some(api.engine_utf16_arguments(method, owner, span, &family)?);
                     }
-                    if !utf16_arguments.as_ref().unwrap()[index - 1] {
-                        supported = false;
-                        break;
+                    if utf16_arguments.as_ref().unwrap()[index - 1] {
+                        super::logging::validate_span_layout(library, span)?;
+                        arguments.push(Argument::Utf16Span);
+                    } else if index == arity
+                        && api.engine_utf16_output(method, owner, span, &family)?
+                    {
+                        super::logging::validate_span_layout(library, span)?;
+                        arguments.push(Argument::Utf16Output);
+                    } else {
+                        if numeric_arguments.is_none() {
+                            numeric_arguments =
+                                Some(api.engine_numeric_spans(method, owner, span, &family)?);
+                        }
+                        if let Some(layout) = numeric_arguments.as_ref().unwrap()[index - 1] {
+                            super::logging::validate_span_layout(library, span)?;
+                            arguments.push(Argument::NumericSpan(layout));
+                        } else {
+                            supported = false;
+                            break;
+                        }
                     }
-                    super::logging::validate_span_layout(library, span)?;
-                    arguments.push(Argument::Utf16Span);
                 } else if index != 0
                     && reference
                     && type_kind == 0x11
@@ -740,18 +782,28 @@ pub(super) fn install(
                         supported = false;
                         break;
                     }
-                    let (width, alignment) =
+                    let keyword_layout = keyword_views::layout(class);
+                    let (width, alignment) = if let Some(layout) = keyword_layout {
+                        (layout.width, layout.alignment)
+                    } else {
                         match value_layout::Api::load(library, unsafe { image_of(class) })?
                             .layout_in(class, &family)
-                            .and_then(|l| l.scalar_inline())
+                            .and_then(|l| l.numeric())
                         {
-                            Ok(layout) => layout,
+                            Ok(layout) => {
+                                let dimensions = (layout.width, layout.alignment);
+                                numeric_values.push((arguments.len(), layout));
+                                dimensions
+                            }
                             Err(_) => {
                                 supported = false;
                                 break;
                             }
-                        };
-                    if !(1..=256).contains(&width) || !matches!(alignment, 1 | 2 | 4 | 8) {
+                        }
+                    };
+                    if !(1..=value_layout::MAX_VALUE_BYTES).contains(&width)
+                        || !matches!(alignment, 1 | 2 | 4 | 8)
+                    {
                         supported = false;
                         break;
                     }
@@ -795,11 +847,19 @@ pub(super) fn install(
                         }
                     }
                     let attrs = attrs.ok_or("engine byref direction absent")?;
-                    arguments.push(Argument::Value(Payload {
+                    let payload = Payload {
                         width,
                         alignment,
                         output: attrs & 3 == 2,
-                    }));
+                    };
+                    arguments.push(if keyword_layout.is_some() {
+                        if payload.output && !keyword_views::producer(method, class)
+                            && !arguments.iter().any(|arg| matches!(arg, Argument::KeywordValue { payload, .. } if !payload.output)) {
+                            supported = false;
+                            break;
+                        }
+                        Argument::KeywordValue { class: class as usize, payload }
+                    } else { Argument::Value(payload) });
                 } else {
                     let storage = if type_kind == 17 {
                         if unsafe { is_enum(class) } == 0 {
@@ -860,7 +920,11 @@ pub(super) fn install(
                 library: library as usize,
                 name: CString::new(name).map_err(|e| e.to_string())?,
                 target,
+                keyword_producer: keyword_views::producer(method, owner).then_some(method as usize).or_else(|| {
+                    arguments.iter().any(|arg| matches!(arg, Argument::KeywordValue { class, payload } if payload.output && keyword_views::producer(method, *class as Object))).then_some(method as usize)
+                }),
                 arguments,
+                numeric_values,
                 returns: result.ok_or("engine scalar return absent")?,
                 work: if context_owner
                     || owned_resources::class(owner)
@@ -965,6 +1029,32 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
         }
     }
     let arguments = checked.as_slice();
+    let mut keywords = Vec::new();
+    let mut keyword_origin = if let Some(method) = binding.keyword_producer {
+        Some(keyword_views::origin(
+            method as Object,
+            *arguments
+                .first()
+                .ok_or("keyword producer receiver absent")?,
+        )?)
+    } else {
+        None
+    };
+    for (index, (argument, &address)) in binding.arguments.iter().zip(arguments).enumerate() {
+        if let Argument::KeywordValue { class, payload } = argument {
+            let layout =
+                keyword_views::layout(*class as Object).ok_or("keyword value layout absent")?;
+            if !payload.output {
+                if let Some(origin) = unsafe { layout.origin(address as usize) }? {
+                    if keyword_origin.is_some_and(|prior| prior != origin) {
+                        return Err("keyword callback combines different borrowed owners".into());
+                    }
+                    keyword_origin = Some(origin);
+                }
+            }
+            keywords.push((index, address as usize, layout, payload.output));
+        }
+    }
     let utf16: Vec<_> = binding
         .arguments
         .iter()
@@ -980,11 +1070,19 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
         .arguments
         .iter()
         .map(|argument| match argument {
-            Argument::Value(layout) => Some(*layout),
+            Argument::Value(layout)
+            | Argument::KeywordValue {
+                payload: layout, ..
+            } => Some(*layout),
             Argument::RenderContext => Some(Payload {
                 width: 8,
                 alignment: 8,
                 output: false,
+            }),
+            Argument::Utf16Output => Some(Payload {
+                width: 16,
+                alignment: 8,
+                output: true,
             }),
             _ => None,
         })
@@ -999,8 +1097,36 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
                 .then_some((index, bits))
         })
         .collect();
-    let (value, frame, outputs) = if layouts.iter().any(Option::is_some) {
-        let frame = unsafe { ValueFrame::prepare(arguments, &layouts) }?;
+    let numeric = unsafe { NumericFrame::prepare(&binding.arguments, arguments, &layouts) }?;
+    let numeric_inputs = numeric.inputs();
+    let (value, frame, mut outputs) = if layouts.iter().any(Option::is_some) {
+        let mut frame = unsafe { ValueFrame::prepare(arguments, &layouts) }?;
+        frame.snapshot_numeric(&binding.numeric_values)?;
+        for &(index, address, layout, output) in &keywords {
+            let source = frame
+                .aliases
+                .iter()
+                .find(|alias| alias.0 == index)
+                .map_or(index, |alias| alias.1);
+            if source != index {
+                // Equal-sized numeric and semantic payloads are not aliases.
+                match (binding.arguments[source], binding.arguments[index]) {
+                    (
+                        Argument::KeywordValue { class: a, .. },
+                        Argument::KeywordValue { class: b, .. },
+                    ) if a == b => {}
+                    _ => return Err("keyword value alias has a different semantic layout".into()),
+                }
+            }
+            let span = frame
+                .spans
+                .iter_mut()
+                .find(|span| span.0 == source)
+                .ok_or("keyword payload absent")?;
+            if !output {
+                span.1 = unsafe { layout.encode(address) }?;
+            }
+        }
         let spans: Vec<_> = frame
             .spans
             .iter()
@@ -1010,46 +1136,46 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
             .iter()
             .map(|(position, units)| (*position, units.as_deref()))
             .collect();
-        let (value, outputs) =
-            if strings.is_empty() && matches!(binding.work, callbacks::Work::Ordinary) {
-                callbacks::guest_value_arguments(
-                    binding.target,
-                    arguments,
-                    &floating,
-                    &spans,
-                    &frame.aliases,
-                )?
-            } else {
-                callbacks::guest_value_span_arguments(
-                    binding.target,
-                    arguments,
-                    &floating,
-                    &spans,
-                    &frame.aliases,
-                    &strings,
-                    binding.work,
-                )?
-            };
+        let (value, outputs) = if strings.is_empty()
+            && numeric_inputs.is_empty()
+            && matches!(binding.work, callbacks::Work::Ordinary)
+        {
+            callbacks::guest_value_arguments(
+                binding.target,
+                arguments,
+                &floating,
+                &spans,
+                &frame.aliases,
+            )?
+        } else {
+            callbacks::guest_value_numeric_span_arguments(
+                binding.target,
+                arguments,
+                &floating,
+                &spans,
+                &frame.aliases,
+                &strings,
+                &numeric_inputs,
+                binding.work,
+            )?
+        };
         (value, Some(frame), outputs)
-    } else if !utf16.is_empty() {
+    } else if !utf16.is_empty() || !numeric_inputs.is_empty() {
         let strings: Vec<_> = utf16
             .iter()
             .map(|(position, units)| (*position, units.as_deref()))
             .collect();
-        (
-            callbacks::guest_value_span_arguments(
-                binding.target,
-                arguments,
-                &floating,
-                &[],
-                &[],
-                &strings,
-                binding.work,
-            )?
-            .0,
-            None,
-            Vec::new(),
-        )
+        let (value, outputs) = callbacks::guest_value_numeric_span_arguments(
+            binding.target,
+            arguments,
+            &floating,
+            &[],
+            &[],
+            &strings,
+            &numeric_inputs,
+            binding.work,
+        )?;
+        (value, None, outputs)
     } else {
         (
             callbacks::guest_scalars_with_work(binding.target, arguments, &floating, binding.work)?,
@@ -1057,6 +1183,15 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
             Vec::new(),
         )
     };
+    let split = outputs
+        .len()
+        .checked_sub(numeric_inputs.len())
+        .ok_or("numeric span outputs absent")?;
+    let numeric_outputs = outputs.split_off(split);
+    numeric.validate(&numeric_outputs)?;
+    if let Some(frame) = &frame {
+        frame.validate_numeric_outputs(&mut outputs, &binding.numeric_values)?;
+    }
     if let Some(frame) = &frame {
         for &(index, pointer) in &contexts {
             let position = frame
@@ -1066,6 +1201,36 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
                 .ok_or("render context payload absent")?;
             if outputs.get(position).map(Vec::as_slice) != Some(pointer.to_le_bytes().as_slice()) {
                 return Err("engine modified readonly render context payload".into());
+            }
+        }
+    }
+    let mut keyword_outputs = Vec::new();
+    if let Some(frame) = &frame {
+        for &(index, _) in &frame.spans {
+            if matches!(binding.arguments[index], Argument::Utf16Output) {
+                let position = frame.spans.iter().position(|span| span.0 == index).unwrap();
+                let bytes = outputs
+                    .get_mut(position)
+                    .ok_or("engine string output missing")?;
+                *bytes = super::binding_strings::prepare_output(bytes)?.0.to_vec();
+            }
+        }
+        for &(index, address, layout, output) in &keywords {
+            let source = frame
+                .aliases
+                .iter()
+                .find(|alias| alias.0 == index)
+                .map_or(index, |alias| alias.1);
+            let position = frame
+                .spans
+                .iter()
+                .position(|span| span.0 == source)
+                .ok_or("keyword result payload absent")?;
+            let bytes = outputs.get(position).ok_or("keyword result missing")?;
+            if output {
+                keyword_outputs.push((address, layout, layout.publish(bytes, keyword_origin)?));
+            } else if bytes != &frame.spans[position].1 {
+                return Err("engine modified an immutable keyword input".into());
             }
         }
     }
@@ -1089,9 +1254,23 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
     }
     // Validate the result and every output before changing any native slot.
     if let Some(frame) = frame {
-        let readonly: Vec<_> = contexts.iter().map(|context| context.0).collect();
+        let readonly: Vec<_> = contexts
+            .iter()
+            .map(|context| context.0)
+            .chain(keywords.iter().map(|keyword| {
+                frame
+                    .aliases
+                    .iter()
+                    .find(|alias| alias.0 == keyword.0)
+                    .map_or(keyword.0, |alias| alias.1)
+            }))
+            .collect();
         unsafe { frame.commit(&outputs, &readonly) }?;
     }
+    for (address, layout, value) in keyword_outputs {
+        unsafe { layout.commit(address, &value) }?;
+    }
+    unsafe { numeric.commit(&numeric_outputs) };
     Ok(if binding.returns.floating() {
         (0, word)
     } else {
@@ -1120,7 +1299,7 @@ impl ValueFrame {
                 .checked_add(layout.width)
                 .ok_or("native value span overflow")?;
             if address == 0
-                || !(1..=256).contains(&layout.width)
+                || !(1..=value_layout::MAX_VALUE_BYTES).contains(&layout.width)
                 || !matches!(layout.alignment, 1 | 2 | 4 | 8)
                 || !address.is_multiple_of(layout.alignment)
             {
@@ -1160,6 +1339,62 @@ impl ValueFrame {
             aliases,
             destinations,
         })
+    }
+    fn snapshot_numeric(
+        &mut self,
+        codecs: &[(usize, value_layout::NumericLayout)],
+    ) -> Result<(), String> {
+        for &(alias, source) in &self.aliases {
+            let left = codecs
+                .iter()
+                .find(|(index, _)| *index == alias)
+                .map(|(_, codec)| codec);
+            let right = codecs
+                .iter()
+                .find(|(index, _)| *index == source)
+                .map(|(_, codec)| codec);
+            if left != right {
+                return Err("value alias has a different typed numeric layout".into());
+            }
+        }
+        for (index, codec) in codecs {
+            if self.aliases.iter().any(|(alias, _)| alias == index) {
+                continue;
+            }
+            let span = self
+                .spans
+                .iter_mut()
+                .find(|(position, _)| position == index)
+                .ok_or("typed numeric span absent")?;
+            codec.canonicalize(&mut span.1)?;
+        }
+        Ok(())
+    }
+    fn validate_numeric_outputs(
+        &self,
+        outputs: &mut [Vec<u8>],
+        codecs: &[(usize, value_layout::NumericLayout)],
+    ) -> Result<(), String> {
+        if outputs.len() != self.spans.len() {
+            return Err("numeric value output arity mismatch".into());
+        }
+        let mut normalized = Vec::new();
+        for (index, codec) in codecs {
+            if self.aliases.iter().any(|(alias, _)| alias == index) {
+                continue;
+            }
+            let position = self
+                .spans
+                .iter()
+                .position(|(source, _)| source == index)
+                .ok_or("numeric output source absent")?;
+            codec.validate(&outputs[position])?;
+            normalized.push((position, codec));
+        }
+        for (position, codec) in normalized {
+            codec.canonicalize(&mut outputs[position])?;
+        }
+        Ok(())
     }
     unsafe fn commit(&self, outputs: &[Vec<u8>], readonly: &[usize]) -> Result<(), String> {
         if outputs.len() != self.destinations.len()
@@ -1209,7 +1444,96 @@ mod tests {
             arguments,
             returns: Return::Scalar(Scalar::from_kind(result).unwrap()),
             work: callbacks::Work::Ordinary,
+            keyword_producer: None,
+            numeric_values: Vec::new(),
         }
+    }
+    #[test]
+    fn typed_values_keep_all_fixed_bytes_zero_padding_and_validate_outputs_before_writeback() {
+        let numeric = |class: usize| {
+            value_layout::Layout {
+                class: class as Object,
+                width: 1028,
+                alignment: 4,
+                value: true,
+                slots: vec![
+                    value_layout::Slot {
+                        nested: false,
+                        offset: 0,
+                        field: ptr::null_mut(),
+                        shape: value_layout::Shape::Inline {
+                            width: 1024,
+                            alignment: 4,
+                        },
+                    },
+                    value_layout::Slot {
+                        nested: false,
+                        offset: 1024,
+                        field: ptr::null_mut(),
+                        shape: value_layout::Shape::Scalar {
+                            width: 1,
+                            boolean: true,
+                        },
+                    },
+                ],
+            }
+            .numeric()
+            .unwrap()
+        };
+        let codec = numeric(1);
+        let payload = Payload {
+            width: 1028,
+            alignment: 4,
+            output: false,
+        };
+        let mut first = [0xa5a5a5a5u32; 257];
+        let mut second = [0xb6b6b6b6u32; 257];
+        first[256] = 0xa5a5a501;
+        second[256] = 0xb6b6b600;
+        let addresses = [first.as_mut_ptr() as u64, second.as_mut_ptr() as u64];
+        let codecs = [(0, codec.clone()), (1, codec.clone())];
+        let mut frame =
+            unsafe { ValueFrame::prepare(&addresses, &[Some(payload), Some(payload)]) }.unwrap();
+        frame.snapshot_numeric(&codecs).unwrap();
+        assert!(frame.spans[0].1[..1024].iter().all(|&byte| byte == 0xa5));
+        assert_eq!(&frame.spans[0].1[1024..], &[1, 0, 0, 0]);
+        let mut outputs: Vec<_> = frame.spans.iter().map(|(_, bytes)| bytes.clone()).collect();
+        outputs[0][0] = 7;
+        outputs[1][1024] = 2;
+        let prior_outputs = outputs.clone();
+        assert!(frame
+            .validate_numeric_outputs(&mut outputs, &codecs)
+            .is_err());
+        assert_eq!(outputs, prior_outputs);
+        assert_eq!(first[0], 0xa5a5a5a5);
+        assert_eq!(second[0], 0xb6b6b6b6);
+        outputs[1][1024] = 1;
+        outputs[1][1025..].fill(0xcc);
+        frame
+            .validate_numeric_outputs(&mut outputs, &codecs)
+            .unwrap();
+        unsafe { frame.commit(&outputs, &[]) }.unwrap();
+        assert_eq!(first[0], 0xa5a5a507);
+        assert_eq!(first[256], 1);
+        assert_eq!(second[256], 1);
+        let mut alias = unsafe {
+            ValueFrame::prepare(
+                &[addresses[0], addresses[0]],
+                &[Some(payload), Some(payload)],
+            )
+        }
+        .unwrap();
+        alias.snapshot_numeric(&codecs).unwrap();
+        assert_eq!(alias.aliases, [(1, 0)]);
+        assert!(alias
+            .snapshot_numeric(&[(0, codec.clone()), (1, numeric(2))])
+            .is_err());
+        assert!(alias.snapshot_numeric(&[(0, codec)]).is_err());
+        first[256] = 2;
+        assert_eq!(first[256], 2);
+        let mut invalid =
+            unsafe { ValueFrame::prepare(&addresses[..1], &[Some(payload)]) }.unwrap();
+        assert!(invalid.snapshot_numeric(&codecs[..1]).is_err());
     }
     #[test]
     fn context_capability_restores_guest_payload_and_rejects_writeback_or_expiration() {

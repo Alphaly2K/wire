@@ -1,0 +1,19 @@
+--- a/mono/metadata/metadata.c
++++ b/mono/metadata/metadata.c
+@@ -7704,6 +7704,16 @@
+ 	return type->attrs;
+ }
+ 
++/* Read local-signature metadata through the runtime's own MonoType layout.
++ * This exposes no native address or mutable metadata and does not compile IL.
++ * The embedding bridge separately checks the actual closed element type. */
++MONO_API mono_bool
++wire_mono_type_is_pinned (MonoType *type)
++{
++	return type && type->pinned;
++}
++
++
+ /**
+  * mono_type_get_type:
+  * \param type the \c MonoType operated on

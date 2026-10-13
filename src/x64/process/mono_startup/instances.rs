@@ -254,6 +254,45 @@ impl Registry {
         }
         Ok(Some(token))
     }
+    /// Reverse an already marshalled engine receiver through its actual strong
+    /// root. A borrowed view must retain managed identity, not just an allocator
+    /// address which could later be reused by another Unity object.
+    pub(super) fn engine_owner(
+        &self,
+        api: Api,
+        pointer: u64,
+        class: Object,
+    ) -> Result<u64, String> {
+        if pointer == 0 || !api.engine_class(class) {
+            return Err("engine view owner requires a typed non-null receiver".into());
+        }
+        let mut result = None;
+        for &token in self.roots.keys() {
+            if unsafe { (api.assignable)(class, self.class(api, token)?) } == 0 {
+                continue;
+            }
+            if self.engine_cached_pointer(api, token, class)? == pointer
+                && result.replace(token).is_some()
+            {
+                return Err("engine view receiver has ambiguous managed identity".into());
+            }
+        }
+        result.ok_or_else(|| "engine view receiver has no canonical managed root".into())
+    }
+    pub(super) fn engine_cached_pointer(
+        &self,
+        api: Api,
+        token: u64,
+        class: Object,
+    ) -> Result<u64, String> {
+        if !api.engine_class(class) {
+            return Err("engine view owner class is not a Unity object".into());
+        }
+        let native = self.compatible(api, token, class)?;
+        let mut pointer = 0u64;
+        unsafe { (api.field_get)(native, api.cached_field, (&mut pointer as *mut u64).cast()) };
+        Ok(pointer)
+    }
     /// Candidate for metadata discovery only. This never authorizes a write:
     /// the caller must match the exact declared field and its complete layout.
     pub(super) fn interior_owner(&self, address: u64) -> Option<u64> {
@@ -832,6 +871,41 @@ pub(super) mod tests {
             target: identity,
             ..api()
         }
+    }
+    #[test]
+    fn engine_view_owners_require_canonical_roots_and_detect_rebound_cached_pointers() {
+        let api = Api {
+            unity_base: 1usize as Object,
+            ..identity_api()
+        };
+        let mut roots = Registry::default();
+        let class = 2usize as Object;
+        CACHED.with(|v| v.set(0x1230));
+        assert!(roots.engine_owner(api, 0x1230, class).is_err());
+        let owner = roots.borrow(api, 4usize as Object).unwrap();
+        assert_eq!(roots.engine_owner(api, 0x1230, class).unwrap(), owner);
+        assert_eq!(
+            roots.engine_cached_pointer(api, owner, class).unwrap(),
+            0x1230
+        );
+        assert!(roots.engine_owner(api, 0, class).is_err());
+        assert!(roots.engine_owner(api, 0x1230, 9usize as Object).is_err());
+        CACHED.with(|v| v.set(0));
+        assert!(roots.engine_owner(api, 0x1230, class).is_err());
+        assert_eq!(roots.engine_cached_pointer(api, owner, class).unwrap(), 0);
+        CACHED.with(|v| v.set(0x4560));
+        assert_eq!(
+            roots.engine_cached_pointer(api, owner, class).unwrap(),
+            0x4560
+        );
+        roots.borrow(api, 6usize as Object).unwrap();
+        assert!(roots
+            .engine_owner(api, 0x4560, class)
+            .unwrap_err()
+            .contains("ambiguous"));
+        roots.release(api);
+        assert!(roots.engine_cached_pointer(api, owner, class).is_err());
+        CACHED.with(|v| v.set(0));
     }
     pub(in crate::x64::process::mono_startup) fn allocation_api(
         new: unsafe extern "C" fn(Object, Object, *mut u16) -> Object,

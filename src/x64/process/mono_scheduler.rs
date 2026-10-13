@@ -136,6 +136,18 @@ fn run_worker(
         }
         if let Some(binding) = runtime.gateways.binding(&context.cpu.rip) {
             if binding.dll.as_ref() == "mono-2.0-bdwgc.dll" {
+                if super::mono_startup::cooperative_worker_leaf(
+                    &binding.original_function,
+                    &mut context.cpu,
+                    memory,
+                    runtime,
+                )? {
+                    context.cpu.work += 1;
+                    if runtime.thread_runnable(1, memory)? {
+                        break;
+                    }
+                    continue;
+                }
                 return Err(format!("native Mono wait requires typed worker reentry; guest-thread={}; function={}; args={:x?}", runtime.active_thread(), binding.original_function, [context.cpu.regs[1], context.cpu.regs[2], context.cpu.regs[8], context.cpu.regs[9]]));
             }
             let control = runtime.dispatch_bound(&binding, &mut context.cpu, memory)?;

@@ -9,9 +9,20 @@ import unittest
 from unittest.mock import patch
 
 import probe_startup
+import probe
 
 
 class StorageTests(unittest.TestCase):
+    def test_fixture_compilation_cannot_overwrite_frozen_game_corelib_support(self):
+        argv = ['probe.py', 'compile', '--output', str(self.runtime), '--fixture-output', str(self.runtime / 'probe')]
+        with patch.object(probe, 'REPO', self.repo), patch('sys.argv', argv), \
+             patch.object(probe, 'compile_fixtures') as compile_fixtures, \
+             redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as stopped:
+            probe.main()
+        self.assertEqual(stopped.exception.code, 2)
+        compile_fixtures.assert_not_called()
+        self.assertEqual(self.support.read_bytes(), b'support')
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix='wire-startup-storage-')
         self.addCleanup(self.temporary.cleanup)

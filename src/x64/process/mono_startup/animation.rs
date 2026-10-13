@@ -225,6 +225,42 @@ fn resources() -> Result<Vec<Resource>, String> {
             .ok_or("animation adapter has no owning thread".into())
     })
 }
+/// The eight bootstrap curves predate the generic resource registry. Preserve
+/// their existing rooted fixture and exact owner-thread finalization contract;
+/// newly created curves use the common opaque identity lifecycle.
+pub(super) fn legacy_lifecycle(create_adapter: Object, release_adapter: Object) -> bool {
+    create_adapter == create as *const () as Object
+        && release_adapter == destroy as *const () as Object
+}
+pub(super) fn legacy_pointer(pointer: u64) -> Option<u64> {
+    STATE.with(|state| {
+        state.borrow().as_ref().and_then(|state| {
+            state
+                .resources
+                .iter()
+                .any(|r| r.pointer == pointer && !r.destroyed)
+                .then_some(pointer)
+        })
+    })
+}
+pub(super) fn release_legacy(pointer: u64) -> Result<(), String> {
+    if legacy_pointer(pointer).is_none() {
+        return Err("curve release lacks live bootstrap ownership".into());
+    }
+    callbacks::guest_arguments(BINDINGS[1].1, &[pointer])?;
+    STATE.with(|state| {
+        state
+            .borrow_mut()
+            .as_mut()
+            .unwrap()
+            .resources
+            .iter_mut()
+            .find(|r| r.pointer == pointer)
+            .unwrap()
+            .destroyed = true;
+    });
+    Ok(())
+}
 fn checked<T>(operation: impl FnOnce() -> Result<T, String>) -> T {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation)) {
         Ok(Ok(value)) => value,
@@ -240,6 +276,9 @@ fn checked<T>(operation: impl FnOnce() -> Result<T, String>) -> T {
 }
 unsafe extern "C" fn create(span: *const Span) -> Object {
     checked(|| {
+        if let Some(result) = unsafe { super::owned_resources::cached_span_factory(span.cast()) } {
+            return result.map(|token| token as Object);
+        }
         callbacks::with_service(|_, _| Ok(()))?;
         if span.is_null() {
             return Err("NULL Keyframe span".into());
@@ -288,23 +327,8 @@ unsafe extern "C" fn create(span: *const Span) -> Object {
 }
 unsafe extern "C" fn destroy(pointer: Object) {
     checked(|| {
-        let pointer = pointer as usize as u64;
-        let records = resources()?;
-        if !records.iter().any(|r| r.pointer == pointer && !r.destroyed) {
-            return Err("destroy requires a live owned guest curve".into());
-        }
-        callbacks::guest_arguments(BINDINGS[1].1, &[pointer])?;
-        STATE.with(|s| {
-            let mut s = s.borrow_mut();
-            s.as_mut()
-                .unwrap()
-                .resources
-                .iter_mut()
-                .find(|r| r.pointer == pointer)
-                .unwrap()
-                .destroyed = true;
-        });
-        Ok(())
+        super::owned_resources::cached_release(pointer as usize)
+            .unwrap_or_else(|| release_legacy(pointer as u64))
     })
 }
 unsafe extern "C" fn scriptable(object: Object) {

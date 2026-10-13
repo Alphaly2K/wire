@@ -54,7 +54,7 @@ allocator/GCHandle 类 Int64、callback 和异步协议没有由纯 ABI 推断�
 
 前两项验收 ABI 机制。不同 profile 回归使用自编 fixture；真实第二游戏的兼容性验收
 仍待实施。引用/缓冲区/线程/GC 的剩余协议需要各自的端到端验收。
-整个启动 provider 仍锁定 Alice 与 24-patch native runtime；解除这些限制、验证其他
+整个启动 provider 仍锁定 Alice 与 25-patch native runtime；解除这些限制、验证其他
 游戏/Unity 版本以及可交互主循环，是独立的未完成门槛。
 
 ## 验证结果
@@ -463,3 +463,207 @@ material property blocks created=1 / live=0 / closed=true；guard checks=322 / d
 （`-D warnings`）与 **16 项**工具回归通过。最后帧仍为加载页，URP 初始化异常进入
 Shader.get_keywordSpace_Injected。下一批按 shader keyword/view 的完整协议处理，
 包括借用 view 的来源、nested reference、字符串与数组，继续使用全量静态清单。
+
+## Shader keyword 借用值批次
+
+全量包装 IL 中，LocalKeywordSpace 的 IntPtr 仅用于相等/哈希和传回原 engine；
+LocalKeyword 还包含 LocalKeywordSpace、String 与 UInt32，且由 URP 静态字段跨帧持有。
+该协议使用独立、不映射到 native/guest memory 的 identity arena。记录保存实际 Shader /
+ComputeShader / RayTracingShader class、canonical managed owner root、创建时 m_CachedPtr、
+实际注册的 getter target 和原 view pointer。重复查询保持相等，不同 managed owner
+即使重用同一 engine 地址也不会共享身份。每次消费核对原 rooted owner 的 m_CachedPtr，
+并调用原 getter 验证 view 未被替换；销毁、重绑定、foreign token 和退休后使用均拒绝。
+
+实际 metadata 决定字段偏移、布局和注册目标。LocalKeyword 输入按字段重建：指针
+私下恢复、String 通过既有 roots 转为 canonical reference、padding 归零；输出先验证
+全部 payload，再通过 Mono barrier 写回引用。普通 shader/material/compute/raytracing/
+command-buffer 消费者从共用 signature 扫描发现。GlobalKeyword 的实际布局只有 UInt32，
+继续使用普通数值协议。数组返回、BlittableArrayWrapper 和 ShaderKeywordSet 的多指针
+状态保留各自的完整协议待办，不把同名的 keyword 接口视为相同 ABI。
+
+同批增加通用 UTF16 输出识别：完整解析 wrapper 指令边界、真实 finally ranges、
+span/result 的不同 local 和实际 OutStringMarshaller.GetStringAndDispose 签名。
+只有该流程被证明后，ManagedSpanWrapper 才获得输出字符串协议；numeric spans 不受影响。
+原 engine allocation 先验证并复制，所有输出完成转换后才写 native storage，释放仍走
+原 BindingsAllocator.Free。带 injected value 输出的字符串输入包装也支持从 metadata
+匹配实际返回 class，而非假定 wrapper 与 icall 的参数数量相同。
+
+probe-187 自动注册 **4,275** 个入口（比 probe-186 增加 99），61.96 秒、357 draws /
+133 presents，正常退出配置边界；owned resources live=0 / closed=true，guard checks=322 /
+denied=0，GC scope depth=0。原 Shader.get_keywordSpace_Injected 已真实执行，最终帧仍
+为加载页，URP 的异常进入 LocalKeyword.GetShaderKeywordIndex_Injected。原因是共用
+engine-pointer 来源分析未覆盖 StringMarshaller 的多次调用、locals 和分支。修正通过
+实际 resolved signatures 计算调用的 stack effect；只有已验证的 Marshal/owned-resource
+转换能产生 PointerSource，其他调用返回和 local loads 仅为 unknown value。各条路径
+到达 target 时必须保持相同来源，back edges、未知调用 effect 和被消费的来源均拒绝。
+这项修复覆盖同形 mixed wrapper，而非给该 keyword 方法添加 adapter。
+
+probe-187 前完整 release 回归 **563 passed / 7 ignored**，release build、all-target
+Clippy（`-D warnings`）和 **16 项**工具回归通过。该轮同时进行 Clippy，时间不用于
+性能对比；mixed-wrapper 分析变更还需单独完成回归和集中验收。
+
+probe-188 自动注册 **4,462** 个入口、deferred=1,029；57.47 秒后旧曲线原型 abort。
+实际完成 LocalKeyword index/count 查询、Material.get_shader/FindPass、GlobalKeyword
+创建/index/count、URP batching 与 QualitySettings 查询。完整 lookup audit 是本轮
+131 个 loaded image 范围内的 11,615 个声明、5,829 个 missing；与 probe-174 的
+153 程序集全量 Cecil 清单分开记录。数值/keyword 普通消费者已 resolved，LocalKeyword[] /
+String[]、BlittableArrayWrapper 和 ShaderKeywordSet 仍保留独立协议待办。
+
+keyword identity arena 已从会与 async-operation retained buffers 重叠的 `0x6feb...`
+移到独立的 `0x6fe9...`。probe-188 使用修正前的冻结二进制，后续验收使用修正版；
+不把那次未触发 retained-buffer 的运行算作地址区间隔离验证。mixed-wrapper 完整
+release 回归 **564 passed / 7 ignored**，release build 与 all-target Clippy 通过。
+
+## 曲线生命周期和 pinned 数值 span
+
+AnimationCurve 加入共用 typed owned-resource 注册表。实际 factory/destructor
+签名、m_Ptr、BindingsMarshaller 的完整 field-load IL、原引擎目标及 Keyframe
+size/alignment 都来自本次 metadata。新曲线使用 opaque identity、foreign-finalizer
+队列、owner-thread release 与 quiesce；旧的八条 bootstrap 曲线仍保持其真实 managed
+Finalize/SuppressFinalize 验证和收尾，不放大旧构造函数的资源数量限制。
+
+probe-189 自动注册 **4,479** 个入口，62.09 秒后仍进入旧 bootstrap factory 并 abort。
+Mono 早期编译的 call sites 保留了旧 adapter：`mono_add_internal_call` 的重新注册
+不会使已有调用点失效。现让经过身份核对的旧 factory/destructor 成对转发到共用
+实现；未修改 executable code，也没有新增构造函数/MethodDef/RVA 特例。
+这轮 abort 同样没有完整 guard/资源收尾统计。
+
+本批进一步覆盖生成的 pinned `T[] -> Span<T> -> ManagedSpanWrapper` 包装。实际
+locals、闭合 generic argument、constructor/GetPinnableReference/get_Length 的完整
+签名、唯一 target 调用及 pin 清理尾部全部核对。numeric 元素须完整非 Boolean
+scalar 覆盖，不含 reference、IntPtr、padding。提前越过初始化的 branch、local
+重写、未知调用消费 header、部分 overlap 和不同 element 类型的 alias 均拒绝。
+来自现成 Span/NativeArray 的包装、含引用数组和 allocator-owned 数组返回仍需各自
+的协议，不因为同为 16B header 而自动准入。
+
+原 native pinned 数据复制到与 UTF16/byref 共用的 guest scope；相同实际 element
+range 和 type 保持数据 alias，各 header 独立检查。引擎可修改数组内容，全部返回
+长度、alias、普通输出及返回值先核对再提交 native bytes；失败、fault 和 header
+修改均保持原数组/输出不变。单 span 最大 65,536 个元素 / 128KiB，整个 callback
+仍受原 scope/work budget 限制，退出即撤销所有临时映射。
+
+runtime patch 0025 增加只读 `wire_mono_type_is_pinned` 导出，从运行时自己的 MonoType
+布局读取 actual local-signature 标记；Rust 没有冻结 MonoType 的内存布局。25-patch
+runtime 保持 no-JIT、MSVC class ABI 和原 corelib support。普通/incremental 两种配置
+各通过既有 11 组原生 fixture 与 5 项可执行内存拒绝测试；链接对象审查为 304 个
+objects、668 个 dependencies、0 unmatched。完整 release 回归 **569 passed /
+7 ignored**、16 项工具回归通过。具体游戏执行与最终资源清理还需集中验收。
+
+probe-190 自动注册 **4,591** 个入口、deferred=923；与 probe-188 的同一 loaded-image
+lookup audit 比较，有 **129** 个 missing 入口变为 resolved，分布在 **36** 个类。
+该数量包括连续两批变更，数值 span 单批相对 probe-189 增加 112 个自动注册入口。
+游戏真实创建一个 MaterialPropertyBlock 和 **16 条新 AnimationCurve**，经过更多
+URP VolumeComponent 构造/OnEnable。57.85 秒后 SIGSEGV；最终帧仍为加载页。
+异常退出缺少 guard 与资源收尾证据，results 中的默认零值不能计为正常释放。
+全量平台接口中仍有非游戏所需声明，不用 missing 总数估算游戏完成比例。
+
+## 保留原 IL 的引擎对象头读取
+
+probe-192 的 LLDB 现场确定 SIGSEGV 是 `UnityEngine.Object.GetInstanceID()` 中
+`ldind.i4` 对 guest 地址的直接宿主解引用；调用链为 RTHandle.SetTexture ->
+RenderTargetIdentifier 构造 -> GetInstanceID。m_CachedPtr 按既有真实绑定协议保存
+guest C++ 对象地址。原 IL 将它与真实静态 OffsetOfInstanceIDInCPlusPlusObject 相加
+后读 I4，在原生 Mono 中需要一个明确的地址空间边界。
+
+runtime patch 0026 增加 immutable、exact-method 的 scalar-read gateway。在实际
+core/corelib image family 完整建立后的 ordinary IL invoke 边界、该方法首次 transform
+之前注册；已编译的 unchecked
+transform 拒绝接入。该方法保留原始 IL、null 分支及返回位模式，禁止被 inline，
+其解释器 transform 使用原受检方法的优化限制。在唯一受检 I4 load 中调用预编译
+Rust 回调，不改 executable memory、不换构造函数、不生成 managed 替代体。
+
+准入核对实际实例签名、全部 locals、完整无异常处理 IL、每个指令边界、两条
+return 分支、null/non-null 分支、实际字段和 IntPtr helpers 的完整签名。FieldDef /
+MemberRef 来自当前 image 解析，无固定 token/spec。读取偏移来自原方法已经加载的
+真实 static field；不固定为 8，不制造 instance ID。回调核对 canonical strong root、
+Unity base/derived class、当前 m_CachedPtr、精确 pointer+offset、I4 宽度和 live guest
+data 范围，再从 Memory 读原始值。没有 callback owner、伪造/退休指针或错误类型
+返回拒绝状态，由 Mono 原异常边界抛 AccessViolationException，禁止 native fallback。
+其他方法继续使用原来的宿主地址语义。
+
+独立原生 fixture 在禁 JIT 构建与 noexec guard 下验证原 null IL、派生 receiver、
+GC 后身份、checked guest I4 位模式、拒绝时托管异常和其他 native pointer load 隔离。
+fixture 使用独立程序集/support，不覆盖游戏 corelib support。26-patch runtime
+SHA256 为 `915541508f53a6f237b1b18634340134952767607b807e9adae48857357cb6fa`；
+corelib support 仍为 `6bb5f274387eb907ecc97ddc963bc832d249adf52a452b58b1d417fa50424e0e`。
+链接对象审查仍为 304 objects / 668 dependencies / 0 unmatched。游戏验收待记录。
+
+probe-193 暴露了注册早于 corelib family 准入的问题，注册已移到上述 ordinary IL
+入口。probe-194/195 确认新增读取代码将 `mono_field_from_token` 的 retklass 误传为
+NULL；该 API 命中字段缓存仍会写输出。已改用真实声明类输出 cell，独立 native
+fixture 增加首次/缓存字段解析回归，普通与 incremental 配置均通过。
+
+probe-196 正常完成共用 gateway 登记和 4,591 个 metadata-discovered icall 的注册，
+但 35.07 秒后在 Mesh.Internal_Create 的 guest wait 中被既有 cooperative scheduler
+拒绝；尚未执行到 GetInstanceID 的实际读。真实 worker #3 调用
+mono_gc_wbarrier_set_field(NULL, <worker stack cell>, <attached worker Thread token>)。
+这是等待时调度路径与正常 worker 路径的协议覆盖差异，不新增 Mesh 方法适配。
+
+等待调度器现可服务 NULL-owner barrier 对 private C++ 临时引用槽的 token store。
+复用暂停 owner 的 canonical root route，并由当前真实 worker resources/TEB 核对
+栈范围、RSP、对齐、返回槽与 shadow space；栈内目标必须位于 RSP+40 之后，不能
+以 allocator 记账绕过 shadow-space 限制。非栈目标只允许 live original/private
+guest data；native managed fields/shared reference views、code、foreign token、
+非 NULL owner 和退休 worker 均拒绝。整个过程只写 guest token，不把目标地址
+交给宿主 Mono barrier，不切换实际 Mono TLS、不执行 managed IL，也不另起 guest
+执行线程。回归使用真实 CreateThread resources 验证 TEB、slot、root、返回和失败
+不写回。涉及分配/托管调用或其他 worker 状态的 gateway 仍须其原独立协议。
+
+## 批量身份、等待调度和数值结构体
+
+probe-197 的 `0x6ffe00001008` 经 attach/current 日志核对是 worker #3 的 Thread
+token，前一轮交接将它误认为 String。原正常 worker dispatcher 已支持这种临时
+引用，协作等待路径缺少 attachment 身份检查。现用实际 OS worker 命令完成时的
+receipt 核对 guest ID、owner、attached、精确 token 和重新 attach 的 generation。
+Metadata scope 共享借用 workers State，期间不能 detach/re-attach；临时引用
+只保存 token，不查询主线程 Mono TLS，不把 Thread native pointer 发给 guest。
+
+同批加入只读 domain/root/current 查询：domain/current 来自被 scope 冻结的实际
+attachment receipt，root 来自 retained domain；未 attach 的 domain 为 NULL，
+current 查询拒绝。分配、attach/detach 和 managed invocation 继续走原实际 OS
+worker 通道。栈槽和私有数据槽检查沿用真实 TEB/resources，失败保持目标不变。
+
+启动期 String、RuntimeType、empty SZARRAY 在 ordinary graph API 首次建立时，
+先验证原 strong root、实际 class/immutable payload，再按原 token 纳入 canonical
+graph。String/array/field/handle/reentry 共用 reverse identity；重复采用幂等，
+改变内容/身份或退休拒绝。两个 allocation 入口共用初始化方法。attribute roots
+继续使用其独立 checked service。
+
+数值结构体支持最多 4096B，保留 actual alignment、leaf offsets、Boolean 槽与
+全部 numeric bytes；padding 是桥接自有零字节。输入/输出都校验 Boolean，返回值
+和所有输出通过后才提交 native storage。同范围 alias 必须具有相同 actual value
+class/完整布局，numeric 与 semantic payload 不互为 alias；部分重叠仍拒绝。
+canonicalization 原地处理已拥有的 snapshot，避免增加一次 payload allocation/copy。
+
+runtime patch 0027 只读解析真实 corelib FixedBufferAttribute 的完整 blob，核对
+actual constructor signature、唯一声明、element Type、positive bounded count 和
+无 named arguments；不实例化属性、不执行构造 IL。Rust 核对 actual storage 的
+UnsafeValueType marker、size/alignment、唯一 element field 与 primitive type。
+全部吻合才展开完整元素；首元素外的数据不能误当 padding，standalone unsafe
+storage 拒绝。非 Boolean buffer 使用完整 inline range，Boolean buffer 逐元素
+校验并保留原 64-slot 上限。离线 Cecil inventory 同样记录 `fixed[count]:element`，
+缺少 declaring-field proof 的 unsafe storage 记为 unresolved。
+
+本批先完成独立回归，再统一进行游戏验收。27-patch no-JIT runtime SHA256：
+`3058346e80d719110015eca91887b0c2021118e7150637a70666e809a054f8c2`。
+普通与 incremental 各通过 12 组 native fixtures、5 项 noexec guard 拒绝测试
+（exit86）；实际 compiler-generated float[24]/byte[1024] 元数据和 engine-header
+原 IL fixture 通过，guard denied=0。审查 304 objects / 668 dependencies / 0 unmatched。
+最终完整 release Rust 回归为 **577 passed / 7 ignored**，all-target release
+Clippy（`-D warnings`）通过，17 项工具回归通过；最终 release binary 已重建。
+
+fixture 编译/运行的默认输出现为 `root/fixtures`，游戏专用输入仍为 `root/probe`；
+显式 fixture-output 禁止指向游戏 probe，避免验证时覆盖冻结 support。一次旧工具
+默认编译曾覆盖 probe 中的 SDK classlib，harness 在启动前拒绝；已从唯一游戏
+sandbox 恢复原 DLL，并重新建立/校验 support，游戏原始 mscorlib SHA256 未变。
+当前游戏 support SHA256 为
+`09c81365daa1bcbcbd792c7d00b47aa765dd23a7ae6cd53d2f7770bdce5bc6fd`。
+隔离的 SDK 与游戏 profile 均通过 12 组原生夹具；游戏 profile 普通/incremental
+验证使用上述实际冻结 support，而非另行生成的同源文件。
+
+probe-198 自动安装 **4,639** 个入口、deferred=875，数值布局批次相对 probe-190
+增加 48 个入口。35.30 秒后协作等待在 worker #3 的 mono_runtime_invoke 停止；
+临时 Thread 引用保存已越过，下一缺口属于等待调度与实际 OS worker 调用通道的
+接合。尚未记录 GetInstanceID 的实际 checked read；本轮 returncode=-6，没有
+正常 guard/资源收尾数据，results 默认的零值不计为清理成功。后续先成批统一
+worker 调用、分配和虚方法协议，再集中进行游戏验收。

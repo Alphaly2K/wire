@@ -58,8 +58,8 @@ thread_local! { static RECORDS: RefCell<Vec<Option<Vec<u16>>>> = const { RefCell
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub(super) struct Span {
-    begin: *const u16,
-    length: i32,
+    pub(super) begin: *const u16,
+    pub(super) length: i32,
 }
 macro_rules! sym {
     ($library:expr, $name:literal, $ty:ty) => {{

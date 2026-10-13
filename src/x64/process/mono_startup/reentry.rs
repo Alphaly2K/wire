@@ -30,6 +30,7 @@ pub(super) struct ObjectRoots<'a> {
     pub(super) reflection: (reflection::Api, &'a mut reflection::Registry),
     pub(super) empty_arrays: (arrays::Api, &'a mut arrays::Registry),
     pub(super) handles: (handles::Api, &'a mut handles::Registry),
+    pub(super) workers: &'a super::workers::State,
 }
 pub(super) struct Metadata<'a> {
     pub(super) gc: Option<super::gc_scopes::State>,
@@ -468,7 +469,9 @@ impl Metadata<'_> {
             .objects
             .as_ref()
             .ok_or("nested object query has no root service")?;
-        if roots.reflection.1.contains(token) {
+        if roots.objects.contains(token) {
+            roots.objects.native_string(roots.strings, token)
+        } else if roots.reflection.1.contains(token) {
             roots.reflection.1.native(roots.reflection.0, token)
         } else if roots.empty_arrays.1.contains(token) {
             roots.empty_arrays.1.native(roots.empty_arrays.0, token)
@@ -477,6 +480,20 @@ impl Metadata<'_> {
         } else {
             roots.roots.native(roots.api, token)
         }
+    }
+    pub(super) fn validate_temporary_reference(
+        &self,
+        guest: u64,
+        token: u64,
+    ) -> Result<(), String> {
+        if self
+            .objects
+            .as_ref()
+            .is_some_and(|roots| roots.workers.owns_thread_token(guest, token))
+        {
+            return Ok(());
+        }
+        self.rooted_native(token).map(|_| ())
     }
     pub(super) fn root_blittable_array(
         &mut self,
