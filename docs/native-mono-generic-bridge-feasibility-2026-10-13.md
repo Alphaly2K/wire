@@ -741,3 +741,29 @@ probe-201 实际执行 SetRenderTargetSingle_Internal_Injected 的原 engine tar
 263 draws / 100 presents，画面 hash 与 probe-199 相同，沙漏动画尚未恢复。
 继续统一 main/nested 的 metadata-discovered reference cell 与 canonical-root
 通道，不放宽为任意 heap reference 写入。
+
+main 与 nested barrier 现共用 `reference_cell_at`：只有 retained ordinary reference
+owner 的精确、对齐实际字段偏移能触发 discovery，且只安装该 reference field。
+未知位置、numeric/pointer 字段、boxed value、engine 对象、歧义字段或错 owner
+保持拒绝；private/NonSerialized reference 的显式访问不改变序列化选择。完整
+类布局中无关的 private pointer 不再阻止这一项合法 reference cell 的准入。
+原生 fixture 的 OpaqueReferenceCell 包含 IntPtr 与 String 两种字段，验证只选择
+String、pointer 不出 view、非对齐偏移拒绝。SDK 普通与游戏 classlib incremental
+原生验证均通过，完整 release **587 passed / 8 ignored**，all-target release
+Clippy（`-D warnings`）通过。startup stack 拒绝诊断增加 args/owned/rsp，便于
+一次定位剩余存储/身份问题；没有放松旧 stack 范围规则。
+
+probe-202 的准确拒绝参数为 owner=NULL、destination=`0x6fff21fb0020`、
+value=`0x6fff21eb0000`；destination 属于 CreateAsyncInstantiateOperationResultArray
+的返回数组首元素（canonical token+32），并非 ordinary object field。该结果
+已 strong-rooted，但旧 ordinary return route 尚未发布数组 header/payload，因此
+不会进入既有 typed array barrier。图像 hash 仍未改变，43.0 秒后 returncode=1。
+
+ordinary IL 的 reference return 与 reference outputs 现在按实际 array rank 纳入
+既有 container graph publication，保留原 canonical identity。main 与 nested
+入口均完成 publication 后才返回 guest；opaque non-array helpers 保留各自协议。
+没有添加 async instantiate 方法名单、固定 array offset/length 或伪造完成状态。
+新增原生 fixture 覆盖先 root 后 publish 的数组、NULL-owner 首元素 barrier、实际
+native 元素同步、GC 后 identity、forged reference 拒绝及 roots/views 正常退休。
+SDK 普通与游戏 classlib incremental 均通过，noexec checks=41/denied=0；完整
+release **587 passed / 8 ignored**，all-target release Clippy（`-D warnings`）通过。

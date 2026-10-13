@@ -121,6 +121,68 @@ impl Api {
     fn specs(self, images: &[Object], object: Object, class: Object) -> Result<Vec<Spec>, String> {
         self.describe(images, object, class, false)
     }
+    fn reference_at(
+        self,
+        images: &[Object],
+        class: Object,
+        offset: usize,
+        field_offset: unsafe extern "C" fn(Object) -> i32,
+    ) -> Result<Option<Object>, String> {
+        if class.is_null()
+            || !images.contains(&unsafe { (self.image)(class) })
+            || unsafe { (self.is_value)(class) } != 0
+            || !(16..65536).contains(&offset)
+            || !offset.is_multiple_of(8)
+        {
+            return Err("reference cell requires an exact aligned owned reference field".into());
+        }
+        let mut declaring = class;
+        let mut seen = Vec::new();
+        let mut candidate = None;
+        while !declaring.is_null() && images.contains(&unsafe { (self.image)(declaring) }) {
+            if seen.len() >= 16 || seen.contains(&declaring) {
+                return Err("reference cell class chain is not bounded/acyclic".into());
+            }
+            seen.push(declaring);
+            let mut iterator = ptr::null_mut();
+            let mut count = 0;
+            loop {
+                let field = unsafe { (self.fields)(declaring, &mut iterator) };
+                if field.is_null() {
+                    break;
+                }
+                count += 1;
+                if count > 128 || unsafe { (self.field_parent)(field) } != declaring {
+                    return Err("reference cell field count/owner mismatch".into());
+                }
+                if unsafe { (self.flags)(field) } & (0x10 | 0x40) != 0 {
+                    continue;
+                }
+                if unsafe { field_offset(field) } != offset as i32 {
+                    continue;
+                }
+                if candidate.replace(field).is_some() {
+                    return Err("reference cell offset has ambiguous field views".into());
+                }
+            }
+            declaring = unsafe { (self.parent)(declaring) };
+        }
+        let Some(field) = candidate else {
+            return Ok(None);
+        };
+        let ty = unsafe { (self.ty)(field) };
+        if ty.is_null() || unsafe { (self.byref)(ty) } != 0 {
+            return Err("reference cell has missing/byref type".into());
+        }
+        if !matches!(unsafe { (self.kind)(ty) }, 0xe | 0x12 | 0x15 | 0x1c | 0x1d) {
+            return Ok(None);
+        }
+        let target = unsafe { (self.type_class)(ty) };
+        if target.is_null() || unsafe { (self.is_value)(target) } != 0 {
+            return Ok(None);
+        }
+        Ok(Some(field))
+    }
     fn graph_admitted(self, class: Object, delegate: Object) -> Result<bool, String> {
         if class.is_null() || delegate.is_null() {
             return Err("reference graph class/delegate declaration absent".into());
@@ -385,6 +447,30 @@ pub(super) fn reference_storage_specs(
     }
     api.describe(images, object, class, true)
 }
+/// Discover one explicit reference barrier cell. Unrelated private pointer
+/// members remain opaque; no whole-class storage or serialized-field policy is
+/// inferred from an embedding write to this one field.
+pub(super) fn reference_cell_at(
+    library: Object,
+    core: Object,
+    images: &[Object],
+    object: Object,
+    class: Object,
+    offset: usize,
+) -> Result<Vec<Spec>, String> {
+    let api = Api::load(library, core)?;
+    let field_offset: unsafe extern "C" fn(Object) -> i32 = unsafe {
+        let p = libc::dlsym(library, c"mono_field_get_offset".as_ptr());
+        if p.is_null() {
+            return Err("reference cell offset API absent".into());
+        }
+        std::mem::transmute(p)
+    };
+    match api.reference_at(images, class, offset, field_offset)? {
+        Some(field) => explicit_field(library, core, images, object, class, field),
+        None => Ok(Vec::new()),
+    }
+}
 /// Internal backing fields only for resolved reference generic instances in
 /// the fingerprinted corlib. Private/NonSerialized/readonly storage matters
 /// here; this does not change Unity serialization field selection.
@@ -620,6 +706,30 @@ mod tests {
         assert_eq!(specs[0].kind, 8);
         assert_eq!(specs[1].name, c"PrivateSerializedReference");
         assert_eq!(specs[1].kind, 0xe);
+        assert_eq!(INFOS.with(Cell::get), 0);
+    }
+    #[test]
+    fn explicit_barrier_cell_requires_exact_reference_offset_and_keeps_pointer_fields_opaque() {
+        unsafe extern "C" fn offset(field: Object) -> i32 {
+            8 + field as i32 * 8
+        }
+        let api = api();
+        let images = [200usize as Object];
+        let class = 100usize as Object;
+        assert_eq!(
+            api.reference_at(&images, class, 24, offset).unwrap(),
+            Some(2usize as Object)
+        );
+        assert_eq!(api.reference_at(&images, class, 16, offset).unwrap(), None);
+        assert_eq!(api.reference_at(&images, class, 80, offset).unwrap(), None);
+        for off in [0, 8, 17, 25, 65536] {
+            assert!(api.reference_at(&images, class, off, offset).is_err());
+        }
+        assert!(api.reference_at(&[], class, 24, offset).is_err());
+        UNSAFE_SHAPE.with(|c| c.set(true));
+        assert_eq!(api.reference_at(&images, class, 24, offset).unwrap(), None);
+        CLASS_PARENT.with(|c| c.set(class as usize));
+        assert!(api.reference_at(&images, class, 24, offset).is_err());
         assert_eq!(INFOS.with(Cell::get), 0);
     }
     #[test]

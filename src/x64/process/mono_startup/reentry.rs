@@ -1048,12 +1048,13 @@ impl Metadata<'_> {
                             let class = roots.roots.class(roots.api, owner)?;
                             if !roots.api.engine_class(class) && !roots.roots.is_boxed(owner) {
                                 let native = roots.roots.native(roots.api, owner)?;
-                                let specs = field_layouts::reference_storage_specs(
+                                let specs = field_layouts::reference_cell_at(
                                     self.library,
                                     self.images.unique_native_image(super::CORE_MODULE)?,
                                     &self.images.live_native_images()?,
                                     native,
                                     class,
+                                    (a[1] - owner) as usize,
                                 )?;
                                 roots.fields.install_with(
                                     self.library,
@@ -1603,7 +1604,12 @@ impl Metadata<'_> {
             for out in frame.outputs()? {
                 let word = match out.shape {
                     shape @ managed_calls::Shape::Reference { .. } => {
-                        self.root_reference(calls.compatible(out.word as Object, shape)?, memory)?
+                        let native = calls.compatible(out.word as Object, shape)?;
+                        let token = self.root_reference(native, memory)?;
+                        if calls.reference_array_result(native)? {
+                            self.publish_container_graph(memory, vec![native])?;
+                        }
+                        token
                     }
                     managed_calls::Shape::Scalar { .. } => out.word,
                 };
@@ -1640,12 +1646,17 @@ impl Metadata<'_> {
                 .objects
                 .borrow_reference(roots.strings, roots.api, roots.roots, result)?;
         roots.objects.publish_pending(memory)?;
+        let returned_array =
+            managed_calls::Api::load(self.library)?.reference_array_result(result)?;
+        if returned_array {
+            self.publish_container_graph(memory, vec![result])?;
+        }
         self.refresh_native(memory)?;
         let roots = self
             .objects
             .as_mut()
             .ok_or("nested result root service retired")?;
-        if !roots.objects.contains(token) && !roots.fields.has_owner(token) {
+        if !returned_array && !roots.objects.contains(token) && !roots.fields.has_owner(token) {
             let class = roots.roots.class(roots.api, token)?;
             let images = self.images.live_native_images()?;
             let specs = field_layouts::reference_storage_specs(

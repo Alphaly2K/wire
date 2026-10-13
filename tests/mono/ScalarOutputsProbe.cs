@@ -1,5 +1,9 @@
 using System;
 public enum OutputMode { Off = 0, On = 3 }
+public sealed class OpaqueReferenceCell {
+    public IntPtr Native;
+    public string Cached;
+}
 // Original fixture. The bridge must derive pointer roles from actual metadata
 // and IL rather than recognizing these names or their MethodDef tokens.
 public static unsafe class ScalarOutputsProbe {

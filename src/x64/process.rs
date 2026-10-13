@@ -1066,7 +1066,7 @@ impl Process64 {
                                         &mut self.cpu,
                                         &mut self.memory,
                                         &fs,
-                                        &self.runtime,
+                                        &mut self.runtime,
                                     )
                                 }
                             },

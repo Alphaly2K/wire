@@ -128,6 +128,23 @@ pub(super) struct Api {
     closed: closed_types::Api,
 }
 impl Api {
+    /// Only actual array objects need backing publication at an ordinary IL
+    /// result boundary. Opaque reference helpers keep their existing protocols.
+    pub(super) fn reference_array_result(self, object: Object) -> Result<bool, String> {
+        if object.is_null() {
+            return Ok(false);
+        }
+        let class = unsafe { (self.object_class)(object) };
+        if class.is_null() {
+            return Err("managed reference result has no actual class".into());
+        }
+        let p = unsafe { libc::dlsym(self.library, c"mono_class_get_rank".as_ptr()) };
+        if p.is_null() {
+            return Err("managed array result rank API absent".into());
+        }
+        let rank: unsafe extern "C" fn(Object) -> u32 = unsafe { std::mem::transmute(p) };
+        Ok(unsafe { rank(class) } != 0)
+    }
     /// Derive the private v2 object-handle result from the actual Unity wrapper:
     /// call <this icall>; call UnmarshalUnityObject<T>(IntPtr); ret. Method IDs,
     /// the result class and MethodSpec signatures all come from current metadata.

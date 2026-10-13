@@ -815,7 +815,7 @@ impl Probe {
         cpu: &mut Cpu64,
         memory: &mut Memory,
         fs: &GuestFs,
-        runtime: &Runtime64,
+        runtime: &mut Runtime64,
     ) -> Result<bool, String> {
         if self.stopped {
             return Err("native Mono startup probe is closed; resume rejected".into());
@@ -1148,6 +1148,38 @@ impl Probe {
                 ));
             }
             "mono_gc_wbarrier_set_field" if self.root_ready && self.main_thread => {
+                let thread_rooted = !native.thread_handle.is_null();
+                if self.assets
+                    && self.fields
+                    && !self.field_registry.has_reference(a[0], a[1])
+                    && !self.reference_array_registry.has_reference(a[0], a[1])
+                {
+                    if let Some(owner) = self.instance_registry.interior_owner(a[1]) {
+                        if a[0] == 0 || a[0] == owner {
+                            let api = self
+                                .instance_api
+                                .ok_or("barrier field discovery before root API")?;
+                            let class = self.instance_registry.class(api, owner)?;
+                            if !api.engine_class(class) && !self.instance_registry.is_boxed(owner) {
+                                let object = self.instance_registry.native(api, owner)?;
+                                let targets = self.callback_targets();
+                                let (installed, _) =
+                                    callbacks::with_owner(memory, runtime, targets, || {
+                                        let specs = field_layouts::reference_cell_at(
+                                            lib,
+                                            self.image_registry.unique_native_image(CORE_MODULE)?,
+                                            &self.image_registry.live_native_images()?,
+                                            object,
+                                            class,
+                                            (a[1] - owner) as usize,
+                                        )?;
+                                        self.install_fields(lib, api, specs)
+                                    })?;
+                                installed?;
+                            }
+                        }
+                    }
+                }
                 if self.assets && self.reference_array_registry.has_reference(a[0], a[1]) {
                     self.reference_array_registry.store(
                         self.reference_array_api
@@ -1176,7 +1208,7 @@ impl Probe {
                     cpu.return_integer(memory, 0)?;
                     return Ok(false);
                 }
-                let owned = if (a[2] == THREAD_TOKEN && !native.thread_handle.is_null())
+                let owned = if (a[2] == THREAD_TOKEN && thread_rooted)
                     || self.object_registry.contains(a[2])
                     || self.reflection_registry.contains(a[2])
                     || self.array_registry.contains(a[2])
@@ -3738,6 +3770,7 @@ impl Probe {
         )?;
         let result = invoked?;
         let (converted, _) = callbacks::with_owner(memory, runtime, targets, || {
+            let mut returned_arrays = Vec::new();
             let result = match descriptor.returns {
                 None if result.is_null() => 0,
                 None => return Err("void managed call returned a boxed value".into()),
@@ -3760,12 +3793,16 @@ impl Probe {
                 }
                 Some(shape @ managed_calls::Shape::Reference { .. }) => {
                     call_api.compatible(result, shape)?;
-                    self.object_registry.borrow_reference(
+                    let token = self.object_registry.borrow_reference(
                         strings,
                         api,
                         &mut self.instance_registry,
                         result,
-                    )?
+                    )?;
+                    if call_api.reference_array_result(result)? {
+                        returned_arrays.push(result);
+                    }
+                    token
                 }
             };
             let mut outputs = Vec::new();
@@ -3778,6 +3815,9 @@ impl Probe {
                 let (word, width) = match out.shape {
                     shape @ managed_calls::Shape::Reference { .. } => {
                         let native = call_api.compatible(out.word as Object, shape)?;
+                        if call_api.reference_array_result(native)? {
+                            returned_arrays.push(native);
+                        }
                         (
                             self.object_registry.borrow_reference(
                                 strings,
@@ -3793,6 +3833,9 @@ impl Probe {
                 outputs.push((out.address, width, word));
             }
             self.refresh_managed_graph(library, api)?;
+            if !returned_arrays.is_empty() {
+                self.publish_container_graph(library, api, returned_arrays)?;
+            }
             callbacks::with_service(|memory, runtime| {
                 self.object_registry.publish_pending(memory)?;
                 for &(address, width, _) in &outputs {
@@ -5382,10 +5425,7 @@ fn store_stack_token(
         || a[1] < super::STACK
         || end > super::STACK + 64 * 1024 * 1024
     {
-        return Err(
-            "startup barrier admits only an owned strong-rooted token in a live main-stack slot"
-                .into(),
-        );
+        return Err(format!("startup barrier admits only an owned strong-rooted token in a live main-stack slot; args={a:#x?}; owned={owned:#x}; rsp={:#x}", cpu.regs[4]));
     }
     memory.write_int(a[1], 8, a[2])
 }
@@ -5577,7 +5617,7 @@ mod tests {
         runtime_memory
             .map(super::super::STACK, 65536, READ | WRITE)
             .unwrap();
-        let runtime = Runtime64::new(
+        let mut runtime = Runtime64::new(
             &mut runtime_memory,
             0x140000000,
             super::super::STACK,
@@ -5592,7 +5632,7 @@ mod tests {
                 &mut cpu,
                 &mut memory,
                 &fs,
-                &runtime
+                &mut runtime
             )
             .unwrap());
         assert_eq!(cpu.rip, 0x12345);
@@ -5609,7 +5649,7 @@ mod tests {
                 &mut cpu,
                 &mut memory,
                 &fs,
-                &runtime
+                &mut runtime
             )
             .is_err());
     }

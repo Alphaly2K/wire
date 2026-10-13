@@ -793,6 +793,145 @@ mod tests {
         let owner = unsafe { find(image, c"".as_ptr(), c"ScalarOutputsProbe".as_ptr()) };
         assert!(!owner.is_null());
         let api = Api::load(library).unwrap();
+        if let Ok(core) = std::env::var("WIRE_MONO_OUTPUT_CORE") {
+            let core = CString::new(core).unwrap();
+            let assembly = unsafe { open(domain, core.as_ptr()) };
+            assert!(!assembly.is_null());
+            let get_image = symbol!(
+                "mono_assembly_get_image",
+                unsafe extern "C" fn(Object) -> Object
+            );
+            let core_image = unsafe { get_image(assembly) };
+            let family = [image, family[1], core_image];
+            let opaque = unsafe { find(image, c"".as_ptr(), c"OpaqueReferenceCell".as_ptr()) };
+            let allocate = symbol!(
+                "mono_object_new",
+                unsafe extern "C" fn(Object, Object) -> Object
+            );
+            let retain = symbol!(
+                "mono_gchandle_new_v2",
+                unsafe extern "C" fn(Object, i32) -> Object
+            );
+            let release = symbol!("mono_gchandle_free_v2", unsafe extern "C" fn(Object));
+            let field = symbol!(
+                "mono_class_get_field_from_name",
+                unsafe extern "C" fn(Object, *const libc::c_char) -> Object
+            );
+            let offset = symbol!("mono_field_get_offset", unsafe extern "C" fn(Object) -> i32);
+            let object = unsafe { allocate(domain, opaque) };
+            assert!(!object.is_null());
+            let root = unsafe { retain(object, 1) };
+            let reference = unsafe { field(opaque, c"Cached".as_ptr()) };
+            let pointer = unsafe { field(opaque, c"Native".as_ptr()) };
+            let reference_offset = unsafe { offset(reference) } as usize;
+            let specs = crate::x64::process::mono_startup::field_layouts::reference_cell_at(
+                library,
+                core_image,
+                &family,
+                object,
+                opaque,
+                reference_offset,
+            )
+            .unwrap();
+            assert_eq!(specs.len(), 1);
+            assert_eq!(specs[0].name, c"Cached");
+            assert_eq!(specs[0].kind, 0xe);
+            assert!(
+                crate::x64::process::mono_startup::field_layouts::reference_cell_at(
+                    library,
+                    core_image,
+                    &family,
+                    object,
+                    opaque,
+                    unsafe { offset(pointer) } as usize
+                )
+                .unwrap()
+                .is_empty()
+            );
+            assert!(
+                crate::x64::process::mono_startup::field_layouts::reference_cell_at(
+                    library,
+                    core_image,
+                    &family,
+                    object,
+                    opaque,
+                    reference_offset + 1
+                )
+                .is_err()
+            );
+            use crate::x64::process::mono_startup::{instances, reference_arrays};
+            let root_api = instances::Api::load(library, core_image).unwrap();
+            let mut roots = instances::Registry::default();
+            let object_token = roots.borrow(root_api, object).unwrap();
+            let new_array = symbol!(
+                "mono_array_new",
+                unsafe extern "C" fn(Object, Object, usize) -> Object
+            );
+            let array = unsafe { new_array(domain, opaque, 1) };
+            assert!(api.reference_array_result(array).unwrap());
+            assert!(!api.reference_array_result(object).unwrap());
+            assert!(!api.reference_array_result(ptr::null_mut()).unwrap());
+            let array_token = roots.borrow(root_api, array).unwrap();
+            let array_api = reference_arrays::Api::load(
+                library,
+                [image, family[1], core_image, image, family[1], core_image],
+                &family,
+            )
+            .unwrap();
+            let mut arrays = reference_arrays::Registry::default();
+            let borrowed = arrays
+                .borrow_with(
+                    array_api,
+                    root_api,
+                    &mut roots,
+                    array,
+                    |registry, native| registry.borrow(root_api, native),
+                )
+                .unwrap();
+            assert_eq!(borrowed, array_token);
+            let mut memory = Memory::default();
+            arrays.publish(&mut memory, array_token).unwrap();
+            let address = arrays.address(array_token, 8, 0).unwrap();
+            assert_eq!(address, array_token + 32);
+            assert!(arrays.has_reference(0, address));
+            assert!(memory.check(array_token, 16, READ).is_err());
+            arrays
+                .store(
+                    array_api,
+                    root_api,
+                    &roots,
+                    &mut memory,
+                    [0, address, object_token],
+                )
+                .unwrap();
+            let array_address = symbol!(
+                "mono_array_addr_with_size",
+                unsafe extern "C" fn(Object, i32, usize) -> Object
+            );
+            assert_eq!(
+                unsafe { array_address(array, 8, 0).cast::<Object>().read() },
+                object
+            );
+            assert!(arrays
+                .store(
+                    array_api,
+                    root_api,
+                    &roots,
+                    &mut memory,
+                    [0, address, u64::MAX]
+                )
+                .is_err());
+            assert_eq!(memory.read_int(address, 8).unwrap(), object_token);
+            let collect = symbol!("mono_gc_collect", unsafe extern "C" fn(i32));
+            let generation = symbol!("mono_gc_max_generation", unsafe extern "C" fn() -> i32);
+            unsafe { collect(generation()) };
+            roots.verify(root_api).unwrap();
+            arrays.verify(array_api, root_api, &roots).unwrap();
+            roots.release(root_api);
+            arrays.retire(&mut memory, &roots).unwrap();
+            roots.retire_views(&mut memory).unwrap();
+            unsafe { release(root) };
+        }
         for (name, count, expected) in [
             (c"Boolean", 1, 1),
             (c"Mode", 2, 3),
