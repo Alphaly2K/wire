@@ -17,7 +17,7 @@
 
 | 阶段 | 状态 |
 | --- | --- |
-| R0 入口/fixture | 文档和 before 已固定，fixture 迁移进行中 |
+| R0 入口/fixture | 已完成；12 组 golden 输入一致，默认与旧路径各 7 个运行 smoke 通过 |
 | R1 GUID 契约试点 | 待开始；先保留两种架构现有错误/输出行为差异 |
 | R2 分发收敛 | 在 GUID 试点验收后按领域推进 |
 | R3 状态归属 | 待对应领域边界形成 |
@@ -25,3 +25,7 @@
 | R5 host/graphics | 待 Process/状态边界形成 |
 | R6 原生 Mono | 按用户指示跳过 |
 | R7 工具/结构 | 先提取测试 harness，旧入口和脚本兼容保留 |
+
+## R0 fixture 验收
+
+原创生成器已进入 `tools/perf/fixtures/amd64_audit.py`，默认 V2 replay 不再需要 ignored audit 输入。旧 `--audit-probes PATH` 保留；两个入口的 7 个 input manifest 完全一致。`test_perf_fixtures.py` 对照迁移前固定的 12K/100M SHA-256 和结果，工具测试 6 项通过。源函数内容保持原样，没有修改任何 runtime 热路径。

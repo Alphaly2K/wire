@@ -21,7 +21,7 @@
 cargo fmt --all -- --check
 cargo test --release --all-targets --locked
 cargo clippy --all-targets --all-features --locked -- -D warnings
-python3 -B -m unittest discover -s tools -p 'test_api_inventory.py'
+python3 -B -m unittest discover -s tools -p 'test_*.py'
 ```
 
 `2e78377` 的完整 release 结果为 382 passed、0 failed、7 ignored；构建、fmt 和 strict Clippy 通过。Unicorn 参照测试在受限 macOS 沙箱可能触发 SIGILL，必须在允许参照执行的环境完成验证。发布运行时不使用 Unicorn。

@@ -1,0 +1,78 @@
+{
+  "12000": {
+    "sse-register": {
+      "sha256": "886823e99185e8c0169336f275c79b9cda15d114ce7d0e0d64df22d3e5a5bb97",
+      "rax": "0xdb3085db3085d681",
+      "retired": 12007,
+      "work": 12007
+    },
+    "code-alias": {
+      "sha256": "8d6d2c2ccf91cbbb62d0320db851aec2ebbb1defb1fa9e9922c1671e1d8d63c6",
+      "rax": "0xfa0",
+      "retired": 12008,
+      "work": 12008
+    },
+    "code-control": {
+      "sha256": "2b05b99f6f97850612d2bcc6d1f5a56a5049d3b22acc3ce2acc4d168327f7d87",
+      "rax": "0xfa0",
+      "retired": 12008,
+      "work": 12008
+    },
+    "data-alias": {
+      "sha256": "5a5d99f357d5a0967956771e19aeb144bf5110739d9f833483439d7533396c1c",
+      "rax": "0x3e80",
+      "retired": 12007,
+      "work": 12007
+    },
+    "data-control": {
+      "sha256": "8671c7804360e24f9596b1f3977c9c8224031b584bd8e89be61ad5cb3a453dde",
+      "rax": "0x3e80",
+      "retired": 12007,
+      "work": 12007
+    },
+    "fp-scalar": {
+      "sha256": "2621cb8da195cd90653f156ad88427895ddace4b8d109cf3f3a3caa8ab6f0a62",
+      "rax": "0x535",
+      "retired": 12010,
+      "work": 12010
+    }
+  },
+  "100000000": {
+    "sse-register": {
+      "sha256": "d7797ee2f74547316b53db1628b7eb9d36a0840b926931806a57b308cfa33caa",
+      "rax": "0x5d6e7f90a11a1c51",
+      "retired": 100000003,
+      "work": 100000003
+    },
+    "code-alias": {
+      "sha256": "11f35fb23967536f86c4d4b9b07e1db6704d861727eff1a070b05080ea05a11f",
+      "rax": "0x1fca054",
+      "retired": 100000004,
+      "work": 100000004
+    },
+    "code-control": {
+      "sha256": "3f391f01a79c92edc5e810e75b09cd6ed74bba05c00999a74d65a6c0f4994cea",
+      "rax": "0x1fca054",
+      "retired": 100000004,
+      "work": 100000004
+    },
+    "data-alias": {
+      "sha256": "f2b7051c721fe165b99e60ea78c848784537d930741ee5c4fccad312982ff622",
+      "rax": "0x7f28150",
+      "retired": 100000003,
+      "work": 100000003
+    },
+    "data-control": {
+      "sha256": "6934d594cc0b02c1643656c4729172dcd5937729a89dc9533a092e4e16246788",
+      "rax": "0x7f28150",
+      "retired": 100000003,
+      "work": 100000003
+    },
+    "fp-scalar": {
+      "sha256": "98188ec93db9dc4b7c6a1d67ee17d80179d5e8630a07716feb211e1f13eb5cdf",
+      "rax": "0xa98ac7",
+      "retired": 100000012,
+      "work": 100000012
+    }
+  }
+}

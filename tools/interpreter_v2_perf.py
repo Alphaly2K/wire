@@ -16,7 +16,9 @@ def bit_fixture(work):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--binary',action='append',required=True)
-    p.add_argument('--audit-probes',type=Path,required=True)
+    p.add_argument('--audit-probes',type=Path,
+                   default=Path(__file__).resolve().parent/'perf/fixtures/amd64_audit.py',
+                   help='fixture module; defaults to the versioned V2 acceptance inputs')
     p.add_argument('--out',type=Path,required=True)
     p.add_argument('--cases',nargs='+',default=['fp-scalar','bit-test'])
     p.add_argument('--work',type=int,default=100000000)
