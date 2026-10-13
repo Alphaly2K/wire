@@ -149,16 +149,38 @@ impl WorkerBorrow<'_> {
         } = self;
         let function = request.function.clone();
         let result = execute(request)?;
+        registry.commit_worker(function, iteration, result)
+    }
+}
+/// The retained image family keeps these nonmoving capabilities alive while
+/// Metadata is released for a collector callback. Completion rechecks every
+/// operand and the iterator's exact pre-call state before publication.
+pub(super) struct WorkerPlan {
+    function: String,
+    operands: Vec<(u64, Kind, Object)>,
+    iteration: Option<(u64, u64)>,
+    iterator: Option<Object>,
+}
+impl Registry {
+    fn commit_worker(
+        &mut self,
+        function: String,
+        iteration: Option<(u64, u64)>,
+        result: WorkerResult,
+    ) -> Result<(Value, Option<u64>), String> {
         let token = if let Some((parent, token)) = iteration {
             let native = result
                 .iterator
                 .ok_or("worker metadata iterator result missing")?;
             let token = if token == 0 {
-                ITER_BASE + registry.iterators.len() as u64 * 256
+                if self.iterators.len() >= 65536 {
+                    return Err("metadata iterator capacity exceeded".into());
+                }
+                ITER_BASE + self.iterators.len() as u64 * 256
             } else {
                 token
             };
-            registry.iterators.insert(
+            self.iterators.insert(
                 token,
                 Iterator {
                     parent,
@@ -173,8 +195,55 @@ impl WorkerBorrow<'_> {
             }
             None
         };
-        registry.queries += 1;
+        self.queries += 1;
         Ok((result.value, token))
+    }
+    pub(super) fn prepare_reentry_worker(
+        &mut self,
+        library: Object,
+        function: &str,
+        arguments: [u64; 3],
+        iterator_token: Option<u64>,
+    ) -> Result<(WorkerRequest, WorkerPlan), String> {
+        let WorkerBorrow {
+            request, iteration, ..
+        } = self.prepare_worker(library, function, arguments, iterator_token)?;
+        let plan = WorkerPlan {
+            function: request.function.clone(),
+            operands: request.operands.clone(),
+            iteration,
+            iterator: request.iterator,
+        };
+        Ok((request, plan))
+    }
+    pub(super) fn finish_reentry_worker(
+        &mut self,
+        plan: WorkerPlan,
+        result: WorkerResult,
+    ) -> Result<(Value, Option<u64>), String> {
+        for &(token, kind, native) in &plan.operands {
+            if self.native(token, kind)? != native {
+                return Err("worker metadata operand lifetime changed".into());
+            }
+        }
+        if self.retired {
+            return Err("metadata registry retired".into());
+        }
+        if let Some((parent, token)) = plan.iteration {
+            if token != 0 {
+                let previous = self
+                    .iterators
+                    .get(&token)
+                    .ok_or("worker iterator retired")?;
+                if previous.parent != parent
+                    || previous.function != plan.function
+                    || Some(previous.native) != plan.iterator
+                {
+                    return Err("worker metadata iterator changed during native request".into());
+                }
+            }
+        }
+        self.commit_worker(plan.function, plan.iteration, result)
     }
 }
 fn iteration_shape(function: &str) -> Result<(Kind, Kind), String> {
@@ -246,6 +315,9 @@ pub(super) fn worker_handles(function: &str) -> bool {
     CORE_CLASSES.contains(&function)
         || iteration_shape(function).is_ok()
         || worker_query_shape(function).is_some()
+}
+pub(super) fn worker_iterates(function: &str) -> bool {
+    iteration_shape(function).is_ok()
 }
 /// Audited frozen-source getters only: immutable metadata access without a
 /// current-domain lookup, managed allocation, lazy setup or managed invocation.
@@ -1148,6 +1220,87 @@ pub(super) fn handles(function: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn released_worker_plans_reject_advanced_iterators_and_retired_operands() {
+        let mut memory = Memory::default();
+        let mut registry = Registry::default();
+        let mut native = [0u64; 64];
+        let mut changed_native = [0u64; 64];
+        let class = registry
+            .wrap(
+                &mut memory,
+                Value::Handle(native.as_mut_ptr().cast(), Kind::Class),
+            )
+            .unwrap();
+        let (_, initial) = registry
+            .prepare_reentry_worker(
+                ptr::null_mut(),
+                "mono_class_get_fields",
+                [class, 0, 0],
+                Some(0),
+            )
+            .unwrap();
+        let result = |iterator| WorkerResult {
+            value: Value::Handle(ptr::null_mut(), Kind::Field),
+            iterator: Some(iterator as Object),
+        };
+        let (_, token) = registry
+            .finish_reentry_worker(initial, result(0x100))
+            .unwrap();
+        let token = token.unwrap();
+        let (_, first) = registry
+            .prepare_reentry_worker(
+                ptr::null_mut(),
+                "mono_class_get_fields",
+                [class, 0, 0],
+                Some(token),
+            )
+            .unwrap();
+        let (_, stale) = registry
+            .prepare_reentry_worker(
+                ptr::null_mut(),
+                "mono_class_get_fields",
+                [class, 0, 0],
+                Some(token),
+            )
+            .unwrap();
+        registry
+            .finish_reentry_worker(first, result(0x200))
+            .unwrap();
+        let queries = registry.queries;
+        assert!(
+            matches!(registry.finish_reentry_worker(stale, result(0x300)),
+            Err(error) if error.contains("changed during native request"))
+        );
+        assert_eq!(registry.queries, queries);
+        assert_eq!(registry.iterators[&token].native as usize, 0x200);
+        let (_, changed) = registry
+            .prepare_reentry_worker(
+                ptr::null_mut(),
+                "mono_class_get_fields",
+                [class, 0, 0],
+                Some(token),
+            )
+            .unwrap();
+        registry.handles.get_mut(&class).unwrap().native = changed_native.as_mut_ptr().cast();
+        assert!(
+            matches!(registry.finish_reentry_worker(changed, result(0x300)),
+            Err(error) if error.contains("operand lifetime changed"))
+        );
+        assert_eq!(registry.iterators[&token].native as usize, 0x200);
+        let (_, retired) = registry
+            .prepare_reentry_worker(
+                ptr::null_mut(),
+                "mono_class_get_fields",
+                [class, 0, 0],
+                Some(token),
+            )
+            .unwrap();
+        registry.retire(&mut memory).unwrap();
+        assert!(registry
+            .finish_reentry_worker(retired, result(0x300))
+            .is_err());
+    }
     #[test]
     fn worker_metadata_capabilities_reject_wrong_kinds_and_bind_iterator_state() {
         use super::*;

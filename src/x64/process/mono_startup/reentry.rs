@@ -7,6 +7,7 @@ use super::{
     value_layout, Cpu64, Memory, Object,
 };
 use std::ffi::CString;
+mod workers;
 #[cfg(test)]
 use std::ptr;
 macro_rules! sym {
@@ -84,6 +85,11 @@ pub(super) enum Allocated {
     EmptyArray(Object, instances::WorkerRoot),
     String(instances::WorkerRoot),
 }
+// Prepared requests contain only retained nonmoving domain/type capabilities,
+// owned bytes/layouts and owned GC roots. Allocated replies transfer those
+// roots back synchronously; no guest address or VM borrow crosses the queue.
+unsafe impl Send for PreparedAllocation {}
+unsafe impl Send for Allocated {}
 impl PreparedAllocation {
     /// Native allocation may expand the GC heap and call the original Unity
     /// profiler. No Metadata, Memory or Runtime RefCell is borrowed here.

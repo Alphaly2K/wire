@@ -44,11 +44,53 @@ pub(super) fn with_scheduler<T>(
     let _scope = Scope;
     Ok(operation())
 }
+#[derive(Debug)]
+pub(super) enum Pump {
+    Advanced(u64),
+    Reentry {
+        guest: u64,
+        target: u64,
+        function: String,
+        work: u64,
+    },
+}
+/// Leave VM borrows behind before a native worker request can emit profiler
+/// events. The selected CPU stays in its existing cooperative context; this
+/// scope serializes access without borrowing Memory or Runtime.
+pub(super) fn with_reentry<T>(
+    guest: u64,
+    target: u64,
+    operation: impl FnOnce(&mut super::Cpu64) -> Result<T, String>,
+) -> Result<T, String> {
+    SCHEDULER.with(|slot| {
+        if slot.get().is_null() {
+            return Err("worker reentry has no cooperative process scheduler".into());
+        }
+        let scheduler = unsafe { &*slot.get() };
+        let mut contexts = scheduler
+            .contexts
+            .try_borrow_mut()
+            .map_err(|_| "cooperative worker reentry context is already borrowed")?;
+        let context = contexts
+            .get_mut(&guest)
+            .filter(|context| {
+                guest > 1
+                    && context.started
+                    && context.cpu.rip == target
+                    && !context.current.notify
+                    && context.callbacks.is_empty()
+            })
+            .ok_or("cooperative worker reentry context changed")?;
+        let result = operation(&mut context.cpu)?;
+        context.cpu.work += 1;
+        Ok(result)
+    })
+}
 pub(super) fn pump(
     memory: &mut Memory,
     runtime: &mut Runtime64,
     remaining: u64,
-) -> Result<u64, String> {
+) -> Result<Pump, String> {
     if remaining == 0 || runtime.active_thread() != 1 {
         return Err("native Mono wait pump requires bounded guest main owner".into());
     }
@@ -100,19 +142,24 @@ pub(super) fn pump(
             })();
             runtime.activate_thread(1);
             contexts.insert(id, context);
-            if let Ok(work) = &result {
+            if let Ok((work, _)) = &result {
                 let quanta = scheduler.quanta.get() + 1;
                 scheduler.quanta.set(quanta);
                 if quanta <= 4 || quanta.is_power_of_two() {
                     eprintln!("NATIVE_MONO_COOPERATIVE_WAIT: worker={id}; quantum={quanta}; work={work}; main-runnable={}", runtime.thread_runnable(1, memory)?);
                 }
             }
-            return result;
+            return result.map(|(work, function)| match function {
+                Some(function) => Pump::Reentry {
+                    guest: id, target: contexts[&id].cpu.rip, function, work,
+                },
+                None => Pump::Advanced(work),
+            });
         }
-        if runtime.thread_runnable(1, memory)? { return Ok(1); }
+        if runtime.thread_runnable(1, memory)? { return Ok(Pump::Advanced(1)); }
         if let Some(delay) = runtime.idle_delay() {
             std::thread::sleep(delay);
-            return Ok(1);
+            return Ok(Pump::Advanced(1));
         }
         Err("native Mono guest wait deadlock: no runnable existing worker or timed wait".into())
     })
@@ -122,7 +169,7 @@ fn run_worker(
     memory: &mut Memory,
     runtime: &mut Runtime64,
     remaining: u64,
-) -> Result<u64, String> {
+) -> Result<(u64, Option<String>), String> {
     let start = context.cpu.work;
     while context.cpu.work - start < remaining {
         if context.cpu.rip == RETURN {
@@ -148,7 +195,10 @@ fn run_worker(
                     }
                     continue;
                 }
-                return Err(format!("native Mono wait requires typed worker reentry; guest-thread={}; function={}; args={:x?}", runtime.active_thread(), binding.original_function, [context.cpu.regs[1], context.cpu.regs[2], context.cpu.regs[8], context.cpu.regs[9]]));
+                return Ok((
+                    context.cpu.work - start,
+                    Some(binding.original_function.to_string()),
+                ));
             }
             let control = runtime.dispatch_bound(&binding, &mut context.cpu, memory)?;
             context.cpu.work += 1;
@@ -167,5 +217,5 @@ fn run_worker(
             break;
         }
     }
-    Ok(context.cpu.work - start)
+    Ok((context.cpu.work - start, None))
 }

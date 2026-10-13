@@ -667,3 +667,34 @@ probe-198 自动安装 **4,639** 个入口、deferred=875，数值布局批次�
 接合。尚未记录 GetInstanceID 的实际 checked read；本轮 returncode=-6，没有
 正常 guard/资源收尾数据，results 默认的零值不计为清理成功。后续先成批统一
 worker 调用、分配和虚方法协议，再集中进行游戏验收。
+
+## 协作等待复用实际 OS worker 通道
+
+等待调度采用两阶段 gateway：保留真实 guest context/PC，释放 Memory/Runtime
+借用后，再由原 attached OS worker 执行分配、零参数 managed invocation、虚方法
+解析和 lazy metadata。字段、views、handles、typed barriers 与 userdata 复用原
+rooted route；只读 attachment 查询保留 leaf 通道。临时切换真实 guest TEB 后
+以 RAII 恢复 owner，递归调度与同 worker 重入在发送命令前拒绝。没有把 main
+native Mono TLS 用作 worker TLS，也没有增加按类构造函数替代实现。
+
+命令接收器独占借用直到真实 completion；profiler callback 失败仍消费 completion，
+退出 GC Safe 后释放返回 roots。metadata preparation/completion 核对同一 retained
+operand、kind、parent、iterator 原状态与 guest output slot，退休或已推进的状态
+不提交。新增回归覆盖实际 OS worker TLS、callback failure 后继续请求、递归拒绝、
+context/PC 恢复和 stale metadata。完整 release 回归 **580 passed / 7 ignored**，
+all-target release Clippy（`-D warnings`）通过，release binary 已重建。
+
+probe-199 正常结束（exit0），越过 InputSystemUIInputModule 构造的等待阻塞，
+实际执行 checked GetInstanceID I4 read，并创建 RenderTexture 与 CommandBuffer。
+本轮 42.85 秒、403,108,513 retired、269 draws / 101 presents；尚未做性能对照。
+正常收尾记录 GC disable/enable=9/9，worker attach/detach=2/2、live=0，owned
+resources、AnimationCurve、CommandBuffer、async 与 unsafe buffers 均正常关闭，
+noexec checks=337、denied=0。画面仍是蓝底沙漏首帧，frame hash 为
+`6a9315288a646561e394147f3b32a58ccf2bc3bfb2615da52bbf4a00783124f0`。
+
+下一批缺口来自共用 pointer payload 协议：SupportedRenderingFeatures 的多个
+IntPtr scalar output 查询，以及 RenderTargetIdentifier/RenderBuffer 的借用来源。
+URP 初始化已先因 SetRenderTargetSingle_Internal_Injected 未解析抛异常，正常
+边界随后停在 IsUIOverlayRenderedBySRP。需一起处理，不能以越过查询作为加载
+动画恢复的验收。继续按实际 metadata/完整 IL 推导，不固定 MethodDef/Spec 值，
+guest pointer 不直接进入 native managed ABI。

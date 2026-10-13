@@ -7,6 +7,7 @@ use std::{
     ffi::c_void,
     ptr,
 };
+mod cooperative;
 const STACK_BASE: u64 = 0x6ffd00000000;
 const STACK_BYTES: u64 = 1024 * 1024;
 const RETURN: u64 = 0x6ffd00100000;
@@ -220,6 +221,9 @@ pub(super) fn cooperative_worker_leaf(
             | "mono_domain_get"
             | "mono_thread_current"
     ) {
+        return Ok(false);
+    }
+    if function == "mono_gc_wbarrier_set_field" && cpu.regs[1] != 0 {
         return Ok(false);
     }
     OWNER.with(|slot| {
@@ -597,11 +601,7 @@ fn execute_scalar_guest_bounded(
             match control {
                 Control::Returned => {}
                 Control::Blocked => {
-                    let work = super::super::mono_scheduler::pump(
-                        &mut owner.memory.borrow_mut(),
-                        &mut owner.runtime.borrow_mut(),
-                        work_limit - cpu.work,
-                    )?;
+                    let work = cooperative::pump(owner, work_limit - cpu.work)?;
                     cpu.work += work;
                     continue;
                 }

@@ -4,7 +4,7 @@
 //! domain switching and ordinary worker engine callbacks are not admitted.
 use super::{Object, ROOT_TOKEN};
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     collections::BTreeMap,
     ptr,
     sync::mpsc::{self, Receiver, SyncSender},
@@ -106,6 +106,7 @@ enum Command {
     Invoke(super::constructors::WorkerRequest),
     Virtual(super::virtual_methods::WorkerRequest),
     Array(Box<super::reference_arrays::WorkerRequest>),
+    ReentryAllocation(super::reentry::PreparedAllocation),
     Close,
 }
 enum Reply {
@@ -115,6 +116,7 @@ enum Reply {
     Allocation(super::instances::WorkerAllocation),
     Virtual(super::virtual_methods::WorkerResult),
     Array(super::reference_arrays::WorkerAllocation),
+    ReentryAllocation(super::reentry::Allocated),
 }
 struct Completion {
     result: Result<Reply, String>,
@@ -193,6 +195,7 @@ impl Attachment {
                 | Command::Invoke(_)
                 | Command::Virtual(_)
                 | Command::Array(_)
+                | Command::ReentryAllocation(_)
         ) {
             self.current()?;
             if unsafe { (self.api.domain)() } as usize != self.root {
@@ -205,6 +208,9 @@ impl Attachment {
                 Command::Invoke(request) => request.execute().map(|()| Reply::Scalar(0)),
                 Command::Virtual(request) => request.execute().map(Reply::Virtual),
                 Command::Array(request) => (*request).execute().map(Reply::Array),
+                Command::ReentryAllocation(request) => {
+                    request.execute().map(Reply::ReentryAllocation)
+                }
                 _ => unreachable!(),
             };
         }
@@ -273,6 +279,7 @@ impl Attachment {
             }
             Command::Virtual(_) => unreachable!(),
             Command::Array(_) => unreachable!(),
+            Command::ReentryAllocation(_) => unreachable!(),
         }
     }
 }
@@ -328,12 +335,12 @@ fn run(
 
 struct Worker {
     send: SyncSender<Command>,
-    receive: Receiver<Event>,
+    receive: RefCell<Receiver<Event>>,
     join: Option<JoinHandle<()>>,
-    attached: bool,
-    attaches: usize,
-    detaches: usize,
-    token: u64,
+    attached: Cell<bool>,
+    attaches: Cell<usize>,
+    detaches: Cell<usize>,
+    token: Cell<u64>,
 }
 impl Worker {
     fn start(api: Api, root: usize, ordinal: usize) -> Result<Self, String> {
@@ -353,20 +360,26 @@ impl Worker {
             .map_err(|e| format!("cannot create native Mono TLS worker: {e}"))?;
         Ok(Self {
             send,
-            receive,
+            receive: RefCell::new(receive),
             join: Some(join),
-            attached: false,
-            attaches: 0,
-            detaches: 0,
-            token: 0,
+            attached: Cell::new(false),
+            attaches: Cell::new(0),
+            detaches: Cell::new(0),
+            token: Cell::new(0),
         })
     }
     fn request(
-        &mut self,
+        &self,
         api: Api,
         command: Command,
         callback: &mut impl FnMut(Profiler) -> Result<(), String>,
     ) -> Result<Reply, String> {
+        // Acquire before sending anything: a nested profiler callback must not
+        // enqueue a second command on this worker or consume its completion.
+        let receive = self
+            .receive
+            .try_borrow_mut()
+            .map_err(|_| "native Mono worker command already in flight")?;
         let _shared_wait = super::burst_shared::suspend();
         let mut marker = ptr::null_mut();
         let _safe = SafeWait::enter(api, &mut marker);
@@ -375,16 +388,15 @@ impl Worker {
             .map_err(|_| "native Mono TLS worker command closed")?;
         let mut callback_error = None;
         loop {
-            match self
-                .receive
+            match receive
                 .recv()
                 .map_err(|_| "native Mono TLS worker result closed")?
             {
                 Event::Completed(completion) => {
-                    self.attached = completion.attached;
-                    self.attaches = completion.attaches;
-                    self.detaches = completion.detaches;
-                    self.token = completion.token;
+                    self.attached.set(completion.attached);
+                    self.attaches.set(completion.attaches);
+                    self.detaches.set(completion.detaches);
+                    self.token.set(completion.token);
                     // Rooted allocation replies may be dropped on callback
                     // failure. Leave GC Safe before freeing their actual roots.
                     drop(_safe);
@@ -403,7 +415,7 @@ impl Worker {
         }
     }
     fn scalar(
-        &mut self,
+        &self,
         api: Api,
         command: Command,
         callback: &mut impl FnMut(Profiler) -> Result<(), String>,
@@ -421,6 +433,7 @@ pub(super) struct State {
     root: usize,
     workers: BTreeMap<u64, Worker>,
     calls: usize,
+    cooperative_calls: Cell<usize>,
     gc_verifications: usize,
     closed: bool,
 }
@@ -444,8 +457,8 @@ impl State {
         let token = self
             .workers
             .get(&guest)
-            .filter(|worker| self.owns_thread_token(guest, worker.token))
-            .map(|worker| worker.token);
+            .filter(|worker| self.owns_thread_token(guest, worker.token.get()))
+            .map(|worker| worker.token.get());
         match function {
             "mono_get_root_domain" => Ok(ROOT_TOKEN),
             "mono_domain_get" => Ok(if token.is_some() { ROOT_TOKEN } else { 0 }),
@@ -463,7 +476,7 @@ impl State {
             && token != 0
             && self.owner == Some(thread::current().id())
             && self.workers.get(&guest).is_some_and(|worker| {
-                worker.attached && worker.token == token && worker.join.is_some()
+                worker.attached.get() && worker.token.get() == token && worker.join.is_some()
             })
     }
     pub(super) fn handles(function: &str) -> bool {
@@ -548,30 +561,12 @@ impl State {
         Ok(result)
     }
     pub(super) fn metadata(
-        &mut self,
+        &self,
         guest: u64,
         request: super::metadata::WorkerRequest,
     ) -> Result<super::metadata::WorkerResult, String> {
-        if self.closed || self.owner != Some(thread::current().id()) {
-            return Err("worker metadata command outside live process owner".into());
-        }
-        let api = self.api.ok_or("worker metadata before native TLS setup")?;
-        let worker = self
-            .workers
-            .get_mut(&guest)
-            .ok_or("worker metadata before worker creation")?;
-        if !worker.attached {
-            return Err("worker metadata before actual root attachment".into());
-        }
-        match worker.request(
-            api,
-            Command::Metadata(request),
-            &mut super::callbacks::worker_profiler,
-        )? {
-            Reply::Metadata(value) => {
-                self.calls += 1;
-                Ok(value)
-            }
+        match self.request_attached(guest, Command::Metadata(request))? {
+            Reply::Metadata(value) => Ok(value),
             _ => Err("worker metadata received mismatched result".into()),
         }
     }
@@ -590,7 +585,7 @@ impl State {
             .workers
             .get_mut(&guest)
             .ok_or("worker attributes before worker creation")?;
-        if !worker.attached {
+        if !worker.attached.get() {
             return Err("worker attributes before actual root attachment".into());
         }
         match worker.request(
@@ -619,7 +614,7 @@ impl State {
         let worker = self
             .workers
             .get_mut(&guest)
-            .filter(|w| w.attached)
+            .filter(|w| w.attached.get())
             .ok_or("worker allocation before actual root attachment")?;
         match worker.request(
             api,
@@ -634,56 +629,51 @@ impl State {
         }
     }
     pub(super) fn invoke(
-        &mut self,
+        &self,
         guest: u64,
         request: super::constructors::WorkerRequest,
     ) -> Result<(), String> {
-        if self.closed || self.owner != Some(thread::current().id()) {
-            return Err("worker invocation outside live process owner".into());
+        match self.request_attached(guest, Command::Invoke(request))? {
+            Reply::Scalar(0) => Ok(()),
+            _ => Err("worker invocation received mismatched result".into()),
         }
-        let api = self
-            .api
-            .ok_or("worker invocation before native TLS setup")?;
-        let worker = self
-            .workers
-            .get_mut(&guest)
-            .filter(|w| w.attached)
-            .ok_or("worker invocation before actual root attachment")?;
-        worker.scalar(
-            api,
-            Command::Invoke(request),
-            &mut super::callbacks::worker_profiler,
-        )?;
-        self.calls += 1;
-        Ok(())
     }
     pub(super) fn resolve_virtual(
-        &mut self,
+        &self,
         guest: u64,
         request: super::virtual_methods::WorkerRequest,
     ) -> Result<super::virtual_methods::WorkerResult, String> {
-        if self.closed || self.owner != Some(thread::current().id()) {
-            return Err("worker virtual resolution outside live process owner".into());
-        }
-        let api = self
-            .api
-            .ok_or("worker virtual resolution before native TLS setup")?;
-        let worker = self
-            .workers
-            .get_mut(&guest)
-            .filter(|w| w.attached)
-            .ok_or("worker virtual resolution before actual root attachment")?;
-        match worker.request(
-            api,
-            Command::Virtual(request),
-            &mut super::callbacks::worker_profiler,
-        )? {
-            Reply::Virtual(value) => {
-                self.calls += 1;
-                Ok(value)
-            }
+        match self.request_attached(guest, Command::Virtual(request))? {
+            Reply::Virtual(value) => Ok(value),
             _ => Err("worker virtual resolution received mismatched result".into()),
         }
+    }
+    pub(super) fn allocate_reentry(
+        &self,
+        guest: u64,
+        request: super::reentry::PreparedAllocation,
+    ) -> Result<super::reentry::Allocated, String> {
+        match self.request_attached(guest, Command::ReentryAllocation(request))? {
+            Reply::ReentryAllocation(value) => Ok(value),
+            _ => Err("worker reentry allocation received mismatched result".into()),
+        }
+    }
+    fn request_attached(&self, guest: u64, command: Command) -> Result<Reply, String> {
+        if self.closed || guest <= 1 || self.owner != Some(thread::current().id()) {
+            return Err("worker request outside live process owner".into());
+        }
+        let api = self.api.ok_or("worker request before native TLS setup")?;
+        let worker = self
+            .workers
+            .get(&guest)
+            .filter(|worker| self.owns_thread_token(guest, worker.token.get()))
+            .ok_or("worker request before actual root attachment")?;
+        // State's shared borrow freezes the worker map/domain/lifetime. The
+        // per-worker receiver serializes requests while the Metadata and VM
+        // borrows are released for real collector callbacks on the owner.
+        let reply = worker.request(api, command, &mut super::callbacks::worker_profiler)?;
+        self.cooperative_calls.set(self.cooperative_calls.get() + 1);
+        Ok(reply)
     }
     pub(super) fn allocate_array(
         &mut self,
@@ -699,7 +689,7 @@ impl State {
         let worker = self
             .workers
             .get_mut(&guest)
-            .filter(|w| w.attached)
+            .filter(|w| w.attached.get())
             .ok_or("worker array allocation before actual root attachment")?;
         match worker.request(
             api,
@@ -726,7 +716,7 @@ impl State {
         if let Some(api) = self.api {
             for worker in self.workers.values_mut() {
                 worker.scalar(api, Command::Close, &mut super::callbacks::worker_profiler)?;
-                if worker.attached || worker.attaches != worker.detaches {
+                if worker.attached.get() || worker.attaches.get() != worker.detaches.get() {
                     return Err("native Mono TLS worker attachment teardown is incomplete".into());
                 }
                 if let Some(join) = worker.join.take() {
@@ -738,7 +728,7 @@ impl State {
         Ok(())
     }
     pub(super) fn verify_gc(&mut self) -> Result<(), String> {
-        if self.closed || self.workers.values().all(|w| !w.attached) {
+        if self.closed || self.workers.values().all(|w| !w.attached.get()) {
             return Ok(());
         }
         if self.owner != Some(thread::current().id()) {
@@ -748,8 +738,8 @@ impl State {
             .api
             .ok_or("native Mono worker GC verification has no API")?;
         unsafe { (api.collect)((api.max_generation)()) };
-        for worker in self.workers.values_mut().filter(|w| w.attached) {
-            let expected = worker.token;
+        for worker in self.workers.values_mut().filter(|w| w.attached.get()) {
+            let expected = worker.token.get();
             let current = worker.scalar(
                 api,
                 Command::Current,
@@ -763,7 +753,7 @@ impl State {
         Ok(())
     }
     pub(super) fn report(&self) -> String {
-        format!("native-worker-tls-calls={}\nnative-worker-tls-threads={}\nnative-worker-tls-attaches={}\nnative-worker-tls-detaches={}\nnative-worker-tls-live={}\nnative-worker-tls-gc-verifications={}\nnative-worker-tls-closed={}\n", self.calls, self.workers.len(), self.workers.values().map(|w| w.attaches).sum::<usize>(), self.workers.values().map(|w| w.detaches).sum::<usize>(), self.workers.values().filter(|w| w.attached).count(), self.gc_verifications, self.closed)
+        format!("native-worker-tls-calls={}\nnative-worker-tls-threads={}\nnative-worker-tls-attaches={}\nnative-worker-tls-detaches={}\nnative-worker-tls-live={}\nnative-worker-tls-gc-verifications={}\nnative-worker-tls-closed={}\n", self.calls + self.cooperative_calls.get(), self.workers.len(), self.workers.values().map(|w| w.attaches.get()).sum::<usize>(), self.workers.values().map(|w| w.detaches.get()).sum::<usize>(), self.workers.values().filter(|w| w.attached.get()).count(), self.gc_verifications, self.closed)
     }
 }
 
@@ -854,6 +844,115 @@ mod tests {
         }
     }
     #[test]
+    fn attached_request_allows_owner_gc_callbacks_and_drains_failed_completions() {
+        use super::super::{callbacks, instances, reentry};
+        use crate::x64::{
+            memory::{Memory, EXECUTE, READ, WRITE},
+            runtime::Runtime64,
+        };
+        unsafe extern "C" fn allocate(
+            domain: Object,
+            bytes: *const super::super::c_char,
+            length: u32,
+        ) -> Object {
+            assert_eq!(domain as usize, ROOT);
+            assert_eq!(DOMAIN.with(Cell::get), ROOT);
+            assert_ne!(THREAD.with(Cell::get), 0);
+            assert_eq!(SAFE_MARKER.with(Cell::get), 0);
+            assert_eq!(
+                unsafe { std::slice::from_raw_parts(bytes.cast::<u8>(), length as usize) },
+                b"worker"
+            );
+            // A failed owner callback must still drain the completion and its
+            // rooted allocation before any subsequent command can be sent.
+            let _ = forward_profiler(Profiler::Resize(4096));
+            4usize as Object
+        }
+        let api = api();
+        let mut state = State {
+            api: Some(api),
+            owner: Some(thread::current().id()),
+            root: ROOT,
+            ..State::default()
+        };
+        let worker = Worker::start(api, ROOT, 0).unwrap();
+        let token = worker
+            .scalar(api, Command::Attach, &mut |_| Ok(()))
+            .unwrap();
+        state.workers.insert(3, worker);
+        let mut memory = Memory::default();
+        memory.map(0x1000, 4096, READ | WRITE | EXECUTE).unwrap();
+        memory.write(0x1000, &[0x48, 0x89, 0xd0, 0xc3]).unwrap();
+        memory
+            .map(super::super::super::STACK, 65536, READ | WRITE)
+            .unwrap();
+        let mut runtime = Runtime64::new(
+            &mut memory,
+            0x140000000,
+            super::super::super::STACK,
+            65536,
+            "worker-queued-allocation",
+        )
+        .unwrap();
+        let request = || reentry::PreparedAllocation::String {
+            new: allocate,
+            roots: instances::tests::identity_api(),
+            domain: ROOT as Object,
+            bytes: b"worker".to_vec(),
+            empty: None,
+        };
+        let (allocated, stats) = callbacks::with_owner(
+            &mut memory,
+            &mut runtime,
+            [0, 0, 0, 0, 0x1000, 0, 0],
+            || state.allocate_reentry(3, request()),
+        )
+        .unwrap();
+        let reentry::Allocated::String(root) = allocated.unwrap() else {
+            panic!("reply shape")
+        };
+        assert_eq!(root.target().unwrap(), 4usize as Object);
+        drop(root);
+        assert_eq!(stats.calls[4], 1);
+        assert_eq!(DOMAIN.with(Cell::get), 0);
+        assert_eq!(SAFE_MARKER.with(Cell::get), 0);
+        let (failed, _) = callbacks::with_owner(&mut memory, &mut runtime, [0; 7], || {
+            state.allocate_reentry(3, request())
+        })
+        .unwrap();
+        assert!(failed.is_err());
+        assert!(state.owns_thread_token(3, token));
+        assert_eq!(
+            state.workers[&3]
+                .scalar(api, Command::Current, &mut |_| Ok(()))
+                .unwrap(),
+            token
+        );
+        let first = &state.workers[&3];
+        let failed = first.request(api, Command::ReentryAllocation(request()), &mut |_| {
+            assert!(first
+                .scalar(api, Command::Current, &mut |_| Ok(()))
+                .unwrap_err()
+                .contains("already in flight"));
+            Err("injected profiler failure".into())
+        });
+        assert!(matches!(failed, Err(error) if error == "injected profiler failure"));
+        assert_eq!(
+            first
+                .scalar(api, Command::Current, &mut |_| Ok(()))
+                .unwrap(),
+            token
+        );
+        assert!(state.allocate_reentry(1, request()).is_err());
+        assert!(state.allocate_reentry(7, request()).is_err());
+        state.close().unwrap();
+        assert!(state.allocate_reentry(3, request()).is_err());
+        // Keep the borrowed owner memory accessible after every failure.
+        memory
+            .write_int(super::super::super::STACK, 8, 0x1234)
+            .unwrap();
+    }
+    #[test]
     fn os_worker_tls_isolation_live_tokens_gc_queue_and_joined_detach() {
         let api = api();
         let owner = thread::current().id();
@@ -895,7 +994,7 @@ mod tests {
         assert!(first
             .scalar(api, Command::Detach(other), &mut callback)
             .is_err());
-        assert!(first.attached);
+        assert!(first.attached.get());
         first
             .scalar(api, Command::Detach(old), &mut callback)
             .unwrap();
@@ -915,8 +1014,8 @@ mod tests {
         for worker in [&mut first, &mut second] {
             worker.scalar(api, Command::Close, &mut callback).unwrap();
             worker.join.take().unwrap().join().unwrap();
-            assert!(!worker.attached);
-            assert_eq!(worker.attaches, worker.detaches);
+            assert!(!worker.attached.get());
+            assert_eq!(worker.attaches.get(), worker.detaches.get());
         }
         assert_eq!(profiler_calls, 3);
         assert_eq!(DOMAIN.with(Cell::get), 0);
