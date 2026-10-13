@@ -5,8 +5,10 @@ use crate::x64::memory::{READ, WRITE};
 use std::{ffi::CStr, ptr};
 mod engine_headers;
 mod engine_spans;
+mod scalar_outputs;
 pub(super) use engine_headers::HeaderRead;
 pub(super) use engine_spans::NumericSpanLayout;
+pub(super) use scalar_outputs::ScalarOutputDescriptor;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Shape {
     Scalar {
@@ -2811,6 +2813,14 @@ pub(super) struct Frame {
     slots: Vec<Slot>,
     arguments: Vec<(usize, bool)>,
     byte_output: Option<ByteOutput>,
+    scalar_outputs: Vec<ScalarOutput>,
+}
+struct ScalarOutput {
+    // Eight-byte aligned private cell with canaries on both sides. Only the
+    // proven primitive width can be copied back after the complete invocation.
+    buffer: Box<[u64; 3]>,
+    address: u64,
+    shape: Shape,
 }
 struct ByteOutput {
     buffer: Box<[u8; 16]>,
@@ -2871,6 +2881,7 @@ impl Frame {
             slots: Vec::with_capacity(count),
             arguments: Vec::with_capacity(count),
             byte_output: None,
+            scalar_outputs: Vec::new(),
         };
         for (index, parameter) in descriptor.parameters.iter().enumerate() {
             let argument = memory.read_int(arguments + index as u64 * 8, 8)?;
@@ -2988,6 +2999,100 @@ impl Frame {
         });
         Ok(())
     }
+    pub(super) fn prepare_scalar_outputs(
+        &mut self,
+        memory: &Memory,
+        arguments: u64,
+        outputs: &[(usize, Shape)],
+        mut writable: impl FnMut(u64, usize) -> bool,
+    ) -> Result<(), String> {
+        if self.byte_output.is_some() || !self.scalar_outputs.is_empty() || outputs.is_empty() {
+            return Err("scalar output frame already prepared or empty".into());
+        }
+        let overlaps = |a: u64, n: usize, b: u64, m: usize| {
+            a < b.saturating_add(m as u64) && b < a.saturating_add(n as u64)
+        };
+        let mut prepared: Vec<ScalarOutput> = Vec::new();
+        let mut replacements = Vec::new();
+        for &(parameter, shape) in outputs {
+            let width = shape.width();
+            if !matches!(shape, Shape::Scalar { .. }) || !matches!(width, 1 | 2 | 4 | 8) {
+                return Err("scalar output shape exceeds primitive cell".into());
+            }
+            let &(slot, indirect) = self
+                .arguments
+                .get(parameter)
+                .ok_or("scalar output parameter absent")?;
+            if !indirect
+                || self.slots[slot].guest.is_some()
+                || !matches!(
+                    self.slots[slot].shape,
+                    Shape::Scalar {
+                        width: 8,
+                        boolean: false,
+                        ..
+                    }
+                )
+                || replacements.iter().any(|&(prior, _)| prior == slot)
+            {
+                return Err("scalar output input lacks a unique private IntPtr word".into());
+            }
+            let address = self.words[slot];
+            memory.check(address, width, WRITE)?;
+            if address == 0
+                || !address.is_multiple_of(shape.alignment() as u64)
+                || !writable(address, width)
+                || overlaps(address, width, arguments, self.arguments.len() * 8)
+            {
+                return Err("scalar output is not disjoint live temporary storage".into());
+            }
+            // An output cannot overwrite its own or another argument's pointer
+            // cell. Validate every scalar input, independent of argument order.
+            for (index, &(input_slot, indirect)) in self.arguments.iter().enumerate() {
+                if indirect {
+                    let input = memory.read_int(arguments + index as u64 * 8, 8)?;
+                    if overlaps(address, width, input, self.slots[input_slot].shape.width()) {
+                        return Err("scalar output overlaps an argument input cell".into());
+                    }
+                }
+            }
+            if self.slots.iter().any(|other| {
+                other
+                    .guest
+                    .is_some_and(|a| overlaps(address, width, a, other.shape.width()))
+            }) {
+                return Err("scalar output overlaps an ordinary byref cell".into());
+            }
+            let mut alias = None;
+            for (index, prior) in prepared.iter().enumerate() {
+                if overlaps(address, width, prior.address, prior.shape.width()) {
+                    if address != prior.address || shape != prior.shape {
+                        return Err("scalar output alias has different range/type".into());
+                    }
+                    alias = Some(index);
+                }
+            }
+            let index = alias.unwrap_or_else(|| {
+                let mut buffer = Box::new([0xa5a5_a5a5_a5a5_a5a5u64; 3]);
+                let bytes = buffer[1].to_le_bytes();
+                let mut initial = bytes;
+                initial[..width].fill(0);
+                buffer[1] = u64::from_le_bytes(initial);
+                prepared.push(ScalarOutput {
+                    buffer,
+                    address,
+                    shape,
+                });
+                prepared.len() - 1
+            });
+            replacements.push((slot, index));
+        }
+        for (slot, output) in replacements {
+            self.words[slot] = (&mut prepared[output].buffer[1] as *mut u64) as u64;
+        }
+        self.scalar_outputs = prepared;
+        Ok(())
+    }
     pub(super) fn pointers(&mut self) -> Vec<Object> {
         self.arguments
             .iter()
@@ -3002,6 +3107,25 @@ impl Frame {
     }
     pub(super) fn outputs(&self) -> Result<Vec<Output>, String> {
         let mut outputs = Vec::new();
+        for output in &self.scalar_outputs {
+            let width = output.shape.width();
+            let bytes = output.buffer[1].to_le_bytes();
+            if output.buffer[0] != 0xa5a5_a5a5_a5a5_a5a5
+                || output.buffer[2] != 0xa5a5_a5a5_a5a5_a5a5
+                || bytes[width..].iter().any(|&b| b != 0xa5)
+            {
+                return Err("scalar output exceeds private primitive cell/canary".into());
+            }
+            let mut word = [0; 8];
+            word[..width].copy_from_slice(&bytes[..width]);
+            let word = u64::from_le_bytes(word);
+            output.shape.validate(word)?;
+            outputs.push(Output {
+                address: output.address,
+                shape: output.shape,
+                word,
+            });
+        }
         if let Some(output) = &self.byte_output {
             if output.buffer[1..].iter().any(|&value| value != 0xa5) || output.buffer[0] > 1 {
                 return Err("coroutine output exceeds canonical Boolean byte/canary".into());
@@ -3649,6 +3773,105 @@ mod tests {
             class: 2usize as Object,
             string: true,
         }
+    }
+    fn scalar_output_inputs(count: usize) -> Descriptor {
+        Descriptor {
+            receiver: None,
+            parameters: (0..count)
+                .map(|_| Parameter {
+                    shape: Shape::Scalar {
+                        class: 3usize as Object,
+                        width: 8,
+                        alignment: 8,
+                        boolean: false,
+                    },
+                    byref: false,
+                })
+                .collect(),
+            returns: None,
+            name: "unknown scalar outputs".into(),
+        }
+    }
+    #[test]
+    fn scalar_output_aliases_share_private_storage_and_fail_transactionally() {
+        let mut memory = Memory::default();
+        memory.map(0x1000, 4096, READ | WRITE).unwrap();
+        memory.write_int(0x1000, 8, 0x1100).unwrap();
+        memory.write_int(0x1008, 8, 0x1108).unwrap();
+        let shape = Shape::Scalar {
+            class: 4usize as Object,
+            width: 4,
+            alignment: 4,
+            boolean: false,
+        };
+        for (first, second, second_shape, valid) in [
+            (0x1200, 0x1200, shape, true),
+            (0x1200, 0x1202, shape, false),
+            (0x1200, 0x1200, boolean(), false),
+            (0x1200, 0x1004, shape, false),
+            (0x1200, 0x1104, shape, false),
+            (0x1200, 0x1108, shape, false),
+            (0x1200, 0x2000, shape, false),
+        ] {
+            memory.write_int(0x1100, 8, first).unwrap();
+            memory.write_int(0x1108, 8, second).unwrap();
+            let mut frame = Frame::prepare(
+                &memory,
+                &scalar_output_inputs(2),
+                0x1000,
+                |_, _| unreachable!(),
+                |_, _| false,
+            )
+            .unwrap();
+            let prepared = frame.prepare_scalar_outputs(
+                &memory,
+                0x1000,
+                &[(0, shape), (1, second_shape)],
+                |_, _| true,
+            );
+            assert_eq!(prepared.is_ok(), valid);
+            if valid {
+                let parameters = frame.pointers();
+                let first = unsafe { parameters[0].cast::<*mut u32>().read() };
+                let second = unsafe { parameters[1].cast::<*mut u32>().read() };
+                assert_eq!(first, second);
+                unsafe { first.write(77) };
+                assert_eq!(frame.outputs().unwrap()[0].word, 77);
+                unsafe { first.cast::<u8>().sub(1).write(0) };
+                assert!(frame.outputs().is_err());
+            } else {
+                assert_eq!((frame.words[0], frame.words[1]), (first, second));
+                assert!(frame.scalar_outputs.is_empty());
+            }
+        }
+    }
+    #[test]
+    fn scalar_output_boolean_and_width_canaries_are_validated_before_copyback() {
+        let mut memory = Memory::default();
+        memory.map(0x1000, 4096, READ | WRITE).unwrap();
+        memory.write_int(0x1000, 8, 0x1100).unwrap();
+        memory.write_int(0x1100, 8, 0x1200).unwrap();
+        memory.write_int(0x1200, 1, 9).unwrap();
+        let mut frame = Frame::prepare(
+            &memory,
+            &scalar_output_inputs(1),
+            0x1000,
+            |_, _| unreachable!(),
+            |_, _| false,
+        )
+        .unwrap();
+        frame
+            .prepare_scalar_outputs(&memory, 0x1000, &[(0, boolean())], |_, _| true)
+            .unwrap();
+        let parameters = frame.pointers();
+        let output = unsafe { parameters[0].cast::<*mut u8>().read() };
+        unsafe { output.write(2) };
+        assert!(frame.outputs().is_err());
+        unsafe { output.write(1) };
+        assert_eq!(frame.outputs().unwrap()[0].word, 1);
+        unsafe { output.add(1).write(0) };
+        assert!(frame.outputs().is_err());
+        assert_eq!(memory.read_int(0x1200, 1).unwrap(), 9);
     }
     #[test]
     fn owned_frame_uses_native_refs_and_coalesces_same_byref_alias_without_guest_pointers() {

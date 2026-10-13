@@ -1378,7 +1378,7 @@ impl Metadata<'_> {
             self.sync_guest(memory)?;
             let frame = ordinary
                 .as_ref()
-                .map(|descriptor| self.prepare_frame(descriptor, cpu, memory, stack))
+                .map(|descriptor| self.prepare_frame(descriptor, &[], cpu, memory, stack))
                 .transpose()?;
             return Ok(PreparedInvoke {
                 library: self.library,
@@ -1395,6 +1395,7 @@ impl Metadata<'_> {
                 exception_slot,
             });
         }
+        let mut scalar_outputs = Vec::new();
         let (step, ordinary) =
             if super::invoke::validate_classlib_init(self.library, method, image, 5).is_ok() {
                 (Some(5), None)
@@ -1406,9 +1407,16 @@ impl Metadata<'_> {
                     return Err("nested ordinary invoke has no owned object service".into());
                 }
                 let images = self.images.live_native_images()?;
-                let descriptor = managed_calls::Api::load(self.library)?
-                    .describe(method, &images, &images)?
-                    .ok_or("nested ordinary entry is not admitted IL")?;
+                let calls = managed_calls::Api::load(self.library)?;
+                let descriptor = match calls.describe_scalar_outputs(method, &images)? {
+                    Some(entry) => {
+                        scalar_outputs = entry.outputs;
+                        entry.call
+                    }
+                    None => calls
+                        .describe(method, &images, &images)?
+                        .ok_or("nested ordinary entry is not admitted IL")?,
+                };
                 if descriptor.receiver.is_some()
                     || matches!(
                         descriptor.returns,
@@ -1424,7 +1432,7 @@ impl Metadata<'_> {
         self.sync_guest(memory)?;
         let frame = ordinary
             .as_ref()
-            .map(|descriptor| self.prepare_frame(descriptor, cpu, memory, stack))
+            .map(|descriptor| self.prepare_frame(descriptor, &scalar_outputs, cpu, memory, stack))
             .transpose()?;
         self.metadata.note_query();
         Ok(PreparedInvoke {
@@ -1445,18 +1453,27 @@ impl Metadata<'_> {
     fn prepare_frame(
         &self,
         descriptor: &managed_calls::Descriptor,
+        scalar_outputs: &[(usize, managed_calls::Shape)],
         cpu: &Cpu64,
         memory: &Memory,
         stack: (u64, u64),
     ) -> Result<managed_calls::Frame, String> {
         let calls = managed_calls::Api::load(self.library)?;
-        let frame = managed_calls::Frame::prepare(
+        let mut frame = managed_calls::Frame::prepare(
             memory,
             descriptor,
             cpu.regs[8],
             |token, shape| calls.compatible(self.rooted_native(token)?, shape),
             |address, width| checked_output(memory, cpu, stack, address, width).is_ok(),
         )?;
+        if !scalar_outputs.is_empty() {
+            frame.prepare_scalar_outputs(
+                memory,
+                cpu.regs[8],
+                scalar_outputs,
+                |address, width| checked_output(memory, cpu, stack, address, width).is_ok(),
+            )?;
+        }
         if cpu.regs[9] != 0
             && frame.outputs()?.iter().any(|out| {
                 out.address < cpu.regs[9] + 8

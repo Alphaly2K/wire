@@ -5,7 +5,7 @@
 //! pointer/callback/lifetime shapes stay outside the ordinary value ABI.
 use super::{
     bindings, callbacks, engine_objects, images, keyword_views, managed_calls, owned_resources,
-    render_context, value_layout, Object,
+    render_context, render_targets, value_layout, Object,
 };
 use std::{
     cell::RefCell,
@@ -123,6 +123,7 @@ enum Argument {
     RenderContext,
     OwnedResource { class: usize, nullable: bool },
     KeywordValue { class: usize, payload: Payload },
+    RenderTarget(render_targets::Layout),
     ReferenceContainer { class: usize },
 }
 struct Binding {
@@ -783,7 +784,14 @@ pub(super) fn install(
                         break;
                     }
                     let keyword_layout = keyword_views::layout(class);
+                    let render_target = render_targets::Layout::describe(
+                        library,
+                        unsafe { image_of(engine_base) },
+                        class,
+                    )?;
                     let (width, alignment) = if let Some(layout) = keyword_layout {
+                        (layout.width, layout.alignment)
+                    } else if let Some(layout) = render_target {
                         (layout.width, layout.alignment)
                     } else {
                         match value_layout::Api::load(library, unsafe { image_of(class) })?
@@ -859,6 +867,9 @@ pub(super) fn install(
                             break;
                         }
                         Argument::KeywordValue { class: class as usize, payload }
+                    } else if let Some(layout) = render_target {
+                        if payload.output { supported = false; break; }
+                        Argument::RenderTarget(layout)
                     } else { Argument::Value(payload) });
                 } else {
                     let storage = if type_kind == 17 {
@@ -1079,6 +1090,11 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
                 alignment: 8,
                 output: false,
             }),
+            Argument::RenderTarget(layout) => Some(Payload {
+                width: layout.width,
+                alignment: layout.alignment,
+                output: false,
+            }),
             Argument::Utf16Output => Some(Payload {
                 width: 16,
                 alignment: 8,
@@ -1102,6 +1118,7 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
     let (value, frame, mut outputs) = if layouts.iter().any(Option::is_some) {
         let mut frame = unsafe { ValueFrame::prepare(arguments, &layouts) }?;
         frame.snapshot_numeric(&binding.numeric_values)?;
+        frame.snapshot_render_targets(&binding.arguments)?;
         for &(index, address, layout, output) in &keywords {
             let source = frame
                 .aliases
@@ -1190,6 +1207,7 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
     let numeric_outputs = outputs.split_off(split);
     numeric.validate(&numeric_outputs)?;
     if let Some(frame) = &frame {
+        frame.validate_render_target_outputs(&outputs, &binding.arguments)?;
         frame.validate_numeric_outputs(&mut outputs, &binding.numeric_values)?;
     }
     if let Some(frame) = &frame {
@@ -1257,6 +1275,21 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
         let readonly: Vec<_> = contexts
             .iter()
             .map(|context| context.0)
+            .chain(
+                binding
+                    .arguments
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, arg)| {
+                        matches!(arg, Argument::RenderTarget(_)).then_some(
+                            frame
+                                .aliases
+                                .iter()
+                                .find(|a| a.0 == index)
+                                .map_or(index, |a| a.1),
+                        )
+                    }),
+            )
             .chain(keywords.iter().map(|keyword| {
                 frame
                     .aliases
@@ -1283,6 +1316,38 @@ struct ValueFrame {
     destinations: Vec<(usize, Payload)>,
 }
 impl ValueFrame {
+    fn snapshot_render_targets(&mut self, arguments: &[Argument]) -> Result<(), String> {
+        for &(alias, source) in &self.aliases {
+            match (arguments[alias], arguments[source]) {
+                (Argument::RenderTarget(a), Argument::RenderTarget(b)) if a == b => {}
+                (Argument::RenderTarget(_), _) | (_, Argument::RenderTarget(_)) => {
+                    return Err("render target alias has a different semantic type".into())
+                }
+                _ => {}
+            }
+        }
+        for (index, bytes) in &mut self.spans {
+            if let Argument::RenderTarget(layout) = arguments[*index] {
+                layout.canonicalize(bytes)?;
+            }
+        }
+        Ok(())
+    }
+    fn validate_render_target_outputs(
+        &self,
+        outputs: &[Vec<u8>],
+        arguments: &[Argument],
+    ) -> Result<(), String> {
+        if outputs.len() != self.spans.len() {
+            return Err("render target output count differs".into());
+        }
+        for ((index, input), output) in self.spans.iter().zip(outputs) {
+            if matches!(arguments[*index], Argument::RenderTarget(_)) && output != input {
+                return Err("engine modified an immutable render target input".into());
+            }
+        }
+        Ok(())
+    }
     /// The compiled adapter is called only by a verified native Mono ABI.
     /// Validate all ranges/aliases before reading any native value storage.
     unsafe fn prepare(arguments: &[u64], layouts: &[Option<Payload>]) -> Result<Self, String> {

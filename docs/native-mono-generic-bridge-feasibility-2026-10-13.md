@@ -698,3 +698,46 @@ URP 初始化已先因 SetRenderTargetSingle_Internal_Injected 未解析抛异�
 边界随后停在 IsUIOverlayRenderedBySRP。需一起处理，不能以越过查询作为加载
 动画恢复的验收。继续按实际 metadata/完整 IL 推导，不固定 MethodDef/Spec 值，
 guest pointer 不直接进入 native managed ABI。
+
+## 完整 IL 推导的标量 pointer output 与无 buffer 渲染目标
+
+新增 scalar output 协议从实际 static void IL、IntPtr 参数和 pointer locals 推导
+有限 primitive/enum 输出。完整解码并检查有界无环 CFG、指令边界、stack/local
+provenance 和所有 normal return 的 definite writes。唯一地址转换须是实际 corlib
+IntPtr::op_Explicit(IntPtr)->void*；普通 call/field 的实际签名禁止 pointer、IntPtr
+或 byref 传播。ldind、pointer arithmetic、未知调用逃逸、异常处理、back edges、
+未写输出的分支及不一致 pointer joins 均拒绝。没有按类名、MethodDef 或 Spec
+安装查询名单。实际 SupportedRenderingFeatures 的 11 个查询通过同一套检查。
+
+Frame 为每个输出提供前后 canary 的对齐私有 cell，guest IntPtr 不进宿主调用。
+相同范围且相同 actual type 的输出共用同一 cell；部分重叠、不同类型 alias、
+参数 vector/input cell 和 exception slot overlap 拒绝。canonical Boolean、完整
+canary、返回值和全部 live output storage 通过后才事务写回。顶层与 nested ordinary
+invoke 使用同一协议；已有 input-event/render-context 专用描述保持优先级。
+
+RenderTargetIdentifier 使用独立 semantic payload：实际字段、enum/IntPtr class、
+offset、size、alignment 和无重叠布局逐项核对。保留原 numeric IDs，padding 为
+自有零字节，m_BufferPointer 必须为零；非零 RenderBuffer 仍需要 retained typed
+owner/lifetime，未放宽为普通 numeric 字段。输入 readonly，engine 改写拒绝；
+semantic/numeric/keyword/context payload 不互为 alias。新增 15 个 metadata-discovered
+icall（总计 4,654，deferred=860），不更改游戏/Unity IL，不涉及 IL2CPP。
+
+独立原生夹具通过 Boolean、enum 的两条分支、I8、同址 output alias；拒绝原输入
+读取、pointer offset/escape 和未完整写回分支。新工具
+`tools/mono/probe_scalar_outputs.py` 只在隔离 fixture 子目录生成原始夹具/support，
+不写游戏 root/probe 或原 classlib/support。SDK 与实际游戏 classlib 的普通/
+incremental GC 各通过该夹具，并只读核对实际 CoreModule 的 11 个查询和渲染目标
+布局；每轮 noexec checks=41、denied=0。完整 release 回归 **586 passed / 8 ignored**
+（新增原生 fixture 单独执行通过），all-target release Clippy（`-D warnings`）通过。
+
+probe-200 首次窗口验收在输入事件上发现新 descriptor 抢先处理已有专用协议的
+准入顺序回归；已修正为专用 descriptor 优先，再跑 Mono 回归并重建 release。
+该次游戏未越过 probe-199 的边界，不记录为场景/动画推进。后续游戏验收另记。
+
+probe-201 实际执行 SetRenderTargetSingle_Internal_Injected 的原 engine target，
+不再在 URP 初始化抛出该 unresolved icall 异常；完成 IsUIOverlayRenderedBySRP
+和 GetRenderFrameInterval 的受检 scalar output，继续到 OnEndOfFrame/Awake。
+44.07 秒后停止在顶层引用 barrier 的旧 startup stack 限制（returncode=1）；
+263 draws / 100 presents，画面 hash 与 probe-199 相同，沙漏动画尚未恢复。
+继续统一 main/nested 的 metadata-discovered reference cell 与 canonical-root
+通道，不放宽为任意 heap reference 写入。

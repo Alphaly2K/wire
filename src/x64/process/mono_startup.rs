@@ -87,6 +87,7 @@ mod reentry;
 mod reference_arrays;
 mod reflection;
 mod render_context;
+mod render_targets;
 mod resources;
 mod scalar_engine;
 mod screen;
@@ -2376,6 +2377,15 @@ impl Probe {
                         {
                             return Ok(false);
                         }
+                        if matches!(
+                            managed_calls::Api::load(library)?.describe_scalar_outputs(
+                                method,
+                                &self.image_registry.live_native_images()?,
+                            ),
+                            Ok(Some(_))
+                        ) {
+                            return Ok(false);
+                        }
                         match managed_calls::Api::load(library)?.describe(
                             method,
                             &self.image_registry.live_native_images()?,
@@ -3526,16 +3536,27 @@ impl Probe {
             &managed_images,
         )?;
         let output_boolean = coroutine.as_ref().map(|entry| entry.boolean);
-        let descriptor =
-            match input_events::descriptor(method).or_else(|| render_context::descriptor(method)) {
-                Some(entry) => entry,
-                None => match coroutine {
+        let predefined =
+            input_events::descriptor(method).or_else(|| render_context::descriptor(method));
+        let scalar_output: Option<managed_calls::ScalarOutputDescriptor> =
+            if coroutine.is_none() && predefined.is_none() {
+                call_api.describe_scalar_outputs(method, &managed_images)?
+            } else {
+                None
+            };
+        let scalar_outputs = scalar_output.as_ref().map(|entry| entry.outputs.clone());
+        let descriptor = match predefined {
+            Some(entry) => entry,
+            None => match coroutine {
+                Some(entry) => entry.call,
+                None => match scalar_output {
                     Some(entry) => entry.call,
                     None => call_api
                         .describe(method, &managed_images, &managed_images)?
                         .ok_or("managed entry is not an admitted ordinary IL call")?,
                 },
-            };
+            },
+        };
         if descriptor.receiver.is_some() != (a[1] != 0) {
             return Err("managed static/instance receiver presence mismatch".into());
         }
@@ -3598,6 +3619,14 @@ impl Probe {
                         .as_mut()
                         .ok_or("coroutine cannot use the input buffer protocol")?
                         .prepare_coroutine_output(memory, a[2], boolean, |address, width| {
+                            Self::temporary_call_slot(memory, runtime, rsp, address, width)
+                        })?;
+                }
+                if let Some(outputs) = &scalar_outputs {
+                    frame
+                        .as_mut()
+                        .ok_or("scalar outputs cannot use the input buffer protocol")?
+                        .prepare_scalar_outputs(memory, a[2], outputs, |address, width| {
                             Self::temporary_call_slot(memory, runtime, rsp, address, width)
                         })?;
                 }
