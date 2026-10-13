@@ -67,13 +67,35 @@ class StorageTests(unittest.TestCase):
             log = self.sandbox / 'Users/wire/AppData/LocalLow/Game/Player.log'
             log.parent.mkdir(parents=True, exist_ok=True)
             log.write_text('actual guest log\n')
-            if fail:
-                raise subprocess.TimeoutExpired(command, 180)
             kwargs['stdout'].write('native-root-ready=true\nWIRE_NOEXEC_GUARD checks=1 denied=0\n')
-            return subprocess.CompletedProcess(command, 0)
+            class Process:
+                pid = 1234
+                returncode = None
+                killed = False
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    self_outer.assertIsNotNone(self.returncode)
+
+                def wait(self, timeout=None):
+                    if fail and not self.killed:
+                        raise subprocess.TimeoutExpired(command, timeout)
+                    self.returncode = -9 if self.killed else 0
+                    return self.returncode
+
+                def kill(self):
+                    self.killed = True
+
+                def poll(self):
+                    return self.returncode
+
+            self_outer = self
+            return Process()
 
         with patch.object(probe_startup, 'REPO', self.repo), patch('sys.argv', argv), \
-                patch.object(probe_startup.subprocess, 'run', side_effect=guest), \
+                patch.object(probe_startup.subprocess, 'Popen', side_effect=guest), \
                 redirect_stdout(io.StringIO()):
             probe_startup.main()
 
@@ -120,7 +142,7 @@ class StorageTests(unittest.TestCase):
         argv = ['probe_startup.py', '--game', str(self.game), '--sandbox', str(forbidden),
                 '--output', str(self.repo / 'wire-out/rejected')]
         with patch.object(probe_startup, 'REPO', self.repo), patch('sys.argv', argv), \
-                patch.object(probe_startup.subprocess, 'run') as guest, \
+                patch.object(probe_startup.subprocess, 'Popen') as guest, \
                 redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             probe_startup.main()
         guest.assert_not_called()

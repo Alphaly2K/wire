@@ -34,6 +34,8 @@ macro_rules! sym {
 struct Api {
     corlib: usize,
     class: unsafe extern "C" fn(Object, *const c_char, *const c_char) -> Object,
+    nested: unsafe extern "C" fn(Object, *mut Object) -> Object,
+    class_name: unsafe extern "C" fn(Object) -> *const c_char,
     methods: unsafe extern "C" fn(Object, *mut Object) -> Object,
     method_name: unsafe extern "C" fn(Object) -> *const c_char,
     method_class: unsafe extern "C" fn(Object) -> Object,
@@ -112,6 +114,31 @@ impl Api {
         }
         Ok(actual == params)
     }
+    fn interop_class(&self, name: &str) -> Result<Object, String> {
+        let interop =
+            unsafe { (self.class)(self.corlib as Object, c"".as_ptr(), c"Interop".as_ptr()) };
+        if interop.is_null() {
+            return Err("locked corelib Interop class absent".into());
+        }
+        let mut iterator = ptr::null_mut();
+        let mut found: Object = ptr::null_mut();
+        loop {
+            let class = unsafe { (self.nested)(interop, &mut iterator) };
+            if class.is_null() {
+                break;
+            }
+            if text(unsafe { (self.class_name)(class) })? == name {
+                if !found.is_null() {
+                    return Err("ambiguous corelib Interop owner".into());
+                }
+                found = class;
+            }
+        }
+        if found.is_null() || unsafe { (self.class_image)(found) } as usize != self.corlib {
+            return Err(format!("locked corelib Interop owner absent: {name}"));
+        }
+        Ok(found)
+    }
 }
 pub(super) fn install(library: Object) -> Result<(), String> {
     if API.get().is_some() {
@@ -134,6 +161,16 @@ pub(super) fn install(library: Object) -> Result<(), String> {
             library,
             "mono_class_from_name",
             unsafe extern "C" fn(Object, *const c_char, *const c_char) -> Object
+        ),
+        nested: sym!(
+            library,
+            "mono_class_get_nested_types",
+            unsafe extern "C" fn(Object, *mut Object) -> Object
+        ),
+        class_name: sym!(
+            library,
+            "mono_class_get_name",
+            unsafe extern "C" fn(Object) -> *const c_char
         ),
         methods: sym!(
             library,
@@ -442,6 +479,41 @@ pub(super) fn install(library: Object) -> Result<(), String> {
         api.pinvokes
             .push((method as usize, scope, entry, flags, target));
     }
+    for entry in directory::entries() {
+        let class = api.interop_class(entry.owner)?;
+        let mut iterator = ptr::null_mut();
+        let mut found: Object = ptr::null_mut();
+        loop {
+            let method = unsafe { (api.methods)(class, &mut iterator) };
+            if method.is_null() {
+                break;
+            }
+            if api.matches(method, entry.name, entry.returns, &entry.parameters, false)? {
+                let mut implementation = 0;
+                if unsafe { (api.flags)(method, &mut implementation) } & 0x2000 == 0
+                    || unsafe { (api.method_class)(method) } != class
+                    || !found.is_null()
+                {
+                    return Err("ambiguous or non-P/Invoke directory declaration".into());
+                }
+                found = method;
+            }
+        }
+        if found.is_null() {
+            return Err(format!(
+                "directory service signature absent: {}::{}",
+                entry.owner, entry.name
+            ));
+        }
+        api.pinvokes.push((
+            found as usize,
+            entry.scope,
+            entry.entry,
+            entry.flags,
+            entry.target,
+        ));
+    }
+    let pinvoke_count = api.pinvokes.len();
     let install = sym!(
         library,
         "wire_mono_install_pinvoke_adapter",
@@ -461,7 +533,7 @@ pub(super) fn install(library: Object) -> Result<(), String> {
             add(name.as_ptr(), target as Object);
         }
     }
-    eprintln!("NATIVE_MONO_WINDOWS_SERVICES: locked corelib identity, MonoIO and 6 exact P/Invoke adapters installed; same guest process owner");
+    eprintln!("NATIVE_MONO_WINDOWS_SERVICES: locked corelib identity, MonoIO and {pinvoke_count} exact P/Invoke adapters installed; same guest process owner");
     Ok(())
 }
 unsafe extern "C" fn resolve(
@@ -821,6 +893,7 @@ unsafe extern "C" fn random(algorithm: Object, output: *mut u8, count: i32, flag
         Err(_) => 0xc0000001u32 as i32,
     }
 }
+mod directory;
 mod io;
 
 #[cfg(test)]

@@ -985,3 +985,29 @@ Mono runtime，也没有固定属性类、MethodDef token、Spec 或 Unity 地�
 枚举异常，以及 JobsUtility.get_ThreadIndexCount 缺失导致 Render Graph error。
 随后发生 native SIGSEGV，下一轮收集原生栈并继续补协议；画面 hash 仍为加载首帧，
 此轮异常退出未保留正常 guard/GPU 汇总。
+
+## Windows classlib 目录枚举与渲染线程查询
+
+新增四个锁定 corelib P/Invoke 协议：CreateFileW、CloseHandle、NtQueryDirectoryFile
+和 RtlNtStatusToDosError。通过实际 Interop 嵌套类、完整方法 signature、declaring
+image、static/PInvoke flags 查找方法身份；不写死新增 MethodDef token。调用时仍
+要求 exact method/scope/entry/flags 匹配。UTF16 和目录输出先复制到当前 guest owner
+的 VFS service；原生地址不进入 guest Memory，目录句柄、cursor、confined path
+与 Win32/NTSTATUS 使用现有 Runtime64 实现。这里只接入同步 directory query，
+异步 event/APC/context、非 NULL SECURITY_ATTRIBUTES/template file 保持明确拒绝。
+单批 buffer 上限 64KiB，只写回实际已提交字节和 IO_STATUS_BLOCK，失败不伪造结果。
+
+原引擎 JobsUtility / UIElements.UIR.Utility 的普通数值接口共用 scalar entry pool，
+原有 pointer/callback/handle 排除规则保持。新增目录回归覆盖真实句柄、中文文件名、
+单项枚举/结束/重启、太小 buffer、重复关闭、owner 撤销和失败输出保护。
+模块 release **196 passed / 1 ignored**，完整 release **603 passed / 8 ignored**，
+all-target release Clippy、release build 通过。
+
+probe-221 实际解析三个目录 P/Invoke，越过 Naninovel 本地资源枚举，进入
+AudioManager.InitializeService；下一声明为 AudioMixer.FindMatchingGroups_Injected
+返回 engine object array。JobsUtility.get_ThreadIndexCount 已调用原引擎。72.48 秒
+后仍在 native Mono ldind I4 读取 guest address 时 SIGSEGV，需继续定位具体 IL。
+LLDB probe-220 因系统 attach 无法暂停进程未执行游戏，改用 macOS crash report 和
+范围受限的 Mono managed trace；新诊断 filter 保留默认 all 行为，并记录到
+command.json。harness 的 Popen mock 已同步修复，五项 storage/timeout 回归通过。
+所有 probe 仍复用同一软链接 sandbox，并自动回收测试 executable snapshot。

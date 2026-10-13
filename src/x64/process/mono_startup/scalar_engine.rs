@@ -52,6 +52,8 @@ const FAMILIES: &[(&CStr, &CStr)] = &[
     (c"UnityEngine", c"RenderAs2DUtil"),
     (c"UnityEngine", c"ScalableBufferManager"),
     (c"UnityEngine.UIElements", c"UIElementsRuntimeUtilityNative"),
+    (c"UnityEngine.UIElements.UIR", c"Utility"),
+    (c"Unity.Jobs.LowLevel.Unsafe", c"JobsUtility"),
     (c"UnityEngine.Rendering", c"CullingResults"),
     (c"UnityEngine.TextCore.LowLevel", c"FontEngine"),
     (c"UnityEngine.Rendering", c"GraphicsSettings"),

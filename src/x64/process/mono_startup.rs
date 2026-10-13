@@ -174,7 +174,10 @@ impl Native {
                 "mono_jit_set_trace_options",
                 unsafe extern "C" fn(*const c_char) -> i32
             );
-            if unsafe { trace(c"all".as_ptr()) } == 0 {
+            let options = std::env::var("WIRE_NATIVE_MONO_MANAGED_TRACE_FILTER")
+                .unwrap_or_else(|_| "all".into());
+            let options = CString::new(options).map_err(|e| e.to_string())?;
+            if unsafe { trace(options.as_ptr()) } == 0 {
                 return Err("native Mono managed trace setup failed".into());
             }
         }

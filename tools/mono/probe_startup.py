@@ -83,12 +83,15 @@ def run(cleanup):
     parser.add_argument('--window', action='store_true', help='show actual guest windows through the native presenter')
     parser.add_argument('--capture-frame', action='store_true', help='capture an actual Present to frame.ppm; enables the native presenter')
     parser.add_argument('--managed-trace', action='store_true', help='debug-only native managed call trace; timing is not a performance result')
+    parser.add_argument('--managed-trace-filter', help='Mono trace expression for --managed-trace; defaults to all')
     parser.add_argument('--bridge-audit', action='store_true', help='diagnostic metadata/icall lookup inventory; no game methods are executed by the audit')
     parser.add_argument('--lldb', action='store_true', help='capture a stopped native fault and backtrace using the same ephemeral game sandbox')
     parser.add_argument('--max-instr', type=int, default=30000000, help='bounded guest work budget')
     parser.add_argument('--skip-etw', action='store_true', help='explicit diagnostic platform divergence')
     parser.add_argument('--boundary', choices=('root', 'main-thread', 'pre-bindings', 'bindings', 'profiler', 'pre-images', 'images', 'metadata', 'strings', 'managed-types', 'classlib', 'logging', 'exceptions', 'synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup', 'objects', 'curves', 'fields', 'components', 'assets'), default='root', help='finite diagnostic initialization boundary')
     args = parser.parse_args()
+    if args.managed_trace_filter and not args.managed_trace:
+        parser.error('managed-trace-filter requires managed-trace')
     if args.timeout <= 0 or any(not 0 < delay < args.timeout for delay in args.sample_after):
         parser.error('timeout must be positive and sample delays must be inside the timeout')
     if args.sample_after and args.lldb:
@@ -148,11 +151,14 @@ def run(cleanup):
         if key.startswith('MONO_') or key in ('DYLD_INSERT_LIBRARIES', 'DYLD_LIBRARY_PATH'):
             env.pop(key)
     env.pop('WIRE_NATIVE_MONO_MANAGED_TRACE', None)
+    env.pop('WIRE_NATIVE_MONO_MANAGED_TRACE_FILTER', None)
     env.pop('WIRE_NATIVE_MONO_BRIDGE_AUDIT', None)
     if args.bridge_audit:
         env['WIRE_NATIVE_MONO_BRIDGE_AUDIT'] = str(output / 'bridge-audit')
     if args.managed_trace:
         env['WIRE_NATIVE_MONO_MANAGED_TRACE'] = '1'
+        if args.managed_trace_filter:
+            env['WIRE_NATIVE_MONO_MANAGED_TRACE_FILTER'] = args.managed_trace_filter
     env.update(DYLD_INSERT_LIBRARIES=str(guard), MONO_THREADS_SUSPEND='preemptive')
     if args.boundary in ('bindings', 'profiler', 'pre-images', 'images', 'metadata', 'strings', 'managed-types', 'classlib', 'logging', 'exceptions', 'synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup', 'objects', 'curves', 'fields', 'components', 'assets'):
         reference = args.registration_reference.resolve()
@@ -191,7 +197,7 @@ def run(cleanup):
     (output / 'command.json').write_text(json.dumps({'command': command, 'cwd': str(clone),
         'game_sandbox': str(sandbox),
         'storage_policy': 'one reused sandbox; ephemeral symlinks and wire snapshot; logs retained',
-        'environment': {key: env[key] for key in ('DYLD_INSERT_LIBRARIES', 'MONO_THREADS_SUSPEND', 'WIRE_NATIVE_MONO_MANAGED_TRACE', 'WIRE_NATIVE_MONO_BRIDGE_AUDIT', 'WIRE_NATIVE_MONO_CALLBACK_REFERENCE_INTERPRETER', 'WIRE_NATIVE_MONO_CALLBACK_DIAGNOSTICS') if key in env},
+        'environment': {key: env[key] for key in ('DYLD_INSERT_LIBRARIES', 'MONO_THREADS_SUSPEND', 'WIRE_NATIVE_MONO_MANAGED_TRACE', 'WIRE_NATIVE_MONO_MANAGED_TRACE_FILTER', 'WIRE_NATIVE_MONO_BRIDGE_AUDIT', 'WIRE_NATIVE_MONO_CALLBACK_REFERENCE_INTERPRETER', 'WIRE_NATIVE_MONO_CALLBACK_DIAGNOSTICS') if key in env},
         'full_game_backend': False, 'timing_is_performance_comparison': False,
         'native_presenter_requested': args.window or args.capture_frame,
         'debugger_requested': args.lldb,
