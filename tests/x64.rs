@@ -1,10 +1,11 @@
+#[path = "support/x64.rs"]
+mod support;
+use support::{fixture, put16, put32, put64, startup, startup_call, startup_dll_call, BASE, STACK};
 use wire::x64::{
     cpu::Cpu64,
     memory::{Memory, EXECUTE, READ, WRITE},
     pe::Pe64,
 };
-const BASE: u64 = 0x140000000;
-const STACK: u64 = 0x7ff000000000;
 #[test]
 fn win64_isolated_identity_names_validate_lengths_domains_exports_and_output_faults() {
     let (mut m, mut cpu, mut r) = startup();
@@ -1241,47 +1242,6 @@ fn win64_bstr_ordinals_byte_lengths_alias_reallocation_and_faults_preserve_owned
     ));
     assert!(wire::x64::runtime::import_supported("oleaut32.dll", "#150"));
 }
-fn put16(b: &mut [u8], at: usize, n: u16) {
-    b[at..at + 2].copy_from_slice(&n.to_le_bytes());
-}
-fn put32(b: &mut [u8], at: usize, n: u32) {
-    b[at..at + 4].copy_from_slice(&n.to_le_bytes());
-}
-fn put64(b: &mut [u8], at: usize, n: u64) {
-    b[at..at + 8].copy_from_slice(&n.to_le_bytes());
-}
-fn fixture() -> Vec<u8> {
-    let mut b = vec![0; 0x600];
-    b[..2].copy_from_slice(b"MZ");
-    put32(&mut b, 0x3c, 0x80);
-    b[0x80..0x84].copy_from_slice(b"PE\0\0");
-    put16(&mut b, 0x84, 0x8664);
-    put16(&mut b, 0x86, 1);
-    put16(&mut b, 0x94, 0xf0);
-    let opt = 0x98;
-    put16(&mut b, opt, 0x20b);
-    put32(&mut b, opt + 16, 0x1000);
-    put64(&mut b, opt + 24, BASE);
-    put32(&mut b, opt + 32, 0x1000);
-    put32(&mut b, opt + 36, 0x200);
-    put32(&mut b, opt + 56, 0x2000);
-    put32(&mut b, opt + 60, 0x200);
-    put64(&mut b, opt + 72, 0x100000);
-    put64(&mut b, opt + 80, 0x1000);
-    put32(&mut b, opt + 108, 16);
-    let s = opt + 0xf0;
-    b[s..s + 5].copy_from_slice(b".text");
-    put32(&mut b, s + 8, 0x400);
-    put32(&mut b, s + 12, 0x1000);
-    put32(&mut b, s + 16, 0x400);
-    put32(&mut b, s + 20, 0x200);
-    put32(&mut b, s + 36, 0xe0000020);
-    // mov r8,0x123456789abcdef0; mov rax,r8; ret
-    b[0x200..0x20e].copy_from_slice(&[
-        0x49, 0xb8, 0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12, 0x4c, 0x89, 0xc0, 0xc3,
-    ]);
-    b
-}
 #[test]
 fn pe32plus_loads_high_addresses_dir64_iat_and_rejects_bad_ranges() {
     let mut b = fixture();
@@ -2028,27 +1988,6 @@ fn amd64_cli_probe_executes_high_entry_and_fails_on_unresolved_import() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-fn startup() -> (Memory, Cpu64, wire::x64::runtime::Runtime64) {
-    let mut mem = Memory::default();
-    mem.map(STACK, 8192, READ | WRITE).unwrap();
-    let rsp = STACK + 0x1f88;
-    mem.write_int(rsp, 8, BASE).unwrap();
-    let mut cpu = Cpu64::new(BASE + 0x1000, rsp);
-    cpu.gs_base = wire::x64::runtime::TEB;
-    let runtime =
-        wire::x64::runtime::Runtime64::new(&mut mem, BASE, STACK, 8192, "\"C:\\probe.exe\"")
-            .unwrap();
-    (mem, cpu, runtime)
-}
-fn startup_call(
-    mem: &mut Memory,
-    cpu: &mut Cpu64,
-    runtime: &mut wire::x64::runtime::Runtime64,
-    name: &str,
-    args: &[u64],
-) -> u64 {
-    startup_dll_call(mem, cpu, runtime, "KERNEL32.dll", name, args)
-}
 #[test]
 fn win64_api_inventory_is_opt_in_counts_calls_and_keeps_lookup_provider() {
     let (mut mem, mut cpu, mut runtime) = startup();
@@ -3170,32 +3109,6 @@ fn amd64_user_apc_wakes_alertable_target_and_preserves_64_bit_parameter_and_retu
     assert_eq!(p.memory.read_int(DATA + 24, 8).unwrap(), 1);
     assert_eq!(p.memory.read_int(DATA + 32, 8).unwrap(), 0x8000);
     std::fs::remove_file(path).unwrap();
-}
-fn startup_dll_call(
-    mem: &mut Memory,
-    cpu: &mut Cpu64,
-    runtime: &mut wire::x64::runtime::Runtime64,
-    dll: &str,
-    name: &str,
-    args: &[u64],
-) -> u64 {
-    cpu.regs[4] = STACK + 0x1f88;
-    mem.write_int(cpu.regs[4], 8, BASE).unwrap();
-    for (i, &value) in args.iter().enumerate() {
-        if i < 4 {
-            cpu.regs[[1, 2, 8, 9][i]] = value;
-        } else {
-            mem.write_int(cpu.regs[4] + 40 + (i as u64 - 4) * 8, 8, value)
-                .unwrap();
-        }
-    }
-    assert_eq!(
-        runtime.dispatch(dll, name, cpu, mem).unwrap(),
-        wire::x64::runtime::Control::Returned
-    );
-    assert_eq!(cpu.regs[4], STACK + 0x1f90);
-    assert_eq!(cpu.rip, BASE);
-    cpu.regs[0]
 }
 #[test]
 fn win64_guid_entropy_layout_string_roundtrip_and_task_ownership() {

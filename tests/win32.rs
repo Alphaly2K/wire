@@ -1,15 +1,11 @@
 //! Behavioral tests for the Win32 subset, independent of a proprietary EXE.
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use wire::api::{self, ApiLogger, ApiState, ApiTable, HandleObj};
+use wire::api::{self, ApiTable, HandleObj};
 use wire::cpu::Cpu;
-use wire::fs::GuestFs;
 use wire::loader::{STACK_BASE, STACK_SIZE, TEB_ADDR};
 use wire::mem::GuestMem;
-use wire::thread::Sched;
-const DATA: u32 = 0x20000;
-const CODE: u32 = 0x10000;
-const RET: u32 = CODE + 0x800;
+#[path = "support/x86.rs"]
+mod support;
+use support::{Vm, CODE, DATA, RET};
 
 #[test]
 fn crt_math_returns_x87_values_and_integer_helpers_consume_st0() {
@@ -1249,99 +1245,6 @@ fn spec_ordinals_share_named_stubs_and_large_abis_read_the_full_checked_stack() 
     // With all arguments committed, the known stdcall ABI restores exactly 56 bytes.
     v.call("gdi32.dll", "CreateFontW", &[0; 14]);
     assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 4 + 56);
-}
-
-struct Vm {
-    mem: GuestMem,
-    cpu: Cpu,
-    api: ApiTable,
-    state: ApiState,
-    log: ApiLogger,
-    sched: Sched,
-    dir: PathBuf,
-}
-impl Vm {
-    fn new() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "wire-win32-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = dir.canonicalize().unwrap();
-        let mut mem = GuestMem::new().unwrap();
-        for (p, n) in [
-            (CODE, 0x10000),
-            (DATA, 0x10000),
-            (STACK_BASE, STACK_SIZE),
-            (TEB_ADDR, 0x1000),
-        ] {
-            mem.commit(p, n).unwrap();
-        }
-        mem.write_u32(TEB_ADDR, u32::MAX).unwrap();
-        mem.write_u32(TEB_ADDR + 4, STACK_BASE + STACK_SIZE)
-            .unwrap();
-        mem.write_u32(TEB_ADDR + 8, STACK_BASE).unwrap();
-        let cpu = Cpu::new(CODE, STACK_BASE + STACK_SIZE - 256, TEB_ADDR);
-        let api = ApiTable::new();
-        let mut state = ApiState::new(0x400000, "C:\\test.exe".into(), 0, 0);
-        state.fs = Some(GuestFs::new(&dir).unwrap());
-        let log = ApiLogger::new(&dir.join("api.log")).unwrap();
-        let mut sched = Sched::new();
-        let tid = sched.alloc_tid();
-        let handle = state.alloc_handle(HandleObj::Thread { tid });
-        sched.add_main(tid, handle, TEB_ADDR);
-        Self {
-            mem,
-            cpu,
-            api,
-            state,
-            log,
-            sched,
-            dir,
-        }
-    }
-    fn call(&mut self, dll: &str, name: &str, args: &[u32]) -> u32 {
-        self.try_call(dll, name, args).unwrap()
-    }
-    fn try_call(&mut self, dll: &str, name: &str, args: &[u32]) -> Result<u32, String> {
-        let addr = self.api.register(dll, Some(name), None);
-        self.cpu.eip = addr;
-        self.cpu.set_esp(STACK_BASE + STACK_SIZE - 256);
-        let sp = self.cpu.esp();
-        self.mem.write_u32(sp, RET).unwrap();
-        for i in 0..16 {
-            self.mem
-                .write_u32(sp + 4 + i * 4, args.get(i as usize).copied().unwrap_or(0))
-                .unwrap();
-        }
-        let idx = self.api.stub_index(addr).unwrap();
-        api::dispatch(
-            idx,
-            &mut self.cpu,
-            &mut self.mem,
-            &mut self.api,
-            &mut self.state,
-            &mut self.log,
-            &mut self.sched,
-            1_000_000,
-        )?;
-        Ok(self.cpu.regs[0])
-    }
-    fn k(&mut self, name: &str, args: &[u32]) -> u32 {
-        self.call("kernel32.dll", name, args)
-    }
-    fn wide(&self, p: u32, text: &str) {
-        for (i, c) in text.encode_utf16().chain([0]).enumerate() {
-            self.mem.write_u16(p + i as u32 * 2, c).unwrap();
-        }
-    }
-}
-impl Drop for Vm {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
 }
 
 fn menu_info(v: &Vm, fields: [u32; 12]) -> u32 {
