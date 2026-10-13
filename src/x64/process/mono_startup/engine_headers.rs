@@ -10,7 +10,7 @@ struct Binding {
     domain: unsafe extern "C" fn() -> Object,
     get: unsafe extern "C" fn(Object, Object, Object),
 }
-static BINDING: OnceLock<Binding> = OnceLock::new();
+static BINDING: OnceLock<Vec<Binding>> = OnceLock::new();
 thread_local! { static READS: Cell<usize> = const { Cell::new(0) }; }
 pub(super) fn installed() -> bool {
     BINDING.get().is_some()
@@ -38,12 +38,6 @@ pub(super) fn install(library: Object, core: Object, images: &[Object]) -> Resul
     if owner.is_null() {
         return Err("engine header base class absent".into());
     }
-    let method = unsafe { method(owner, c"GetInstanceID".as_ptr(), 0) };
-    let managed_calls::HeaderRead {
-        method,
-        owner,
-        offset,
-    } = managed_calls::Api::load(library)?.engine_header_read(method, owner, images)?;
     let register = sym!(
         "wire_mono_install_scalar_read_adapter",
         unsafe extern "C" fn(
@@ -52,30 +46,49 @@ pub(super) fn install(library: Object, core: Object, images: &[Object]) -> Resul
             unsafe extern "C" fn(Object, Object, u64, *mut i32, usize) -> i32,
         ) -> i32
     );
-    let binding = Binding {
-        method: method as usize,
-        owner: owner as usize,
-        offset: offset as usize,
-        vtable: sym!(
-            "mono_class_vtable",
-            unsafe extern "C" fn(Object, Object) -> Object
-        ),
-        domain: sym!("mono_domain_get", unsafe extern "C" fn() -> Object),
-        get: sym!(
-            "mono_field_static_get_value",
-            unsafe extern "C" fn(Object, Object, Object)
-        ),
-    };
-    BINDING
-        .set(binding)
-        .map_err(|_| "engine header read already installed")?;
-    let status = unsafe { register(1, method, read) };
-    if status != 0 {
-        return Err(format!(
-            "engine header method read registration rejected: {status}"
-        ));
+    let vtable = sym!(
+        "mono_class_vtable",
+        unsafe extern "C" fn(Object, Object) -> Object
+    );
+    let domain = sym!("mono_domain_get", unsafe extern "C" fn() -> Object);
+    let get = sym!(
+        "mono_field_static_get_value",
+        unsafe extern "C" fn(Object, Object, Object)
+    );
+    let api = managed_calls::Api::load(library)?;
+    let mut bindings = Vec::new();
+    for name in [c"GetInstanceID", c"GetEntityId"] {
+        let getter = unsafe { method(owner, name.as_ptr(), 0) };
+        if getter.is_null() && name == c"GetEntityId" {
+            continue; // Older CoreModule versions have no EntityId getter.
+        }
+        let managed_calls::HeaderRead {
+            method,
+            owner,
+            offset,
+        } = api.engine_header_read(getter, owner, images)?;
+        bindings.push(Binding {
+            method: method as usize,
+            owner: owner as usize,
+            offset: offset as usize,
+            vtable,
+            domain,
+            get,
+        });
     }
-    eprintln!("NATIVE_MONO_ENGINE_HEADER_READ_INSTALLED: original-managed-IL=true; actual-offset-field=true");
+    BINDING
+        .set(bindings)
+        .map_err(|_| "engine header read already installed")?;
+    let bindings = BINDING.get().unwrap();
+    for binding in bindings {
+        let status = unsafe { register(2, binding.method as Object, read) };
+        if status != 0 {
+            return Err(format!(
+                "engine header method read registration rejected: {status}"
+            ));
+        }
+    }
+    eprintln!("NATIVE_MONO_ENGINE_HEADER_READ_INSTALLED: original-managed-IL=true; actual-offset-field=true; methods={}", bindings.len());
     Ok(())
 }
 
@@ -110,13 +123,13 @@ unsafe extern "C" fn read(
     width: usize,
 ) -> i32 {
     let result = std::panic::catch_unwind(|| -> Result<i32, String> {
-        let b = BINDING.get().ok_or("engine header read not installed")?;
-        if method as usize != b.method
-            || receiver.is_null()
-            || output.is_null()
-            || width != 4
-            || !callbacks::has_owner()
-        {
+        let b = BINDING
+            .get()
+            .ok_or("engine header read not installed")?
+            .iter()
+            .find(|b| b.method == method as usize)
+            .ok_or("engine header read method identity mismatch")?;
+        if receiver.is_null() || output.is_null() || width != 4 || !callbacks::has_owner() {
             return Err("engine header read method/owner/output mismatch".into());
         }
         let pointer = callbacks::with_metadata_service(|route, _| {

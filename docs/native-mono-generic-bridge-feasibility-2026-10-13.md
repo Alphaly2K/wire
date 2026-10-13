@@ -1011,3 +1011,46 @@ LLDB probe-220 因系统 attach 无法暂停进程未执行游戏，改用 macOS
 范围受限的 Mono managed trace；新诊断 filter 保留默认 all 行为，并记录到
 command.json。harness 的 Popen mock 已同步修复，五项 storage/timeout 回归通过。
 所有 probe 仍复用同一软链接 sandbox，并自动回收测试 executable snapshot。
+
+## EntityId 对象头读取与引擎数组返回（2026-10-14）
+
+probe-223 在 71.33 秒后 SIGSEGV，画面仍为蓝底沙漏首帧。范围受限的 managed trace
+和 crash report 显示原生解释器在渲染入口读取 guest `0x31274188` 的 I4。
+probe-224 精确追踪确认最后调用为 `UnityEngine.Object.GetEntityId()`；实际
+RecordAndExecuteRenderGraph 原 IL 的首个调用就是该 getter。此前受检边界覆盖
+GetInstanceID，但这个新 getter 也读取 m_CachedPtr + 同一个实际静态偏移，然后执行
+原 EntityId.op_Implicit。三个相机路径中第三个相机在此处崩溃。
+
+新增 runtime patch 0028：scalar-read ABI v2 接入多个 immutable exact-method binding，
+允许 I4 或不含引用的四字节 value result。v1 保留单 I4 getter 合同。每个方法仍须在
+首次 transform 前注册；已缓存 unchecked body、重复方法、错误版本/签名拒绝。
+所有登记方法禁止 inline，并使用既有 checked transform。只有其 I4 indirect read
+进入回调，其他方法保留原 native address 语义，不修改方法 IL 或 executable memory。
+
+Rust 从当前 metadata 推导完整 getter/null/conversion 分支、真实 locals、返回布局、
+字段和 helpers。GetEntityId 在较旧 CoreModule 中不存在时不要求注册；存在但不满足
+完整证明时失败。回调按真实 method 身份选择 binding，继续共用 canonical receiver、
+原静态 offset 和 live guest memory 校验。原 get_None 和 op_Implicit 仍执行，不制造
+EntityId 值，不存储固定 MethodDef/字段 token、guest 地址或返回常量。
+
+引擎普通接口同时支持直接返回 engine-object SZARRAY：rank、实际 element 的
+UnityEngine.Object 派生关系、image family、完整声明数组 class 均从 metadata 检查。
+原 engine 返回的 token 经既有 canonical root/sync 协议还原，核对实际 native array
+类型后返回给 Mono。probe-223 已记录 AudioMixer.FindMatchingGroups_Injected 的原引擎
+调用成功；这修复了 AudioManager 的数组返回边界。
+
+新 28-patch runtime SHA256 为
+`0af88ce3560df4276a94af3fe44eac7bc8137d48cd841f487b54ec078b2e48d0`；corelib support
+仍为 `09c81365daa1bcbcbd792c7d00b47aa765dd23a7ae6cd53d2f7770bdce5bc6fd`。
+原生 fixture 新增值类型结果、两个并存绑定、null helper、GC 和拒绝后 managed unwind
+验证；普通配置的 12 组 fixture 与 5 项可执行内存拒绝验证通过。链接对象审查为
+304 objects / 668 dependencies / 0 unmatched。Rust 与新游戏实测结果另记。
+本批涉及开源 Mono interpreter 的地址空间边界及 Rust 桥接，没有改 IL2CPP 或游戏文件。
+
+最终模块 release **197 passed / 1 ignored**，完整 release **604 passed / 8 ignored**，
+all-target release Clippy（-D warnings）和 release build 通过；incremental 配置也通过
+同样 12 组 native fixture / 5 项 guard 验证。probe-225 在 **76.30 秒**退出码 1，
+不再 SIGSEGV，继续执行 Render Graph 与 Submit，保留完整资源收尾和 guard **345/0**。
+GPU 记录 **238 draws / 92 presents**，最终帧变成纯黑；未达到可玩界面。实际日志集中
+显示 Display.RequiresSrgbBlitToBackbufferImpl、ScriptableRenderContext 的 RendererList
+创建以及 Naninovel 存档 JSON 序列化缺口，后续继续处理这些边界。

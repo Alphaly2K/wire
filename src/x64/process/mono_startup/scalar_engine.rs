@@ -152,6 +152,7 @@ struct Binding {
 enum Return {
     Scalar(Scalar),
     EngineHandle { class: usize },
+    EngineArray { class: usize },
 }
 impl Return {
     fn floating(&self) -> bool {
@@ -743,7 +744,7 @@ pub(super) fn install(
                     arguments.push(Argument::EngineObject {
                         class: class as usize,
                     });
-                } else if !reference && type_kind == 0x1d && index != 0 {
+                } else if !reference && type_kind == 0x1d {
                     let element = unsafe { element_class(class) };
                     if element.is_null()
                         || unsafe { rank(class) } != 1
@@ -753,10 +754,17 @@ pub(super) fn install(
                         break;
                     }
                     if unsafe { assignable(engine_base, element) } != 0 {
-                        arguments.push(Argument::EngineArray {
-                            class: class as usize,
-                        });
-                    } else if element != intptr
+                        if index == 0 {
+                            result = Some(Return::EngineArray {
+                                class: class as usize,
+                            });
+                        } else {
+                            arguments.push(Argument::EngineArray {
+                                class: class as usize,
+                            });
+                        }
+                    } else if index != 0
+                        && element != intptr
                         && value_layout::Api::load(library, unsafe { image_of(element) })?
                             .layout_in(element, &family)
                             .and_then(|layout| layout.scalar_inline())
@@ -1336,6 +1344,18 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
             engine_objects::engine_handle(binding.library as Object, class as Object, value.0)?
                 as u64
         }
+        Return::EngineArray { class } => callbacks::with_metadata_service(|route, memory| {
+            route.sync_guest(memory)?;
+            let native = route.rooted_native(value.0)?;
+            managed_calls::Api::load(binding.library as Object)?.compatible(
+                native,
+                managed_calls::Shape::Reference {
+                    class: class as Object,
+                    string: false,
+                },
+            )?;
+            Ok(native as u64)
+        })?,
     };
     if !object_pins.is_empty() {
         // The original engine may bind m_CachedPtr or update array elements.

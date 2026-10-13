@@ -14,6 +14,7 @@ extern int wire_mono_prepare_memory_adapter(uint32_t);
 extern int wire_mono_field_fixed_buffer(uint32_t, MonoClass *, MonoClassField *, MonoType **, uint32_t *);
 extern int wire_mono_class_is_unsafe_value(uint32_t, MonoClass *);
 static MonoMethod *read_method;
+static MonoMethod *value_method;
 static MonoGCHandle receiver_root;
 static int calls;
 static uint32_t engine_header[8];
@@ -22,7 +23,7 @@ static void require(int ok, const char *label) {
 }
 static int read_guest(MonoMethod *method, MonoObject *receiver, uint64_t address,
                       void *output, size_t width) {
-    if (method != read_method || receiver != mono_gchandle_get_target_v2(receiver_root) ||
+    if ((method != read_method && method != value_method) || receiver != mono_gchandle_get_target_v2(receiver_root) ||
         address != UINT64_C(0x30100014) || !output || width != 4) return 1;
     memcpy(output, &engine_header[5], 4);
     ++calls;
@@ -95,15 +96,32 @@ int main(int argc, char **argv) {
             "cached unchecked transform rejected");
     read_method = mono_class_get_method_from_name(base, "Read", 0);
     require(read_method != NULL, "read metadata");
-    require(wire_mono_install_scalar_read_adapter(2, read_method, read_guest) != 0,
+    require(wire_mono_install_scalar_read_adapter(3, read_method, read_guest) != 0,
             "invalid ABI version rejected");
     require(wire_mono_install_scalar_read_adapter(1, read_method, read_guest) == 0,
             "immutable exact method installed before first transform");
     require(wire_mono_install_scalar_read_adapter(1, read_method, read_guest) != 0,
             "duplicate installation rejected");
+    value_method = mono_class_get_method_from_name(base, "ReadValue", 0);
+    require(value_method != NULL, "actual value getter metadata");
+    require(wire_mono_install_scalar_read_adapter(1, value_method, read_guest) != 0,
+            "version one rejects value result");
+    require(wire_mono_install_scalar_read_adapter(2, value_method, read_guest) == 0,
+            "version two installs second exact method with four-byte value result");
+    require(wire_mono_install_scalar_read_adapter(2, value_method, read_guest) != 0,
+            "version two duplicate rejected");
+    require(wire_mono_install_scalar_read_adapter(2,
+            mono_class_get_method_from_name(base, "WideValue", 0), read_guest) != 0,
+            "version two rejects wide result");
+    MonoMethod *already_value = mono_class_get_method_from_name(base, "AlreadyValue", 0);
+    require(invoke(already_value, receiver, NULL, 0) == 7, "ordinary value method executes");
+    require(wire_mono_install_scalar_read_adapter(2, already_value, read_guest) != 0,
+            "version two cached unchecked value transform rejected");
     mono_runtime_object_init(receiver);
     require(invoke(read_method, receiver, NULL, 0) == 0 && calls == 0,
             "original null behavior bypasses memory callback");
+    require(invoke(value_method, receiver, NULL, 0) == 0 && calls == 0,
+            "original value null helper bypasses memory callback");
     MonoClassField *cached = mono_class_get_field_from_name(base, "Cached");
     for (int i = 0; i < 2; ++i) {
         MonoClass *declaring = NULL;
@@ -129,6 +147,20 @@ int main(int argc, char **argv) {
     void *args[] = { &pointer };
     require(invoke(unscoped, receiver, args, 0) == native && calls == 2,
             "other IL keeps actual native pointer semantics");
+    pointer = UINT64_C(0x30100000);
+    mono_field_set_value(receiver, cached, &pointer);
+    require((uint32_t)invoke(value_method, receiver, NULL, 0) == engine_header[5] && calls == 3,
+            "value getter executes original I4 conversion with original guest bits");
+    require((uint32_t)invoke(read_method, receiver, NULL, 0) == engine_header[5] && calls == 4,
+            "first method binding remains valid after second binding");
+    mono_gc_collect(mono_gc_max_generation());
+    receiver = mono_gchandle_get_target_v2(receiver_root);
+    require((uint32_t)invoke(value_method, receiver, NULL, 0) == engine_header[5] && calls == 5,
+            "value getter identity survives GC");
+    pointer += 8;
+    mono_field_set_value(receiver, cached, &pointer);
+    invoke(value_method, receiver, NULL, 1);
+    require(calls == 5, "value getter rejection has no host pointer fallback");
     mono_gchandle_free_v2(receiver_root);
     mono_jit_cleanup(domain);
     puts("PASS engine-header: exact method, original null IL, inherited receiver, GC, managed rejection, native read isolation");

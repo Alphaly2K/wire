@@ -23,9 +23,9 @@ const INCREMENTAL_SUPPORT: &str =
 const ATTRIBUTES_CANDIDATE: &str =
     "94a8252dfb4bf7aa3584be4b1888afd128431cc7ea70b7bd6773fc299cab0a5e";
 const ATTRIBUTES_SUPPORT: &str = "7cd421d0e370b09a865848a59e47aa2b1362fd9ff484804fe3b2c1b4a5bc8029";
-// Locked 27-patch build in the main checkout: audited objects and inputs,
+// Locked 28-patch build in the main checkout: audited objects and inputs,
 // ordinary/incremental native fixtures and executable-memory guard verified.
-const OBJECTS_CANDIDATE: &str = "3058346e80d719110015eca91887b0c2021118e7150637a70666e809a054f8c2";
+const OBJECTS_CANDIDATE: &str = "0af88ce3560df4276a94af3fe44eac7bc8137d48cd841f487b54ec078b2e48d0";
 const OBJECTS_SUPPORT: &str = "09c81365daa1bcbcbd792c7d00b47aa765dd23a7ae6cd53d2f7770bdce5bc6fd";
 const EXE: &str = "94cccae89918110514672a6ec249a1252ffaeb28c0ae8d8633a9352988738f12";
 const UNITY: &str = "a2022611884470ddab23927a3eb7bbaef3924c18972d30ba7b5330a8fd25bcc4";

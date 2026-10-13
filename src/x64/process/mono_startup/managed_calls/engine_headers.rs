@@ -14,6 +14,7 @@ struct Body {
     equal: u32,
     explicit: u32,
     offset: u32,
+    value_helpers: Option<(u32, u32)>,
 }
 
 /// Accept only the complete null-or-pointer-plus-static-offset I4 read. Branch
@@ -46,17 +47,23 @@ fn body(code: &[u8]) -> Option<Body> {
             instructions.push((at, op, arg));
         }
     }
-    let expected = [
+    let mut expected = vec![
         0x02, 0x7b, 0x7e, 0x28, 0x0a, 0x06, 0x2c, 0x16, 0x0b, 0x2b, 0x02, 0x7b, 0x28, 0x7e, 0x58,
         0x4a, 0x0b, 0x2b, 0x07, 0x2a,
     ];
+    let value = instructions.get(7)?.1 == 0x28;
+    if value {
+        expected[7] = 0x28;
+        expected.insert(16, 0x28);
+    }
     if instructions.len() != expected.len()
         || instructions.iter().zip(expected).any(|(i, op)| i.1 != op)
         || instructions[1].2 != instructions[11].2
     {
         return None;
     }
-    for (branch, target) in [(6, 10), (9, 18), (17, 18)] {
+    let shift = usize::from(value);
+    for (branch, target) in [(6, 10), (9, 18 + shift), (17 + shift, 18 + shift)] {
         let destination = instructions[branch].2 as usize;
         let next = instructions[target].0;
         if !boundaries.contains(&destination)
@@ -72,6 +79,7 @@ fn body(code: &[u8]) -> Option<Body> {
         equal: instructions[3].2,
         explicit: instructions[12].2,
         offset: instructions[13].2,
+        value_helpers: value.then(|| (instructions[7].2, instructions[16].2)),
     })
 }
 
@@ -94,6 +102,9 @@ impl Api {
         let descriptor = self
             .describe(method, images, images)?
             .ok_or("engine header read has no IL")?;
+        let returns = unsafe { (self.returns)((self.signature)(method)) };
+        let return_kind = unsafe { (self.kind)(returns) };
+        let return_class = unsafe { (self.type_class)(returns) };
         if descriptor.receiver != Some(owner)
             || !descriptor.parameters.is_empty()
             || !matches!(
@@ -104,9 +115,9 @@ impl Api {
                     ..
                 })
             )
-            || unsafe { (self.kind)((self.returns)((self.signature)(method))) } != 8
+            || !matches!(return_kind, 8 | 0x11)
         {
-            return Err("engine header read is not an instance I4 getter".into());
+            return Err("engine header read is not an instance four-byte getter".into());
         }
         let clauses = sym!(
             "mono_method_header_get_num_clauses",
@@ -126,11 +137,12 @@ impl Api {
         let valid = unsafe { clauses(header) } == 0
             && count == 2
             && !types.is_null()
-            && [2, 8].iter().enumerate().all(|(index, kind)| {
+            && [2, return_kind].iter().enumerate().all(|(index, kind)| {
                 let ty = unsafe { *types.add(index) };
                 !ty.is_null()
                     && unsafe { (self.kind)(ty) } == *kind
                     && unsafe { (self.byref)(ty) } == 0
+                    && (index == 0 || unsafe { (self.type_class)(ty) } == return_class)
             });
         let read = if valid && !code.is_null() && length <= 256 && stack <= 8 {
             body(unsafe { std::slice::from_raw_parts(code, length as usize) })
@@ -139,6 +151,9 @@ impl Api {
         };
         unsafe { (self.free)(header) };
         let read = read.ok_or("engine header getter has an unverified complete body")?;
+        if read.value_helpers.is_some() != (return_kind == 0x11) {
+            return Err("engine header null/conversion branch does not match result type".into());
+        }
         let field = sym!(
             "mono_field_from_token",
             unsafe extern "C" fn(Object, u32, *mut Object, Object) -> Object
@@ -163,6 +178,49 @@ impl Api {
         let intptr = sym!("mono_get_intptr_class", unsafe extern "C" fn() -> Object);
         let intptr = unsafe { intptr() };
         let image = unsafe { (self.image)(owner) };
+        if let Some((none, convert)) = read.value_helpers {
+            // Both helpers keep executing their original IL. Qualify their
+            // exact declared signatures; only the caller's I4 read is bridged.
+            for (token, name, arity) in [(none, c"get_None", 0), (convert, c"op_Implicit", 1)] {
+                let helper = unsafe { resolve(image, token, ptr::null_mut()) };
+                if helper.is_null()
+                    || unsafe { (self.class)(helper) } != return_class
+                    || unsafe { (self.generic)(helper) } != 0
+                    || unsafe { (self.inflated)(helper) } != 0
+                    || unsafe { (self.name)(helper) }.is_null()
+                    || unsafe { std::ffi::CStr::from_ptr((self.name)(helper)) } != name
+                {
+                    return Err("engine header value helper identity mismatch".into());
+                }
+                let desc = self
+                    .describe(helper, images, images)?
+                    .ok_or("value helper has no IL")?;
+                if desc.receiver.is_some()
+                    || desc.parameters.len() != arity
+                    || desc.returns != descriptor.returns
+                    || desc.parameters.iter().any(|p| {
+                        p.byref
+                            || !matches!(
+                                p.shape,
+                                Shape::Scalar {
+                                    width: 4,
+                                    boolean: false,
+                                    ..
+                                }
+                            )
+                    })
+                {
+                    return Err("engine header value helper signature mismatch".into());
+                }
+                if arity == 1 {
+                    let mut iterator = ptr::null_mut();
+                    let arg = unsafe { (self.parameters)((self.signature)(helper), &mut iterator) };
+                    if arg.is_null() || unsafe { (self.kind)(arg) } != 8 {
+                        return Err("engine header value conversion does not consume I4".into());
+                    }
+                }
+            }
+        }
         let resolve_field = |token| {
             let mut declaring = ptr::null_mut();
             // Mono writes retklass on both cached and MemberRef resolution.
@@ -293,5 +351,25 @@ mod tests {
         shifted[38..42].copy_from_slice(&0x04009876u32.to_le_bytes());
         assert_eq!(body(&shifted).unwrap().cached, 0x04005678);
         assert_eq!(body(&shifted).unwrap().offset, 0x04009876);
+    }
+    #[test]
+    fn engine_header_value_result_preserves_both_original_helper_calls() {
+        let mut code = fixture();
+        code.splice(21..22, [0x28, 0x12, 0x34, 0x56, 0x06]);
+        code[20] = 8;
+        code[28] = 27;
+        code.splice(48..48, [0x28, 0x78, 0x9a, 0xbc, 0x06]);
+        let read = body(&code).unwrap();
+        assert_eq!(read.value_helpers, Some((0x06563412, 0x06bc9a78)));
+        assert_eq!(read.cached, 0x04000123);
+        assert_eq!(read.offset, 0x04000345);
+        for (at, replacement) in [(20, 4), (28, 22), (48, 0x6f), (47, 0x4b), (54, 1)] {
+            let mut invalid = code.clone();
+            invalid[at] = replacement;
+            assert!(body(&invalid).is_none(), "mutated byte {at}");
+        }
+        for end in 0..code.len() {
+            assert!(body(&code[..end]).is_none());
+        }
     }
 }
