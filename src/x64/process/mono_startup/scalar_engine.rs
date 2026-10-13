@@ -119,6 +119,9 @@ enum Argument {
     Value(Payload),
     EngineSelf,
     EnginePointer { nullable: bool },
+    // Engine Texture factories accept NULL for ordinary owned creation. A
+    // nonzero external GPU texture requires a separate resource protocol.
+    NullGpuTexture,
     EngineObject { class: usize },
     EngineArray { class: usize },
     Exception { class: usize },
@@ -688,6 +691,15 @@ pub(super) fn install(
                         Argument::EngineSelf
                     });
                 } else if index != 0 && type_kind == 0x18 && class == intptr && !reference {
+                    if engine_object
+                        && !asset_bases[3].is_null()
+                        && unsafe { assignable(asset_bases[3], owner) } != 0
+                        && !names[index - 1].is_null()
+                        && unsafe { CStr::from_ptr(names[index - 1]) } == c"nativeTex"
+                    {
+                        arguments.push(Argument::NullGpuTexture);
+                        continue;
+                    }
                     if engine_arguments.is_none() {
                         engine_arguments = Some(api.engine_pointer_arguments(
                             method,
@@ -1016,7 +1028,11 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
     }
     let mut object_pins = Vec::new();
     for (argument, value) in binding.arguments.iter().zip(&mut checked) {
-        if matches!(argument, Argument::CullingPointer) {
+        if matches!(argument, Argument::NullGpuTexture) {
+            if *value != 0 {
+                return Err("external native GPU texture has no issued cross-architecture resource identity".into());
+            }
+        } else if matches!(argument, Argument::CullingPointer) {
             *value = render_context::culling::pointer(*value)?;
         } else if let Argument::OwnedResource { class, nullable } = argument {
             if *value != 0 || !nullable {
@@ -1954,6 +1970,24 @@ mod tests {
         memory.map(STACK, 65536, READ | WRITE).unwrap();
         let mut runtime =
             Runtime64::new(&mut memory, 0x140000000, STACK, 65536, "value-result-test").unwrap();
+        let factory = binding("TextureFactory", 0x1100, vec![Argument::NullGpuTexture], 8);
+        memory.write(0x1100, &[0x48, 0x89, 0xc8, 0xc3]).unwrap(); // return original NULL RCX
+        let result = callbacks::with_owner(&mut memory, &mut runtime, [0; 7], || {
+            execute(&factory, &[0])
+        })
+        .unwrap()
+        .0
+        .unwrap();
+        assert_eq!(result.0, 0);
+        assert!(
+            callbacks::with_owner(&mut memory, &mut runtime, [0; 7], || execute(
+                &factory,
+                &[0xabcdef]
+            ))
+            .unwrap()
+            .0
+            .is_err()
+        );
         memory
             .write(0x1000, &[0xc7, 0x01, 0, 0, 0, 0, 0xb8, 2, 0, 0, 0, 0xc3])
             .unwrap();

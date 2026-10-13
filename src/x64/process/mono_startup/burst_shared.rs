@@ -333,9 +333,9 @@ pub(super) fn validate_handles() -> Result<(), String> {
     }
     callbacks::with_service(|memory, runtime| {
         for region in regions {
-            let value = region.with_native(|pointer| unsafe {
-                pointer.as_ptr().cast::<u64>().read_unaligned()
-            })?;
+            let mut bytes = [0; 8];
+            region.read(0, &mut bytes)?;
+            let value = u64::from_le_bytes(bytes);
             if value != 0
                 && !(memory.owned_noncode_access(value, 1)
                     && (runtime.live_data_slot(value, 1)

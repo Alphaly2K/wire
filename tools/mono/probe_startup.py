@@ -13,6 +13,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from probe import REPO, sha256
 
@@ -44,6 +45,21 @@ def reset_player_logs(sandbox):
                 log.unlink()
 
 
+def sample_process(process, output, delays, stopped):
+    """Capture the live process on schedule, even when startup stops logging."""
+    started = time.monotonic()
+    for delay in sorted(set(delays)):
+        if stopped.wait(max(0, started + delay - time.monotonic())) or process.poll() is not None:
+            return
+        with (output / f'sample-{delay:g}.log').open('w') as stream:
+            try:
+                subprocess.run(['/usr/bin/sample', str(process.pid), '5', '1', '-file',
+                                str(output / f'sample-{delay:g}.txt')],
+                               stdout=stream, stderr=subprocess.STDOUT, timeout=15)
+            except subprocess.TimeoutExpired:
+                stream.write('sample tool exceeded its 15 second bound\n')
+
+
 def main():
     # Input links and the small frozen wire executable retire even on timeout,
     # failed evidence checks or interruption. The game directory is reused.
@@ -53,6 +69,9 @@ def main():
 
 def run(cleanup):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--timeout', type=int, default=180, help='maximum wall seconds for the bounded game process')
+    parser.add_argument('--sample-after', type=float, action='append', default=[],
+                        help='capture a 5 second native stack sample after this many seconds; repeatable')
     parser.add_argument('--game', type=Path, required=True, help='read-only original EXE')
     parser.add_argument('--runtime-output', type=Path, default=REPO / 'wire-out/native-mono-m1')
     parser.add_argument('--output', type=Path, default=REPO / 'wire-out/native-mono-unity-startup-probe')
@@ -70,6 +89,10 @@ def run(cleanup):
     parser.add_argument('--skip-etw', action='store_true', help='explicit diagnostic platform divergence')
     parser.add_argument('--boundary', choices=('root', 'main-thread', 'pre-bindings', 'bindings', 'profiler', 'pre-images', 'images', 'metadata', 'strings', 'managed-types', 'classlib', 'logging', 'exceptions', 'synchronization', 'subsystems', 'subsystem-map', 'imgui-cache', 'attributes', 'attribute-arrays', 'assembly-lookup', 'objects', 'curves', 'fields', 'components', 'assets'), default='root', help='finite diagnostic initialization boundary')
     args = parser.parse_args()
+    if args.timeout <= 0 or any(not 0 < delay < args.timeout for delay in args.sample_after):
+        parser.error('timeout must be positive and sample delays must be inside the timeout')
+    if args.sample_after and args.lldb:
+        parser.error('scheduled samples require the direct game process, without --lldb')
     if bool(args.graphics_backend) != bool(args.moltenvk):
         parser.error("--graphics-backend and --moltenvk must be paired")
     output = args.output.resolve()
@@ -172,13 +195,28 @@ def run(cleanup):
         'full_game_backend': False, 'timing_is_performance_comparison': False,
         'native_presenter_requested': args.window or args.capture_frame,
         'debugger_requested': args.lldb,
+        'wall_timeout_seconds': args.timeout,
+        'stack_sample_after_seconds': sorted(set(args.sample_after)),
         'present_capture_requested': args.capture_frame}, indent=2) + '\n')
     reset_player_logs(sandbox)
     start = time.monotonic()
     cleanup.callback(snapshot_player_logs, sandbox, output)
     with (output / 'startup.log').open('w') as stream:
         usage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
-        result = subprocess.run(command, cwd=clone, env=env, stdout=stream, stderr=subprocess.STDOUT, timeout=180)
+        with subprocess.Popen(command, cwd=clone, env=env, stdout=stream, stderr=subprocess.STDOUT) as process:
+            stopped = threading.Event()
+            sampler = threading.Thread(target=sample_process,
+                                       args=(process, output, args.sample_after, stopped), daemon=True)
+            sampler.start()
+            try:
+                result = subprocess.CompletedProcess(command, process.wait(timeout=args.timeout))
+            except BaseException:
+                process.kill()
+                process.wait()
+                raise
+            finally:
+                stopped.set()
+                sampler.join(timeout=16)
         usage_after = resource.getrusage(resource.RUSAGE_CHILDREN)
     content = (output / 'startup.log').read_text()
     original_attach = bool(re.search(r'^(?:entry stage:|TLS process attach:).*mono-2\.0-bdwgc\.dll', content, re.M))

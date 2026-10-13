@@ -13,6 +13,30 @@ use std::{
 #[cfg(feature = "native-mono-backend")]
 use std::{marker::PhantomData, rc::Rc};
 
+#[cfg(feature = "native-mono-backend")]
+static SNAPSHOT_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn note_snapshot_access() {
+    #[cfg(feature = "native-mono-backend")]
+    {
+        use std::sync::atomic::Ordering;
+        // Saturation permanently disables the fast path instead of letting
+        // an old revision become equal again after integer wraparound.
+        let _ = SNAPSHOT_REVISION.fetch_update(Ordering::AcqRel, Ordering::Acquire, |revision| {
+            revision.checked_add(1)
+        });
+    }
+}
+
+struct SnapshotAccess;
+impl Drop for SnapshotAccess {
+    fn drop(&mut self) {
+        // A closure may reenter a callback and mutate after that callback's
+        // checkpoint. Invalidate again on return/unwind, not just on entry.
+        note_snapshot_access();
+    }
+}
+
 struct GateState {
     owner: Option<ThreadId>,
     depth: usize,
@@ -124,6 +148,7 @@ impl HostRegion {
         {
             return Err("invalid foreign region length".into());
         }
+        note_snapshot_access();
         Ok(Self(Arc::new(RegionInner {
             pointer,
             len,
@@ -170,20 +195,34 @@ impl HostRegion {
     /// The pointer is a data pointer; dereferencing it remains an unsafe act.
     pub fn with_native<T>(&self, call: impl FnOnce(NonNull<u8>) -> T) -> Result<T, String> {
         let _lease = self.lease()?;
+        // A native closure may mutate owned snapshots. Conservatively count
+        // every closure, even reads, so native access invalidates the previous
+        // comparison at the next same-owner boundary.
+        note_snapshot_access();
+        let _snapshot_access = SnapshotAccess;
         Ok(call(self.0.pointer))
+    }
+    /// Revision of bridge-owned snapshots accessed through with_native or
+    /// written through any guest mapping. This is not a general native heap
+    /// version: raw foreign storage still needs its full execution protocol.
+    #[cfg(feature = "native-mono-backend")]
+    pub(crate) fn snapshot_revision() -> Option<u64> {
+        let revision = SNAPSHOT_REVISION.load(std::sync::atomic::Ordering::Acquire);
+        (revision != u64::MAX).then_some(revision)
     }
     /// Invalidate every mapping/alias before releasing a native allocation.
     /// Retained storage stays alive until the last region/mapping is dropped.
     pub fn revoke(&self) -> Result<(), String> {
         let _lease = self.lease()?;
         self.0.gate.lock().unwrap().revoked = true;
+        note_snapshot_access();
         Ok(())
     }
     fn check_live(&self) -> Result<(), String> {
         let _lease = self.lease()?;
         Ok(())
     }
-    fn read(&self, offset: usize, output: &mut [u8]) -> Result<(), String> {
+    pub(crate) fn read(&self, offset: usize, output: &mut [u8]) -> Result<(), String> {
         let _lease = self.lease()?;
         if offset
             .checked_add(output.len())
@@ -215,6 +254,7 @@ impl HostRegion {
                 bytes.len(),
             );
         }
+        note_snapshot_access();
         Ok(())
     }
 }
@@ -553,6 +593,46 @@ impl Memory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "native-mono-backend")]
+    #[test]
+    fn snapshot_revision_observes_guest_aliases_rmw_native_access_and_revocation() {
+        let mut memory = Memory::default();
+        let region = HostRegion::owned(16).unwrap();
+        for address in [0x58000003, 0x58001003] {
+            memory
+                .map_shared_data(address, region.clone(), READ | WRITE, READ | WRITE)
+                .unwrap();
+        }
+        let revision = HostRegion::snapshot_revision().unwrap();
+        memory.write_int(0x58001003 + 7, 8, 19).unwrap();
+        assert!(HostRegion::snapshot_revision().unwrap() > revision);
+        assert_eq!(memory.read_int(0x58000003 + 7, 8).unwrap(), 19);
+        let revision = HostRegion::snapshot_revision().unwrap();
+        memory.modify_int(0x58000003 + 7, 8, |n| n + 1).unwrap();
+        assert!(HostRegion::snapshot_revision().unwrap() > revision);
+        assert_eq!(memory.read_int(0x58001003 + 7, 8).unwrap(), 20);
+        let revision = HostRegion::snapshot_revision().unwrap();
+        region
+            .with_native(|p| unsafe { p.as_ptr().write(3) })
+            .unwrap();
+        assert!(HostRegion::snapshot_revision().unwrap() > revision);
+        assert_eq!(memory.read_int(0x58001003, 1).unwrap(), 3);
+        let mut nested_checkpoint = None;
+        region
+            .with_native(|p| {
+                nested_checkpoint = HostRegion::snapshot_revision();
+                // A native callback can establish its checkpoint before the
+                // enclosing closure performs its final mutation.
+                unsafe { p.as_ptr().write(4) };
+            })
+            .unwrap();
+        assert!(HostRegion::snapshot_revision().unwrap() > nested_checkpoint.unwrap());
+        assert_eq!(memory.read_int(0x58001003, 1).unwrap(), 4);
+        let revision = HostRegion::snapshot_revision().unwrap();
+        region.revoke().unwrap();
+        assert!(HostRegion::snapshot_revision().unwrap() > revision);
+        assert!(memory.read_int(0x58000003, 1).is_err());
+    }
     #[cfg(feature = "native-mono-backend")]
     #[test]
     fn engine_overlay_has_one_backing_blocks_page_mutation_and_restores_final_bytes() {

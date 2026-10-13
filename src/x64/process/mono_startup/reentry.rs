@@ -534,11 +534,30 @@ impl Metadata<'_> {
         roots.handles.1.native_handle(roots.handles.0, token)
     }
     pub(super) fn sync_guest(&mut self, memory: &Memory) -> Result<(), String> {
+        self.sync_guest_after_callback(memory, false)
+    }
+    /// Only the same callback owner may assert unchanged, using the global
+    /// owned-snapshot revision captured after its last successful full sync.
+    /// Cached Unity pointers and semantic data addresses retain per-boundary
+    /// lifetime checks. Native Mono heap writes are not snapshot writes.
+    pub(super) fn sync_guest_after_callback(
+        &mut self,
+        memory: &Memory,
+        unchanged: bool,
+    ) -> Result<(), String> {
         if let Some(roots) = self.objects.as_mut() {
             roots.roots.sync_from_guest(roots.api, memory)?;
-            roots.fields.sync(roots.api, roots.roots)?;
+            if unchanged {
+                roots.fields.validate_dynamic(roots.api, roots.roots)?;
+            } else {
+                roots.fields.sync(roots.api, roots.roots)?;
+            }
             if let Some((api, arrays)) = roots.arrays.as_mut() {
-                arrays.sync(*api, roots.api, roots.roots, memory)?;
+                if unchanged {
+                    arrays.validate_dynamic(*api, roots.api, roots.roots, memory)?;
+                } else {
+                    arrays.sync(*api, roots.api, roots.roots, memory)?;
+                }
             }
         }
         Ok(())

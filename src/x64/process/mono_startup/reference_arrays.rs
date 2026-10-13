@@ -282,6 +282,7 @@ pub(super) struct Registry {
     scalar_writes: usize,
     borrowed: usize,
     refreshed: usize,
+    dynamic_entries: Vec<u64>,
 }
 pub(super) struct Refresh {
     updates: Vec<(u64, Vec<u8>)>,
@@ -730,12 +731,30 @@ impl Registry {
             return Err("typed array sync after retirement".into());
         }
         let mut updates = Vec::new();
+        let mut dynamic_entries = Vec::new();
         for (&token, entry) in &self.entries {
             if roots.native(root_api, token)? != entry.native {
                 return Err("typed array root changed".into());
             }
             Self::layout(api, entry)?;
-            let bytes = Self::values(entry)?;
+            // The committed snapshot was already type/padding/reference
+            // checked. Compare under the region lease before allocating or
+            // traversing its elements again. Root and native layout checks
+            // above still run on every boundary, including an unchanged view.
+            // Engine addresses have independently changing guest lifetimes.
+            let dynamic =
+                entry.engine_handles
+                    || entry.layout.slots.iter().any(|slot| {
+                        matches!(slot.shape, value_layout::Shape::EngineAddress { .. })
+                    });
+            let bytes = entry.payload.with_native(|p| unsafe {
+                let bytes = std::slice::from_raw_parts(p.as_ptr(), entry.committed.len());
+                (dynamic || bytes != entry.committed).then(|| bytes.to_vec())
+            })?;
+            if dynamic {
+                dynamic_entries.push(token);
+            }
+            let Some(bytes) = bytes else { continue };
             if entry.engine_handles {
                 validate_engine_handles(&bytes, |value| memory.guest_private_data_slot(value, 1))?;
             }
@@ -778,6 +797,47 @@ impl Registry {
             }
             let start = index * entry.layout.width + offset;
             entry.committed[start..start + bytes.len()].copy_from_slice(&bytes);
+        }
+        self.dynamic_entries = dynamic_entries;
+        Ok(())
+    }
+    /// Snapshot bytes are unchanged, but engine data addresses may have been
+    /// freed or revoked without writing any shared snapshot.
+    pub(super) fn validate_dynamic(
+        &self,
+        api: Api,
+        root_api: instances::Api,
+        roots: &instances::Registry,
+        memory: &Memory,
+    ) -> Result<(), String> {
+        if self.retired || roots.roots_released() {
+            return Err("typed array cached synchronization after retirement".into());
+        }
+        for &token in &self.dynamic_entries {
+            let entry = &self.entries[&token];
+            if roots.native(root_api, token)? != entry.native {
+                return Err("typed array dynamic root changed".into());
+            }
+            Self::layout(api, entry)?;
+            let bytes = Self::values(entry)?;
+            if bytes != entry.committed {
+                return Err("typed array changed during cached synchronization".into());
+            }
+            if entry.engine_handles {
+                validate_engine_handles(&bytes, |value| memory.guest_private_data_slot(value, 1))?;
+            }
+            for value in bytes.chunks_exact(entry.layout.width) {
+                for slot in &entry.layout.slots {
+                    if let value_layout::Shape::EngineAddress { condition } = slot.shape {
+                        super::player_loop::check_address(
+                            u64::from_le_bytes(
+                                value[slot.offset..slot.offset + 8].try_into().unwrap(),
+                            ),
+                            condition,
+                        )?;
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -1238,6 +1298,41 @@ mod tests {
             .is_err());
     }
     #[test]
+    fn cached_dynamic_arrays_reject_freed_engine_storage_without_a_snapshot_write() {
+        let api = Api {
+            intptr: 2usize as Object,
+            ..api()
+        };
+        let root_api = instances::tests::identity_api();
+        let mut roots = instances::Registry::default();
+        let mut arrays = Registry::default();
+        let mut memory = Memory::default();
+        let address = memory.virtual_alloc(0, 4096, 0x3000, 4).unwrap();
+        let token = arrays
+            .allocate(
+                api,
+                root_api,
+                &mut roots,
+                1usize as Object,
+                2usize as Object,
+                1,
+            )
+            .unwrap();
+        arrays.publish(&mut memory, token).unwrap();
+        memory.write_int(token + 32, 8, address).unwrap();
+        arrays.sync(api, root_api, &roots, &memory).unwrap();
+        arrays
+            .validate_dynamic(api, root_api, &roots, &memory)
+            .unwrap();
+        memory.virtual_free(address, 0, 0x8000).unwrap();
+        assert_eq!(memory.read_int(token + 32, 8).unwrap(), address);
+        assert!(arrays
+            .validate_dynamic(api, root_api, &roots, &memory)
+            .is_err());
+        roots.release(root_api);
+        arrays.retire(&mut memory, &roots).unwrap();
+    }
+    #[test]
     fn value_arrays_validate_scalars_and_all_references_before_native_writes() {
         WRITES.with(|c| c.set(0));
         unsafe extern "C" fn wide_size(_: Object) -> i32 {
@@ -1323,6 +1418,20 @@ mod tests {
         assert_eq!(data[4], 4);
         assert_eq!(data[5], 0x80000001);
         assert_eq!(WRITES.with(Cell::get), 1);
+        for _ in 0..8 {
+            registry.sync(api, root_api, &roots, &memory).unwrap();
+        }
+        assert_eq!(WRITES.with(Cell::get), 1);
+        // Padding alone must invalidate the whole changed snapshot, even
+        // after repeated unchanged boundaries. A valid earlier scalar change
+        // cannot commit before the later invalid byte is checked.
+        memory.write_int(token + 40, 4, 7).unwrap();
+        memory.write_int(token + 44, 1, 1).unwrap();
+        assert!(registry.sync(api, root_api, &roots, &memory).is_err());
+        assert_eq!(data[5], 0x80000001);
+        memory.write_int(token + 44, 1, 0).unwrap();
+        registry.sync(api, root_api, &roots, &memory).unwrap();
+        assert_eq!(data[5], 7);
         assert!(!registry.has_reference(0, token + 40));
         assert!(registry
             .store(api, root_api, &roots, &mut memory, [0, token + 48, value])
@@ -1331,6 +1440,7 @@ mod tests {
         registry.verify(api, root_api, &roots).unwrap();
         assert_eq!(registry.value_verified, 1);
         roots.release(root_api);
+        assert!(registry.sync(api, root_api, &roots, &memory).is_err());
         registry.retire(&mut memory, &roots).unwrap();
         assert!(memory.read_int(token + 32, 8).is_err());
     }

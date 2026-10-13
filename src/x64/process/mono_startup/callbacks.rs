@@ -51,6 +51,7 @@ struct Owner<'a> {
     gc_events: Cell<u32>,
     mono_reentries: Cell<usize>,
     managed_reentries: Cell<usize>,
+    synced_snapshot_revision: Cell<Option<u64>>,
     reference_outputs: Cell<[Option<(u64, usize)>; 8]>,
     metadata: Option<RefCell<super::reentry::Metadata<'a>>>,
 }
@@ -159,6 +160,7 @@ fn with_routes<'a, T>(
         gc_events: Cell::new(0),
         mono_reentries: Cell::new(0),
         managed_reentries: Cell::new(0),
+        synced_snapshot_revision: Cell::new(None),
         reference_outputs: Cell::new([None; 8]),
         metadata: metadata.map(RefCell::new),
     };
@@ -485,10 +487,16 @@ fn execute_scalar_guest_bounded_inner(
     loop {
         if cpu.rip == RETURN {
             if let Some(route) = owner.metadata.as_ref() {
+                let revision = crate::x64::memory::shared::HostRegion::snapshot_revision();
+                let unchanged =
+                    revision.is_some() && revision == owner.synced_snapshot_revision.get();
                 route
                     .try_borrow_mut()
                     .map_err(|_| "nested completion metadata is already borrowed")?
-                    .sync_guest(&owner.memory.borrow())?;
+                    .sync_guest_after_callback(&owner.memory.borrow(), unchanged)?;
+                owner
+                    .synced_snapshot_revision
+                    .set(crate::x64::memory::shared::HostRegion::snapshot_revision());
             }
             return Ok((
                 cpu.regs[0],
@@ -597,6 +605,7 @@ fn execute_scalar_guest_bounded_inner(
                         .finish_allocation(allocation, &mut owner.memory.borrow_mut())?;
                     cpu.return_integer(&owner.memory.borrow(), token)?;
                 } else {
+                    let return_address = owner.memory.borrow().read_int(cpu.regs[4], 8).ok();
                     route
                         .try_borrow_mut()
                         .map_err(|_| "nested metadata route is already borrowed")?
@@ -612,7 +621,7 @@ fn execute_scalar_guest_bounded_inner(
                                 binding.original_function,
                                 [cpu.regs[1], cpu.regs[2], cpu.regs[8], cpu.regs[9]],
                                 cpu.regs[4],
-                                owner.memory.borrow().read_int(cpu.regs[4], 8).ok()
+                                return_address
                             )
                         })?;
                 }
@@ -2581,6 +2590,34 @@ mod tests {
         assert!(OWNER.with(|slot| slot.get().is_null()));
         assert!(with_metadata_service(|_, _| Ok(())).is_err());
         assert!(memory.read_int(STACK_BASE, 8).is_err());
+        let unknown = runtime.register("mono-2.0-bdwgc.dll", "mono_error_get_message");
+        let mut code = vec![0x48, 0xb8];
+        code.extend(unknown.to_le_bytes());
+        code.extend([0xff, 0xe0]);
+        memory.write(0x1200, &code).unwrap();
+        let (failure, _) = with_metadata_owner(
+            &mut memory,
+            &mut runtime,
+            [0; 7],
+            super::super::reentry::Metadata {
+                gc: None,
+                library: ptr::null_mut(),
+                domain: ptr::null_mut(),
+                thread_handle: ptr::null_mut(),
+                metadata: &mut registry,
+                images: &mut images,
+                errors: &mut super::super::errors::Registry::default(),
+                rooted_instance: None,
+                objects: None,
+            },
+            || guest_arguments(0x1200, &[]),
+        )
+        .unwrap();
+        let failure = failure.unwrap_err();
+        assert!(failure.contains("function=mono_error_get_message"));
+        assert!(failure.contains("return=Some"));
+        assert!(failure.contains("callback-target=0x1200"));
+        assert!(OWNER.with(|slot| slot.get().is_null()));
         registry.retire(&mut memory).unwrap();
         assert!(memory.read_int(token + 232, 8).is_err());
     }

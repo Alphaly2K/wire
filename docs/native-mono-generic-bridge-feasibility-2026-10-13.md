@@ -886,3 +886,62 @@ runtime wrapper 处理；逐页核对 owned/noncode 权限、对齐、当前 RSP
 SpriteMaskUtility 复用现有 numeric scalar/value descriptor。嵌套状态批次的完整
 release 回归 **595 passed / 8 ignored**，模块回归 **189 passed / 1 ignored**；
 all-target release Clippy 通过。后续窗口结果另记。
+
+## 贴图初始化与同步热点
+
+Texture factory 的 IntPtr 参数由 actual Texture 派生 owner 和 `nativeTex` 参数名
+识别；普通 owned texture 创建允许 NULL。外部 GPU texture 的非零 native pointer
+仍需独立 resource identity 协议。probe-211 实际执行
+Texture2D.Internal_CreateImpl_Injected、Texture.set_wrapMode_Injected、
+Texture2D.get_isReadable_Injected 和 SetPixelImpl_Injected，随后 180 秒超时。
+probe-212 也超时；probe-213 停在更早的 render pipeline 初始化，未赶上 live sample。
+
+probe-214 在 55、110 秒自动采样，两个时段都在 native Mono 的 icall 内持续执行，
+线程没有停在 GC/通道死锁。55 秒的主线程 4130 个 samples 中，3790 个在
+mono_runtime_invoke 内；两个 numeric/scalar adapter 分支分别有 1910/1865 个
+samples 落在 execute_scalar_guest_bounded，其中大部分在完成时的 sync_guest。
+typed array 的每个未变化元素仍重建 layout coverage、分配 reference vectors、
+查询根身份；字段同步也逐 cell 复制并解析未变化的引用。这使 SetPixel 的小调用
+反复承担整个已发布对象图的扫描成本。110 秒的样本呈现同一热点，画面仍是加载首帧。
+
+同步路径先在 region lease 内按字节比较已验证 committed snapshot；未变化的
+普通数组不再分配/逐元素校验，字段不再复制未变化 cell。数组根身份/native SZ
+layout、字段 owner 身份和完整 value/padding 校验保留；独立生命周期的引擎数据
+地址与 IntPtr 数组仍在每次边界验证。全部变化批次仍先完整校验，再执行原 Mono
+write barrier 或数值写回。回归覆盖重复未变化边界后，后部 padding 伪造阻止前部
+合法 scalar 写入，以及退休根拒绝。后续实测与验证结果另记。
+
+修复 nested dispatch 错误格式化中的 RefCell 二次借用：在 dispatch 前记录实际
+return PC，错误路径保留原 function/target/arguments；新增异常 gateway 回归。
+测试 harness 增加 bounded wall timeout 和重复 `--sample-after`，采样当前进程 PID，
+每次 5 秒，单次采样工具另限 15 秒；退出/超时均取消剩余采样并回收临时输入链接。
+本批不修改 IL2CPP、游戏 IL 或冻结 native Mono runtime。
+
+probe-215 的数组逐元素扫描已下降，但仍在 SetPixel 初始化处 180 秒超时。
+55 秒样本中 scalar pool 分支的 sync_guest 数组部分下降到 240 samples；字段
+部分占 1648 samples，主要是逐 cell 查询同一 owner 的 GC handle 与 region lease。
+
+进一步将每个 callback owner 的最后成功同步绑定到 owned snapshot revision。
+guest shared writes（包括别名、RMW）、任何 with_native closure（包含只读访问）、
+region 创建/撤销均使 revision 失效；计数饱和永久回退完整扫描。一个 owner 内没有
+上述操作时，共用上次已验证结果，跳过普通字段/数组重扫。该标记只描述本桥接私有
+owned snapshots，外部 raw foreign backing 继续遵守其原 execution lease 协议。
+Unity cached pointer 的 guest 范围检查、EngineAddress 字段和 IntPtr/EngineAddress
+数组的独立生命周期检查仍每次执行；GC 验证、写 barrier 和首次/变化批次的完整
+验证保留。不同 owner 不继承标记，失败也不建立新的同步 checkpoint。
+
+新增别名/跨 offset scalar 写入、RMW、native closure、撤销的 revision 回归；
+另验证 IntPtr 数组 view 未变化但 guest engine allocation 已释放时，cached
+dynamic 检查立即拒绝。完整 library release **252 passed / 8 ignored**；
+all-target Clippy、release build 和实际窗口结果另记。
+
+probe-216 在 124.65 秒进入后续 component 创建，原 Texture2D.ApplyImpl_Injected
+和 Object.GetName_Injected 已执行；最终遇到 nested
+mono_unity_custom_attrs_construct 尚未路由的明确错误。继续缩减 cached dynamic
+扫描：首次/变化的完整同步建立 semantic address 索引；未变化时只重查这些地址，
+无需再次解析同一 payload 的普通引用。with_native 返回/展开也撤销 revision，覆盖
+native closure 在内层 callback checkpoint 之后再写入的情形。SharedStatic
+只读检查改用持 lease 的只读 copy API，避免其每次检查触发保守 full scan。
+完整 release **597 passed / 8 ignored**，all-target Clippy 与 release build 通过。
+下一步共用原 attribute ownership 和 scoped MonoError，接入 nested checked
+attribute array construction；游戏与 IL2CPP 均不修改。

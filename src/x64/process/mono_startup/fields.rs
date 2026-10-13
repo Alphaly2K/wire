@@ -132,6 +132,7 @@ pub(super) struct Registry {
     refreshed: usize,
     payloads: BTreeMap<u64, (value_layout::Layout, HostRegion)>,
     inline_payloads: BTreeMap<u64, InlinePayload>,
+    dynamic_cells: Vec<u64>,
     unboxes: usize,
 }
 pub(super) struct Spec {
@@ -714,9 +715,20 @@ impl Registry {
         self.validate_payloads(root_api, roots)?;
         let mut updates = Vec::new();
         for (&address, cell) in &self.cells {
-            let bytes = Self::value(cell)?;
-            Self::validate(cell.shape, &bytes)?;
             let owner = roots.native(root_api, cell.owner)?;
+            let bytes = cell.view.with_native(|p| unsafe {
+                let bytes = std::slice::from_raw_parts(
+                    p.as_ptr().add(cell.view_offset),
+                    cell.shape.width(),
+                );
+                (bytes != cell.committed).then(|| bytes.to_vec())
+            })?;
+            let Some(bytes) = bytes else {
+                // Address validity can change even when its bytes do not.
+                Self::validate(cell.shape, &cell.committed)?;
+                continue;
+            };
+            Self::validate(cell.shape, &bytes)?;
             let reference = if let Shape::Reference(class) = cell.shape {
                 let token = u64::from_le_bytes(bytes.as_slice().try_into().unwrap());
                 Some(if token == 0 {
@@ -727,9 +739,7 @@ impl Registry {
             } else {
                 None
             };
-            if bytes != cell.committed {
-                updates.push((address, owner, bytes, reference));
-            }
+            updates.push((address, owner, bytes, reference));
         }
         // Validate the entire batch before touching any native field. Pinned
         // targets stay alive through the native reference write barrier.
@@ -739,6 +749,32 @@ impl Registry {
             self.writes += 1;
             self.reference_writes += usize::from(reference.is_some());
             cell.committed = bytes;
+        }
+        self.dynamic_cells = self
+            .cells
+            .iter()
+            .filter_map(|(&address, cell)| {
+                matches!(cell.shape, Shape::EngineAddress { .. }).then_some(address)
+            })
+            .collect();
+        Ok(())
+    }
+    pub(super) fn validate_dynamic(
+        &self,
+        root_api: instances::Api,
+        roots: &instances::Registry,
+    ) -> Result<(), String> {
+        if self.retired || roots.roots_released() {
+            return Err("instance field cached synchronization after retirement".into());
+        }
+        for address in &self.dynamic_cells {
+            let cell = &self.cells[address];
+            roots.native(root_api, cell.owner)?;
+            let bytes = Self::value(cell)?;
+            if bytes != cell.committed {
+                return Err("instance field changed during cached synchronization".into());
+            }
+            Self::validate(cell.shape, &bytes)?;
         }
         Ok(())
     }
@@ -753,10 +789,13 @@ impl Registry {
             .map(|(l, v)| (l, v))
             .chain(self.inline_payloads.values().map(|p| (&p.layout, &p.view)))
         {
-            let bytes = view.with_native(|p| unsafe {
-                std::slice::from_raw_parts(p.as_ptr(), layout.width).to_vec()
-            })?;
-            layout.validate(&bytes, api, roots)?;
+            view.with_native(|p| unsafe {
+                layout.validate(
+                    std::slice::from_raw_parts(p.as_ptr(), layout.width),
+                    api,
+                    roots,
+                )
+            })??;
         }
         Ok(())
     }
