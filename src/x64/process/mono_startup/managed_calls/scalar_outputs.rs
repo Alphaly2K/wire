@@ -1049,6 +1049,34 @@ mod tests {
             );
             let core_image = unsafe { get_image(assembly) };
             let family = [core_image, family[1]];
+            let array_layout =
+                crate::x64::process::mono_startup::binding_arrays::describe(library, core_image)
+                    .unwrap();
+            let sorting = unsafe {
+                find(
+                    core_image,
+                    c"UnityEngine".as_ptr(),
+                    c"SortingLayer".as_ptr(),
+                )
+            };
+            let array_result = api
+                .engine_blittable_output(
+                    unsafe { method(sorting, c"GetSortingLayerIDsInternal_Injected".as_ptr(), 1) },
+                    sorting,
+                    array_layout.class as Object,
+                    &family,
+                )
+                .unwrap()
+                .expect("actual SortingLayer closed Int32 array output");
+            assert_eq!(array_result.stride, 4);
+            assert_eq!(array_result.alignment, 4);
+            assert_eq!(array_result.element, unsafe {
+                find(family[1], c"System".as_ptr(), c"Int32".as_ptr())
+            } as usize);
+            eprintln!(
+                "PASS actual generated array-output metadata: wrapper={} stride={}",
+                array_layout.width, array_result.stride
+            );
             let rendering = |name: &CStr| unsafe {
                 find(core_image, c"UnityEngine.Rendering".as_ptr(), name.as_ptr())
             };

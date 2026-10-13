@@ -831,7 +831,58 @@ probe-205 实际完成 Internal_Cull_Injected，生成 scoped result identity，
 执行 ScriptableRenderContext::Submit_Internal，并成功创建两个 engine Event。
 UIElementsUtility 初始化阻塞已越过，多个 Start entry 进入原 IL；仍有 SortingLayer
 BlittableArrayWrapper 输出与 FreeNativeOwnedMemory unresolved，Render Graph 报错
-后继续运行，最终在一次 guest callback 的 NULL address 访问停止。增加错误路径
+后继续运行，最终在 mono_runtime_invoke 的 NULL address 访问停止。增加错误路径
 的实际 callback target/PC/arguments/registers 诊断，不改变解释器正常执行。
 49.56 秒后 returncode=1，271 draws / 102 presents，画面 hash 仍未变化；noexec
 checks=337、denied=0。完整 release 回归 **591 passed / 8 ignored**。
+
+## 数值数组输出与空输入边界
+
+BlittableArrayWrapper 输出现在共用 scalar entry pool，元素类型由实际 generated
+wrapper 的完整 IL、finally 范围、InitLocals、三组局部类型及闭合
+Unmarshal<T>(ref T[]) MethodSpec 推导。实际 out Param 属性必须匹配；多个 wrapper
+推导类型冲突时拒绝。当前支持完整 non-Boolean scalar 覆盖的 primitive、enum 和
+numeric value；含引用、pointer、padding、数组输入/inout 或多输出形状仍不准入。
+没有写死 MethodSpec token、Int32 element 或目标 RVA。
+
+实际 BlittableArrayWrapper、UpdateFlags enum 与 NativeOwnedMemory header 的字段、
+归属、pointee、完整 size/alignment/动态 offsets 均核对。enum 值读 metadata constant
+blob，不执行静态构造。默认状态要求实际 NoUpdateNeeded=0；其他符号值从元数据读取。
+原 guest header/数据完整范围必须为 live private noncode storage；数组经私有 native
+numeric snapshot 后才写回 native output。原 Unmarshal IL 继续建立真正托管数组。
+DataIsNativeOwnedMemory 的 native header 有独立 issued identity，FreeNativeOwnedMemory
+只接受 owner-thread 上 exact live header，恢复其原 guest allocation 并调用实际
+注册的引擎 free。重复/伪造/跨线程释放拒绝，失败时 native output 不写回。
+
+快照和退休 header 在 VM cleanup 后释放，地址在此前不复用；诊断路径有限容量为
+4096 组、32MiB retained、单数组最多 65536 元素/2MiB。长期回收仍需扩展已证明的
+managed consumer 生命周期，不能把这个有界 arena 当作完整长时间运行方案。
+
+probe-207/208 将先前裸 NULL 错误定位到 NativeInputSystem.NotifyUpdate 的
+prepare-frame/input-events 阶段。原 InputEventBuffer 构造 IL 在 eventPtr=NULL 且
+eventCount=0 时保留默认空 buffer，跳过容量存储；旧桥接却检查 NULL + capacity
+hint 的范围。现在空事件状态保留 capacity 数值但不访问零地址，也不发布不存在的
+storage；非空 NULL 事件和未持有的非零输出 pointer 继续拒绝。
+
+新增测试覆盖完整/截断/错边界 finally、跨页 numeric snapshot、变化的 flag 常量、
+负数/过大 count、NX 代码历史拒绝、原 guest free 指针恢复、重复/跨线程释放，以及
+NULL 空事件带非零容量的输出。SDK 普通与游戏 incremental classlib 原生夹具均通过，
+实际 SortingLayer 闭合 Int32 output metadata 验证通过，noexec checks=46/denied=0。
+完整 release **594 passed / 8 ignored**，release build 和 all-target Clippy
+（`-D warnings`）通过。IL2CPP 未修改。
+
+probe-209 自动接入 4791 个 scalar pool declarations（deferred=811）。实际执行
+SortingLayer 的 4B/Int32 数组输出，flags=DataIsNativeOwnedMemory，原 Unmarshal
+完成复制并通过新 adapter 释放 guest header。下一空事件更新正常完成，输入 NULL
+错误已经越过；随后创建多组 GameObject、配置新的相机及 UI。原渲染循环还缺
+SpriteMaskUtility 数值接口，添加组件时首次遇到 nested mono_error_init 未路由。
+50.43 秒后由明确 adapter reject 停止（returncode=-6）；帧 hash 仍为原加载首帧，
+未正常收尾的 guard/GPU 总计不作为验收数据。
+
+MonoError 的 104B 外部状态快照现在共用主入口/嵌套入口的 Registry，范围来自
+当前 owner callback stack。只写/read status word，native 私有资源始终由 actual
+runtime wrapper 处理；逐页核对 owned/noncode 权限、对齐、当前 RSP 和完整范围，
+回调完成撤销其 stack slice 中的状态，防止后续复用同地址而继承旧身份。
+SpriteMaskUtility 复用现有 numeric scalar/value descriptor。嵌套状态批次的完整
+release 回归 **595 passed / 8 ignored**，模块回归 **189 passed / 1 ignored**；
+all-target release Clippy 通过。后续窗口结果另记。

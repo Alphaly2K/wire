@@ -387,8 +387,16 @@ pub(super) fn prepare(
         return Err("input callback vector is not aligned".into());
     }
     memory.check(arguments, 16, READ)?;
-    let update = memory.read_int(memory.read_int(arguments, 8)?, 4)?;
-    let guest = memory.read_int(memory.read_int(arguments + 8, 8)?, 8)?;
+    let slots = [
+        memory.read_int(arguments, 8)?,
+        memory.read_int(arguments + 8, 8)?,
+    ];
+    let update = memory
+        .read_int(slots[0], 4)
+        .map_err(|error| format!("{error}; input-stage=update-value; slots={slots:x?}"))?;
+    let guest = memory
+        .read_int(slots[1], 8)
+        .map_err(|error| format!("{error}; input-stage=buffer-value; slots={slots:x?}"))?;
     if !writable(guest, 20) {
         return Err("input callback header is not a live callback-stack output".into());
     }
@@ -396,8 +404,20 @@ pub(super) fn prepare(
     let mut bytes = [0; 20];
     memory.read(guest, &mut bytes)?;
     let initial = header(&bytes)?;
-    owned(memory, Some(runtime), initial.pointer, initial.capacity)?;
-    let mut payload = unsafe_buffers::InputSpan::new(initial.capacity.max(1))?;
+    // Original InputEventBuffer IL returns its default value when eventPtr is
+    // NULL and count is zero, regardless of a retained capacity hint. There is
+    // no backing storage to check/export in that state. Header validation still
+    // rejects NULL for a nonempty event chain.
+    if initial.pointer != 0 {
+        owned(memory, Some(runtime), initial.pointer, initial.capacity).map_err(|error| {
+            format!("{error}; input-stage=event-storage; header={guest:#x}; pointer={:#x}; count={}; size={}; capacity={}", initial.pointer, initial.count, initial.size, initial.capacity)
+        })?;
+    }
+    let mut payload = unsafe_buffers::InputSpan::new(if initial.pointer == 0 {
+        1
+    } else {
+        initial.capacity.max(1)
+    })?;
     if initial.size != 0 {
         memory.read(initial.pointer, payload.bytes_mut(initial.size)?)?;
     }
@@ -435,7 +455,8 @@ impl Prepared {
     pub(super) fn overlaps(&self, address: u64, width: usize) -> bool {
         address.checked_add(width as u64).is_none_or(|end| {
             (address < self.guest + 20 && self.guest < end)
-                || (self.initial.capacity != 0
+                || (self.initial.pointer != 0
+                    && self.initial.capacity != 0
                     && address < self.initial.pointer + self.initial.capacity as u64
                     && self.initial.pointer < end)
         })
@@ -446,27 +467,30 @@ impl Prepared {
         }
         let bytes = unsafe { std::slice::from_raw_parts(self.words.as_ptr().cast::<u8>(), 20) };
         let output = header(bytes)?;
-        let (pointer, data) = if output.pointer == self.payload.pointer() as u64 {
-            if output.capacity > self.initial.capacity {
-                return Err("input callback enlarged its borrowed buffer".into());
-            }
-            (
-                self.initial.pointer,
-                self.payload.bytes(output.size)?.to_vec(),
-            )
-        } else if output.pointer == 0 && output.size == 0 && output.capacity == 0 {
-            (0, Vec::new())
-        } else {
-            unsafe_buffers::export_input_span(output.pointer as usize, output.capacity).map(
-                |(pointer, mut data)| {
-                    data.truncate(output.size);
-                    (pointer, data)
-                },
-            )?
-        };
+        let (pointer, data) =
+            if self.initial.pointer != 0 && output.pointer == self.payload.pointer() as u64 {
+                if output.capacity > self.initial.capacity {
+                    return Err("input callback enlarged its borrowed buffer".into());
+                }
+                (
+                    self.initial.pointer,
+                    self.payload.bytes(output.size)?.to_vec(),
+                )
+            } else if output.pointer == 0 && output.size == 0 {
+                (0, Vec::new())
+            } else {
+                unsafe_buffers::export_input_span(output.pointer as usize, output.capacity).map(
+                    |(pointer, mut data)| {
+                        data.truncate(output.size);
+                        (pointer, data)
+                    },
+                )?
+            };
         event_chain(&data, output.count)?;
         owned(memory, None, self.guest, 20)?;
-        owned(memory, Some(runtime), pointer, output.capacity)?;
+        if pointer != 0 {
+            owned(memory, Some(runtime), pointer, output.capacity)?;
+        }
         let mut header = bytes.to_vec();
         header[..8].copy_from_slice(&pointer.to_le_bytes());
         if !data.is_empty() {
@@ -566,5 +590,18 @@ mod tests {
         prepared.finish(&mut memory, &runtime).unwrap();
         memory.read(0x1080, &mut actual).unwrap();
         assert_eq!(actual, [0; 20]);
+        // Unity keeps its old capacity after an empty update clears the pointer.
+        // Preserve that scalar hint without checking or exporting address zero.
+        prepared.initial.capacity = 4096;
+        prepared.words[2] |= 4096;
+        prepared.finish(&mut memory, &runtime).unwrap();
+        memory.read(0x1080, &mut actual).unwrap();
+        assert_eq!(&actual[..16], &[0; 16]);
+        assert_eq!(&actual[16..], &4096u32.to_le_bytes());
+        assert!(!prepared.overlaps(8, 8));
+        prepared.words[1] = 1;
+        assert!(prepared.finish(&mut memory, &runtime).is_err());
+        memory.read(0x1080, &mut actual).unwrap();
+        assert_eq!(&actual[..16], &[0; 16]);
     }
 }

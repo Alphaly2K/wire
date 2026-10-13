@@ -46,6 +46,7 @@ mod arrays;
 mod async_operations;
 mod attributes;
 mod awaitables;
+mod binding_arrays;
 mod binding_strings;
 mod bindings;
 mod bridge_audit;
@@ -3313,6 +3314,23 @@ impl Probe {
         memory: &mut Memory,
         runtime: &mut Runtime64,
     ) -> Result<bool, String> {
+        let arguments = [cpu.regs[1], cpu.regs[2], cpu.regs[8], cpu.regs[9]];
+        let rsp = cpu.regs[4];
+        self.dispatch_managed_call_inner(cpu, memory, runtime)
+            .map_err(|error| {
+                let identity = self.native.as_ref().and_then(|native| {
+                    let method = self.metadata_registry.native(arguments[0], metadata::Kind::Method).ok()?;
+                    managed_calls::Api::load(native.library).ok()?.method_identity(method).ok()
+                });
+                format!("{error}; managed-method={identity:?}; guest-invoke-arguments={arguments:x?}; rsp={rsp:#x}")
+            })
+    }
+    fn dispatch_managed_call_inner(
+        &mut self,
+        cpu: &mut Cpu64,
+        memory: &mut Memory,
+        runtime: &mut Runtime64,
+    ) -> Result<bool, String> {
         let native = self
             .native
             .as_ref()
@@ -3540,6 +3558,14 @@ impl Probe {
                 &self.registry,
             )?;
         }
+        if !binding_arrays::installed() {
+            binding_arrays::install(
+                library,
+                self.image_registry.unique_native_image(CORE_MODULE)?,
+                &managed_images,
+                &self.registry,
+            )?;
+        }
         if !scalar_engine::installed() {
             if !keyword_views::installed() {
                 keyword_views::install(
@@ -3618,8 +3644,12 @@ impl Probe {
                 None => (ptr::null_mut(), ptr::null_mut()),
             };
             callbacks::with_service(|memory, runtime| {
-                self.instance_registry.sync_from_guest(api, memory)?;
-                self.field_registry.sync(api, &self.instance_registry)?;
+                self.instance_registry
+                    .sync_from_guest(api, memory)
+                    .map_err(|error| format!("{error}; managed-prepare=sync-instances"))?;
+                self.field_registry
+                    .sync(api, &self.instance_registry)
+                    .map_err(|error| format!("{error}; managed-prepare=sync-fields"))?;
                 if let Some(array_api) = self.reference_array_api {
                     self.reference_array_registry.sync(
                         array_api,
@@ -3631,7 +3661,8 @@ impl Probe {
                 let input =
                     input_events::prepare(method, memory, runtime, a[2], |address, width| {
                         Self::temporary_call_slot(memory, runtime, rsp, address, width)
-                    })?;
+                    })
+                    .map_err(|error| format!("{error}; managed-prepare=input-events"))?;
                 let mut frame = if input.is_none() {
                     Some(managed_calls::Frame::prepare(
                         memory,
@@ -3666,7 +3697,8 @@ impl Probe {
                 Ok::<_, String>((frame, input, receiver, receiver_class))
             })
         })?;
-        let (mut frame, mut input, receiver, receiver_class) = prepared?;
+        let (mut frame, mut input, receiver, receiver_class) =
+            prepared.map_err(|error| format!("{error}; managed-stage=prepare-frame"))?;
         let (render_scope, _) =
             callbacks::with_owner(memory, runtime, targets, || match frame.as_mut() {
                 Some(frame) => render_context::Scope::prepare(method, frame, rsp),
@@ -3718,6 +3750,7 @@ impl Probe {
                 thread_handle,
                 metadata: &mut self.metadata_registry,
                 images: &mut self.image_registry,
+                errors: &mut self.error_registry,
                 rooted_instance: descriptor.receiver.map(|_| (a[1], receiver_class)),
                 objects: Some(reentry::ObjectRoots {
                     api,
@@ -3769,7 +3802,7 @@ impl Probe {
                 Ok::<_, String>(result)
             },
         )?;
-        let result = invoked?;
+        let result = invoked.map_err(|error| format!("{error}; managed-stage=invoke-IL"))?;
         let (converted, _) = callbacks::with_owner(memory, runtime, targets, || {
             let mut returned_arrays = Vec::new();
             let result = match descriptor.returns {
@@ -3872,7 +3905,8 @@ impl Probe {
             })?;
             Ok::<_, String>((result, outputs.len()))
         })?;
-        let (result, outputs) = converted?;
+        let (result, outputs) =
+            converted.map_err(|error| format!("{error}; managed-stage=convert-return"))?;
         let kind = if descriptor.receiver.is_some() {
             self.instance_invokes += 1;
             self.instance_output_writes += outputs;
@@ -3967,6 +4001,7 @@ impl Probe {
                         .thread_handle,
                     metadata: &mut self.metadata_registry,
                     images: &mut self.image_registry,
+                    errors: &mut self.error_registry,
                     rooted_instance: Some((a[1], class)),
                     objects: None,
                 },
@@ -4107,6 +4142,7 @@ impl Probe {
                         .thread_handle,
                     metadata: &mut self.metadata_registry,
                     images: &mut self.image_registry,
+                    errors: &mut self.error_registry,
                     rooted_instance: Some((a[1], class)),
                     objects: None,
                 },
@@ -4319,6 +4355,7 @@ impl Probe {
                             .thread_handle,
                         metadata: &mut self.metadata_registry,
                         images: &mut self.image_registry,
+                        errors: &mut self.error_registry,
                         rooted_instance: None,
                         objects: None,
                     },
@@ -5176,6 +5213,7 @@ impl Probe {
                     thread_handle: native.thread_handle,
                     metadata: &mut self.metadata_registry,
                     images: &mut self.image_registry,
+                    errors: &mut self.error_registry,
                     rooted_instance: None,
                     objects: Some(reentry::ObjectRoots {
                         workers: &native.workers,
@@ -5294,6 +5332,7 @@ impl Probe {
             // execute IL/finalizers. Only then release original guest records.
             unsafe_buffers::retire_after_vm_cleanup()?;
             binding_strings::retire_after_vm_cleanup()?;
+            binding_arrays::retire_after_vm_cleanup()?;
             gpu_buffers::retire_after_vm_cleanup()?;
             profiler_recorders::retire_after_vm_cleanup()?;
             burst_shared::retire_after_vm_cleanup()?;

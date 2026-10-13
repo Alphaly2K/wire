@@ -40,6 +40,7 @@ pub(super) struct Metadata<'a> {
     pub(super) thread_handle: Object,
     pub(super) metadata: &'a mut metadata::Registry,
     pub(super) images: &'a mut images::Registry,
+    pub(super) errors: &'a mut super::errors::Registry,
     pub(super) rooted_instance: Option<(u64, Object)>,
     pub(super) objects: Option<ObjectRoots<'a>>,
 }
@@ -701,6 +702,16 @@ impl Metadata<'_> {
         memory: &mut Memory,
         stack: (u64, u64),
     ) -> Result<(), String> {
+        if super::errors::handles(function) {
+            let address = cpu.regs[1];
+            let result = if function == "mono_error_init" {
+                self.errors.init_in(memory, cpu, address, stack)?
+            } else {
+                self.errors
+                    .query_in(memory, cpu, function, address, stack)?
+            };
+            return cpu.return_integer(memory, result);
+        }
         if matches!(
             function,
             "mono_unity_gc_disable" | "mono_unity_gc_enable" | "mono_unity_gc_is_disabled"
@@ -1965,6 +1976,7 @@ mod tests {
             thread_handle: ptr::null_mut(),
             metadata: &mut registry,
             images: &mut images,
+            errors: &mut super::super::errors::Registry::default(),
             rooted_instance: None,
             objects: None,
         };
@@ -2034,6 +2046,7 @@ mod tests {
             thread_handle: ptr::null_mut(),
             metadata: &mut registry,
             images: &mut images,
+            errors: &mut super::super::errors::Registry::default(),
             rooted_instance: Some((owned, native_class.as_mut_ptr().cast())),
             objects: None,
         };
@@ -2144,6 +2157,7 @@ mod tests {
             thread_handle: ptr::null_mut(),
             metadata: &mut registry,
             images: &mut images,
+            errors: &mut super::super::errors::Registry::default(),
             rooted_instance: None,
             objects: None,
         };

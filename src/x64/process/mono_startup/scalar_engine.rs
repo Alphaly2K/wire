@@ -37,6 +37,8 @@ const FAMILIES: &[(&CStr, &CStr)] = &[
     (c"UnityEngine", c"Physics2D"),
     (c"UnityEngine", c"Random"),
     (c"UnityEngine", c"HumanTrait"),
+    (c"UnityEngine", c"SortingLayer"),
+    (c"UnityEngine", c"SpriteMaskUtility"),
     (c"UnityEngine", c"DynamicGI"),
     (c"UnityEngine", c"Debug"),
     (c"UnityEngine", c"DebugLogHandler"),
@@ -123,6 +125,7 @@ enum Argument {
     DataArray { class: usize },
     Utf16Span,
     Utf16Output,
+    BlittableOutput(managed_calls::NumericSpanLayout),
     NumericSpan(managed_calls::NumericSpanLayout),
     RenderContext,
     CullingPointer,
@@ -705,6 +708,19 @@ pub(super) fn install(
                             Argument::OwnedResource { class, nullable }
                         }
                     });
+                } else if index == arity
+                    && reference
+                    && type_kind == 0x11
+                    && class as usize == super::binding_arrays::layout()?.class
+                {
+                    if let Some(layout) =
+                        api.engine_blittable_output(method, owner, class, &family)?
+                    {
+                        arguments.push(Argument::BlittableOutput(layout));
+                    } else {
+                        supported = false;
+                        break;
+                    }
                 } else if index != 0
                     && !reference
                     && matches!(type_kind, 0x12 | 0x15)
@@ -1093,6 +1109,15 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
                 .map(|units| (index, units))
         })
         .collect::<Result<_, _>>()?;
+    let array_layout = if binding
+        .arguments
+        .iter()
+        .any(|a| matches!(a, Argument::BlittableOutput(_)))
+    {
+        Some(super::binding_arrays::layout()?)
+    } else {
+        None
+    };
     let layouts: Vec<_> = binding
         .arguments
         .iter()
@@ -1116,6 +1141,11 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
                 alignment: 8,
                 output: true,
             }),
+            Argument::BlittableOutput(_) => Some(Payload {
+                width: array_layout.unwrap().width,
+                alignment: array_layout.unwrap().alignment,
+                output: true,
+            }),
             _ => None,
         })
         .collect();
@@ -1133,6 +1163,12 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
     let numeric_inputs = numeric.inputs();
     let (value, frame, mut outputs) = if layouts.iter().any(Option::is_some) {
         let mut frame = unsafe { ValueFrame::prepare(arguments, &layouts) }?;
+        if frame.aliases.iter().any(|&(a, b)| {
+            matches!(binding.arguments[a], Argument::BlittableOutput(_))
+                || matches!(binding.arguments[b], Argument::BlittableOutput(_))
+        }) {
+            return Err("array-output storage aliases another engine argument".into());
+        }
         frame.snapshot_numeric(&binding.numeric_values)?;
         frame.snapshot_render_targets(&binding.arguments)?;
         for &(index, address, layout, output) in &keywords {
@@ -1247,6 +1283,12 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
                     .get_mut(position)
                     .ok_or("engine string output missing")?;
                 *bytes = super::binding_strings::prepare_output(bytes)?.0.to_vec();
+            } else if let Argument::BlittableOutput(element) = binding.arguments[index] {
+                let position = frame.spans.iter().position(|span| span.0 == index).unwrap();
+                let bytes = outputs
+                    .get_mut(position)
+                    .ok_or("engine array output missing")?;
+                *bytes = super::binding_arrays::prepare_output(bytes, element)?;
             }
         }
         for &(index, address, layout, output) in &keywords {

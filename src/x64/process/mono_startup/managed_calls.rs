@@ -3,6 +3,7 @@
 use super::{c_char, closed_types, Memory, Object};
 use crate::x64::memory::{READ, WRITE};
 use std::{ffi::CStr, ptr};
+mod array_outputs;
 mod engine_headers;
 mod engine_spans;
 mod scalar_outputs;
@@ -128,6 +129,26 @@ pub(super) struct Api {
     closed: closed_types::Api,
 }
 impl Api {
+    /// Metadata-only name; no managed formatting or class initialization.
+    pub(super) fn method_identity(self, method: Object) -> Result<String, String> {
+        let name = unsafe { libc::dlsym(self.library, c"mono_method_full_name".as_ptr()) };
+        let free = unsafe { libc::dlsym(self.library, c"mono_free".as_ptr()) };
+        if method.is_null() || name.is_null() || free.is_null() {
+            return Err("method diagnostic metadata API absent".into());
+        }
+        let name: unsafe extern "C" fn(Object, i32) -> *mut c_char =
+            unsafe { std::mem::transmute(name) };
+        let free: unsafe extern "C" fn(Object) = unsafe { std::mem::transmute(free) };
+        let text = unsafe { name(method, 1) };
+        if text.is_null() {
+            return Err("method diagnostic identity absent".into());
+        }
+        let identity = unsafe { CStr::from_ptr(text) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { free(text.cast()) };
+        Ok(identity)
+    }
     /// Only actual array objects need backing publication at an ordinary IL
     /// result boundary. Opaque reference helpers keep their existing protocols.
     pub(super) fn reference_array_result(self, object: Object) -> Result<bool, String> {

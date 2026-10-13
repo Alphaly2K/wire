@@ -364,6 +364,32 @@ fn execute_scalar_guest_bounded(
     floating: &[(usize, u64)],
     work_limit: u64,
 ) -> Result<(u64, u64), String> {
+    let depth = owner.depth.get();
+    let result = execute_scalar_guest_bounded_inner(owner, target, args, floating, work_limit);
+    if depth < 8 {
+        if let Some(route) = owner.metadata.as_ref() {
+            let top = STACK_BASE + STACK_BYTES - depth as u64 * STACK_SLICE;
+            route
+                .try_borrow_mut()
+                .map_err(|_| "callback error-state completion metadata is borrowed")?
+                .errors
+                .retire_stack((top - STACK_SLICE, top));
+        }
+    }
+    result.map_err(|error| {
+        format!(
+            "{error}; callback-target={target:#x}; arguments={args:x?}; callback-owner-depth={}",
+            owner.depth.get()
+        )
+    })
+}
+fn execute_scalar_guest_bounded_inner(
+    owner: &Owner<'_>,
+    target: u64,
+    args: &[u64],
+    floating: &[(usize, u64)],
+    work_limit: u64,
+) -> Result<(u64, u64), String> {
     super::burst_shared::validate_handles()?;
     if floating
         .iter()
@@ -582,10 +608,11 @@ fn execute_scalar_guest_bounded(
                         )
                         .map_err(|error| {
                             format!(
-                                "{error}; function={}; args={:x?}; rsp={:#x}",
+                                "{error}; function={}; args={:x?}; rsp={:#x}; return={:x?}",
                                 binding.original_function,
                                 [cpu.regs[1], cpu.regs[2], cpu.regs[8], cpu.regs[9]],
-                                cpu.regs[4]
+                                cpu.regs[4],
+                                owner.memory.borrow().read_int(cpu.regs[4], 8).ok()
                             )
                         })?;
                 }
@@ -593,11 +620,16 @@ fn execute_scalar_guest_bounded(
                 cpu.work += 1;
                 continue;
             }
-            let control = owner.runtime.borrow_mut().dispatch_bound(
-                &binding,
-                &mut cpu,
-                &mut owner.memory.borrow_mut(),
-            )?;
+            let control = owner
+                .runtime
+                .borrow_mut()
+                .dispatch_bound(&binding, &mut cpu, &mut owner.memory.borrow_mut())
+                .map_err(|error| {
+                    format!(
+                        "{error}; callback-gateway={}!{}; rip={:#x}; work={}; registers={:x?}",
+                        binding.dll, binding.original_function, cpu.rip, cpu.work, cpu.regs
+                    )
+                })?;
             match control {
                 Control::Returned => {}
                 Control::Blocked => {
@@ -2529,6 +2561,7 @@ mod tests {
                 thread_handle: ptr::null_mut(),
                 metadata: &mut registry,
                 images: &mut images,
+                errors: &mut super::super::errors::Registry::default(),
                 rooted_instance: None,
                 objects: None,
             },
