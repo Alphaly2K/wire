@@ -3529,6 +3529,7 @@ impl Probe {
                 library,
                 self.image_registry.unique_native_image(CORE_MODULE)?,
                 &managed_images,
+                &self.registry,
             )?;
         }
         if !owned_resources::installed() {
@@ -5287,6 +5288,7 @@ impl Probe {
             logging::retire_after_vm_cleanup()?;
             async_operations::retire_after_vm_cleanup()?;
             owned_resources::retire_after_vm_cleanup()?;
+            render_context::culling::retire_after_vm_cleanup()?;
             keyword_views::retire_after_vm_cleanup();
             // Raw native IL pointers remain owned until the VM can no longer
             // execute IL/finalizers. Only then release original guest records.

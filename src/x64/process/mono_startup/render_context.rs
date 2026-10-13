@@ -1,7 +1,8 @@
 //! Synchronous engine render contexts are capabilities of one actual managed
 //! render-loop invocation. Native IL carries an opaque identity; original guest
 //! pointers are recovered only by context bindings on the same owner thread.
-use super::{callbacks, engine_objects, managed_calls, Object, Probe};
+use super::{bindings, callbacks, engine_objects, managed_calls, Object, Probe};
+pub(super) mod culling;
 use std::{
     cell::RefCell,
     ptr,
@@ -36,7 +37,12 @@ pub(super) fn installed() -> bool {
 pub(super) fn context_class(class: Object) -> bool {
     BINDING.get().is_some_and(|b| b.context == class as usize)
 }
-pub(super) fn install(library: Object, core: Object, images: &[Object]) -> Result<(), String> {
+pub(super) fn install(
+    library: Object,
+    core: Object,
+    images: &[Object],
+    registry: &bindings::Registry,
+) -> Result<(), String> {
     macro_rules! sym {
         ($name:literal, $ty:ty) => {{
             let p = unsafe { libc::dlsym(library, concat!($name, "\0").as_ptr().cast()) };
@@ -152,7 +158,8 @@ pub(super) fn install(library: Object, core: Object, images: &[Object]) -> Resul
             object: object as usize,
             intptr: intptr as usize,
         })
-        .map_err(|_| "render context bridge already installed".into())
+        .map_err(|_| "render context bridge already installed")?;
+    culling::install(library, core, images, registry)
 }
 fn pointer_shape(b: &Binding) -> managed_calls::Shape {
     managed_calls::Shape::Scalar {
@@ -252,6 +259,7 @@ impl Scope {
 }
 impl Drop for Scope {
     fn drop(&mut self) {
+        culling::retire_context(self.token);
         SCOPES.with(|scopes| {
             if scopes.borrow_mut().pop().map(|p| p.token) != Some(self.token) {
                 eprintln!("NATIVE_MONO_RENDER_CONTEXT_REJECT: scope retirement order changed");

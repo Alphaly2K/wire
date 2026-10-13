@@ -613,10 +613,17 @@ fn execute_scalar_guest_bounded(
                 }
             }
             cpu.work += 1;
-        } else if reference {
-            cpu.step_reference(&mut owner.memory.borrow_mut())?;
         } else {
-            cpu.step_bounded(&mut owner.memory.borrow_mut(), work_limit - cpu.work)?;
+            let previous = cpu.rip;
+            let result = if reference {
+                cpu.step_reference(&mut owner.memory.borrow_mut())
+            } else {
+                cpu.step_bounded(&mut owner.memory.borrow_mut(), work_limit - cpu.work)
+                    .map(|_| ())
+            };
+            result.map_err(|error| {
+                format!("{error}; callback-target={target:#x}; before={previous:#x}; rip={:#x}; work={}; depth={}; arguments={args:x?}; registers={:x?}", cpu.rip,cpu.work,depth+1,cpu.regs)
+            })?;
         }
     }
 }

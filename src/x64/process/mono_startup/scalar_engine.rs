@@ -48,7 +48,9 @@ const FAMILIES: &[(&CStr, &CStr)] = &[
     (c"UnityEngine", c"Canvas"),
     (c"UnityEngine", c"UISystemProfilerApi"),
     (c"UnityEngine", c"RenderAs2DUtil"),
+    (c"UnityEngine", c"ScalableBufferManager"),
     (c"UnityEngine.UIElements", c"UIElementsRuntimeUtilityNative"),
+    (c"UnityEngine.Rendering", c"CullingResults"),
     (c"UnityEngine.TextCore.LowLevel", c"FontEngine"),
     (c"UnityEngine.Rendering", c"GraphicsSettings"),
     (c"UnityEngine.Rendering", c"ScriptableRenderContext"),
@@ -123,6 +125,7 @@ enum Argument {
     Utf16Output,
     NumericSpan(managed_calls::NumericSpanLayout),
     RenderContext,
+    CullingPointer,
     OwnedResource { class: usize, nullable: bool },
     KeywordValue { class: usize, payload: Payload },
     RenderTarget(render_targets::Layout),
@@ -656,6 +659,15 @@ pub(super) fn install(
                     result = Some(Return::EngineHandle {
                         class: class as usize,
                     });
+                } else if render_context::culling::result_class(owner)
+                    && index == 1
+                    && type_kind == 0x18
+                    && class == intptr
+                    && !reference
+                    && !names[0].is_null()
+                    && unsafe { CStr::from_ptr(names[0]) } == c"cullingResultsPtr"
+                {
+                    arguments.push(Argument::CullingPointer);
                 } else if (engine_object || owned_resources::class(owner))
                     && index == 1
                     && type_kind == 0x18
@@ -988,7 +1000,9 @@ fn execute(binding: &Binding, arguments: &[u64]) -> Result<(u64, u64), String> {
     }
     let mut object_pins = Vec::new();
     for (argument, value) in binding.arguments.iter().zip(&mut checked) {
-        if let Argument::OwnedResource { class, nullable } = argument {
+        if matches!(argument, Argument::CullingPointer) {
+            *value = render_context::culling::pointer(*value)?;
+        } else if let Argument::OwnedResource { class, nullable } = argument {
             if *value != 0 || !nullable {
                 *value = owned_resources::pointer(*value as usize, *class)?;
             }

@@ -1049,6 +1049,55 @@ mod tests {
             );
             let core_image = unsafe { get_image(assembly) };
             let family = [core_image, family[1]];
+            let rendering = |name: &CStr| unsafe {
+                find(core_image, c"UnityEngine.Rendering".as_ptr(), name.as_ptr())
+            };
+            let allocation = rendering(c"CullingAllocationInfo");
+            let light = rendering(c"VisibleLight");
+            let reflection = rendering(c"VisibleReflectionProbe");
+            let intptr = unsafe { find(family[1], c"System".as_ptr(), c"IntPtr".as_ptr()) };
+            let integer = unsafe { find(family[1], c"System".as_ptr(), c"Int32".as_ptr()) };
+            use crate::x64::process::mono_startup::{render_context::culling, value_layout};
+            let results_layout = culling::record_layout(
+                library,
+                rendering(c"CullingResults"),
+                &[
+                    (c"ptr", 0x18, intptr),
+                    (c"m_AllocationInfo", 0xf, allocation),
+                ],
+            )
+            .unwrap();
+            let allocation_layout = culling::record_layout(
+                library,
+                allocation,
+                &[
+                    (c"visibleLightsPtr", 0xf, light),
+                    (c"visibleOffscreenVertexLightsPtr", 0xf, light),
+                    (c"visibleReflectionProbesPtr", 0xf, reflection),
+                    (c"visibleLightCount", 8, integer),
+                    (c"visibleOffscreenVertexLightCount", 8, integer),
+                    (c"visibleReflectionProbeCount", 8, integer),
+                ],
+            )
+            .unwrap();
+            let layout_api = value_layout::Api::load(library, core_image).unwrap();
+            let parameters = layout_api
+                .layout_in(rendering(c"ScriptableCullingParameters"), &family)
+                .unwrap()
+                .numeric()
+                .unwrap();
+            for element in [light, reflection] {
+                let layout = layout_api
+                    .layout_in(element, &family)
+                    .unwrap()
+                    .numeric()
+                    .unwrap();
+                layout.canonicalize(&mut vec![0; layout.width]).unwrap();
+            }
+            eprintln!(
+                "PASS actual culling metadata: result={} allocation={} parameters={}",
+                results_layout.width, allocation_layout.width, parameters.width
+            );
             let target_class = unsafe {
                 find(
                     core_image,

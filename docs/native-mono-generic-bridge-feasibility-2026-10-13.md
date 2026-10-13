@@ -801,3 +801,37 @@ RenderAs2DUtil::InitializeCanRenderAs2D 已执行。这使原 URP render loop �
 尚未再次到达 Start/Event 创建，因此 Event 生命周期仅完成元数据/独立 ABI 验证。
 不将这次更早的渲染分支错误记录为沙漏动画恢复，后续接合裁剪结果 borrowed
 context lifetime 与 native buffer views。IL2CPP 未修改。
+
+## Render-loop 借用的裁剪结果
+
+Internal_Cull_Injected 采用 actual-signature checked compiled entry，仍执行
+原注册的 guest engine target。ScriptableCullingParameters 使用完整 numeric
+layout（本游戏 1592B），context 恢复原 guest pointer，结果先写入私有 guest
+payload。实际 CullingResults（16B）和 CullingAllocationInfo（40B）的全部实例
+字段按名字、类型、pointee class、动态 offset/width/alignment 核对，缺失/额外/
+重叠/错类型字段拒绝。三组 VisibleLight/VisibleReflectionProbe buffers 按 actual
+numeric layout 校验 count、完整 extent、Boolean 和零 padding，再建立 native
+numeric snapshots；guest pointers 不供 native IL 解引用。
+
+结果句柄使用独立、不可复用的 identity，绑定原 render-loop scope/thread；
+CullingResults scalar methods 通过同一 pool 恢复原引擎句柄。scope 退休后禁止
+重新调用 engine。私有 numeric snapshots 留到 VM cleanup 防止 escaped unsafe
+views 成为悬垂地址；当前诊断路径上限为 4096 组、32MiB retained data，单次
+最多 2MiB。长时间运行的回收仍需明确 NativeArray view owner 协议。
+
+跨页 numeric guest buffer 要求完整范围位于一个 live private allocation，每页
+均 committed/writable/owned，且无 code history；旧 scalar-slot 快路径保持独立。
+独立测试执行真实 guest 写入指令，验证跨页数组私有 snapshot、guest 修改后的
+snapshot 身份、负数/过大 count、输出事务提交、context/foreign-thread 拒绝和
+NX 后代码页仍不准入。实际游戏 metadata 与 SDK 普通/游戏 incremental classlib
+原生夹具均通过，noexec checks=46、denied=0；release build 与 all-target Clippy
+（`-D warnings`）通过。窗口验收另记。
+
+probe-205 实际完成 Internal_Cull_Injected，生成 scoped result identity，随后
+执行 ScriptableRenderContext::Submit_Internal，并成功创建两个 engine Event。
+UIElementsUtility 初始化阻塞已越过，多个 Start entry 进入原 IL；仍有 SortingLayer
+BlittableArrayWrapper 输出与 FreeNativeOwnedMemory unresolved，Render Graph 报错
+后继续运行，最终在一次 guest callback 的 NULL address 访问停止。增加错误路径
+的实际 callback target/PC/arguments/registers 诊断，不改变解释器正常执行。
+49.56 秒后 returncode=1，271 draws / 102 presents，画面 hash 仍未变化；noexec
+checks=337、denied=0。完整 release 回归 **591 passed / 8 ignored**。

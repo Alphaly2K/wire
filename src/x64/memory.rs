@@ -704,6 +704,33 @@ impl Memory {
                 .is_some_and(|(_, a)| a.guest && a.kind == crate::mem::MEM_PRIVATE && end <= a.end)
             && self.check(address, size, WRITE).is_ok()
     }
+    /// A numeric engine buffer may span pages, but must remain within one live
+    /// private allocation. Every page must be owned, writable and never code.
+    #[cfg(feature = "native-mono-backend")]
+    pub(crate) fn guest_private_data_range(&self, address: u64, size: usize) -> bool {
+        let Some(end) = address.checked_add(size as u64) else {
+            return false;
+        };
+        if size == 0
+            || !self
+                .allocations
+                .range(..=address)
+                .next_back()
+                .is_some_and(|(_, a)| a.guest && a.kind == crate::mem::MEM_PRIVATE && end <= a.end)
+            || self.check(address, size, WRITE).is_err()
+        {
+            return false;
+        }
+        let mut cursor = address;
+        while cursor < end {
+            let length = (PAGE - (cursor & (PAGE - 1))).min(end - cursor) as usize;
+            if !self.owned_noncode_access(cursor, length) {
+                return false;
+            }
+            cursor += length as u64;
+        }
+        true
+    }
     #[inline(never)]
     pub(crate) fn try_checked_segment(
         &mut self,
