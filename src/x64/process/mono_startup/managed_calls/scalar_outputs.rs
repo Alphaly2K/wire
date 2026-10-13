@@ -861,6 +861,25 @@ mod tests {
             );
             use crate::x64::process::mono_startup::{instances, reference_arrays};
             let root_api = instances::Api::load(library, core_image).unwrap();
+            for (name, expected) in [
+                (
+                    c"ThrowNested",
+                    "System.MissingMethodException: \"missing original fixture entry\"",
+                ),
+                (c"ThrowDeep", "[inner exception depth limit]"),
+                (c"ThrowCycle", "[inner exception cycle]"),
+            ] {
+                let target = unsafe { method(owner, name.as_ptr(), 0) };
+                let mut exception = ptr::null_mut();
+                assert!(unsafe {
+                    (api.invoke)(target, ptr::null_mut(), ptr::null_mut(), &mut exception)
+                }
+                .is_null());
+                assert!(!exception.is_null());
+                let diagnostic = api.exception_diagnostic(root_api, exception).unwrap();
+                assert!(diagnostic.contains(expected), "{diagnostic}");
+                eprintln!("PASS exception chain: {diagnostic}");
+            }
             let mut roots = instances::Registry::default();
             let object_token = roots.borrow(root_api, object).unwrap();
             let new_array = symbol!(
@@ -1017,6 +1036,10 @@ mod tests {
         // Optional read-only scan of the actual engine family: no game methods
         // are invoked here, but every query is checked before game acceptance.
         if let Ok(core) = std::env::var("WIRE_MONO_OUTPUT_CORE") {
+            let imgui = std::path::Path::new(&core)
+                .parent()
+                .unwrap()
+                .join("UnityEngine.IMGUIModule.dll");
             let core = CString::new(core).unwrap();
             let assembly = unsafe { open(domain, core.as_ptr()) };
             assert!(!assembly.is_null());
@@ -1070,6 +1093,35 @@ mod tests {
             }
             assert_eq!(checked, 11);
             eprintln!("PASS actual engine metadata: {checked} scalar-output queries and render-target layout");
+            if imgui.is_file() {
+                let path = CString::new(imgui.to_str().unwrap()).unwrap();
+                let assembly = unsafe { open(domain, path.as_ptr()) };
+                assert!(!assembly.is_null());
+                let imgui = unsafe { get_image(assembly) };
+                let event = unsafe { find(imgui, c"UnityEngine".as_ptr(), c"Event".as_ptr()) };
+                assert!(!event.is_null());
+                let intptr = unsafe { find(family[1], c"System".as_ptr(), c"IntPtr".as_ptr()) };
+                let integer = unsafe { find(family[1], c"System".as_ptr(), c"Int32".as_ptr()) };
+                let void = unsafe { find(family[1], c"System".as_ptr(), c"Void".as_ptr()) };
+                let family = [core_image, family[1], imgui];
+                api.fixed_typed_icall(
+                    unsafe { method(event, c"Internal_Create".as_ptr(), 1) },
+                    event,
+                    &[(0x18, intptr, false), (8, integer, false)],
+                    &family,
+                )
+                .unwrap();
+                api.fixed_typed_icall(
+                    unsafe { method(event, c"Internal_Destroy".as_ptr(), 1) },
+                    event,
+                    &[(1, void, false), (0x18, intptr, false)],
+                    &family,
+                )
+                .unwrap();
+                eprintln!(
+                    "PASS actual cross-module Event metadata: Int32 factory and IntPtr destructor"
+                );
+            }
         }
         unsafe { cleanup(domain) };
     }

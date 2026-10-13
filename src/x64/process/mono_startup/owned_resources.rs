@@ -54,11 +54,28 @@ const POLICIES: &[(&CStr, &CStr, &CStr, &CStr)] = &[
         c"Internal_Create_Injected",
         c"Internal_Destroy",
     ),
+    (
+        c"UnityEngine",
+        c"Event",
+        c"Internal_Create",
+        c"Internal_Destroy",
+    ),
 ];
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct SpanLayout {
     stride: usize,
     alignment: usize,
+}
+#[derive(Clone, Copy, Debug)]
+enum Factory {
+    Empty,
+    I32,
+    NumericSpan(SpanLayout),
+}
+enum FactoryInput {
+    Empty,
+    I32(i32),
+    NumericSpan(usize, Vec<u8>),
 }
 struct Binding {
     class: usize,
@@ -66,33 +83,45 @@ struct Binding {
     create: u64,
     release: u64,
     label: String,
-    input: Option<SpanLayout>,
+    factory: Factory,
     bootstrap_curves: bool,
 }
 static BINDING: OnceLock<Vec<Binding>> = OnceLock::new();
-const CREATE_ADAPTERS: [Object; 6] = [
+const CREATE_ADAPTERS: [Object; 7] = [
     create_resource::<0> as Object,
     create_resource::<1> as Object,
     create_resource::<2> as Object,
     create_resource::<3> as Object,
     create_resource::<4> as Object,
     create_resource::<5> as Object,
+    create_resource::<6> as Object,
 ];
-const SPAN_ADAPTERS: [Object; 6] = [
+const I32_ADAPTERS: [Object; 7] = [
+    create_i32_resource::<0> as Object,
+    create_i32_resource::<1> as Object,
+    create_i32_resource::<2> as Object,
+    create_i32_resource::<3> as Object,
+    create_i32_resource::<4> as Object,
+    create_i32_resource::<5> as Object,
+    create_i32_resource::<6> as Object,
+];
+const SPAN_ADAPTERS: [Object; 7] = [
     create_span_resource::<0> as Object,
     create_span_resource::<1> as Object,
     create_span_resource::<2> as Object,
     create_span_resource::<3> as Object,
     create_span_resource::<4> as Object,
     create_span_resource::<5> as Object,
+    create_span_resource::<6> as Object,
 ];
-const RELEASE_ADAPTERS: [Object; 6] = [
+const RELEASE_ADAPTERS: [Object; 7] = [
     release_resource::<0> as Object,
     release_resource::<1> as Object,
     release_resource::<2> as Object,
     release_resource::<3> as Object,
     release_resource::<4> as Object,
     release_resource::<5> as Object,
+    release_resource::<6> as Object,
 ];
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
@@ -278,6 +307,26 @@ pub(super) fn install(
         "mono_class_get_method_from_name",
         unsafe extern "C" fn(Object, *const libc::c_char, i32) -> Object
     );
+    let image_name = sym!(
+        "mono_image_get_name",
+        unsafe extern "C" fn(Object) -> *const libc::c_char
+    );
+    let methods = sym!(
+        "mono_class_get_methods",
+        unsafe extern "C" fn(Object, *mut Object) -> Object
+    );
+    let method_name = sym!(
+        "mono_method_get_name",
+        unsafe extern "C" fn(Object) -> *const libc::c_char
+    );
+    let signature = sym!(
+        "mono_method_signature",
+        unsafe extern "C" fn(Object) -> Object
+    );
+    let parameter_count = sym!(
+        "mono_signature_get_param_count",
+        unsafe extern "C" fn(Object) -> u32
+    );
     let corlib = sym!("mono_get_corlib", unsafe extern "C" fn() -> Object);
     let nested = sym!(
         "mono_class_get_nested_types",
@@ -317,24 +366,66 @@ pub(super) fn install(
     let corlib = unsafe { corlib() };
     let intptr = unsafe { find(corlib, c"System".as_ptr(), c"IntPtr".as_ptr()) };
     let void = unsafe { find(corlib, c"System".as_ptr(), c"Void".as_ptr()) };
-    if [intptr, void].iter().any(|p| p.is_null()) {
+    let integer = unsafe { find(corlib, c"System".as_ptr(), c"Int32".as_ptr()) };
+    if [intptr, void, integer].iter().any(|p| p.is_null()) {
         return Err("owned resource primitive metadata absent".into());
     }
     let api = managed_calls::Api::load(library)?;
     let mut discovered = Vec::new();
     let mut registrations = Vec::new();
     for &(namespace, label, factory, destructor) in POLICIES {
-        let class = unsafe { find(core, namespace.as_ptr(), label.as_ptr()) };
-        if class.is_null() {
+        // Resource classes can live in any retained engine module. Never take
+        // a same-named game class or choose arbitrarily among duplicates.
+        let mut candidates: Vec<_> = images
+            .iter()
+            .copied()
+            .filter_map(|image| {
+                let name = unsafe { image_name(image) };
+                if name.is_null()
+                    || !unsafe { CStr::from_ptr(name) }
+                        .to_bytes()
+                        .starts_with(b"UnityEngine.")
+                {
+                    return None;
+                }
+                let class = unsafe { find(image, namespace.as_ptr(), label.as_ptr()) };
+                (!class.is_null()).then_some(class)
+            })
+            .collect();
+        candidates.sort_unstable();
+        candidates.dedup();
+        if candidates.is_empty() {
             continue;
         }
+        if candidates.len() != 1 {
+            return Err("ambiguous owned engine resource class".into());
+        }
+        let class = candidates[0];
         let curve = label == c"AnimationCurve" && namespace == c"UnityEngine";
-        let create = unsafe { method(class, factory.as_ptr(), i32::from(curve)) };
+        let mut iterator = ptr::null_mut();
+        let mut create: Object = ptr::null_mut();
+        loop {
+            let candidate = unsafe { methods(class, &mut iterator) };
+            if candidate.is_null() {
+                break;
+            }
+            let name = unsafe { method_name(candidate) };
+            if !name.is_null() && unsafe { CStr::from_ptr(name) } == factory {
+                if !create.is_null() {
+                    return Err("ambiguous owned resource factory overloads".into());
+                }
+                create = candidate;
+            }
+        }
         let release = unsafe { method(class, destructor.as_ptr(), 1) };
         if create.is_null() || release.is_null() {
             continue;
         }
-        let input = if curve {
+        let create_signature = unsafe { signature(create) };
+        if create_signature.is_null() {
+            return Err("owned resource factory signature absent".into());
+        }
+        let factory_abi = if curve {
             let span = unsafe {
                 find(
                     core,
@@ -353,10 +444,18 @@ pub(super) fn install(
                 &[(0x18, intptr, false), (0x11, span, true)],
                 images,
             )?;
-            Some(SpanLayout { stride, alignment })
+            Factory::NumericSpan(SpanLayout { stride, alignment })
+        } else if unsafe { parameter_count(create_signature) } == 1 {
+            api.fixed_typed_icall(
+                create,
+                class,
+                &[(0x18, intptr, false), (8, integer, false)],
+                images,
+            )?;
+            Factory::I32
         } else {
             api.fixed_typed_icall(create, class, &[(0x18, intptr, false)], images)?;
-            None
+            Factory::Empty
         };
         api.fixed_typed_icall(
             release,
@@ -440,15 +539,15 @@ pub(super) fn install(
             create: create_target?,
             release: release_target?,
             label: owner,
-            input,
+            factory: factory_abi,
             bootstrap_curves,
         });
         registrations.push((
             create_name,
-            if input.is_some() {
-                SPAN_ADAPTERS[slot]
-            } else {
-                CREATE_ADAPTERS[slot]
+            match factory_abi {
+                Factory::Empty => CREATE_ADAPTERS[slot],
+                Factory::I32 => I32_ADAPTERS[slot],
+                Factory::NumericSpan(_) => SPAN_ADAPTERS[slot],
             },
         ));
         registrations.push((release_name, RELEASE_ADAPTERS[slot]));
@@ -498,7 +597,10 @@ fn checked<T>(action: impl FnOnce() -> Result<T, String>) -> T {
     }
 }
 unsafe extern "C" fn create_resource<const KIND: usize>() -> usize {
-    checked(|| create_owned(KIND, None))
+    checked(|| create_owned(KIND, FactoryInput::Empty))
+}
+unsafe extern "C" fn create_i32_resource<const KIND: usize>(value: i32) -> usize {
+    checked(|| create_owned(KIND, FactoryInput::I32(value)))
 }
 unsafe extern "C" fn create_span_resource<const KIND: usize>(span: *const logging::Span) -> usize {
     checked(|| unsafe { create_span_owned(KIND, span) })
@@ -515,11 +617,11 @@ unsafe fn create_span_owned(kind: usize, span: *const logging::Span) -> Result<u
         .get()
         .and_then(|b| b.get(kind))
         .ok_or("resource span binding absent")?;
-    let layout = binding
-        .input
-        .ok_or("resource factory has no span protocol")?;
+    let Factory::NumericSpan(layout) = binding.factory else {
+        return Err("resource factory has no span protocol".into());
+    };
     let (count, bytes) = unsafe { owned_numeric_span(span, layout) }?;
-    create_owned(kind, Some((count, bytes)))
+    create_owned(kind, FactoryInput::NumericSpan(count, bytes))
 }
 /// mono_add_internal_call does not invalidate already compiled managed call
 /// sites. The verified bootstrap pair forwards those cached entries here once
@@ -561,7 +663,19 @@ unsafe fn owned_numeric_span(
     };
     Ok((count, data))
 }
-fn create_owned(kind: usize, input: Option<(usize, Vec<u8>)>) -> Result<usize, String> {
+fn factory_call(factory: Factory, target: u64, input: FactoryInput) -> Result<u64, String> {
+    match (factory, input) {
+        (Factory::Empty, FactoryInput::Empty) => callbacks::guest_arguments(target, &[]),
+        (Factory::I32, FactoryInput::I32(value)) => {
+            callbacks::guest_arguments(target, &[u64::from(value as u32)])
+        }
+        (Factory::NumericSpan(layout), FactoryInput::NumericSpan(count, bytes)) => {
+            callbacks::guest_numeric_resource_span(target, count, layout.stride, &bytes)
+        }
+        _ => Err("owned resource factory input protocol mismatch".into()),
+    }
+}
+fn create_owned(kind: usize, input: FactoryInput) -> Result<usize, String> {
     state(|s| {
         s.owner()?;
         if s.closing {
@@ -573,13 +687,7 @@ fn create_owned(kind: usize, input: Option<(usize, Vec<u8>)>) -> Result<usize, S
         .get()
         .and_then(|b| b.get(kind))
         .ok_or("owned resource creation absent")?;
-    let pointer = match (b.input, input) {
-        (None, None) => callbacks::guest_arguments(b.create, &[])?,
-        (Some(layout), Some((count, bytes))) => {
-            callbacks::guest_numeric_resource_span(b.create, count, layout.stride, &bytes)?
-        }
-        _ => return Err("owned resource factory input protocol mismatch".into()),
-    };
+    let pointer = factory_call(b.factory, b.create, input)?;
     if pointer == 0 {
         return Ok(0);
     }
@@ -730,6 +838,44 @@ pub(super) fn report() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn integer_factory_preserves_win64_i32_bits_and_rejects_wrong_entry_shape() {
+        use crate::x64::{
+            memory::{Memory, EXECUTE, READ, WRITE},
+            runtime::Runtime64,
+        };
+        let mut memory = Memory::default();
+        memory.map(0x1000, 4096, READ | WRITE | EXECUTE).unwrap();
+        // mov rax, rcx; ret: check the actual guest argument, including its
+        // zero-extended upper half for a negative Win64 Int32.
+        memory.write(0x1000, &[0x48, 0x89, 0xc8, 0xc3]).unwrap();
+        memory
+            .map(super::super::super::STACK, 65536, READ | WRITE)
+            .unwrap();
+        let mut runtime = Runtime64::new(
+            &mut memory,
+            0x140000000,
+            super::super::super::STACK,
+            65536,
+            "resource-factory",
+        )
+        .unwrap();
+        let (result, _) = callbacks::with_owner(&mut memory, &mut runtime, [0; 7], || {
+            assert_eq!(
+                factory_call(Factory::I32, 0x1000, FactoryInput::I32(-7))?,
+                0xfffffff9
+            );
+            assert_eq!(factory_call(Factory::I32, 0x1000, FactoryInput::I32(3))?, 3);
+            assert!(factory_call(Factory::I32, 0x1000, FactoryInput::Empty).is_err());
+            assert!(factory_call(Factory::Empty, 0x1000, FactoryInput::I32(3)).is_err());
+            assert!(
+                factory_call(Factory::I32, 0x1000, FactoryInput::NumericSpan(0, vec![])).is_err()
+            );
+            Ok::<_, String>(())
+        })
+        .unwrap();
+        result.unwrap();
+    }
     #[test]
     fn numeric_span_owns_input_bytes_and_rejects_unaligned_or_oversized_pinned_ranges() {
         let mut input = [0x3f800000u32, 0x40000000];

@@ -767,3 +767,37 @@ ordinary IL 的 reference return 与 reference outputs 现在按实际 array ran
 native 元素同步、GC 后 identity、forged reference 拒绝及 roots/views 正常退休。
 SDK 普通与游戏 classlib incremental 均通过，noexec checks=41/denied=0；完整
 release **587 passed / 8 ignored**，all-target release Clippy（`-D warnings`）通过。
+
+probe-203 已越过 CreateAsyncInstantiateOperationResultArray 返回数组的首元素
+写屏障，随后调用 InvokeCompletionEvent 并进入 Start。当前错误是
+UIElementsUtility 静态初始化异常；完整原 IL 显示其中构造 UnityEngine.Event，
+实际日志同时记录 Event::Internal_Create / Internal_Destroy 未接入。RenderAs2DUtil
+初始化也报告 unresolved icall。本次 43.05 秒后 returncode=1，264 draws / 100
+presents，noexec checks=338、denied=0；画面仍为蓝底沙漏首帧，hash 与先前相同。
+接下来成批接合跨 engine module 的 owned resource 生命周期、actual Int32 factory
+ABI 和相关 scalar family，并增加不执行 managed ToString 的内部异常链诊断。
+范围限定于 Mono 桥接，不修改 IL2CPP。
+
+owned resource discovery 现在遍历 retained UnityEngine.* images，并拒绝同名
+类歧义及 factory overload 歧义。actual metadata 决定采用 void-argument、Int32
+或已证明 numeric-span 的 compiled adapter；Int32 按 Win64 ABI 保留低 32 位。
+Event 的创建/销毁加入同一 typed identity、owner-thread、finalizer queue 协议，
+常规属性由既有 scalar engine pool 自动扫描。RenderAs2DUtil 与
+UIElementsRuntimeUtilityNative 复用 actual-signature / registered-target 的
+scalar family；没有新增按构造函数或 Spec 值替代原 IL 的路径。
+
+异常诊断只读 actual System.Exception 的 _message/_innerException 字段，逐项
+核对类型/实例字段归属，用 pinned roots 保留有界 chain，并限制循环及深度；
+不运行 ToString。原生夹具覆盖多层 TypeInitializationException、depth limit 和
+cycle。SDK 普通与游戏 classlib incremental 均通过，noexec checks=44/denied=0；
+actual IMGUIModule Event factory/destructor 元数据验证通过。完整 release 回归
+**588 passed / 8 ignored**，all-target release Clippy（`-D warnings`）通过。
+
+probe-204 安装 4,705 个 scalar pool 入口（deferred=874），actual
+RenderAs2DUtil::InitializeCanRenderAs2D 已执行。这使原 URP render loop 继续
+初始化 camera/rendering/shadow/light data；ScalableBufferManager::ResizeBuffers
+及 ScriptableRenderContext::Internal_Cull_Injected 成为实际 unresolved icall。
+最终 DoRenderLoop_Internal 抛 MissingMethodException，47.73 秒后 returncode=1；
+尚未再次到达 Start/Event 创建，因此 Event 生命周期仅完成元数据/独立 ABI 验证。
+不将这次更早的渲染分支错误记录为沙漏动画恢复，后续接合裁剪结果 borrowed
+context lifetime 与 native buffer views。IL2CPP 未修改。

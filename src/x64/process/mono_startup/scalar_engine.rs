@@ -47,6 +47,8 @@ const FAMILIES: &[(&CStr, &CStr)] = &[
     (c"UnityEngine", c"Graphics"),
     (c"UnityEngine", c"Canvas"),
     (c"UnityEngine", c"UISystemProfilerApi"),
+    (c"UnityEngine", c"RenderAs2DUtil"),
+    (c"UnityEngine.UIElements", c"UIElementsRuntimeUtilityNative"),
     (c"UnityEngine.TextCore.LowLevel", c"FontEngine"),
     (c"UnityEngine.Rendering", c"GraphicsSettings"),
     (c"UnityEngine.Rendering", c"ScriptableRenderContext"),

@@ -894,7 +894,7 @@ impl Api {
         }
         Ok(false)
     }
-    /// Read actual Exception metadata/message without executing ToString IL.
+    /// Read a bounded, pinned actual Exception chain without executing ToString IL.
     pub(super) fn exception_diagnostic(
         self,
         roots: super::instances::Api,
@@ -941,12 +941,9 @@ impl Api {
             "mono_string_chars",
             unsafe extern "C" fn(Object) -> *const u16
         );
-        let root = roots.worker_root(exception)?;
-        let exception = root.target()?;
-        let class = unsafe { (self.object_class)(exception) };
         let base = unsafe { base() };
-        if class.is_null() || base.is_null() || unsafe { (self.assignable)(base, class) } == 0 {
-            return Err("invoke exception is not an actual System.Exception".into());
+        if base.is_null() {
+            return Err("actual System.Exception metadata absent".into());
         }
         let text = |p: *const c_char| -> Result<String, String> {
             if p.is_null() {
@@ -954,48 +951,83 @@ impl Api {
             }
             Ok(unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
         };
-        let identity = format!(
-            "{}.{}",
-            text(unsafe { namespace(class) })?,
-            text(unsafe { class_name(class) })?
-        );
         let message_field = unsafe { field(base, c"_message".as_ptr()) };
-        if message_field.is_null() {
-            return Ok(identity);
+        let inner_field = unsafe { field(base, c"_innerException".as_ptr()) };
+        for (candidate, expected_kind, expected_class) in [
+            (message_field, 14, unsafe { string_class() }),
+            (inner_field, 0x12, base),
+        ] {
+            if candidate.is_null() {
+                continue;
+            }
+            let ty = unsafe { field_type(candidate) };
+            if unsafe { parent(candidate) } != base
+                || unsafe { field_flags(candidate) } & 0x10 != 0
+                || ty.is_null()
+                || unsafe { (self.kind)(ty) } != expected_kind
+                || unsafe { (self.byref)(ty) } != 0
+                || unsafe { (self.type_class)(ty) } != expected_class
+            {
+                return Err("Exception diagnostic field metadata changed".into());
+            }
         }
-        let ty = unsafe { field_type(message_field) };
-        if unsafe { parent(message_field) } != base
-            || unsafe { field_flags(message_field) } & 0x10 != 0
-            || ty.is_null()
-            || unsafe { (self.kind)(ty) } != 14
-            || unsafe { (self.byref)(ty) } != 0
-            || unsafe { (self.type_class)(ty) } != unsafe { string_class() }
-        {
-            return Err("Exception message field metadata changed".into());
+        let mut pinned = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut parts = Vec::new();
+        let mut next = exception;
+        while !next.is_null() && parts.len() < 8 {
+            if !seen.insert(next as usize) {
+                parts.push("[inner exception cycle]".into());
+                next = ptr::null_mut();
+                break;
+            }
+            pinned.push(roots.worker_root(next)?);
+            let exception = pinned.last().unwrap().target()?;
+            let class = unsafe { (self.object_class)(exception) };
+            if class.is_null() || unsafe { (self.assignable)(base, class) } == 0 {
+                return Err("invoke exception is not an actual System.Exception".into());
+            }
+            let mut identity = format!(
+                "{}.{}",
+                text(unsafe { namespace(class) })?,
+                text(unsafe { class_name(class) })?
+            );
+            if !message_field.is_null() {
+                let mut message: Object = ptr::null_mut();
+                unsafe {
+                    field_get(
+                        exception,
+                        message_field,
+                        (&mut message as *mut Object).cast(),
+                    )
+                };
+                if !message.is_null() {
+                    let message_root = roots.worker_root(message)?;
+                    let message = message_root.target()?;
+                    if unsafe { (self.object_class)(message) } != unsafe { string_class() } {
+                        return Err("Exception message has incompatible native class".into());
+                    }
+                    let length = unsafe { length(message) };
+                    let data = unsafe { chars(message) };
+                    if length < 0 || data.is_null() {
+                        return Err("Exception message storage absent".into());
+                    }
+                    let message = String::from_utf16_lossy(unsafe {
+                        std::slice::from_raw_parts(data, (length as usize).min(2048))
+                    });
+                    identity.push_str(&format!(": {message:?}"));
+                }
+            }
+            parts.push(identity);
+            next = ptr::null_mut();
+            if !inner_field.is_null() {
+                unsafe { field_get(exception, inner_field, (&mut next as *mut Object).cast()) };
+            }
         }
-        let mut message: Object = ptr::null_mut();
-        unsafe {
-            field_get(
-                exception,
-                message_field,
-                (&mut message as *mut Object).cast(),
-            )
-        };
-        if message.is_null() {
-            return Ok(identity);
+        if !next.is_null() {
+            parts.push("[inner exception depth limit]".into());
         }
-        if unsafe { (self.object_class)(message) } != unsafe { string_class() } {
-            return Err("Exception message has incompatible native class".into());
-        }
-        let length = unsafe { length(message) };
-        let data = unsafe { chars(message) };
-        if length < 0 || data.is_null() {
-            return Err("Exception message storage absent".into());
-        }
-        let message = String::from_utf16_lossy(unsafe {
-            std::slice::from_raw_parts(data, (length as usize).min(2048))
-        });
-        Ok(format!("{identity}: {message:?}"))
+        Ok(parts.join(" -> "))
     }
     /// Unity's SetupCoroutine IL entry treats IntPtr as a Boolean output address.
     /// Its native address is substituted with private storage by Frame, never

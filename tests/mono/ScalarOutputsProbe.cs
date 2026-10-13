@@ -7,6 +7,19 @@ public sealed class OpaqueReferenceCell {
 // Original fixture. The bridge must derive pointer roles from actual metadata
 // and IL rather than recognizing these names or their MethodDef tokens.
 public static unsafe class ScalarOutputsProbe {
+    public static void ThrowNested() {
+        throw new TypeInitializationException("OriginalFixture", new MissingMethodException("missing original fixture entry"));
+    }
+    public static void ThrowDeep() {
+        Exception error = new MissingMethodException("deep original fixture entry");
+        for (int i = 0; i < 12; ++i) error = new Exception("level " + i, error);
+        throw error;
+    }
+    public static void ThrowCycle() {
+        var error = new Exception("cyclic original fixture entry");
+        typeof(Exception).GetField("_innerException", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).SetValue(error, error);
+        throw error;
+    }
     public static void Boolean(IntPtr pointer) {
         bool* output = (bool*)(void*)pointer;
         *output = true;
