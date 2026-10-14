@@ -22,7 +22,6 @@ mod find;
 mod gateways;
 mod guid;
 mod heap;
-mod identity;
 mod locale;
 mod mapping;
 mod modules;
@@ -106,7 +105,8 @@ pub struct Runtime64 {
     exception_handlers: Vec<(u64, u64)>,
     next_exception_handler: u64,
     environment_blocks: std::collections::BTreeSet<u64>,
-    environment: BTreeMap<String, (String, String)>,
+    profile: crate::runtime::environment::GuestEnvironment,
+    environment: crate::runtime::environment::EnvironmentVariables,
     local_blocks: std::collections::BTreeSet<u64>,
     task_blocks: std::collections::BTreeSet<u64>,
     bstrings: BTreeMap<u64, (u64, usize)>,
@@ -890,7 +890,8 @@ impl Runtime64 {
             exception_handlers: Vec::new(),
             next_exception_handler: 0x7fff8000,
             environment_blocks: std::collections::BTreeSet::new(),
-            environment: BTreeMap::new(),
+            profile: crate::runtime::environment::GuestEnvironment::amd64(),
+            environment: Default::default(),
             local_blocks: std::collections::BTreeSet::new(),
             task_blocks: std::collections::BTreeSet::new(),
             hstrings: Default::default(),
@@ -962,12 +963,7 @@ impl Runtime64 {
             .fs
             .as_ref()
             .ok_or("Win64 user profile requires a filesystem")?;
-        for path in [
-            "C:\\Users\\wire\\AppData\\Local",
-            "C:\\Users\\wire\\AppData\\LocalLow",
-            "C:\\Users\\wire\\AppData\\Roaming",
-            "C:\\Users\\wire\\Documents",
-        ] {
+        for path in self.profile.user_directories() {
             let host = fs
                 .resolve(path)
                 .map_err(|e| format!("Win64 user profile path error {e}"))?;
@@ -1396,7 +1392,9 @@ impl Runtime64 {
         use crate::win32::catalog::ApiId;
         match id {
             ApiId::Guid(id) => crate::win32::x64::guid::call(mem, id, args),
-            ApiId::Identity(id) => self.identity_call(mem, id, args),
+            ApiId::Identity(id) => {
+                crate::win32::x64::identity::call(mem, id, args, &self.profile, self.teb() + 0x68)
+            }
         }
     }
 
@@ -2133,19 +2131,19 @@ impl Runtime64 {
                 mem.read(args[0], &mut guid)?;
                 let path = match guid {
                     [0xa4, 0xa1, 0x20, 0xa5, 0x80, 0x17, 0xf6, 0x4f, 0xbd, 0x18, 0x16, 0x73, 0x43, 0xc5, 0xaf, 0x16] => {
-                        Some("C:\\Users\\wire\\AppData\\LocalLow")
+                        Some(self.profile.local_low())
                     }
                     [0x85, 0x27, 0xb3, 0xf1, 0xba, 0x6f, 0xcf, 0x4f, 0x9d, 0x55, 0x7b, 0x8e, 0x7f, 0x15, 0x70, 0x91] => {
-                        Some("C:\\Users\\wire\\AppData\\Local")
+                        Some(self.profile.local())
                     }
                     [0xdb, 0x85, 0xb6, 0x3e, 0xf9, 0x65, 0xf6, 0x4c, 0xa0, 0x3a, 0xe3, 0xef, 0x65, 0x72, 0x9f, 0x3d] => {
-                        Some("C:\\Users\\wire\\AppData\\Roaming")
+                        Some(self.profile.roaming())
                     }
                     [0x8f, 0x85, 0x6c, 0x5e, 0x22, 0x0e, 0x60, 0x47, 0x9a, 0xfe, 0xea, 0x33, 0x17, 0xb6, 0x71, 0x73] => {
-                        Some("C:\\Users\\wire")
+                        Some(self.profile.home())
                     }
                     [0xd0, 0x9a, 0xd3, 0xfd, 0x8f, 0x23, 0xaf, 0x46, 0xad, 0xb4, 0x6c, 0x85, 0x48, 0x03, 0x69, 0xc7] => {
-                        Some("C:\\Users\\wire\\Documents")
+                        Some(self.profile.documents())
                     }
                     _ => None,
                 };
@@ -2236,7 +2234,7 @@ impl Runtime64 {
             | "GetSystemDefaultLCID"
             | "GetThreadLocale"
             | "GetUserDefaultLangID"
-            | "GetSystemDefaultLangID" => 0x411,
+            | "GetSystemDefaultLangID" => self.profile.locale_id() as u64,
             "IsValidLocaleName" => {
                 (args[0] == 0 || locale::id(&Self::utf16(mem, args[0])?).is_some()) as u64
             }
@@ -2808,10 +2806,9 @@ impl Runtime64 {
                     self.set_error(mem, 87)?;
                     0
                 } else {
-                    let key = variable.to_lowercase();
                     if name.starts_with("Set") {
                         if args[1] == 0 {
-                            if self.environment.remove(&key).is_some() {
+                            if self.environment.remove(&variable) {
                                 1
                             } else {
                                 self.set_error(mem, 203)?;
@@ -2819,10 +2816,10 @@ impl Runtime64 {
                             }
                         } else {
                             let value = Self::path_name(mem, args[1], wide)?;
-                            self.environment.insert(key, (variable, value));
+                            self.environment.set(variable, value);
                             1
                         }
-                    } else if let Some((_, value)) = self.environment.get(&key) {
+                    } else if let Some(value) = self.environment.get(&variable) {
                         let bytes: Vec<u8> = if wide {
                             value
                                 .encode_utf16()
@@ -2830,9 +2827,12 @@ impl Runtime64 {
                                 .flat_map(u16::to_le_bytes)
                                 .collect()
                         } else {
-                            crate::codepage::encode(&(value.clone() + "\0"), 932)
-                                .map_err(|e| format!("environment codepage error {e}"))?
-                                .0
+                            crate::codepage::encode(
+                                &(value.to_owned() + "\0"),
+                                self.profile.codepage(),
+                            )
+                            .map_err(|e| format!("environment codepage error {e}"))?
+                            .0
                         };
                         let required = bytes.len() / if wide { 2 } else { 1 };
                         if args[2] < required as u64 {
@@ -4295,20 +4295,7 @@ impl Runtime64 {
             }
             "GetEnvironmentStringsW" => {
                 // Initially empty; changes are guest-owned and never inherit host secrets.
-                let mut bytes: Vec<u8> = self
-                    .environment
-                    .values()
-                    .flat_map(|(name, value)| {
-                        format!("{name}={value}\0")
-                            .encode_utf16()
-                            .flat_map(u16::to_le_bytes)
-                            .collect::<Vec<_>>()
-                    })
-                    .collect();
-                bytes.extend_from_slice(&[0, 0]);
-                if bytes.len() == 2 {
-                    bytes.extend_from_slice(&[0, 0]);
-                }
+                let bytes = self.environment.wide_block();
                 let ptr = self.heap_alloc(mem, bytes.len() as u64)?;
                 if ptr != 0 {
                     mem.write(ptr, &bytes)?;
@@ -4474,7 +4461,9 @@ impl Runtime64 {
                     }
                 }
             }
-            "GetACP" | "GetOEMCP" | "GetConsoleOutputCP" | "GetConsoleCP" => 932,
+            "GetACP" | "GetOEMCP" | "GetConsoleOutputCP" | "GetConsoleCP" => {
+                self.profile.codepage() as u64
+            }
             "IsValidCodePage" => matches!(args[0] as u32, 932 | 1252 | 65001) as u64,
             "GetCPInfo" | "GetCPInfoExA" | "GetCPInfoExW" => {
                 let extended = name != "GetCPInfo";

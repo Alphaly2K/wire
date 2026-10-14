@@ -20,7 +20,7 @@
 | R0 入口/fixture | 已完成；12 组 golden 输入一致，默认与旧路径各 7 个运行 smoke 通过 |
 | R1 GUID 契约试点 | 已完成唯一契约、双架构冷绑定、纯语义/适配器、行为及性能验收 |
 | R2 分发收敛 | GUID + 6 个 identity export 已迁移；locale/version/file 等仍 legacy |
-| R3 状态归属 | 待对应领域边界形成 |
+| R3 状态归属 | identity/profile 与可变环境变量已形成独立边界；module/file/thread/COM 待迁移 |
 | R4 PE32 Process | 待调用边界回归稳定 |
 | R5 host/graphics | 待 Process/状态边界形成 |
 | R6 原生 Mono | 按用户指示跳过 |
@@ -66,3 +66,13 @@ PE32 公开 `ApiEntry`/`entries` 和 stub 地址保持兼容，内部 Arc 快照
 三对 210M work 与 R1 after 对照：integer -0.32%、memory +2.13%、thread-id gateway +1.10%、GUID gateway +0.49%；无超过 3% 的 CPU 中位数回退。冻结 `identity-bound-wire`，日志在 `r2-identity-timing`。
 
 补充 PE32 GUID gateway 独立 fixture，70M guest 指令、raw/IR 各三对，以最初基线对照：IR CPU 2.9755s → 2.2423s（-24.64%），raw 3.7758s → 3.0548s（-19.10%）。该 API 密集负载反映冷缓存 ABI、Arc 绑定快照与 typed 路由的共同影响，不推断游戏整体增益。API trace 仍格式化并计数，写入 null device，避免每轮生成数百万行日志；该策略在 manifest 中明确记录，默认工具行为不变。12K smoke 与 7M 小样本均保留，正式轮次位于 `r2-pe32-guid-timing-large`。
+
+## R3 environment/identity 所有权
+
+`runtime/environment.rs` 集中不可变默认身份、版本、codepage/locale 和用户路径。PE32 6.1.7601、Win64 10.0.19045 的版本差异保持；CRT version data export、版本 query/verify、默认 locale/codepage 和 Win64 用户目录使用该来源。算法中的显式 locale 映射和 ABI 布局仍留在各自 codec，不强行合并。
+
+guest 环境变量由 `EnvironmentVariables` 私有 map 拥有，大小写归一化、原始拼写和 UTF-16 block 由该对象处理，原有枚举顺序/双 NUL 保持；架构 allocator 和环境 block 生命周期仍由 Runtime64 管理。Win64 identity adapter 移出 `impl Runtime64`，只借用内存、不可变描述和 LastError 槽地址，原 handler 删除。
+
+完整 release 392 passed / 0 failed / 7 ignored，debug 两架构 246 项、fmt、strict Clippy 通过。profile 没有继承 host 用户或环境值。
+
+性能先测 210M work 三对：integer -0.76%、thread-id gateway -2.56%、GUID +0.05% 左右，memory +3.32% 触发调查。扩展到 700M work 并加入原始冻结基线：memory 相对紧邻 R2 CPU 中位数 +3.73%，相对最初基线 -0.53%；全部三对均未超过 5%，RSS 无实质增长。保留 `r3-memory-investigation` 全轮次。诊断的 IR/fallback/translations/invalidation/epoch/cold counts 相同；RegisterSegment::execute_mixed 的 2925 行反汇编仅有代码/常量地址及重定位偏移差异，opcode/register/control 形态一致，未触碰 ISA/cache 源码。本次记录这项布局成本，不将阶段结果统一称为“无回退”。保留原结构候选，后续布局变化继续对照最初及相邻基线；若出现三对均超过 5% 则拒绝对应候选。

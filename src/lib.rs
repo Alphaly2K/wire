@@ -22,6 +22,7 @@ pub mod nls;
 pub mod pe;
 pub mod platform;
 pub mod resource;
+pub mod runtime;
 pub mod seh;
 mod simd;
 pub mod system;

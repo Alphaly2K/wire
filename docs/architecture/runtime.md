@@ -9,6 +9,7 @@
 | `api` | PE32 stub 与 ABI 调用 facade；领域契约将集中在 `win32::catalog`，领域语义逐步拥有独立状态 |
 | `x64::runtime` | Win64 gateway 与服务组合根；已有 BoundImport 冷绑定和 HotImport 热路由，迁移中保留 |
 | `fs`、`codepage`、`simd` | 已共享的纯语义或公共服务，继续复用 |
+| `runtime::environment` | 不可变 guest 身份/版本/locale/路径；私有可变环境变量模型，架构 allocator 生命周期独立 |
 | `graphics`、`d3d9`、`gpu`、`platform` | guest ABI、像素/资源核心、native FFI 与 host UI 尚有交叉，按资源所有权渐进分离 |
 | `main` | CLI 和报表；运行状态构造迁入 Process，避免继续扩展总命令函数 |
 

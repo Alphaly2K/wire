@@ -173,15 +173,16 @@ impl ApiTable {
         {
             return Ok(None);
         }
+        let version = crate::runtime::environment::GuestEnvironment::pe32().version();
         let initial = match name {
             "_acmdln" => cmdline_a,
             "_wcmdln" => cmdline_w,
             "_fmode" | "_commode" | "_adjust_fdiv" | "_timezone" | "_daylight" => 0,
             "__argc" => 1,
-            "_winmajor" => 6,
-            "_winminor" => 1,
-            "_winver" => 0x601,
-            "_osver" => 7601,
+            "_winmajor" => version.major,
+            "_winminor" => version.minor,
+            "_winver" => (version.major << 8) | version.minor,
+            "_osver" => version.build,
             _ => return Ok(None),
         };
         let key = (dll, name.to_string());
@@ -243,6 +244,7 @@ pub enum HandleObj {
 
 /// Mutable host-side state for the emulated process.
 pub struct ApiState {
+    pub(crate) environment: crate::runtime::environment::GuestEnvironment,
     pub last_error: u32,
     pub unhandled_filter: u32,
     pub start: Instant,
@@ -285,6 +287,7 @@ pub struct ApiState {
 impl ApiState {
     pub fn new(exe_base: u32, exe_path: String, cmdline_a: u32, cmdline_w: u32) -> ApiState {
         let mut s = ApiState {
+            environment: crate::runtime::environment::GuestEnvironment::pe32(),
             last_error: 0,
             unhandled_filter: 0,
             start: Instant::now(),
@@ -2362,7 +2365,7 @@ pub fn dispatch(
             ret = 0;
         }
         ("kernel32.dll", "GetVersion") => {
-            ret = 0x1db1_0106;
+            ret = state.environment.version().packed();
             note = "fake Windows 7 (6.1.7601)".into();
         }
         ("kernel32.dll", "GetCurrentProcess") => ret = 0xffff_ffff,
@@ -2381,7 +2384,7 @@ pub fn dispatch(
         ("kernel32.dll", "GetCommandLineA") => ret = state.cmdline_a,
         ("kernel32.dll", "GetCommandLineW") => ret = state.cmdline_w,
         ("kernel32.dll", "GetACP") => {
-            ret = 932;
+            ret = state.environment.codepage();
             note = "fake CP932 (ja-JP)".into();
         }
         ("kernel32.dll", "GetCPInfo") => {
@@ -2506,7 +2509,7 @@ pub fn dispatch(
         ("kernel32.dll", "LockResource") => ret = args[0],
         ("kernel32.dll", "FreeResource") => ret = 0,
         ("kernel32.dll", "GetOEMCP") => {
-            ret = 932;
+            ret = state.environment.codepage();
             note = "fake CP932 (ja-JP)".into();
         }
         ("kernel32.dll", "IsDBCSLeadByte") => {
@@ -2520,7 +2523,7 @@ pub fn dispatch(
             note = "CP932 lead-byte ranges (codepage arg ignored)".into();
         }
         ("kernel32.dll", "GetConsoleCP") | ("kernel32.dll", "GetConsoleOutputCP") => {
-            ret = 932;
+            ret = state.environment.codepage();
             note = "fake CP932".into();
         }
         ("kernel32.dll", "IsDebuggerPresent") => ret = 0,
@@ -2895,11 +2898,21 @@ pub fn dispatch(
             let size = mem.read_u32(args[0]).map_err(|e| e.to_string())?;
             if matches!(size, 148 | 156 | 276 | 284) {
                 let mut info = vec![0; size as usize];
-                for (i, value) in [size, 6, 1, 7601, 2].iter().enumerate() {
+                let version = state.environment.version();
+                for (i, value) in [
+                    size,
+                    version.major,
+                    version.minor,
+                    version.build,
+                    version.platform,
+                ]
+                .iter()
+                .enumerate()
+                {
                     info[i * 4..i * 4 + 4].copy_from_slice(&value.to_le_bytes());
                 }
                 if matches!(size, 156 | 284) {
-                    info[size as usize - 2] = 1;
+                    info[size as usize - 2] = version.product_type;
                 } // VER_NT_WORKSTATION
                 mem.write_bytes(args[0], &info).map_err(|e| e.to_string())?;
                 ret = if dll == "ntdll.dll" { 0 } else { 1 };

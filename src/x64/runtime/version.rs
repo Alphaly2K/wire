@@ -38,7 +38,13 @@ fn update(last: &mut u8, condition: u8) -> u8 {
     }
     *last & 15
 }
-fn verify(mem: &Memory, pointer: u64, mask: u32, conditions: u64) -> Result<u32, String> {
+fn verify(
+    mem: &Memory,
+    pointer: u64,
+    mask: u32,
+    conditions: u64,
+    version: crate::runtime::environment::WindowsVersion,
+) -> Result<u32, String> {
     let mut info = [0; 284];
     mem.read(pointer, &mut info)?;
     if u32::from_le_bytes(info[..4].try_into().unwrap()) != 284
@@ -60,21 +66,21 @@ fn verify(mem: &Memory, pointer: u64, mask: u32, conditions: u64) -> Result<u32,
         _ => unreachable!(),
     };
     let condition = |bit| ((conditions >> (bit * 3)) & 7u64) as u8;
-    if mask & 0x80 != 0 && !compare(1, requested(7), condition(7)) {
+    if mask & 0x80 != 0 && !compare(version.product_type as u32, requested(7), condition(7)) {
         return Ok(MISMATCH);
     }
     if mask & 0x40 != 0 {
         let expected = requested(6);
         let passed = match condition(6) {
-            6 => 0x100 & expected == expected,
-            7 => expected == 0 || 0x100 & expected != 0,
+            6 => version.suite_mask as u32 & expected == expected,
+            7 => expected == 0 || version.suite_mask as u32 & expected != 0,
             _ => return Ok(INVALID),
         };
         if !passed {
             return Ok(MISMATCH);
         }
     }
-    for (bit, value) in [(3, 2), (2, 19045)] {
+    for (bit, value) in [(3, version.platform), (2, version.build)] {
         if mask & (1 << bit) != 0 && !compare(value, requested(bit), condition(bit)) {
             return Ok(MISMATCH);
         }
@@ -83,7 +89,7 @@ fn verify(mem: &Memory, pointer: u64, mask: u32, conditions: u64) -> Result<u32,
     // major version satisfies >= without independently checking the minor field.
     let mut last = 0;
     let mut passed = true;
-    for (bit, value) in [(1, 10), (0, 0), (5, 0), (4, 0)] {
+    for (bit, value) in [(1, version.major), (0, version.minor), (5, 0), (4, 0)] {
         if mask & (1 << bit) == 0 {
             continue;
         }
@@ -102,15 +108,16 @@ impl Runtime64 {
         name: &str,
         args: &[u64],
     ) -> Result<u64, String> {
+        let version = self.profile.version();
         match name {
-            "GetVersion" => Ok((19045 << 16) | 10),
+            "GetVersion" => Ok(version.packed() as u64),
             "VerSetConditionMask" => {
                 let mask = args[1] as u32 & 0xff;
                 let shift = if mask == 0 { 0 } else { mask.ilog2() * 3 };
                 Ok(args[0] | if mask == 0 { 0 } else { (args[2] & 7) << shift })
             }
             "RtlVerifyVersionInfo" | "VerifyVersionInfoW" => {
-                let status = verify(mem, args[0], args[1] as u32, args[2])?;
+                let status = verify(mem, args[0], args[1] as u32, args[2], version)?;
                 if name == "RtlVerifyVersionInfo" {
                     return Ok(status as u64);
                 }
@@ -134,12 +141,21 @@ impl Runtime64 {
                     return Ok(0);
                 }
                 let mut info = vec![0; size];
-                for (n, value) in [size as u32, 10, 0, 19045, 2].into_iter().enumerate() {
+                for (n, value) in [
+                    size as u32,
+                    version.major,
+                    version.minor,
+                    version.build,
+                    version.platform,
+                ]
+                .into_iter()
+                .enumerate()
+                {
                     info[n * 4..n * 4 + 4].copy_from_slice(&value.to_le_bytes());
                 }
                 if matches!(size, 156 | 284) {
-                    info[size - 4..size - 2].copy_from_slice(&0x100u16.to_le_bytes());
-                    info[size - 2] = 1;
+                    info[size - 4..size - 2].copy_from_slice(&version.suite_mask.to_le_bytes());
+                    info[size - 2] = version.product_type;
                 }
                 mem.write(args[0], &info)?;
                 Ok((name != "RtlGetVersion") as u64)

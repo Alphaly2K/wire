@@ -178,7 +178,7 @@ pub fn dispatch(
             | "GetSystemDefaultLCID"
             | "GetThreadLocale"
             | "GetUserDefaultLangID"
-            | "GetSystemDefaultLangID" => Ok(0x411),
+            | "GetSystemDefaultLangID" => Ok(state.environment.locale_id()),
             "SHGetSpecialFolderPathA" | "SHGetSpecialFolderPathW" => {
                 crate::file_api::write_string(mem, a[1], 260, "C:\\", name.ends_with('W'))?;
                 Ok(1)
