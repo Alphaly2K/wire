@@ -43,17 +43,21 @@ pub struct ApiTable {
 /// that view invalidate this snapshot before the next call (including reentry).
 struct BoundEntry {
     entry: ApiEntry,
-    guid: Option<&'static crate::win32::catalog::Contract>,
+    guid: Option<crate::win32::catalog::GuidApi>,
     stack_bytes: Option<u32>,
 }
 impl BoundEntry {
     fn new(entry: ApiEntry) -> Self {
-        use crate::win32::catalog::{resolve, Architecture, Resolution};
-        let guid = match resolve(Architecture::X86, &entry.dll, &entry.name) {
+        use crate::win32::catalog::{resolve, ApiId, Architecture, ExecutionPolicy, Resolution};
+        let contract = match resolve(Architecture::X86, &entry.dll, &entry.name) {
             Resolution::Bound(contract) => Some(contract),
             Resolution::WrongDll(_) | Resolution::Legacy => None,
         };
-        let stack_bytes = guid.map_or_else(
+        let guid = contract.and_then(|c| match c.id {
+            ApiId::Guid(id) if c.execution(Architecture::X86) == ExecutionPolicy::Typed => Some(id),
+            _ => None,
+        });
+        let stack_bytes = contract.map_or_else(
             || legacy_stack_args_bytes(&entry.dll, &entry.name),
             |c| Some(c.stdcall_bytes()),
         );
@@ -812,10 +816,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetVersionExW", 4),
                 ("VerifyVersionInfoW", 16),
                 ("VerSetConditionMask", 16),
-                ("GetComputerNameA", 8),
-                ("GetComputerNameW", 8),
-                ("GetUserNameA", 8),
-                ("GetUserNameW", 8),
                 ("GetDiskFreeSpaceA", 20),
                 ("GetDiskFreeSpaceW", 20),
                 ("GetDriveTypeA", 4),
@@ -1300,8 +1300,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("RegEnumKeyExA", 32),
                 ("RegEnumValueA", 32),
                 ("RegQueryInfoKeyA", 48),
-                ("GetUserNameA", 8),
-                ("GetUserNameW", 8),
                 ("OpenProcessToken", 12),
                 ("GetTokenInformation", 20),
                 ("LookupPrivilegeValueA", 12),
@@ -1762,7 +1760,7 @@ pub fn dispatch(
     let ret: u32;
     match (dll, name) {
         _ if binding.guid.is_some() => {
-            match crate::win32::x86::guid::call(binding.guid.unwrap().id, &args, mem) {
+            match crate::win32::x86::guid::call(binding.guid.unwrap(), &args, mem) {
                 Ok(value) => {
                     ret = value;
                     note = "common process/string/COM allocation contract".into();

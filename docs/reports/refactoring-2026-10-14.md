@@ -19,7 +19,7 @@
 | --- | --- |
 | R0 入口/fixture | 已完成；12 组 golden 输入一致，默认与旧路径各 7 个运行 smoke 通过 |
 | R1 GUID 契约试点 | 已完成唯一契约、双架构冷绑定、纯语义/适配器、行为及性能验收 |
-| R2 分发收敛 | 在 GUID 试点验收后按领域推进 |
+| R2 分发收敛 | GUID + 6 个 identity export 已迁移；locale/version/file 等仍 legacy |
 | R3 状态归属 | 待对应领域边界形成 |
 | R4 PE32 Process | 待调用边界回归稳定 |
 | R5 host/graphics | 待 Process/状态边界形成 |
@@ -56,3 +56,13 @@ PE32 公开 `ApiEntry`/`entries` 和 stub 地址保持兼容，内部 Arc 快照
 - Alice 原始 guest Mono 启动前缀再执行三对 AB/BA，均到相同 200M work 预算边界，无新增 API/访存错误，Draw/Present 仍为 0；exe/UnityPlayer/guest Mono 输入 SHA 未变。CPU 中位数 before 2.75s、after 2.71s，wall 2.84s/2.82s，RSS 约 375MB。计时/线程导致 RIP 与退休数略有差异，不宣称逐指令相同或完整游戏 FPS 收益。复用原隔离目录，无复制游戏或素材；日志在 `r1-alice-prefix`。
 
 以上完成首批六步，不代表 R2–R5/R7 全仓迁移完成。下一步审计 identity/environment 的 ABI 与实现范围，再按领域扩展。
+
+## R2 identity 契约迁移
+
+六个名字的 DLL、scalar 参数与 typed ID 汇入 `catalog/identity.rs`，删除旧 identity 的 arity/export 表、root dwords 推测、group bit 路由和 PE32 手写重复项。共享契约类型显式记录架构执行策略；`LegacyUnimplemented` 保留 PE32 已知 ABI 的诊断/零返回，Win64 使用 typed handler。历史 PE32 kernel32 GetUserName ABI 登记仍保留并写入限制说明，不在重构里暗改导出范围。
+
+新增 PE32 基线在切换前后逐项验证 8 个 DLL/export 组合的栈清理、LastError、输出不变与错误 DLL。原 Win64 identity 测试已覆盖大小、域名、高位 DWORD、输出 fault 和动态 GetProcAddress。本批 300 项所属测试通过（lib 外部图形 7 ignored）、strict Clippy 与工具测试通过；catalog 增加 export/DLL 唯一性、参数索引和声明限制的自动检查。
+
+三对 210M work 与 R1 after 对照：integer -0.32%、memory +2.13%、thread-id gateway +1.10%、GUID gateway +0.49%；无超过 3% 的 CPU 中位数回退。冻结 `identity-bound-wire`，日志在 `r2-identity-timing`。
+
+补充 PE32 GUID gateway 独立 fixture，70M guest 指令、raw/IR 各三对，以最初基线对照：IR CPU 2.9755s → 2.2423s（-24.64%），raw 3.7758s → 3.0548s（-19.10%）。该 API 密集负载反映冷缓存 ABI、Arc 绑定快照与 typed 路由的共同影响，不推断游戏整体增益。API trace 仍格式化并计数，写入 null device，避免每轮生成数百万行日志；该策略在 manifest 中明确记录，默认工具行为不变。12K smoke 与 7M 小样本均保留，正式轮次位于 `r2-pe32-guid-timing-large`。

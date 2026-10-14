@@ -13,7 +13,32 @@ def pe32(code):
     opt=0x98;u16(opt,0x10b);u32(opt+16,0x1000);u32(opt+28,0x400000);u32(opt+32,4096);u32(opt+36,512);u32(opt+56,8192);u32(opt+60,512);u32(opt+72,65536);u32(opt+76,4096);u32(opt+92,16)
     s=opt+0xe0;b[s:s+5]=b'.text';u32(s+8,len(code));u32(s+12,4096);u32(s+16,raw);u32(s+20,512);u32(s+36,0x60000020);b[512:512+len(code)]=code;return b
 
+def guid_gateway_fixture(work):
+    n = max(1, work // 7)
+    code = bytearray.fromhex('57 53 bf') + struct.pack('<I', n)
+    code += bytes.fromhex('31db 83ec10')
+    loop = len(code)
+    # CLSIDFromString(NULL, &stack_guid); stdcall consumes both arguments.
+    code += bytes.fromhex('8d0424 50 6a00 ff15') + struct.pack('<I', 0x401190)
+    code += bytes.fromhex('01c3 4f')
+    at = len(code)
+    code += bytes.fromhex('0f85') + struct.pack('<i', loop - at - 6)
+    code += bytes.fromhex('8b0424 01d8 83c410 5b 5f cc')
+    code.extend(bytes(512 - len(code)))
+    struct.pack_into('<I', code, 0x100, 0x1180)
+    struct.pack_into('<I', code, 0x10c, 0x11c0)
+    struct.pack_into('<I', code, 0x110, 0x1190)
+    struct.pack_into('<I', code, 0x180, 0x11d0)
+    code[0x1c0:0x1ca] = b'ole32.dll\0'
+    symbol = b'CLSIDFromString\0'
+    code[0x1d2:0x1d2 + len(symbol)] = symbol
+    image = pe32(code)
+    struct.pack_into('<II', image, 0x98 + 96 + 8, 0x1100, 40)
+    return image, dict(eax=0, retired=7 * n + 10)
+
 def fixture(name,work):
+    if name == 'gateway-guid':
+        return guid_gateway_fixture(work)
     n=max(1,work//6);c=bytearray()
     if name=='sse-register':
         c+=bytes.fromhex('b801000000 660f6ec0 b803000000 660f6ec8 bf')+struct.pack('<I',n)
@@ -28,9 +53,9 @@ def fixture(name,work):
     return pe32(c),dict(eax=expected&0xffffffff,retired=count)
 
 def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--binary',action='append',required=True);p.add_argument('--out',type=Path,required=True);p.add_argument('--pairs',type=int,default=3);p.add_argument('--work',type=int,default=30000000);p.add_argument('--cases',nargs='+',default=['sse-register','fp-scalar','bit-test','integer']);p.add_argument('--paths',nargs='+',default=['ir','raw']);a=p.parse_args()
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--binary',action='append',required=True);p.add_argument('--out',type=Path,required=True);p.add_argument('--pairs',type=int,default=3);p.add_argument('--work',type=int,default=30000000);p.add_argument('--cases',nargs='+',default=['sse-register','fp-scalar','bit-test','integer']);p.add_argument('--paths',nargs='+',default=['ir','raw']);p.add_argument('--discard-api-log',action='store_true',help='send API trace writes to the null device, retaining formatting and counters');a=p.parse_args()
     bins={n:Path(v).resolve(strict=True) for n,v in (s.split('=',1) for s in a.binary)};a.out.mkdir(parents=True,exist_ok=False)
-    manifest=dict(binaries={n:dict(path=str(v),sha256=digest(v)) for n,v in bins.items()},script_sha256=digest(Path(__file__)),pairs=a.pairs,inputs={});results={}
+    manifest=dict(binaries={n:dict(path=str(v),sha256=digest(v)) for n,v in bins.items()},script_sha256=digest(Path(__file__)),pairs=a.pairs,api_log='discard' if a.discard_api_log else 'file',inputs={});results={}
     for case in a.cases:
         data,expected=fixture(case,a.work);exe=a.out/f'{case}.exe';exe.write_bytes(data);ir=a.out/f'{case}.wir'
         subprocess.run([str(next(iter(bins.values()))),'prepare',str(exe),'--out',str(ir)],check=True,stdout=subprocess.DEVNULL)
@@ -40,6 +65,9 @@ def main():
             for pair in range(a.pairs):
                 for name in list(bins) if pair%2==0 else list(reversed(bins)):
                     out=a.out/case/path/f'pair-{pair}-{name}';out.mkdir(parents=True)
+                    if a.discard_api_log:
+                        (out/'logs').mkdir()
+                        (out/'logs/api.log').symlink_to(os.devnull)
                     cmd=[str(bins[name]),'run',str(exe),'--headless','--max-instr',str(expected['retired']+10),'--log-dir',str(out/'logs')]
                     if path=='ir':cmd+=['--ir',str(ir)]
                     with (out/'report.txt').open('w') as report:

@@ -1,32 +1,15 @@
 //! Identity of the isolated guest profile; this does not query host accounts/DNS.
 use super::{Memory, Runtime64, WRITE};
-pub(super) fn user(name: &str) -> bool {
-    matches!(name, "GetUserNameA" | "GetUserNameW")
-}
-pub(super) fn arity(name: &str) -> Option<usize> {
-    Some(match name {
-        "GetComputerNameA" | "GetComputerNameW" | "GetUserNameA" | "GetUserNameW" => 2,
-        "GetComputerNameExA" | "GetComputerNameExW" => 3,
-        _ => return None,
-    })
-}
-pub(super) fn export(dll: &str, name: &str) -> bool {
-    arity(name).is_some()
-        && if user(name) {
-            dll.eq_ignore_ascii_case("advapi32.dll")
-        } else {
-            dll.eq_ignore_ascii_case("kernel32.dll") || dll.eq_ignore_ascii_case("kernelbase.dll")
-        }
-}
+
 impl Runtime64 {
     pub(super) fn identity_call(
         &mut self,
         mem: &mut Memory,
-        name: &str,
+        id: crate::win32::catalog::IdentityApi,
         a: &[u64],
     ) -> Result<u64, String> {
-        let extended = name.contains("Ex");
-        let text = if user(name) {
+        let extended = id.extended();
+        let text = if id.user() {
             "wire"
         } else if extended {
             match a[0] {
@@ -50,7 +33,7 @@ impl Runtime64 {
             mem.write_int(size, 4, required)?;
             self.set_error(
                 mem,
-                if user(name) {
+                if id.user() {
                     122
                 } else if extended {
                     234
@@ -60,7 +43,7 @@ impl Runtime64 {
             )?;
             return Ok(0);
         }
-        let bytes: Vec<u8> = if name.ends_with('W') {
+        let bytes: Vec<u8> = if id.wide() {
             text.encode_utf16()
                 .chain([0])
                 .flat_map(u16::to_le_bytes)
@@ -70,7 +53,7 @@ impl Runtime64 {
         };
         mem.check(out, bytes.len(), WRITE)?;
         mem.write(out, &bytes)?;
-        mem.write_int(size, 4, if user(name) { required } else { required - 1 })?;
+        mem.write_int(size, 4, if id.user() { required } else { required - 1 })?;
         Ok(1)
     }
 }

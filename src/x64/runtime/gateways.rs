@@ -31,7 +31,7 @@ pub(crate) struct BoundImport {
     pub dwords: &'static [usize],
     pub groups: u32,
     pub hot: HotImport,
-    pub guid: Option<crate::win32::catalog::GuidApi>,
+    pub api: Option<crate::win32::catalog::ApiId>,
     pub valid: bool,
 }
 impl BoundImport {
@@ -77,7 +77,7 @@ impl BoundImport {
             dwords: contract.map_or_else(|| super::import_dwords(name), |c| c.win64_dwords()),
             groups: super::import_groups(name),
             hot,
-            guid: contract.map(|c| c.id),
+            api: contract.map(|c| c.id),
             valid,
         }
     }

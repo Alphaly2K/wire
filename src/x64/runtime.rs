@@ -217,7 +217,10 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
     use crate::win32::catalog::{resolve, Architecture, Resolution};
     let name = automation::symbol(dll, dxgi::symbol(dll, sockets::symbol(dll, name)));
     match resolve(Architecture::X64, dll, name) {
-        Resolution::Bound(_) => return true,
+        Resolution::Bound(contract) => {
+            return contract.execution(Architecture::X64)
+                == crate::win32::catalog::ExecutionPolicy::Typed
+        }
         Resolution::WrongDll(_) => return false,
         Resolution::Legacy => {}
     }
@@ -248,9 +251,6 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
         return false;
     }
     if winrt::arity(name).is_some() && !winrt::export(dll, name) {
-        return false;
-    }
-    if identity::arity(name).is_some() && !identity::export(dll, name) {
         return false;
     }
     if !dll.eq_ignore_ascii_case("kernel32.dll")
@@ -317,16 +317,18 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
         && !com_export(dll, name)
         && !automation::export(dll, name)
         && !winhttp::export(dll, name)
-        && !identity::export(dll, name)
     {
         return false;
     }
     true
 }
 fn kernel_export(name: &str) -> bool {
-    if crate::win32::catalog::by_name(name).is_some()
-        || identity::user(name)
-        || devices::arity(name).is_some()
+    if let Some(contract) = crate::win32::catalog::by_name(name) {
+        return contract
+            .dlls(crate::win32::catalog::Architecture::X64)
+            .contains(&"kernel32.dll");
+    }
+    if devices::arity(name).is_some()
         || automation::arity(name).is_some()
         || winhttp::arity(name).is_some()
         || winrt::arity(name).is_some()
@@ -380,7 +382,6 @@ fn import_arity(name: &str) -> Option<usize> {
         return Some(contract.parameters.len());
     }
     Some(match name {
-        name if identity::arity(name).is_some() => identity::arity(name).unwrap(),
         name if automation::arity(name).is_some() => automation::arity(name).unwrap(),
         name if winhttp::arity(name).is_some() => winhttp::arity(name).unwrap(),
         name if sockets::arity(name).is_some() => sockets::arity(name).unwrap(),
@@ -652,13 +653,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         return contract.win64_dwords();
     }
     match name {
-        name if identity::arity(name).is_some() => {
-            if name.contains("Ex") {
-                &[0]
-            } else {
-                &[]
-            }
-        }
         name if automation::arity(name).is_some() => automation::dwords(name),
         name if winhttp::arity(name).is_some() => winhttp::dwords(name),
         name if sockets::arity(name).is_some() => sockets::dwords(name),
@@ -804,7 +798,7 @@ fn import_groups(name: &str) -> u32 {
         winhttp::arity(name).is_some(),
         devices::arity(name).is_some(),
         user::message_arity(name).is_some(),
-        identity::arity(name).is_some(),
+        false, // identity moved to catalog typed IDs; preserve legacy bit positions
         winrt::arity(name).is_some(),
         guid::arity(name).is_some(),
         dxgi::arity(name).is_some(),
@@ -1393,6 +1387,19 @@ impl Runtime64 {
     }
     /// Validate the return frame first, then dispatch the exact Win64 arity.
     /// A bad return frame or checked output fault must not commit CPU/API state.
+    fn catalog_call(
+        &mut self,
+        mem: &mut Memory,
+        id: crate::win32::catalog::ApiId,
+        args: &[u64],
+    ) -> Result<u64, String> {
+        use crate::win32::catalog::ApiId;
+        match id {
+            ApiId::Guid(id) => crate::win32::x64::guid::call(mem, id, args),
+            ApiId::Identity(id) => self.identity_call(mem, id, args),
+        }
+    }
+
     pub fn dispatch(
         &mut self,
         dll: &str,
@@ -1473,9 +1480,7 @@ impl Runtime64 {
             });
         }
         let ret = match name {
-            _ if binding.guid.is_some() => {
-                crate::win32::x64::guid::call(mem, binding.guid.unwrap(), args)?
-            }
+            _ if binding.api.is_some() => self.catalog_call(mem, binding.api.unwrap(), args)?,
             _ if binding.groups & (1 << 0) != 0 => self.automation_call(mem, name, args)?,
             _ if binding.groups & (1 << 1) != 0 => self.winhttp_call(mem, name, args)?,
             _ if binding.groups & (1 << 2) != 0 => self.device_call(mem, name, args)?,
@@ -1483,7 +1488,6 @@ impl Runtime64 {
                 Some(value) => value,
                 None => return Ok(Control::Blocked),
             },
-            _ if binding.groups & (1 << 4) != 0 => self.identity_call(mem, name, args)?,
             _ if binding.groups & (1 << 5) != 0 => self.winrt_call(mem, name, args)?,
             _ if binding.groups & (1 << 6) != 0 => self.guid_call(mem, name, args)?,
             _ if binding.groups & (1 << 7) != 0 => self.dxgi_call(mem, name, args)?,
@@ -4948,7 +4952,6 @@ impl Runtime64 {
                             crate::win32::catalog::Resolution::Bound(_)
                         )
                         || guid::export(&provider, &function)
-                        || identity::export(&provider, &function)
                         || devices::export(&provider, &function)
                         || winrt::export(&provider, &function)
                         || com_export(&provider, &function)
