@@ -3,6 +3,28 @@
 use super::*;
 
 #[test]
+fn abi_only_file_binding_rebinds_when_public_entry_changes_execution_policy() {
+    let mut v = Vm::new();
+    assert_eq!(v.k("GetFileAttributesExA", &[0x30000, 1, DATA]), 0);
+    let address = v
+        .api
+        .lookup("kernel32.dll", "GetFileAttributesExA")
+        .unwrap();
+    let index = v.api.stub_index(address).unwrap();
+    v.api.entries[index].name = "GetCurrentDirectoryA".into();
+    // register() still returns the original public stub; dispatch must rebind it.
+    assert_eq!(v.k("GetFileAttributesExA", &[4, DATA, 0]), 3);
+    assert_eq!(v.mem.read_cstr(DATA, 4).unwrap(), "C:\\");
+    assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 12);
+    v.api.entries[index].name = "GetFileAttributesExA".into();
+    v.mem.write_u32(DATA, 0xa5a5a5a5).unwrap();
+    assert_eq!(v.k("GetFileAttributesExA", &[0x30000, 1, DATA]), 0);
+    assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 16);
+    assert_eq!(v.state.last_error, 120);
+    assert_eq!(v.mem.read_u32(DATA).unwrap(), 0xa5a5a5a5);
+}
+
+#[test]
 fn mutation_contract_baseline_keeps_pe32_security_subset_and_abi_only_calls() {
     let mut v = Vm::new();
     v.mem.write_bytes(DATA, b"C:\\fresh\0").unwrap();
