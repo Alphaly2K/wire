@@ -42,7 +42,7 @@ impl Runtime64 {
         }
         let mut bytes = vec![0; if wide { 592 } else { 320 }];
         bytes[..4].copy_from_slice(
-            &files::attributes(&meta, self.not_indexed.contains(path)).to_le_bytes(),
+            &files::attributes(&meta, self.files.is_not_indexed(path)).to_le_bytes(),
         );
         for (offset, time) in [
             (4, meta.created()),
@@ -96,7 +96,7 @@ impl Runtime64 {
                     return Err(2);
                 }
                 let (directory, wildcard) = pattern.rsplit_once('/').unwrap_or((".", &pattern));
-                let fs = self.fs.as_ref().ok_or(3u32)?;
+                let fs = self.files.filesystem().ok_or(3u32)?;
                 let directory = fs.resolve(if directory == "C:" {
                     "C:/"
                 } else if directory.is_empty() {

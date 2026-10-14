@@ -1,7 +1,9 @@
 //! Real confined file handles, with sharing, access and endpoint lifetime checks.
 mod directory;
+mod standard;
+use standard::StandardHandles;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::{File, Metadata, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::PathBuf,
@@ -72,19 +74,168 @@ struct OpenFile {
     flags: u32,
     directory: Option<std::rc::Rc<std::cell::RefCell<directory::Cursor>>>,
 }
+pub(super) enum PathMutation<'a> {
+    Move {
+        destination: Option<&'a str>,
+        flags: u64,
+    },
+    DeleteFile,
+    RemoveDirectory,
+}
 pub(super) struct Files {
     next: u64,
     handles: BTreeMap<u64, OpenFile>,
+    fs: Option<crate::fs::GuestFs>,
+    not_indexed: BTreeSet<PathBuf>,
+    standard: StandardHandles,
 }
 impl Default for Files {
     fn default() -> Self {
         Self {
             next: 0x100000,
             handles: BTreeMap::new(),
+            fs: None,
+            not_indexed: BTreeSet::new(),
+            standard: StandardHandles::default(),
         }
     }
 }
 impl Files {
+    pub(super) fn set_filesystem(&mut self, fs: crate::fs::GuestFs) {
+        self.fs = Some(fs);
+    }
+    pub(super) fn filesystem(&self) -> Option<&crate::fs::GuestFs> {
+        self.fs.as_ref()
+    }
+    pub(super) fn filesystem_mut(&mut self) -> Option<&mut crate::fs::GuestFs> {
+        self.fs.as_mut()
+    }
+    #[inline]
+    pub(super) fn standard(&self) -> &StandardHandles {
+        &self.standard
+    }
+    #[inline]
+    pub(super) fn standard_mut(&mut self) -> &mut StandardHandles {
+        &mut self.standard
+    }
+    pub(super) fn is_not_indexed(&self, path: &std::path::Path) -> bool {
+        self.not_indexed.contains(path)
+    }
+    pub(super) fn set_attributes(&mut self, path: &str, flags: u64) -> Result<(), u32> {
+        if flags & !0x2090 != 0 {
+            return Err(50);
+        }
+        let path = self.fs.as_ref().ok_or(3u32)?.resolve(path)?;
+        let path = path.canonicalize().map_err(|e| crate::fs::win_error(&e))?;
+        // Indexing is absent; preserve the guest metadata without changing type.
+        if flags & 0x2000 != 0 {
+            self.not_indexed.insert(path);
+        } else {
+            self.not_indexed.remove(&path);
+        }
+        Ok(())
+    }
+    pub(super) fn mutate_path(
+        &mut self,
+        path: &str,
+        mutation: PathMutation<'_>,
+    ) -> Result<(), u32> {
+        let (moving, destination, flags, remove_directory) = match mutation {
+            PathMutation::Move { destination, flags } => (true, destination, flags, false),
+            PathMutation::DeleteFile => (false, None, 0, false),
+            PathMutation::RemoveDirectory => (false, None, 0, true),
+        };
+        if flags & !1 != 0 || moving && destination.is_none() {
+            return Err(50);
+        }
+        let fs = self.fs.as_ref().ok_or(3u32)?;
+        let source = fs.resolve(path)?;
+        let current = fs.resolve(&fs.cwd())?;
+        if current.starts_with(&source) {
+            return Err(32);
+        }
+        if self.in_use(&source) {
+            return Err(32);
+        }
+        let canonical_source = source
+            .canonicalize()
+            .map_err(|e| crate::fs::win_error(&e))?;
+        if moving {
+            let target = fs.resolve(destination.unwrap())?;
+            let meta = std::fs::metadata(&source).map_err(|e| crate::fs::win_error(&e))?;
+            if source == target {
+                return Ok(());
+            }
+            if self.in_use(&target) {
+                return Err(32);
+            }
+            if target.exists() {
+                if flags & 1 == 0 {
+                    return Err(183);
+                }
+                if target.is_dir() || meta.is_dir() {
+                    return Err(5);
+                }
+                if target
+                    .metadata()
+                    .map_err(|e| crate::fs::win_error(&e))?
+                    .permissions()
+                    .readonly()
+                {
+                    return Err(5);
+                }
+            }
+            if !target.parent().is_some_and(|p| p.is_dir()) {
+                return Err(3);
+            }
+            std::fs::rename(&source, &target).map_err(|e| crate::fs::win_error(&e))?;
+            let canonical_target = target
+                .canonicalize()
+                .map_err(|e| crate::fs::win_error(&e))?;
+            let moved: Vec<_> = self
+                .not_indexed
+                .iter()
+                .filter_map(|p| {
+                    p.strip_prefix(&canonical_source)
+                        .ok()
+                        .map(|suffix| (p.clone(), canonical_target.join(suffix)))
+                })
+                .collect();
+            self.not_indexed
+                .retain(|p| !p.starts_with(&canonical_target));
+            for (old, new) in moved {
+                self.not_indexed.remove(&old);
+                self.not_indexed.insert(new);
+            }
+        } else if remove_directory {
+            if !source.is_dir() {
+                return Err(267);
+            }
+            std::fs::remove_dir(source).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::DirectoryNotEmpty {
+                    145
+                } else {
+                    crate::fs::win_error(&e)
+                }
+            })?;
+            self.not_indexed.remove(&canonical_source);
+        } else {
+            if source.is_dir() {
+                return Err(5);
+            }
+            if source
+                .metadata()
+                .map_err(|e| crate::fs::win_error(&e))?
+                .permissions()
+                .readonly()
+            {
+                return Err(5);
+            }
+            std::fs::remove_file(source).map_err(|e| crate::fs::win_error(&e))?;
+            self.not_indexed.remove(&canonical_source);
+        }
+        Ok(())
+    }
     pub fn in_use(&self, path: &std::path::Path) -> bool {
         self.handles.values().any(|f| f.path == path)
     }

@@ -3,6 +3,218 @@
 use super::*;
 
 #[test]
+fn win64_standard_handle_redirects_aliases_and_faults_keep_endpoint_lifetimes() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let out = STACK + 0x100;
+    let flags = out + 16;
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetStdHandle",
+            &[0xfffffff5]
+        ),
+        0x101
+    );
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "SetStdHandle",
+            &[0xfffffff5, 0x102]
+        ),
+        1
+    );
+    // Changing the process redirect table does not close the original endpoint.
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetFileType", &[0x101]),
+        3
+    );
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "SetHandleInformation",
+            &[0x101, 2, 2]
+        ),
+        1
+    );
+    mem.write_int(out, 8, 0xdeadbeef).unwrap();
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "DuplicateHandle",
+            &[u64::MAX, 0x101, u64::MAX, out, 0, 1, 3]
+        ),
+        0
+    );
+    assert_eq!(mem.read_int(out, 8).unwrap(), 0xdeadbeef);
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        6
+    );
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "SetHandleInformation",
+            &[0x101, 2, 0]
+        ),
+        1
+    );
+
+    // An invalid output cannot allocate an alias or apply CLOSE_SOURCE.
+    cpu.regs[4] = STACK + 0x1f88;
+    mem.write_int(cpu.regs[4], 8, BASE).unwrap();
+    cpu.regs[1] = u64::MAX;
+    cpu.regs[2] = 0x101;
+    cpu.regs[8] = u64::MAX;
+    cpu.regs[9] = STACK + 8192 - 4;
+    for (i, value) in [0, 1, 3].into_iter().enumerate() {
+        mem.write_int(cpu.regs[4] + 40 + i as u64 * 8, 8, value)
+            .unwrap();
+    }
+    let before = cpu.clone();
+    assert!(runtime
+        .dispatch("kernel32.dll", "DuplicateHandle", &mut cpu, &mut mem)
+        .is_err());
+    assert_eq!(cpu.regs, before.regs);
+    assert_eq!(cpu.rip, before.rip);
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetFileType", &[0x101]),
+        3
+    );
+
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "DuplicateHandle",
+            &[u64::MAX, 0x101, u64::MAX, out, 0, 1, 3]
+        ),
+        1
+    );
+    let alias = mem.read_int(out, 8).unwrap();
+    assert_eq!(alias, 0x7fff3000);
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetFileType", &[0x101]),
+        0
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetFileType", &[alias]),
+        3
+    );
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetStdHandle",
+            &[0xfffffff5]
+        ),
+        0x102
+    );
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "SetHandleInformation",
+            &[alias, 2, 2]
+        ),
+        1
+    );
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "DuplicateHandle",
+            &[u64::MAX, alias, u64::MAX, out, 0, 0, 2]
+        ),
+        1
+    );
+    let second = mem.read_int(out, 8).unwrap();
+    assert_eq!(second, 0x7fff3001);
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetHandleInformation",
+            &[alias, flags]
+        ),
+        1
+    );
+    assert_eq!(mem.read_int(flags, 4).unwrap(), 3);
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetHandleInformation",
+            &[second, flags]
+        ),
+        1
+    );
+    assert_eq!(mem.read_int(flags, 4).unwrap(), 0);
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "CloseHandle", &[alias]),
+        0
+    );
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "SetStdHandle",
+            &[0xfffffff5, second]
+        ),
+        1
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "CloseHandle", &[second]),
+        1
+    );
+    // GetStdHandle returns the stored value even when that endpoint was closed.
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetStdHandle",
+            &[0xfffffff5]
+        ),
+        second
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetFileType", &[second]),
+        0
+    );
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "SetHandleInformation",
+            &[alias, 2, 0]
+        ),
+        1
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "CloseHandle", &[alias]),
+        1
+    );
+}
+
+#[test]
 fn win64_create_directory_validates_default_security_and_faults_before_creating() {
     let (mut mem, mut cpu, mut runtime) = startup();
     const DATA: u64 = 0x6e0000000;

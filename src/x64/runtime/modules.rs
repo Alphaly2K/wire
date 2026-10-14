@@ -53,8 +53,8 @@ impl Runtime64 {
                     Some(text)
                 } else {
                     let fs = self
-                        .fs
-                        .as_ref()
+                        .files
+                        .filesystem()
                         .ok_or("Win64 DLL directory requires filesystem")?;
                     match fs.resolve(&text) {
                         Ok(path) => Some(fs.guest_path(&path)),

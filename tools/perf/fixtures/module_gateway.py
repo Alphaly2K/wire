@@ -3,14 +3,13 @@ import struct
 from amd64_perf import pe64
 
 
-def image(code, builder, width):
+def image(code, builder, width, symbol=b'GetModuleHandleExW\0'):
     code.extend(bytes(512 - len(code)))
     struct.pack_into('<I', code, 0x100, 0x1180)
     struct.pack_into('<I', code, 0x10c, 0x11c0)
     struct.pack_into('<I', code, 0x110, 0x1190)
     struct.pack_into('<Q' if width == 8 else '<I', code, 0x180, 0x11d0)
     code[0x1c0:0x1cd] = b'kernel32.dll\0'
-    symbol = b'GetModuleHandleExW\0'
     code[0x1d2:0x1d2 + len(symbol)] = symbol
     result = bytearray(builder(code))
     struct.pack_into('<II', result, 0x98 + (112 if width == 8 else 96) + 8, 0x1100, 40)

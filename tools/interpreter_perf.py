@@ -207,6 +207,10 @@ def main():
         from perf.fixtures.module_gateway import x64
         data, meta = x64(args.work)
         entries.append(('gateway-module', data, meta))
+    if args.cases and 'gateway-file-type' in args.cases:
+        from perf.fixtures.standard_gateway import x64
+        data, meta = x64(args.work)
+        entries.append(('gateway-file-type', data, meta))
     if args.cases:
         if set(args.cases) - {name for name, _, _ in entries}:
             p.error('unknown fixture name')

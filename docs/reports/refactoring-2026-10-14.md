@@ -20,11 +20,11 @@
 | R0 入口/fixture | 已完成；12 组 golden 输入一致，默认与旧路径各 7 个运行 smoke 通过 |
 | R1 GUID 契约试点 | 已完成唯一契约、双架构冷绑定、纯语义/适配器、行为及性能验收 |
 | R2 分发收敛 | GUID + 6 个 identity + 8 个 version + 42 个 NLS export 已迁移；file/module 等仍 legacy |
-| R3 状态归属 | identity/profile 与可变环境变量已形成独立边界；module/file/thread/COM 待迁移 |
+| R3 状态归属 | identity/profile、环境变量、双架构 module 和 Win64 file 已有 owner；PE32 file/thread/COM 等仍待迁移 |
 | R4 PE32 Process | 已完成装载/执行编排提取；旧 Cpu 方法只保留委托 facade |
 | R5 host/graphics | 已完成 owned UI 请求/事件与 GDI adapter 分离，真实 native 验证通过 |
 | R6 原生 Mono | 按用户指示跳过 |
-| R7 工具/结构 | 先提取测试 harness，旧入口和脚本兼容保留 |
+| R7 工具/结构 | 当前 PE32 内核、领域测试、公共性能工具已整理；后续领域继续迁移，旧入口和脚本兼容保留 |
 
 ## 测试 harness 提取
 

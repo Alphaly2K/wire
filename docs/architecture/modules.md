@@ -14,6 +14,6 @@ Win64 的 `win32::x64::modules::Modules` 私有持有 handle/name/ref、pin、ex
 - `GetModuleHandleEx` 的受检输出和引用提交由架构 adapter 安排。Win64 先检查输出和 flags，解析 handle，再准备 ReferenceUpdate；guest 写入成功后才更新 ref/pin。FreeLibrary 的 guest/provider outcome 保留原来的 CPU/trace 提交路径。
 - resource/USER 只读查询 image metadata，经 owner view 读取；PE 地址/结构范围仍由原有 checked codec 验证。
 
-本批完成状态所有权，模块 API 的签名/provider/能力声明仍使用当前 legacy 路由，后续 R2 再按家族迁入 catalog。文件系统 owner 也仍是后续工作；没有建立万能 Context 或统一两架构 module arena。
+本批完成状态所有权，模块 API 的签名/provider/能力声明仍使用当前 legacy 路由，后续 R2 再按家族迁入 catalog。Win64 文件系统现由 [Files](files.md) 拥有，模块 adapter 显式借用；PE32 文件状态仍待迁移。没有建立万能 Context 或统一两架构 module arena。
 
 验收与性能拒绝/修复记录见 [实施报告](../reports/refactoring-modules-2026-10-14.md)。

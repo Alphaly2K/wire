@@ -84,11 +84,6 @@ pub struct Runtime64 {
     tls: [Option<u64>; 64],
     fls: [Option<(u64, u64)>; 128],
     modules: crate::win32::x64::modules::Modules,
-    std_handles: [u64; 3],
-    std_open: [bool; 3],
-    std_flags: [u32; 3],
-    std_aliases: BTreeMap<u64, (usize, u32)>,
-    next_std_alias: u64,
     tokens: BTreeMap<u64, (u32, u32)>,
     next_token: u64,
     etw: BTreeMap<u64, ([u8; 16], u64, u64)>,
@@ -120,7 +115,6 @@ pub struct Runtime64 {
     screen_reader: bool,
     snapshots: BTreeMap<u64, snapshot::Snapshot>,
     next_snapshot: u64,
-    not_indexed: std::collections::BTreeSet<std::path::PathBuf>,
     pub api_calls: u64,
     /// Most recent calls, bounded independently of the full api_calls counter.
     pub trace: Trace,
@@ -134,7 +128,6 @@ pub struct Runtime64 {
     registry: registry::Registry,
     user: user::User,
     searches: find::Searches,
-    fs: Option<crate::fs::GuestFs>,
     process_attributes: BTreeMap<u64, (u32, BTreeMap<u64, Vec<u8>>)>,
 }
 #[derive(Debug, PartialEq, Eq)]
@@ -827,11 +820,6 @@ impl Runtime64 {
             tls: [None; 64],
             fls: [None; 128],
             modules: crate::win32::x64::modules::Modules::new(TEB + 0x20000),
-            std_handles: [0x100, 0x101, 0x102],
-            std_open: [true; 3],
-            std_flags: [0; 3],
-            std_aliases: BTreeMap::new(),
-            next_std_alias: 0x7fff3000,
             tokens: BTreeMap::new(),
             next_token: 0x7fff4000,
             etw: BTreeMap::new(),
@@ -862,7 +850,6 @@ impl Runtime64 {
             screen_reader: false,
             snapshots: BTreeMap::new(),
             next_snapshot: 0x7fff1000,
-            not_indexed: std::collections::BTreeSet::new(),
             api_calls: 0,
             trace: Trace::default(),
             events: events::Events::default(),
@@ -875,7 +862,6 @@ impl Runtime64 {
             registry: registry::Registry::default(),
             user: user::User::default(),
             searches: find::Searches::default(),
-            fs: None,
             process_attributes: BTreeMap::new(),
         })
     }
@@ -883,35 +869,12 @@ impl Runtime64 {
         mem.write_int(self.teb() + 0x68, 4, error as u64)
     }
     pub fn set_filesystem(&mut self, fs: crate::fs::GuestFs) {
-        self.fs = Some(fs);
-    }
-    fn std_index(&self, handle: u64) -> Option<usize> {
-        self.std_aliases.get(&handle).map(|h| h.0).or_else(|| {
-            handle
-                .checked_sub(0x100)
-                .filter(|&n| n < 3 && self.std_open[n as usize])
-                .map(|n| n as usize)
-        })
-    }
-    fn std_flags(&self, handle: u64) -> Option<u32> {
-        self.std_aliases
-            .get(&handle)
-            .map(|h| h.1)
-            .or_else(|| self.std_index(handle).map(|n| self.std_flags[n]))
-    }
-    fn close_std(&mut self, handle: u64) -> Result<(), u32> {
-        if self.std_flags(handle).ok_or(6u32)? & 2 != 0 {
-            return Err(6);
-        }
-        if self.std_aliases.remove(&handle).is_none() {
-            self.std_open[(handle - 0x100) as usize] = false;
-        }
-        Ok(())
+        self.files.set_filesystem(fs);
     }
     pub(crate) fn prepare_user_profile(&self) -> Result<(), String> {
         let fs = self
-            .fs
-            .as_ref()
+            .files
+            .filesystem()
             .ok_or("Win64 user profile requires a filesystem")?;
         for path in self.profile.user_directories() {
             let host = fs
@@ -946,7 +909,8 @@ impl Runtime64 {
         }
     }
     fn native_module(&mut self, name: &str, load: bool) -> Result<u64, String> {
-        self.modules.native_module(self.fs.as_ref(), name, load)
+        self.modules
+            .native_module(self.files.filesystem(), name, load)
     }
     pub fn install_gateways(&mut self, gateways: BTreeMap<u64, String>) {
         self.gateways = gateways.into();
@@ -1087,8 +1051,9 @@ impl Runtime64 {
         self.modules.register_image(base, size, entry);
     }
     pub(crate) fn filesystem(&self) -> Result<crate::fs::GuestFs, String> {
-        self.fs
-            .clone()
+        self.files
+            .filesystem()
+            .cloned()
             .ok_or("Win64 module load requires a filesystem".into())
     }
     pub(crate) fn complete_call(&mut self, dll: &str, function: &str, args: &[u64], base: u64) {
@@ -1670,104 +1635,17 @@ impl Runtime64 {
                 } else {
                     None
                 };
-                let result = (|| -> Result<(), u32> {
-                    let flags = if moving && name.contains("Ex") {
-                        args[2]
-                    } else {
-                        0
-                    };
-                    if flags & !1 != 0 || moving && destination.is_none() {
-                        return Err(50);
+                let mutation = if moving {
+                    files::PathMutation::Move {
+                        destination: destination.as_deref(),
+                        flags: if name.contains("Ex") { args[2] } else { 0 },
                     }
-                    let fs = self.fs.as_ref().ok_or(3u32)?;
-                    let source = fs.resolve(&path)?;
-                    let current = fs.resolve(&fs.cwd())?;
-                    if current.starts_with(&source) {
-                        return Err(32);
-                    }
-                    if self.files.in_use(&source) {
-                        return Err(32);
-                    }
-                    let canonical_source = source
-                        .canonicalize()
-                        .map_err(|e| crate::fs::win_error(&e))?;
-                    if moving {
-                        let target = fs.resolve(destination.as_ref().unwrap())?;
-                        let meta =
-                            std::fs::metadata(&source).map_err(|e| crate::fs::win_error(&e))?;
-                        if source == target {
-                            return Ok(());
-                        }
-                        if self.files.in_use(&target) {
-                            return Err(32);
-                        }
-                        if target.exists() {
-                            if flags & 1 == 0 {
-                                return Err(183);
-                            }
-                            if target.is_dir() || meta.is_dir() {
-                                return Err(5);
-                            }
-                            if target
-                                .metadata()
-                                .map_err(|e| crate::fs::win_error(&e))?
-                                .permissions()
-                                .readonly()
-                            {
-                                return Err(5);
-                            }
-                        }
-                        if !target.parent().is_some_and(|p| p.is_dir()) {
-                            return Err(3);
-                        }
-                        std::fs::rename(&source, &target).map_err(|e| crate::fs::win_error(&e))?;
-                        let canonical_target = target
-                            .canonicalize()
-                            .map_err(|e| crate::fs::win_error(&e))?;
-                        let moved: Vec<_> = self
-                            .not_indexed
-                            .iter()
-                            .filter_map(|p| {
-                                p.strip_prefix(&canonical_source)
-                                    .ok()
-                                    .map(|suffix| (p.clone(), canonical_target.join(suffix)))
-                            })
-                            .collect();
-                        self.not_indexed
-                            .retain(|p| !p.starts_with(&canonical_target));
-                        for (old, new) in moved {
-                            self.not_indexed.remove(&old);
-                            self.not_indexed.insert(new);
-                        }
-                    } else if name.starts_with("RemoveDirectory") {
-                        if !source.is_dir() {
-                            return Err(267);
-                        }
-                        std::fs::remove_dir(source).map_err(|e| {
-                            if e.kind() == std::io::ErrorKind::DirectoryNotEmpty {
-                                145
-                            } else {
-                                crate::fs::win_error(&e)
-                            }
-                        })?;
-                        self.not_indexed.remove(&canonical_source);
-                    } else {
-                        if source.is_dir() {
-                            return Err(5);
-                        }
-                        if source
-                            .metadata()
-                            .map_err(|e| crate::fs::win_error(&e))?
-                            .permissions()
-                            .readonly()
-                        {
-                            return Err(5);
-                        }
-                        std::fs::remove_file(source).map_err(|e| crate::fs::win_error(&e))?;
-                        self.not_indexed.remove(&canonical_source);
-                    }
-                    Ok(())
-                })();
+                } else if name.starts_with("RemoveDirectory") {
+                    files::PathMutation::RemoveDirectory
+                } else {
+                    files::PathMutation::DeleteFile
+                };
+                let result = self.files.mutate_path(&path, mutation);
                 match result {
                     Ok(()) => 1,
                     Err(error) => {
@@ -1790,26 +1668,13 @@ impl Runtime64 {
                     } else {
                         Some(args[4] as u32)
                     };
-                    if let Some(index) = self.std_index(args[1]) {
-                        if args[6] & 1 != 0 && self.std_flags(args[1]).unwrap() & 2 != 0 {
-                            return Err(6);
-                        }
-                        if let Some(access) = desired {
-                            let allowed = if index == 0 { 0x80120089 } else { 0x40120116 };
-                            if access & !allowed != 0 {
-                                return Err(5);
-                            }
-                            // A narrowed stdio handle needs separate data access rights.
-                            return Err(50);
-                        }
-                        if self.std_aliases.len() >= 128 || self.next_std_alias >= 0x7fff4000 {
-                            return Err(8);
-                        }
-                        let handle = self.next_std_alias;
-                        self.next_std_alias += 1;
-                        self.std_aliases
-                            .insert(handle, (index, (args[5] != 0) as u32));
-                        Ok(handle)
+                    if let Some(result) = self.files.standard_mut().duplicate(
+                        args[1],
+                        desired,
+                        args[5] != 0,
+                        args[6] & 1 != 0,
+                    ) {
+                        result
                     } else if self.files.flags(args[1]).is_some() {
                         if args[6] & 1 != 0 && self.files.flags(args[1]).unwrap() & 2 != 0 {
                             return Err(6);
@@ -1843,8 +1708,8 @@ impl Runtime64 {
                     Ok(handle) => {
                         mem.write_int(args[3], 8, handle)?;
                         if args[6] & 1 != 0 {
-                            if self.std_index(args[1]).is_some() {
-                                self.close_std(args[1]).map_err(|e| {
+                            if self.files.standard().index(args[1]).is_some() {
+                                self.files.standard_mut().close(args[1]).map_err(|e| {
                                     format!("close duplicated std handle error {e}")
                                 })?;
                             } else if self.mappings.flags(args[1]).is_some() {
@@ -1867,21 +1732,7 @@ impl Runtime64 {
             }
             "SetFileAttributesW" | "SetFileAttributesA" => {
                 let path = Self::path_name(mem, args[0], name.ends_with('W'))?;
-                let result = (|| -> Result<(), u32> {
-                    if args[1] & !0x2090 != 0 {
-                        return Err(50);
-                    }
-                    let path = self.fs.as_ref().ok_or(3u32)?.resolve(&path)?;
-                    let path = path.canonicalize().map_err(|e| crate::fs::win_error(&e))?;
-                    // Guest content indexing is absent; retain this actual guest metadata
-                    // for both queries. Directory/normal flags do not change file type.
-                    if args[1] & 0x2000 != 0 {
-                        self.not_indexed.insert(path);
-                    } else {
-                        self.not_indexed.remove(&path);
-                    }
-                    Ok(())
-                })();
+                let result = self.files.set_attributes(&path, args[1]);
                 match result {
                     Ok(()) => 1,
                     Err(error) => {
@@ -1939,7 +1790,7 @@ impl Runtime64 {
                         return Err(50);
                     }
                     let path = path.ok_or(50u32)?;
-                    let host = self.fs.as_ref().ok_or(3u32)?.resolve(path)?;
+                    let host = self.files.filesystem().ok_or(3u32)?.resolve(path)?;
                     if args[1] & 0x8000 != 0 {
                         std::fs::create_dir_all(&host).map_err(|e| crate::fs::win_error(&e))?;
                     }
@@ -1995,8 +1846,8 @@ impl Runtime64 {
                 }
                 let path = Self::path_name(mem, args[0], name.ends_with('W'))?;
                 let result = self
-                    .fs
-                    .as_ref()
+                    .files
+                    .filesystem()
                     .ok_or("Win64 directory requires filesystem")?
                     .resolve(&path)
                     .and_then(|p| {
@@ -2599,8 +2450,8 @@ impl Runtime64 {
                     mem.read_int(args[3] + 16, 4)? != 0
                 };
                 let result = self
-                    .fs
-                    .as_ref()
+                    .files
+                    .filesystem()
                     .ok_or("Win64 file open has no mounted filesystem")?
                     .resolve(&path)
                     .and_then(|path| {
@@ -2644,7 +2495,7 @@ impl Runtime64 {
                         &meta,
                         path.canonicalize()
                             .ok()
-                            .is_some_and(|p| self.not_indexed.contains(&p)),
+                            .is_some_and(|p| self.files.is_not_indexed(&p)),
                     );
                     let kind = if name == "GetFileInformationByHandleEx" {
                         args[1]
@@ -2803,8 +2654,8 @@ impl Runtime64 {
                 } else {
                     let path = Self::path_name(mem, args[0], name.ends_with('W'))?;
                     let fs = self
-                        .fs
-                        .as_ref()
+                        .files
+                        .filesystem()
                         .ok_or("Win64 file query has no mounted filesystem")?;
                     match fs.resolve(&path).and_then(|p| {
                         std::fs::metadata(&p)
@@ -2816,7 +2667,7 @@ impl Runtime64 {
                                 | if path
                                     .canonicalize()
                                     .ok()
-                                    .is_some_and(|p| self.not_indexed.contains(&p))
+                                    .is_some_and(|p| self.files.is_not_indexed(&p))
                                 {
                                     0x2000
                                 } else {
@@ -2871,8 +2722,8 @@ impl Runtime64 {
             "SetCurrentDirectoryW" | "SetCurrentDirectoryA" => {
                 let path = Self::path_name(mem, args[0], name.ends_with('W'))?;
                 match self
-                    .fs
-                    .as_mut()
+                    .files
+                    .filesystem_mut()
                     .ok_or("Win64 has no mounted filesystem")?
                     .set_cwd(&path)
                 {
@@ -2885,8 +2736,8 @@ impl Runtime64 {
             }
             "GetCurrentDirectoryW" | "GetCurrentDirectoryA" => {
                 let path = self
-                    .fs
-                    .as_ref()
+                    .files
+                    .filesystem()
                     .ok_or("Win64 has no mounted filesystem")?
                     .cwd();
                 let wide = name.ends_with('W');
@@ -3155,8 +3006,8 @@ impl Runtime64 {
                     }
                 };
                 let fs = self
-                    .fs
-                    .as_ref()
+                    .files
+                    .filesystem()
                     .ok_or("Win64 CreateProcess has no mounted guest filesystem")?;
                 let result = fs
                     .resolve(&application)
@@ -3212,7 +3063,7 @@ impl Runtime64 {
                     .or_else(|| self.mappings.flags(args[0]))
                     .or_else(|| self.threads.flags(args[0]))
                     .or_else(|| self.snapshots.get(&args[0]).map(|s| s.flags))
-                    .or_else(|| self.std_flags(args[0]))
+                    .or_else(|| self.files.standard().flags(args[0]))
                     .or_else(|| self.tokens.get(&args[0]).map(|h| h.1))
                 {
                     mem.write_int(args[1], 4, flags as u64)?;
@@ -3239,18 +3090,17 @@ impl Runtime64 {
                     self.record(dll, name, args, result);
                     return Ok(Control::Returned);
                 }
-                if let Some(old) = self.std_flags(args[0]) {
-                    let result = if args[1] & !3 != 0 {
-                        self.set_error(mem, 87)?;
-                        0
-                    } else {
-                        let new = old & !(args[1] as u32) | args[2] as u32 & args[1] as u32;
-                        if let Some(alias) = self.std_aliases.get_mut(&args[0]) {
-                            alias.1 = new;
-                        } else {
-                            self.std_flags[(args[0] - 0x100) as usize] = new;
+                if let Some(result) = self
+                    .files
+                    .standard_mut()
+                    .set_flags(args[0], args[1], args[2])
+                {
+                    let result = match result {
+                        Ok(()) => 1,
+                        Err(error) => {
+                            self.set_error(mem, error)?;
+                            0
                         }
-                        1
                     };
                     returned.regs[0] = result;
                     *cpu = returned;
@@ -4018,9 +3868,9 @@ impl Runtime64 {
                 };
                 if let Some(index) = index {
                     if name == "GetStdHandle" {
-                        self.std_handles[index]
+                        self.files.standard().redirect(index)
                     } else {
-                        self.std_handles[index] = args[1];
+                        self.files.standard_mut().set_redirect(index, args[1]);
                         1
                     }
                 } else {
@@ -4033,7 +3883,7 @@ impl Runtime64 {
                 }
             }
             "GetFileType" | "GetConsoleMode" | "CloseHandle" => {
-                let index = self.std_index(args[0]);
+                let index = self.files.standard().index(args[0]);
                 if index.is_some() {
                     match name {
                         "GetFileType" => 3, // Redirected host pipe, not a console.
@@ -4041,7 +3891,7 @@ impl Runtime64 {
                             self.set_error(mem, 6)?;
                             0
                         }
-                        _ => match self.close_std(args[0]) {
+                        _ => match self.files.standard_mut().close(args[0]) {
                             Ok(()) => 1,
                             Err(error) => {
                                 self.set_error(mem, error)?;
@@ -4187,7 +4037,7 @@ impl Runtime64 {
                     self.record(dll, name, args, value);
                     return Ok(Control::Returned);
                 }
-                let index = self.std_index(args[0]).filter(|&i| i != 0);
+                let index = self.files.standard().index(args[0]).filter(|&i| i != 0);
                 if name == "WriteConsoleW" || index.is_none() {
                     self.set_error(mem, 6)?;
                     0
@@ -4257,7 +4107,7 @@ impl Runtime64 {
                 match self.native_module(&module, true) {
                     Ok(handle) => handle,
                     Err(error) => {
-                        let path = self.fs.as_ref().ok_or(126u32).and_then(|fs| {
+                        let path = self.files.filesystem().ok_or(126u32).and_then(|fs| {
                             self.module_path(fs, &module, flags)
                                 .map(|path| fs.guest_path(&path))
                         });

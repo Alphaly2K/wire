@@ -215,8 +215,8 @@ impl Runtime64 {
         } else {
             mem.check(a[5], capacity, WRITE)?;
             self.files.directory_batch(
-                self.fs
-                    .as_ref()
+                self.files
+                    .filesystem()
                     .ok_or("directory query has no mounted filesystem")?,
                 a[0],
                 capacity,
@@ -254,8 +254,8 @@ impl Runtime64 {
         }
         mem.check(a[2], a[3] as usize, WRITE)?;
         let result = self.files.directory_batch(
-            self.fs
-                .as_ref()
+            self.files
+                .filesystem()
                 .ok_or("directory query has no mounted filesystem")?,
             a[0],
             a[3] as usize,
