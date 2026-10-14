@@ -4,6 +4,8 @@
 
 模块 API catalog 扩展前新增独立的 [IR 布局隔离](refactoring-ir-layout-2026-10-14.md)：仅改变 macOS 寄存器段执行器的节归属/对齐，26 个 case/path 三对验收，最大 CPU 中位数回退 +2.12%，release 403、debug 288、native GPU 7 项通过。原 module 候选因 bit-test 持续回退没有接受，后续以该独立批次为新基线继续验收。
 
+后续 module 候选又暴露受检段的布局敏感性；在 `ff7495a` 上独立隔离 `CheckedSegment::execute` 并声明正确 Mach-O 代码属性。26 个 case/path 全部校验，memory +0.07%；SSE +3.63% 经 700M/IR 计数/机器码调查后记录接受。两项布局调整均没有更改 ISA/fault/预算行为，详情和失败轮次继续保存在同一报告。
+
 ## R0 固定基线
 
 - 代码：`2e78377`，tracked working tree 干净。

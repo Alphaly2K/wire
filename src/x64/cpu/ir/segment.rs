@@ -67,7 +67,10 @@ impl RegisterSegment {
     }
     // Mach-O places this loop in a separately aligned section: unrelated API
     // refactors must not shift every dispatch target within an instruction line.
-    #[cfg_attr(target_os = "macos", link_section = "__TEXT,__wire_ir")]
+    #[cfg_attr(
+        target_os = "macos",
+        link_section = "__TEXT,__wire_ir,regular,pure_instructions"
+    )]
     pub(crate) fn execute(&self, cpu: &mut Cpu64) {
         // Verifier: no admitted operation reads RIP, and only the final
         // instruction can branch. Absolute RIP-relative operands were fixed
@@ -139,6 +142,11 @@ impl CheckedSegment {
             bytes,
         })
     }
+    // Checked scalar dispatch has the same sensitivity to unrelated text layout.
+    #[cfg_attr(
+        target_os = "macos",
+        link_section = "__TEXT,__wire_irchk,regular,pure_instructions"
+    )]
     pub(crate) fn execute(
         &self,
         cpu: &mut Cpu64,

@@ -23,3 +23,13 @@ macOS 的寄存器段执行器现放在 `__TEXT,__wire_ir`，由 Cargo 的 linke
 - Alice 复用现有软链接隔离目录，200M work 按预算停止，retired 199588574、API calls 390526，隐藏窗口 client 314×211，draw/present 0；与 before 的启动边界相同。没有复制游戏，也没有推断完整游戏 FPS。
 
 原始数据位于 `wire-out/refactoring-2026-10-14/ir-layout-baseline-*`；失败候选为 `r2-module-bit-investigation`、`r2-module-control-bit-preflight`。机器码与跳转表分析记录为 `ir-layout-machine-code.json`、`r2-module-jump-table-analysis.json`。普通 objdump 默认只选 `__text`，读取本函数须显式使用 `--section=__wire_ir --disassemble`。
+
+## 受检段的独立补充
+
+以 `ff7495a` 为基线，module 组合候选恢复 scalar 优先分发后，700M memory 中位数 +5.41%。两版 `CheckedSegment::execute` 均为 2156 条指令、opcode 序列相同，入口从 `0x1000f7158` 移到 `0x1000f69c8`。将受检段放入另一个 4KiB 对齐的 `__TEXT,__wire_irchk`，权限、逐指令回滚及预算逻辑保持；同时为两个节显式声明 `regular,pure_instructions`，消除 linker 对代码节/unwind 属性的警告。失败日志也保留。
+
+再次撤出 module 改动，独立冻结 `ir-layout-checked-wire/wire`：SHA-256 `6832b3042699771ead13f04b08766061468e102c06c947c4ceaf3271f0478142`，5,885,560 bytes，比上批增加 16,576 bytes。完整 release 403、debug 288、strict Clippy、fmt 和真实 GPU 7 项通过。26 个 case/path 三对全部校验；PE32 integer/raw 短样本 +3.33%，700M 为 +1.12%。AMD64 memory +0.07%，其余最终结果最大回退为 SSE +3.63%，RSS 中位数最大增加 144KiB。
+
+SSE 的 700M 复测保留了 +3.63% 局部成本，没有触发三对均超过 5% 的拒绝条件。诊断 replay 的两版 IR=1000003、fallback=0、translations=13、invalidations=0；`execute_mixed` 均有 2925 条指令、opcode 序列相同，入口从 `0x100104d7c` 移至 `0x100102c1c`。接受这一已调查的布局成本，以固定受检段边界；没有增加向量/ISA 实现、cache 容量或通用 payload，也不将其全部归因于单一地址变化。后续模块组合独立对照这个新基线。
+
+Alice 的 200M work 仍按相同预算出口停止：retired 199588536、API calls 390560，隐藏窗口 client 314×211，draw/present 0。证据在 `ir-layout-checked-*`，包括全部短样本、700M 扩样、独立 stats 和机器码分析；计时与 Cargo/diagnostics/native 测试分开。受检段反汇编须显式选择 `--section=__wire_irchk`。

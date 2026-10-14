@@ -18,6 +18,8 @@ R7 的 38 个 case/path 三对全部校验通过；large-code 初筛超 3% 后�
 
 macOS AMD64 寄存器段执行器现独立放入 4KiB 对齐的 Mach-O 代码节，保持循环 body 与 guest 语义。该独立批次 release 403、debug 288、外部 GPU 7 项通过；26 个 case/path 三对校验，最大 CPU 中位数回退 +2.12%。它用于减轻 Win32 handler 重构引发的布局敏感性，模块 catalog 仍单独验收。见 [布局记录](reports/refactoring-ir-layout-2026-10-14.md)。
 
+受检段也已独立隔离，并补齐两个节的显式代码属性。该补充批次 release 403、debug 288、native GPU 7 项通过；26 个 case/path 校验，memory +0.07%。SSE 扩样仍有 +3.63% 局部成本，已核对相同 IR/cache 计数及 2925 条指令的 opcode 序列并记录接受；其它最终结果最大回退 +2.63%，资源/cache 上限保持。模块组合以这批为新基线。
+
 PE32 kernel 资源 owner 抽取因 V2 bit-test 持续回退被拒绝，运行时代码恢复至 `4500aaf`。event 内联版的 700M bit-test 为 +7.83%，后续惰性 tid 和保留原类型身份的候选也未满足门槛；采样与指令形态调查见 [拒绝记录](reports/refactoring-pe32-kernel-rejected-2026-10-14.md)。仅保留独立故障/寿命回归和原创 event fixture，PE32 状态迁移仍待完成。
 
 Win64 文件状态批次的首版因 AMD64 memory 持续回退被拒绝；恢复小型页查询 getter 内联后，24 个 case/path 三对全部校验。扩样的 memory −0.64%、PE32 integer/IR +0.38%、data-alias −2.12%，其余最终矩阵最大 CPU 中位数回退 +2.71%，RSS 最大增加 128KiB。标准 endpoint/alias 故障基线、短样本调查和全部证据见 [文件记录](reports/refactoring-files-2026-10-14.md)。
