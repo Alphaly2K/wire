@@ -75,7 +75,7 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def gateway_fixture(work):
+def gateway_fixture(work, version=False):
     n = max(1, work // 5)
     code = bytearray.fromhex('4156 4157 41bf') + struct.pack('<I', n)
     code += bytes.fromhex('4531f6 4883ec28')
@@ -90,10 +90,12 @@ def gateway_fixture(work):
     struct.pack_into('<I', code, 0x110, 0x1190)
     struct.pack_into('<Q', code, 0x180, 0x11d0)
     code[0x1c0:0x1cd] = b'kernel32.dll\0'
-    symbol = b'GetCurrentThreadId\0'; code[0x1d2:0x1d2 + len(symbol)] = symbol
+    symbol = b'GetVersion\0' if version else b'GetCurrentThreadId\0'
+    code[0x1d2:0x1d2 + len(symbol)] = symbol
     image = bytearray(pe64(code))
     struct.pack_into('<II', image, 0x98 + 112 + 8, 0x1100, 40)
-    return image, dict(rax=hex(n), retired=4 * n + 10, work=5 * n + 10, api_calls=n, startup=True)
+    value = 0x4a65000a if version else 1
+    return image, dict(rax=hex(n * value & MASK), retired=4 * n + 10, work=5 * n + 10, api_calls=n, startup=True)
 
 
 def replay(binary, exe, expected, folder, mode, timeout, cache=None, qos_clamp=None):
@@ -181,6 +183,9 @@ def main():
     if args.cases and 'gateway-thread-id' in args.cases:
         data, meta = gateway_fixture(args.work)
         entries.append(('gateway-thread-id', data, meta))
+    if args.cases and 'gateway-version' in args.cases:
+        data, meta = gateway_fixture(args.work, version=True)
+        entries.append(('gateway-version', data, meta))
     if args.cases and 'gateway-guid' in args.cases:
         from perf.fixtures.guid_gateway import fixture
         data, meta = fixture(args.work)

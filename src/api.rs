@@ -43,27 +43,26 @@ pub struct ApiTable {
 /// that view invalidate this snapshot before the next call (including reentry).
 struct BoundEntry {
     entry: ApiEntry,
-    guid: Option<crate::win32::catalog::GuidApi>,
+    typed: Option<crate::win32::catalog::ApiId>,
     stack_bytes: Option<u32>,
 }
 impl BoundEntry {
     fn new(entry: ApiEntry) -> Self {
-        use crate::win32::catalog::{resolve, ApiId, Architecture, ExecutionPolicy, Resolution};
+        use crate::win32::catalog::{resolve, Architecture, ExecutionPolicy, Resolution};
         let contract = match resolve(Architecture::X86, &entry.dll, &entry.name) {
             Resolution::Bound(contract) => Some(contract),
             Resolution::WrongDll(_) | Resolution::Legacy => None,
         };
-        let guid = contract.and_then(|c| match c.id {
-            ApiId::Guid(id) if c.execution(Architecture::X86) == ExecutionPolicy::Typed => Some(id),
-            _ => None,
-        });
+        let typed = contract
+            .filter(|c| c.execution(Architecture::X86) == ExecutionPolicy::Typed)
+            .map(|c| c.id);
         let stack_bytes = contract.map_or_else(
             || legacy_stack_args_bytes(&entry.dll, &entry.name),
             |c| Some(c.stdcall_bytes()),
         );
         Self {
             entry,
-            guid,
+            typed,
             stack_bytes,
         }
     }
@@ -814,11 +813,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetExitCodeThread", 8),
                 ("TerminateThread", 8),
                 ("CreateSemaphoreA", 16),
-                ("GetVersion", 0),
-                ("GetVersionExA", 4),
-                ("GetVersionExW", 4),
-                ("VerifyVersionInfoW", 16),
-                ("VerSetConditionMask", 16),
                 ("GetDiskFreeSpaceA", 20),
                 ("GetDiskFreeSpaceW", 20),
                 ("GetDriveTypeA", 4),
@@ -1435,7 +1429,7 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
             "mpr.dll",
             &[("WNetGetUniversalNameA", 16), ("WNetGetUniversalNameW", 16)],
         );
-        add("ntdll.dll", &[("RtlGetVersion", 4), ("RtlUnwind", 16)]);
+        add("ntdll.dll", &[("RtlUnwind", 16)]);
         add(
             "user32.dll",
             &[
@@ -1762,8 +1756,11 @@ pub fn dispatch(
     let mut yield_after_return = false;
     let ret: u32;
     match (dll, name) {
-        _ if binding.guid.is_some() => {
-            match crate::win32::x86::guid::call(binding.guid.unwrap(), &args, mem) {
+        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Guid(_))) => {
+            let Some(crate::win32::catalog::ApiId::Guid(id)) = binding.typed else {
+                unreachable!();
+            };
+            match crate::win32::x86::guid::call(id, &args, mem) {
                 Ok(value) => {
                     ret = value;
                     note = "common process/string/COM allocation contract".into();
@@ -1774,6 +1771,24 @@ pub fn dispatch(
                     note = format!("common API error {error:#x}");
                 }
             }
+        }
+        _ if matches!(
+            binding.typed,
+            Some(crate::win32::catalog::ApiId::Version(_))
+        ) =>
+        {
+            let Some(crate::win32::catalog::ApiId::Version(id)) = binding.typed else {
+                unreachable!();
+            };
+            let value = crate::win32::x86::version::call(
+                id,
+                &args,
+                mem,
+                &state.environment,
+                &mut state.last_error,
+            )?;
+            ret = value.value;
+            note = value.note.into();
         }
         (
             "winmm.dll",
@@ -2364,10 +2379,6 @@ pub fn dispatch(
             state.last_error = args[0];
             ret = 0;
         }
-        ("kernel32.dll", "GetVersion") => {
-            ret = state.environment.version().packed();
-            note = "fake Windows 7 (6.1.7601)".into();
-        }
         ("kernel32.dll", "GetCurrentProcess") => ret = 0xffff_ffff,
         ("kernel32.dll", "GetCurrentProcessId") => {
             ret = 4242;
@@ -2891,35 +2902,6 @@ pub fn dispatch(
         }
         ("mpr.dll", "WNetGetUniversalNameA") | ("mpr.dll", "WNetGetUniversalNameW") => {
             ret = 2250; // ERROR_NOT_CONNECTED: sandbox C: is a local drive
-        }
-        ("kernel32.dll", "GetVersionExA")
-        | ("kernel32.dll", "GetVersionExW")
-        | ("ntdll.dll", "RtlGetVersion") => {
-            let size = mem.read_u32(args[0]).map_err(|e| e.to_string())?;
-            if matches!(size, 148 | 156 | 276 | 284) {
-                let mut info = vec![0; size as usize];
-                let version = state.environment.version();
-                for (i, value) in [
-                    size,
-                    version.major,
-                    version.minor,
-                    version.build,
-                    version.platform,
-                ]
-                .iter()
-                .enumerate()
-                {
-                    info[i * 4..i * 4 + 4].copy_from_slice(&value.to_le_bytes());
-                }
-                if matches!(size, 156 | 284) {
-                    info[size as usize - 2] = version.product_type;
-                } // VER_NT_WORKSTATION
-                mem.write_bytes(args[0], &info).map_err(|e| e.to_string())?;
-                ret = if dll == "ntdll.dll" { 0 } else { 1 };
-            } else {
-                state.last_error = 87;
-                ret = 0;
-            }
         }
         ("kernel32.dll", "FormatMessageA") | ("kernel32.dll", "FormatMessageW") => {
             let wide = name.ends_with('W');

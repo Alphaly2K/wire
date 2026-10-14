@@ -62,7 +62,30 @@ def gdi_gateway_fixture(work):
     struct.pack_into('<II', image, 0x98 + 96 + 8, 0x1100, 40)
     return image, dict(eax=0, retired=7 * n + 14)
 
+def version_gateway_fixture(work):
+    n = max(1, work // 4)
+    code = bytearray.fromhex('57 53 bf') + struct.pack('<I', n)
+    code += bytes.fromhex('31db')
+    loop = len(code)
+    code += bytes.fromhex('ff15') + struct.pack('<I', 0x401190)
+    code += bytes.fromhex('01c3 4f')
+    at = len(code)
+    code += bytes.fromhex('0f85') + struct.pack('<i', loop - at - 6)
+    code += bytes.fromhex('89d8 5b 5f cc')
+    code.extend(bytes(512 - len(code)))
+    struct.pack_into('<I', code, 0x100, 0x1180)
+    struct.pack_into('<I', code, 0x10c, 0x11c0)
+    struct.pack_into('<I', code, 0x110, 0x1190)
+    struct.pack_into('<I', code, 0x180, 0x11d0)
+    code[0x1c0:0x1cd] = b'kernel32.dll\0'
+    code[0x1d2:0x1dd] = b'GetVersion\0'
+    image = pe32(code)
+    struct.pack_into('<II', image, 0x98 + 96 + 8, 0x1100, 40)
+    return image, dict(eax=(n * 0x1db10106) & 0xffffffff, retired=4 * n + 7)
+
 def fixture(name,work):
+    if name == 'gateway-version':
+        return version_gateway_fixture(work)
     if name == 'gateway-guid':
         return guid_gateway_fixture(work)
     if name == 'gateway-gdi':

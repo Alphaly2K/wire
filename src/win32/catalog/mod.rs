@@ -2,8 +2,10 @@
 //! Unconverted families remain on explicit legacy routes.
 mod guid;
 mod identity;
+mod version;
 pub use guid::{GuidApi, GUID_CONTRACTS};
 pub use identity::{IdentityApi, IDENTITY_CONTRACTS};
+pub use version::{VersionApi, VERSION_CONTRACTS};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Architecture {
@@ -16,6 +18,9 @@ pub enum Parameter {
     Pointer,
     Int32,
     Uint32,
+    /// A byte is consumed by its adapter; retain the historical Win64 carrier.
+    Uint8,
+    Uint64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,12 +28,16 @@ pub enum ReturnConvention {
     CharacterCount,
     Hresult,
     BoolLastError,
+    Uint32,
+    Uint64,
+    Ntstatus,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApiId {
     Guid(GuidApi),
     Identity(IdentityApi),
+    Version(VersionApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,6 +45,8 @@ pub enum ExecutionPolicy {
     Typed,
     /// ABI is known; preserve the PE32 unimplemented diagnostic/return policy.
     LegacyUnimplemented,
+    /// No binding for this architecture; preserve its prior rejection/unknown ABI.
+    Absent,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -101,7 +112,16 @@ impl Contract {
         .execution
     }
     pub fn stdcall_bytes(&self) -> u32 {
-        self.parameters.len() as u32 * 4
+        self.parameters
+            .iter()
+            .map(|parameter| {
+                if matches!(parameter, Parameter::Uint64) {
+                    8
+                } else {
+                    4
+                }
+            })
+            .sum()
     }
     pub fn win64_dwords(&'static self) -> &'static [usize] {
         &self.dwords[..self.dword_count]
@@ -135,7 +155,10 @@ pub(crate) fn by_name(name: &str) -> Option<&'static Contract> {
 }
 
 pub fn contracts() -> impl Iterator<Item = &'static Contract> {
-    GUID_CONTRACTS.iter().chain(IDENTITY_CONTRACTS.iter())
+    GUID_CONTRACTS
+        .iter()
+        .chain(IDENTITY_CONTRACTS.iter())
+        .chain(VERSION_CONTRACTS.iter())
 }
 
 #[cfg(test)]
@@ -161,7 +184,10 @@ mod tests {
                     assert_eq!(*dll, dll.to_ascii_lowercase());
                     assert!(owners.insert(*dll), "duplicate owner {}", dll);
                 }
-                assert!(!owners.is_empty());
+                assert_eq!(
+                    owners.is_empty(),
+                    contract.execution(architecture) == ExecutionPolicy::Absent
+                );
             }
         }
     }

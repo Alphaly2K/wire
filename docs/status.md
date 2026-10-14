@@ -2,9 +2,11 @@
 
 更新日期：2026-10-14。重构前固定代码基线 `2e78377`；本轮进度见 [重构记录](reports/refactoring-2026-10-14.md)。
 
-R0/R1、R4、R5 已完成：正式 fixture、测试 harness、GUID 唯一契约、PE32 Process32、owned host UI 请求与 GDI/像素状态分离。R2/R3 已迁移 identity 与 guest environment，其余家族仍待迁移。最新完整 release 为 394 passed / 7 ignored；7 项外部图形测试已另行显式执行，全部通过。debug 两架构及 host 单元测试 241 项、strict Clippy 和工具检查通过。
+R0/R1、R4、R5 已完成：正式 fixture、测试 harness、GUID 唯一契约、PE32 Process32、owned host UI 请求与 GDI/像素状态分离。R2/R3 已迁移 identity、guest environment 和 version，其余家族仍待迁移。最新完整 release 为 397 passed / 7 ignored；7 项外部图形测试在 R5 已另行显式执行，全部通过。version 的两架构 debug 回归 249 项、strict Clippy 和工具检查通过。
 
 R5 的 29 个解释器 case/path 已做三对 AB/BA，work/retired/checksum 全部校验；扩样后的最大 CPU 中位数回退为 +2.66%。R4 的 memory 成本在 R5 的 700M 复测中已消退：相对 R4 -6.04%，相对最初基线 -2.94%。这是结构调整后的代码生成/布局结果，不推断完整游戏 FPS；调查与全部轮次见 [重构记录](reports/refactoring-2026-10-14.md)。
+
+version 的 11 个受影响 case/path 三对均校验通过；PE32 SSE raw 初筛 +4.39%，700M 扩样后为 +2.50%，相对最初基线 -6.72%。其它初筛回退低于 2%，RSS 无实质增长。版本查询、ABI-only 校验函数和两架构故障差异见 [version 契约](architecture/version.md)。
 
 ## 主路径和能力
 

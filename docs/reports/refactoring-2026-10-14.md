@@ -19,7 +19,7 @@
 | --- | --- |
 | R0 入口/fixture | 已完成；12 组 golden 输入一致，默认与旧路径各 7 个运行 smoke 通过 |
 | R1 GUID 契约试点 | 已完成唯一契约、双架构冷绑定、纯语义/适配器、行为及性能验收 |
-| R2 分发收敛 | GUID + 6 个 identity export 已迁移；locale/version/file 等仍 legacy |
+| R2 分发收敛 | GUID + 6 个 identity + 8 个 version export 已迁移；locale/file 等仍 legacy |
 | R3 状态归属 | identity/profile 与可变环境变量已形成独立边界；module/file/thread/COM 待迁移 |
 | R4 PE32 Process | 已完成装载/执行编排提取；旧 Cpu 方法只保留委托 facade |
 | R5 host/graphics | 已完成 owned UI 请求/事件与 GDI adapter 分离，真实 native 验证通过 |
@@ -105,3 +105,15 @@ GDI 的 DLL 接受范围、USER client dimensions、LastError 和 diagnostics �
 - Alice 窗口模式 200M 启动前缀三对到相同 budget，guest bootstrap HWND 仍隐藏、client=314x211、无新 API/访存错误，没有提前进入 Draw/Present。复用原隔离目录，日志 `r5-alice-window-prefix`；实际渲染正确性由上述真实 native 探针和 GPU/像素 fixture 验证。
 
 R5 没有把 D3D9/DXGI 的所有 guest COM 语义都迁入新 catalog；它们按 R2/R3 继续逐领域处理。当前完整重构仍有剩余家族和 R7 收尾，R6 按用户要求跳过。
+
+
+## R2/R3 version 家族
+
+八个版本 API 的 provider/签名/执行策略集中到 catalog；PE32 immutable binding 从 GUID 专属字段扩展为 typed ID，Win64 复用原 BoundImport。删除两端的重复 ABI、arity、DWORD、支持条件与旧 version handler。PE32 ABI-only 与 unknown 条目保持原策略，没有扩展 API 能力。
+
+适配器仅借用内存、GuestEnvironment 与错误槽；纯层级比较迁到 kernel/version，保留 Wine LGPL 来源和版权声明。查询 size、LastError、suite/product 输出、NTSTATUS、return-slot alias 及完整结构先读后验证保持。完整契约见 [version](../architecture/version.md)。
+
+- 新独立基线 3 项通过；完整 release 397 passed / 0 failed / 7 ignored，debug version/GUID/identity/Win32/AMD64 249 项通过，fmt、strict Clippy、工具 6 项通过。R5 的 native 7 项结果仍按原基线记录。
+- 冻结 `version-wire` SHA-256：`a3756a2026e491d55eb4d26b8dea2df1022dc081fafdff042543590897aa750f`。
+- 11 个 case/path，100M work、三对 AB/BA；整数、SSE、memory、thread-ID 和两架构 version gateway 均校验 work/retired/checksum。version gateway PE32 IR/raw +0.52%/+1.59%，Win64 -0.19%，其它初筛除 PE32 SSE raw 外回退均低于 2%。
+- PE32 SSE raw 初筛 +4.39% 触发扩样；700M work 后相对 R5 +2.50%，相对最初基线 -6.72%，各对回退 +2.10%/+2.74%/+3.72%，没有三对均超过 5%。RSS 无实质增长。记录该布局成本，全部初筛与扩大轮次位于 `r2-version-*-timing` 和 `r2-version-sse-investigation`；未改 ISA/cache 热循环。

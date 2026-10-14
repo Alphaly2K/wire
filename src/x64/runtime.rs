@@ -46,7 +46,6 @@ pub(crate) enum WindowStep {
     Next(u64, [u64; 4]),
     Returned(u64),
 }
-mod version;
 mod winhttp;
 mod winrt;
 
@@ -288,7 +287,6 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
         && !(dll.eq_ignore_ascii_case("advapi32.dll") && tracing::is_call(name))
         && !(dll.eq_ignore_ascii_case("advapi32.dll") && registry::arity(name).is_some())
         && !(dll.eq_ignore_ascii_case("ntdll.dll") && unwind::is_call(name))
-        && !(dll.eq_ignore_ascii_case("ntdll.dll") && version::is_call(name))
         && !(dll.eq_ignore_ascii_case("ntdll.dll") && name == "NtQueryDirectoryFile")
         && !(dll.eq_ignore_ascii_case("ws2_32.dll") && sockets::is_call(name))
         && !(dll.eq_ignore_ascii_case("secur32.dll") && sspi::arity(name).is_some())
@@ -401,9 +399,6 @@ fn import_arity(name: &str) -> Option<usize> {
         | "GetWindowsDirectoryW"
         | "GetSystemWindowsDirectoryA"
         | "GetSystemWindowsDirectoryW" => 2,
-        "GetVersion" => 0,
-        "RtlGetVersion" | "GetVersionExA" | "GetVersionExW" => 1,
-        "RtlVerifyVersionInfo" | "VerifyVersionInfoW" | "VerSetConditionMask" => 3,
         "SetDllDirectoryW" | "SetDllDirectoryA" => 1,
         "GetDllDirectoryW" | "GetDllDirectoryA" => 2,
         "WaitOnAddress" => 4,
@@ -671,7 +666,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         | "GetWindowsDirectoryW"
         | "GetSystemWindowsDirectoryA"
         | "GetSystemWindowsDirectoryW" => &[1],
-        "RtlVerifyVersionInfo" | "VerifyVersionInfoW" | "VerSetConditionMask" => &[1],
         "GetDllDirectoryW" | "GetDllDirectoryA" => &[0],
         "WaitOnAddress" => &[3],
         "WSASetLastError" => &[0],
@@ -1395,6 +1389,9 @@ impl Runtime64 {
             ApiId::Identity(id) => {
                 crate::win32::x64::identity::call(mem, id, args, &self.profile, self.teb() + 0x68)
             }
+            ApiId::Version(id) => {
+                crate::win32::x64::version::call(mem, id, args, &self.profile, self.teb() + 0x68)
+            }
         }
     }
 
@@ -1562,13 +1559,6 @@ impl Runtime64 {
                     required as u64 - 1
                 }
             }
-            "GetVersion"
-            | "RtlGetVersion"
-            | "GetVersionExA"
-            | "GetVersionExW"
-            | "RtlVerifyVersionInfo"
-            | "VerifyVersionInfoW"
-            | "VerSetConditionMask" => self.version_call(mem, name, args)?,
             "SetDllDirectoryW" | "SetDllDirectoryA" | "GetDllDirectoryW" | "GetDllDirectoryA" => {
                 self.dll_directory_call(mem, name, args)?
             }
@@ -4922,10 +4912,6 @@ impl Runtime64 {
                             provider.as_str(),
                             "ntdll.dll" | "kernel32.dll" | "kernelbase.dll"
                         ) && unwind::is_call(&function))
-                        || (matches!(
-                            provider.as_str(),
-                            "kernel32.dll" | "kernelbase.dll" | "ntdll.dll"
-                        ) && version::is_call(&function))
                         || (provider == "ntdll.dll" && function == "NtQueryDirectoryFile")
                         || (provider == "ws2_32.dll" && sockets::is_call(&function))
                         || (provider == "secur32.dll" && sspi::arity(&function).is_some())
