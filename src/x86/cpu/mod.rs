@@ -1105,6 +1105,10 @@ impl Cpu {
         result
     }
 
+    #[cfg_attr(
+        target_os = "macos",
+        link_section = "__TEXT,__wire_raw32,regular,pure_instructions"
+    )]
     fn step_x86(&mut self, mem: &mut GuestMem) -> Result<(), CpuError> {
         self.decode_address16 = false;
         let eip0 = self.eip;
@@ -1586,6 +1590,10 @@ impl Cpu {
         Ok(())
     }
 
+    #[cfg_attr(
+        target_os = "macos",
+        link_section = "__TEXT,__wire_0f32,regular,pure_instructions"
+    )]
     fn step_0f(
         &mut self,
         mem: &mut GuestMem,

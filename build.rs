@@ -11,6 +11,15 @@ fn main() {
     // handler sizes. A page boundary also preserves its cache-line offsets.
     println!("cargo:rustc-link-arg=-Wl,-sectalign,__TEXT,__wire_ir,0x1000");
     println!("cargo:rustc-link-arg=-Wl,-sectalign,__TEXT,__wire_irchk,0x1000");
+    for section in [
+        "__wire_ir32",
+        "__wire_mix32",
+        "__wire_simd32",
+        "__wire_raw32",
+        "__wire_0f32",
+    ] {
+        println!("cargo:rustc-link-arg=-Wl,-sectalign,__TEXT,{section},0x1000");
+    }
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let status = Command::new("clang")
         .args([

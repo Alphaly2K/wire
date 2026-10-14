@@ -8,6 +8,8 @@
 
 31 个模块 export 的 catalog 已在新基线独立验收：release 406、debug 291、native GPU 7 项通过，26 个 case/path 的完整初筛/扩样结果校验通过。最终最大 CPU 中位数回退 +2.31%，RSS 最多增加 96KiB；Alice 200M 启动保持相同预算出口和隐藏窗口。静态/动态查询与已绑定 gateway 的差异、控制请求提交顺序及全部候选证据见 [模块 API 契约](refactoring-module-catalog-2026-10-14.md)。
 
+2026-10-15 核心文件迁移新增两项独立 ABI/fault 基线，三版 catalog 候选因持续 PE32 IR 回退全部撤出；调查见 [文件 catalog](refactoring-file-catalog-2026-10-15.md)。随后单独隔离 PE32 五个实际执行边界：release 408、debug 293、native7 通过，28 个 case/path 及整数/位操作 700M 扩样全部校验，最终最大 CPU 中位数回退 +2.01%、RSS 最多增加 128KiB。SIMD 内层未生成独立节的旧候选与删除属性的重建结果都保留，最终改为外层 execute/回滚边界并重新验收。详见 [布局记录](refactoring-ir-layout-2026-10-14.md)。
+
 ## R0 固定基线
 
 - 代码：`2e78377`，tracked working tree 干净。

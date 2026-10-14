@@ -246,6 +246,13 @@ impl Descriptor {
                     | M::Btc
             )
     }
+    // Keep the rollback boundary, including the inlined semantic body, in one
+    // code section. execute_inner alone may disappear during optimization.
+    #[inline(never)]
+    #[cfg_attr(
+        target_os = "macos",
+        link_section = "__TEXT,__wire_simd32,regular,pure_instructions"
+    )]
     pub(crate) fn execute(self, cpu: &mut Cpu, mem: &GuestMem, pc: u32) -> Result<(), CpuError> {
         let result = self.execute_inner(cpu, mem, pc);
         if result.is_err() {

@@ -183,6 +183,10 @@ impl Cpu {
     /// bound the chain; observers use a one-instruction limit. A callback's
     /// stack ceiling is checked after each operation, before the next fetch.
     /// Cold/fallback operations and API targets return to the outer dispatcher.
+    #[cfg_attr(
+        target_os = "macos",
+        link_section = "__TEXT,__wire_ir32,regular,pure_instructions"
+    )]
     pub(crate) fn steps_cached(
         &mut self,
         mem: &mut GuestMem,
@@ -420,6 +424,10 @@ impl Cpu {
     // Preserve the original tight integer loop. The verified mixed path has
     // a separate cold call boundary and reuses the same semantic operations.
     #[inline(never)]
+    #[cfg_attr(
+        target_os = "macos",
+        link_section = "__TEXT,__wire_mix32,regular,pure_instructions"
+    )]
     fn execute_mixed_run(&mut self, mem: &GuestMem, index: usize, len: usize) -> compact::Hot {
         let mut last = self.ir_cache.as_ref().unwrap().scalar_hot(index);
         for index in index..index + len {

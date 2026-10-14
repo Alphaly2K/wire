@@ -12,6 +12,7 @@
 - [模块身份与生命周期](architecture/modules.md)：31 个 export 的冷绑定契约、动态查询差异、私有 owner 与引用/pin 提交。
 - [模块 API 契约验收](reports/refactoring-module-catalog-2026-10-14.md)：模块 catalog、控制请求与独立性能调查。
 - [文件状态与标准句柄](architecture/files.md)：Win64 filesystem、属性元数据、endpoint/alias 寿命和输出提交顺序。
+- [文件 catalog 调查](reports/refactoring-file-catalog-2026-10-15.md)：核心文件行为基线、失败候选与 PE32 布局调查。
 - [本次渐进重构记录](reports/refactoring-2026-10-14.md)：阶段交付、行为差异与验收结果。
 - [R7 稳定边界整理](reports/refactoring-r7-2026-10-14.md)：PE32 目录、领域测试、freeze/replay 工具及完整对照。
 - [PE32 kernel 候选拒绝记录](reports/refactoring-pe32-kernel-rejected-2026-10-14.md)：独立资源故障基线、性能回退调查及运行时代码撤回。
