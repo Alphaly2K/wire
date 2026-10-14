@@ -761,7 +761,7 @@ fn dll_qualified_module_names_and_native_stub_addresses_resolve_correctly() {
     assert_eq!(v.k("GetModuleHandleExW", &[6, stub, DATA + 0x300]), 1);
     assert_eq!(
         v.mem.read_u32(DATA + 0x300).unwrap(),
-        v.state.module_handles["kernel32.dll"]
+        0x7000_1000 // First persistent PE32 provider; keep its legacy handle.
     );
 }
 

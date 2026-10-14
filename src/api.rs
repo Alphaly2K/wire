@@ -249,9 +249,6 @@ pub struct ApiState {
     pub exe_path: String,
     pub cmdline_a: u32,
     pub cmdline_w: u32,
-    pub module_handles: HashMap<String, u32>, // dll name (lowercase) -> fake HMODULE
-    pub handle_to_dll: HashMap<u32, String>,
-    pub next_module_handle: u32,
     pub scratch_top: u32,
     pub argv_ptr: u32,
     pub envp_ptr: u32,
@@ -292,9 +289,6 @@ impl ApiState {
             exe_path,
             cmdline_a,
             cmdline_w,
-            module_handles: HashMap::new(),
-            handle_to_dll: HashMap::new(),
-            next_module_handle: 0x7000_1000,
             scratch_top: SCRATCH_BASE,
             argv_ptr: 0,
             envp_ptr: 0,
@@ -361,15 +355,7 @@ impl ApiState {
     }
 
     pub fn module_handle_for(&mut self, dll: &str) -> u32 {
-        let dll = dll.to_ascii_lowercase();
-        if let Some(&h) = self.module_handles.get(&dll) {
-            return h;
-        }
-        let h = self.next_module_handle;
-        self.next_module_handle += 0x1_0000;
-        self.module_handles.insert(dll.clone(), h);
-        self.handle_to_dll.insert(h, dll);
-        h
+        self.modules.provider_handle_for(dll)
     }
 
     /// Bump-allocate guest scratch memory (for fake CRT structures).

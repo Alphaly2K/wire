@@ -399,7 +399,7 @@ impl Runtime64 {
                     // stock objects is separate from the window/frame presenter.
                     Vec::new()
                 } else {
-                    if !self.guest_images.contains_key(&args[0]) {
+                    if self.modules.image(args[0]).is_none() {
                         self.set_error(mem, 6)?;
                         return Ok(0);
                     }

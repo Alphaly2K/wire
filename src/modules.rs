@@ -55,6 +55,7 @@ struct Module {
 }
 #[derive(Default)]
 pub struct Modules {
+    providers: crate::win32::x86::modules::Providers,
     images: HashMap<u32, Module>,
     paths: HashMap<PathBuf, u32>,
     tls_vectors: HashMap<u32, u32>, // TEB -> ThreadLocalStoragePointer
@@ -387,6 +388,17 @@ pub fn native_module(name: &str) -> bool {
     )
 }
 impl Modules {
+    /// Existing logical provider handles are persistent for the process.
+    pub fn provider_handle_for(&mut self, dll: &str) -> u32 {
+        self.providers.handle_for(dll)
+    }
+    /// Lookup uses the existing lowercase key; it never registers a provider.
+    pub fn provider_handle(&self, dll: &str) -> Option<u32> {
+        self.providers.handle(dll)
+    }
+    pub fn provider_name(&self, handle: u32) -> Option<&String> {
+        self.providers.name(handle)
+    }
     pub fn register_main(
         &mut self,
         mem: &GuestMem,
@@ -798,7 +810,7 @@ fn resolve(
     if seen.len() >= 64 || !seen.insert((handle, key.clone())) {
         return Err(Failure::Expected(127, "export forwarder cycle".into()));
     }
-    if let Some(dll) = state.handle_to_dll.get(&handle) {
+    if let Some(dll) = state.modules.provider_name(handle) {
         if let Symbol::Name(name) = &symbol {
             if let Some(addr) = api
                 .data_export(mem, dll, name, state.cmdline_a, state.cmdline_w)
@@ -1174,7 +1186,7 @@ fn unload(
     sched: &mut Sched,
     max_instr: u64,
 ) -> LoadResult<()> {
-    if state.handle_to_dll.contains_key(&handle) {
+    if state.modules.provider_name(handle).is_some() {
         return Ok(());
     }
     let module = state
@@ -1279,7 +1291,7 @@ pub fn dispatch(
                 Ok(handle)
             }
             "DisableThreadLibraryCalls" => {
-                if state.handle_to_dll.contains_key(&a[0]) {
+                if state.modules.provider_name(a[0]).is_some() {
                     return Ok(1);
                 }
                 let module = state
@@ -1349,7 +1361,7 @@ pub fn dispatch(
                 let handle = if flags & 4 != 0 {
                     state.modules.address(pointer).or_else(|| {
                         api.stub_index(pointer)
-                            .and_then(|i| state.module_handles.get(&api.entries[i].dll).copied())
+                            .and_then(|i| state.modules.provider_handle(&api.entries[i].dll))
                     })
                 } else if pointer == 0 {
                     Some(state.exe_base)
@@ -1357,9 +1369,8 @@ pub fn dispatch(
                     let path = crate::api::read_str(mem, pointer, name.ends_with('W'));
                     state.modules.handle(&path, state.fs.as_ref()).or_else(|| {
                         state
-                            .module_handles
-                            .get(&basename(&library_name(&path)))
-                            .copied()
+                            .modules
+                            .provider_handle(&basename(&library_name(&path)))
                     })
                 }
                 .ok_or_else(|| Failure::Expected(126, "module is not loaded".into()))?;
@@ -1384,7 +1395,7 @@ pub fn dispatch(
                     state.exe_path.clone()
                 } else if let Some(module) = state.modules.images.get(&a[0]) {
                     module.guest_path.clone()
-                } else if let Some(path) = state.handle_to_dll.get(&a[0]) {
+                } else if let Some(path) = state.modules.provider_name(a[0]) {
                     format!("C:\\Windows\\System32\\{path}")
                 } else {
                     return Err(Failure::Expected(6, "invalid module handle".into()));

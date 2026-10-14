@@ -9,6 +9,7 @@
 - [Windows version 契约](architecture/version.md)：架构 provider 范围、ABI-only 策略与故障提交。
 - [NLS/locale 契约](architecture/nls.md)：转换、字符分类、日历与进程回调的边界。
 - [测试与性能工具](architecture/validation-tools.md)：领域测试名映射、公共测量库、freeze 输入和兼容入口。
+- [模块身份与生命周期](architecture/modules.md)：私有状态 owner、provider handle、引用/pin 与故障提交。
 - [本次渐进重构记录](reports/refactoring-2026-10-14.md)：阶段交付、行为差异与验收结果。
 - [R7 稳定边界整理](reports/refactoring-r7-2026-10-14.md)：PE32 目录、领域测试、freeze/replay 工具及完整对照。
 - [原生 Mono 撤回](mono-native-rollback-2026-10-14.md)：保留通用优化，继续执行原始 guest Mono。

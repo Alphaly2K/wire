@@ -79,17 +79,11 @@ pub struct Runtime64 {
     timer_periods: BTreeMap<u32, u32>,
     image_base: u64,
     next_alloc: u64,
-    next_module: u64,
     allocations: BTreeMap<u64, (usize, u64)>,
     guest_heap: heap::Heap,
     tls: [Option<u64>; 64],
     fls: [Option<(u64, u64)>; 128],
-    modules: BTreeMap<u64, (String, u32)>,
-    pinned_modules: std::collections::BTreeSet<u64>,
-    guest_exports: BTreeMap<u64, super::pe::Exports64>,
-    guest_paths: BTreeMap<u64, String>,
-    guest_images: BTreeMap<u64, (u32, u64)>,
-    dll_directory: Option<String>,
+    modules: crate::win32::x64::modules::Modules,
     std_handles: [u64; 3],
     std_open: [bool; 3],
     std_flags: [u32; 3],
@@ -827,18 +821,12 @@ impl Runtime64 {
             timer_periods: BTreeMap::new(),
             image_base,
             next_alloc: 0x400000000,
-            next_module: TEB + 0x20000,
             allocations: BTreeMap::new(),
             guest_heap: Default::default(),
             bstrings: BTreeMap::new(),
             tls: [None; 64],
             fls: [None; 128],
-            modules: BTreeMap::new(),
-            pinned_modules: std::collections::BTreeSet::new(),
-            guest_exports: BTreeMap::new(),
-            guest_paths: BTreeMap::new(),
-            guest_images: BTreeMap::new(),
-            dll_directory: None,
+            modules: crate::win32::x64::modules::Modules::new(TEB + 0x20000),
             std_handles: [0x100, 0x101, 0x102],
             std_open: [true; 3],
             std_flags: [0; 3],
@@ -958,81 +946,7 @@ impl Runtime64 {
         }
     }
     fn native_module(&mut self, name: &str, load: bool) -> Result<u64, String> {
-        let module = name
-            .replace('\\', "/")
-            .rsplit('/')
-            .next()
-            .unwrap_or(name)
-            .to_ascii_lowercase();
-        let module = if module.contains('.') {
-            module
-        } else {
-            format!("{module}.dll")
-        };
-        if load && name.contains(['/', '\\']) {
-            let path = self.fs.as_ref().and_then(|fs| fs.resolve(name).ok());
-            let loaded = self.guest_paths.values().any(|p| {
-                path.is_some() && self.fs.as_ref().and_then(|fs| fs.resolve(p).ok()) == path
-            });
-            // A logical provider is loaded by its canonical guest system32 name;
-            // an arbitrary path with the same basename is not that provider.
-            let system_provider = self
-                .fs
-                .as_ref()
-                .zip(path.as_ref())
-                .is_some_and(|(fs, path)| {
-                    (Self::dynamic_provider(&module)
-                        || self.modules.iter().any(|(&handle, (name, _))| {
-                            name == &module && !self.guest_exports.contains_key(&handle)
-                        }))
-                        && fs
-                            .guest_path(path)
-                            .eq_ignore_ascii_case(&format!("C:\\Windows\\System32\\{module}"))
-                });
-            if !loaded && !system_provider {
-                return Err(format!("Win64 guest DLL requires process loader: {name}"));
-            }
-        }
-        let name = module;
-        if let Some((&handle, (_, refs))) = self.modules.iter_mut().find(|(_, (n, _))| n == &name) {
-            if load {
-                *refs = refs.checked_add(1).ok_or("module reference overflow")?;
-            }
-            return Ok(handle);
-        }
-        // These API sets route to the actual startup service provider below.
-        if !load {
-            return Ok(0);
-        }
-        if !Self::dynamic_provider(&name) {
-            return Err(format!("Win64 guest DLL loading not implemented: {name}"));
-        }
-        let handle = self.next_module;
-        self.next_module += 0x10000;
-        self.modules.insert(handle, (name, 1));
-        Ok(handle)
-    }
-    fn dynamic_provider(name: &str) -> bool {
-        matches!(
-            name,
-            "kernel32.dll"
-                | "kernelbase.dll"
-                | "hid.dll"
-                | "setupapi.dll"
-                | "secur32.dll"
-                | "ws2_32.dll"
-                | "oleaut32.dll"
-                | "winhttp.dll"
-                | "dxgi.dll"
-                | "d3d12.dll"
-                | "d3d11.dll"
-                | "winmm.dll"
-                | "api-ms-win-core-synch-l1-2-0.dll"
-                | "api-ms-win-core-fibers-l1-1-1.dll"
-                | "api-ms-win-core-localization-l1-2-1.dll"
-                | "api-ms-win-core-string-l1-1-0.dll"
-                | "api-ms-win-core-datetime-l1-1-1.dll"
-        )
+        self.modules.native_module(self.fs.as_ref(), name, load)
     }
     pub fn install_gateways(&mut self, gateways: BTreeMap<u64, String>) {
         self.gateways = gateways.into();
@@ -1041,12 +955,9 @@ impl Runtime64 {
             .expect("kernel32 provider");
         self.register_provider("ntdll.dll");
         let ntdll = self
-            .modules
-            .iter()
-            .find(|(_, (name, _))| name == "ntdll.dll")
-            .unwrap()
-            .0;
-        self.pinned_modules.insert(*ntdll);
+            .native_module("ntdll.dll", false)
+            .expect("ntdll provider");
+        self.modules.pin(ntdll);
     }
     pub fn initialize_tls(
         &mut self,
@@ -1167,14 +1078,13 @@ impl Runtime64 {
         Some(output)
     }
     pub fn register_module(&mut self, name: &str, base: u64, exports: super::pe::Exports64) {
-        self.modules.insert(base, (name.to_ascii_lowercase(), 1));
-        self.guest_exports.insert(base, exports);
+        self.modules.register_guest(name, base, exports);
     }
     pub(crate) fn register_module_path(&mut self, base: u64, path: String) {
-        self.guest_paths.insert(base, path);
+        self.modules.register_path(base, path);
     }
     pub(crate) fn register_image(&mut self, base: u64, size: u32, entry: u64) {
-        self.guest_images.insert(base, (size, entry));
+        self.modules.register_image(base, size, entry);
     }
     pub(crate) fn filesystem(&self) -> Result<crate::fs::GuestFs, String> {
         self.fs
@@ -1190,16 +1100,7 @@ impl Runtime64 {
         Ok(())
     }
     pub fn register_provider(&mut self, name: &str) {
-        if self
-            .modules
-            .values()
-            .any(|(n, _)| n.eq_ignore_ascii_case(name))
-        {
-            return;
-        }
-        let handle = self.next_module;
-        self.next_module += 0x10000;
-        self.modules.insert(handle, (name.to_ascii_lowercase(), 1));
+        self.modules.register_provider(name);
     }
     pub fn register(&mut self, dll: &str, name: &str) -> u64 {
         let name = automation::symbol(dll, dxgi::symbol(dll, sockets::symbol(dll, name)));
@@ -2403,7 +2304,7 @@ impl Runtime64 {
             "DisableThreadLibraryCalls" => {
                 // Static TLS needs thread notifications; support explicit failure rather than
                 // silently suppressing required callbacks.
-                if !self.guest_exports.contains_key(&args[0]) {
+                if self.modules.exports(args[0]).is_none() {
                     self.set_error(mem, 6)?;
                 } else {
                     self.set_error(mem, 50)?;
@@ -4072,8 +3973,8 @@ impl Runtime64 {
                 let path = if args[0] == 0 || args[0] == self.image_base {
                     &self.exe_path
                 } else {
-                    self.guest_paths
-                        .get(&args[0])
+                    self.modules
+                        .path(args[0])
                         .ok_or("Win64 native module filename query not implemented")?
                 };
                 let wide = name.ends_with('W');
@@ -4392,28 +4293,15 @@ impl Runtime64 {
                 }
             }
             "FreeLibrary" => {
-                if self.guest_exports.contains_key(&args[0]) {
-                    let refs = &mut self.modules.get_mut(&args[0]).unwrap().1;
-                    if *refs <= 1 && !self.pinned_modules.contains(&args[0]) {
-                        return Err("Win64 guest DLL detach/unload not implemented".into());
-                    }
-                    *refs = refs.saturating_sub(1).max(1);
+                if matches!(
+                    self.modules.release(args[0])?,
+                    crate::win32::x64::modules::Release::GuestReference
+                ) {
                     returned.regs[0] = 1;
                     *cpu = returned;
                     self.api_calls += 1;
                     self.record(dll, name, args, 1);
                     return Ok(Control::Returned);
-                }
-                let Some((module, refs)) = self.modules.get_mut(&args[0]) else {
-                    return Err("invalid Win64 module handle".into());
-                };
-                if (module != "kernel32.dll" && !self.pinned_modules.contains(&args[0]))
-                    || *refs > 1
-                {
-                    *refs -= 1;
-                    if *refs == 0 {
-                        self.modules.remove(&args[0]);
-                    }
                 }
                 1
             }
@@ -4432,8 +4320,8 @@ impl Runtime64 {
                 if self.api_inventory.is_some() {
                     let provider = self
                         .modules
-                        .get(&module_handle)
-                        .map(|(dll, _)| dll.clone())
+                        .name(module_handle)
+                        .cloned()
                         .unwrap_or_else(|| "?".into());
                     self.inventory_record("lookup", &provider, &symbol);
                 }
@@ -4441,7 +4329,7 @@ impl Runtime64 {
                     "GetProcAddress lookup module={:#x} symbol={symbol}",
                     args[0]
                 ));
-                if let Some(exports) = self.guest_exports.get(&module_handle) {
+                if let Some(exports) = self.modules.exports(module_handle) {
                     let address = if args[1] <= 65535 {
                         exports.ordinals.get(&(args[1] as u16)).copied()
                     } else {
@@ -4452,7 +4340,7 @@ impl Runtime64 {
                     }
                     address.unwrap_or(0)
                 } else {
-                    let Some((module, _)) = self.modules.get(&module_handle) else {
+                    let Some(module) = self.modules.name(module_handle) else {
                         self.set_error(
                             mem,
                             if module_handle == self.image_base {

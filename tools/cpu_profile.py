@@ -139,7 +139,8 @@ def summarize(args):
     names = demangle({n["symbol"] for _, nodes in parsed for n in nodes})
     folded, reports = collections.Counter(), []
     def runtime_entry(symbol):
-        return (("wire::cpu" in symbol and symbol.endswith("::run_loop"))
+        return ((("wire::cpu" in symbol or "wire::x86::cpu" in symbol) and symbol.endswith("::run_loop"))
+                or ("wire::x86::process" in symbol and symbol.endswith("::run"))
                 or ("wire::x64::process" in symbol and symbol.endswith("::run")))
     for path, nodes in parsed:
         categories, inclusive = collections.Counter(), collections.Counter()
@@ -184,7 +185,7 @@ def summarize(args):
                     group = "API outside guest execution"
                 else:
                     group = "outer dispatch and other"
-            elif "wire::cpu::fpu" in execution or "::fpu_op" in execution:
+            elif "wire::cpu::fpu" in execution or "wire::x86::cpu::fpu" in execution or "::fpu_op" in execution:
                 group = "x87 software execution"
             elif "::step_x86" in execution:
                 group = "other raw fallback"

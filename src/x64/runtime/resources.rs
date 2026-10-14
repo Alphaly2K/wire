@@ -20,9 +20,9 @@ impl Runtime64 {
         kind: u32,
         key: &Key,
     ) -> Result<Option<Vec<u8>>, String> {
-        let &(image_size, _) = self
-            .guest_images
-            .get(&base)
+        let (image_size, _) = self
+            .modules
+            .image(base)
             .ok_or("invalid Win64 resource module")?;
         let nt = mem.read_int(base + 0x3c, 4)?;
         if nt

@@ -15,10 +15,7 @@ pub(super) fn is_query(name: &str) -> bool {
 }
 impl Runtime64 {
     pub(super) fn absolute_module_path(name: &str) -> bool {
-        let bytes = name.as_bytes();
-        bytes.first() == Some(&b'/')
-            || bytes.first() == Some(&b'\\')
-            || (bytes.get(1) == Some(&b':') && matches!(bytes.get(2), Some(b'/' | b'\\')))
+        crate::win32::x64::modules::Modules::absolute_path(name)
     }
     /// Supported confined search order, including the process SetDllDirectory.
     /// PATH and AddDllDirectory cookies are not part of this bring-up loader.
@@ -37,44 +34,8 @@ impl Runtime64 {
         flags: u64,
         altered_directory: Option<&str>,
     ) -> Result<std::path::PathBuf, u32> {
-        let filename = name.replace('/', "\\");
-        let basename = filename.rsplit('\\').next().unwrap_or(&filename);
-        let filename = if basename.contains('.') {
-            filename
-        } else {
-            format!("{filename}.dll")
-        };
-        if filename.contains(['\\', ':']) {
-            let path = fs.resolve(&filename)?;
-            return path.is_file().then_some(path).ok_or(126);
-        }
-        let mut directories = Vec::new();
-        if flags & 0x1000 != 0 || flags & 0x800 == 0 {
-            let directory = if let Some(directory) = altered_directory {
-                directory
-            } else {
-                let end = self.exe_path.rfind(['\\', '/']).ok_or(123u32)?;
-                &self.exe_path[..end]
-            };
-            directories.push(directory.to_owned());
-            if let Some(dir) = self.dll_directory.as_ref().filter(|d| !d.is_empty()) {
-                directories.push(dir.clone());
-            }
-        }
-        directories.push("C:\\Windows\\System32".into());
-        if flags == 0 || flags == 8 {
-            directories.push("C:\\Windows".into());
-            if self.dll_directory.is_none() {
-                directories.push(fs.cwd());
-            }
-        }
-        for dir in directories {
-            let path = fs.resolve(&format!("{dir}\\{filename}"))?;
-            if path.is_file() {
-                return Ok(path);
-            }
-        }
-        Err(126)
+        self.modules
+            .resolve_path(fs, &self.exe_path, name, flags, altered_directory)
     }
     pub(super) fn dll_directory_call(
         &mut self,
@@ -104,10 +65,10 @@ impl Runtime64 {
                     }
                 }
             };
-            self.dll_directory = directory;
+            self.modules.set_directory(directory);
             return Ok(1);
         }
-        let text = self.dll_directory.as_deref().unwrap_or("");
+        let text = self.modules.directory().unwrap_or("");
         let bytes: Vec<u8> = if wide {
             text.encode_utf16()
                 .chain(Some(0))
@@ -142,33 +103,21 @@ impl Runtime64 {
             return Ok(0);
         }
         let base = if flags & 4 != 0 {
-            self.guest_images
-                .iter()
-                .find(|&(&base, &(size, _))| args[1] >= base && args[1] - base < size as u64)
-                .map(|(&base, _)| base)
-                .unwrap_or(0)
+            self.modules.containing_image(args[1]).unwrap_or(0)
         } else if args[1] == 0 {
             self.image_base
         } else {
             let module = Self::path_name(mem, args[1], name.ends_with('W'))?;
             self.native_module(&module, false)?
         };
-        if base == 0 || !self.modules.contains_key(&base) {
+        if base == 0 || !self.modules.contains(base) {
             mem.write_int(args[2], 8, 0)?;
             self.set_error(mem, 126)?;
             return Ok(0);
         }
-        let refs = &mut self.modules.get_mut(&base).unwrap().1;
-        let next = if flags & 2 != 0 {
-            *refs
-        } else {
-            refs.checked_add(1).ok_or("module reference overflow")?
-        };
+        let update = self.modules.prepare_reference(base, flags)?;
         mem.write_int(args[2], 8, base)?;
-        *refs = next;
-        if flags & 1 != 0 {
-            self.pinned_modules.insert(base);
-        }
+        update.commit();
         Ok(1)
     }
     pub(super) fn format_message(
@@ -262,7 +211,7 @@ impl Runtime64 {
             let handles: Vec<_> = if query.ends_with("Ex") && args[4] == 1 {
                 Vec::new() // No 32-bit modules in an AMD64 process.
             } else {
-                self.modules.keys().copied().collect()
+                self.modules.bases().collect()
             };
             let count = handles.len().min(args[2] as usize / 8);
             mem.check(args[3], 4, WRITE)?;
@@ -280,7 +229,7 @@ impl Runtime64 {
         } else {
             args[1]
         };
-        let Some((module, _)) = self.modules.get(&base) else {
+        let Some(module) = self.modules.name(base) else {
             self.set_error(mem, 6)?;
             return Ok(0);
         };
@@ -289,7 +238,7 @@ impl Runtime64 {
                 self.set_error(mem, 122)?;
                 return Ok(0);
             }
-            let Some(&(size, entry)) = self.guest_images.get(&base) else {
+            let Some((size, entry)) = self.modules.image(base) else {
                 self.set_error(mem, 50)?; // Built-ins have no guest PE image.
                 return Ok(0);
             };
@@ -303,8 +252,8 @@ impl Runtime64 {
         let value = if query.starts_with("GetModuleBaseName") {
             module.clone()
         } else {
-            self.guest_paths
-                .get(&base)
+            self.modules
+                .path(base)
                 .cloned()
                 .unwrap_or_else(|| format!("C:\\Windows\\System32\\{module}"))
         };

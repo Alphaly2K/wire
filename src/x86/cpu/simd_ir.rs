@@ -527,6 +527,7 @@ impl Default for RawCache {
     }
 }
 impl GuestMem {
+    #[inline]
     fn cached_simd(&self, pc: u32) -> Option<Descriptor> {
         let cache = self.raw_simd.get()?;
         let (saved, g, g2, d) = cache.entries[(pc ^ (pc >> 8)) as usize & 255].get()?;
@@ -539,6 +540,7 @@ impl GuestMem {
         }
         Some(d)
     }
+    #[inline]
     fn cache_simd(&self, pc: u32, d: Descriptor) {
         let Some(end) = pc.checked_add(d.len as u32 - 1) else {
             return;
