@@ -612,18 +612,7 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetStdHandle", 4),
                 ("SetHandleCount", 4),
                 ("SetStdHandle", 8),
-                ("GetFileType", 4),
-                ("CreateFileA", 28),
-                ("CreateFileW", 28),
-                ("ReadFile", 20),
-                ("WriteFile", 20),
                 ("CloseHandle", 4),
-                ("GetFileSize", 8),
-                ("GetFileSizeEx", 8),
-                ("SetFilePointer", 16),
-                ("SetFilePointerEx", 20),
-                ("SetEndOfFile", 4),
-                ("FlushFileBuffers", 4),
                 ("DeleteFileA", 4),
                 ("DeleteFileW", 4),
                 ("CreateDirectoryA", 8),
@@ -1688,6 +1677,12 @@ pub fn dispatch(
     let mut yield_after_return = false;
     let ret: u32;
     match (dll, name) {
+        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::File(_))) => {
+            let Some(crate::win32::catalog::ApiId::File(id)) = binding.typed else {
+                unreachable!();
+            };
+            (ret, note) = crate::file_api::call(id, &args, mem, state);
+        }
         _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Guid(_))) => {
             let Some(crate::win32::catalog::ApiId::Guid(id)) = binding.typed else {
                 unreachable!();
@@ -2542,9 +2537,6 @@ pub fn dispatch(
         ("kernel32.dll", "EncodePointer") | ("kernel32.dll", "DecodePointer") => {
             ret = args[0];
             note = "identity encoding".into();
-        }
-        ("kernel32.dll", "GetFileType") => {
-            ret = matches!(state.handles.get(&args[0]), Some(HandleObj::File { .. })) as u32;
         }
         ("kernel32.dll", "GetEnvironmentStrings") => {
             // empty block: "\0\0"

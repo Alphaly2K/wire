@@ -458,9 +458,6 @@ fn import_arity(name: &str) -> Option<usize> {
         "GetEnvironmentVariableW" | "GetEnvironmentVariableA" => 3,
         "SetEnvironmentVariableW" | "SetEnvironmentVariableA" => 2,
         "GlobalMemoryStatusEx" => 1,
-        "CreateFileW" | "CreateFileA" => 7,
-        "SetFilePointerEx" => 4,
-        "GetFileSizeEx" | "GetFileSize" => 2,
         "GetFileInformationByHandle" => 2,
         "GetFileInformationByHandleEx" | "GetFileTime" => 4,
         "NtQueryDirectoryFile" => 11,
@@ -468,7 +465,6 @@ fn import_arity(name: &str) -> Option<usize> {
         "MapViewOfFile" => 5,
         "UnmapViewOfFile" => 1,
         "FlushViewOfFile" => 2,
-        "FlushFileBuffers" => 1,
         "GetFileAttributesW"
         | "GetFileAttributesA"
         | "SetCurrentDirectoryW"
@@ -529,7 +525,6 @@ fn import_arity(name: &str) -> Option<usize> {
         "CreatePipe" => 4,
         "GetHandleInformation" => 2,
         "SetHandleInformation" => 3,
-        "ReadFile" => 5,
         "InitializeProcThreadAttributeList" => 4,
         "UpdateProcThreadAttribute" => 7,
         "DeleteProcThreadAttributeList" => 1,
@@ -538,7 +533,6 @@ fn import_arity(name: &str) -> Option<usize> {
         | "FlsGetValue"
         | "FlsFree"
         | "GetStdHandle"
-        | "GetFileType"
         | "CloseHandle"
         | "FreeEnvironmentStringsW" => 1,
         "FlsSetValue" | "SetStdHandle" | "GetConsoleMode" | "GetTempPathW" | "GetTempPath2W" => 2,
@@ -568,7 +562,7 @@ fn import_arity(name: &str) -> Option<usize> {
         "TlsSetValue" | "InitializeCriticalSectionAndSpinCount" => 2,
         "HeapAlloc" | "HeapFree" | "HeapSize" | "InitializeCriticalSectionEx" => 3,
         "HeapReAlloc" => 4,
-        "WriteFile" | "WriteConsoleW" => 5,
+        "WriteConsoleW" => 5,
         _ => return None,
     })
 }
@@ -635,8 +629,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "BCryptOpenAlgorithmProvider" => &[3],
         "BCryptCloseAlgorithmProvider" => &[1],
         "GetEnvironmentVariableW" | "GetEnvironmentVariableA" => &[2],
-        "CreateFileW" | "CreateFileA" => &[1, 2, 4, 5],
-        "SetFilePointerEx" => &[3],
         "GetFileInformationByHandleEx" => &[1, 3],
         "NtQueryDirectoryFile" => &[6, 7],
         "CreateFileMappingW" | "CreateFileMappingA" => &[2, 3, 4],
@@ -655,7 +647,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "CreateProcessW" => &[4, 5],
         "CreatePipe" => &[3],
         "SetHandleInformation" => &[1, 2],
-        "ReadFile" => &[2],
         "CreateEventW" | "CreateEventA" => &[1, 2],
         "CreateEventExW" | "CreateEventExA" => &[2, 3],
         "OpenEventW" | "OpenEventA" => &[0, 1],
@@ -687,7 +678,7 @@ fn import_dwords(name: &str) -> &'static [usize] {
         | "HeapReAlloc"
         | "InitializeCriticalSectionAndSpinCount" => &[1],
         "InitializeCriticalSectionEx" => &[1, 2],
-        "WriteFile" | "WriteConsoleW" => &[2],
+        "WriteConsoleW" => &[2],
         "InitOnceBeginInitialize" | "InitOnceComplete" => &[1],
         _ => &[],
     }
@@ -1095,6 +1086,7 @@ impl Runtime64 {
     ) -> Result<u64, String> {
         use crate::win32::catalog::ApiId;
         match id {
+            ApiId::File(_) => unreachable!("core file calls are handled by the bound gateway"),
             ApiId::Guid(id) => crate::win32::x64::guid::call(mem, id, args),
             ApiId::Identity(id) => {
                 crate::win32::x64::identity::call(mem, id, args, &self.profile, self.teb() + 0x68)
@@ -1189,8 +1181,15 @@ impl Runtime64 {
                 args: args.to_vec(),
             });
         }
+        use crate::win32::catalog::{ApiId, FileApi};
+        let file = match binding.api {
+            Some(ApiId::File(id)) => Some(id),
+            _ => None,
+        };
         let ret = match name {
-            _ if binding.api.is_some() => self.catalog_call(mem, binding.api.unwrap(), args)?,
+            _ if binding.api.is_some() && file.is_none() => {
+                self.catalog_call(mem, binding.api.unwrap(), args)?
+            }
             _ if matches!(binding.control, gateways::ControlImport::Module(_)) => {
                 let gateways::ControlImport::Module(id) = binding.control else {
                     unreachable!();
@@ -2412,11 +2411,11 @@ impl Runtime64 {
                     0
                 }
             },
-            "CreateFileW" | "CreateFileA" => {
+            _ if matches!(file, Some(FileApi::CreateFileW | FileApi::CreateFileA)) => {
                 if args[6] != 0 {
                     return Err("Win64 file template handle not implemented".into());
                 }
-                let path = Self::path_name(mem, args[0], name.ends_with('W'))?;
+                let path = Self::path_name(mem, args[0], file.unwrap().wide())?;
                 let inherit = if args[3] == 0 {
                     false
                 } else {
@@ -2574,18 +2573,22 @@ impl Runtime64 {
                     }
                 }
             }
-            "GetFileSizeEx" | "GetFileSize" | "FlushFileBuffers" => {
-                let result = if name == "FlushFileBuffers" {
+            _ if matches!(
+                file,
+                Some(FileApi::GetFileSizeEx | FileApi::GetFileSize | FileApi::FlushFileBuffers)
+            ) =>
+            {
+                let result = if file == Some(FileApi::FlushFileBuffers) {
                     self.files.flush(args[0])
                 } else {
                     self.files.size(args[0])
                 };
                 match result {
-                    Ok(value) if name == "GetFileSizeEx" => {
+                    Ok(value) if file == Some(FileApi::GetFileSizeEx) => {
                         mem.write_int(args[1], 8, value)?;
                         1
                     }
-                    Ok(value) if name == "GetFileSize" => {
+                    Ok(value) if file == Some(FileApi::GetFileSize) => {
                         if args[1] != 0 {
                             mem.write_int(args[1], 4, value >> 32)?;
                         }
@@ -2595,7 +2598,7 @@ impl Runtime64 {
                     Ok(value) => value,
                     Err(error) => {
                         self.set_error(mem, error)?;
-                        if name == "GetFileSize" {
+                        if file == Some(FileApi::GetFileSize) {
                             u32::MAX as u64
                         } else {
                             0
@@ -2603,7 +2606,7 @@ impl Runtime64 {
                     }
                 }
             }
-            "SetFilePointerEx" => {
+            _ if file == Some(FileApi::SetFilePointerEx) => {
                 if args[2] != 0 {
                     mem.check(args[2], 8, WRITE)?;
                 }
@@ -3138,7 +3141,7 @@ impl Runtime64 {
                     }
                 }
             }
-            "ReadFile" => {
+            _ if file == Some(FileApi::ReadFile) => {
                 let count = args[2] as usize;
                 if args[4] != 0 || count > 16 * 1024 * 1024 || args[3] == 0 {
                     return Err("unsupported Win64 ReadFile overlap/size/result pointer".into());
@@ -3819,11 +3822,13 @@ impl Runtime64 {
                     }
                 }
             }
-            "GetFileType" | "GetConsoleMode" | "CloseHandle" => {
+            _ if file == Some(FileApi::GetFileType)
+                || matches!(name, "GetConsoleMode" | "CloseHandle") =>
+            {
                 let index = self.files.standard().index(args[0]);
                 if index.is_some() {
                     match name {
-                        "GetFileType" => 3, // Redirected host pipe, not a console.
+                        _ if file == Some(FileApi::GetFileType) => 3, // Redirected host pipe, not a console.
                         "GetConsoleMode" => {
                             self.set_error(mem, 6)?;
                             0
@@ -3838,7 +3843,7 @@ impl Runtime64 {
                     }
                 } else if self.files.flags(args[0]).is_some() {
                     match name {
-                        "GetFileType" => 1,
+                        _ if file == Some(FileApi::GetFileType) => 1,
                         "CloseHandle" => match self.files.close(args[0]) {
                             Ok(()) => 1,
                             Err(error) => {
@@ -3853,7 +3858,7 @@ impl Runtime64 {
                     }
                 } else if self.pipes.flags(args[0]).is_some() {
                     match name {
-                        "GetFileType" => 3,
+                        _ if file == Some(FileApi::GetFileType) => 3,
                         "CloseHandle" => match self.pipes.close(args[0]) {
                             Ok(()) => 1,
                             Err(error) => {
@@ -3905,8 +3910,8 @@ impl Runtime64 {
                     0
                 }
             }
-            "WriteFile" | "WriteConsoleW" => {
-                if name == "WriteFile" && self.files.flags(args[0]).is_some() {
+            _ if file == Some(FileApi::WriteFile) || name == "WriteConsoleW" => {
+                if file == Some(FileApi::WriteFile) && self.files.flags(args[0]).is_some() {
                     if args[4] != 0 || args[2] > 16 * 1024 * 1024 || args[3] == 0 {
                         return Err(
                             "unsupported Win64 file write overlap/size/result pointer".into()
@@ -3943,7 +3948,7 @@ impl Runtime64 {
                     self.record(dll, name, args, result);
                     return Ok(Control::Returned);
                 }
-                if name == "WriteFile" && self.pipes.flags(args[0]).is_some() {
+                if file == Some(FileApi::WriteFile) && self.pipes.flags(args[0]).is_some() {
                     if args[4] != 0 || args[2] > 16 * 1024 * 1024 || args[3] == 0 {
                         return Err(
                             "unsupported Win64 pipe write overlap/size/result pointer".into()

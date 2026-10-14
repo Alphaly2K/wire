@@ -1,6 +1,8 @@
 # 核心文件 API 契约迁移记录
 
-本批以 `89a8f9a` 的冻结模块 catalog 二进制为性能基线（SHA256 `03e5b2a3a2c26a3e3ae9f55737a1a244ba07e7b5059da1b9aae1943818daa8b3`），在本地 main 开发，不 push、不复制游戏，不恢复 native Mono。当前候选尚未完成性能验收，不能据此将 R2 file 或 R3 PE32 状态所有权标为完成。
+11 个核心文件 export 已完成唯一契约与两架构接入，release 408、debug 293、真实 native7 和工具12 通过。28 个 case/path 全部校验，完成调度条件调查与扩样后，最终最大 CPU 中位数回退为 +2.32%。PE32 状态所有权和其余文件 API 家族仍待迁移。
+
+早期候选以 `89a8f9a` 的冻结模块 catalog 二进制为性能基线（SHA256 `03e5b2a3a2c26a3e3ae9f55737a1a244ba07e7b5059da1b9aae1943818daa8b3`）；这些失败版本保留在下文。最终候选以独立布局提交 `3dcd3c0` 为基线，在本地 main 开发，不 push、不复制游戏，不恢复 native Mono。
 
 ## 范围与行为
 
@@ -33,3 +35,17 @@ PE32 的旧 file_api::dispatch 保留原函数/DLL/大小写范围，主 gateway
 该保留边界版最终也未通过性能门槛：integer/IR 三对 +214.88%/+206.45%/+206.01%，CPU 中位数 +206.49%；FP/IR +8.37%、bit/IR +11.44%，raw 各项约 1% 以内。三个 IR 函数仍有 2208/503/1659 条指令，opcode 序列 hash 相同；这些证据没有确定唯一成因。日志 `r2-file-core-retained-preflight` 和机器码分析保留，文件 catalog 再次撤出。两项已提交的行为基线保留。
 
 后续单独验证 PE32 执行器布局，文件 catalog 未接入。首个五声明候选实际只生成四个独立节：SIMD execute_inner 被内联进 execute，声明的 SIMD 节不存在。该版的 28 个 case/path 与 integer 700M 扩样已完成，最大最终 CPU 中位数回退 +1.58%，但不据此声称五函数全部隔离。删除无效属性又改变了编译器的内联选择，重建二进制未保持一致；现将隔离点放在实际 SIMD execute/回滚边界，并重新执行独立验收。旧版及删除属性的重建证据继续保留在 `pe32-executor-layout-*`；新候选使用 `pe32-executor-boundary-*`。
+
+## 最终接入与验收
+
+PE32 执行边界独立验收并提交后，恢复保留原 handler 边界的文件 catalog，未更改 CPU/build 源码。DLL、ABI、参数宽度、typed/absent 策略由 `catalog/files.rs` 唯一声明，原 arity/DWORD/PE32 清栈重复项删除；热调用消费 bound ID。Win64 保留原 gateway 分支位置与 endpoint 完成顺序，PE32 公开 legacy facade 保留原函数和大小写范围。完整契约见 [文件架构](../architecture/files.md)。
+
+冻结 `r2-file-core-aligned-wire/wire`：SHA256 `cafc89d799e46f439208144292cb6116cf4b2479db57f352211582f88709e8b9`，5,929,544 bytes，比布局基线增加 5,616 bytes。完整 release 408/7 ignored、debug Win32/AMD64/FPU/Unicorn 293、fmt、strict Clippy、build、native7 和工具12 通过。没有新增文件能力；两个独立 ABI/fault 基线保持。
+
+28 个路径各三对 100M work 全部结果校验。integer/IR 短样本 +3.75%、GUID/IR +3.11% 触发 700M 调查；默认条件整数三对为 +21.45%/+21.83%/−0.01%，没有直接归因于 candidate。同二进制对照也出现 CPU 2.31–7.28s 两档，而 IR=699999999、fallback=1、scalar runs=116666444、scalar instructions=699997777 完全一致。默认 UI capture 与补做的 headless capture 均只抓到快档，采样没有复现慢档；全部日志保留，包括一次 capture 参数错误及修正重跑。
+
+原生 UI 显式设置 USER_INITIATED QoS，headless 计时没有该步骤。给 PE32 工具补齐可选 utility clamp 并独立提交 `73afd50`，默认行为保持。utility 同二进制三对差异 +0.70%/−1.88%/+2.49%；该明确条件下整数/GUID 各三对 700M 的 CPU 中位数为 +2.32%/−1.38%。各对整数 −0.06%/+1.22%/+5.72%，GUID +5.76%/−1.76%/−0.48%，仍保留单对离散，没有出现三对均超过 5% 的拒绝条件。
+
+最终矩阵采用上述两个 utility 扩样路径，其余 26 条为默认 100M 条件，不混算两种模式的绝对吞吐量。最终最大 CPU 中位数回退 +2.32%，其余最大 +2.08%（AMD64 module gateway），RSS 中位数最多增加 229,376 bytes。steps_cached/execute_mixed_run/Descriptor::execute 前后分别为 2203/502/1664 条，opcode 序列 hash 相同；地址和 relocation 可变。ISA、FLAGS、IR 格式、缓存容量保持。
+
+Alice 原始 guest Mono 路径 200M 正常预算停止（exit1），retired 199588578、API 390530、隐藏窗口 314×211、draw/present 0，保持基线出口。未测完整游戏 FPS。证据仍在 `wire-out/refactoring-2026-10-14/`，前缀 `r2-file-core-aligned-*`，最终指标为 `r2-file-core-aligned-final-metrics.json`；默认计时、受控计时、采样、native 和 Cargo 检查分开运行。

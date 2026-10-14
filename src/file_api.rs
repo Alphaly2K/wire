@@ -93,41 +93,44 @@ pub fn dispatch(
     mem: &GuestMem,
     state: &mut ApiState,
 ) -> Option<(u32, String)> {
-    let supported = dll == "kernel32.dll"
-        && matches!(
-            name,
-            "CreateFileA"
-                | "CreateFileW"
-                | "ReadFile"
-                | "WriteFile"
-                | "GetFileSize"
-                | "GetFileSizeEx"
-                | "SetFilePointer"
-                | "SetFilePointerEx"
-                | "SetEndOfFile"
-                | "FlushFileBuffers"
-                | "GetCurrentDirectoryA"
-                | "GetCurrentDirectoryW"
-                | "SetCurrentDirectoryA"
-                | "SetCurrentDirectoryW"
-                | "GetFullPathNameA"
-                | "GetFullPathNameW"
-                | "GetFileAttributesA"
-                | "GetFileAttributesW"
-                | "CreateDirectoryA"
-                | "CreateDirectoryW"
-                | "DeleteFileA"
-                | "DeleteFileW"
-                | "SetFileAttributesA"
-                | "SetFileAttributesW"
-                | "FindFirstFileA"
-                | "FindFirstFileW"
-                | "FindFirstFileExA"
-                | "FindFirstFileExW"
-                | "FindNextFileA"
-                | "FindNextFileW"
-                | "FindClose"
-        )
+    use crate::win32::catalog::{resolve, ApiId, Architecture, FileApi, Resolution};
+    let core = if dll == "kernel32.dll" {
+        match resolve(Architecture::X86, dll, name) {
+            Resolution::Bound(contract) => match contract.id {
+                ApiId::File(id) if id != FileApi::GetFileType => Some(id),
+                _ => None,
+            },
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let supported = core.is_some()
+        || dll == "kernel32.dll"
+            && matches!(
+                name,
+                "GetCurrentDirectoryA"
+                    | "GetCurrentDirectoryW"
+                    | "SetCurrentDirectoryA"
+                    | "SetCurrentDirectoryW"
+                    | "GetFullPathNameA"
+                    | "GetFullPathNameW"
+                    | "GetFileAttributesA"
+                    | "GetFileAttributesW"
+                    | "CreateDirectoryA"
+                    | "CreateDirectoryW"
+                    | "DeleteFileA"
+                    | "DeleteFileW"
+                    | "SetFileAttributesA"
+                    | "SetFileAttributesW"
+                    | "FindFirstFileA"
+                    | "FindFirstFileW"
+                    | "FindFirstFileExA"
+                    | "FindFirstFileExW"
+                    | "FindNextFileA"
+                    | "FindNextFileW"
+                    | "FindClose"
+            )
         || dll == "shlwapi.dll"
             && matches!(
                 name,
@@ -148,14 +151,39 @@ pub fn dispatch(
     if !supported {
         return None;
     }
-    let wide = name.ends_with('W');
+    Some(execute(core, name, a, mem, state))
+}
+
+/// Bound core IDs bypass the public legacy facade's cold name/DLL resolution.
+pub(crate) fn call(
+    id: crate::win32::catalog::FileApi,
+    a: &crate::api::Args,
+    mem: &GuestMem,
+    state: &mut ApiState,
+) -> (u32, String) {
+    execute(Some(id), "", a, mem, state)
+}
+
+fn execute(
+    core: Option<crate::win32::catalog::FileApi>,
+    name: &str,
+    a: &crate::api::Args,
+    mem: &GuestMem,
+    state: &mut ApiState,
+) -> (u32, String) {
+    use crate::win32::catalog::FileApi;
+    let wide = core.map_or_else(|| name.ends_with('W'), |id| id.wide());
     let failure = if matches!(
+        core,
+        Some(
+            FileApi::CreateFileA
+                | FileApi::CreateFileW
+                | FileApi::GetFileSize
+                | FileApi::SetFilePointer
+        )
+    ) || matches!(
         name,
-        "CreateFileA"
-            | "CreateFileW"
-            | "GetFileSize"
-            | "SetFilePointer"
-            | "GetFileAttributesA"
+        "GetFileAttributesA"
             | "GetFileAttributesW"
             | "FindFirstFileA"
             | "FindFirstFileW"
@@ -167,8 +195,8 @@ pub fn dispatch(
         0
     };
     let result = (|| -> Result<(u32, String), u32> {
-        match name {
-            "PathRemoveFileSpecA" | "PathRemoveFileSpecW" => {
+        match (core, name) {
+            (None, "PathRemoveFileSpecA" | "PathRemoveFileSpecW") => {
                 if a[0] == 0 {
                     return Ok((0, String::new()));
                 }
@@ -272,7 +300,7 @@ pub fn dispatch(
                 }
                 Ok((1, "removed last path component".into()))
             }
-            "CreateFileA" | "CreateFileW" => {
+            (Some(FileApi::CreateFileA | FileApi::CreateFileW), _) => {
                 if a[6] != 0 || a[5] & 0x4000_0000 != 0 {
                     return Err(50);
                 } // OVERLAPPED not implemented
@@ -312,7 +340,7 @@ pub fn dispatch(
                 });
                 Ok((h, format!("file {text:?}")))
             }
-            "ReadFile" | "WriteFile" => {
+            (Some(FileApi::ReadFile | FileApi::WriteFile), _) => {
                 if a[4] != 0 {
                     return Err(50);
                 }
@@ -328,7 +356,7 @@ pub fn dispatch(
                 else {
                     return Err(6);
                 };
-                let reading = name == "ReadFile";
+                let reading = core == Some(FileApi::ReadFile);
                 if reading && !*readable || !reading && !*writable {
                     return Err(5);
                 }
@@ -343,12 +371,12 @@ pub fn dispatch(
                 mem.write_u32(a[3], n as u32).map_err(|_| 87u32)?;
                 Ok((1, format!("{n} bytes")))
             }
-            "GetFileSize" | "GetFileSizeEx" => {
+            (Some(FileApi::GetFileSize | FileApi::GetFileSizeEx), _) => {
                 let Some(HandleObj::File { file, .. }) = state.handles.get(&a[0]) else {
                     return Err(6);
                 };
                 let n = file.metadata().map_err(|e| win_error(&e))?.len();
-                if name == "GetFileSizeEx" {
+                if core == Some(FileApi::GetFileSizeEx) {
                     mem.write_u64(a[1], n).map_err(|_| 87u32)?;
                     Ok((1, String::new()))
                 } else {
@@ -359,8 +387,8 @@ pub fn dispatch(
                     Ok((n as u32, String::new()))
                 }
             }
-            "SetFilePointer" | "SetFilePointerEx" => {
-                let ex = name.ends_with("Ex");
+            (Some(FileApi::SetFilePointer | FileApi::SetFilePointerEx), _) => {
+                let ex = core == Some(FileApi::SetFilePointerEx);
                 let distance = if ex {
                     ((a[2] as u64) << 32 | a[1] as u64) as i64
                 } else if a[2] != 0 {
@@ -393,7 +421,7 @@ pub fn dispatch(
                     Ok((pos as u32, String::new()))
                 }
             }
-            "SetEndOfFile" | "FlushFileBuffers" => {
+            (Some(FileApi::SetEndOfFile | FileApi::FlushFileBuffers), _) => {
                 let Some(HandleObj::File { file, writable, .. }) = state.handles.get_mut(&a[0])
                 else {
                     return Err(6);
@@ -401,7 +429,7 @@ pub fn dispatch(
                 if !*writable {
                     return Err(5);
                 }
-                if name == "SetEndOfFile" {
+                if core == Some(FileApi::SetEndOfFile) {
                     let n = file.stream_position().map_err(|e| win_error(&e))?;
                     file.set_len(n).map_err(|e| win_error(&e))?;
                 } else {
@@ -409,16 +437,16 @@ pub fn dispatch(
                 }
                 Ok((1, String::new()))
             }
-            "GetCurrentDirectoryA" | "GetCurrentDirectoryW" => {
+            (None, "GetCurrentDirectoryA" | "GetCurrentDirectoryW") => {
                 let cwd = state.fs.as_ref().ok_or(3u32)?.cwd();
                 Ok((write_string(mem, a[1], a[0], &cwd, wide)?, cwd))
             }
-            "SetCurrentDirectoryA" | "SetCurrentDirectoryW" => {
+            (None, "SetCurrentDirectoryA" | "SetCurrentDirectoryW") => {
                 let text = read_name(mem, a[0], wide)?;
                 state.fs.as_mut().ok_or(3u32)?.set_cwd(&text)?;
                 Ok((1, text))
             }
-            "GetFullPathNameA" | "GetFullPathNameW" => {
+            (None, "GetFullPathNameA" | "GetFullPathNameW") => {
                 let text = read_name(mem, a[0], wide)?;
                 let fs = state.fs.as_ref().ok_or(3u32)?;
                 let path = fs.resolve(&text)?;
@@ -435,8 +463,11 @@ pub fn dispatch(
                 }
                 Ok((ret, full))
             }
-            "GetFileAttributesA" | "GetFileAttributesW" | "PathFileExistsA" | "PathFileExistsW"
-            | "PathIsDirectoryA" | "PathIsDirectoryW" => {
+            (
+                None,
+                "GetFileAttributesA" | "GetFileAttributesW" | "PathFileExistsA" | "PathFileExistsW"
+                | "PathIsDirectoryA" | "PathIsDirectoryW",
+            ) => {
                 let text = read_name(mem, a[0], wide)?;
                 let path = state.fs.as_ref().ok_or(3u32)?.resolve(&text)?;
                 let attr = attributes(&path)?;
@@ -451,7 +482,7 @@ pub fn dispatch(
                     text,
                 ))
             }
-            "MakeSureDirectoryPathExists" => {
+            (None, "MakeSureDirectoryPathExists") => {
                 let text = read_name(mem, a[0], false)?;
                 let path = state.fs.as_ref().ok_or(3u32)?.resolve(&text)?;
                 let directory = if text.ends_with(['\\', '/']) {
@@ -462,7 +493,7 @@ pub fn dispatch(
                 std::fs::create_dir_all(directory).map_err(|e| win_error(&e))?;
                 Ok((1, text))
             }
-            "PathUnquoteSpacesA" | "PathUnquoteSpacesW" => {
+            (None, "PathUnquoteSpacesA" | "PathUnquoteSpacesW") => {
                 if a[0] == 0 {
                     return Ok((0, String::new()));
                 }
@@ -472,10 +503,13 @@ pub fn dispatch(
                 }
                 Ok((0, text))
             }
-            "PathRenameExtensionA"
-            | "PathRenameExtensionW"
-            | "PathAddExtensionA"
-            | "PathAddExtensionW" => {
+            (
+                None,
+                "PathRenameExtensionA"
+                | "PathRenameExtensionW"
+                | "PathAddExtensionA"
+                | "PathAddExtensionW",
+            ) => {
                 if a[0] == 0 || a[1] == 0 {
                     return Ok((0, String::new()));
                 }
@@ -500,7 +534,7 @@ pub fn dispatch(
                 write_string(mem, a[0], 260, &text, wide)?;
                 Ok((1, text))
             }
-            "DeleteFileA" | "DeleteFileW" => {
+            (None, "DeleteFileA" | "DeleteFileW") => {
                 let text = read_name(mem, a[0], wide)?;
                 let path = state.fs.as_ref().ok_or(3u32)?.resolve(&text)?;
                 let info = path.metadata().map_err(|e| win_error(&e))?;
@@ -510,7 +544,7 @@ pub fn dispatch(
                 std::fs::remove_file(path).map_err(|e| win_error(&e))?;
                 Ok((1, text))
             }
-            "SetFileAttributesA" | "SetFileAttributesW" => {
+            (None, "SetFileAttributesA" | "SetFileAttributesW") => {
                 let text = read_name(mem, a[0], wide)?;
                 let path = state.fs.as_ref().ok_or(3u32)?.resolve(&text)?;
                 if a[1] & !0x81 != 0 {
@@ -532,13 +566,16 @@ pub fn dispatch(
                 std::fs::set_permissions(path, permissions).map_err(|e| win_error(&e))?;
                 Ok((1, text))
             }
-            "CreateDirectoryA" | "CreateDirectoryW" => {
+            (None, "CreateDirectoryA" | "CreateDirectoryW") => {
                 let text = read_name(mem, a[0], wide)?;
                 let path = state.fs.as_ref().ok_or(3u32)?.resolve(&text)?;
                 std::fs::create_dir(path).map_err(|e| win_error(&e))?;
                 Ok((1, text))
             }
-            "FindFirstFileA" | "FindFirstFileW" | "FindFirstFileExA" | "FindFirstFileExW" => {
+            (
+                None,
+                "FindFirstFileA" | "FindFirstFileW" | "FindFirstFileExA" | "FindFirstFileExW",
+            ) => {
                 let extended = name.starts_with("FindFirstFileEx");
                 if extended && (a[1] > 1 || a[3] != 0 || a[4] != 0 || a[5] & !2 != 0) {
                     return Err(87);
@@ -573,7 +610,7 @@ pub fn dispatch(
                     text,
                 ))
             }
-            "FindNextFileA" | "FindNextFileW" => {
+            (None, "FindNextFileA" | "FindNextFileW") => {
                 let Some(HandleObj::Search { entries, next }) = state.handles.get_mut(&a[0]) else {
                     return Err(6);
                 };
@@ -582,21 +619,25 @@ pub fn dispatch(
                 *next += 1;
                 Ok((1, String::new()))
             }
-            "FindClose" => {
+            (None, "FindClose") => {
                 if !matches!(state.handles.get(&a[0]), Some(HandleObj::Search { .. })) {
                     return Err(6);
                 }
                 state.handles.remove(&a[0]);
                 Ok((1, String::new()))
             }
+            (Some(FileApi::GetFileType), _) => Ok((
+                matches!(state.handles.get(&a[0]), Some(HandleObj::File { .. })) as u32,
+                String::new(),
+            )),
             _ => unreachable!(),
         }
     })();
-    Some(match result {
+    match result {
         Ok(v) => v,
         Err(e) => {
             state.last_error = e;
-            let path = if matches!(name, "CreateFileA" | "CreateFileW") {
+            let path = if matches!(core, Some(FileApi::CreateFileA | FileApi::CreateFileW)) {
                 read_name(mem, a[0], wide)
                     .map(|path| format!("; file {path:?}"))
                     .unwrap_or_default()
@@ -605,5 +646,5 @@ pub fn dispatch(
             };
             (failure, format!("Win32 error {e}{path}"))
         }
-    })
+    }
 }

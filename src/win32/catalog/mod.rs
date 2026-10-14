@@ -1,10 +1,12 @@
 //! Export identity and ABI plans are resolved during binding, not execution.
 //! Unconverted families remain on explicit legacy routes.
+mod files;
 mod guid;
 mod identity;
 mod modules;
 mod nls;
 mod version;
+pub use files::{FileApi, FILE_CONTRACTS};
 pub use guid::{GuidApi, GUID_CONTRACTS};
 pub use identity::{IdentityApi, IDENTITY_CONTRACTS};
 pub use modules::{ModuleApi, ModuleQueryApi, MODULE_CONTRACTS, MODULE_QUERY_CONTRACTS};
@@ -25,6 +27,7 @@ pub enum Parameter {
     /// A byte is consumed by its adapter; retain the historical Win64 carrier.
     Uint8,
     Uint64,
+    Int64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,6 +49,7 @@ pub enum ApiId {
     Nls(NlsApi),
     Module(ModuleApi),
     ModuleQuery(ModuleQueryApi),
+    File(FileApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,7 +146,7 @@ impl Contract {
         self.parameters
             .iter()
             .map(|parameter| {
-                if matches!(parameter, Parameter::Uint64) {
+                if matches!(parameter, Parameter::Int64 | Parameter::Uint64) {
                     8
                 } else {
                     4
@@ -189,6 +193,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(NLS_CONTRACTS.iter())
         .chain(MODULE_CONTRACTS.iter())
         .chain(MODULE_QUERY_CONTRACTS.iter())
+        .chain(FILE_CONTRACTS.iter())
 }
 
 #[cfg(test)]
