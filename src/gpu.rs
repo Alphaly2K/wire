@@ -243,7 +243,7 @@ pub struct NativeGraphics(Rc<Inner>);
 pub(crate) struct Surface {
     graphics: NativeGraphics,
     handle: NonNull<c_void>,
-    _layer: crate::platform::MetalLayer,
+    _layer: crate::host::ui::MetalLayer,
 }
 impl Drop for Surface {
     fn drop(&mut self) {
@@ -660,7 +660,7 @@ impl NativeGraphics {
     }
     pub(crate) fn create_surface(
         &self,
-        layer: crate::platform::MetalLayer,
+        layer: crate::host::ui::MetalLayer,
     ) -> Result<Surface, String> {
         let mut error = [0u8; 4096];
         let handle = NonNull::new(unsafe {

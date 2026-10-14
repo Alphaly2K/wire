@@ -278,7 +278,7 @@ pub struct ApiState {
     pub d3d9: crate::d3d9::D3D9,
     pub dsound: crate::dsound::DSound,
     pub(crate) wmi: crate::wmi::Wmi,
-    pub presenter: crate::platform::Presenter,
+    pub presenter: crate::host::ui::Presenter,
     pub stop_after_presents: Option<u64>,
     pub(crate) bstrs: HashMap<u32, u32>,
     pub(crate) com_threads: HashMap<u32, (u32, u32)>,
@@ -321,7 +321,7 @@ impl ApiState {
             d3d9: crate::d3d9::D3D9::default(),
             dsound: crate::dsound::DSound::default(),
             wmi: crate::wmi::Wmi::default(),
-            presenter: crate::platform::Presenter::default(),
+            presenter: crate::host::ui::Presenter::default(),
             stop_after_presents: None,
             bstrs: HashMap::new(),
             com_threads: HashMap::new(),
@@ -1705,7 +1705,7 @@ pub fn dispatch(
 ) -> Result<(), String> {
     let binding = api.binding(idx);
     let entry = &binding.entry;
-    crate::platform::poll(mem, state, sched);
+    crate::win32::x86::host::poll(mem, state, sched);
     let dll = entry.dll.as_str();
     let name = entry.name.as_str();
     if dll == "user32.dll"
@@ -3044,7 +3044,7 @@ pub fn dispatch(
                 note = msg;
                 implemented = supported;
             } else if let Some((v, msg, supported)) =
-                crate::graphics::dispatch(dll, name, &args, mem, state)
+                crate::win32::gdi::x86::dispatch(dll, name, &args, mem, state)
             {
                 ret = v;
                 note = msg;

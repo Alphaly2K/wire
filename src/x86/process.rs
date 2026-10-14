@@ -47,7 +47,7 @@ impl Process32 {
         );
         state.fs = Some(fs);
         state.stop_after_presents = config.stop_after_presents;
-        state.presenter = crate::platform::Presenter::new(config.present, config.capture_frames)
+        state.presenter = crate::host::ui::Presenter::new(config.present, config.capture_frames)
             .map_err(|e| format!("presenter: {e}"))?;
         state.d3d9.enable_gpu = config.gpu_enabled;
         state.d3d9.prepare_gpu();
@@ -194,7 +194,7 @@ pub(crate) fn run_loop(
                 // Cooperative timeslice: a guest thread that never calls a
                 // blocking API (spin loop) must not starve the others.
                 if cpu.instr_count & 0xF_FFFF == 0 {
-                    crate::platform::poll(mem, state, sched);
+                    crate::win32::x86::host::poll(mem, state, sched);
                     sched.round_robin(cpu);
                 }
             }

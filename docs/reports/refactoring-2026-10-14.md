@@ -22,7 +22,7 @@
 | R2 分发收敛 | GUID + 6 个 identity export 已迁移；locale/version/file 等仍 legacy |
 | R3 状态归属 | identity/profile 与可变环境变量已形成独立边界；module/file/thread/COM 待迁移 |
 | R4 PE32 Process | 已完成装载/执行编排提取；旧 Cpu 方法只保留委托 facade |
-| R5 host/graphics | 待 Process/状态边界形成 |
+| R5 host/graphics | 已完成 owned UI 请求/事件与 GDI adapter 分离，真实 native 验证通过 |
 | R6 原生 Mono | 按用户指示跳过 |
 | R7 工具/结构 | 先提取测试 harness，旧入口和脚本兼容保留 |
 
@@ -89,3 +89,19 @@ guest 环境变量由 `EnvironmentVariables` 私有 map 拥有，大小写归一
 - Alice 200M work 启动前缀三对均按相同预算退出，无新增 API/访存错误，未进入 Draw/Present。CPU 中位数 2.64s → 2.66s、wall 2.70s → 2.70s，RSS 约 375MB；线程/计时使 RIP 与 retired 略变。复用原隔离目录，没有复制素材，日志在 `r4-alice-prefix`。
 
 过渡例外仍明确保留：领域 callback 通过旧 Cpu facade 重入 Process；IR 保留地址边界暂引用公开 `api::STUB_BASE`。后续将地址布局与领域控制请求逐步迁出兼容入口。R2/R3 的剩余领域和 R5/R7 未因此自动完成。
+
+## R5 host / graphics
+
+native UI FFI、MetalLayer retain/release 与 CPU frame presenter 移入 `host/ui.rs`。host 接收 owned window/frame 请求并产出普通事件，两架构 guest adapter 分别负责窗口选择/ID 映射和消息入队。PE32 音频、16ms gate、native window sync、事件消费、frame sequence、snapshot/failure、上传及 capture 的顺序保持。Presenter 明确受主线程约束，Frame 在 FFI 前验证尺寸与字节数；旧 `platform::Presenter` 作为公开 facade 保留。
+
+GDI 的 DLL 接受范围、USER client dimensions、LastError 和 diagnostics 移入 `win32/gdi/x86.rs`；图形对象、DIB/font 和 checked raster operations 不再借用 ApiState。PE32 GuestMem codec 和资源上限保留，没有借此次迁移更换 handle arena 或合并两架构内存。native C/ObjC、build.rs、include 和第三方库路径未改变。完整契约见 [host/graphics](../architecture/host-graphics.md)。
+
+- 默认完整 release：394 passed / 0 failed / 7 ignored；新增 2 项 host 边界测试验证 malformed frame、RGB 字节、去重和 16 帧限额。debug Win32/AMD64 + host 共 241 项、fmt、strict Clippy、6 项工具检查通过。
+- 提供现有 native graphics/MoltenVK/原创 GS 和隔离 DXBC 后，全部 7 项 ignored 显式运行通过（Metal/software 像素对照、GPU shader/resource owner/lifetime、DXGI draw/swapchain）。输入 SHA 保存为 `r5-native-input-sha256.txt`；没有复制游戏或构建 Mono。
+- 新 `examples/host_ui_probe.rs` 在真实 AppKit 主线程验证非主线程初始化拒绝、窗口 resize/remove、上传成功与 failure、RGB capture 和去重；通过日志为 `r5-host-ui-probe.txt`。探针仅使用自己生成的两像素帧。
+- `host-graphics-wire` SHA-256：`d72a5cf8f35e0453f137e677eac49a11b7ef7c36cca0471058c4a7481fd9f41f`。
+- 29 个 case/path、100M work、各三对 AB/BA，所有结果校验。新增 PE32 GDI fixture 以 CreateCompatibleDC → GetPixel(0,0) 黑色 checksum → DeleteDC 独立验证，raw/IR CPU 中位数变化 -0.53%/+0.65%；trace 仍格式化/计数，写 null device 以限制日志体积。
+- thread-ID gateway 初筛 +4.12% 扩到 700M 后为 +2.66%，相对最初 +0.95%；其余初筛回退均小于 3%。memory 扩样相对 R4 -6.04%、相对最初 -2.94%，R4 记录的布局成本已消退。RSS 没有实质增长，全部初筛与扩大轮次保留于 `r5-host-*-timing` / `r5-host-gateway-memory-investigation`。
+- Alice 窗口模式 200M 启动前缀三对到相同 budget，guest bootstrap HWND 仍隐藏、client=314x211、无新 API/访存错误，没有提前进入 Draw/Present。复用原隔离目录，日志 `r5-alice-window-prefix`；实际渲染正确性由上述真实 native 探针和 GPU/像素 fixture 验证。
+
+R5 没有把 D3D9/DXGI 的所有 guest COM 语义都迁入新 catalog；它们按 R2/R3 继续逐领域处理。当前完整重构仍有剩余家族和 R7 收尾，R6 按用户要求跳过。

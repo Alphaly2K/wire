@@ -11,7 +11,8 @@
 | `x64::runtime` | Win64 gateway 与服务组合根；已有 BoundImport 冷绑定和 HotImport 热路由，迁移中保留 |
 | `fs`、`codepage`、`simd` | 已共享的纯语义或公共服务，继续复用 |
 | `runtime::environment` | 不可变 guest 身份/版本/locale/路径；私有可变环境变量模型，架构 allocator 生命周期独立 |
-| `graphics`、`d3d9`、`gpu`、`platform` | guest ABI、像素/资源核心、native FFI 与 host UI 尚有交叉，按资源所有权渐进分离 |
+| `host::ui`、`win32::{x86::host,gdi::x86}` | host 接收 owned 窗口/帧请求并产出事件；guest adapter 负责 USER 入队、GDI 语义映射及 LastError，公开 platform 路径只作 facade |
+| `graphics`、`d3d9`、`gpu` | 像素/对象核心不依赖 ApiState；DIB/font 仍有 PE32 codec，D3D9/DXGI 的其它 guest COM 适配器后续按领域迁移 |
 | `main` | CLI、IR 文件读取和报表；PE32 状态构造与执行委托 `Process32` |
 
 目标依赖方向：CLI → Process → Loader/CPU/ABI adapter；ABI adapter → Win32 领域状态 → 纯算法/host 服务。共享 ISA 语义不依赖 Win32 或 host；host 产出事件，由 Process/USER 消费，host callback 不运行 guest CPU。
@@ -23,3 +24,5 @@ CPU 热循环、FLAGS/fault 提交、Memory/cache 所有权、stub 地址和 `.w
 本轮忽略已撤回的原生 Mono 实验；原始 guest Mono 的普通解释执行和诊断仍保留。
 
 PE32 callback 仍允许领域 handler 经旧 Cpu facade 重入 Process。这一兼容环在迁移控制请求时逐家族解除；facade 的删除条件是内部调用者和外部使用者都已迁到 Process。IR 链目前仍引用 `api::STUB_BASE` 作为保留地址边界，后续移到架构地址布局；不能将它误当作可继续链执行的普通指令地址。
+
+host/graphics 的调用顺序、所有权与原生验证见 [宿主与图形边界](host-graphics.md)。native 源码和 build.rs 未迁移，保留的第三方构建输入不变。

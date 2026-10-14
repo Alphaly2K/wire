@@ -36,9 +36,37 @@ def guid_gateway_fixture(work):
     struct.pack_into('<II', image, 0x98 + 96 + 8, 0x1100, 40)
     return image, dict(eax=0, retired=7 * n + 10)
 
+def gdi_gateway_fixture(work):
+    n = max(1, work // 7)
+    code = bytearray.fromhex('57 56 53 bf') + struct.pack('<I', n)
+    code += bytes.fromhex('31db 6a00 ff15') + struct.pack('<I', 0x401190)
+    code += bytes.fromhex('89c6')
+    loop = len(code)
+    # Stock 1x1 bitmap: GetPixel(memory_dc, 0, 0) returns black COLORREF.
+    code += bytes.fromhex('6a00 6a00 56 ff15') + struct.pack('<I', 0x401194)
+    code += bytes.fromhex('01c3 4f')
+    at = len(code)
+    code += bytes.fromhex('0f85') + struct.pack('<i', loop - at - 6)
+    code += bytes.fromhex('56 ff15') + struct.pack('<I', 0x401198)
+    code += bytes.fromhex('89d8 5b 5e 5f cc')
+    code.extend(bytes(512 - len(code)))
+    struct.pack_into('<I', code, 0x100, 0x1180)
+    struct.pack_into('<I', code, 0x10c, 0x11c0)
+    struct.pack_into('<I', code, 0x110, 0x1190)
+    for offset, target in [(0x180, 0x11d0), (0x184, 0x11f0), (0x188, 0x11b0)]:
+        struct.pack_into('<I', code, offset, target)
+    code[0x1c0:0x1ca] = b'gdi32.dll\0'
+    for offset, symbol in [(0x1d2, b'CreateCompatibleDC\0'), (0x1f2, b'GetPixel\0'), (0x1b2, b'DeleteDC\0')]:
+        code[offset:offset + len(symbol)] = symbol
+    image = pe32(code)
+    struct.pack_into('<II', image, 0x98 + 96 + 8, 0x1100, 40)
+    return image, dict(eax=0, retired=7 * n + 14)
+
 def fixture(name,work):
     if name == 'gateway-guid':
         return guid_gateway_fixture(work)
+    if name == 'gateway-gdi':
+        return gdi_gateway_fixture(work)
     n=max(1,work//6);c=bytearray()
     if name=='sse-register':
         c+=bytes.fromhex('b801000000 660f6ec0 b803000000 660f6ec8 bf')+struct.pack('<I',n)

@@ -1,8 +1,8 @@
 //! Optional native window bridge. Guest HWNDs are mapped, never truncated to AppKit IDs.
 use super::runtime::{Runtime64, WindowEvent};
+use crate::host::ui;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    ffi::CString,
     time::{Duration, Instant},
 };
 pub(crate) struct Presenter64 {
@@ -19,7 +19,7 @@ impl Presenter64 {
         return Err("visible Win64 presenter requires macOS".into());
         #[cfg(target_os = "macos")]
         {
-            if unsafe { crate::platform::wire_ui_init() } == 0 {
+            if unsafe { ui::wire_ui_init() } == 0 {
                 return Err("AppKit requires the main thread".into());
             }
             Ok(Self {
@@ -47,7 +47,7 @@ impl Presenter64 {
         {
             for (&guest, &native) in &self.windows {
                 if !live.contains(&guest) {
-                    unsafe { crate::platform::wire_ui_remove(native) };
+                    ui::remove_window(native);
                 }
             }
             self.windows.retain(|guest, _| live.contains(guest));
@@ -72,24 +72,21 @@ impl Presenter64 {
                     self.windows.insert(w.handle, native);
                     native
                 };
-                let title = CString::new(w.title.replace('\0', "")).map_err(|e| e.to_string())?;
-                unsafe {
-                    crate::platform::wire_ui_window(
-                        native,
-                        title.as_ptr(),
-                        w.width,
-                        w.height,
-                        w.visible as i32,
-                    );
-                    crate::platform::wire_ui_window_topmost(native, w.topmost as i32);
-                };
+                ui::update_window(ui::WindowRequest {
+                    id: native,
+                    title: w.title,
+                    width: w.width,
+                    height: w.height,
+                    visible: w.visible,
+                })?;
+                ui::set_topmost(native, w.topmost);
             }
             for _ in 0..512 {
-                let mut event = crate::platform::Event::default();
-                if unsafe { crate::platform::wire_ui_poll(&mut event) } == 0 {
+                let Some(event) = ui::poll_event() else {
                     break;
-                }
-                if let Some((&window, _)) = self.windows.iter().find(|(_, id)| **id == event.hwnd) {
+                };
+                if let Some((&window, _)) = self.windows.iter().find(|(_, id)| **id == event.window)
+                {
                     runtime.queue_window_event(WindowEvent {
                         window,
                         message: event.message,
@@ -120,7 +117,7 @@ impl Presenter64 {
                 .windows
                 .get(&window)
                 .ok_or("no visible native window for swapchain")?;
-            let layer = crate::platform::MetalLayer::for_window(native)?;
+            let layer = ui::MetalLayer::for_window(native)?;
             if let std::collections::btree_map::Entry::Vacant(entry) = self.surfaces.entry(window) {
                 entry.insert(gpu.create_surface(layer)?);
             }
@@ -170,7 +167,7 @@ impl Drop for Presenter64 {
         self.surfaces.clear();
         #[cfg(target_os = "macos")]
         unsafe {
-            crate::platform::wire_ui_shutdown()
+            ui::wire_ui_shutdown()
         }
     }
 }

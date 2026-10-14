@@ -12,6 +12,7 @@ pub mod gdiplus;
 pub mod gpu;
 pub mod graphics;
 pub mod heap;
+pub mod host;
 pub mod ir;
 mod keyboard;
 pub mod loader;

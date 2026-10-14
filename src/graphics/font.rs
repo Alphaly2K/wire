@@ -1,7 +1,7 @@
 //! Logical font handles and x86 LOGFONT A/W marshaling. Font realization and
 //! glyph rendering use a platform backend; a handle alone is no glyph result.
-use super::Graphics;
-use crate::{api::Args, mem::GuestMem};
+use super::{Arguments, Graphics};
+use crate::mem::GuestMem;
 use std::collections::BTreeMap;
 pub(super) const SYSTEM_FONT: u32 = 0x42000080 + 13 * 4;
 pub(super) struct Font {
@@ -55,7 +55,7 @@ fn read_font(mem: &GuestMem, p: u32, wide: bool) -> Result<[u8; 92], u32> {
 }
 pub(super) fn dispatch(
     name: &str,
-    a: &Args,
+    a: &Arguments,
     mem: &GuestMem,
     gfx: &mut Graphics,
 ) -> Option<Result<u32, u32>> {

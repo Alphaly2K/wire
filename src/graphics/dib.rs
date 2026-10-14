@@ -1,6 +1,6 @@
 //! Checked 32bpp BI_RGB transfer contracts for the initial raster backend.
-use super::{surface::dimensions, Graphics};
-use crate::{api::Args, mem::GuestMem};
+use super::{surface::dimensions, Arguments, Graphics};
+use crate::mem::GuestMem;
 fn words(mem: &GuestMem, p: u32) -> Result<[u32; 10], u32> {
     let mut bytes = [0; 40];
     mem.read_bytes(p, &mut bytes).map_err(|_| 87u32)?;
@@ -10,7 +10,7 @@ fn words(mem: &GuestMem, p: u32) -> Result<[u32; 10], u32> {
 }
 pub(super) fn dispatch(
     name: &str,
-    a: &Args,
+    a: &Arguments,
     mem: &GuestMem,
     gfx: &mut Graphics,
 ) -> Option<Result<u32, u32>> {
