@@ -3,6 +3,57 @@
 use super::*;
 
 #[test]
+fn path_contract_baseline_keeps_win64_capacity_alias_and_absent_exports() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let root = std::env::temp_dir().join(format!("wire64-path-contract-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    runtime.set_filesystem(wire::fs::GuestFs::new(&root).unwrap());
+    let high = 0xabcd0000_00000000;
+    startup_call(&mut mem, &mut cpu, &mut runtime, "SetLastError", &[0x55]);
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "kernelbase.dll",
+            "GetCurrentDirectoryA",
+            &[high, 0xdead0000]
+        ),
+        4
+    );
+    let frame = STACK + 0x1f88;
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "kernelbase.dll",
+            "GetCurrentDirectoryA",
+            &[high | 4, frame]
+        ),
+        3
+    );
+    let mut bytes = [0; 4];
+    mem.read(frame, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"C:\\\0");
+    assert_eq!(cpu.rip, BASE);
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        0x55
+    );
+    assert!(!wire::x64::runtime::import_supported(
+        "user32.dll",
+        "GetCurrentDirectoryA"
+    ));
+    for dll in ["kernel32.dll", "kernelbase.dll"] {
+        for name in ["GetFullPathNameA", "GetFullPathNameW"] {
+            assert!(!wire::x64::runtime::import_supported(dll, name));
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn core_file_contract_keeps_win64_widths_preflight_and_return_slot_alias() {
     let (mut mem, mut cpu, mut runtime) = startup();
     let root = std::env::temp_dir().join(format!("wire64-core-contract-{}", std::process::id()));

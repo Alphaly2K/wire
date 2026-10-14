@@ -3,6 +3,35 @@
 use super::*;
 
 #[test]
+fn path_contract_baseline_keeps_full_path_partial_output_and_stdcall() {
+    let mut v = Vm::new();
+    let output = DATA + 0x400;
+    let part = DATA + 0x500;
+    v.mem.write_bytes(DATA, b"leaf.dat\0").unwrap();
+    v.mem.write_bytes(output, &[0xaa; 64]).unwrap();
+    v.mem.write_u32(part, 0xfeedface).unwrap();
+    v.k("SetLastError", &[0x55]);
+    assert_eq!(v.k("GetFullPathNameA", &[DATA, 2, output, part]), 12);
+    assert_eq!(v.mem.read_u32(output).unwrap(), 0xaaaaaaaa);
+    assert_eq!(v.mem.read_u32(part).unwrap(), 0xfeedface);
+    assert_eq!(v.state.last_error, 0x55);
+    assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 20);
+    assert_eq!(v.k("GetFullPathNameA", &[DATA, 64, output, 0x30000]), 0);
+    assert_eq!(v.state.last_error, 87);
+    assert_eq!(v.mem.read_cstr(output, 64).unwrap(), "C:\\leaf.dat");
+    v.wide(DATA, "leaf.dat");
+    assert_eq!(v.k("GetFullPathNameW", &[DATA, 64, output, part]), 11);
+    assert_eq!(v.mem.read_wstr(output, 64).unwrap(), "C:\\leaf.dat");
+    assert_eq!(v.mem.read_u32(part).unwrap(), output + 6);
+    v.mem.write_bytes(output, &[0xaa; 64]).unwrap();
+    assert_eq!(
+        v.call("user32.dll", "GetFullPathNameW", &[DATA, 64, output, part]),
+        0
+    );
+    assert_eq!(v.mem.read_u32(output).unwrap(), 0xaaaaaaaa);
+}
+
+#[test]
 fn core_file_contract_keeps_pe32_split_distance_and_post_seek_output_failure() {
     let mut v = Vm::new();
     std::fs::write(v.dir.join("seek.bin"), b"abc").unwrap();
