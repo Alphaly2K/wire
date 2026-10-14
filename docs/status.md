@@ -2,7 +2,7 @@
 
 更新日期：2026-10-15。重构前固定代码基线 `2e78377`；本轮进度见 [重构记录](reports/refactoring-2026-10-14.md)。
 
-R0/R1、R4、R5 已完成：正式 fixture、测试 harness、GUID 唯一契约、PE32 Process32、owned host UI 请求与 GDI/像素状态分离。R2/R3 已迁移 identity、guest environment、version、42 个 NLS/locale、31 个模块和 11 个核心文件 export，另完成双架构模块及 Win64 文件状态归属；PE32 内核/文件状态及其余家族仍待迁移。R7 已完成当前 PE32 内核目录、领域测试和公共性能工具的整理，后续目录随其余领域迁移继续推进。最新核心文件契约批次完整 release 为 408 passed / 7 ignored，debug Win32/AMD64/FPU/Unicorn 293 项、fmt 与 strict Clippy 通过；7 项外部图形测试再次显式执行，全部通过，工具12 通过。
+R0/R1、R4、R5 已完成：正式 fixture、测试 harness、GUID 唯一契约、PE32 Process32、owned host UI 请求与 GDI/像素状态分离。R2/R3 已迁移 identity、guest environment、version、42 个 NLS/locale、31 个模块和 21 个文件 export，另完成双架构模块及 Win64 文件状态归属；PE32 内核/文件状态及其余家族仍待迁移。R7 已完成当前 PE32 内核目录、领域测试和公共性能工具的整理，后续目录随其余领域迁移继续推进。最新路径/属性契约批次完整 release 为 410 passed / 7 ignored，debug Win32/AMD64/FPU/Unicorn 295 项、fmt 与 strict Clippy 通过；7 项外部图形测试再次显式执行，全部通过，工具12 通过。
 
 R5 的 29 个解释器 case/path 已做三对 AB/BA，work/retired/checksum 全部校验；扩样后的最大 CPU 中位数回退为 +2.66%。R4 的 memory 成本在 R5 的 700M 复测中已消退：相对 R4 -6.04%，相对最初基线 -2.94%。这是结构调整后的代码生成/布局结果，不推断完整游戏 FPS；调查与全部轮次见 [重构记录](reports/refactoring-2026-10-14.md)。
 
@@ -21,6 +21,8 @@ R7 的 38 个 case/path 三对全部校验通过；large-code 初筛超 3% 后�
 macOS PE32 的五个实际执行边界已分别隔离到对齐代码节，SIMD 以 execute/EIP 回滚边界为准。28 个 case/path 三对及 integer/bit 700M 扩样全部校验，最终最大 CPU 中位数回退 +2.01%、RSS 最多增加 128KiB。实际生成代码与完整证据见 [布局记录](reports/refactoring-ir-layout-2026-10-14.md)。
 
 核心文件 catalog 在上述新基线上独立验收：28 个路径三对校验，整数/GUID 的默认短样本经过同二进制噪声、采样及 utility QoS 扩样调查；受控 700M 结果 +2.32%/−1.38%，最终最大 CPU 中位数回退 +2.32%、RSS 最多增加 224KiB。两种调度模式分别记录，全部失败与离散样本保留。PE32 全部 11 个 typed，Win64 9 个 typed、SetFilePointer/SetEndOfFile 保持 absent；路径/目录/metadata/section/标准句柄仍待迁移。见 [文件 catalog 验收](reports/refactoring-file-catalog-2026-10-15.md)。
+
+路径/属性 catalog 新增 10 个 export，文件契约合计 PE32 21 typed、Win64 17 typed/4 absent。31 个 case/path 校验，整数 IR 的 700M 九对 +4.77% 经同二进制噪声与 2.1B 长样本调查；长样本中位数 −4.86%，仍有单轮离散，不宣称整数提速。最终矩阵最大 CPU 中位数回退 +1.91%、RSS 最多增加 80KiB。Alice 200M 保持隐藏窗口和预算出口。目录/metadata/section/标准句柄等仍待迁移，完整证据见 [路径/属性验收](reports/refactoring-file-path-catalog-2026-10-15.md)。
 
 macOS AMD64 寄存器段执行器现独立放入 4KiB 对齐的 Mach-O 代码节，保持循环 body 与 guest 语义。该独立批次 release 403、debug 288、外部 GPU 7 项通过；26 个 case/path 三对校验，最大 CPU 中位数回退 +2.12%。它用于减轻 Win32 handler 重构引发的布局敏感性，模块 catalog 仍单独验收。见 [布局记录](reports/refactoring-ir-layout-2026-10-14.md)。
 

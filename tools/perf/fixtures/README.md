@@ -20,5 +20,7 @@ PE 容器与其余生成器复用 `tools/amd64_perf.py`、`tools/interpreter_per
 其 PE32 同名 case 只读打开生成的 `gateway-file-type.exe` 自身，校验文件句柄类型、
 返回 checksum、退休数和 API count，不需要游戏素材或额外输入文件；
 `kernel_gateway.py` 的 PE32 CreateEvent → SetEvent/ResetEvent 循环校验共享 handle 寿命和每次返回值。
+`path_gateway.py` 的双架构 GetCurrentDirectoryA(0, NULL) 循环校验根目录
+`C:\` 的四字符容量、累计 checksum、退休数和 API count，不访问外部素材。
 这些 case 需显式选择，默认 case 集合不变。PE32 正式 API 计时可加
 `--discard-api-log`：仍格式化 trace、记录频率和计数，将全量 trace 写入空设备。

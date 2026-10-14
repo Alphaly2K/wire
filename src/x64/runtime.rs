@@ -418,7 +418,6 @@ fn import_arity(name: &str) -> Option<usize> {
         "MoveFileW" | "MoveFileA" => 2,
         "DeleteFileW" | "DeleteFileA" | "RemoveDirectoryW" | "RemoveDirectoryA" => 1,
         "DuplicateHandle" => 7,
-        "SetFileAttributesW" | "SetFileAttributesA" => 2,
         "SHGetKnownFolderPath" => 4,
         "CoTaskMemAlloc" | "CoTaskMemFree" => 1,
         "CoCreateInstance" => 5,
@@ -465,11 +464,6 @@ fn import_arity(name: &str) -> Option<usize> {
         "MapViewOfFile" => 5,
         "UnmapViewOfFile" => 1,
         "FlushViewOfFile" => 2,
-        "GetFileAttributesW"
-        | "GetFileAttributesA"
-        | "SetCurrentDirectoryW"
-        | "SetCurrentDirectoryA" => 1,
-        "GetCurrentDirectoryW" | "GetCurrentDirectoryA" => 2,
         "GetFileAttributesExW" | "GetFileAttributesExA" => 3,
         "CommandLineToArgvW" => 2,
         "LocalFree" => 1,
@@ -612,7 +606,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "GetTokenInformation" => &[1, 3],
         "MoveFileExW" | "MoveFileExA" => &[2],
         "DuplicateHandle" => &[4, 5, 6],
-        "SetFileAttributesW" | "SetFileAttributesA" => &[1],
         "SHGetKnownFolderPath" => &[1],
         "CreateToolhelp32Snapshot" => &[0, 1],
         "SystemParametersInfoA" | "SystemParametersInfoW" => &[0, 1, 3],
@@ -633,7 +626,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "NtQueryDirectoryFile" => &[6, 7],
         "CreateFileMappingW" | "CreateFileMappingA" => &[2, 3, 4],
         "MapViewOfFile" | "MapViewOfFileEx" => &[1, 2, 3],
-        "GetCurrentDirectoryW" | "GetCurrentDirectoryA" => &[0],
         "GetFileAttributesExW" | "GetFileAttributesExA" => &[1],
         "RoInitialize" => &[0],
         "CoInitializeEx" => &[1],
@@ -1716,8 +1708,12 @@ impl Runtime64 {
                     }
                 }
             }
-            "SetFileAttributesW" | "SetFileAttributesA" => {
-                let path = Self::path_name(mem, args[0], name.ends_with('W'))?;
+            _ if matches!(
+                file,
+                Some(FileApi::SetFileAttributesW | FileApi::SetFileAttributesA)
+            ) =>
+            {
+                let path = Self::path_name(mem, args[0], file.unwrap().wide())?;
                 let result = self.files.set_attributes(&path, args[1]);
                 match result {
                     Ok(()) => 1,
@@ -2623,16 +2619,18 @@ impl Runtime64 {
                     }
                 }
             }
-            "GetFileAttributesW"
-            | "GetFileAttributesA"
-            | "GetFileAttributesExW"
-            | "GetFileAttributesExA" => {
-                let extended = name.contains("Ex");
+            _ if matches!(
+                file,
+                Some(FileApi::GetFileAttributesW | FileApi::GetFileAttributesA)
+            ) || matches!(name, "GetFileAttributesExW" | "GetFileAttributesExA") =>
+            {
+                let extended = file.is_none();
                 if extended && args[1] != 0 {
                     self.set_error(mem, 87)?;
                     0
                 } else {
-                    let path = Self::path_name(mem, args[0], name.ends_with('W'))?;
+                    let wide = file.map_or_else(|| name.ends_with('W'), |id| id.wide());
+                    let path = Self::path_name(mem, args[0], wide)?;
                     let fs = self
                         .files
                         .filesystem()
@@ -2699,8 +2697,12 @@ impl Runtime64 {
                     }
                 }
             }
-            "SetCurrentDirectoryW" | "SetCurrentDirectoryA" => {
-                let path = Self::path_name(mem, args[0], name.ends_with('W'))?;
+            _ if matches!(
+                file,
+                Some(FileApi::SetCurrentDirectoryW | FileApi::SetCurrentDirectoryA)
+            ) =>
+            {
+                let path = Self::path_name(mem, args[0], file.unwrap().wide())?;
                 match self
                     .files
                     .filesystem_mut()
@@ -2714,13 +2716,17 @@ impl Runtime64 {
                     }
                 }
             }
-            "GetCurrentDirectoryW" | "GetCurrentDirectoryA" => {
+            _ if matches!(
+                file,
+                Some(FileApi::GetCurrentDirectoryW | FileApi::GetCurrentDirectoryA)
+            ) =>
+            {
                 let path = self
                     .files
                     .filesystem()
                     .ok_or("Win64 has no mounted filesystem")?
                     .cwd();
-                let wide = name.ends_with('W');
+                let wide = file.unwrap().wide();
                 let bytes: Vec<u8> = if wide {
                     path.encode_utf16()
                         .chain(Some(0))

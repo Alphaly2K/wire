@@ -29,7 +29,7 @@
 | --- | --- |
 | R0 入口/fixture | 已完成；12 组 golden 输入一致，默认与旧路径各 7 个运行 smoke 通过 |
 | R1 GUID 契约试点 | 已完成唯一契约、双架构冷绑定、纯语义/适配器、行为及性能验收 |
-| R2 分发收敛 | GUID + 6 个 identity + 8 个 version + 42 个 NLS + 31 个 module + 11 个 core file export 已迁移；其余 file/同步/USER/COM/图形等仍 legacy |
+| R2 分发收敛 | GUID + 6 个 identity + 8 个 version + 42 个 NLS + 31 个 module + 21 个 file export 已迁移；其余 file/同步/USER/COM/图形等仍 legacy |
 | R3 状态归属 | identity/profile、环境变量、双架构 module 和 Win64 file 已有 owner；PE32 file/thread/COM 等仍待迁移 |
 | R4 PE32 Process | 已完成装载/执行编排提取；旧 Cpu 方法只保留委托 facade |
 | R5 host/graphics | 已完成 owned UI 请求/事件与 GDI adapter 分离，真实 native 验证通过 |

@@ -1,6 +1,6 @@
 # 新增 Win32 API：GUID 试点
 
-`StringFromGUID2`、`CLSIDFromString`、`IIDFromString`、六个身份、八个版本、42 个 NLS 和 31 个模块 export 已迁入新边界。普通 scalar API 的操作步骤如下；其它家族目前仍使用旧分发器，不能将 ABI 已知当作完整实现。
+`StringFromGUID2`、`CLSIDFromString`、`IIDFromString`、六个身份、八个版本、42 个 NLS、31 个模块和 21 个文件 export 已迁入新边界。普通 scalar API 的操作步骤如下；其它家族目前仍使用旧分发器，不能将 ABI 已知当作完整实现。
 
 1. 在 `src/win32/catalog/` 的所属领域声明 export、DLL/架构范围、typed ID、参数类型、返回约定和限制。GUID 的一份声明派生 PE32 stdcall 清栈和 Win64 DWORD 截断，执行时不查询字符串表。
 2. 把不依赖 guest 内存和进程状态的算法放入领域纯核。GUID 的 Windows little-endian 布局、canonical parser/formatter 位于 `win32/com/guid.rs`；纯核不读 CPU，不写 LastError。
@@ -36,3 +36,5 @@ version 增加 `Absent`，表示该架构没有原有绑定；空 DLL 集合与�
 callback API 使用专用架构控制路由。NLS 的 `EnumSystemLocalesEx` 在冷绑定时选择 ControlImport，由原进程框架完成回调 frame 与资源生命周期；普通 scalar handler 的参数和返回类型没有被扩成万能 Context。参见 [NLS](nls.md)。
 
 模块家族把静态导入 DLL 与动态查询 DLL 分开声明：默认一致，有历史差异时显式设置 `lookup_dlls`，且 lookup provider 必须属于 import provider 集合。Win64 fresh-provider 的 PSAPI 查询可见性与已有 gateway registry fallback 分别保持，新增声明不能替换后者。K32 与无前缀名称冷绑定为相同行为 ID。`LoadLibrary`、`FreeLibrary`、`GetProcAddress` 使用模块控制路由，adapter 返回 Value、Returned 或 Load 请求，进程框架保存 frame、API count、trace、unblock 和加载提交顺序。新 API 若产生控制请求，应先固定这些顺序，再选择其专用 outcome；参见 [模块契约](modules.md)。
+
+文件家族先收敛契约与 bound ID，adapter 继续留在原调用边界。`SetFilePointerEx` 的 Int64 参数在 PE32 占两个 DWORD slot，Win64 占一个 carrier；输出检查与定位提交先后按架构保留。普通文件、pipe、标准 endpoint 的完成与 unblock 次序各自保持。扩展契约无需同时抽取结果框架或移动状态 owner；这些工作分别验收。CWD 容量查询、小 buffer、file-part 输出 fault 与 return-slot alias 都有独立行为基线；详见 [文件契约](files.md)。

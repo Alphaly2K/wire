@@ -109,20 +109,10 @@ pub fn dispatch(
         || dll == "kernel32.dll"
             && matches!(
                 name,
-                "GetCurrentDirectoryA"
-                    | "GetCurrentDirectoryW"
-                    | "SetCurrentDirectoryA"
-                    | "SetCurrentDirectoryW"
-                    | "GetFullPathNameA"
-                    | "GetFullPathNameW"
-                    | "GetFileAttributesA"
-                    | "GetFileAttributesW"
-                    | "CreateDirectoryA"
+                "CreateDirectoryA"
                     | "CreateDirectoryW"
                     | "DeleteFileA"
                     | "DeleteFileW"
-                    | "SetFileAttributesA"
-                    | "SetFileAttributesW"
                     | "FindFirstFileA"
                     | "FindFirstFileW"
                     | "FindFirstFileExA"
@@ -180,15 +170,12 @@ fn execute(
                 | FileApi::CreateFileW
                 | FileApi::GetFileSize
                 | FileApi::SetFilePointer
+                | FileApi::GetFileAttributesA
+                | FileApi::GetFileAttributesW
         )
     ) || matches!(
         name,
-        "GetFileAttributesA"
-            | "GetFileAttributesW"
-            | "FindFirstFileA"
-            | "FindFirstFileW"
-            | "FindFirstFileExA"
-            | "FindFirstFileExW"
+        "FindFirstFileA" | "FindFirstFileW" | "FindFirstFileExA" | "FindFirstFileExW"
     ) {
         u32::MAX
     } else {
@@ -437,16 +424,16 @@ fn execute(
                 }
                 Ok((1, String::new()))
             }
-            (None, "GetCurrentDirectoryA" | "GetCurrentDirectoryW") => {
+            (Some(FileApi::GetCurrentDirectoryA | FileApi::GetCurrentDirectoryW), _) => {
                 let cwd = state.fs.as_ref().ok_or(3u32)?.cwd();
                 Ok((write_string(mem, a[1], a[0], &cwd, wide)?, cwd))
             }
-            (None, "SetCurrentDirectoryA" | "SetCurrentDirectoryW") => {
+            (Some(FileApi::SetCurrentDirectoryA | FileApi::SetCurrentDirectoryW), _) => {
                 let text = read_name(mem, a[0], wide)?;
                 state.fs.as_mut().ok_or(3u32)?.set_cwd(&text)?;
                 Ok((1, text))
             }
-            (None, "GetFullPathNameA" | "GetFullPathNameW") => {
+            (Some(FileApi::GetFullPathNameA | FileApi::GetFullPathNameW), _) => {
                 let text = read_name(mem, a[0], wide)?;
                 let fs = state.fs.as_ref().ok_or(3u32)?;
                 let path = fs.resolve(&text)?;
@@ -463,16 +450,18 @@ fn execute(
                 }
                 Ok((ret, full))
             }
-            (
+            (Some(FileApi::GetFileAttributesA | FileApi::GetFileAttributesW), _)
+            | (
                 None,
-                "GetFileAttributesA" | "GetFileAttributesW" | "PathFileExistsA" | "PathFileExistsW"
-                | "PathIsDirectoryA" | "PathIsDirectoryW",
+                "PathFileExistsA" | "PathFileExistsW" | "PathIsDirectoryA" | "PathIsDirectoryW",
             ) => {
                 let text = read_name(mem, a[0], wide)?;
                 let path = state.fs.as_ref().ok_or(3u32)?.resolve(&text)?;
                 let attr = attributes(&path)?;
                 Ok((
-                    if name.starts_with("PathIsDirectory") {
+                    if core.is_some() {
+                        attr
+                    } else if name.starts_with("PathIsDirectory") {
                         (attr & 0x10 != 0) as u32
                     } else if name.starts_with("Path") {
                         1
@@ -544,7 +533,7 @@ fn execute(
                 std::fs::remove_file(path).map_err(|e| win_error(&e))?;
                 Ok((1, text))
             }
-            (None, "SetFileAttributesA" | "SetFileAttributesW") => {
+            (Some(FileApi::SetFileAttributesA | FileApi::SetFileAttributesW), _) => {
                 let text = read_name(mem, a[0], wide)?;
                 let path = state.fs.as_ref().ok_or(3u32)?.resolve(&text)?;
                 if a[1] & !0x81 != 0 {

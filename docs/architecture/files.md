@@ -18,10 +18,14 @@ Win64 的 `x64::runtime::files::Files` 拥有真实文件描述符、sharing/acc
 
 核心文件 API 的 11 个 export 由 `win32/catalog/files.rs` 统一声明：CreateFileA/W、ReadFile、WriteFile、GetFileSize/Ex、SetFilePointer/Ex、SetEndOfFile、FlushFileBuffers、GetFileType。PE32 全部为 typed 路由，DLL 保持 kernel32；Win64 其中 9 个为 typed，DLL 保持 kernel32/kernelbase，SetFilePointer 与 SetEndOfFile 仍为 absent。Int64 参数明确描述 SetFilePointerEx 的有符号距离，PE32 占两个栈 slot，Win64 占一个 64 位 carrier；DWORD 截断只在 gateway 取参时进行。
 
-PE32 adapter 暂留 `file_api.rs` 的原领域调用边界：主 gateway 用 bound FileApi ID 调用，公开 `file_api::dispatch` 保留原来的大小写/DLL 和函数范围，作为冷解析 facade。内部执行器区分核心 typed ID 与尚未迁移的路径/目录名称，不再在核心调用时解析 DLL 或 export。GetFileType 仍由主 gateway 执行，invalid/non-file handle 返回 0 并保持 LastError。读写先清零 count，再查 handle/权限和数据 buffer；SetFilePointer/Ex 先定位并清 LastError，再写可选输出，输出失败时定位已提交。错误仍映射成原来的返回值、LastError 和日志文本。
+路径与属性的 10 个 export 也由同一契约声明：GetCurrentDirectoryA/W、SetCurrentDirectoryA/W、GetFullPathNameA/W、GetFileAttributesA/W、SetFileAttributesA/W。PE32 全部 typed/kernel32，Win64 新增 8 个 typed/kernel32+kernelbase，GetFullPathNameA/W 保持 absent；文件契约合计 21 个 export，Win64 17 typed、4 absent。查询容量和属性 flags 是 DWORD，指针不截断，A/W 选择由绑定 ID 决定。
+
+PE32 GetFullPathName 的小 buffer 只返回所需容量；成功写字符串后再写可选 file-part 指针，因此第二个输出 fault 时字符串已提交。现有宽字符 file-part 偏移也原样保留。Win64 CWD 输出可以覆盖 guest return slot，gateway 继续使用提前保存的返回地址；成功调用保持 LastError。GetFileAttributesExA/W 仍为 legacy，与 basic attributes 共用原 handler body，没有迁移或新增其能力。
+
+PE32 adapter 暂留 `file_api.rs` 的原领域调用边界：主 gateway 用 bound FileApi ID 调用，公开 `file_api::dispatch` 保留原来的大小写/DLL 和函数范围，作为冷解析 facade。内部执行器区分 typed ID 与尚未迁移的目录/SHLWAPI 名称，已迁移调用不再解析 DLL 或 export。GetFileType 仍由主 gateway 执行，invalid/non-file handle 返回 0 并保持 LastError。读写先清零 count，再查 handle/权限和数据 buffer；SetFilePointer/Ex 先定位并清 LastError，再写可选输出，输出失败时定位已提交。错误仍映射成原来的返回值、LastError 和日志文本。
 
 Win64 adapter 暂留 Runtime64 的原 gateway 分支位置，分支由 bound FileApi ID 选择，继续借用已存在的 Files、Pipes、Mappings、标准 endpoint owner 和 guest 内存。打开/读取/写入的权限、sharing、16MiB transfer 上限、section coherence、可选输出及 confined path 保持。定位输出先检查，再改变 offset；GetFileSize 清 LastError 的次序保持。GetFileType 按 standard → file → pipe 查询，未知 handle 返回 0/LastError=6。
 
 Win64 普通文件读写和管道写入继续在原位置提前返回 Control::Returned，gateway 提交提前保存的 CPU return frame、计数和 trace，保留这些 endpoint 原来不调用 scheduler unblock 的行为。管道读入和标准输出写入走原来的通用 unblock/提交路径。没有新建文件完成框架或另移 CPU 提交；这项边界保留是前几个候选性能失败后的渐进取舍。WriteConsoleW 保持原来的拒绝结果，没有借迁移扩展 console 能力。
 
-PE32 目前仍使用 ApiState 的混合 HandleObj 表与 filesystem 字段，属于后续 R3 工作。路径/目录枚举、文件 metadata/section、标准句柄和跨资源 CloseHandle 等 API 的 catalog 迁移仍待完成，本页不表示整个文件领域已完成。
+PE32 目前仍使用 ApiState 的混合 HandleObj 表与 filesystem 字段，属于后续 R3 工作。目录创建/变更/枚举、文件 metadata/section、SHLWAPI、标准句柄和跨资源 CloseHandle 等 API 的 catalog 迁移仍待完成，本页不表示整个文件领域已完成。
