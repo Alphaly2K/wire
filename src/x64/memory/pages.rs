@@ -75,6 +75,7 @@ impl Pages {
         Some(index)
     }
 
+    #[inline(always)]
     pub(super) fn get(&self, address: &u64) -> Option<&Page> {
         self.slots[self.slot(address)?]
             .as_ref()
