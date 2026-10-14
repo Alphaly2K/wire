@@ -3,6 +3,80 @@
 use super::*;
 
 #[test]
+fn mutation_contract_baseline_keeps_win64_flag_width_and_path_fault_order() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let root =
+        std::env::temp_dir().join(format!("wire64-mutation-contract-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("source.bin"), b"original").unwrap();
+    runtime.set_filesystem(wire::fs::GuestFs::new(&root).unwrap());
+    let source = STACK + 0x100;
+    let destination = STACK + 0x200;
+    let frame = STACK + 0x1f88;
+    let high = 0xface0000_00000000;
+    mem.write(source, b"C:\\source.bin\0").unwrap();
+    mem.write(destination, b"C:\\target.bin\0").unwrap();
+    startup_call(&mut mem, &mut cpu, &mut runtime, "SetLastError", &[0x55]);
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "kernelbase.dll",
+            "MoveFileExA",
+            &[source, destination, high],
+        ),
+        1
+    );
+    assert!(!root.join("source.bin").exists());
+    assert_eq!(std::fs::read(root.join("target.bin")).unwrap(), b"original");
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        0x55
+    );
+    // Guest path decoding precedes rejecting unsupported flags.
+    cpu.regs[4] = frame;
+    mem.write_int(frame, 8, BASE).unwrap();
+    cpu.regs[1] = 0xdead0000;
+    cpu.regs[2] = destination;
+    cpu.regs[8] = 4;
+    let before = cpu.clone();
+    let calls = runtime.api_calls;
+    assert!(runtime
+        .dispatch("kernelbase.dll", "MoveFileExA", &mut cpu, &mut mem)
+        .is_err());
+    assert_eq!(cpu.regs, before.regs);
+    assert_eq!(cpu.rip, before.rip);
+    assert_eq!(runtime.api_calls, calls);
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "kernelbase.dll",
+            "MoveFileExA",
+            &[destination, 0, high],
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        50
+    );
+    assert_eq!(std::fs::read(root.join("target.bin")).unwrap(), b"original");
+    for symbol in ["CopyFileA", "CopyFileW"] {
+        for dll in ["kernel32.dll", "kernelbase.dll"] {
+            assert!(!wire::x64::runtime::import_supported(dll, symbol));
+        }
+    }
+    assert!(!wire::x64::runtime::import_supported(
+        "user32.dll",
+        "MoveFileExA"
+    ));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn metadata_contract_baseline_keeps_win64_widths_error_order_and_return_slot_alias() {
     let (mut mem, mut cpu, mut runtime) = startup();
     let root =

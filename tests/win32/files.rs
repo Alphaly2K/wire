@@ -3,6 +3,39 @@
 use super::*;
 
 #[test]
+fn mutation_contract_baseline_keeps_pe32_security_subset_and_abi_only_calls() {
+    let mut v = Vm::new();
+    v.mem.write_bytes(DATA, b"C:\\fresh\0").unwrap();
+    v.k("SetLastError", &[0x55]);
+    // PE32's existing directory subset ignores SECURITY_ATTRIBUTES entirely.
+    assert_eq!(v.k("CreateDirectoryA", &[DATA, 0x30000]), 1);
+    assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 12);
+    assert!(v.dir.join("fresh").is_dir());
+    assert_eq!(v.state.last_error, 0x55);
+    for (name, slots) in [
+        ("MoveFileA", 2),
+        ("MoveFileW", 2),
+        ("MoveFileExA", 3),
+        ("MoveFileExW", 3),
+        ("CopyFileA", 3),
+        ("CopyFileW", 3),
+        ("RemoveDirectoryA", 1),
+        ("RemoveDirectoryW", 1),
+    ] {
+        assert_eq!(v.k(name, &[0x30000; 3][..slots]), 0);
+        assert_eq!(
+            v.cpu.esp(),
+            STACK_BASE + STACK_SIZE - 256 + 4 + slots as u32 * 4
+        );
+        assert_eq!(v.state.last_error, 120);
+        assert!(v.dir.join("fresh").is_dir());
+    }
+    assert_eq!(v.call("user32.dll", "CreateDirectoryA", &[DATA, 0]), 0);
+    assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 4);
+    assert!(v.dir.join("fresh").is_dir());
+}
+
+#[test]
 fn metadata_contract_baseline_keeps_pe32_abi_only_outputs_and_unknown_dll_cleanup() {
     let mut v = Vm::new();
     for (name, slots) in [
