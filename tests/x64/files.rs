@@ -3,6 +3,105 @@
 use super::*;
 
 #[test]
+fn core_file_contract_keeps_win64_widths_preflight_and_return_slot_alias() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let root = std::env::temp_dir().join(format!("wire64-core-contract-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("read.bin"), b"abc").unwrap();
+    runtime.set_filesystem(wire::fs::GuestFs::new(&root).unwrap());
+    let path = STACK + 0x100;
+    let buffer = STACK + 0x200;
+    let output = STACK + 0x300;
+    let high = 0xabcd0000_00000000;
+    mem.write(path, b"C:\\read.bin\0").unwrap();
+    let file = startup_dll_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "kernelbase.dll",
+        "CreateFileA",
+        &[
+            path,
+            high | 0x80000000,
+            high | 3,
+            0,
+            high | 3,
+            high | 0x80,
+            0,
+        ],
+    );
+    assert_ne!(file, u64::MAX);
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "SetFilePointerEx",
+            &[file, 0x1_0000_0002, output, high]
+        ),
+        1
+    );
+    assert_eq!(mem.read_int(output, 8).unwrap(), 0x1_0000_0002);
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "SetFilePointerEx",
+            &[file, (-0x1_0000_0002i64) as u64, output, high | 1]
+        ),
+        1
+    );
+    assert_eq!(mem.read_int(output, 8).unwrap(), 0);
+    cpu.regs[4] = STACK + 0x1f88;
+    mem.write_int(cpu.regs[4], 8, BASE).unwrap();
+    cpu.regs[1] = file;
+    cpu.regs[2] = 2;
+    cpu.regs[8] = STACK + 8192 - 4;
+    cpu.regs[9] = 0;
+    let before = cpu.clone();
+    let calls = runtime.api_calls;
+    assert!(runtime
+        .dispatch("kernel32.dll", "SetFilePointerEx", &mut cpu, &mut mem)
+        .is_err());
+    assert_eq!(cpu.regs, before.regs);
+    assert_eq!(cpu.rip, before.rip);
+    assert_eq!(runtime.api_calls, calls);
+    // Win64 checks the seek output before changing the file offset.
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "ReadFile",
+            &[file, buffer, high | 3, STACK + 0x1f88, 0]
+        ),
+        1
+    );
+    assert_eq!(mem.read_int(STACK + 0x1f88, 4).unwrap(), 3);
+    let mut bytes = [0; 3];
+    mem.read(buffer, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"abc");
+    assert!(!wire::x64::runtime::import_supported(
+        "user32.dll",
+        "ReadFile"
+    ));
+    assert!(!wire::x64::runtime::import_supported(
+        "kernel32.dll",
+        "SetEndOfFile"
+    ));
+    assert!(!wire::x64::runtime::import_supported(
+        "kernel32.dll",
+        "SetFilePointer"
+    ));
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "CloseHandle", &[file]),
+        1
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn win64_standard_handle_redirects_aliases_and_faults_keep_endpoint_lifetimes() {
     let (mut mem, mut cpu, mut runtime) = startup();
     let out = STACK + 0x100;

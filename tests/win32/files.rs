@@ -3,6 +3,30 @@
 use super::*;
 
 #[test]
+fn core_file_contract_keeps_pe32_split_distance_and_post_seek_output_failure() {
+    let mut v = Vm::new();
+    std::fs::write(v.dir.join("seek.bin"), b"abc").unwrap();
+    v.wide(DATA, "C:\\seek.bin");
+    let file = v.k("CreateFileW", &[DATA, 0x80000000, 0, 0, 3, 0x80, 0]);
+    assert_ne!(file, u32::MAX);
+    assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 32);
+    assert_eq!(v.k("SetFilePointerEx", &[file, 2, 1, 0x50000, 0]), 0);
+    assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 24);
+    assert_eq!(v.k("GetLastError", &[]), 87);
+    // PE32's existing seek commits before checking its optional output.
+    assert_eq!(v.k("SetFilePointerEx", &[file, 0, 0, DATA + 128, 1]), 1);
+    assert_eq!(v.mem.read_u64(DATA + 128).unwrap(), 0x1_0000_0002);
+    v.k("SetLastError", &[0x1234]);
+    assert_eq!(v.k("GetFileType", &[0xdeadbeef]), 0);
+    assert_eq!(v.k("GetLastError", &[]), 0x1234);
+    assert_eq!(v.call("user32.dll", "GetFileType", &[file]), 0);
+    assert_eq!(v.log.unimpl_freq.get("user32.dll!GetFileType"), Some(&1));
+    assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 4);
+    assert_eq!(v.k("GetFileType", &[file]), 1);
+    assert_eq!(v.k("CloseHandle", &[file]), 1);
+}
+
+#[test]
 fn file_buffers_search_cursor_and_semaphore_outputs_keep_fault_commit_order() {
     let mut v = Vm::new();
     std::fs::write(v.dir.join("a.order"), b"abc").unwrap();
