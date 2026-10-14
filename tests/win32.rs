@@ -1,5 +1,5 @@
 //! Behavioral tests for the Win32 subset, independent of a proprietary EXE.
-use wire::api::{self, ApiTable, HandleObj};
+use wire::api::{self, ApiTable};
 use wire::cpu::Cpu;
 use wire::loader::{STACK_BASE, STACK_SIZE, TEB_ADDR};
 use wire::mem::GuestMem;

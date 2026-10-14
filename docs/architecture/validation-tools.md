@@ -2,7 +2,7 @@
 
 2026-10-14：保留 `x64`、`win32` integration target，把已有测试按 CPU/SIMD、memory、kernel、files、modules、sync、USER、COM 和图形等实际领域组织到子模块。共享小型 PE/VM/调用 harness 位于 `tests/support/`，跨领域的 PE32 DLL builder 与 guest COM 调用也在此处；领域私有 helper 和测试一起移动。
 
-完整函数名新增领域前缀，例如原 `amd64_integer_flags_and_rex_register_aliases_match_unicorn` 现在为 `cpu::amd64_integer_flags_and_rex_register_aliases_match_unicorn`。旧的函数名 substring 过滤继续可用，`--exact` 过滤需要新名称。完整映射保存在 `tests/test-name-map-2026-10-14.json`；130 个 x64 测试与 109 个 Win32 测试数量不变，5 个原始 guest Mono 观察测试留在 `x64.rs`，不涉及 native Mono。
+完整函数名新增领域前缀，例如原 `amd64_integer_flags_and_rex_register_aliases_match_unicorn` 现在为 `cpu::amd64_integer_flags_and_rex_register_aliases_match_unicorn`。旧的函数名 substring 过滤继续可用，`--exact` 过滤需要新名称。完整映射保存在 `tests/test-name-map-2026-10-14.json`；R7 迁移时的 130 个 x64 测试与 109 个 Win32 测试逐名保持，后续新增用例不属于名称迁移项。5 个原始 guest Mono 观察测试留在 `x64.rs`，不涉及 native Mono。
 
 ```sh
 cargo test --release --test x64 -- cpu::

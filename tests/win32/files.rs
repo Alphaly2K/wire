@@ -3,6 +3,47 @@
 use super::*;
 
 #[test]
+fn file_buffers_search_cursor_and_semaphore_outputs_keep_fault_commit_order() {
+    let mut v = Vm::new();
+    std::fs::write(v.dir.join("a.order"), b"abc").unwrap();
+    std::fs::write(v.dir.join("b.order"), b"def").unwrap();
+    v.wide(DATA, "C:\\a.order");
+    let file = v.k("CreateFileW", &[DATA, 0x80000000, 0, 0, 3, 0x80, 0]);
+    v.mem.write_u32(DATA + 128, 0xdeadbeef).unwrap();
+    assert_eq!(v.k("ReadFile", &[file, 0, 3, DATA + 128, 0]), 0);
+    assert_eq!(v.mem.read_u32(DATA + 128).unwrap(), 0);
+    assert_eq!(v.k("ReadFile", &[file, DATA + 256, 3, DATA + 128, 0]), 1);
+    let mut bytes = [0; 3];
+    v.mem.read_bytes(DATA + 256, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"abc"); // The failed buffer access did not advance the file.
+
+    v.wide(DATA, "C:\\*.order");
+    let search = v.k("FindFirstFileW", &[DATA, DATA + 512]);
+    assert_ne!(search, u32::MAX);
+    assert_eq!(v.k("FindNextFileW", &[search, 0]), 0);
+    assert_eq!(v.k("FindNextFileW", &[search, DATA + 512]), 1);
+    assert_eq!(v.mem.read_wstr(DATA + 512 + 44, 260).unwrap(), "b.order");
+    assert_eq!(v.k("FindNextFileW", &[search, DATA + 512]), 0);
+    assert_eq!(v.k("GetLastError", &[]), 18);
+    assert_eq!(v.k("CloseHandle", &[search]), 1);
+    assert_eq!(v.k("FindClose", &[search]), 0);
+
+    let sem = v.k("CreateSemaphoreW", &[0, 0, 2, 0]);
+    let mut registers = v.cpu.regs;
+    registers[wire::cpu::ESP] = STACK_BASE + STACK_SIZE - 256;
+    assert!(v
+        .try_call("kernel32.dll", "ReleaseSemaphore", &[sem, 1, 0x50000])
+        .is_err());
+    assert_eq!(
+        v.cpu.eip,
+        v.api.lookup("kernel32.dll", "ReleaseSemaphore").unwrap()
+    );
+    assert_eq!(v.cpu.regs, registers);
+    assert_eq!(v.k("WaitForSingleObject", &[sem, 0]), 0);
+    assert_eq!(v.k("WaitForSingleObject", &[sem, 0]), 0x102);
+}
+
+#[test]
 fn files_read_write_seek_eof_and_invalid_handles() {
     let mut v = Vm::new();
     v.wide(DATA, "C:\\日本.txt");

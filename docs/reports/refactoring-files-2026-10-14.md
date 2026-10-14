@@ -24,6 +24,8 @@
 
 冻结修复版为 `r3-files-inline-wire/wire`，SHA-256 `9ad226f421044a504e77b520345a215bd0f5df724507f6a33115dd7a2672721c`，5,869,048 bytes，相对模块基线减少 24,032 bytes。source/diff/toolchain 与输入 hash 由各 manifest 保存，原始数据位于 `wire-out/refactoring-2026-10-14/`。
 
+该批 PE32 gateway 补测未使用空设备 trace，曾产生约 26GB 日志。24 份完整 API trace 后续无损归档为同目录 `api.log.zst`，全部经过 `zstd -t` 校验；`trace-archives.json` 记录位置。轮次 run.json、report.txt、compare.json、输入与 binary manifest 保持原样。后续 PE32 API 密集计时使用 `--discard-api-log`，仍保留格式化、频率和计数。
+
 - 完整 release：401 passed / 0 failed / 7 ignored；debug Win32/AMD64/FPU/Unicorn：286 passed；fmt、strict all-targets/all-features Clippy、Python 工具 12 项通过。沙箱内一次 Unicorn SIGILL、最初两处 filesystem 漏调用的编译失败均保留，最终验证在允许参照执行的环境完成。
 - 24 个 case/path，各至少三对串行 AB/BA，全部 checksum/work/retired/API count 校验通过。700M 的 AMD64 memory −0.64%、PE32 integer/IR +0.38%、data-alias −2.12%；其余 100M 矩阵及上述 bit/FP 扩样的最大 CPU 中位数回退为 AMD64 SSE +2.71%。RSS 中位数最大增加 128KiB，原有资源/cache 上限没有增加。结果见 `r3-files-inline-{memory,integer,data-alias}-investigation`、`r3-files-inline-{pe32,amd64,v2,integer-raw}-timing`。
 - 正式计时与 Cargo、运行时采样分开。计时后外部 native GPU/Metal 的 7 项 ignored 显式执行，7 passed，输入复用此前冻结的 graphics/MoltenVK/GS/DXBC。

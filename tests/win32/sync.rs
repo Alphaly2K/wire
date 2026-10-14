@@ -3,19 +3,51 @@
 use super::*;
 
 #[test]
+fn shared_kernel_handle_namespace_keeps_named_identity_and_close_lifetimes() {
+    let mut v = Vm::new();
+    v.wide(DATA, "shared-object");
+    let event = v.k("CreateEventW", &[0, 1, 0, DATA]);
+    assert_eq!(event, 0x104); // Main thread owns the first legacy handle, 0x100.
+    v.k("SetLastError", &[123]);
+    // Preserve the existing cross-kind name lookup policy during refactoring.
+    assert_eq!(v.k("CreateMutexW", &[0, 1, DATA]), event);
+    assert_eq!(v.k("GetLastError", &[]), 183);
+    assert_eq!(v.k("OpenEventW", &[0, 0, DATA]), event);
+    assert_eq!(v.k("ReleaseMutex", &[event]), 0);
+    assert_eq!(v.k("GetLastError", &[]), 6);
+    assert_eq!(v.k("SetEvent", &[event]), 1);
+    assert_eq!(v.k("WaitForSingleObject", &[event, 0]), 0);
+    assert_eq!(v.k("CloseHandle", &[event]), 1);
+    assert_eq!(v.k("OpenEventW", &[0, 0, DATA]), 0);
+    assert_eq!(v.k("GetLastError", &[]), 2);
+
+    v.wide(DATA + 128, "C:\\handle.txt");
+    let file = v.k("CreateFileW", &[DATA + 128, 0xc0000000, 0, 0, 2, 0x80, 0]);
+    assert_eq!(file, 0x108);
+    assert_eq!(v.k("FindClose", &[file]), 0);
+    assert_eq!(v.k("GetLastError", &[]), 6);
+    assert_eq!(v.k("GetFileType", &[file]), 1);
+    assert_eq!(v.k("CloseHandle", &[file]), 1);
+    assert_eq!(v.k("GetFileType", &[file]), 0);
+    assert_eq!(v.k("CreateEventW", &[0, 0, 1, DATA]), 0x10c);
+    assert_eq!(v.k("WaitForSingleObject", &[event, 0]), u32::MAX);
+}
+
+#[test]
 fn thread_resource_limit_returns_win32_failure_and_does_not_create_partial_handles() {
     let mut v = Vm::new();
+    let mut last_handle = 0x100;
     while v.sched.has_thread_capacity() {
-        assert_ne!(v.k("CreateThread", &[0, 0, CODE, 0, 4, 0]), 0);
+        last_handle = v.k("CreateThread", &[0, 0, CODE, 0, 4, 0]);
+        assert_ne!(last_handle, 0);
     }
     let count = v.sched.threads.len();
-    let handles = v.state.handles.len();
     let next_tid_output = DATA;
     v.mem.write_u32(next_tid_output, 0xdeadbeef).unwrap();
     assert_eq!(v.k("CreateThread", &[0, 0, CODE, 0, 4, next_tid_output]), 0);
     assert_eq!(v.state.last_error, 8);
     assert_eq!(v.sched.threads.len(), count);
-    assert_eq!(v.state.handles.len(), handles);
+    assert_eq!(v.k("CreateEventW", &[0, 0, 0, 0]), last_handle + 4);
     assert_eq!(v.mem.read_u32(next_tid_output).unwrap(), 0xdeadbeef);
     for t in v.sched.threads.iter().skip(1) {
         assert!(t.stack_base + wire::thread::THREAD_STACK_SIZE < 0x10000000);
@@ -117,19 +149,11 @@ fn wait_all_acquires_objects_atomically() {
     v.mem.write_u32(DATA, event).unwrap();
     v.mem.write_u32(DATA + 4, sem).unwrap();
     assert_eq!(v.k("WaitForMultipleObjects", &[2, DATA, 1, 0]), 0x102);
-    assert!(matches!(
-        v.state.handles.get(&event),
-        Some(HandleObj::Event { signaled: true, .. })
-    ));
+    assert_eq!(v.k("WaitForSingleObject", &[event, 0]), 0);
+    assert_eq!(v.k("SetEvent", &[event]), 1);
     assert_eq!(v.k("ReleaseSemaphore", &[sem, 1, 0]), 1);
     assert_eq!(v.k("WaitForMultipleObjects", &[2, DATA, 1, 0]), 0);
-    assert!(matches!(
-        v.state.handles.get(&event),
-        Some(HandleObj::Event {
-            signaled: false,
-            ..
-        })
-    ));
+    assert_eq!(v.k("WaitForSingleObject", &[event, 0]), 0x102);
     assert_eq!(v.k("WaitForSingleObject", &[sem, 0]), 0x102);
     assert_eq!(v.k("SetEvent", &[event]), 1);
     assert_eq!(v.k("WaitForSingleObjectEx", &[event, 0, 1]), 0);
