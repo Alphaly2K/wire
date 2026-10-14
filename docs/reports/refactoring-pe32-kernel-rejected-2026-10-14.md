@@ -33,3 +33,13 @@ PE32 raw event 两版分别有 2921/2778 个 guest runtime 样本；热点分布
 两个独立 PE32 布局候选也被拒绝。仅隔离 steps_cached 的 `ir32-layout-wire` 在完整矩阵的 SSE/IR 三对回退 +15.92%/+15.68%/+15.53%，停止剩余计时；其 owner 组合 `r3-pe32-kernel-ir32-wire` 只有预检结果，未完成验收。随后将 steps_cached、execute_mixed_run、SIMD execute_inner 分别放入独立 4KiB 对齐代码节，冻结为 `ir32-family-layout-wire`（SHA256 `cfcbd3f44f6c094b15d11a775a2d95af3c61121783fcbac371ae090a548b9dc1`）。三函数版正确性 release 406/debug 291、fmt、strict Clippy 通过；100M 四类 raw/IR 三对预检的 48 轮全部结果校验通过，但 bit-test/raw 连续三对 +5.02%/+6.12%/+6.10%，CPU 中位数 +5.57%，SSE/raw +4.47%。integer/IR 首对存在 +58.60% 离散值，后两对 +0.19%/−0.31%；所有轮次保留，未把中位数单独作为通过依据。
 
 三函数候选没有继续完整矩阵、native GPU 或游戏 smoke，代码已撤回。证据前缀分别为 `ir32-layout-*`、`r3-pe32-kernel-ir32-*`、`ir32-family-layout-*`。布局调整没有改变 ISA/FLAGS/cache/预算；这些结果仍未定位回退的唯一成因。暂缓依赖布局调查的 PE32 资源 owner，继续独立 file catalog；不使用 padding 调试地址或更改验收门槛。
+
+## 五执行边界与文件契约后的重试（2026-10-15）
+
+以 `6e16790` 为代码基线、`r2-file-core-aligned-wire/wire` 为性能 before，适配新 FileApi 路由后重试 KernelObjects：保留 HandleObj 类型身份、event/readiness/acquire 内联与惰性 tid 查询。文件/同步对象仍共享旧句柄空间；五个 PE32 执行边界的节属性和 linker 配置保持。没有修改 CPU、FLAGS、IR/cache 或 guest 语义。
+
+正确性完整 release 408/7 ignored、debug Win32/AMD64/FPU/Unicorn 293、fmt、strict Clippy、build、native7 全过。冻结 `r3-pe32-kernel-aligned-wire/wire`，SHA256 `92c74aa6a923385685bf9fdf98cf1c267b3a3b673ba7114fd8be23f62e91d687`，5,906,856 bytes。
+
+明确使用与 before 相同的 utility QoS 条件，PE32 四类 raw/IR 各三对共 48 轮结果全部校验，但 integer/IR 三对 +219.43%/+207.64%/+203.62%，CPU 中位数 +206.81%；FP/IR +8.28%/+9.48%/+7.56%，中位数 +8.30%；bit/IR +10.54%/+8.52%/+10.77%，中位数 +10.23%。三项均持续超过拒绝门槛，不以 SSE/IR −12.70% 或 raw 中位数变化抵消失败，也不将先前默认条件的噪声对照用于豁免这批受控三对失败。
+
+停止依赖该候选的后续矩阵，未做其 AMD64/V2 完整验收或游戏 smoke。源码全部撤回，tracked 工作区恢复 `6e16790`；已验证的布局、工具和核心文件契约保留。证据前缀 `r3-pe32-kernel-aligned-*`，所有完成轮次保留。按计划 §8 暂停这条 owner 迁移，继续独立路径/目录 API 契约；后续重试需要先形成新的可验证方案。
