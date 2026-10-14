@@ -20,3 +20,7 @@ python3 -B -m unittest discover -s tools -p 'test_*.py'
 ```
 
 PE32、AMD64 和 V2 的公开脚本入口保持不变，正式 fixture 位于 `tools/perf/fixtures/`。native/probe 和 inventory 的现有入口仍保留；native source、FFI 和 third_party 构建路径没有搬动。本页描述当前工具边界，后续领域迁移仍需独立验收。
+
+2026-10-15：PE32 和 AMD64 测量入口均接受可选 `--qos-clamp utility|background|maintenance`，通过 macOS taskpolicy 对每个被测 child 施加同样的调度上限；默认不改变 QoS。manifest 明确记录模式与 taskpolicy hash，逐轮 command 保留 wrapper，不把受控调度结果混成默认前台吞吐量。
+
+PE32 headless 整数 fixture 的同二进制 700M 对照曾出现 2.31–7.28s 两档，而 IR/fallback/scalar-run 计数完全相同。开启采样后没有复现慢档；原生 UI 初始化另有显式 USER_INITIATED QoS。因此调查必须保持 headless/UI、采样和调度条件一致，不能沿用 capture 默认 UI 的结果替代 headless 计时，也不能直接认定为代码回退。utility 同二进制三对的差异约 +0.70%/−1.88%/+2.49%，该受控条件可用于后续成对调查；默认条件的失败、离散轮次仍全部保留。
