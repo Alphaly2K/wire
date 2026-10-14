@@ -707,8 +707,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("TlsFree", 4),
                 ("GetLastError", 0),
                 ("SetLastError", 4),
-                ("MultiByteToWideChar", 24),
-                ("WideCharToMultiByte", 32),
                 ("VirtualAlloc", 16),
                 ("VirtualFree", 12),
                 ("VirtualProtect", 16),
@@ -758,32 +756,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("InterlockedCompareExchange", 12),
                 ("InitializeSListHead", 4),
                 ("InterlockedFlushSList", 4),
-                ("GetACP", 0),
-                ("GetOEMCP", 0),
-                ("GetCPInfo", 8),
-                ("IsValidCodePage", 4),
-                ("IsDBCSLeadByte", 4),
-                ("IsDBCSLeadByteEx", 8),
-                ("GetConsoleCP", 0),
-                ("GetConsoleOutputCP", 0),
-                ("GetCPInfoExA", 12),
-                ("GetCPInfoExW", 12),
-                ("GetStringTypeA", 20),
-                ("GetStringTypeW", 16),
-                ("GetStringTypeExA", 20),
-                ("GetStringTypeExW", 20),
-                ("GetLocaleInfoA", 16),
-                ("GetLocaleInfoW", 16),
-                ("GetUserDefaultLCID", 0),
-                ("GetSystemDefaultLCID", 0),
-                ("GetThreadLocale", 0),
-                ("SetThreadLocale", 4),
-                ("EnumSystemLocalesA", 8),
-                ("EnumSystemLocalesW", 8),
-                ("CompareStringA", 24),
-                ("CompareStringW", 24),
-                ("LCMapStringA", 24),
-                ("LCMapStringW", 24),
                 ("LoadResource", 8),
                 ("FindResourceA", 12),
                 ("FindResourceW", 12),
@@ -827,8 +799,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("DeviceIoControl", 32),
                 ("GetOverlappedResult", 16),
                 ("IsProcessorFeaturePresent", 4),
-                ("GetSystemDefaultLangID", 0),
-                ("GetUserDefaultLangID", 0),
                 ("SetConsoleCtrlHandler", 8),
                 ("GetProcessTimes", 20),
                 ("GetProcessWorkingSetSize", 12),
@@ -861,14 +831,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetCurrentProcessorNumber", 0),
                 ("SetThreadStackGuarantee", 4),
                 ("SetDefaultDllDirectories", 4),
-                ("EnumSystemLocalesEx", 16),
-                ("CompareStringEx", 36),
-                ("GetDateFormatEx", 28),
-                ("GetLocaleInfoEx", 16),
-                ("GetTimeFormatEx", 24),
-                ("GetUserDefaultLocaleName", 8),
-                ("IsValidLocaleName", 4),
-                ("LCMapStringEx", 36),
                 ("SetThreadPriority", 8),
                 ("GetThreadPriority", 4),
                 ("SuspendThread", 4),
@@ -912,7 +874,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("lstrcmpA", 8),
                 ("lstrlenW", 4),
                 ("lstrlenA", 4),
-                ("IsValidLocale", 8),
                 ("HeapSetInformation", 16),
                 ("HeapQueryInformation", 20),
                 ("HeapCompact", 8),
@@ -1790,6 +1751,20 @@ pub fn dispatch(
             ret = value.value;
             note = value.note.into();
         }
+        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Nls(_))) => {
+            let Some(crate::win32::catalog::ApiId::Nls(id)) = binding.typed else {
+                unreachable!();
+            };
+            let value = crate::win32::x86::nls::call(
+                id,
+                &args,
+                mem,
+                &state.environment,
+                &mut state.last_error,
+            )?;
+            ret = value.value;
+            note = value.note;
+        }
         (
             "winmm.dll",
             "mciSendCommandA" | "mciSendCommandW" | "mciSendStringA" | "mciSendStringW",
@@ -2394,35 +2369,6 @@ pub fn dispatch(
         }
         ("kernel32.dll", "GetCommandLineA") => ret = state.cmdline_a,
         ("kernel32.dll", "GetCommandLineW") => ret = state.cmdline_w,
-        ("kernel32.dll", "GetACP") => {
-            ret = state.environment.codepage();
-            note = "fake CP932 (ja-JP)".into();
-        }
-        ("kernel32.dll", "GetCPInfo") => {
-            let cp = if args[0] == 0 || args[0] == 1 {
-                932
-            } else {
-                args[0]
-            };
-            if matches!(cp, 932 | 1252 | 65001) {
-                let mut info = [0u8; 20];
-                let width: u32 = match cp {
-                    932 => 2,
-                    65001 => 4,
-                    _ => 1,
-                };
-                info[..4].copy_from_slice(&width.to_le_bytes());
-                info[4] = b'?';
-                if cp == 932 {
-                    info[6..10].copy_from_slice(&[0x81, 0x9f, 0xe0, 0xfc]);
-                }
-                mem.write_bytes(args[1], &info).map_err(|e| e.to_string())?;
-                ret = 1;
-            } else {
-                state.last_error = 87;
-                ret = 0;
-            }
-        }
         ("kernel32.dll", "IsProcessorFeaturePresent") => {
             // SSE/SSE2 subset is enabled; SSE3 still lacks several opcodes.
             ret = matches!(args[0], 6 | 10) as u32;
@@ -2519,24 +2465,6 @@ pub fn dispatch(
         }
         ("kernel32.dll", "LockResource") => ret = args[0],
         ("kernel32.dll", "FreeResource") => ret = 0,
-        ("kernel32.dll", "GetOEMCP") => {
-            ret = state.environment.codepage();
-            note = "fake CP932 (ja-JP)".into();
-        }
-        ("kernel32.dll", "IsDBCSLeadByte") => {
-            let b = args[0] as u8;
-            ret = ((0x81..=0x9f).contains(&b) || (0xe0..=0xfc).contains(&b)) as u32;
-            note = "CP932 lead-byte ranges".into();
-        }
-        ("kernel32.dll", "IsDBCSLeadByteEx") => {
-            let b = args[1] as u8;
-            ret = ((0x81..=0x9f).contains(&b) || (0xe0..=0xfc).contains(&b)) as u32;
-            note = "CP932 lead-byte ranges (codepage arg ignored)".into();
-        }
-        ("kernel32.dll", "GetConsoleCP") | ("kernel32.dll", "GetConsoleOutputCP") => {
-            ret = state.environment.codepage();
-            note = "fake CP932".into();
-        }
         ("kernel32.dll", "IsDebuggerPresent") => ret = 0,
         ("kernel32.dll", "GetSystemTimeAsFileTime") => {
             mem.write_u64(args[0], filetime_now())

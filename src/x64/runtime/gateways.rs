@@ -20,6 +20,11 @@ pub(crate) enum HotImport {
     ErrorGet,
     ErrorSet,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControlImport {
+    None,
+    LocaleEnumeration,
+}
 pub(crate) struct BoundImport {
     pub export: Arc<str>,
     pub dll: Arc<str>,
@@ -32,6 +37,7 @@ pub(crate) struct BoundImport {
     pub groups: u32,
     pub hot: HotImport,
     pub api: Option<crate::win32::catalog::ApiId>,
+    pub control: ControlImport,
     pub valid: bool,
 }
 impl BoundImport {
@@ -77,7 +83,19 @@ impl BoundImport {
             dwords: contract.map_or_else(|| super::import_dwords(name), |c| c.win64_dwords()),
             groups: super::import_groups(name),
             hot,
-            api: contract.map(|c| c.id),
+            api: contract.and_then(|c| {
+                (c.id
+                    != crate::win32::catalog::ApiId::Nls(
+                        crate::win32::catalog::NlsApi::EnumSystemLocalesEx,
+                    ))
+                .then_some(c.id)
+            }),
+            control: match contract.map(|c| c.id) {
+                Some(crate::win32::catalog::ApiId::Nls(
+                    crate::win32::catalog::NlsApi::EnumSystemLocalesEx,
+                )) => ControlImport::LocaleEnumeration,
+                _ => ControlImport::None,
+            },
             valid,
         }
     }

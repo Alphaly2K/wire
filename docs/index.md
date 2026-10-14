@@ -7,6 +7,7 @@
 - [宿主与图形边界](architecture/host-graphics.md)：owned 请求、事件消费顺序、GDI 适配及 native 验证入口。
 - [新增 API 与 GUID 契约](architecture/adding-api.md)：唯一声明、冷绑定、双架构错误和提交顺序。
 - [Windows version 契约](architecture/version.md)：架构 provider 范围、ABI-only 策略与故障提交。
+- [NLS/locale 契约](architecture/nls.md)：转换、字符分类、日历与进程回调的边界。
 - [本次渐进重构记录](reports/refactoring-2026-10-14.md)：阶段交付、行为差异与验收结果。
 - [原生 Mono 撤回](mono-native-rollback-2026-10-14.md)：保留通用优化，继续执行原始 guest Mono。
 

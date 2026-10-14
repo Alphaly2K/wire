@@ -2,9 +2,11 @@
 //! Unconverted families remain on explicit legacy routes.
 mod guid;
 mod identity;
+mod nls;
 mod version;
 pub use guid::{GuidApi, GUID_CONTRACTS};
 pub use identity::{IdentityApi, IDENTITY_CONTRACTS};
+pub use nls::{NlsApi, NLS_CONTRACTS};
 pub use version::{VersionApi, VERSION_CONTRACTS};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +40,7 @@ pub enum ApiId {
     Guid(GuidApi),
     Identity(IdentityApi),
     Version(VersionApi),
+    Nls(NlsApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,6 +162,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .iter()
         .chain(IDENTITY_CONTRACTS.iter())
         .chain(VERSION_CONTRACTS.iter())
+        .chain(NLS_CONTRACTS.iter())
 }
 
 #[cfg(test)]

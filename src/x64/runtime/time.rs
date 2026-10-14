@@ -342,7 +342,8 @@ impl Runtime64 {
             i32::try_from((offset(&standard) - offset(&daylight)) / 60).map_err(|_| 87u32)?;
         data[168..172].copy_from_slice(&daylight_bias.to_le_bytes());
         for (dst, mut wall) in transitions {
-            let days = Self::month_days(year as u32, wall[1] as u32) as u16;
+            let days =
+                crate::win32::kernel::calendar::month_days(year as u32, wall[1] as u32) as u16;
             wall[0] = 0;
             wall[3] = if wall[3] + 7 > days {
                 5

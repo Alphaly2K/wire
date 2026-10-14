@@ -62,7 +62,7 @@ def gdi_gateway_fixture(work):
     struct.pack_into('<II', image, 0x98 + 96 + 8, 0x1100, 40)
     return image, dict(eax=0, retired=7 * n + 14)
 
-def version_gateway_fixture(work):
+def version_gateway_fixture(work, nls=False):
     n = max(1, work // 4)
     code = bytearray.fromhex('57 53 bf') + struct.pack('<I', n)
     code += bytes.fromhex('31db')
@@ -78,12 +78,42 @@ def version_gateway_fixture(work):
     struct.pack_into('<I', code, 0x110, 0x1190)
     struct.pack_into('<I', code, 0x180, 0x11d0)
     code[0x1c0:0x1cd] = b'kernel32.dll\0'
-    code[0x1d2:0x1dd] = b'GetVersion\0'
+    symbol = b'GetACP\0' if nls else b'GetVersion\0'
+    code[0x1d2:0x1d2 + len(symbol)] = symbol
     image = pe32(code)
     struct.pack_into('<II', image, 0x98 + 96 + 8, 0x1100, 40)
-    return image, dict(eax=(n * 0x1db10106) & 0xffffffff, retired=4 * n + 7)
+    value = 932 if nls else 0x1db10106
+    return image, dict(eax=(n * value) & 0xffffffff, retired=4 * n + 7)
+
+def nls_conversion_fixture(work):
+    n = max(1, work // 11)
+    code = bytearray.fromhex('57 53 bf') + struct.pack('<I', n)
+    code += bytes.fromhex('31db 83ec04')
+    loop = len(code)
+    # Convert a terminated ASCII string including NUL into two UTF-16 units.
+    code += bytes.fromhex('8d0424 6a02 50 6aff 68') + struct.pack('<I', 0x4011f0)
+    code += bytes.fromhex('6a00 68') + struct.pack('<I', 932)
+    code += bytes.fromhex('ff15') + struct.pack('<I', 0x401190)
+    code += bytes.fromhex('01c3 4f')
+    at = len(code)
+    code += bytes.fromhex('0f85') + struct.pack('<i', loop - at - 6)
+    code += bytes.fromhex('8b0424 01d8 83c404 5b 5f cc')
+    code.extend(bytes(512 - len(code)))
+    for offset, value in [(0x100, 0x1180), (0x10c, 0x11c0), (0x110, 0x1190), (0x180, 0x11d0)]:
+        struct.pack_into('<I', code, offset, value)
+    code[0x1c0:0x1cd] = b'kernel32.dll\0'
+    symbol = b'MultiByteToWideChar\0'
+    code[0x1d2:0x1d2 + len(symbol)] = symbol
+    code[0x1f0:0x1f2] = b'A\0'
+    image = pe32(code)
+    struct.pack_into('<II', image, 0x98 + 96 + 8, 0x1100, 40)
+    return image, dict(eax=(65 + 2 * n) & 0xffffffff, retired=11 * n + 10)
 
 def fixture(name,work):
+    if name == 'gateway-nls':
+        return version_gateway_fixture(work, nls=True)
+    if name == 'nls-conversion':
+        return nls_conversion_fixture(work)
     if name == 'gateway-version':
         return version_gateway_fixture(work)
     if name == 'gateway-guid':

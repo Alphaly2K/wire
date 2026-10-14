@@ -1,5 +1,16 @@
 //! Checked Win64 raw string transfer; HRESULT policy belongs to the API adapter.
 use crate::x64::memory::Memory;
+pub(crate) fn utf16(mem: &Memory, ptr: u64) -> Result<String, String> {
+    let mut units = Vec::new();
+    for n in 0..32768u64 {
+        let u = mem.read_int(ptr.checked_add(n * 2).ok_or("string overflow")?, 2)? as u16;
+        if u == 0 {
+            return String::from_utf16(&units).map_err(|_| "invalid Win64 UTF-16 string".into());
+        }
+        units.push(u);
+    }
+    Err("unterminated Win64 UTF-16 string".into())
+}
 pub(crate) fn string_bytes(
     mem: &Memory,
     ptr: u64,

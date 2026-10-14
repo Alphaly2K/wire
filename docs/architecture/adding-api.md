@@ -1,6 +1,6 @@
 # 新增 Win32 API：GUID 试点
 
-`StringFromGUID2`、`CLSIDFromString`、`IIDFromString`、六个身份 API 和八个版本 API 已迁入新边界。普通 scalar API 的操作步骤如下；其它家族目前仍使用旧分发器，不能将 ABI 已知当作完整实现。
+`StringFromGUID2`、`CLSIDFromString`、`IIDFromString`、六个身份、八个版本和 42 个 NLS API 已迁入新边界。普通 scalar API 的操作步骤如下；其它家族目前仍使用旧分发器，不能将 ABI 已知当作完整实现。
 
 1. 在 `src/win32/catalog/` 的所属领域声明 export、DLL/架构范围、typed ID、参数类型、返回约定和限制。GUID 的一份声明派生 PE32 stdcall 清栈和 Win64 DWORD 截断，执行时不查询字符串表。
 2. 把不依赖 guest 内存和进程状态的算法放入领域纯核。GUID 的 Windows little-endian 布局、canonical parser/formatter 位于 `win32/com/guid.rs`；纯核不读 CPU，不写 LastError。
@@ -32,3 +32,5 @@ Win64 的 raw 字符串 codec 已提取到 `win32/x64/text.rs`，旧 Runtime64 �
 identity 展示了 ABI 与执行策略分离：相同签名在 PE32 上保留 `LegacyUnimplemented`，在 Win64 上拥有 typed route。PE32 历史 kernel32 GetUserName ABI 登记也保留，不能用 Win64 的 DLL 范围覆盖它。每个新增家族需要先核对这样的差异，再删除旧规则；catalog 的唯一性检查防止 duplicate export/owner 与参数索引越界。
 
 version 增加 `Absent`，表示该架构没有原有绑定；空 DLL 集合与这一策略必须对应。64 位 scalar 在 PE32 使用两个 DWORD slot，在 Win64 使用一个参数位置。BYTE 的 Win64 原始 trace carrier 保留，由适配器消费低位。详细兼容行为见 [version](version.md)。
+
+callback API 使用专用架构控制路由。NLS 的 `EnumSystemLocalesEx` 在冷绑定时选择 ControlImport，由原进程框架完成回调 frame 与资源生命周期；普通 scalar handler 的参数和返回类型没有被扩成万能 Context。参见 [NLS](nls.md)。

@@ -1,5 +1,5 @@
 //! Small, explicit guest NLS vocabulary shared by enumeration and locale queries.
-pub(super) fn id(name: &str) -> Option<u32> {
+pub(crate) fn id(name: &str) -> Option<u32> {
     match name.to_ascii_lowercase().as_str() {
         "ja-jp" => Some(0x411),
         "en-us" => Some(0x409),
@@ -9,7 +9,7 @@ pub(super) fn id(name: &str) -> Option<u32> {
         _ => None,
     }
 }
-pub(super) fn name(id: u32) -> Option<&'static str> {
+pub(crate) fn name(id: u32) -> Option<&'static str> {
     match id {
         0x411 | 0x400 | 0x800 => Some("ja-JP"),
         0x409 => Some("en-US"),
@@ -19,7 +19,7 @@ pub(super) fn name(id: u32) -> Option<&'static str> {
         _ => None,
     }
 }
-pub(super) fn info(id: u32, kind: u32) -> Result<Vec<u8>, u32> {
+pub(crate) fn info(id: u32, kind: u32) -> Result<Vec<u8>, u32> {
     let japanese = matches!(id, 0x411 | 0x11);
     let invariant = id == 0x7f;
     let number = match kind & 0xffff {
@@ -117,7 +117,7 @@ pub(super) fn info(id: u32, kind: u32) -> Result<Vec<u8>, u32> {
         .collect())
 }
 
-pub(super) fn format(
+pub(crate) fn format(
     pattern: &str,
     fields: [u16; 8],
     japanese: bool,
@@ -245,124 +245,50 @@ pub(super) fn format(
     Ok(out)
 }
 
-impl super::Runtime64 {
-    pub(super) fn format_calendar(
-        &self,
-        mem: &mut super::Memory,
-        name: &str,
-        args: &[u64],
-    ) -> Result<u64, String> {
-        let date = name == "GetDateFormatEx";
-        let locale = if args[0] == 0 {
-            Some(0x411)
-        } else {
-            id(&Self::utf16(mem, args[0])?)
-        };
-        let flags = args[1] as u32;
-        let custom = if args[3] == 0 {
-            None
-        } else {
-            Some(Self::utf16(mem, args[3])?)
-        };
-        let mut fields = [0u16; 8];
-        if args[2] == 0 {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|e| e.to_string())?;
-            let instant = now.as_secs() as libc::time_t;
-            let mut calendar: libc::tm = unsafe { std::mem::zeroed() };
-            if unsafe { libc::localtime_r(&instant, &mut calendar) }.is_null() {
-                return Err("host local calendar unavailable".into());
-            }
-            fields = [
-                (calendar.tm_year + 1900) as u16,
-                (calendar.tm_mon + 1) as u16,
-                calendar.tm_wday as u16,
-                calendar.tm_mday as u16,
-                calendar.tm_hour as u16,
-                calendar.tm_min as u16,
-                calendar.tm_sec as u16,
-                now.subsec_millis() as u16,
-            ];
-        } else {
-            mem.check(args[2], 16, super::READ)?;
-            for (n, value) in fields.iter_mut().enumerate() {
-                *value = mem.read_int(args[2] + n as u64 * 2, 2)? as u16;
-            }
-        }
-        let output = (|| -> Result<Vec<u8>, u32> {
-            let id = locale.ok_or(87u32)?;
-            if id == 0x7f {
-                return Err(50);
-            }
-            if custom.is_some() && flags != 0 || (args[5] as i32) < 0 {
-                return Err(1004);
-            }
-            let japanese = matches!(id, 0x411 | 0x11);
-            let pattern = if date {
-                if args[6] != 0 || flags & !0x8000000b != 0 || (flags & 0xb).count_ones() > 1 {
-                    return Err(1004);
-                }
-                let mut day_fields = fields;
-                day_fields[4..].fill(0);
-                let ticks = Self::calendar_to_ticks(day_fields).ok_or(87u32)?;
-                if fields[0] > 9999 {
-                    return Err(87);
-                }
-                fields[2] = ((ticks / 864000000000 + 1) % 7) as u16;
-                custom.unwrap_or_else(|| match (japanese, flags & 0xb) {
-                    (true, 2) => "yyyy'年'M'月'd'日'".into(),
-                    (false, 2) => "dddd, MMMM d, yyyy".into(),
-                    (true, 8) => "yyyy'年'M'月'".into(),
-                    (false, 8) => "MMMM yyyy".into(),
-                    (true, _) => "yyyy/MM/dd".into(),
-                    (false, _) => "M/d/yyyy".into(),
-                })
-            } else {
-                if flags & !0xf != 0 || fields[4] > 23 || fields[5] > 59 || fields[6] > 59 {
-                    return Err(87);
-                }
-                custom.unwrap_or_else(|| {
-                    let mut p = if japanese || flags & 8 != 0 {
-                        "H".to_owned()
-                    } else {
-                        "h".to_owned()
-                    };
-                    if flags & 1 == 0 {
-                        p.push_str(":mm");
-                        if flags & 2 == 0 {
-                            p.push_str(":ss");
-                        }
-                    }
-                    if !japanese && flags & 12 == 0 {
-                        p.push_str(" tt");
-                    }
-                    p
-                })
-            };
-            Ok(format(&pattern, fields, japanese, date)?
-                .encode_utf16()
-                .chain(Some(0))
-                .flat_map(u16::to_le_bytes)
-                .collect())
-        })();
-        match output {
-            Err(error) => {
-                self.set_error(mem, error)?;
-                Ok(0)
-            }
-            Ok(bytes) => {
-                let size = bytes.len() as u64 / 2;
-                if args[5] != 0 && args[5] < size {
-                    self.set_error(mem, 122)?;
-                    Ok(0)
-                } else {
-                    if args[5] != 0 {
-                        mem.write(args[4], &bytes)?;
-                    }
-                    Ok(size)
-                }
-            }
-        }
+/// C1 flags needed by the CRT's character tables. Unicode properties follow
+/// Rust's Unicode tables; this is not a complete Windows NLS database.
+pub(crate) fn ctype1(unit: u16) -> u16 {
+    let Some(c) = char::from_u32(unit as u32) else {
+        return 0;
+    };
+    if (0xfdd0..=0xfdef).contains(&unit) || unit >= 0xfffe {
+        return 0;
     }
+    let mut flags = 0x200;
+    if c.is_uppercase() {
+        flags |= 1;
+    }
+    if c.is_lowercase() {
+        flags |= 2;
+    }
+    if c.is_ascii_digit() || ('０'..='９').contains(&c) {
+        flags |= 4;
+    }
+    if c.is_whitespace() {
+        flags |= 8;
+    }
+    if c.is_control() {
+        flags |= 0x20;
+    }
+    if matches!(
+        c,
+        '\t' | ' ' | '\u{a0}' | '\u{1680}' | '\u{202f}' | '\u{205f}' | '\u{3000}'
+    ) || ('\u{2000}'..='\u{200a}').contains(&c)
+    {
+        flags |= 0x40;
+    }
+    if c.is_ascii_hexdigit()
+        || ('Ａ'..='Ｆ').contains(&c)
+        || ('ａ'..='ｆ').contains(&c)
+        || ('０'..='９').contains(&c)
+    {
+        flags |= 0x80;
+    }
+    if c.is_alphabetic() {
+        flags |= 0x100;
+    }
+    if !c.is_alphanumeric() && !c.is_whitespace() && !c.is_control() {
+        flags |= 0x10;
+    }
+    flags
 }

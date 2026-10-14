@@ -22,7 +22,6 @@ mod find;
 mod gateways;
 mod guid;
 mod heap;
-mod locale;
 mod mapping;
 mod modules;
 mod pipes;
@@ -458,16 +457,6 @@ fn import_arity(name: &str) -> Option<usize> {
         "timeBeginPeriod" | "timeEndPeriod" => 1,
         "timeGetDevCaps" => 2,
         "CreateDirectoryW" | "CreateDirectoryA" => 2,
-        "GetDateFormatEx" => 7,
-        "GetTimeFormatEx" => 6,
-        "EnumSystemLocalesEx" | "GetLocaleInfoEx" | "GetLocaleInfoW" | "LCIDToLocaleName" => 4,
-        "LocaleNameToLCID" | "GetUserDefaultLocaleName" | "GetSystemDefaultLocaleName" => 2,
-        "IsValidLocaleName" => 1,
-        "GetUserDefaultLCID"
-        | "GetSystemDefaultLCID"
-        | "GetThreadLocale"
-        | "GetUserDefaultLangID"
-        | "GetSystemDefaultLangID" => 0,
         "CreateToolhelp32Snapshot"
         | "Process32First"
         | "Process32Next"
@@ -539,11 +528,7 @@ fn import_arity(name: &str) -> Option<usize> {
         | "IsDebuggerPresent"
         | "TlsAlloc"
         | "GetProcessHeap"
-        | "AreFileApisANSI"
-        | "GetACP"
-        | "GetOEMCP"
-        | "GetConsoleOutputCP"
-        | "GetConsoleCP" => 0,
+        | "AreFileApisANSI" => 0,
         "GetErrorMode" => 0,
         "SetErrorMode" => 1,
         "GetThreadErrorMode" => 0,
@@ -595,11 +580,10 @@ fn import_arity(name: &str) -> Option<usize> {
         | "GetStdHandle"
         | "GetFileType"
         | "CloseHandle"
-        | "IsValidCodePage"
         | "FreeEnvironmentStringsW" => 1,
-        "GetProcAddress" | "FlsSetValue" | "SetStdHandle" | "GetConsoleMode" | "GetCPInfo"
-        | "GetTempPathW" | "GetTempPath2W" => 2,
-        "LoadLibraryExW" | "LoadLibraryExA" | "GetCPInfoExA" | "GetCPInfoExW" => 3,
+        "GetProcAddress" | "FlsSetValue" | "SetStdHandle" | "GetConsoleMode" | "GetTempPathW"
+        | "GetTempPath2W" => 2,
+        "LoadLibraryExW" | "LoadLibraryExA" => 3,
         "GetSystemTimes" => 3,
         "GetSystemTimeAsFileTime"
         | "GetSystemTimePreciseAsFileTime"
@@ -631,11 +615,8 @@ fn import_arity(name: &str) -> Option<usize> {
         | "InitializeCriticalSectionEx"
         | "GetModuleFileNameW"
         | "GetModuleFileNameA" => 3,
-        "HeapReAlloc" | "GetStringTypeW" => 4,
+        "HeapReAlloc" => 4,
         "WriteFile" | "WriteConsoleW" => 5,
-        "MultiByteToWideChar" | "LCMapStringW" => 6,
-        "WideCharToMultiByte" => 8,
-        "LCMapStringEx" => 9,
         _ => return None,
     })
 }
@@ -653,7 +634,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         name if sockets::arity(name).is_some() => sockets::dwords(name),
         name if devices::arity(name).is_some() => devices::dwords(name),
         name if winrt::arity(name).is_some() => winrt::dwords(name),
-        "GetCPInfoExA" | "GetCPInfoExW" => &[0, 1],
         name if dxgi::arity(name).is_some() => dxgi::dwords(name),
         "FindFirstFileExA" | "FindFirstFileExW" => &[1, 3, 5],
         name if user::arity(name).is_some() => user::dwords(name),
@@ -701,12 +681,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "DuplicateHandle" => &[4, 5, 6],
         "SetFileAttributesW" | "SetFileAttributesA" => &[1],
         "SHGetKnownFolderPath" => &[1],
-        "GetDateFormatEx" | "GetTimeFormatEx" => &[1, 5],
-        "EnumSystemLocalesEx" => &[1],
-        "GetLocaleInfoEx" => &[1, 3],
-        "GetLocaleInfoW" => &[0, 1, 3],
-        "LCIDToLocaleName" => &[0, 2, 3],
-        "LocaleNameToLCID" | "GetUserDefaultLocaleName" | "GetSystemDefaultLocaleName" => &[1],
         "CreateToolhelp32Snapshot" => &[0, 1],
         "SystemParametersInfoA" | "SystemParametersInfoW" => &[0, 1, 3],
         "GetSystemMetrics" => &[0],
@@ -767,8 +741,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         | "FlsFree"
         | "GetStdHandle"
         | "SetStdHandle"
-        | "IsValidCodePage"
-        | "GetCPInfo"
         | "ExitProcess" => &[0],
         "HeapAlloc"
         | "HeapFree"
@@ -778,10 +750,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "InitializeCriticalSectionEx" => &[1, 2],
         "LoadLibraryExW" | "LoadLibraryExA" | "GetModuleFileNameW" | "GetModuleFileNameA"
         | "WriteFile" | "WriteConsoleW" => &[2],
-        "MultiByteToWideChar" | "WideCharToMultiByte" => &[0, 1, 3, 5],
-        "LCMapStringW" => &[0, 1, 3, 5],
-        "LCMapStringEx" => &[1, 3, 5],
-        "GetStringTypeW" => &[0, 2],
         "InitOnceBeginInitialize" | "InitOnceComplete" => &[1],
         _ => &[],
     }
@@ -966,16 +934,7 @@ impl Runtime64 {
         Ok(())
     }
     fn utf16(mem: &Memory, ptr: u64) -> Result<String, String> {
-        let mut units = Vec::new();
-        for n in 0..32768u64 {
-            let u = mem.read_int(ptr.checked_add(n * 2).ok_or("string overflow")?, 2)? as u16;
-            if u == 0 {
-                return String::from_utf16(&units)
-                    .map_err(|_| "invalid Win64 UTF-16 string".into());
-            }
-            units.push(u);
-        }
-        Err("unterminated Win64 UTF-16 string".into())
+        crate::win32::x64::text::utf16(mem, ptr)
     }
     fn ascii(mem: &Memory, ptr: u64) -> Result<String, String> {
         let mut bytes = Vec::new();
@@ -1273,77 +1232,11 @@ impl Runtime64 {
     fn string_bytes(mem: &Memory, ptr: u64, count: u64, width: usize) -> Result<Vec<u8>, String> {
         crate::win32::x64::text::string_bytes(mem, ptr, count, width)
     }
-    fn days_before_year(year: u32) -> u64 {
-        let y = year as u64 - 1;
-        y * 365 + y / 4 - y / 100 + y / 400
-    }
-    fn month_days(year: u32, month: u32) -> u32 {
-        match month {
-            2 => {
-                28 + (year.is_multiple_of(4)
-                    && (!year.is_multiple_of(100) || year.is_multiple_of(400)))
-                    as u32
-            }
-            4 | 6 | 9 | 11 => 30,
-            _ => 31,
-        }
-    }
     fn calendar_to_ticks(fields: [u16; 8]) -> Option<u64> {
-        let [year, month, _, day, hour, minute, second, millis] = fields.map(u32::from);
-        if !(1601..=30827).contains(&year)
-            || !(1..=12).contains(&month)
-            || day == 0
-            || day > Self::month_days(year, month)
-            || hour > 23
-            || minute > 59
-            || second > 59
-            || millis > 999
-        {
-            return None;
-        }
-        let days = Self::days_before_year(year) - Self::days_before_year(1601)
-            + (1..month)
-                .map(|m| Self::month_days(year, m) as u64)
-                .sum::<u64>()
-            + day as u64
-            - 1;
-        Some(
-            (days * 86400 + hour as u64 * 3600 + minute as u64 * 60 + second as u64) * 10_000_000
-                + millis as u64 * 10000,
-        )
+        crate::win32::kernel::calendar::calendar_to_ticks(fields)
     }
     fn ticks_to_calendar(ticks: u64) -> Option<[u16; 8]> {
-        let day = ticks / 864000000000;
-        let origin = Self::days_before_year(1601);
-        if ticks >= 1 << 63 || day >= Self::days_before_year(30828) - origin {
-            return None;
-        }
-        let (mut low, mut high) = (1601, 30828);
-        while high - low > 1 {
-            let mid = low + (high - low) / 2;
-            if Self::days_before_year(mid) - origin <= day {
-                low = mid;
-            } else {
-                high = mid;
-            }
-        }
-        let mut remaining = day - (Self::days_before_year(low) - origin);
-        let mut month = 1;
-        while remaining >= Self::month_days(low, month) as u64 {
-            remaining -= Self::month_days(low, month) as u64;
-            month += 1;
-        }
-        let seconds = (ticks / 10_000_000) % 86400;
-        Some([
-            low as u16,
-            month as u16,
-            ((day + 1) % 7) as u16,
-            remaining as u16 + 1,
-            (seconds / 3600) as u16,
-            ((seconds / 60) % 60) as u16,
-            (seconds % 60) as u16,
-            ((ticks / 10000) % 1000) as u16,
-        ])
+        crate::win32::kernel::calendar::ticks_to_calendar(ticks)
     }
     fn processor_information(relation: u32) -> Option<Vec<u8>> {
         if !matches!(relation, 0 | 1 | 2 | 3 | 4 | 6 | 0xffff) {
@@ -1391,6 +1284,9 @@ impl Runtime64 {
             }
             ApiId::Version(id) => {
                 crate::win32::x64::version::call(mem, id, args, &self.profile, self.teb() + 0x68)
+            }
+            ApiId::Nls(id) => {
+                crate::win32::x64::nls::call(mem, id, args, &self.profile, self.teb() + 0x68)
             }
         }
     }
@@ -2219,104 +2115,7 @@ impl Runtime64 {
                     }
                 }
             }
-            "GetDateFormatEx" | "GetTimeFormatEx" => self.format_calendar(mem, name, args)?,
-            "GetUserDefaultLCID"
-            | "GetSystemDefaultLCID"
-            | "GetThreadLocale"
-            | "GetUserDefaultLangID"
-            | "GetSystemDefaultLangID" => self.profile.locale_id() as u64,
-            "IsValidLocaleName" => {
-                (args[0] == 0 || locale::id(&Self::utf16(mem, args[0])?).is_some()) as u64
-            }
-            "LocaleNameToLCID" => {
-                if args[1] & !0x08000000 != 0 {
-                    self.set_error(mem, 1004)?;
-                    0
-                } else {
-                    let id = if args[0] == 0 {
-                        Some(0x411)
-                    } else {
-                        locale::id(&Self::utf16(mem, args[0])?)
-                    };
-                    match id {
-                        Some(9) if args[1] == 0 => 0x409,
-                        Some(0x11) if args[1] == 0 => 0x411,
-                        Some(n) => n as u64,
-                        None => {
-                            self.set_error(mem, 87)?;
-                            0
-                        }
-                    }
-                }
-            }
-            "LCIDToLocaleName" | "GetUserDefaultLocaleName" | "GetSystemDefaultLocaleName" => {
-                let (name, pointer, capacity) = if name == "LCIDToLocaleName" {
-                    (
-                        if args[3] & !0x08000000 == 0 {
-                            locale::name(args[0] as u32)
-                        } else {
-                            None
-                        },
-                        args[1],
-                        args[2],
-                    )
-                } else {
-                    (Some("ja-JP"), args[0], args[1])
-                };
-                if let Some(name) = name {
-                    let data: Vec<_> = name
-                        .encode_utf16()
-                        .chain(Some(0))
-                        .flat_map(u16::to_le_bytes)
-                        .collect();
-                    if capacity != 0 && (capacity as i32 <= 0 || capacity < data.len() as u64 / 2) {
-                        self.set_error(mem, 122)?;
-                        0
-                    } else {
-                        if capacity != 0 {
-                            mem.write(pointer, &data)?;
-                        }
-                        data.len() as u64 / 2
-                    }
-                } else {
-                    self.set_error(mem, 87)?;
-                    0
-                }
-            }
-            "GetLocaleInfoEx" | "GetLocaleInfoW" => {
-                let id = if name == "GetLocaleInfoW" {
-                    locale::name(args[0] as u32).and_then(locale::id)
-                } else if args[0] == 0 {
-                    Some(0x411)
-                } else {
-                    locale::id(&Self::utf16(mem, args[0])?)
-                };
-                let data = if args[1] & !(0x80000000 | 0x20000000 | 0xffff) != 0 {
-                    Err(1004)
-                } else {
-                    id.ok_or(87)
-                        .and_then(|id| locale::info(id, args[1] as u32 & !0x80000000))
-                };
-                match data {
-                    Err(error) => {
-                        self.set_error(mem, error)?;
-                        0
-                    }
-                    Ok(data) => {
-                        let required = data.len() as u64 / 2;
-                        if args[3] != 0 && (args[3] as i32 <= 0 || args[3] < required) {
-                            self.set_error(mem, 122)?;
-                            0
-                        } else {
-                            if args[3] != 0 {
-                                mem.write(args[2], &data)?;
-                            }
-                            required
-                        }
-                    }
-                }
-            }
-            "EnumSystemLocalesEx" => {
+            _ if binding.control == gateways::ControlImport::LocaleEnumeration => {
                 if args[0] == 0 || args[3] != 0 || args[1] & !0x37 != 0 {
                     self.set_error(mem, 87)?;
                     0
@@ -2329,31 +2128,11 @@ impl Runtime64 {
                         & !15)
                         + 8;
                     mem.check(frame, 40, WRITE)?;
-                    let mut calls = Vec::new();
                     let block = self.heap_alloc(mem, 64)?;
                     if block == 0 {
                         0
                     } else {
-                        let mut at = block;
-                        for (locale, flags) in
-                            [("en-US", 0x21), ("ja-JP", 0x21), ("en", 0x11), ("ja", 0x11)]
-                        {
-                            let requested = args[1] as u32;
-                            if requested != 0 && requested & 7 != 0 && requested & 1 == 0 {
-                                continue;
-                            }
-                            if requested & 0x30 != 0 && requested & flags & 0x30 == 0 {
-                                continue;
-                            }
-                            let data: Vec<_> = locale
-                                .encode_utf16()
-                                .chain(Some(0))
-                                .flat_map(u16::to_le_bytes)
-                                .collect();
-                            mem.write(at, &data)?;
-                            calls.push((args[0], [at, flags as u64, args[2], 0]));
-                            at += data.len() as u64;
-                        }
+                        let calls = crate::win32::x64::nls::enumeration_calls(mem, block, args)?;
                         returned.regs[0] = 1;
                         *cpu = returned;
                         self.unblock();
@@ -4265,24 +4044,6 @@ impl Runtime64 {
                     path.len() as u64
                 }
             }
-            "GetStringTypeW" => {
-                if args[0] as u32 != 1 {
-                    self.set_error(mem, 1004)?;
-                    0
-                } else {
-                    let bytes = Self::string_bytes(mem, args[1], args[2], 2)?;
-                    let output: Vec<u8> = bytes
-                        .as_chunks::<2>()
-                        .0
-                        .iter()
-                        .flat_map(|b| {
-                            crate::nls::ctype1(u16::from_le_bytes([b[0], b[1]])).to_le_bytes()
-                        })
-                        .collect();
-                    mem.write(args[3], &output)?;
-                    1
-                }
-            }
             "GetEnvironmentStringsW" => {
                 // Initially empty; changes are guest-owned and never inherit host secrets.
                 let bytes = self.environment.wide_block();
@@ -4345,178 +4106,6 @@ impl Runtime64 {
                     } else {
                         (units - 1) as u64
                     }
-                }
-            }
-            "MultiByteToWideChar" | "WideCharToMultiByte" | "LCMapStringW" | "LCMapStringEx" => {
-                if name == "LCMapStringEx" {
-                    let locale = if args[0] == 0 {
-                        "ja-JP".into()
-                    } else {
-                        Self::utf16(mem, args[0])?
-                    };
-                    if !matches!(locale.as_str(), "" | "ja-JP" | "en-US")
-                        || args[6..].iter().any(|&a| a != 0)
-                    {
-                        return Err("Win64 locale/version/sort handle not implemented".into());
-                    }
-                }
-                let wide_input = name != "MultiByteToWideChar";
-                let input =
-                    Self::string_bytes(mem, args[2], args[3], if wide_input { 2 } else { 1 })?;
-                let output: Result<(Vec<u8>, bool), u32> = if name == "MultiByteToWideChar" {
-                    if args[1] as u32 & !9 != 0 {
-                        Err(1004)
-                    } else {
-                        let text = if args[1] & 8 != 0 {
-                            crate::codepage::decode(&input, args[0] as u32)
-                        } else {
-                            crate::codepage::decode_lossy(&input, args[0] as u32)
-                        };
-                        text.map(|text| {
-                            (
-                                text.encode_utf16().flat_map(u16::to_le_bytes).collect(),
-                                false,
-                            )
-                        })
-                    }
-                } else {
-                    let units: Vec<u16> = input
-                        .as_chunks::<2>()
-                        .0
-                        .iter()
-                        .map(|b| u16::from_le_bytes([b[0], b[1]]))
-                        .collect();
-                    if name == "LCMapStringW" || name == "LCMapStringEx" {
-                        let upper = args[1] & 0x200 != 0;
-                        let lower = args[1] & 0x100 != 0;
-                        if upper == lower || args[1] & !0x01000300 != 0 {
-                            Err(1004)
-                        } else {
-                            String::from_utf16(&units).map_err(|_| 1113).map(|text| {
-                                let mapped = if upper {
-                                    text.to_uppercase()
-                                } else {
-                                    text.to_lowercase()
-                                };
-                                (
-                                    mapped.encode_utf16().flat_map(u16::to_le_bytes).collect(),
-                                    false,
-                                )
-                            })
-                        }
-                    } else if args[6] != 0 {
-                        return Err(
-                            "Win64 custom codepage default character is not implemented".into()
-                        );
-                    } else if args[1] & !0x480 != 0
-                        || (args[0] as u32 == 65001 && (args[7] != 0 || args[1] & !0x80 != 0))
-                    {
-                        Err(1004)
-                    } else {
-                        let text = if args[1] & 0x80 != 0 {
-                            String::from_utf16(&units).map_err(|_| 1113)
-                        } else {
-                            Ok(String::from_utf16_lossy(&units))
-                        };
-                        text.and_then(|text| crate::codepage::encode(&text, args[0] as u32))
-                    }
-                };
-                match output {
-                    Err(error) => {
-                        self.set_error(mem, error)?;
-                        0
-                    }
-                    Ok((output, used)) => {
-                        let count =
-                            output.len() / if name == "WideCharToMultiByte" { 1 } else { 2 };
-                        let capacity = args[5] as u32 as i32;
-                        if capacity < 0 || (capacity != 0 && (capacity as usize) < count) {
-                            self.set_error(mem, 122)?;
-                            0
-                        } else {
-                            if capacity != 0 {
-                                mem.check(args[4], output.len(), WRITE)?;
-                            }
-                            if name == "WideCharToMultiByte" && args[7] != 0 {
-                                mem.check(args[7], 4, WRITE)?;
-                            }
-                            if capacity != 0 {
-                                mem.write(args[4], &output)?;
-                            }
-                            if name == "WideCharToMultiByte" && args[7] != 0 {
-                                mem.write_int(args[7], 4, used as u64)?;
-                            }
-                            count as u64
-                        }
-                    }
-                }
-            }
-            "GetACP" | "GetOEMCP" | "GetConsoleOutputCP" | "GetConsoleCP" => {
-                self.profile.codepage() as u64
-            }
-            "IsValidCodePage" => matches!(args[0] as u32, 932 | 1252 | 65001) as u64,
-            "GetCPInfo" | "GetCPInfoExA" | "GetCPInfoExW" => {
-                let extended = name != "GetCPInfo";
-                let cp = match args[0] as u32 {
-                    0 | 1 | 3 => 932,
-                    value => value,
-                };
-                if extended && args[1] != 0 {
-                    self.set_error(mem, 1004)?;
-                    0
-                } else if !matches!(cp, 932 | 1252 | 65001) {
-                    self.set_error(mem, 87)?;
-                    0
-                } else {
-                    let wide = name.ends_with('W');
-                    let mut info = vec![
-                        0;
-                        if !extended {
-                            20
-                        } else if wide {
-                            544
-                        } else {
-                            284
-                        }
-                    ];
-                    info[..4].copy_from_slice(
-                        &(if cp == 932 {
-                            2u32
-                        } else if cp == 65001 {
-                            4
-                        } else {
-                            1
-                        })
-                        .to_le_bytes(),
-                    );
-                    info[4] = b'?';
-                    if cp == 932 {
-                        info[6..10].copy_from_slice(&[0x81, 0x9f, 0xe0, 0xfc]);
-                    }
-                    if extended {
-                        let unicode_default = if cp == 932 {
-                            0x30fbu16
-                        } else if cp == 65001 {
-                            0xfffd
-                        } else {
-                            0x3f
-                        };
-                        info[18..20].copy_from_slice(&unicode_default.to_le_bytes());
-                        info[20..24].copy_from_slice(&cp.to_le_bytes());
-                        let name = match cp {
-                            932 => "932 (Japanese Shift-JIS)",
-                            1252 => "1252 (Western European)",
-                            _ => "65001 (UTF-8)",
-                        };
-                        let bytes: Vec<u8> = if wide {
-                            name.encode_utf16().flat_map(u16::to_le_bytes).collect()
-                        } else {
-                            name.as_bytes().to_vec()
-                        };
-                        info[24..24 + bytes.len()].copy_from_slice(&bytes);
-                    }
-                    mem.write(args[if extended { 2 } else { 1 }], &info)?;
-                    1
                 }
             }
             "GetStdHandle" | "SetStdHandle" => {
@@ -4961,22 +4550,11 @@ impl Runtime64 {
                                     | "WakeByAddressSingle"
                                     | "WakeByAddressAll"
                                     | "AreFileApisANSI"
-                                    | "LCMapStringEx"
                                     | "FlsAlloc"
                                     | "FlsGetValue"
                                     | "FlsSetValue"
                                     | "FlsFree"
                                     | "InitializeCriticalSectionEx"
-                                    | "EnumSystemLocalesEx"
-                                    | "GetLocaleInfoEx"
-                                    | "GetLocaleInfoW"
-                                    | "IsValidLocaleName"
-                                    | "LocaleNameToLCID"
-                                    | "LCIDToLocaleName"
-                                    | "GetUserDefaultLocaleName"
-                                    | "GetSystemDefaultLocaleName"
-                                    | "GetDateFormatEx"
-                                    | "GetTimeFormatEx"
                             ))
                         || self.gateways.values().any(|export| {
                             export.split_once('!').is_some_and(|(dll, n)| {

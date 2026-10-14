@@ -19,7 +19,7 @@
 | --- | --- |
 | R0 入口/fixture | 已完成；12 组 golden 输入一致，默认与旧路径各 7 个运行 smoke 通过 |
 | R1 GUID 契约试点 | 已完成唯一契约、双架构冷绑定、纯语义/适配器、行为及性能验收 |
-| R2 分发收敛 | GUID + 6 个 identity + 8 个 version export 已迁移；locale/file 等仍 legacy |
+| R2 分发收敛 | GUID + 6 个 identity + 8 个 version + 42 个 NLS export 已迁移；file/module 等仍 legacy |
 | R3 状态归属 | identity/profile 与可变环境变量已形成独立边界；module/file/thread/COM 待迁移 |
 | R4 PE32 Process | 已完成装载/执行编排提取；旧 Cpu 方法只保留委托 facade |
 | R5 host/graphics | 已完成 owned UI 请求/事件与 GDI adapter 分离，真实 native 验证通过 |
@@ -117,3 +117,16 @@ R5 没有把 D3D9/DXGI 的所有 guest COM 语义都迁入新 catalog；它们�
 - 冻结 `version-wire` SHA-256：`a3756a2026e491d55eb4d26b8dea2df1022dc081fafdff042543590897aa750f`。
 - 11 个 case/path，100M work、三对 AB/BA；整数、SSE、memory、thread-ID 和两架构 version gateway 均校验 work/retired/checksum。version gateway PE32 IR/raw +0.52%/+1.59%，Win64 -0.19%，其它初筛除 PE32 SSE raw 外回退均低于 2%。
 - PE32 SSE raw 初筛 +4.39% 触发扩样；700M work 后相对 R5 +2.50%，相对最初基线 -6.72%，各对回退 +2.10%/+2.74%/+3.72%，没有三对均超过 5%。RSS 无实质增长。记录该布局成本，全部初筛与扩大轮次位于 `r2-version-*-timing` 和 `r2-version-sse-investigation`；未改 ISA/cache 热循环。
+
+
+## R2/R3 NLS / locale 家族
+
+42 个原有 export 集中到 catalog（PE32 20 个 typed、22 个 ABI-only；Win64 28 个 typed、14 个 absent）。删除两端的重复 ABI/arity/DWORD、动态支持列表与旧 NLS handler。公开 nls::dispatch 保留原函数范围并委托新适配器，main gateway 直接消费冷绑定 ID。Wine spec 继续是未迁移 API 的 ABI 来源。
+
+locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿主 localtime provider 进入 host。Win64 locale 枚举使用冷绑定 ControlImport，进程框架保留线程/executor、callback frame、allocation/release、CPU/trace 提交与 budget/stop-on-false 顺序，adapter 只填充回调输入。详细 flags、部分输出、size/encoding/fault 差异见 [NLS](../architecture/nls.md)。
+
+- 迁移前新增 3 个独立行为基线，迁移后全部通过；完整 release 400 passed / 0 failed / 7 ignored，debug 252 项通过。fmt、strict Clippy、工具 6 项通过。迁移中的 helper 漏调用和常量 cast 检查失败日志保留，修正后的全量验证单独记录。
+- 冻结 `nls-wire` SHA-256：`39ef6903fdf338d13bf81596a590756b482a0e9dd5f1398b4fcbeff0c2ec9982`。
+- 新 `gateway-nls` 和 `nls-conversion` 原创 fixture 在前后两版先做低 work 功能预检；正式 14 个 case/path 使用 100M work、三对 AB/BA，全部 work/retired/checksum/API count 校验。查询 fixture 累加固定 CP932 返回值；转换 fixture 同时校验 UTF-16 输出和返回 count。默认 case 集合保持原样。
+- 相对 version，Win64 查询/转换 CPU 中位数 -33.08%/-11.31%，PE32 相应 raw/IR -0.81% 至 -2.11%；普通整数/SSE/thread-ID 初筛回退均低于 1%。这些是确定 fixture 的变化。
+- AMD64 memory 初筛 +3.08% 触发 700M 扩样：相对 version +3.14%、相对最初基线 +1.80%，各对约 +3.07%/+3.39%/+2.72%，RSS 无实质增长。独立 diagnostics 的 IR=12008、fallback=0、translations=16、invalidations=0，以及 cold/epoch/byte/mapping 原因一致。CheckedSegment 与 RegisterSegment 各为 2156/2925 条指令，opcode 序列一致；地址及常量重定位变化，原始反汇编保留为 `r2-nls-*-segment-*.txt`。ISA/cache 源码未改，按调查门槛接受并记录这项成本，未发生三对均回退超过 5%。全部轮次在 `r2-nls-*-timing`、`r2-nls-memory-investigation`，诊断分开运行。
