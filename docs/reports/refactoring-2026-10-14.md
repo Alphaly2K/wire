@@ -2,6 +2,8 @@
 
 按用户提供的 2026-10-11 计划实施，原生 Mono/R6 忽略。用户要求直接在本地 main 分批提交；不创建 worktree，不 push。用户未跟踪设计文档、PDF、IDE 与系统文件保持现状。
 
+模块 API catalog 扩展前新增独立的 [IR 布局隔离](refactoring-ir-layout-2026-10-14.md)：仅改变 macOS 寄存器段执行器的节归属/对齐，26 个 case/path 三对验收，最大 CPU 中位数回退 +2.12%，release 403、debug 288、native GPU 7 项通过。原 module 候选因 bit-test 持续回退没有接受，后续以该独立批次为新基线继续验收。
+
 ## R0 固定基线
 
 - 代码：`2e78377`，tracked working tree 干净。

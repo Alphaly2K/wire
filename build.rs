@@ -7,6 +7,9 @@ fn main() {
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
         return;
     }
+    // Keep the register IR executor's instruction layout independent of Win32
+    // handler sizes. A page boundary also preserves its cache-line offsets.
+    println!("cargo:rustc-link-arg=-Wl,-sectalign,__TEXT,__wire_ir,0x1000");
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let status = Command::new("clang")
         .args([
