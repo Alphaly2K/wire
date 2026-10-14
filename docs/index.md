@@ -4,6 +4,7 @@
 
 - [当前状态与验证矩阵](status.md)：注明代码基线、运行入口与外部测试条件。
 - [架构和依赖方向](architecture/runtime.md)：当前边界、保留 facade 与迁移目标。
+- [新增 API 与 GUID 契约](architecture/adding-api.md)：唯一声明、冷绑定、双架构错误和提交顺序。
 - [本次渐进重构记录](reports/refactoring-2026-10-14.md)：阶段交付、行为差异与验收结果。
 - [原生 Mono 撤回](mono-native-rollback-2026-10-14.md)：保留通用优化，继续执行原始 guest Mono。
 

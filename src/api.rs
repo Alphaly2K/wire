@@ -1762,8 +1762,17 @@ pub fn dispatch(
     let ret: u32;
     match (dll, name) {
         _ if binding.guid.is_some() => {
-            (ret, note, implemented) =
-                crate::common_api::bound_guid_call(binding.guid.unwrap().id, &args, mem, state);
+            match crate::win32::x86::guid::call(binding.guid.unwrap().id, &args, mem) {
+                Ok(value) => {
+                    ret = value;
+                    note = "common process/string/COM allocation contract".into();
+                }
+                Err(error) => {
+                    state.last_error = error;
+                    ret = error;
+                    note = format!("common API error {error:#x}");
+                }
+            }
         }
         (
             "winmm.dll",

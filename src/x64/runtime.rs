@@ -1287,36 +1287,7 @@ impl Runtime64 {
         Ok(address)
     }
     fn string_bytes(mem: &Memory, ptr: u64, count: u64, width: usize) -> Result<Vec<u8>, String> {
-        let count = count as u32 as i32;
-        if count == 0 || count < -1 || ptr == 0 {
-            return Err("invalid Win64 string input".into());
-        }
-        let length = if count == -1 {
-            let mut n = 0;
-            loop {
-                if n >= 32768 {
-                    return Err("Win64 terminated string exceeds capacity".into());
-                }
-                let unit = mem.read_int(
-                    ptr.checked_add(n as u64 * width as u64)
-                        .ok_or("string overflow")?,
-                    width,
-                )?;
-                n += 1;
-                if unit == 0 {
-                    break n;
-                }
-            }
-        } else {
-            count as usize
-        };
-        let size = length
-            .checked_mul(width)
-            .filter(|&n| n <= 16 * 1024 * 1024)
-            .ok_or("Win64 string transfer exceeds capacity")?;
-        let mut bytes = vec![0; size];
-        mem.read(ptr, &mut bytes)?;
-        Ok(bytes)
+        crate::win32::x64::text::string_bytes(mem, ptr, count, width)
     }
     fn days_before_year(year: u32) -> u64 {
         let y = year as u64 - 1;
@@ -1502,7 +1473,9 @@ impl Runtime64 {
             });
         }
         let ret = match name {
-            _ if binding.guid.is_some() => guid::bound_guid_call(mem, binding.guid.unwrap(), args)?,
+            _ if binding.guid.is_some() => {
+                crate::win32::x64::guid::call(mem, binding.guid.unwrap(), args)?
+            }
             _ if binding.groups & (1 << 0) != 0 => self.automation_call(mem, name, args)?,
             _ if binding.groups & (1 << 1) != 0 => self.winhttp_call(mem, name, args)?,
             _ if binding.groups & (1 << 2) != 0 => self.device_call(mem, name, args)?,
