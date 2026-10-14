@@ -605,19 +605,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
         add(
             "kernel32.dll",
             &[
-                ("GetModuleHandleA", 4),
-                ("GetModuleHandleW", 4),
-                ("GetModuleHandleExA", 12),
-                ("GetModuleHandleExW", 12),
-                ("GetModuleFileNameA", 12),
-                ("GetModuleFileNameW", 12),
-                ("GetProcAddress", 8),
-                ("LoadLibraryA", 4),
-                ("LoadLibraryW", 4),
-                ("LoadLibraryExA", 12),
-                ("LoadLibraryExW", 12),
-                ("FreeLibrary", 4),
-                ("DisableThreadLibraryCalls", 4),
                 ("GetStartupInfoA", 4),
                 ("GetStartupInfoW", 4),
                 ("GetCommandLineA", 0),
@@ -2472,24 +2459,12 @@ pub fn dispatch(
             note = "zeroed STARTUPINFO".into();
             ret = 0;
         }
-        (
-            "kernel32.dll",
-            "GetModuleHandleA"
-            | "GetModuleHandleW"
-            | "GetModuleHandleExA"
-            | "GetModuleHandleExW"
-            | "GetModuleFileNameA"
-            | "GetModuleFileNameW"
-            | "LoadLibraryA"
-            | "LoadLibraryW"
-            | "LoadLibraryExA"
-            | "LoadLibraryExW"
-            | "GetProcAddress"
-            | "FreeLibrary"
-            | "DisableThreadLibraryCalls",
-        ) => {
+        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Module(_))) => {
+            let Some(crate::win32::catalog::ApiId::Module(id)) = binding.typed else {
+                unreachable!();
+            };
             let (outcome, message) =
-                crate::modules::dispatch(name, &args, cpu, mem, api, state, log, sched, max_instr)?;
+                crate::modules::call(id, &args, cpu, mem, api, state, log, sched, max_instr)?;
             match outcome {
                 crate::cpu::GuestCallOutcome::Returned(value) => {
                     ret = value;

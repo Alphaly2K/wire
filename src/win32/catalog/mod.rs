@@ -2,10 +2,12 @@
 //! Unconverted families remain on explicit legacy routes.
 mod guid;
 mod identity;
+mod modules;
 mod nls;
 mod version;
 pub use guid::{GuidApi, GUID_CONTRACTS};
 pub use identity::{IdentityApi, IDENTITY_CONTRACTS};
+pub use modules::{ModuleApi, ModuleQueryApi, MODULE_CONTRACTS, MODULE_QUERY_CONTRACTS};
 pub use nls::{NlsApi, NLS_CONTRACTS};
 pub use version::{VersionApi, VERSION_CONTRACTS};
 
@@ -27,6 +29,7 @@ pub enum Parameter {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReturnConvention {
+    Pointer,
     CharacterCount,
     Hresult,
     BoolLastError,
@@ -41,6 +44,8 @@ pub enum ApiId {
     Identity(IdentityApi),
     Version(VersionApi),
     Nls(NlsApi),
+    Module(ModuleApi),
+    ModuleQuery(ModuleQueryApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,6 +71,7 @@ pub struct Contract {
     pub returns: ReturnConvention,
     pub limits: &'static str,
     plans: [ArchitecturePlan; 2],
+    lookup_dlls: Option<[&'static [&'static str]; 2]>,
     dwords: [usize; 16],
     dword_count: usize,
 }
@@ -97,6 +103,7 @@ impl Contract {
             returns,
             limits,
             plans,
+            lookup_dlls: None,
             dwords,
             dword_count,
         }
@@ -105,6 +112,23 @@ impl Contract {
         match architecture {
             Architecture::X86 => self.plans[0].dlls,
             Architecture::X64 => self.plans[1].dlls,
+        }
+    }
+    /// Some legacy providers accept static imports that GetProcAddress rejects.
+    /// Preserve that distinction explicitly without changing the import plan.
+    pub(super) const fn with_lookup_dlls(mut self, dlls: [&'static [&'static str]; 2]) -> Self {
+        self.lookup_dlls = Some(dlls);
+        self
+    }
+    pub fn lookup_dlls(&self, architecture: Architecture) -> &'static [&'static str] {
+        match self.lookup_dlls {
+            Some(dlls) => {
+                dlls[match architecture {
+                    Architecture::X86 => 0,
+                    Architecture::X64 => 1,
+                }]
+            }
+            None => self.dlls(architecture),
         }
     }
     pub fn execution(&self, architecture: Architecture) -> ExecutionPolicy {
@@ -163,6 +187,8 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(IDENTITY_CONTRACTS.iter())
         .chain(VERSION_CONTRACTS.iter())
         .chain(NLS_CONTRACTS.iter())
+        .chain(MODULE_CONTRACTS.iter())
+        .chain(MODULE_QUERY_CONTRACTS.iter())
 }
 
 #[cfg(test)]
@@ -192,6 +218,14 @@ mod tests {
                     owners.is_empty(),
                     contract.execution(architecture) == ExecutionPolicy::Absent
                 );
+                let mut lookups = std::collections::HashSet::new();
+                for dll in contract.lookup_dlls(architecture) {
+                    assert!(
+                        owners.contains(dll),
+                        "lookup owner must have an import plan"
+                    );
+                    assert!(lookups.insert(*dll), "duplicate lookup owner {}", dll);
+                }
             }
         }
     }

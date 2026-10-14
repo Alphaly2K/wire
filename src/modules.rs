@@ -1257,18 +1257,42 @@ pub fn dispatch(
     sched: &mut Sched,
     max_instr: u64,
 ) -> Result<(GuestCallOutcome, String), String> {
+    let Some(crate::win32::catalog::ApiId::Module(id)) =
+        crate::win32::catalog::by_name(name).map(|c| c.id)
+    else {
+        unreachable!();
+    };
+    call(id, a, cpu, mem, api, state, log, sched, max_instr)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn call(
+    id: crate::win32::catalog::ModuleApi,
+    a: &crate::api::Args,
+    cpu: &mut Cpu,
+    mem: &mut GuestMem,
+    api: &mut ApiTable,
+    state: &mut ApiState,
+    log: &mut ApiLogger,
+    sched: &mut Sched,
+    max_instr: u64,
+) -> Result<(GuestCallOutcome, String), String> {
+    use crate::win32::catalog::ModuleApi;
     let mut txn = Transaction::default();
     let mut note = String::new();
     let result = (|| -> LoadResult<u32> {
-        match name {
-            "LoadLibraryA" | "LoadLibraryW" | "LoadLibraryExA" | "LoadLibraryExW" => {
-                if name.starts_with("LoadLibraryEx") && (a[1] != 0 || a[2] & !8 != 0) {
+        match id {
+            ModuleApi::LoadLibraryA
+            | ModuleApi::LoadLibraryW
+            | ModuleApi::LoadLibraryExA
+            | ModuleApi::LoadLibraryExW => {
+                if id.extended() && (a[1] != 0 || a[2] & !8 != 0) {
                     return Err(Failure::Expected(
                         87,
                         "unsupported LoadLibraryEx flags/file handle".into(),
                     ));
                 }
-                let path = crate::api::read_str(mem, a[0], name.ends_with('W'));
+                let path = crate::api::read_str(mem, a[0], id.wide());
                 let handle =
                     link(&path, None, mem, api, state, &mut txn, 0).map_err(|e| match e {
                         Failure::Expected(code, reason) => {
@@ -1290,7 +1314,7 @@ pub fn dispatch(
                 note = format!("loaded {path:?} at {handle:#x}");
                 Ok(handle)
             }
-            "DisableThreadLibraryCalls" => {
+            ModuleApi::DisableThreadLibraryCalls => {
                 if state.modules.provider_name(a[0]).is_some() {
                     return Ok(1);
                 }
@@ -1308,11 +1332,11 @@ pub fn dispatch(
                 module.thread_calls_disabled = true;
                 Ok(1)
             }
-            "FreeLibrary" => {
+            ModuleApi::FreeLibrary => {
                 unload(a[0], cpu, mem, api, state, log, sched, max_instr)?;
                 Ok(1)
             }
-            "GetProcAddress" => {
+            ModuleApi::GetProcAddress => {
                 let symbol = if a[1] >> 16 == 0 {
                     Symbol::Ordinal(a[1] as u16)
                 } else {
@@ -1350,9 +1374,11 @@ pub fn dispatch(
                 }
                 Ok(value)
             }
-            "GetModuleHandleA" | "GetModuleHandleW" | "GetModuleHandleExA"
-            | "GetModuleHandleExW" => {
-                let extended = name.starts_with("GetModuleHandleEx");
+            ModuleApi::GetModuleHandleA
+            | ModuleApi::GetModuleHandleW
+            | ModuleApi::GetModuleHandleExA
+            | ModuleApi::GetModuleHandleExW => {
+                let extended = id.extended();
                 let flags = if extended { a[0] } else { 2 };
                 if flags & !7 != 0 || flags & 3 == 3 {
                     return Err(Failure::Expected(87, "invalid module handle flags".into()));
@@ -1366,7 +1392,7 @@ pub fn dispatch(
                 } else if pointer == 0 {
                     Some(state.exe_base)
                 } else {
-                    let path = crate::api::read_str(mem, pointer, name.ends_with('W'));
+                    let path = crate::api::read_str(mem, pointer, id.wide());
                     state.modules.handle(&path, state.fs.as_ref()).or_else(|| {
                         state
                             .modules
@@ -1390,7 +1416,7 @@ pub fn dispatch(
                     Ok(handle)
                 }
             }
-            "GetModuleFileNameA" | "GetModuleFileNameW" => {
+            ModuleApi::GetModuleFileNameA | ModuleApi::GetModuleFileNameW => {
                 let path = if a[0] == 0 || a[0] == state.exe_base {
                     state.exe_path.clone()
                 } else if let Some(module) = state.modules.images.get(&a[0]) {
@@ -1400,7 +1426,7 @@ pub fn dispatch(
                 } else {
                     return Err(Failure::Expected(6, "invalid module handle".into()));
                 };
-                let wide = name.ends_with('W');
+                let wide = id.wide();
                 let length = if wide {
                     path.encode_utf16().count()
                 } else {
@@ -1437,7 +1463,12 @@ pub fn dispatch(
                     Ok(length)
                 }
             }
-            _ => unreachable!(),
+            ModuleApi::GetDllDirectoryA
+            | ModuleApi::GetDllDirectoryW
+            | ModuleApi::SetDllDirectoryA
+            | ModuleApi::SetDllDirectoryW => {
+                unreachable!("ABI-only DLL directory call entered PE32 typed adapter")
+            }
         }
     })();
     match result {

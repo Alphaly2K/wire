@@ -265,7 +265,6 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
                     name,
                     "SystemParametersInfoA" | "SystemParametersInfoW" | "GetSystemMetrics"
                 )))
-        && !(dll.eq_ignore_ascii_case("psapi.dll") && modules::is_query(name))
         && !(dll.eq_ignore_ascii_case("imm32.dll") && user::ime_arity(name).is_some())
         && !(dll.eq_ignore_ascii_case("dwmapi.dll")
             && matches!(name, "DwmGetWindowAttribute" | "DwmIsCompositionEnabled"))
@@ -309,7 +308,7 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
 fn kernel_export(name: &str) -> bool {
     if let Some(contract) = crate::win32::catalog::by_name(name) {
         return contract
-            .dlls(crate::win32::catalog::Architecture::X64)
+            .lookup_dlls(crate::win32::catalog::Architecture::X64)
             .contains(&"kernel32.dll");
     }
     if devices::arity(name).is_some()
@@ -324,7 +323,6 @@ fn kernel_export(name: &str) -> bool {
         || sspi::arity(name).is_some()
         || tracing::is_call(name)
         || dxgi::arity(name).is_some()
-        || (modules::is_query(name) && !name.starts_with("K32"))
         || name.starts_with("BCrypt")
         || name.starts_with("time")
         || name == "NtQueryDirectoryFile"
@@ -385,8 +383,6 @@ fn import_arity(name: &str) -> Option<usize> {
         | "GetWindowsDirectoryW"
         | "GetSystemWindowsDirectoryA"
         | "GetSystemWindowsDirectoryW" => 2,
-        "SetDllDirectoryW" | "SetDllDirectoryA" => 1,
-        "GetDllDirectoryW" | "GetDllDirectoryA" => 2,
         "WaitOnAddress" => 4,
         "WakeByAddressSingle" | "WakeByAddressAll" => 1,
         "InitializeCriticalSection" | "TryEnterCriticalSection" => 1,
@@ -398,26 +394,12 @@ fn import_arity(name: &str) -> Option<usize> {
         "RtlAddFunctionTable" | "RtlLookupFunctionEntry" => 3,
         "RtlDeleteFunctionTable" => 1,
         "RtlInstallFunctionTableCallback" => 6,
-        "GetModuleHandleExA" | "GetModuleHandleExW" => 3,
         "EventRegister" | "EventWrite" | "EventWriteString" | "EventSetInformation" => 4,
         "EventUnregister" => 1,
         "EventEnabled" => 2,
         "EventProviderEnabled" => 3,
         "EventWriteTransfer" => 6,
         "FormatMessageA" | "FormatMessageW" => 7,
-        "K32EnumProcessModules"
-        | "EnumProcessModules"
-        | "K32GetModuleInformation"
-        | "GetModuleInformation"
-        | "K32GetModuleBaseNameA"
-        | "K32GetModuleBaseNameW"
-        | "GetModuleBaseNameA"
-        | "GetModuleBaseNameW"
-        | "K32GetModuleFileNameExA"
-        | "K32GetModuleFileNameExW"
-        | "GetModuleFileNameExA"
-        | "GetModuleFileNameExW" => 4,
-        "K32EnumProcessModulesEx" | "EnumProcessModulesEx" => 5,
         "GetSidSubAuthority" | "EqualSid" => 2,
         "CopySid" | "InitializeSid" => 3,
         "GetSidSubAuthorityCount"
@@ -454,13 +436,8 @@ fn import_arity(name: &str) -> Option<usize> {
         "SystemParametersInfoA" | "SystemParametersInfoW" => 4,
         "GetSystemMetrics" => 1,
         "CreateThread" => 6,
-        "Sleep"
-        | "ExitThread"
-        | "ResumeThread"
-        | "SuspendThread"
-        | "GetThreadId"
-        | "GetThreadPriority"
-        | "DisableThreadLibraryCalls" => 1,
+        "Sleep" | "ExitThread" | "ResumeThread" | "SuspendThread" | "GetThreadId"
+        | "GetThreadPriority" => 1,
         "SwitchToThread" => 0,
         "QueueUserAPC" => 3,
         "SleepEx" => 2,
@@ -560,17 +537,11 @@ fn import_arity(name: &str) -> Option<usize> {
         "FlsAlloc"
         | "FlsGetValue"
         | "FlsFree"
-        | "GetModuleHandleA"
-        | "LoadLibraryW"
-        | "LoadLibraryA"
-        | "FreeLibrary"
         | "GetStdHandle"
         | "GetFileType"
         | "CloseHandle"
         | "FreeEnvironmentStringsW" => 1,
-        "GetProcAddress" | "FlsSetValue" | "SetStdHandle" | "GetConsoleMode" | "GetTempPathW"
-        | "GetTempPath2W" => 2,
-        "LoadLibraryExW" | "LoadLibraryExA" => 3,
+        "FlsSetValue" | "SetStdHandle" | "GetConsoleMode" | "GetTempPathW" | "GetTempPath2W" => 2,
         "GetSystemTimes" => 3,
         "GetSystemTimeAsFileTime"
         | "GetSystemTimePreciseAsFileTime"
@@ -583,7 +554,6 @@ fn import_arity(name: &str) -> Option<usize> {
         | "InitializeSListHead"
         | "GetStartupInfoW"
         | "GetStartupInfoA"
-        | "GetModuleHandleW"
         | "SetLastError"
         | "IsProcessorFeaturePresent"
         | "TlsGetValue"
@@ -596,12 +566,7 @@ fn import_arity(name: &str) -> Option<usize> {
         | "LeaveCriticalSection"
         | "DeleteCriticalSection" => 1,
         "TlsSetValue" | "InitializeCriticalSectionAndSpinCount" => 2,
-        "HeapAlloc"
-        | "HeapFree"
-        | "HeapSize"
-        | "InitializeCriticalSectionEx"
-        | "GetModuleFileNameW"
-        | "GetModuleFileNameA" => 3,
+        "HeapAlloc" | "HeapFree" | "HeapSize" | "InitializeCriticalSectionEx" => 3,
         "HeapReAlloc" => 4,
         "WriteFile" | "WriteConsoleW" => 5,
         _ => return None,
@@ -633,7 +598,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         | "GetWindowsDirectoryW"
         | "GetSystemWindowsDirectoryA"
         | "GetSystemWindowsDirectoryW" => &[1],
-        "GetDllDirectoryW" | "GetDllDirectoryA" => &[0],
         "WaitOnAddress" => &[3],
         "WSASetLastError" => &[0],
         "SetCriticalSectionSpinCount" => &[1],
@@ -641,22 +605,10 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "RaiseException" => &[0, 1, 2],
         "RtlAddFunctionTable" => &[1],
         "RtlInstallFunctionTableCallback" => &[2],
-        "GetModuleHandleExA" | "GetModuleHandleExW" => &[0],
         "EventWrite" => &[2],
         "EventWriteTransfer" => &[4],
         "EventSetInformation" => &[1, 3],
         "FormatMessageA" | "FormatMessageW" => &[0, 2, 3, 5],
-        "K32EnumProcessModules" | "EnumProcessModules" => &[2],
-        "K32EnumProcessModulesEx" | "EnumProcessModulesEx" => &[2, 4],
-        "K32GetModuleInformation" | "GetModuleInformation" => &[3],
-        "K32GetModuleBaseNameA"
-        | "K32GetModuleBaseNameW"
-        | "GetModuleBaseNameA"
-        | "GetModuleBaseNameW"
-        | "K32GetModuleFileNameExA"
-        | "K32GetModuleFileNameExW"
-        | "GetModuleFileNameExA"
-        | "GetModuleFileNameExW" => &[3],
         "GetSidSubAuthority" => &[1],
         "CopySid" => &[0],
         "LocalAlloc" | "GlobalAlloc" => &[0],
@@ -735,8 +687,7 @@ fn import_dwords(name: &str) -> &'static [usize] {
         | "HeapReAlloc"
         | "InitializeCriticalSectionAndSpinCount" => &[1],
         "InitializeCriticalSectionEx" => &[1, 2],
-        "LoadLibraryExW" | "LoadLibraryExA" | "GetModuleFileNameW" | "GetModuleFileNameA"
-        | "WriteFile" | "WriteConsoleW" => &[2],
+        "WriteFile" | "WriteConsoleW" => &[2],
         "InitOnceBeginInitialize" | "InitOnceComplete" => &[1],
         _ => &[],
     }
@@ -1154,6 +1105,8 @@ impl Runtime64 {
             ApiId::Nls(id) => {
                 crate::win32::x64::nls::call(mem, id, args, &self.profile, self.teb() + 0x68)
             }
+            ApiId::Module(id) => self.scalar_module_call(mem, id, args),
+            ApiId::ModuleQuery(id) => self.module_query(mem, id, args),
         }
     }
 
@@ -1238,6 +1191,47 @@ impl Runtime64 {
         }
         let ret = match name {
             _ if binding.api.is_some() => self.catalog_call(mem, binding.api.unwrap(), args)?,
+            _ if matches!(binding.control, gateways::ControlImport::Module(_)) => {
+                let gateways::ControlImport::Module(id) = binding.control else {
+                    unreachable!();
+                };
+                match self.control_module_call(mem, id, args)? {
+                    modules::ModuleControlResult::Value(value) => value,
+                    modules::ModuleControlResult::Returned { value, unblock } => {
+                        returned.regs[0] = value;
+                        *cpu = returned;
+                        if unblock {
+                            self.unblock();
+                        }
+                        self.api_calls += 1;
+                        self.record(dll, name, args, value);
+                        return Ok(Control::Returned);
+                    }
+                    modules::ModuleControlResult::Load { path, flags } => {
+                        *cpu = returned;
+                        self.api_calls += 1;
+                        return Ok(Control::LoadModule {
+                            search: (
+                                flags,
+                                if flags & 8 != 0 {
+                                    Some(
+                                        path.rsplit_once('\\')
+                                            .ok_or("DLL directory is missing")?
+                                            .0
+                                            .to_owned(),
+                                    )
+                                } else {
+                                    None
+                                },
+                            ),
+                            path,
+                            dll: dll.into(),
+                            function: name.into(),
+                            args: args.to_vec(),
+                        });
+                    }
+                }
+            }
             _ if binding.groups & (1 << 0) != 0 => self.automation_call(mem, name, args)?,
             _ if binding.groups & (1 << 1) != 0 => self.winhttp_call(mem, name, args)?,
             _ if binding.groups & (1 << 2) != 0 => self.device_call(mem, name, args)?,
@@ -1320,9 +1314,6 @@ impl Runtime64 {
                     mem.write(args[0], &bytes)?;
                     required as u64 - 1
                 }
-            }
-            "SetDllDirectoryW" | "SetDllDirectoryA" | "GetDllDirectoryW" | "GetDllDirectoryA" => {
-                self.dll_directory_call(mem, name, args)?
             }
             "WaitOnAddress" => match self.wait_address(mem, args)? {
                 Some(value) => value,
@@ -1412,12 +1403,8 @@ impl Runtime64 {
                     });
                 }
             },
-            "GetModuleHandleExA" | "GetModuleHandleExW" => {
-                self.module_handle_ex(mem, name, args)?
-            }
             name if tracing::is_call(name) => self.etw_call(mem, name, args)?,
             "FormatMessageA" | "FormatMessageW" => self.format_message(mem, name, args)?,
-            name if modules::is_query(name) => self.module_query(mem, name, args)?,
             "GetSidSubAuthority"
             | "GetSidSubAuthorityCount"
             | "GetSidIdentifierAuthority"
@@ -2152,16 +2139,6 @@ impl Runtime64 {
                     }
                 }
             },
-            "DisableThreadLibraryCalls" => {
-                // Static TLS needs thread notifications; support explicit failure rather than
-                // silently suppressing required callbacks.
-                if self.modules.exports(args[0]).is_none() {
-                    self.set_error(mem, 6)?;
-                } else {
-                    self.set_error(mem, 50)?;
-                }
-                0
-            }
             "GetThreadContext" => match self.threads.id(args[0]) {
                 Err(error) => {
                     self.set_error(mem, error)?;
@@ -3819,46 +3796,6 @@ impl Runtime64 {
                     1
                 }
             }
-            "GetModuleFileNameW" | "GetModuleFileNameA" => {
-                let path = if args[0] == 0 || args[0] == self.image_base {
-                    &self.exe_path
-                } else {
-                    self.modules
-                        .path(args[0])
-                        .ok_or("Win64 native module filename query not implemented")?
-                };
-                let wide = name.ends_with('W');
-                let bytes = if wide {
-                    path.encode_utf16()
-                        .chain(Some(0))
-                        .flat_map(u16::to_le_bytes)
-                        .collect::<Vec<_>>()
-                } else {
-                    crate::codepage::encode(&(path.clone() + "\0"), 932)
-                        .map_err(|e| format!("codepage error {e}"))?
-                        .0
-                };
-                let width = if wide { 2 } else { 1 };
-                let capacity = args[2] as u32 as usize;
-                if capacity == 0 {
-                    self.set_error(mem, 122)?;
-                    0
-                } else {
-                    let units = bytes.len() / width;
-                    let n = capacity.min(units);
-                    let mut output = bytes[..n * width].to_vec();
-                    if n < units {
-                        output[(n - 1) * width..].fill(0);
-                    }
-                    mem.write(args[1], &output)?;
-                    if n < units {
-                        self.set_error(mem, 122)?;
-                        n as u64
-                    } else {
-                        (units - 1) as u64
-                    }
-                }
-            }
             "GetStdHandle" | "SetStdHandle" => {
                 let index = match args[0] as u32 {
                     0xfffffff6 => Some(0),
@@ -4071,239 +4008,6 @@ impl Runtime64 {
                             self.set_error(mem, crate::fs::win_error(&error))?;
                             0
                         }
-                    }
-                }
-            }
-            "GetModuleHandleW" | "GetModuleHandleA" => {
-                if args[0] == 0 {
-                    self.image_base
-                } else {
-                    let module = if name.ends_with('W') {
-                        Self::utf16(mem, args[0])?
-                    } else {
-                        Self::ascii(mem, args[0])?
-                    };
-                    let handle = self.native_module(&module, false)?;
-                    if handle == 0 {
-                        self.set_error(mem, 126)?;
-                    }
-                    handle
-                }
-            }
-            "LoadLibraryExW" | "LoadLibraryExA" | "LoadLibraryW" | "LoadLibraryA" => {
-                let flags = if arity == 3 { args[2] } else { 0 };
-                if arity == 3 && (args[1] != 0 || flags & !0x1808 != 0) {
-                    return Err("unsupported Win64 LoadLibraryEx flags/file".into());
-                }
-                let module = Self::path_name(mem, args[0], name.ends_with('W'))?;
-                if flags & 8 != 0 && (flags & 0x1800 != 0 || !Self::absolute_module_path(&module)) {
-                    self.set_error(mem, 87)?;
-                    returned.regs[0] = 0;
-                    *cpu = returned;
-                    self.api_calls += 1;
-                    self.record(dll, name, args, 0);
-                    return Ok(Control::Returned);
-                }
-                match self.native_module(&module, true) {
-                    Ok(handle) => handle,
-                    Err(error) => {
-                        let path = self.files.filesystem().ok_or(126u32).and_then(|fs| {
-                            self.module_path(fs, &module, flags)
-                                .map(|path| fs.guest_path(&path))
-                        });
-                        if let Ok(path) = path {
-                            if !self.threads.enabled {
-                                return Err(error);
-                            }
-                            *cpu = returned;
-                            self.api_calls += 1;
-                            return Ok(Control::LoadModule {
-                                search: (
-                                    flags,
-                                    if flags & 8 != 0 {
-                                        Some(
-                                            path.rsplit_once('\\')
-                                                .ok_or("DLL directory is missing")?
-                                                .0
-                                                .to_owned(),
-                                        )
-                                    } else {
-                                        None
-                                    },
-                                ),
-                                path,
-                                dll: dll.into(),
-                                function: name.into(),
-                                args: args.to_vec(),
-                            });
-                        }
-                        self.set_error(mem, path.unwrap_err())?;
-                        0
-                    }
-                }
-            }
-            "FreeLibrary" => {
-                if matches!(
-                    self.modules.release(args[0])?,
-                    crate::win32::x64::modules::Release::GuestReference
-                ) {
-                    returned.regs[0] = 1;
-                    *cpu = returned;
-                    self.api_calls += 1;
-                    self.record(dll, name, args, 1);
-                    return Ok(Control::Returned);
-                }
-                1
-            }
-            "GetProcAddress" => {
-                // Windows resolves a NULL module against the main executable.
-                let module_handle = if args[0] == 0 {
-                    self.image_base
-                } else {
-                    args[0]
-                };
-                let symbol = if args[1] <= 65535 {
-                    format!("#{}", args[1])
-                } else {
-                    Self::ascii(mem, args[1])?
-                };
-                if self.api_inventory.is_some() {
-                    let provider = self
-                        .modules
-                        .name(module_handle)
-                        .cloned()
-                        .unwrap_or_else(|| "?".into());
-                    self.inventory_record("lookup", &provider, &symbol);
-                }
-                self.trace_note(format!(
-                    "GetProcAddress lookup module={:#x} symbol={symbol}",
-                    args[0]
-                ));
-                if let Some(exports) = self.modules.exports(module_handle) {
-                    let address = if args[1] <= 65535 {
-                        exports.ordinals.get(&(args[1] as u16)).copied()
-                    } else {
-                        exports.names.get(&Self::ascii(mem, args[1])?).copied()
-                    };
-                    if address.is_none() {
-                        self.set_error(mem, 127)?;
-                    }
-                    address.unwrap_or(0)
-                } else {
-                    let Some(module) = self.modules.name(module_handle) else {
-                        self.set_error(
-                            mem,
-                            if module_handle == self.image_base {
-                                127
-                            } else {
-                                126
-                            },
-                        )?;
-                        returned.regs[0] = 0;
-                        *cpu = returned;
-                        self.unblock();
-                        self.api_calls += 1;
-                        self.record(dll, name, args, 0);
-                        return Ok(Control::Returned);
-                    };
-                    let function = if args[1] <= 65535 {
-                        if module.eq_ignore_ascii_case("ws2_32.dll") {
-                            sockets::ordinal(&symbol).unwrap_or(&symbol).to_owned()
-                        } else if module.eq_ignore_ascii_case("d3d12.dll") {
-                            dxgi::symbol(module, &symbol).to_owned()
-                        } else if module.eq_ignore_ascii_case("oleaut32.dll") {
-                            automation::symbol(module, &symbol).to_owned()
-                        } else {
-                            return Err("Win64 native ordinal lookup is not implemented".into());
-                        }
-                    } else {
-                        Self::ascii(mem, args[1])?
-                    };
-                    let provider = if matches!(
-                        module.as_str(),
-                        "api-ms-win-core-winrt-string-l1-1-0.dll"
-                            | "api-ms-win-core-winrt-l1-1-0.dll"
-                    ) {
-                        "combase.dll"
-                    } else if module.starts_with("api-ms-win-core-") {
-                        "kernel32.dll"
-                    } else {
-                        module.as_str()
-                    }
-                    .to_owned();
-                    let known = (matches!(provider.as_str(), "kernel32.dll" | "kernelbase.dll")
-                        && kernel_export(&function))
-                        || (matches!(provider.as_str(), "kernel32.dll" | "kernelbase.dll")
-                            && timers::arity(&function).is_some())
-                        || (matches!(
-                            provider.as_str(),
-                            "ntdll.dll" | "kernel32.dll" | "kernelbase.dll"
-                        ) && unwind::is_call(&function))
-                        || (provider == "ntdll.dll" && function == "NtQueryDirectoryFile")
-                        || (provider == "ws2_32.dll" && sockets::is_call(&function))
-                        || (provider == "secur32.dll" && sspi::arity(&function).is_some())
-                        || (provider == "dxgi.dll" && dxgi::export(&function))
-                        || (provider == "d3d12.dll" && dxgi::d3d12_export(&function))
-                        || (provider == "d3d11.dll" && dxgi::d3d11_export(&function))
-                        || matches!(
-                            crate::win32::catalog::resolve(
-                                crate::win32::catalog::Architecture::X64,
-                                &provider,
-                                &function
-                            ),
-                            crate::win32::catalog::Resolution::Bound(_)
-                        )
-                        || guid::export(&provider, &function)
-                        || devices::export(&provider, &function)
-                        || winrt::export(&provider, &function)
-                        || com_export(&provider, &function)
-                        || (provider == "winmm.dll"
-                            && matches!(
-                                function.as_str(),
-                                "timeGetTime"
-                                    | "timeBeginPeriod"
-                                    | "timeEndPeriod"
-                                    | "timeGetDevCaps"
-                            ))
-                        || (provider == "user32.dll" && display::arity(&function).is_some())
-                        || (provider == "user32.dll" && user::arity(&function).is_some())
-                        || (provider == "imm32.dll" && user::ime_arity(&function).is_some())
-                        || (provider == "gdi32.dll" && user::gdi_arity(&function).is_some())
-                        || (provider == "dwmapi.dll"
-                            && matches!(
-                                function.as_str(),
-                                "DwmGetWindowAttribute" | "DwmIsCompositionEnabled"
-                            ))
-                        || (provider == "advapi32.dll" && registry::arity(&function).is_some())
-                        || automation::export(&provider, &function)
-                        || winhttp::export(&provider, &function)
-                        || (matches!(provider.as_str(), "kernel32.dll" | "kernelbase.dll")
-                            && matches!(
-                                function.as_str(),
-                                "GetErrorMode"
-                                    | "GetThreadErrorMode"
-                                    | "SetThreadErrorMode"
-                                    | "GetTempPath2W"
-                                    | "WaitOnAddress"
-                                    | "WakeByAddressSingle"
-                                    | "WakeByAddressAll"
-                                    | "AreFileApisANSI"
-                                    | "FlsAlloc"
-                                    | "FlsGetValue"
-                                    | "FlsSetValue"
-                                    | "FlsFree"
-                                    | "InitializeCriticalSectionEx"
-                            ))
-                        || self.gateways.values().any(|export| {
-                            export.split_once('!').is_some_and(|(dll, n)| {
-                                dll.eq_ignore_ascii_case(&provider) && n == function
-                            })
-                        });
-                    if !known {
-                        self.set_error(mem, 127)?;
-                        0
-                    } else {
-                        self.register(&provider, &function)
                     }
                 }
             }

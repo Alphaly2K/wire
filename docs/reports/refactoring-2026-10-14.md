@@ -6,6 +6,8 @@
 
 后续 module 候选又暴露受检段的布局敏感性；在 `ff7495a` 上独立隔离 `CheckedSegment::execute` 并声明正确 Mach-O 代码属性。26 个 case/path 全部校验，memory +0.07%；SSE +3.63% 经 700M/IR 计数/机器码调查后记录接受。两项布局调整均没有更改 ISA/fault/预算行为，详情和失败轮次继续保存在同一报告。
 
+31 个模块 export 的 catalog 已在新基线独立验收：release 406、debug 291、native GPU 7 项通过，26 个 case/path 的完整初筛/扩样结果校验通过。最终最大 CPU 中位数回退 +2.31%，RSS 最多增加 96KiB；Alice 200M 启动保持相同预算出口和隐藏窗口。静态/动态查询与已绑定 gateway 的差异、控制请求提交顺序及全部候选证据见 [模块 API 契约](refactoring-module-catalog-2026-10-14.md)。
+
 ## R0 固定基线
 
 - 代码：`2e78377`，tracked working tree 干净。
@@ -23,7 +25,7 @@
 | --- | --- |
 | R0 入口/fixture | 已完成；12 组 golden 输入一致，默认与旧路径各 7 个运行 smoke 通过 |
 | R1 GUID 契约试点 | 已完成唯一契约、双架构冷绑定、纯语义/适配器、行为及性能验收 |
-| R2 分发收敛 | GUID + 6 个 identity + 8 个 version + 42 个 NLS export 已迁移；file/module 等仍 legacy |
+| R2 分发收敛 | GUID + 6 个 identity + 8 个 version + 42 个 NLS + 31 个 module export 已迁移；file/同步/USER/COM/图形等仍 legacy |
 | R3 状态归属 | identity/profile、环境变量、双架构 module 和 Win64 file 已有 owner；PE32 file/thread/COM 等仍待迁移 |
 | R4 PE32 Process | 已完成装载/执行编排提取；旧 Cpu 方法只保留委托 facade |
 | R5 host/graphics | 已完成 owned UI 请求/事件与 GDI adapter 分离，真实 native 验证通过 |

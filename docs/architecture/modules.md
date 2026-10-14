@@ -14,6 +14,12 @@ Win64 的 `win32::x64::modules::Modules` 私有持有 handle/name/ref、pin、ex
 - `GetModuleHandleEx` 的受检输出和引用提交由架构 adapter 安排。Win64 先检查输出和 flags，解析 handle，再准备 ReferenceUpdate；guest 写入成功后才更新 ref/pin。FreeLibrary 的 guest/provider outcome 保留原来的 CPU/trace 提交路径。
 - resource/USER 只读查询 image metadata，经 owner view 读取；PE 地址/结构范围仍由原有 checked codec 验证。
 
-本批完成状态所有权，模块 API 的签名/provider/能力声明仍使用当前 legacy 路由，后续 R2 再按家族迁入 catalog。Win64 文件系统现由 [Files](files.md) 拥有，模块 adapter 显式借用；PE32 文件状态仍待迁移。没有建立万能 Context 或统一两架构 module arena。
+模块 API 的 31 个 export 由 `win32::catalog::modules` 维护唯一 provider/ABI/执行声明：13 个核心装载、查询与引用 API，4 个 DLL directory API，以及 7 个 PSAPI 查询及其 7 个 K32 名称。PE32 核心 13 个 typed，directory/K32 的 11 个保留 Wine ABI-only 策略，7 个无前缀查询仍 absent；Win64 使用全部既有子集。未知 ABI、stub 地址、序数和 data export 行为保持。
+
+静态导入和动态查找是独立的可见性维度。Contract 的 `dlls` 决定 import binding，`lookup_dlls` 决定 Win64 GetProcAddress 的 fresh-provider 可见性，默认相同，PSAPI 显式覆盖：原 Win64 静态调用接受 kernel32/kernelbase/psapi 的有前缀和无前缀查询；尚未绑定对应 gateway 的 provider 动态查找仅接受 K32 的 kernel32/kernelbase 导出，其余查询返回 0/LastError 127。如果 provider/export 已通过静态导入或公开注册入口绑定 gateway，原 registry fallback 仍返回该地址；PSAPI 和 kernel 无前缀名称均保留这一行为。PE32 动态绑定继续使用原 Wine/native-export 解析及其 ABI-only/unknown 策略。
+
+主路径在装载/lookup 阶段绑定 typed ID。PE32 `modules::dispatch` 保留为公开兼容 facade，根 gateway 直接调用 enum 分发，不逐调用查 catalog 或字符串。Win64 scalar query adapter 只操作 module 所属视图及明确 filesystem 借用；LoadLibrary/FreeLibrary/GetProcAddress 的 ControlImport 保存 ID，原 LoadModule、早返回、unblock、frame、API count 和 trace 顺序保持。query 的 K32/PSAPI 名称绑定到同一行为 ID，调用时不再剥前缀或判断字符串。
+
+Win64 文件系统现由 [Files](files.md) 拥有，模块 adapter 显式借用；PE32 文件状态仍待迁移。没有建立万能 Context 或统一两架构 module arena。
 
 验收与性能拒绝/修复记录见 [实施报告](../reports/refactoring-modules-2026-10-14.md)。

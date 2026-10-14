@@ -2,7 +2,7 @@
 
 更新日期：2026-10-14。重构前固定代码基线 `2e78377`；本轮进度见 [重构记录](reports/refactoring-2026-10-14.md)。
 
-R0/R1、R4、R5 已完成：正式 fixture、测试 harness、GUID 唯一契约、PE32 Process32、owned host UI 请求与 GDI/像素状态分离。R2/R3 已迁移 identity、guest environment、version 和 42 个 NLS/locale export，另完成双架构模块及 Win64 文件状态归属；PE32 文件状态、file/module API catalog 及其余家族仍待迁移。R7 已完成当前 PE32 内核目录、领域测试和公共性能工具的整理，后续目录随其余领域迁移继续推进。最新完整 release 为 403 passed / 7 ignored（新增两项资源行为基线，运行时代码仍为 `4500aaf`）；strict Clippy、工具 12 项通过。7 项外部图形测试在 Win64 文件状态批次再次显式执行，全部通过；该批 debug Win32/AMD64/FPU/Unicorn 为 286 项。
+R0/R1、R4、R5 已完成：正式 fixture、测试 harness、GUID 唯一契约、PE32 Process32、owned host UI 请求与 GDI/像素状态分离。R2/R3 已迁移 identity、guest environment、version、42 个 NLS/locale 和 31 个模块 export，另完成双架构模块及 Win64 文件状态归属；PE32 文件状态、file API catalog 及其余家族仍待迁移。R7 已完成当前 PE32 内核目录、领域测试和公共性能工具的整理，后续目录随其余领域迁移继续推进。最新模块契约批次完整 release 为 406 passed / 7 ignored，debug Win32/AMD64/FPU/Unicorn 291 项、fmt 与 strict Clippy 通过；7 项外部图形测试再次显式执行，全部通过。工具 12 项的最近结果仍见 R7/文件状态批次。
 
 R5 的 29 个解释器 case/path 已做三对 AB/BA，work/retired/checksum 全部校验；扩样后的最大 CPU 中位数回退为 +2.66%。R4 的 memory 成本在 R5 的 700M 复测中已消退：相对 R4 -6.04%，相对最初基线 -2.94%。这是结构调整后的代码生成/布局结果，不推断完整游戏 FPS；调查与全部轮次见 [重构记录](reports/refactoring-2026-10-14.md)。
 
@@ -13,6 +13,8 @@ NLS 的 14 个 case/path 三对均校验通过；Win64 查询/转换负载 CPU �
 R7 的 38 个 case/path 三对全部校验通过；large-code 初筛超 3% 后扩为 2B work，成本降至 +0.22%，相对最初 +1.23%。扩样后的全矩阵最大 CPU 中位数回退 +2.41%，RSS 最大增加 32KiB。完整证据见 [R7 记录](reports/refactoring-r7-2026-10-14.md)。
 
 模块状态批次的首个候选因 SSE 回退被拒绝；修复编译内联并消除引用更新的重复查表后，23 个 case/path 三对校验通过。相对 R7，700M SSE IR/raw 的 CPU 中位数 -13.56%/-2.78%，其它负载最大回退 +1.71%，RSS 最大增加 208KiB。失败候选、修复及最终 native/启动证据见 [模块记录](reports/refactoring-modules-2026-10-14.md)。
+
+模块契约批次以独立布局调整后的 `c1af099` 为基线，26 个 case/path 三对校验通过；integer/memory/data-alias 初筛超过 3%，扩样后分别为 −0.10%/+2.31%/−0.72%，最终最大 CPU 中位数回退 +2.31%，RSS 最多增加 96KiB。bit-test 2.1B 为 +0.13%；静态导入与 fresh-provider 动态 lookup 的历史差异、已有 gateway fallback、全部失败/扩样轮次见 [模块 catalog 验收](reports/refactoring-module-catalog-2026-10-14.md)。
 
 ## 主路径和能力
 

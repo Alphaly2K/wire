@@ -24,6 +24,7 @@ pub(crate) enum HotImport {
 pub(crate) enum ControlImport {
     None,
     LocaleEnumeration,
+    Module(crate::win32::catalog::ModuleApi),
 }
 pub(crate) struct BoundImport {
     pub export: Arc<str>,
@@ -83,17 +84,20 @@ impl BoundImport {
             dwords: contract.map_or_else(|| super::import_dwords(name), |c| c.win64_dwords()),
             groups: super::import_groups(name),
             hot,
-            api: contract.and_then(|c| {
-                (c.id
-                    != crate::win32::catalog::ApiId::Nls(
-                        crate::win32::catalog::NlsApi::EnumSystemLocalesEx,
-                    ))
-                .then_some(c.id)
+            api: contract.and_then(|c| match c.id {
+                crate::win32::catalog::ApiId::Nls(
+                    crate::win32::catalog::NlsApi::EnumSystemLocalesEx,
+                ) => None,
+                crate::win32::catalog::ApiId::Module(id) if id.control() => None,
+                _ => Some(c.id),
             }),
             control: match contract.map(|c| c.id) {
                 Some(crate::win32::catalog::ApiId::Nls(
                     crate::win32::catalog::NlsApi::EnumSystemLocalesEx,
                 )) => ControlImport::LocaleEnumeration,
+                Some(crate::win32::catalog::ApiId::Module(id)) if id.control() => {
+                    ControlImport::Module(id)
+                }
                 _ => ControlImport::None,
             },
             valid,

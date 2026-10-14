@@ -2,6 +2,26 @@
 
 use super::*;
 
+#[test]
+fn module_provider_names_keep_unknown_dll_abi_and_filename_return_alias() {
+    let mut v = Vm::new();
+    let sp = STACK_BASE + STACK_SIZE - 256;
+    for dll in ["kernelbase.dll", "user32.dll"] {
+        v.k("SetLastError", &[0x1234]);
+        assert_eq!(v.call(dll, "GetModuleHandleA", &[0]), 0);
+        assert_eq!(v.cpu.esp(), sp + 4);
+        assert_eq!(v.k("GetLastError", &[]), 120);
+    }
+    assert_eq!(v.k("GetModuleHandleA", &[0]), 0x400000);
+    assert_eq!(v.cpu.esp(), sp + 8);
+
+    // PE32 reads the return slot after the filename output, so aliasing it
+    // preserves the existing overwritten-return behavior.
+    assert_eq!(v.k("GetModuleFileNameA", &[0, sp, 32]), 11);
+    assert_eq!(v.cpu.eip, u32::from_le_bytes(*b"C:\\t"));
+    assert_eq!(v.cpu.esp(), sp + 16);
+}
+
 fn test_tls_dll(attach_ok: bool) -> Vec<u8> {
     let mut bytes = test_dll("kernel32.dll!GetCurrentProcessId", attach_ok, 0);
     let put = |bytes: &mut [u8], rva: usize, data: &[u8]| {

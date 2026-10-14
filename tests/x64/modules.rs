@@ -3,6 +3,134 @@
 use super::*;
 
 #[test]
+fn win64_psapi_imports_and_dynamic_kernel_aliases_keep_distinct_visibility() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    runtime.register_provider("kernel32.dll");
+    runtime.register_provider("psapi.dll");
+    let text = STACK + 0x200;
+    let output = STACK + 0x300;
+    let needed = STACK + 0x380;
+    for dll in ["kernel32.dll", "kernelbase.dll", "psapi.dll"] {
+        for name in ["EnumProcessModules", "K32EnumProcessModules"] {
+            assert_eq!(
+                startup_dll_call(
+                    &mut mem,
+                    &mut cpu,
+                    &mut runtime,
+                    dll,
+                    name,
+                    &[u64::MAX, output, 0xdeadbeef00000008, needed],
+                ),
+                1
+            );
+            assert!(mem.read_int(needed, 4).unwrap() >= 16);
+        }
+    }
+    for (dll, name, visible) in [
+        ("kernel32.dll", "K32EnumProcessModules", true),
+        ("kernel32.dll", "EnumProcessModules", false),
+        ("psapi.dll", "K32EnumProcessModules", false),
+        ("psapi.dll", "EnumProcessModules", false),
+    ] {
+        mem.write(text, format!("{dll}\0").as_bytes()).unwrap();
+        let module = startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetModuleHandleA",
+            &[text],
+        );
+        assert_ne!(module, 0);
+        mem.write(text, format!("{name}\0").as_bytes()).unwrap();
+        let address = startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetProcAddress",
+            &[module, text],
+        );
+        assert_eq!(address != 0, visible);
+        if !visible {
+            assert_eq!(
+                startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+                127
+            );
+        }
+    }
+    // The legacy gateway registry also admits an export that was already bound
+    // by a static import, even when a fresh provider lookup would reject it.
+    for (dll, name) in [
+        ("kernel32.dll", "EnumProcessModules"),
+        ("psapi.dll", "EnumProcessModules"),
+        ("psapi.dll", "K32EnumProcessModules"),
+    ] {
+        let bound = runtime.register(dll, name);
+        mem.write(text, format!("{dll}\0").as_bytes()).unwrap();
+        let module = startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetModuleHandleA",
+            &[text],
+        );
+        mem.write(text, format!("{name}\0").as_bytes()).unwrap();
+        assert_eq!(
+            startup_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "GetProcAddress",
+                &[module, text],
+            ),
+            bound
+        );
+    }
+}
+
+#[test]
+fn win64_module_queries_keep_dword_sizes_wrong_dll_and_saved_return_frame() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let output = STACK + 0x200;
+    let count = startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "GetModuleFileNameA",
+        &[0, output, 32],
+    );
+    assert_ne!(count, 0);
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetModuleFileNameA",
+            &[0, output, 0xdeadbeef00000020],
+        ),
+        count
+    );
+    let sp = STACK + 0x1f88;
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetModuleFileNameA",
+            &[0, sp, 32],
+        ),
+        count
+    );
+    assert_eq!(cpu.rip, BASE);
+    assert_eq!(cpu.regs[4], sp + 8);
+    let before = cpu.clone();
+    assert!(runtime
+        .dispatch("user32.dll", "GetModuleHandleA", &mut cpu, &mut mem)
+        .is_err());
+    assert_eq!(cpu.regs, before.regs);
+    assert_eq!(cpu.rip, before.rip);
+}
+
+#[test]
 fn pe32plus_loads_high_addresses_dir64_iat_and_rejects_bad_ranges() {
     let mut b = fixture();
     let opt = 0x98;
