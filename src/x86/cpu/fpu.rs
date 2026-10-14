@@ -2,7 +2,7 @@
 //! reduced precision keeps the extended exponent range and uses round-to-odd
 //! before the final rounding, avoiding double rounding of 64-bit intermediates.
 use super::{Cpu, CpuError, AF, CF, EAX, OF, PF, SF, ZF};
-use crate::mem::GuestMem;
+use crate::x86::memory::GuestMem;
 use rustc_apfloat::ieee::{Double, IeeeFloat, Quad, Semantics, Single, X87DoubleExtended};
 use rustc_apfloat::{Float, FloatConvert, Round, Status, StatusAnd};
 use std::cmp::Ordering;

@@ -1,0 +1,1410 @@
+{
+  "baseline": "e090281",
+  "note": "The five original guest Mono observation tests keep their names in x64.rs. Function bodies and existing target names are unchanged.",
+  "renamed": [
+    {
+      "target": "x64",
+      "old": "win64_isolated_identity_names_validate_lengths_domains_exports_and_output_faults",
+      "new": "kernel::win64_isolated_identity_names_validate_lengths_domains_exports_and_output_faults",
+      "path": "tests/x64/kernel.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_device_discovery_has_owned_empty_sets_full_pointer_layouts_and_checked_outputs",
+      "new": "kernel::win64_device_discovery_has_owned_empty_sets_full_pointer_layouts_and_checked_outputs",
+      "path": "tests/x64/kernel.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_hid_absence_preserves_outputs_status_and_dll_export_ownership",
+      "new": "kernel::win64_hid_absence_preserves_outputs_status_and_dll_export_ownership",
+      "path": "tests/x64/kernel.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_extended_codepage_info_has_windows_layout_and_checked_full_outputs",
+      "new": "kernel::win64_extended_codepage_info_has_windows_layout_and_checked_full_outputs",
+      "path": "tests/x64/kernel.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_small_heap_blocks_pack_reuse_and_reallocate_without_overlapping_live_data",
+      "new": "kernel::win64_small_heap_blocks_pack_reuse_and_reallocate_without_overlapping_live_data",
+      "path": "tests/x64/kernel.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_system_times_use_real_cpu_counters_and_preflight_all_outputs",
+      "new": "kernel::win64_system_times_use_real_cpu_counters_and_preflight_all_outputs",
+      "path": "tests/x64/kernel.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_registry_owns_high_handles_roundtrips_cp932_and_keeps_errors_outputs_and_access_real",
+      "new": "kernel::win64_registry_owns_high_handles_roundtrips_cp932_and_keeps_errors_outputs_and_access_real",
+      "path": "tests/x64/kernel.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_version_profile_queries_verify_hierarchically_and_keep_ntstatus_and_output_faults",
+      "new": "kernel::win64_version_profile_queries_verify_hierarchically_and_keep_ntstatus_and_output_faults",
+      "path": "tests/x64/kernel.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_token_sid_layout_access_and_local_reallocation_preserve_failure_state",
+      "new": "kernel::win64_token_sid_layout_access_and_local_reallocation_preserve_failure_state",
+      "path": "tests/x64/kernel.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_startup_layout_time_tls_and_recursive_locks_are_real_checked_objects",
+      "new": "kernel::win64_startup_layout_time_tls_and_recursive_locks_are_real_checked_objects",
+      "path": "tests/x64/kernel.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_system_layout_and_host_calendar_have_complete_checked_outputs",
+      "new": "kernel::win64_system_layout_and_host_calendar_have_complete_checked_outputs",
+      "path": "tests/x64/kernel.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_calendar_roundtrips_epoch_leap_centuries_and_rejects_invalid_dates",
+      "new": "kernel::win64_calendar_roundtrips_epoch_leap_centuries_and_rejects_invalid_dates",
+      "path": "tests/x64/kernel.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_timezone_conversion_obeys_dst_boundaries_gaps_and_checked_aliasing",
+      "new": "kernel::win64_timezone_conversion_obeys_dst_boundaries_gaps_and_checked_aliasing",
+      "path": "tests/x64/kernel.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_child_startup_attributes_query_size_and_missing_executable_do_not_fake_process",
+      "new": "kernel::win64_child_startup_attributes_query_size_and_missing_executable_do_not_fake_process",
+      "path": "tests/x64/kernel.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_shell_argv_uses_high_pointers_shell_quoting_and_one_local_allocation",
+      "new": "kernel::win64_shell_argv_uses_high_pointers_shell_quoting_and_one_local_allocation",
+      "path": "tests/x64/kernel.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_memory_status_reports_actual_guest_commit_limit_and_reservations",
+      "new": "kernel::win64_memory_status_reports_actual_guest_commit_limit_and_reservations",
+      "path": "tests/x64/kernel.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_environment_is_guest_owned_case_insensitive_and_length_queries_do_not_write",
+      "new": "kernel::win64_environment_is_guest_owned_case_insensitive_and_length_queries_do_not_write",
+      "path": "tests/x64/kernel.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_bcrypt_uses_os_entropy_checks_output_and_tracks_rng_provider_lifetime",
+      "new": "kernel::win64_bcrypt_uses_os_entropy_checks_output_and_tracks_rng_provider_lifetime",
+      "path": "tests/x64/kernel.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_processor_topology_is_consistent_with_single_guest_cpu_and_x64_record_layouts",
+      "new": "kernel::win64_processor_topology_is_consistent_with_single_guest_cpu_and_x64_record_layouts",
+      "path": "tests/x64/kernel.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_codepage_stack_arguments_and_explicit_stdio_profile",
+      "new": "kernel::win64_codepage_stack_arguments_and_explicit_stdio_profile",
+      "path": "tests/x64/kernel.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_toolhelp_snapshots_have_correct_x64_layout_and_checked_cursor_progress",
+      "new": "kernel::win64_toolhelp_snapshots_have_correct_x64_layout_and_checked_cursor_progress",
+      "path": "tests/x64/kernel.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_native_locale_callbacks_execute_stop_and_preserve_frames_across_budgets",
+      "new": "kernel::amd64_native_locale_callbacks_execute_stop_and_preserve_frames_across_budgets",
+      "path": "tests/x64/kernel.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_locale_queries_and_calendar_formats_preflight_outputs_and_keep_literals",
+      "new": "kernel::win64_locale_queries_and_calendar_formats_preflight_outputs_and_keep_literals",
+      "path": "tests/x64/kernel.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_known_folders_use_confined_real_storage_and_com_allocation_lifetime",
+      "new": "kernel::win64_known_folders_use_confined_real_storage_and_com_allocation_lifetime",
+      "path": "tests/x64/kernel.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_absent_socket_transport_returns_pointer_width_failure_without_creating_handles",
+      "new": "network::win64_absent_socket_transport_returns_pointer_width_failure_without_creating_handles",
+      "path": "tests/x64/network.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_ip_addresses_use_windows_families_network_bytes_and_checked_full_width_outputs",
+      "new": "network::win64_ip_addresses_use_windows_families_network_bytes_and_checked_full_width_outputs",
+      "path": "tests/x64/network.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_winsock_events_are_owned_manual_reset_objects_and_waits_keep_pointer_width",
+      "new": "network::win64_winsock_events_are_owned_manual_reset_objects_and_waits_keep_pointer_width",
+      "path": "tests/x64/network.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_winhttp_proxy_profile_and_absent_transport_preserve_fault_outputs",
+      "new": "network::win64_winhttp_proxy_profile_and_absent_transport_preserve_fault_outputs",
+      "path": "tests/x64/network.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_sspi_tables_are_stable_guest_pointers_and_never_advertise_unavailable_security",
+      "new": "network::win64_sspi_tables_are_stable_guest_pointers_and_never_advertise_unavailable_security",
+      "path": "tests/x64/network.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_guest_calls_the_sspi_function_table_across_single_instruction_budgets",
+      "new": "network::amd64_guest_calls_the_sspi_function_table_across_single_instruction_budgets",
+      "path": "tests/x64/network.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_winsock_negotiates_versions_checks_full_output_and_balances_ordinal_startup_refs",
+      "new": "network::win64_winsock_negotiates_versions_checks_full_output_and_balances_ordinal_startup_refs",
+      "path": "tests/x64/network.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_bstr_ordinals_byte_lengths_alias_reallocation_and_faults_preserve_owned_data",
+      "new": "com::win64_bstr_ordinals_byte_lengths_alias_reallocation_and_faults_preserve_owned_data",
+      "path": "tests/x64/com.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_com_missing_factory_and_multimedia_timer_reference_balance",
+      "new": "com::win64_com_missing_factory_and_multimedia_timer_reference_balance",
+      "path": "tests/x64/com.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_guid_entropy_layout_string_roundtrip_and_task_ownership",
+      "new": "com::win64_guid_entropy_layout_string_roundtrip_and_task_ownership",
+      "path": "tests/x64/com.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_hstrings_preserve_reference_lifetimes_owned_copies_and_utf16_units",
+      "new": "com::win64_hstrings_preserve_reference_lifetimes_owned_copies_and_utf16_units",
+      "path": "tests/x64/com.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_hstring_outputs_fault_before_headers_allocations_or_reference_counts_change",
+      "new": "com::win64_hstring_outputs_fault_before_headers_allocations_or_reference_counts_change",
+      "path": "tests/x64/com.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_guid_faults_are_atomic_and_exports_are_dll_scoped",
+      "new": "com::win64_guid_faults_are_atomic_and_exports_are_dll_scoped",
+      "path": "tests/x64/com.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_winrt_initialization_balances_apartment_refs_and_rejects_mode_changes",
+      "new": "com::win64_winrt_initialization_balances_apartment_refs_and_rejects_mode_changes",
+      "path": "tests/x64/com.rs"
+    },
+    {
+      "target": "x64",
+      "old": "sparse_high_address_memory_is_checked_and_cross_page_writes_are_atomic",
+      "new": "memory::sparse_high_address_memory_is_checked_and_cross_page_writes_are_atomic",
+      "path": "tests/x64/memory.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_scalar_memory_widths_check_guards_boundaries_and_atomic_writes",
+      "new": "memory::amd64_scalar_memory_widths_check_guards_boundaries_and_atomic_writes",
+      "path": "tests/x64/memory.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_sparse_page_reuse_does_not_alias_old_addresses_or_merged_memory",
+      "new": "memory::amd64_sparse_page_reuse_does_not_alias_old_addresses_or_merged_memory",
+      "path": "tests/x64/memory.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_decode_cache_tracks_code_writes_protection_remapping_and_guarded_page_boundaries",
+      "new": "memory::amd64_decode_cache_tracks_code_writes_protection_remapping_and_guarded_page_boundaries",
+      "path": "tests/x64/memory.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_data_mapping_changes_keep_ir_but_preserve_live_data_permissions_and_faults",
+      "new": "memory::amd64_data_mapping_changes_keep_ir_but_preserve_live_data_permissions_and_faults",
+      "path": "tests/x64/memory.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_vmm_tracks_reserve_commit_image_guard_and_allocation_ownership",
+      "new": "memory::amd64_vmm_tracks_reserve_commit_image_guard_and_allocation_ownership",
+      "path": "tests/x64/memory.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_virtual_query_orders_sparse_commit_holes_after_merge_and_reuse",
+      "new": "memory::amd64_virtual_query_orders_sparse_commit_holes_after_merge_and_reuse",
+      "path": "tests/x64/memory.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_vmm_gateway_obeys_size_t_and_prechecks_outputs_before_protection",
+      "new": "memory::win64_vmm_gateway_obeys_size_t_and_prechecks_outputs_before_protection",
+      "path": "tests/x64/memory.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_high_registers_widths_rip_relative_and_gateway_shadow_space",
+      "new": "cpu::amd64_high_registers_widths_rip_relative_and_gateway_shadow_space",
+      "path": "tests/x64/cpu.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_faults_do_not_commit_registers_flags_or_store_and_fetch_stops_at_page_end",
+      "new": "cpu::amd64_faults_do_not_commit_registers_flags_or_store_and_fetch_stops_at_page_end",
+      "path": "tests/x64/cpu.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_scalar_ir_preserves_address_width_gs_and_fault_atomicity",
+      "new": "cpu::amd64_scalar_ir_preserves_address_width_gs_and_fault_atomicity",
+      "path": "tests/x64/cpu.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_scalar_ir_all_conditions_and_typed_memory_alu_match_unicorn",
+      "new": "cpu::amd64_scalar_ir_all_conditions_and_typed_memory_alu_match_unicorn",
+      "path": "tests/x64/cpu.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_adc_sbb_carry_boundaries_all_widths_match_unicorn",
+      "new": "cpu::amd64_adc_sbb_carry_boundaries_all_widths_match_unicorn",
+      "path": "tests/x64/cpu.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_integer_flags_and_rex_register_aliases_match_unicorn",
+      "new": "cpu::amd64_integer_flags_and_rex_register_aliases_match_unicorn",
+      "path": "tests/x64/cpu.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_shifts_and_rotates_match_unicorn_at_mask_and_width_boundaries",
+      "new": "cpu::amd64_shifts_and_rotates_match_unicorn_at_mask_and_width_boundaries",
+      "path": "tests/x64/cpu.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_cmov_setcc_locked_integer_and_negative_memory_bits_match_unicorn",
+      "new": "cpu::amd64_cmov_setcc_locked_integer_and_negative_memory_bits_match_unicorn",
+      "path": "tests/x64/cpu.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_rep_has_bounded_partial_progress_and_checked_fault_restart",
+      "new": "cpu::amd64_rep_has_bounded_partial_progress_and_checked_fault_restart",
+      "path": "tests/x64/cpu.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_cmpxchg_pairs_match_unicorn_and_fault_before_committing_any_state",
+      "new": "cpu::amd64_cmpxchg_pairs_match_unicorn_and_fault_before_committing_any_state",
+      "path": "tests/x64/cpu.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_multiply_divide_widths_overflow_and_cpuid_profile_are_checked",
+      "new": "cpu::amd64_multiply_divide_widths_overflow_and_cpuid_profile_are_checked",
+      "path": "tests/x64/cpu.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_rotate_through_carry_matches_unicorn_across_widths_and_counts",
+      "new": "cpu::amd64_rotate_through_carry_matches_unicorn_across_widths_and_counts",
+      "path": "tests/x64/cpu.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_sse_moves_aliasing_zeroing_and_checked_stores_match_unicorn",
+      "new": "simd::amd64_sse_moves_aliasing_zeroing_and_checked_stores_match_unicorn",
+      "path": "tests/x64/simd.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_scalar_sse_rounding_nan_denormals_and_sticky_status_match_unicorn",
+      "new": "simd::amd64_scalar_sse_rounding_nan_denormals_and_sticky_status_match_unicorn",
+      "path": "tests/x64/simd.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_sse_signed_conversion_and_mxcsr_load_store_are_checked",
+      "new": "simd::amd64_sse_signed_conversion_and_mxcsr_load_store_are_checked",
+      "path": "tests/x64/simd.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_packed_integer_conversions_match_lanes_and_preserve_fault_atomicity",
+      "new": "simd::amd64_packed_integer_conversions_match_lanes_and_preserve_fault_atomicity",
+      "path": "tests/x64/simd.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_x87_control_words_status_and_pending_exceptions_use_checked_high_addresses",
+      "new": "simd::amd64_x87_control_words_status_and_pending_exceptions_use_checked_high_addresses",
+      "path": "tests/x64/simd.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_x87_keeps_extended_precision_high_pointers_rounding_and_fault_atomicity",
+      "new": "simd::amd64_x87_keeps_extended_precision_high_pointers_rounding_and_fault_atomicity",
+      "path": "tests/x64/simd.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_x87_arithmetic_register_directions_and_pops_match_unicorn",
+      "new": "simd::amd64_x87_arithmetic_register_directions_and_pops_match_unicorn",
+      "path": "tests/x64/simd.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_sse_compare_nan_daz_flags_and_unmasked_faults_are_checked",
+      "new": "simd::amd64_sse_compare_nan_daz_flags_and_unmasked_faults_are_checked",
+      "path": "tests/x64/simd.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_sse_sqrt_scalar_and_packed_match_integer_rounding_and_preserve_scalar_upper_lanes",
+      "new": "simd::amd64_sse_sqrt_scalar_and_packed_match_integer_rounding_and_preserve_scalar_upper_lanes",
+      "path": "tests/x64/simd.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_packed_sqrt_aggregates_exceptions_and_checks_memory_before_committing",
+      "new": "simd::amd64_packed_sqrt_aggregates_exceptions_and_checks_memory_before_committing",
+      "path": "tests/x64/simd.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_reciprocal_estimates_obey_error_bound_and_ignore_mxcsr_controls",
+      "new": "simd::amd64_reciprocal_estimates_obey_error_bound_and_ignore_mxcsr_controls",
+      "path": "tests/x64/simd.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_packed_floating_point_checks_full_operand_and_aggregates_lane_exceptions",
+      "new": "simd::amd64_packed_floating_point_checks_full_operand_and_aggregates_lane_exceptions",
+      "path": "tests/x64/simd.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_sse_float_conversions_preserve_or_clear_lanes_and_match_unicorn",
+      "new": "simd::amd64_sse_float_conversions_preserve_or_clear_lanes_and_match_unicorn",
+      "path": "tests/x64/simd.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_sse_min_max_preserve_source_nan_signed_zero_and_fault_atomicity",
+      "new": "simd::amd64_sse_min_max_preserve_source_nan_signed_zero_and_fault_atomicity",
+      "path": "tests/x64/simd.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_sse_predicate_masks_and_sign_masks_match_unicorn",
+      "new": "simd::amd64_sse_predicate_masks_and_sign_masks_match_unicorn",
+      "path": "tests/x64/simd.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_sse_insert_extract_all_controls_and_operand_forms_match_unicorn",
+      "new": "simd::amd64_sse_insert_extract_all_controls_and_operand_forms_match_unicorn",
+      "path": "tests/x64/simd.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_sse_insert_extract_checked_widths_and_faults_preserve_state",
+      "new": "simd::amd64_sse_insert_extract_checked_widths_and_faults_preserve_state",
+      "path": "tests/x64/simd.rs"
+    },
+    {
+      "target": "x64",
+      "old": "pe32plus_loads_high_addresses_dir64_iat_and_rejects_bad_ranges",
+      "new": "modules::pe32plus_loads_high_addresses_dir64_iat_and_rejects_bad_ranges",
+      "path": "tests/x64/modules.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_get_proc_address_null_module_resolves_main_and_missing_exports_return_null",
+      "new": "modules::win64_get_proc_address_null_module_resolves_main_and_missing_exports_return_null",
+      "path": "tests/x64/modules.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_dynamic_kernel_exports_are_available_before_static_gateway_registration",
+      "new": "modules::win64_dynamic_kernel_exports_are_available_before_static_gateway_registration",
+      "path": "tests/x64/modules.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_dll_directory_changes_real_module_search_preserves_faults_and_confines_paths",
+      "new": "modules::amd64_dll_directory_changes_real_module_search_preserves_faults_and_confines_paths",
+      "path": "tests/x64/modules.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_altered_and_system_search_load_real_dependency_code_without_changing_process_directory",
+      "new": "modules::amd64_altered_and_system_search_load_real_dependency_code_without_changing_process_directory",
+      "path": "tests/x64/modules.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_loaded_module_queries_messages_and_disabled_etw_keep_real_lifetimes",
+      "new": "modules::win64_loaded_module_queries_messages_and_disabled_etw_keep_real_lifetimes",
+      "path": "tests/x64/modules.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_static_tls_and_delay_iat_are_high_address_runtime_data",
+      "new": "modules::amd64_static_tls_and_delay_iat_are_high_address_runtime_data",
+      "path": "tests/x64/modules.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_dll_cli_runs_static_tls_callback_before_real_attach_entry",
+      "new": "modules::amd64_dll_cli_runs_static_tls_callback_before_real_attach_entry",
+      "path": "tests/x64/modules.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_process_binds_guest_dll_export_and_attaches_before_readonly_exe_iat_call",
+      "new": "modules::amd64_process_binds_guest_dll_export_and_attaches_before_readonly_exe_iat_call",
+      "path": "tests/x64/modules.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_dynamic_load_executes_tls_and_entry_once_and_initializes_existing_thread_tls",
+      "new": "modules::amd64_dynamic_load_executes_tls_and_entry_once_and_initializes_existing_thread_tls",
+      "path": "tests/x64/modules.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_create_directory_validates_default_security_and_faults_before_creating",
+      "new": "files::win64_create_directory_validates_default_security_and_faults_before_creating",
+      "path": "tests/x64/files.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_directory_handles_share_native_batches_restart_after_rename_and_stay_confined",
+      "new": "files::win64_directory_handles_share_native_batches_restart_after_rename_and_stay_confined",
+      "path": "tests/x64/files.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_directory_queries_preserve_outputs_and_cursor_on_checked_faults_and_short_buffers",
+      "new": "files::win64_directory_queries_preserve_outputs_and_cursor_on_checked_faults_and_short_buffers",
+      "path": "tests/x64/files.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_directory_searches_report_real_wide_metadata_and_do_not_skip_entries_after_output_faults",
+      "new": "files::win64_directory_searches_report_real_wide_metadata_and_do_not_skip_entries_after_output_faults",
+      "path": "tests/x64/files.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_file_move_replace_metadata_and_open_handle_failures_are_confined",
+      "new": "files::win64_file_move_replace_metadata_and_open_handle_failures_are_confined",
+      "path": "tests/x64/files.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_anonymous_pipes_transfer_bytes_preserve_data_on_fault_and_report_broken_endpoint",
+      "new": "files::win64_anonymous_pipes_transfer_bytes_preserve_data_on_fault_and_report_broken_endpoint",
+      "path": "tests/x64/files.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_filesystem_queries_read_real_metadata_and_keep_cwd_confined",
+      "new": "files::win64_filesystem_queries_read_real_metadata_and_keep_cwd_confined",
+      "path": "tests/x64/files.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_readonly_file_sections_keep_views_alive_and_coherent_with_guest_file_writes",
+      "new": "files::win64_readonly_file_sections_keep_views_alive_and_coherent_with_guest_file_writes",
+      "path": "tests/x64/files.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_handle_metadata_preserves_large_sizes_identity_times_and_checked_outputs",
+      "new": "files::win64_handle_metadata_preserves_large_sizes_identity_times_and_checked_outputs",
+      "path": "tests/x64/files.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_file_io_is_real_checks_sharing_and_preflights_before_advancing_offsets",
+      "new": "files::win64_file_io_is_real_checks_sharing_and_preflights_before_advancing_offsets",
+      "path": "tests/x64/files.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_critical_section_ex_ignores_low_flags_and_preserves_recursive_ownership_and_faults",
+      "new": "sync::win64_critical_section_ex_ignores_low_flags_and_preserves_recursive_ownership_and_faults",
+      "path": "tests/x64/sync.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_waitable_timers_reset_consume_cancel_and_share_named_object_identity",
+      "new": "sync::win64_waitable_timers_reset_consume_cancel_and_share_named_object_identity",
+      "path": "tests/x64/sync.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_suspended_thread_context_reads_saved_guest_registers_across_small_and_large_budgets",
+      "new": "sync::amd64_suspended_thread_context_reads_saved_guest_registers_across_small_and_large_budgets",
+      "path": "tests/x64/sync.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_user_apc_wakes_alertable_target_and_preserves_64_bit_parameter_and_return",
+      "new": "sync::amd64_user_apc_wakes_alertable_target_and_preserves_64_bit_parameter_and_return",
+      "path": "tests/x64/sync.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_address_waits_check_size_values_timeouts_and_faults_before_blocking",
+      "new": "sync::win64_address_waits_check_size_values_timeouts_and_faults_before_blocking",
+      "path": "tests/x64/sync.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_address_wait_queues_wake_first_arrival_and_all_across_single_step_budgets",
+      "new": "sync::amd64_address_wait_queues_wake_first_arrival_and_all_across_single_step_budgets",
+      "path": "tests/x64/sync.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_thread_handle_duplicates_keep_identity_and_independent_flags_without_closing_thread",
+      "new": "sync::win64_thread_handle_duplicates_keep_identity_and_independent_flags_without_closing_thread",
+      "path": "tests/x64/sync.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_events_share_named_state_consume_auto_reset_and_validate_wait_access",
+      "new": "sync::win64_events_share_named_state_consume_auto_reset_and_validate_wait_access",
+      "path": "tests/x64/sync.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_semaphores_count_wait_atomically_and_share_event_namespace",
+      "new": "sync::win64_semaphores_count_wait_atomically_and_share_event_namespace",
+      "path": "tests/x64/sync.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_guest_threads_run_callbacks_and_isolate_tls_fls_teb_and_mxcsr",
+      "new": "sync::amd64_guest_threads_run_callbacks_and_isolate_tls_fls_teb_and_mxcsr",
+      "path": "tests/x64/sync.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_timed_sleep_survives_budget_pause_and_wait_timeout_uses_elapsed_time",
+      "new": "sync::amd64_timed_sleep_survives_budget_pause_and_wait_timeout_uses_elapsed_time",
+      "path": "tests/x64/sync.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_srw_ownership_and_init_once_publish_context_without_fake_contention",
+      "new": "sync::win64_srw_ownership_and_init_once_publish_context_without_fake_contention",
+      "path": "tests/x64/sync.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_keyboard_layout_queries_keep_hkl_width_thread_ids_and_dll_ownership",
+      "new": "user::win64_keyboard_layout_queries_keep_hkl_width_thread_ids_and_dll_ownership",
+      "path": "tests/x64/user.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_keyboard_scan_maps_and_unicode_use_explicit_state_without_consuming_it",
+      "new": "user::win64_keyboard_scan_maps_and_unicode_use_explicit_state_without_consuming_it",
+      "path": "tests/x64/user.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_keyboard_key_names_truncate_terminate_and_fold_modifier_sides",
+      "new": "user::win64_keyboard_key_names_truncate_terminate_and_fold_modifier_sides",
+      "path": "tests/x64/user.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_keyboard_cross_page_faults_preserve_outputs_cpu_and_completed_calls",
+      "new": "user::win64_keyboard_cross_page_faults_preserve_outputs_cpu_and_completed_calls",
+      "path": "tests/x64/user.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_window_position_executes_mutable_win64_layout_and_nested_default_messages_across_budgets",
+      "new": "user::amd64_window_position_executes_mutable_win64_layout_and_nested_default_messages_across_budgets",
+      "path": "tests/x64/user.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_window_creation_executes_messages_with_full_createstruct_and_rolls_back_callback_rejection",
+      "new": "user::amd64_window_creation_executes_messages_with_full_createstruct_and_rolls_back_callback_rejection",
+      "path": "tests/x64/user.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_icons_load_real_pe32plus_resources_keep_shared_lifetime_and_fail_missing_ids",
+      "new": "user::amd64_icons_load_real_pe32plus_resources_keep_shared_lifetime_and_fail_missing_ids",
+      "path": "tests/x64/user.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_display_queries_agree_on_one_monitor_and_check_ansi_wide_layouts_and_packed_points",
+      "new": "user::win64_display_queries_agree_on_one_monitor_and_check_ansi_wide_layouts_and_packed_points",
+      "path": "tests/x64/user.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_monitor_enumeration_calls_real_guest_code_preserves_high_lparam_and_returns_callback_bool",
+      "new": "user::amd64_monitor_enumeration_calls_real_guest_code_preserves_high_lparam_and_returns_callback_bool",
+      "path": "tests/x64/user.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_ime_without_input_context_fails_before_touching_composition_buffers",
+      "new": "user::win64_ime_without_input_context_fails_before_touching_composition_buffers",
+      "path": "tests/x64/user.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_cli_probe_executes_high_entry_and_fails_on_unresolved_import",
+      "new": "process::amd64_cli_probe_executes_high_entry_and_fails_on_unresolved_import",
+      "path": "tests/x64/process.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_api_inventory_is_opt_in_counts_calls_and_keeps_lookup_provider",
+      "new": "process::win64_api_inventory_is_opt_in_counts_calls_and_keeps_lookup_provider",
+      "path": "tests/x64/process.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_api_inventory_retains_gateway_failure_after_process_error",
+      "new": "process::win64_api_inventory_retains_gateway_failure_after_process_error",
+      "path": "tests/x64/process.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_gateway_dispatch_preserves_custom_addresses_and_executes_guest_gaps",
+      "new": "process::win64_gateway_dispatch_preserves_custom_addresses_and_executes_guest_gaps",
+      "path": "tests/x64/process.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_vectored_software_exceptions_execute_guest_handlers_and_restore_full_context_across_budgets",
+      "new": "process::amd64_vectored_software_exceptions_execute_guest_handlers_and_restore_full_context_across_budgets",
+      "path": "tests/x64/process.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_same_frame_exception_unwind_executes_guest_language_and_termination_handlers",
+      "new": "process::amd64_same_frame_exception_unwind_executes_guest_language_and_termination_handlers",
+      "path": "tests/x64/process.rs"
+    },
+    {
+      "target": "x64",
+      "old": "amd64_function_tables_lookup_real_metadata_and_execute_guest_lookup_callback_across_budgets",
+      "new": "process::amd64_function_tables_lookup_real_metadata_and_execute_guest_lookup_callback_across_budgets",
+      "path": "tests/x64/process.rs"
+    },
+    {
+      "target": "x64",
+      "old": "win64_gateway_faults_preserve_cpu_and_outputs_and_heap_payloads_survive_realloc",
+      "new": "process::win64_gateway_faults_preserve_cpu_and_outputs_and_heap_payloads_survive_realloc",
+      "path": "tests/x64/process.rs"
+    },
+    {
+      "target": "win32",
+      "old": "crt_math_returns_x87_values_and_integer_helpers_consume_st0",
+      "new": "crt::crt_math_returns_x87_values_and_integer_helpers_consume_st0",
+      "path": "tests/win32/crt.rs"
+    },
+    {
+      "target": "win32",
+      "old": "crt_qsort_calls_guest_comparator_preserves_records_and_callback_boundaries",
+      "new": "crt::crt_qsort_calls_guest_comparator_preserves_records_and_callback_boundaries",
+      "path": "tests/win32/crt.rs"
+    },
+    {
+      "target": "win32",
+      "old": "kernel_and_crt_strings_preserve_bytes_lengths_and_numeric_errors",
+      "new": "crt::kernel_and_crt_strings_preserve_bytes_lengths_and_numeric_errors",
+      "path": "tests/win32/crt.rs"
+    },
+    {
+      "target": "win32",
+      "old": "windows_varargs_formatting_reads_exact_arguments_and_preserves_cdecl_stack",
+      "new": "crt::windows_varargs_formatting_reads_exact_arguments_and_preserves_cdecl_stack",
+      "path": "tests/win32/crt.rs"
+    },
+    {
+      "target": "win32",
+      "old": "crt_data_imports_and_accessors_share_writable_guest_storage",
+      "new": "crt::crt_data_imports_and_accessors_share_writable_guest_storage",
+      "path": "tests/win32/crt.rs"
+    },
+    {
+      "target": "win32",
+      "old": "crt_byte_comparison_and_c_locale_case_preserve_unsigned_bytes_eof_and_cdecl",
+      "new": "crt::crt_byte_comparison_and_c_locale_case_preserve_unsigned_bytes_eof_and_cdecl",
+      "path": "tests/win32/crt.rs"
+    },
+    {
+      "target": "win32",
+      "old": "crt_windows_version_exports_are_shared_data_for_dll_imports_and_getprocaddress",
+      "new": "crt::crt_windows_version_exports_are_shared_data_for_dll_imports_and_getprocaddress",
+      "path": "tests/win32/crt.rs"
+    },
+    {
+      "target": "win32",
+      "old": "wine_path_extensions_and_unquoting_preserve_existing_names",
+      "new": "kernel::wine_path_extensions_and_unquoting_preserve_existing_names",
+      "path": "tests/win32/kernel.rs"
+    },
+    {
+      "target": "win32",
+      "old": "missing_registry_installations_fail_and_dsound_ordinals_resolve",
+      "new": "kernel::missing_registry_installations_fail_and_dsound_ordinals_resolve",
+      "path": "tests/win32/kernel.rs"
+    },
+    {
+      "target": "win32",
+      "old": "path_remove_file_spec_preserves_roots_dbcs_and_checked_buffers",
+      "new": "kernel::path_remove_file_spec_preserves_roots_dbcs_and_checked_buffers",
+      "path": "tests/win32/kernel.rs"
+    },
+    {
+      "target": "win32",
+      "old": "common_strings_arithmetic_com_apartments_and_guid_use_checked_state",
+      "new": "kernel::common_strings_arithmetic_com_apartments_and_guid_use_checked_state",
+      "path": "tests/win32/kernel.rs"
+    },
+    {
+      "target": "win32",
+      "old": "spec_ordinals_share_named_stubs_and_large_abis_read_the_full_checked_stack",
+      "new": "kernel::spec_ordinals_share_named_stubs_and_large_abis_read_the_full_checked_stack",
+      "path": "tests/win32/kernel.rs"
+    },
+    {
+      "target": "win32",
+      "old": "cp932_conversion_lengths_terminators_and_errors",
+      "new": "kernel::cp932_conversion_lengths_terminators_and_errors",
+      "path": "tests/win32/kernel.rs"
+    },
+    {
+      "target": "win32",
+      "old": "x86_slist_init_and_flush_preserve_sequence_and_return_chain",
+      "new": "kernel::x86_slist_init_and_flush_preserve_sequence_and_return_chain",
+      "path": "tests/win32/kernel.rs"
+    },
+    {
+      "target": "win32",
+      "old": "interlocked_compare_exchange_uses_comparand_then_exchange",
+      "new": "kernel::interlocked_compare_exchange_uses_comparand_then_exchange",
+      "path": "tests/win32/kernel.rs"
+    },
+    {
+      "target": "win32",
+      "old": "format_message_allocation_and_local_free_share_real_heap",
+      "new": "kernel::format_message_allocation_and_local_free_share_real_heap",
+      "path": "tests/win32/kernel.rs"
+    },
+    {
+      "target": "win32",
+      "old": "system_profile_memory_structures_and_monotonic_clocks",
+      "new": "kernel::system_profile_memory_structures_and_monotonic_clocks",
+      "path": "tests/win32/kernel.rs"
+    },
+    {
+      "target": "win32",
+      "old": "nls_case_mapping_lengths_buffers_and_crt_character_types",
+      "new": "kernel::nls_case_mapping_lengths_buffers_and_crt_character_types",
+      "path": "tests/win32/kernel.rs"
+    },
+    {
+      "target": "win32",
+      "old": "guid_strings_use_com_allocations_endianness_and_checked_capacity",
+      "new": "com::guid_strings_use_com_allocations_endianness_and_checked_capacity",
+      "path": "tests/win32/com.rs"
+    },
+    {
+      "target": "win32",
+      "old": "variants_deep_copy_bstr_aliases_and_reject_unsupported_managed_types",
+      "new": "com::variants_deep_copy_bstr_aliases_and_reject_unsupported_managed_types",
+      "path": "tests/win32/com.rs"
+    },
+    {
+      "target": "win32",
+      "old": "bstr_preserves_embedded_nuls_reallocation_aliases_and_null_contracts",
+      "new": "com::bstr_preserves_embedded_nuls_reallocation_aliases_and_null_contracts",
+      "path": "tests/win32/com.rs"
+    },
+    {
+      "target": "win32",
+      "old": "wmi_local_objects_balance_references_and_fail_queries_without_null_dereferences",
+      "new": "com::wmi_local_objects_balance_references_and_fail_queries_without_null_dereferences",
+      "path": "tests/win32/com.rs"
+    },
+    {
+      "target": "win32",
+      "old": "version_resources_query_fixed_translation_and_ansi_unicode_nested_strings",
+      "new": "modules::version_resources_query_fixed_translation_and_ansi_unicode_nested_strings",
+      "path": "tests/win32/modules.rs"
+    },
+    {
+      "target": "win32",
+      "old": "large_dll_and_resource_only_dll_preserve_heap_and_reuse_loaded_basenames",
+      "new": "modules::large_dll_and_resource_only_dll_preserve_heap_and_reuse_loaded_basenames",
+      "path": "tests/win32/modules.rs"
+    },
+    {
+      "target": "win32",
+      "old": "main_static_tls_is_initialized_before_entry_and_reserves_its_loader_index",
+      "new": "modules::main_static_tls_is_initialized_before_entry_and_reserves_its_loader_index",
+      "path": "tests/win32/modules.rs"
+    },
+    {
+      "target": "win32",
+      "old": "dll_static_tls_is_ready_for_dllmain_and_isolated_for_existing_and_new_threads",
+      "new": "modules::dll_static_tls_is_ready_for_dllmain_and_isolated_for_existing_and_new_threads",
+      "path": "tests/win32/modules.rs"
+    },
+    {
+      "target": "win32",
+      "old": "dll_tls_failure_rolls_back_and_invalid_callback_targets_are_rejected",
+      "new": "modules::dll_tls_failure_rolls_back_and_invalid_callback_targets_are_rejected",
+      "path": "tests/win32/modules.rs"
+    },
+    {
+      "target": "win32",
+      "old": "dll_last_page_file_padding_is_mapped_but_cannot_extend_into_another_page",
+      "new": "modules::dll_last_page_file_padding_is_mapped_but_cannot_extend_into_another_page",
+      "path": "tests/win32/modules.rs"
+    },
+    {
+      "target": "win32",
+      "old": "tls_callbacks_run_before_dllmain_on_the_owner_and_before_storage_is_released",
+      "new": "modules::tls_callbacks_run_before_dllmain_on_the_owner_and_before_storage_is_released",
+      "path": "tests/win32/modules.rs"
+    },
+    {
+      "target": "win32",
+      "old": "dll_mapping_relocation_exports_initialization_and_reference_counts",
+      "new": "modules::dll_mapping_relocation_exports_initialization_and_reference_counts",
+      "path": "tests/win32/modules.rs"
+    },
+    {
+      "target": "win32",
+      "old": "dll_sidecar_ir_handles_relocation_unload_reload_and_stale_source_hashes",
+      "new": "modules::dll_sidecar_ir_handles_relocation_unload_reload_and_stale_source_hashes",
+      "path": "tests/win32/modules.rs"
+    },
+    {
+      "target": "win32",
+      "old": "dll_dependencies_initialize_before_parent_and_failure_rolls_back",
+      "new": "modules::dll_dependencies_initialize_before_parent_and_failure_rolls_back",
+      "path": "tests/win32/modules.rs"
+    },
+    {
+      "target": "win32",
+      "old": "dll_guest_forwarders_deduplicate_dependencies_and_failed_load_preserves_existing_modules",
+      "new": "modules::dll_guest_forwarders_deduplicate_dependencies_and_failed_load_preserves_existing_modules",
+      "path": "tests/win32/modules.rs"
+    },
+    {
+      "target": "win32",
+      "old": "dll_qualified_module_names_and_native_stub_addresses_resolve_correctly",
+      "new": "modules::dll_qualified_module_names_and_native_stub_addresses_resolve_correctly",
+      "path": "tests/win32/modules.rs"
+    },
+    {
+      "target": "win32",
+      "old": "main_image_registers_real_exports_and_honors_pe_stack_reserve",
+      "new": "modules::main_image_registers_real_exports_and_honors_pe_stack_reserve",
+      "path": "tests/win32/modules.rs"
+    },
+    {
+      "target": "win32",
+      "old": "dll_missing_imports_and_malformed_images_fail_without_fake_modules",
+      "new": "modules::dll_missing_imports_and_malformed_images_fail_without_fake_modules",
+      "path": "tests/win32/modules.rs"
+    },
+    {
+      "target": "win32",
+      "old": "resources_load_real_utf16_strings_and_bound_lengths",
+      "new": "modules::resources_load_real_utf16_strings_and_bound_lengths",
+      "path": "tests/win32/modules.rs"
+    },
+    {
+      "target": "win32",
+      "old": "pe32_dep_policy_interprets_legacy_data_but_preserves_nx_noaccess_guard_and_ir_invalidation",
+      "new": "memory::pe32_dep_policy_interprets_legacy_data_but_preserves_nx_noaccess_guard_and_ir_invalidation",
+      "path": "tests/win32/memory.rs"
+    },
+    {
+      "target": "win32",
+      "old": "heap_reuses_coalesces_and_preserves_realloc",
+      "new": "memory::heap_reuses_coalesces_and_preserves_realloc",
+      "path": "tests/win32/memory.rs"
+    },
+    {
+      "target": "win32",
+      "old": "heap_in_place_only_and_private_heap_ownership",
+      "new": "memory::heap_in_place_only_and_private_heap_ownership",
+      "path": "tests/win32/memory.rs"
+    },
+    {
+      "target": "win32",
+      "old": "virtual_memory_reservation_commit_rounding_query_and_recommit_preserve_permissions",
+      "new": "memory::virtual_memory_reservation_commit_rounding_query_and_recommit_preserve_permissions",
+      "path": "tests/win32/memory.rs"
+    },
+    {
+      "target": "win32",
+      "old": "virtual_memory_4k_decommit_recommit_zeroing_and_release_keep_neighbors_intact",
+      "new": "memory::virtual_memory_4k_decommit_recommit_zeroing_and_release_keep_neighbors_intact",
+      "path": "tests/win32/memory.rs"
+    },
+    {
+      "target": "win32",
+      "old": "virtual_memory_rejects_collisions_invalid_flags_cross_allocations_and_invalid_outputs",
+      "new": "memory::virtual_memory_rejects_collisions_invalid_flags_cross_allocations_and_invalid_outputs",
+      "path": "tests/win32/memory.rs"
+    },
+    {
+      "target": "win32",
+      "old": "files_read_write_seek_eof_and_invalid_handles",
+      "new": "files::files_read_write_seek_eof_and_invalid_handles",
+      "path": "tests/win32/files.rs"
+    },
+    {
+      "target": "win32",
+      "old": "filesystem_confines_paths_and_symlinks_and_handles_case",
+      "new": "files::filesystem_confines_paths_and_symlinks_and_handles_case",
+      "path": "tests/win32/files.rs"
+    },
+    {
+      "target": "win32",
+      "old": "directory_queries_and_enumeration",
+      "new": "files::directory_queries_and_enumeration",
+      "path": "tests/win32/files.rs"
+    },
+    {
+      "target": "win32",
+      "old": "path_directory_creation_readonly_and_delete_stay_inside_guest_root",
+      "new": "files::path_directory_creation_readonly_and_delete_stay_inside_guest_root",
+      "path": "tests/win32/files.rs"
+    },
+    {
+      "target": "win32",
+      "old": "thread_resource_limit_returns_win32_failure_and_does_not_create_partial_handles",
+      "new": "sync::thread_resource_limit_returns_win32_failure_and_does_not_create_partial_handles",
+      "path": "tests/win32/sync.rs"
+    },
+    {
+      "target": "win32",
+      "old": "process_and_thread_affinity_match_single_cpu_profile_and_preserve_failed_outputs",
+      "new": "sync::process_and_thread_affinity_match_single_cpu_profile_and_preserve_failed_outputs",
+      "path": "tests/win32/sync.rs"
+    },
+    {
+      "target": "win32",
+      "old": "zero_delay_yields_finish_the_callers_frame_before_switching_threads",
+      "new": "sync::zero_delay_yields_finish_the_callers_frame_before_switching_threads",
+      "path": "tests/win32/sync.rs"
+    },
+    {
+      "target": "win32",
+      "old": "thread_local_values_and_last_error_are_independent",
+      "new": "sync::thread_local_values_and_last_error_are_independent",
+      "path": "tests/win32/sync.rs"
+    },
+    {
+      "target": "win32",
+      "old": "wait_all_acquires_objects_atomically",
+      "new": "sync::wait_all_acquires_objects_atomically",
+      "path": "tests/win32/sync.rs"
+    },
+    {
+      "target": "win32",
+      "old": "blocked_thread_resumes_after_worker_signals_and_exits",
+      "new": "sync::blocked_thread_resumes_after_worker_signals_and_exits",
+      "path": "tests/win32/sync.rs"
+    },
+    {
+      "target": "win32",
+      "old": "timeslice_wakes_expired_waiter_even_while_other_thread_spins",
+      "new": "sync::timeslice_wakes_expired_waiter_even_while_other_thread_spins",
+      "path": "tests/win32/sync.rs"
+    },
+    {
+      "target": "win32",
+      "old": "worker_teb_slots_do_not_alias_main_teb_or_peb",
+      "new": "sync::worker_teb_slots_do_not_alias_main_teb_or_peb",
+      "path": "tests/win32/sync.rs"
+    },
+    {
+      "target": "win32",
+      "old": "x87_stack_and_rounding_survive_thread_switches",
+      "new": "sync::x87_stack_and_rounding_survive_thread_switches",
+      "path": "tests/win32/sync.rs"
+    },
+    {
+      "target": "win32",
+      "old": "software_seh_continues_with_modified_context_and_rejects_noncontinuable",
+      "new": "exceptions::software_seh_continues_with_modified_context_and_rejects_noncontinuable",
+      "path": "tests/win32/exceptions.rs"
+    },
+    {
+      "target": "win32",
+      "old": "unhandled_filter_is_registered_invoked_and_prior_filter_returned",
+      "new": "exceptions::unhandled_filter_is_registered_invoked_and_prior_filter_returned",
+      "path": "tests/win32/exceptions.rs"
+    },
+    {
+      "target": "win32",
+      "old": "seh_unwind_cleans_inner_frames_keeps_target_and_restores_context",
+      "new": "exceptions::seh_unwind_cleans_inner_frames_keeps_target_and_restores_context",
+      "path": "tests/win32/exceptions.rs"
+    },
+    {
+      "target": "win32",
+      "old": "seh_unwind_rejects_corrupt_or_absent_targets_before_cleanup",
+      "new": "exceptions::seh_unwind_rejects_corrupt_or_absent_targets_before_cleanup",
+      "path": "tests/win32/exceptions.rs"
+    },
+    {
+      "target": "win32",
+      "old": "seh_catch_transfer_escapes_raise_and_initializer_host_callbacks",
+      "new": "exceptions::seh_catch_transfer_escapes_raise_and_initializer_host_callbacks",
+      "path": "tests/win32/exceptions.rs"
+    },
+    {
+      "target": "win32",
+      "old": "seh_context_preserves_and_allows_editing_x87_stack",
+      "new": "exceptions::seh_context_preserves_and_allows_editing_x87_stack",
+      "path": "tests/win32/exceptions.rs"
+    },
+    {
+      "target": "win32",
+      "old": "cursor_show_count_is_signed_and_set_cursor_returns_previous_handle",
+      "new": "user::cursor_show_count_is_signed_and_set_cursor_returns_previous_handle",
+      "path": "tests/win32/user.rs"
+    },
+    {
+      "target": "win32",
+      "old": "monitor_callbacks_and_ansi_info_return_real_bounds_and_honor_clipping",
+      "new": "user::monitor_callbacks_and_ansi_info_return_real_bounds_and_honor_clipping",
+      "path": "tests/win32/user.rs"
+    },
+    {
+      "target": "win32",
+      "old": "frame_adjustment_client_geometry_and_paint_clipping_share_the_same_pixels",
+      "new": "user::frame_adjustment_client_geometry_and_paint_clipping_share_the_same_pixels",
+      "path": "tests/win32/user.rs"
+    },
+    {
+      "target": "win32",
+      "old": "default_window_position_messages_use_actual_client_changes_and_destroy_clears_input_owners",
+      "new": "user::default_window_position_messages_use_actual_client_changes_and_destroy_clears_input_owners",
+      "path": "tests/win32/user.rs"
+    },
+    {
+      "target": "win32",
+      "old": "menus_copy_guest_strings_find_nested_commands_and_preserve_masked_fields",
+      "new": "user::menus_copy_guest_strings_find_nested_commands_and_preserve_masked_fields",
+      "path": "tests/win32/user.rs"
+    },
+    {
+      "target": "win32",
+      "old": "menus_reject_invalid_structs_pointers_cycles_and_deep_graphs_without_partial_mutation",
+      "new": "user::menus_reject_invalid_structs_pointers_cycles_and_deep_graphs_without_partial_mutation",
+      "path": "tests/win32/user.rs"
+    },
+    {
+      "target": "win32",
+      "old": "window_menu_attachment_lifetime_and_coordinate_roundtrip_are_real",
+      "new": "user::window_menu_attachment_lifetime_and_coordinate_roundtrip_are_real",
+      "path": "tests/win32/user.rs"
+    },
+    {
+      "target": "win32",
+      "old": "window_text_dialog_numbers_and_geometry_use_real_control_state",
+      "new": "user::window_text_dialog_numbers_and_geometry_use_real_control_state",
+      "path": "tests/win32/user.rs"
+    },
+    {
+      "target": "win32",
+      "old": "window_classes_keep_metadata_support_atoms_and_share_ansi_unicode_names",
+      "new": "user::window_classes_keep_metadata_support_atoms_and_share_ansi_unicode_names",
+      "path": "tests/win32/user.rs"
+    },
+    {
+      "target": "win32",
+      "old": "keyboard_host_state_and_retrieved_state_follow_different_boundaries",
+      "new": "user::keyboard_host_state_and_retrieved_state_follow_different_boundaries",
+      "path": "tests/win32/user.rs"
+    },
+    {
+      "target": "win32",
+      "old": "keyboard_translation_defers_host_text_and_preserves_unicode_and_ansi",
+      "new": "user::keyboard_translation_defers_host_text_and_preserves_unicode_and_ansi",
+      "path": "tests/win32/user.rs"
+    },
+    {
+      "target": "win32",
+      "old": "keyboard_posted_messages_do_not_fake_physical_key_state",
+      "new": "user::keyboard_posted_messages_do_not_fake_physical_key_state",
+      "path": "tests/win32/user.rs"
+    },
+    {
+      "target": "win32",
+      "old": "window_properties_default_classes_and_registered_names_have_lifetimes",
+      "new": "user::window_properties_default_classes_and_registered_names_have_lifetimes",
+      "path": "tests/win32/user.rs"
+    },
+    {
+      "target": "win32",
+      "old": "display_enumeration_has_consistent_modes_and_checked_output_layouts",
+      "new": "user::display_enumeration_has_consistent_modes_and_checked_output_layouts",
+      "path": "tests/win32/user.rs"
+    },
+    {
+      "target": "win32",
+      "old": "windows_invoke_creation_forwarding_and_destruction_callbacks",
+      "new": "user::windows_invoke_creation_forwarding_and_destruction_callbacks",
+      "path": "tests/win32/user.rs"
+    },
+    {
+      "target": "win32",
+      "old": "message_filters_quit_and_timers_preserve_queue_and_callback_semantics",
+      "new": "user::message_filters_quit_and_timers_preserve_queue_and_callback_semantics",
+      "path": "tests/win32/user.rs"
+    },
+    {
+      "target": "win32",
+      "old": "blocked_message_thread_resumes_after_worker_posts_without_fake_quit",
+      "new": "user::blocked_message_thread_resumes_after_worker_posts_without_fake_quit",
+      "path": "tests/win32/user.rs"
+    },
+    {
+      "target": "win32",
+      "old": "cross_thread_sends_wake_when_window_is_destroyed_or_owner_exits",
+      "new": "user::cross_thread_sends_wake_when_window_is_destroyed_or_owner_exits",
+      "path": "tests/win32/user.rs"
+    },
+    {
+      "target": "win32",
+      "old": "cross_thread_send_message_runs_on_owner_teb_and_preserves_sender_result",
+      "new": "user::cross_thread_send_message_runs_on_owner_teb_and_preserves_sender_result",
+      "path": "tests/win32/user.rs"
+    },
+    {
+      "target": "win32",
+      "old": "window_enumeration_filters_threads_and_children_stops_on_false_and_skips_destroyed_windows",
+      "new": "user::window_enumeration_filters_threads_and_children_stops_on_false_and_skips_destroyed_windows",
+      "path": "tests/win32/user.rs"
+    },
+    {
+      "target": "win32",
+      "old": "message_object_waits_preserve_queue_masks_old_input_and_atomic_acquisition",
+      "new": "user::message_object_waits_preserve_queue_masks_old_input_and_atomic_acquisition",
+      "path": "tests/win32/user.rs"
+    },
+    {
+      "target": "win32",
+      "old": "validated_paint_drops_only_synthetic_messages_and_default_close_destroys_window",
+      "new": "user::validated_paint_drops_only_synthetic_messages_and_default_close_destroys_window",
+      "path": "tests/win32/user.rs"
+    },
+    {
+      "target": "win32",
+      "old": "logical_fonts_preserve_logfont_encoding_selection_and_14_argument_creation",
+      "new": "gdi::logical_fonts_preserve_logfont_encoding_selection_and_14_argument_creation",
+      "path": "tests/win32/gdi.rs"
+    },
+    {
+      "target": "win32",
+      "old": "dib_stretch_and_readback_use_real_bgra_rows_and_checked_scan_ranges",
+      "new": "gdi::dib_stretch_and_readback_use_real_bgra_rows_and_checked_scan_ranges",
+      "path": "tests/win32/gdi.rs"
+    },
+    {
+      "target": "win32",
+      "old": "gdi_color_probe_dc_bitmap_lifetimes_and_pixel_failures_are_real",
+      "new": "gdi::gdi_color_probe_dc_bitmap_lifetimes_and_pixel_failures_are_real",
+      "path": "tests/win32/gdi.rs"
+    },
+    {
+      "target": "win32",
+      "old": "dib_top_down_bottom_up_direct_writes_checked_permissions_and_release",
+      "new": "gdi::dib_top_down_bottom_up_direct_writes_checked_permissions_and_release",
+      "path": "tests/win32/gdi.rs"
+    },
+    {
+      "target": "win32",
+      "old": "bitblt_overlap_clipping_origin_and_invalid_rop_preserve_expected_pixels",
+      "new": "gdi::bitblt_overlap_clipping_origin_and_invalid_rop_preserve_expected_pixels",
+      "path": "tests/win32/gdi.rs"
+    },
+    {
+      "target": "win32",
+      "old": "gdi_font_metrics_measure_the_selected_font_and_check_output",
+      "new": "gdi::gdi_font_metrics_measure_the_selected_font_and_check_output",
+      "path": "tests/win32/gdi.rs"
+    },
+    {
+      "target": "win32",
+      "old": "gdi_bitfields_dib_reports_masks_and_keeps_checked_pixels",
+      "new": "gdi::gdi_bitfields_dib_reports_masks_and_keeps_checked_pixels",
+      "path": "tests/win32/gdi.rs"
+    },
+    {
+      "target": "win32",
+      "old": "gdiplus_exports_startup_allocation_and_unported_status_preserve_x86_abi",
+      "new": "gdiplus::gdiplus_exports_startup_allocation_and_unported_status_preserve_x86_abi",
+      "path": "tests/win32/gdiplus.rs"
+    },
+    {
+      "target": "win32",
+      "old": "gdiplus_matrix_order_clone_inverse_and_object_lifetime_match_affine_geometry",
+      "new": "gdiplus::gdiplus_matrix_order_clone_inverse_and_object_lifetime_match_affine_geometry",
+      "path": "tests/win32/gdiplus.rs"
+    },
+    {
+      "target": "win32",
+      "old": "gdiplus_matrix_singular_threshold_bitwise_identity_and_checked_points",
+      "new": "gdiplus::gdiplus_matrix_singular_threshold_bitwise_identity_and_checked_points",
+      "path": "tests/win32/gdiplus.rs"
+    },
+    {
+      "target": "win32",
+      "old": "gdiplus_rect_mapping_and_integer_rounding_transform_points",
+      "new": "gdiplus::gdiplus_rect_mapping_and_integer_rounding_transform_points",
+      "path": "tests/win32/gdiplus.rs"
+    },
+    {
+      "target": "win32",
+      "old": "d3d9_target_binding_resets_extent_and_rhw_drives_perspective_sampling",
+      "new": "d3d9::d3d9_target_binding_resets_extent_and_rhw_drives_perspective_sampling",
+      "path": "tests/win32/d3d9.rs"
+    },
+    {
+      "target": "win32",
+      "old": "d3d9_indexed_declarations_transforms_and_reset_preserve_real_resources",
+      "new": "d3d9::d3d9_indexed_declarations_transforms_and_reset_preserve_real_resources",
+      "path": "tests/win32/d3d9.rs"
+    },
+    {
+      "target": "win32",
+      "old": "d3d9_depth_stencil_alpha_and_vertex_streams_affect_real_pixels",
+      "new": "d3d9::d3d9_depth_stencil_alpha_and_vertex_streams_affect_real_pixels",
+      "path": "tests/win32/d3d9.rs"
+    },
+    {
+      "target": "win32",
+      "old": "d3d9_com_texture_quad_present_has_real_pixels_and_releases_bound_resources",
+      "new": "d3d9::d3d9_com_texture_quad_present_has_real_pixels_and_releases_bound_resources",
+      "path": "tests/win32/d3d9.rs"
+    },
+    {
+      "target": "win32",
+      "old": "d3d9_surface_locks_and_external_child_references_preserve_com_owners",
+      "new": "d3d9::d3d9_surface_locks_and_external_child_references_preserve_com_owners",
+      "path": "tests/win32/d3d9.rs"
+    },
+    {
+      "target": "win32",
+      "old": "d3d9_failed_outputs_formats_and_vertex_reads_leave_pixels_unchanged",
+      "new": "d3d9::d3d9_failed_outputs_formats_and_vertex_reads_leave_pixels_unchanged",
+      "path": "tests/win32/d3d9.rs"
+    },
+    {
+      "target": "win32",
+      "old": "d3d9_alpha_quad_shared_edges_scissor_and_diffuse_vertices_are_exact",
+      "new": "d3d9::d3d9_alpha_quad_shared_edges_scissor_and_diffuse_vertices_are_exact",
+      "path": "tests/win32/d3d9.rs"
+    },
+    {
+      "target": "win32",
+      "old": "d3d9_pixel_shader_executes_constants_masks_and_preserves_bound_lifetime",
+      "new": "d3d9::d3d9_pixel_shader_executes_constants_masks_and_preserves_bound_lifetime",
+      "path": "tests/win32/d3d9.rs"
+    },
+    {
+      "target": "win32",
+      "old": "d3d9_recorded_stateblocks_isolate_live_state_capture_only_members_and_hold_resources",
+      "new": "d3d9::d3d9_recorded_stateblocks_isolate_live_state_capture_only_members_and_hold_resources",
+      "path": "tests/win32/d3d9.rs"
+    },
+    {
+      "target": "win32",
+      "old": "d3d9_all_stateblocks_restore_defaults_constants_and_exclude_render_targets",
+      "new": "d3d9::d3d9_all_stateblocks_restore_defaults_constants_and_exclude_render_targets",
+      "path": "tests/win32/d3d9.rs"
+    },
+    {
+      "target": "win32",
+      "old": "d3d9_vs2_dp4_constants_clip_position_and_forward_color_to_ps2",
+      "new": "d3d9::d3d9_vs2_dp4_constants_clip_position_and_forward_color_to_ps2",
+      "path": "tests/win32/d3d9.rs"
+    },
+    {
+      "target": "win32",
+      "old": "unsupported_audio_returns_real_failure_and_never_a_success_with_null_object",
+      "new": "audio::unsupported_audio_returns_real_failure_and_never_a_success_with_null_object",
+      "path": "tests/win32/audio.rs"
+    },
+    {
+      "target": "win32",
+      "old": "directsound_notify_identity_keeps_buffer_alive_and_stop_wakes_event",
+      "new": "audio::directsound_notify_identity_keeps_buffer_alive_and_stop_wakes_event",
+      "path": "tests/win32/audio.rs"
+    },
+    {
+      "target": "win32",
+      "old": "directsound_pcm_buffers_check_wrapped_locks_controls_and_release_storage",
+      "new": "audio::directsound_pcm_buffers_check_wrapped_locks_controls_and_release_storage",
+      "path": "tests/win32/audio.rs"
+    }
+  ]
+}

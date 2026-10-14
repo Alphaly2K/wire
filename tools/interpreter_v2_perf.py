@@ -4,6 +4,7 @@ import argparse, importlib.util, json, statistics, struct, sys
 from pathlib import Path
 sys.dont_write_bytecode=True
 from interpreter_perf import digest, replay
+from perf.measurement import paired_order
 from amd64_perf import pe64
 
 def bit_fixture(work):
@@ -27,7 +28,7 @@ def main():
     args=p.parse_args();binaries={n:Path(v).resolve(strict=True) for n,v in (a.split('=',1) for a in args.binary)}
     spec=importlib.util.spec_from_file_location('audit_probes',args.audit_probes.resolve(strict=True));audit=importlib.util.module_from_spec(spec);spec.loader.exec_module(audit)
     args.out.mkdir(parents=True,exist_ok=False)
-    manifest=dict(binaries={n:dict(path=str(v),sha256=digest(v)) for n,v in binaries.items()},fixtures_sha256=digest(args.audit_probes),script_sha256=digest(Path(__file__)),mode=args.mode,pairs=args.pairs,inputs={})
+    manifest=dict(binaries={n:dict(path=str(v),sha256=digest(v)) for n,v in binaries.items()},fixtures_sha256=digest(args.audit_probes),script_sha256=digest(Path(__file__)),replay_sha256=digest(Path(__file__).parent/'interpreter_perf.py'),measurement_sha256=digest(Path(__file__).parent/'perf'/'measurement.py'),mode=args.mode,pairs=args.pairs,inputs={})
     results={}
     for name in args.cases:
         data,expected=bit_fixture(args.work) if name=='bit-test' else audit.fixture(name,args.work)
@@ -36,7 +37,7 @@ def main():
         (args.out/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
         runs=[]
         for pair in range(args.pairs):
-            for version in list(binaries) if pair%2==0 else list(reversed(binaries)):
+            for version in paired_order(binaries, pair):
                 r=replay(binaries[version],exe,expected,args.out/name/f'pair-{pair}-{version}',args.mode,180)
                 r.update(pair=pair,version=version);runs.append(r)
                 print(f'{name} pair={pair} {version}: wall={r["wall_s"]:.4f} cpu={r["cpu_s"]:.4f} RSS={r["peak_rss_bytes"]}',flush=True)

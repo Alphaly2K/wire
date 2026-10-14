@@ -1,8 +1,8 @@
 //! Runtime PE32 SSE/bit descriptors. Persisted .wir v3 records stay unchanged;
 //! binding validates original bytes before deriving this process-local metadata.
 use super::{Cpu, CpuError, CF};
-use crate::mem::GuestMem;
 use crate::simd::SimdState;
+use crate::x86::memory::GuestMem;
 use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic as M, OpKind, Register as R};
 use rustc_apfloat::ieee::{Double, Single};
 use rustc_apfloat::{Float, Round};
@@ -16,7 +16,7 @@ pub(crate) struct Descriptor {
     width: u8,
     integer_width: u8,
     immediate: u8,
-    address: crate::ir::Operand,
+    address: crate::x86::ir::Operand,
     len: u8,
 }
 impl Descriptor {
@@ -106,7 +106,7 @@ impl Descriptor {
             width,
             integer_width: 4,
             immediate: 0,
-            address: crate::ir::Operand::default(),
+            address: crate::x86::ir::Operand::default(),
             len: i.len() as u8,
         };
         d.dst = d.operand(&i, 0)?;
@@ -167,7 +167,7 @@ impl Descriptor {
                 R::GS => 2 << 14,
                 _ => 0,
             };
-            self.address = crate::ir::Operand {
+            self.address = crate::x86::ir::Operand {
                 spec,
                 value: i.memory_displacement64() as u32,
             };

@@ -1,7 +1,7 @@
 //! Eight-byte typed instructions for the common scalar register hot path.
 //! Guest boundaries and fallback operands live outside this instruction word.
 use super::{Op, Record};
-use crate::cpu::{AF, CF, OF, PF, SF, ZF};
+use crate::x86::cpu::{AF, CF, OF, PF, SF, ZF};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Inst {
@@ -347,7 +347,7 @@ pub(crate) fn scalar_member(i: Inst) -> bool {
         ALU_GPR8_BASE..=ALU_GPR8_END => true,
         ALU_GPR16_BASE..=ALU_GPR16_END => {
             let form = op - ALU_GPR16_BASE + ADD_I32;
-            matches!(form, CMP_I32..=TEST_IMM_I32) || i.gpr_dst() != crate::cpu::ESP
+            matches!(form, CMP_I32..=TEST_IMM_I32) || i.gpr_dst() != crate::x86::cpu::ESP
         }
         MOV_I32
         | CONST_I32
@@ -355,7 +355,7 @@ pub(crate) fn scalar_member(i: Inst) -> bool {
         | LEA_I32
         | MOV_GPR16
         | CONST_GPR16
-        | MOV_U8_I32..=MOV_S16_I32 => i.gpr_dst() != crate::cpu::ESP,
+        | MOV_U8_I32..=MOV_S16_I32 => i.gpr_dst() != crate::x86::cpu::ESP,
         _ => false,
     }
 }

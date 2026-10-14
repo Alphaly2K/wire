@@ -1,7 +1,7 @@
 //! Fixed-record interpreter, sharing wire's guest-memory/register semantics.
 use super::{mask, read_sized, sign_extend, write_sized, Cpu, CpuError, AF, CF, OF, PF, SF, ZF};
-use crate::ir::{compact, Image, Op, Operand, Record, FLAGS};
-use crate::mem::GuestMem;
+use crate::x86::ir::{compact, Image, Op, Operand, Record, FLAGS};
+use crate::x86::memory::GuestMem;
 
 #[derive(Clone, Copy)]
 pub(super) struct PendingFlags {
@@ -82,7 +82,7 @@ impl Cpu {
     }
     pub fn install_ir(&mut self, image: Image, mem: &GuestMem) -> Result<usize, String> {
         self.flush_flags();
-        let cache = crate::ir::Cache::bind(image, mem)?;
+        let cache = crate::x86::ir::Cache::bind(image, mem)?;
         let accepted = cache.accepted;
         self.ir_cache = Some(cache);
         self.ir_modules.clear();
@@ -93,7 +93,7 @@ impl Cpu {
     /// between PE images. No code is decoded or generated during binding.
     pub fn add_module_ir(&mut self, image: Image, mem: &GuestMem) -> Result<usize, String> {
         self.flush_flags();
-        let cache = crate::ir::Cache::bind(image, mem)?;
+        let cache = crate::x86::ir::Cache::bind(image, mem)?;
         let accepted = cache.accepted;
         if accepted == 0 {
             return Ok(0);
@@ -115,7 +115,7 @@ impl Cpu {
         self.ir_cache.is_some()
     }
     pub(crate) fn remove_module_ir(&mut self, base: u32, size: u32) {
-        let matches = |c: &crate::ir::Cache| {
+        let matches = |c: &crate::x86::ir::Cache| {
             c.base() >= base && (c.base() as u64) < base as u64 + size as u64
         };
         self.ir_modules.retain(|c| !matches(c));
@@ -294,7 +294,7 @@ impl Cpu {
                 // validates changed code and rejects unrecognized entries.
                 if retired >= limit
                     || op == 0
-                    || self.eip >= crate::api::STUB_BASE
+                    || self.eip >= crate::x86::address_space::STUB_BASE
                     || stack_ceiling.is_some_and(|ceiling| self.esp() >= ceiling)
                 {
                     self.ir_steps += retired;

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Frozen PE32 raw/static-IR comparisons with algebraic state and budget checks."""
-import argparse,json,os,re,statistics,struct,subprocess,time,sys
+import argparse,json,os,re,statistics,struct,subprocess,sys
 from pathlib import Path
 sys.dont_write_bytecode=True
-from interpreter_perf import digest
+from perf.measurement import digest, paired_order, run_command
 
 def pe32(code):
     raw=(len(code)+511)//512*512;b=bytearray(512+raw)
@@ -136,7 +136,7 @@ def fixture(name,work):
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--binary',action='append',required=True);p.add_argument('--out',type=Path,required=True);p.add_argument('--pairs',type=int,default=3);p.add_argument('--work',type=int,default=30000000);p.add_argument('--cases',nargs='+',default=['sse-register','fp-scalar','bit-test','integer']);p.add_argument('--paths',nargs='+',default=['ir','raw']);p.add_argument('--discard-api-log',action='store_true',help='send API trace writes to the null device, retaining formatting and counters');a=p.parse_args()
     bins={n:Path(v).resolve(strict=True) for n,v in (s.split('=',1) for s in a.binary)};a.out.mkdir(parents=True,exist_ok=False)
-    manifest=dict(binaries={n:dict(path=str(v),sha256=digest(v)) for n,v in bins.items()},script_sha256=digest(Path(__file__)),pairs=a.pairs,api_log='discard' if a.discard_api_log else 'file',inputs={});results={}
+    manifest=dict(binaries={n:dict(path=str(v),sha256=digest(v)) for n,v in bins.items()},script_sha256=digest(Path(__file__)),measurement_sha256=digest(Path(__file__).parent/'perf'/'measurement.py'),pairs=a.pairs,api_log='discard' if a.discard_api_log else 'file',inputs={});results={}
     for case in a.cases:
         data,expected=fixture(case,a.work);exe=a.out/f'{case}.exe';exe.write_bytes(data);ir=a.out/f'{case}.wir'
         subprocess.run([str(next(iter(bins.values()))),'prepare',str(exe),'--out',str(ir)],check=True,stdout=subprocess.DEVNULL)
@@ -144,17 +144,16 @@ def main():
         for path in a.paths:
             runs=[]
             for pair in range(a.pairs):
-                for name in list(bins) if pair%2==0 else list(reversed(bins)):
+                for name in paired_order(bins, pair):
                     out=a.out/case/path/f'pair-{pair}-{name}';out.mkdir(parents=True)
                     if a.discard_api_log:
                         (out/'logs').mkdir()
                         (out/'logs/api.log').symlink_to(os.devnull)
                     cmd=[str(bins[name]),'run',str(exe),'--headless','--max-instr',str(expected['retired']+10),'--log-dir',str(out/'logs')]
                     if path=='ir':cmd+=['--ir',str(ir)]
-                    with (out/'report.txt').open('w') as report:
-                        t=time.perf_counter();proc=subprocess.Popen(cmd,stdout=report,stderr=subprocess.STDOUT);_,status,usage=os.wait4(proc.pid,0);proc.returncode=os.waitstatus_to_exitcode(status)
+                    result = run_command(cmd, out/'report.txt')
                     text=(out/'report.txt').read_text();regs=re.search(r'final regs: eax=(0x[0-9a-f]+)',text);count=re.search(r'instructions: (\d+)',text)
-                    result=dict(pair=pair,binary=name,path=path,wall_s=time.perf_counter()-t,cpu_s=usage.ru_utime+usage.ru_stime,peak_rss_bytes=usage.ru_maxrss,exit_code=proc.returncode,command=cmd,eax=None if regs is None else int(regs[1],16),retired=None if count is None else int(count[1]))
+                    result.update(pair=pair,binary=name,path=path,eax=None if regs is None else int(regs[1],16),retired=None if count is None else int(count[1]))
                     result['validated']=bool('breakpoint' in text and result['eax']==expected['eax'] and result['retired']==expected['retired'])
                     (out/'run.json').write_text(json.dumps(result,indent=2)+'\n');runs.append(result);print(f'{case}/{path} pair={pair} {name} wall={result["wall_s"]:.4f} cpu={result["cpu_s"]:.4f} validated={result["validated"]}',flush=True)
                     if not result['validated']:raise RuntimeError(str(out)+'\n'+text)

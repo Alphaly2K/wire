@@ -5,21 +5,17 @@ Timing excludes counters and sampling. Preserve every AB/BA round, CPU time,
 peak RSS, binary/input hashes, exact work/retired and algebraic checksums.
 """
 import argparse
-import hashlib
 import json
-import os
 from pathlib import Path
 import re
 import shutil
 import statistics
 import struct
-import subprocess
 import sys
-import threading
-import time
 
 sys.dont_write_bytecode = True
 from amd64_perf import fixtures, pe64
+from perf.measurement import digest, paired_order, run_command
 
 MASK = (1 << 64) - 1
 CONST = 0x1122334455667788
@@ -69,10 +65,6 @@ def additional(name, work):
     emit('c3')
     return pe64(code), dict(rax=hex(expected), retired=retired, work=total,
                            bytes_written=16384 * n if name == 'rep-memory' else 0)
-
-
-def digest(path):
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def gateway_fixture(work, version=False, nls=False):
@@ -137,29 +129,16 @@ def replay(binary, exe, expected, folder, mode, timeout, cache=None, qos_clamp=N
         command += ['--translation-cache', cache]
     if qos_clamp:
         command = [shutil.which('taskpolicy'), '-c', qos_clamp] + command
-    with (folder / 'report.txt').open('w') as report:
-        start = time.perf_counter()
-        proc = subprocess.Popen(command, stdout=report, stderr=subprocess.STDOUT)
-        timer = threading.Timer(timeout, proc.kill)
-        timer.start()
-        try:
-            _, status, usage = os.wait4(proc.pid, 0)
-            proc.returncode = os.waitstatus_to_exitcode(status)
-        finally:
-            timer.cancel()
-    wall = time.perf_counter() - start
+    result = run_command(command, folder / 'report.txt', timeout)
     report = (folder / 'report.txt').read_text()
     returned = re.search(r'entry returned RAX=(0x[0-9a-f]+); retired=(\d+)', report)
     execution = re.search(r'AMD64 execution: retired=(\d+) work=(\d+)', report)
-    result = dict(command=command, exit_code=proc.returncode, wall_s=wall,
-                  cpu_s=usage.ru_utime + usage.ru_stime,
-                  peak_rss_bytes=usage.ru_maxrss * (1 if sys.platform == 'darwin' else 1024))
     if returned and execution:
         result.update(rax=returned[1], retired=int(returned[2]), work=int(execution[2]))
     if expected.get('api_calls'):
         match = re.search(r'phase=.*; API calls=(\d+)', report)
         result['api_calls'] = int(match[1]) if match else None
-    result['validated'] = (proc.returncode == 0 and returned is not None
+    result['validated'] = (result['exit_code'] == 0 and returned is not None
                            and result.get('retired') == expected['retired']
                            and result.get('work') == expected['work']
                            and (expected.get('rax') is None
@@ -230,7 +209,9 @@ def main():
         entries = [entry for entry in entries if entry[0] in args.cases]
     manifest = dict(binaries={n: dict(path=str(b), sha256=digest(b)) for n, b in binaries.items()},
                     caches=caches,
-                    script_sha256=digest(Path(__file__)), mode=args.mode,
+                    script_sha256=digest(Path(__file__)),
+                    measurement_sha256=digest(Path(__file__).parent / 'perf' / 'measurement.py'),
+                    mode=args.mode,
                     pairs=args.pairs, requested_work=args.work, qos_clamp=args.qos_clamp,
                     taskpolicy_sha256=digest(Path(shutil.which('taskpolicy'))) if args.qos_clamp else None,
                     inputs={})
@@ -241,7 +222,7 @@ def main():
         (args.out / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
         runs = []
         for pair in range(args.pairs):
-            order = list(binaries) if pair % 2 == 0 else list(reversed(binaries))
+            order = paired_order(binaries, pair)
             for version in order:
                 r = replay(binaries[version], exe, expected,
                            args.out / name / f'pair-{pair}-{version}', args.mode, args.timeout,

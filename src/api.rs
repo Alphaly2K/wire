@@ -20,9 +20,7 @@ use std::io::{BufWriter, Write};
 use std::sync::{Arc, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-pub const STUB_BASE: u32 = 0x6fff_0000;
-pub const STUB_STRIDE: u32 = 16;
-pub const STUB_CAPACITY: usize = 4096;
+pub use crate::x86::address_space::{STUB_BASE, STUB_CAPACITY, STUB_STRIDE};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiEntry {

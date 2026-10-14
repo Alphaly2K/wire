@@ -2,7 +2,7 @@
 //! The module owns a small linear memory: 64 u64 vregs at offset zero and
 //! scratch I/O at 4096. It is not yet the process's 4 GiB GuestMem mapping.
 use super::{Image, Op, Operand, Record, FLAGS};
-use crate::cpu::{AF, CF, OF, PF, SF, ZF};
+use crate::x86::cpu::{AF, CF, OF, PF, SF, ZF};
 
 pub const VREG_BYTES: usize = 512;
 pub const EIP_SLOT: usize = 9;

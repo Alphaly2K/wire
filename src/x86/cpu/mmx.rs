@@ -1,6 +1,6 @@
 //! MMX integer operations alias the physical x87 register file, not ST(i).
 use super::{Cpu, CpuError};
-use crate::mem::GuestMem;
+use crate::x86::memory::GuestMem;
 
 pub(super) fn is_opcode(op: u8) -> bool {
     matches!(op, 0x60..=0x6b | 0x6e..=0x77 | 0x7e | 0x7f | 0xc4 | 0xc5 |

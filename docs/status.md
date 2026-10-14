@@ -2,13 +2,15 @@
 
 更新日期：2026-10-14。重构前固定代码基线 `2e78377`；本轮进度见 [重构记录](reports/refactoring-2026-10-14.md)。
 
-R0/R1、R4、R5 已完成：正式 fixture、测试 harness、GUID 唯一契约、PE32 Process32、owned host UI 请求与 GDI/像素状态分离。R2/R3 已迁移 identity、guest environment、version 和 42 个 NLS/locale export，其余家族仍待迁移。最新完整 release 为 400 passed / 7 ignored；7 项外部图形测试在 R5 已另行显式执行，全部通过。两架构 debug 回归 252 项、strict Clippy 和工具检查通过。
+R0/R1、R4、R5 已完成：正式 fixture、测试 harness、GUID 唯一契约、PE32 Process32、owned host UI 请求与 GDI/像素状态分离。R2/R3 已迁移 identity、guest environment、version 和 42 个 NLS/locale export，其余家族仍待迁移。R7 已完成当前 PE32 内核目录、领域测试和公共性能工具的整理，后续目录随其余领域迁移继续推进。最新完整 release 为 400 passed / 7 ignored；7 项外部图形测试在 R7 再次显式执行，全部通过。debug Win32/AMD64/FPU/Unicorn 285 项、strict Clippy、工具 11 项通过。
 
 R5 的 29 个解释器 case/path 已做三对 AB/BA，work/retired/checksum 全部校验；扩样后的最大 CPU 中位数回退为 +2.66%。R4 的 memory 成本在 R5 的 700M 复测中已消退：相对 R4 -6.04%，相对最初基线 -2.94%。这是结构调整后的代码生成/布局结果，不推断完整游戏 FPS；调查与全部轮次见 [重构记录](reports/refactoring-2026-10-14.md)。
 
 version 的 11 个受影响 case/path 三对均校验通过；PE32 SSE raw 初筛 +4.39%，700M 扩样后为 +2.50%，相对最初基线 -6.72%。其它初筛回退低于 2%，RSS 无实质增长。版本查询、ABI-only 校验函数和两架构故障差异见 [version 契约](architecture/version.md)。
 
 NLS 的 14 个 case/path 三对均校验通过；Win64 查询/转换负载 CPU 中位数 -33.08%/-11.31%。memory 扩样相对 version +3.14%、相对最初 +1.80%，已调查 IR/cache 计数及段反汇编，记录该布局成本。没有修改 ISA/cache 实现；回调和转换契约见 [NLS](architecture/nls.md)。
+
+R7 的 38 个 case/path 三对全部校验通过；large-code 初筛超 3% 后扩为 2B work，成本降至 +0.22%，相对最初 +1.23%。扩样后的全矩阵最大 CPU 中位数回退 +2.41%，RSS 最大增加 32KiB。完整证据见 [R7 记录](reports/refactoring-r7-2026-10-14.md)。
 
 ## 主路径和能力
 

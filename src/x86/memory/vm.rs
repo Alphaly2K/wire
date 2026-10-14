@@ -311,7 +311,11 @@ impl GuestMem {
         };
         Ok(image)
     }
-    pub(crate) fn protect_image(&mut self, base: u32, pe: &crate::pe::PeFile) -> Result<(), u32> {
+    pub(crate) fn protect_image(
+        &mut self,
+        base: u32,
+        pe: &crate::x86::pe::PeFile,
+    ) -> Result<(), u32> {
         if pe.size_of_headers > pe.size_of_image {
             return Err(INVALID_ADDRESS);
         }
