@@ -21,7 +21,7 @@
 | R1 GUID 契约试点 | 已完成唯一契约、双架构冷绑定、纯语义/适配器、行为及性能验收 |
 | R2 分发收敛 | GUID + 6 个 identity export 已迁移；locale/version/file 等仍 legacy |
 | R3 状态归属 | identity/profile 与可变环境变量已形成独立边界；module/file/thread/COM 待迁移 |
-| R4 PE32 Process | 待调用边界回归稳定 |
+| R4 PE32 Process | 已完成装载/执行编排提取；旧 Cpu 方法只保留委托 facade |
 | R5 host/graphics | 待 Process/状态边界形成 |
 | R6 原生 Mono | 按用户指示跳过 |
 | R7 工具/结构 | 先提取测试 harness，旧入口和脚本兼容保留 |
@@ -76,3 +76,16 @@ guest 环境变量由 `EnvironmentVariables` 私有 map 拥有，大小写归一
 完整 release 392 passed / 0 failed / 7 ignored，debug 两架构 246 项、fmt、strict Clippy 通过。profile 没有继承 host 用户或环境值。
 
 性能先测 210M work 三对：integer -0.76%、thread-id gateway -2.56%、GUID +0.05% 左右，memory +3.32% 触发调查。扩展到 700M work 并加入原始冻结基线：memory 相对紧邻 R2 CPU 中位数 +3.73%，相对最初基线 -0.53%；全部三对均未超过 5%，RSS 无实质增长。保留 `r3-memory-investigation` 全轮次。诊断的 IR/fallback/translations/invalidation/epoch/cold counts 相同；RegisterSegment::execute_mixed 的 2925 行反汇编仅有代码/常量地址及重定位偏移差异，opcode/register/control 形态一致，未触碰 ISA/cache 源码。本次记录这项布局成本，不将阶段结果统一称为“无回退”。保留原结构候选，后续布局变化继续对照最初及相邻基线；若出现三对均超过 5% 则拒绝对应候选。
+
+## R4 PE32 Process32
+
+`x86/process.rs` 拥有 PE32 的装载、运行状态与执行编排；CLI 保留参数、IR 文件输入和报表。API trap、DLL thread notify、合作调度和 guest callback 从 Cpu 移入 Process，原 `Cpu::run/call_guest` 通过小 facade 委托。字段声明保持原 CLI 的资源析构顺序，原回调 frame、TEB/栈归属、FLAGS flush、预算及非局部转移顺序保持。段内批执行仍在 CPU 内核，没有增加 trait object 或逐指令字符串分发。
+
+- 完整 release：392 passed / 0 failed / 7 ignored；debug IR/Win32/AMD64 270 项通过。现有 exact timeslice、嵌套 callback budget、nonlocal stack boundary、presentation-limit callback return，以及 DLL/TLS/SEH 回归保持。fmt、strict Clippy、6 项工具测试通过。
+- 冻结 `process32-wire` SHA-256：`471cc661b4d94234d5af78127f88228f876ef5c812e9884c3f363f25e081989d`。
+- 27 个 case/path：PE32 210M work raw/IR（整数、SSE、FP、bit、GUID），AMD64 100M work integer/memory/SSE/shift/REP/large-code/indirect-call/gateway，V2 FP/bit/code-data alias/control；全部三对，guest 结果与 work/retired 校验通过，RSS 没有实质增长。原始数据在 `r4-process-*-timing`。
+- PE32 SSE raw 的初筛 +3.56% 扩到 700M work后为 +0.80%，相对最初基线 -0.86%；旧初始化中间版本的异常轮次也保留于 `r4-load-pe32-timing`，未挑选删除。
+- AMD64 memory/large-code 初筛 +4.83%/+4.47%，扩到 700M 并加入最初基线：memory +3.45%（相对最初 +4.08%），large-code +2.20%（相对最初 +3.87%）。三对均未超过 5%；同一二进制重复对照的中位数差异为 -0.55%/+0.11%，故记录 memory 的实际代码生成/布局成本。IR=12008、fallback=0、translations=16、invalidations=0 和 cold/epoch 原因相同；CheckedSegment::execute 的 2156 行指令形态相同，地址/重定位变动，RegisterSegment::execute_mixed 则有 4 行额外生成指令及寄存器分配差异。ISA/cache 源码没有修改。按调查与拒绝门槛接受此候选，后续继续核对该负载；不将其表述为无回退。
+- Alice 200M work 启动前缀三对均按相同预算退出，无新增 API/访存错误，未进入 Draw/Present。CPU 中位数 2.64s → 2.66s、wall 2.70s → 2.70s，RSS 约 375MB；线程/计时使 RIP 与 retired 略变。复用原隔离目录，没有复制素材，日志在 `r4-alice-prefix`。
+
+过渡例外仍明确保留：领域 callback 通过旧 Cpu facade 重入 Process；IR 保留地址边界暂引用公开 `api::STUB_BASE`。后续将地址布局与领域控制请求逐步迁出兼容入口。R2/R3 的剩余领域和 R5/R7 未因此自动完成。

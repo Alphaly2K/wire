@@ -7,9 +7,7 @@
 //! by data, not guesses. Differential testing against a reference emulator
 //! (Unicorn, dev-only) is M1 scope.
 
-use crate::api::{self, ApiLogger, ApiState, ApiTable};
 use crate::mem::{GuestMem, MemFault};
-use crate::thread::Sched;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::time::Instant;
@@ -17,6 +15,8 @@ use std::time::Instant;
 mod fpu;
 mod ir_exec;
 mod mmx;
+mod process_facade;
+pub use crate::x86::process::{GuestCallOutcome, RunOutcome};
 pub(crate) mod simd_ir;
 pub use fpu::Fpu;
 use ir_exec::PendingFlags;
@@ -73,21 +73,6 @@ impl From<MemFault> for CpuError {
     fn from(e: MemFault) -> CpuError {
         CpuError::Mem(e)
     }
-}
-
-pub enum RunOutcome {
-    PresentationLimit(u64),
-    Exited(u32),
-    InstructionLimit,
-    Crashed(String),
-    CallbackReturned, // internal: guest callback frame completed
-    CallbackUnwound,  // internal: a nonlocal transfer discarded the callback stack
-}
-
-pub enum GuestCallOutcome {
-    Returned(u32),
-    Transferred,
-    Exited(u32),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -379,7 +364,7 @@ impl Cpu {
 
     // ---- stack ----
 
-    fn push32(&mut self, mem: &GuestMem, v: u32) -> Result<(), CpuError> {
+    pub(crate) fn push32(&mut self, mem: &GuestMem, v: u32) -> Result<(), CpuError> {
         let esp = self.esp().wrapping_sub(4);
         self.set_esp(esp);
         mem.write_u32(esp, v)?;
@@ -2953,164 +2938,13 @@ impl Cpu {
         Ok(())
     }
 
-    // ---- run loop ----
-
-    pub fn run(
-        &mut self,
-        mem: &mut GuestMem,
-        api: &mut ApiTable,
-        state: &mut ApiState,
-        log: &mut ApiLogger,
-        sched: &mut Sched,
-        max_instr: u64,
-    ) -> RunOutcome {
-        self.run_loop(mem, api, state, log, sched, max_instr, None)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn run_loop(
-        &mut self,
-        mem: &mut GuestMem,
-        api: &mut ApiTable,
-        state: &mut ApiState,
-        log: &mut ApiLogger,
-        sched: &mut Sched,
-        max_instr: u64,
-        callback_exit: Option<(u32, u32, u32)>,
-    ) -> RunOutcome {
-        loop {
-            if self.halted {
-                self.flush_flags();
-                return RunOutcome::Exited(self.exit_code.unwrap_or(0));
-            }
-            if !sched.threads[sched.current].loader_initialized {
-                // Mark before callbacks, which may re-enter the interpreter.
-                let main = sched.threads[sched.current].is_main;
-                sched.threads[sched.current].loader_initialized = true;
-                let saved = self.save_ctx();
-                match crate::modules::notify_thread(
-                    main, true, self, mem, api, state, log, sched, max_instr,
-                ) {
-                    Ok(GuestCallOutcome::Returned(_)) => self.load_ctx(&saved),
-                    Ok(GuestCallOutcome::Exited(code)) => return RunOutcome::Exited(code),
-                    Ok(GuestCallOutcome::Transferred) => continue,
-                    Err(error) => return RunOutcome::Crashed(error),
-                }
-            }
-            if callback_exit.is_none()
-                && state
-                    .stop_after_presents
-                    .is_some_and(|n| state.d3d9.frames >= n)
-            {
-                self.flush_flags();
-                return RunOutcome::PresentationLimit(state.d3d9.frames);
-            }
-            if let Some((exit, owner_teb, stack_ceiling)) = callback_exit {
-                if self.fs_base == owner_teb {
-                    if self.eip == exit && self.esp() <= stack_ceiling {
-                        self.flush_flags();
-                        return RunOutcome::CallbackReturned;
-                    }
-                    if self.esp() >= stack_ceiling {
-                        self.flush_flags();
-                        return RunOutcome::CallbackUnwound;
-                    }
-                }
-            }
-            if let Some(idx) = api.stub_index(self.eip) {
-                self.flush_flags();
-                if let Err(e) = api::dispatch(idx, self, mem, api, state, log, sched, max_instr) {
-                    return RunOutcome::Crashed(format!("api dispatch: {e}"));
-                }
-                continue;
-            }
-            if self.instr_count >= max_instr {
-                self.flush_flags();
-                return RunOutcome::InstructionLimit;
-            }
-            // Amortize outer halt/API/budget dispatch over straight-line IR.
-            // The inner loop retains per-guest fault/code-generation checks.
-            // End exactly at budget or cooperative scheduling boundaries.
-            let slice_remaining = 0x10_0000 - (self.instr_count & 0xF_FFFF);
-            let limit = if self.ir_cache.is_some() && !self.trace_enabled && !self.profile_opcodes {
-                (max_instr - self.instr_count).min(slice_remaining)
-            } else {
-                1
-            };
-            // The executing thread cannot change inside the compact chain.
-            // Check the owner's callback stack after every guest operation;
-            // other threads still stop at the exact cooperative timeslice.
-            let stack_ceiling = callback_exit
-                .filter(|&(_, owner_teb, _)| self.fs_base == owner_teb)
-                .map(|(_, _, ceiling)| ceiling);
-            let (retired, result) = self.steps_cached(mem, limit, stack_ceiling);
-            self.instr_count += retired;
-            match result {
-                Ok(()) => {
-                    // Cooperative timeslice: a guest thread that never calls a
-                    // blocking API (spin loop) must not starve the others.
-                    if self.instr_count & 0xF_FFFF == 0 {
-                        crate::platform::poll(mem, state, sched);
-                        sched.round_robin(self);
-                    }
-                }
-                Err(e) => {
-                    self.flush_flags();
-                    return RunOutcome::Crashed(e.to_string());
-                }
-            }
-        }
-    }
-
-    /// Call a guest function from the host (e.g. CRT initializers in
-    /// _initterm, later window procs). Pushes a fresh frame whose return
-    /// address is the ExitEmulation stub and runs until the guest `ret`s
-    /// into it. A nonlocal stack transfer or process exit is returned separately
-    /// so the host must not restore a callback frame that no longer exists.
-    /// Nested callbacks are supported.
-    #[allow(clippy::too_many_arguments)]
-    pub fn call_guest(
-        &mut self,
-        mem: &mut GuestMem,
-        api: &mut ApiTable,
-        state: &mut ApiState,
-        log: &mut ApiLogger,
-        sched: &mut Sched,
-        func: u32,
-        args: &[u32],
-        max_instr: u64,
-    ) -> Result<GuestCallOutcome, String> {
-        let exit_stub = api
-            .lookup("wire", "ExitEmulation")
-            .ok_or("missing exit stub")?;
-        let stack_ceiling = self.esp();
-        for a in args.iter().rev() {
-            self.push32(mem, *a).map_err(|e| e.to_string())?;
-        }
-        self.push32(mem, exit_stub).map_err(|e| e.to_string())?;
-        let saved_eip = self.eip;
-        self.eip = func;
-        let r = self.run_loop(
-            mem,
-            api,
-            state,
-            log,
-            sched,
-            max_instr,
-            Some((exit_stub, self.fs_base, stack_ceiling)),
-        );
-        match r {
-            RunOutcome::CallbackReturned => {
-                self.eip = saved_eip;
-                Ok(GuestCallOutcome::Returned(self.regs[EAX]))
-            }
-            RunOutcome::CallbackUnwound => Ok(GuestCallOutcome::Transferred),
-            RunOutcome::Exited(c) => Ok(GuestCallOutcome::Exited(c)),
-            RunOutcome::InstructionLimit => Err("instruction limit inside callback".into()),
-            RunOutcome::Crashed(e) => Err(e),
-            RunOutcome::PresentationLimit(_) => {
-                Err("presentation benchmark boundary escaped a guest callback".into())
-            }
+    /// ISA execution capability used by the process scheduler; no host/API dispatch.
+    #[inline]
+    pub(crate) fn execution_batch_limit(&self, remaining: u64, slice_remaining: u64) -> u64 {
+        if self.ir_cache.is_some() && !self.trace_enabled && !self.profile_opcodes {
+            remaining.min(slice_remaining)
+        } else {
+            1
         }
     }
 }

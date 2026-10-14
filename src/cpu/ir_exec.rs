@@ -150,7 +150,7 @@ impl Cpu {
             self.eflags
         }
     }
-    pub(super) fn flush_flags(&mut self) {
+    pub(crate) fn flush_flags(&mut self) {
         if let Some(p) = self.pending_flags.take() {
             self.eflags = (self.eflags & !p.deferred) | p.compute(p.deferred);
         }
@@ -183,7 +183,7 @@ impl Cpu {
     /// bound the chain; observers use a one-instruction limit. A callback's
     /// stack ceiling is checked after each operation, before the next fetch.
     /// Cold/fallback operations and API targets return to the outer dispatcher.
-    pub(super) fn steps_cached(
+    pub(crate) fn steps_cached(
         &mut self,
         mem: &mut GuestMem,
         limit: u64,

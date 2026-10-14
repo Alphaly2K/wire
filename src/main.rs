@@ -1,11 +1,8 @@
 use std::path::Path;
 use std::process::ExitCode;
-use wire::api::{ApiLogger, ApiState, ApiTable, HandleObj};
-use wire::cpu::{Cpu, RunOutcome};
-use wire::loader;
-use wire::mem::GuestMem;
+use wire::api::ApiLogger;
+use wire::cpu::RunOutcome;
 use wire::pe::PeFile;
-use wire::thread::Sched;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -300,7 +297,7 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
 
     std::fs::create_dir_all(&log_dir).ok();
     let api_log_path = Path::new(&log_dir).join("api.log");
-    let mut logger = match ApiLogger::new(&api_log_path) {
+    let logger = match ApiLogger::new(&api_log_path) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("create {}: {e}", api_log_path.display());
@@ -308,62 +305,25 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
         }
     };
 
-    let mut mem = match GuestMem::new() {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("guest memory: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let mut api = ApiTable::new();
-    let loaded = match loader::load_image(&mut mem, &mut api, exe_path, &display_name) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("load {path}: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let mut state = ApiState::new(
-        loaded.image_base,
-        format!("C:\\{display_name}"),
-        loaded.cmdline_a,
-        loaded.cmdline_w,
-    );
-    state.fs = Some(fs);
-    state.stop_after_presents = stop_after_presents;
-    state.presenter = match wire::platform::Presenter::new(present, capture_frames) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("presenter: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    state.d3d9.enable_gpu = !software_render;
-    state.d3d9.prepare_gpu();
-    if let Err(e) = state.modules.register_main(
-        &mem,
-        loaded.image_base,
-        Path::new(exe_path)
-            .canonicalize()
-            .unwrap_or_else(|_| Path::new(exe_path).to_path_buf()),
-        state.exe_path.clone(),
+    let mut process = match wire::x86::process::Process32::load(
+        exe_path,
+        &display_name,
+        fs,
+        logger,
+        wire::x86::process::Config {
+            present,
+            capture_frames,
+            gpu_enabled: !software_render,
+            stop_after_presents,
+        },
     ) {
-        eprintln!("register main module: {e}");
-        return ExitCode::FAILURE;
-    }
-    if let Err(e) =
-        state
-            .modules
-            .setup_tls_thread(&mut mem, &mut state.heap, state.process_heap, loaded.teb)
-    {
-        eprintln!("initialize main static TLS: {e}");
-        return ExitCode::FAILURE;
-    }
-    for dll in api.imported_dlls() {
-        if wire::modules::native_module(dll) {
-            state.module_handle_for(dll);
+        Ok(process) => process,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
         }
-    }
+    };
+    let loaded = &process.loaded;
 
     println!("loaded: {display_name}");
     println!(
@@ -374,49 +334,44 @@ fn cmd_run(path: &str, opts: &[String]) -> ExitCode {
         "  initial eip {:#010x}  esp {:#010x}",
         loaded.entry, loaded.esp
     );
-    logger.note(&format!(
+    process.logger.note(&format!(
         "run {} entry={:#x} esp={:#x}",
         display_name, loaded.entry, loaded.esp
     ));
 
-    // --- execution reaches the entry point here ---
-    let mut cpu = Cpu::new(loaded.entry, loaded.esp, loaded.teb);
-    cpu.trace_enabled = trace_cpu;
-    cpu.profile_opcodes = profile_opcodes;
-    if let Some(path) = ir_path {
-        let result = (|| -> Result<usize, String> {
-            let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-            let exe = std::fs::read(exe_path).map_err(|e| e.to_string())?;
-            let image = wire::ir::Image::parse(&bytes, &exe)?;
-            if image.image_base != loaded.image_base {
-                return Err("IR image base does not match loaded PE".into());
-            }
-            cpu.install_ir(image, &mem)
-        })();
-        match result {
+    // Configure the owned CPU before starting the process.
+    {
+        let cpu = &mut process.cpu;
+        let mem = &mut process.mem;
+        cpu.trace_enabled = trace_cpu;
+        cpu.profile_opcodes = profile_opcodes;
+        if let Some(path) = ir_path {
+            let result = (|| -> Result<usize, String> {
+                let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+                let exe = std::fs::read(exe_path).map_err(|e| e.to_string())?;
+                let image = wire::ir::Image::parse(&bytes, &exe)?;
+                if image.image_base != loaded.image_base {
+                    return Err("IR image base does not match loaded PE".into());
+                }
+                cpu.install_ir(image, mem)
+            })();
+            match result {
             Ok(accepted) => println!("  installed IR: {accepted} instructions; unsupported/changed code uses x86 fallback"),
             Err(e) => { eprintln!("load IR: {e}"); return ExitCode::FAILURE; }
         }
+        }
     }
-    let mut sched = Sched::new();
-    let main_tid = sched.alloc_tid();
-    let main_handle = state.alloc_handle(HandleObj::Thread { tid: main_tid });
-    sched.add_main(main_tid, main_handle, loaded.teb);
     println!(
         "  reached entry point; starting interpretation (max {} instructions)",
         max_instr
     );
     let t_start = std::time::Instant::now();
-    state.d3d9.run_start = Some(t_start);
-    let outcome = cpu.run(
-        &mut mem,
-        &mut api,
-        &mut state,
-        &mut logger,
-        &mut sched,
-        max_instr,
-    );
+    process.state.d3d9.run_start = Some(t_start);
+    let outcome = process.run(max_instr);
     let wall = t_start.elapsed();
+    let wire::x86::process::Process32 {
+        cpu, state, logger, ..
+    } = &mut process;
 
     println!("\n== run report ==");
     match &outcome {

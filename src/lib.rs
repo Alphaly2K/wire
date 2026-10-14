@@ -39,3 +39,4 @@ mod win32_abi;
 mod wmi;
 mod wsprintf;
 pub mod x64;
+pub mod x86;

@@ -2,7 +2,9 @@
 
 更新日期：2026-10-14。重构前固定代码基线 `2e78377`；本轮进度见 [重构记录](reports/refactoring-2026-10-14.md)。
 
-重构首批 R0/R1 已完成：正式 fixture 版本化、测试 harness 提取、GUID 唯一契约与冷绑定、共享纯语义和架构适配器。阶段验收 390 passed / 7 ignored；25 个解释器 case/path 三对 AB/BA 中最大 CPU 中位数回退 2.11%。后续分发、状态、Process32 与 host 边界仍在迁移。
+R0/R1 与 R4 已完成：正式 fixture 版本化、测试 harness、GUID 唯一契约，以及 PE32 Process32 的装载和执行编排边界。R2/R3 已迁移 identity 与 guest environment，其余家族仍待迁移；host/graphics 正在实施。最新完整 release 为 392 passed / 7 ignored，debug 进程边界相关 270 项通过，strict Clippy 和工具检查通过。
+
+R4 的 27 个解释器 case/path 已做三对 AB/BA，work/retired/checksum 全部校验。扩样后 AMD64 memory 相对相邻版本仍有 +3.45% CPU 中位数成本，相对最初基线 +4.08%；调查、噪声对照和完整原始轮次见 [重构记录](reports/refactoring-2026-10-14.md)。不据此宣称解释器整体提速。
 
 ## 主路径和能力
 
