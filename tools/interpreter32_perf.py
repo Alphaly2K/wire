@@ -110,6 +110,9 @@ def nls_conversion_fixture(work):
     return image, dict(eax=(65 + 2 * n) & 0xffffffff, retired=11 * n + 10)
 
 def fixture(name,work):
+    if name=='gateway-file-type':
+        from perf.fixtures.standard_gateway import x86
+        return x86(work,pe32)
     if name=='gateway-event':
         from perf.fixtures.kernel_gateway import x86
         return x86(work,pe32)
@@ -161,6 +164,10 @@ def main():
                     text=(out/'report.txt').read_text();regs=re.search(r'final regs: eax=(0x[0-9a-f]+)',text);count=re.search(r'instructions: (\d+)',text)
                     result.update(pair=pair,binary=name,path=path,eax=None if regs is None else int(regs[1],16),retired=None if count is None else int(count[1]))
                     result['validated']=bool('breakpoint' in text and result['eax']==expected['eax'] and result['retired']==expected['retired'])
+                    if 'api_calls' in expected:
+                        api_count=re.search(r'^api calls: (\d+)',text,re.MULTILINE)
+                        result['api_calls']=None if api_count is None else int(api_count[1])
+                        result['validated'] &= result['api_calls']==expected['api_calls']
                     (out/'run.json').write_text(json.dumps(result,indent=2)+'\n');runs.append(result);print(f'{case}/{path} pair={pair} {name} wall={result["wall_s"]:.4f} cpu={result["cpu_s"]:.4f} validated={result["validated"]}',flush=True)
                     if not result['validated']:raise RuntimeError(str(out)+'\n'+text)
             results[f'{case}/{path}']=dict(runs=runs,medians={n:{k:statistics.median(r[k] for r in runs if r['binary']==n) for k in ['wall_s','cpu_s','peak_rss_bytes']} for n in bins});(a.out/'compare.json').write_text(json.dumps(results,indent=2)+'\n')
