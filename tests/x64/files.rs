@@ -3,6 +3,131 @@
 use super::*;
 
 #[test]
+fn metadata_contract_baseline_keeps_win64_widths_error_order_and_return_slot_alias() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let root =
+        std::env::temp_dir().join(format!("wire64-metadata-contract-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("info.bin"), b"abc").unwrap();
+    runtime.set_filesystem(wire::fs::GuestFs::new(&root).unwrap());
+    let name = STACK + 0x100;
+    let output = STACK + 0x200;
+    let frame = STACK + 0x1f88;
+    let high = 0xface0000_00000000;
+    mem.write(name, b"C:\\info.bin\0").unwrap();
+    let handle = startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "CreateFileA",
+        &[name, 0x80000000, 7, 0, 3, 0x80, 0],
+    );
+    assert_ne!(handle, u64::MAX);
+    // Invalid class precedes decoding the bad path and checking the bad output.
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "kernelbase.dll",
+            "GetFileAttributesExA",
+            &[0xdead0000, high | 1, 0xdead0000],
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        87
+    );
+    startup_call(&mut mem, &mut cpu, &mut runtime, "SetLastError", &[0x55]);
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "kernelbase.dll",
+            "GetFileAttributesExA",
+            &[name, high, frame],
+        ),
+        1
+    );
+    assert_eq!(mem.read_int(frame, 4).unwrap(), 0x80);
+    assert_eq!(cpu.rip, BASE);
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        0x55
+    );
+    mem.write(output, &[0xa5; 64]).unwrap();
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "kernelbase.dll",
+            "GetFileInformationByHandleEx",
+            &[handle, high | 9, output, high | 7],
+        ),
+        0
+    );
+    assert_eq!(mem.read_int(output, 8).unwrap(), 0xa5a5a5a5a5a5a5a5);
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        24
+    );
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "kernelbase.dll",
+            "GetFileInformationByHandleEx",
+            &[handle, high | 9, frame, high | 8],
+        ),
+        1
+    );
+    assert_eq!(mem.read_int(frame, 8).unwrap(), 0x80);
+    assert_eq!(cpu.rip, BASE);
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "kernelbase.dll",
+            "GetFileTime",
+            &[handle, frame, 0, 0],
+        ),
+        1
+    );
+    assert!(mem.read_int(frame, 8).unwrap() > 116444736000000000);
+    assert_eq!(cpu.rip, BASE);
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetFileInformationByHandle",
+            &[u64::MAX, 0xdead0000],
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        6
+    );
+    for symbol in [
+        "GetFileAttributesExA",
+        "GetFileAttributesExW",
+        "GetFileInformationByHandle",
+        "GetFileInformationByHandleEx",
+        "GetFileTime",
+    ] {
+        assert!(!wire::x64::runtime::import_supported("user32.dll", symbol));
+    }
+    startup_call(&mut mem, &mut cpu, &mut runtime, "CloseHandle", &[handle]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn path_contract_baseline_keeps_win64_capacity_alias_and_absent_exports() {
     let (mut mem, mut cpu, mut runtime) = startup();
     let root = std::env::temp_dir().join(format!("wire64-path-contract-{}", std::process::id()));

@@ -3,6 +3,36 @@
 use super::*;
 
 #[test]
+fn metadata_contract_baseline_keeps_pe32_abi_only_outputs_and_unknown_dll_cleanup() {
+    let mut v = Vm::new();
+    for (name, slots) in [
+        ("GetFileAttributesExA", 3),
+        ("GetFileAttributesExW", 3),
+        ("GetFileInformationByHandle", 2),
+        ("GetFileInformationByHandleEx", 4),
+        ("GetFileTime", 4),
+    ] {
+        v.mem.write_bytes(DATA, &[0xa5; 64]).unwrap();
+        v.k("SetLastError", &[0x55]);
+        // ABI-only calls ignore even invalid guest pointers and preserve outputs.
+        assert_eq!(v.k(name, &[0x30000, 99, DATA, 64][..slots]), 0);
+        assert_eq!(v.cpu.eip, RET);
+        assert_eq!(
+            v.cpu.esp(),
+            STACK_BASE + STACK_SIZE - 256 + 4 + slots as u32 * 4
+        );
+        assert_eq!(v.state.last_error, 120);
+        assert_eq!(v.mem.read_u64(DATA).unwrap(), 0xa5a5a5a5a5a5a5a5);
+        assert_eq!(
+            v.log.unimpl_freq.get(&format!("kernel32.dll!{name}")),
+            Some(&1)
+        );
+        assert_eq!(v.call("kernelbase.dll", name, &[0x30000; 4]), 0);
+        assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 4);
+    }
+}
+
+#[test]
 fn path_contract_baseline_keeps_full_path_partial_output_and_stdcall() {
     let mut v = Vm::new();
     let output = DATA + 0x400;
