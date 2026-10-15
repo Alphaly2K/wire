@@ -3,10 +3,41 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from perf.measurement import digest, paired_order, run_command
+from perf.measurement import digest, launch_protocol, paired_order, run_command, stable_command
 
 
 class MeasurementTests(unittest.TestCase):
+    @unittest.skipUnless(Path('/bin/zsh').is_file(), 'stable launch requires zsh')
+    def test_stable_launch_fixes_real_argv0_and_forwards_literal_arguments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / 'report.txt'
+            run_command(stable_command(['/bin/sh', '-c', 'printf "%s" "$0"']), report,
+                        cwd=directory)
+            self.assertEqual(report.read_text(), 'wire')
+            literal = 'spaces $(touch forbidden) `exit 9`; * "quotes"'
+            result = run_command(stable_command([
+                '/bin/sh', '-c', 'printf "%s" "$1"', 'fixture', literal]), report,
+                cwd=directory)
+            self.assertEqual(result['exit_code'], 0)
+            self.assertEqual(report.read_text(), literal)
+            self.assertFalse((Path(directory) / 'forbidden').exists())
+            self.assertEqual(launch_protocol(True)['shell_sha256'], digest('/bin/zsh'))
+
+    def test_child_cwd_is_recorded_without_changing_parent_or_report_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            child = root / 'child'; child.mkdir()
+            (child / 'fixture.txt').write_text('cwd fixture')
+            parent = Path.cwd()
+            report = root / 'report.txt'
+            result = run_command([sys.executable, '-c',
+                'from pathlib import Path; print(Path("fixture.txt").read_text())'],
+                report, cwd=child)
+            self.assertEqual(result['exit_code'], 0)
+            self.assertEqual(report.read_text(), 'cwd fixture\n')
+            self.assertEqual(result['cwd'], str(child.resolve()))
+            self.assertEqual(Path.cwd(), parent)
+
     def test_failed_process_retains_report_status_and_resource_units(self):
         with tempfile.TemporaryDirectory() as directory:
             report = Path(directory) / 'report.txt'

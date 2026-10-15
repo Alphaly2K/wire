@@ -13,7 +13,8 @@ class SummaryEvidence(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
 
-    def evidence(self, name, work=100, qos=None, version_key='version', after_cpu=2):
+    def evidence(self, name, work=100, qos=None, version_key='version', after_cpu=2,
+                 launch=None):
         folder = self.root / name
         folder.mkdir()
         manifest = dict(pairs=1, mode='timing', measurement_sha256='measurement', qos_clamp=qos,
@@ -23,6 +24,8 @@ class SummaryEvidence(unittest.TestCase):
         runs = [dict(pair=0, **{version_key: label}, validated=True, timed_out=False,
                      cpu_s=cpu, wall_s=cpu + 1, peak_rss_bytes=100)
                 for label, cpu in [('before', 1), ('after', after_cpu), ('control', 1.5)]]
+        if launch is not None:
+            manifest['launch'] = launch
         (folder / 'manifest.json').write_text(json.dumps(manifest))
         (folder / 'compare.json').write_text(json.dumps({'integer': dict(runs=runs)}))
         return folder
@@ -69,6 +72,14 @@ class SummaryEvidence(unittest.TestCase):
                 (folder / 'compare.json').write_text(json.dumps(comparison))
                 with self.assertRaises(ValueError):
                     summarize([original, folder])
+
+    def test_launch_protocols_are_never_silently_merged(self):
+        legacy = self.evidence('legacy')
+        explicit = self.evidence('explicit', launch='legacy')
+        stable = self.evidence('stable', launch=dict(mode='stable-argv-v1', shell_sha256='shell'))
+        other_shell = self.evidence('other-shell', launch=dict(mode='stable-argv-v1', shell_sha256='other'))
+        rows = summarize([legacy, explicit, stable, other_shell])['comparisons']
+        self.assertEqual(sorted(r['measurements']['after']['samples'] for r in rows), [1, 1, 2])
 
     def test_pe32_raw_ir_and_amd64_keep_distinct_workloads(self):
         amd64 = self.evidence('amd64')

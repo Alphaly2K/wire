@@ -38,6 +38,7 @@ def summarize(directories, before='before', after='after'):
             name, path = case.rsplit('/', 1) if pe32 else (case, 'default')
             protocol = dict(architecture='x86' if pe32 else 'x64', case=name, path=path,
                             input=manifest['inputs'][name], qos=manifest.get('qos_clamp'),
+                            launch=manifest.get('launch', 'legacy'),
                             api_log=manifest.get('api_log'), caches=manifest.get('caches', {}),
                             script_sha256=manifest.get('script_sha256'),
                             replay_sha256=manifest.get('replay_sha256'),

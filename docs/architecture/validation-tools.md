@@ -29,6 +29,10 @@ PE32 headless 整数 fixture 的同二进制 700M 对照曾出现 2.31–7.28s �
 
 工具拒绝重复目录/轮次、不完整 pair、未验证或 timeout 的样本、同标签不同 binary hash 和非 timing 报告；`--out` 必须是新文件，已有证据不会覆盖。它核对记录的哈希与校验标志，原 fixture 仍负责 guest 结果验证，冻结工具仍负责保存源码与 binary。汇总无需启动 guest 或重跑性能测试。
 
+2026-10-16：三个测量入口新增可选 `--stable-launch`。通过固定的 zsh exec 程序把解释器 argv0 设为 `wire`，启动参数作为独立 argv 原样转交；每次 child 的 host cwd 为本轮输出目录，PE32 的日志参数固定为 `logs`，fixture 与 IR 使用同一绝对路径。QoS wrapper 继续在外层，语义、计数、默认 case、API trace 格式化和旧默认启动方式保持。测量包含小型 shell 的启动成本，before/after/control 使用同一协议。
+
+新增模式源于同一机器码哈希副本在旧协议中出现约 2.3s/7.1s 的重复差异；固定 argv/log 参数后，在同一 utility QoS 中两副本接近。启动参数与其引发的分配布局是调查线索，尚未证明具体 allocator/cache 因果关系。使用该模式需重新测量，不能将旧协议的离散样本静默移除或混入新协议。manifest 保存 launch 模式、argv0、cwd/log 策略与 shell hash；离线汇总按完整 launch 字段分组。调查、工具测试与跨架构预检见 [记录](../reports/refactoring-launch-protocol-2026-10-16.md)。
+
 ```sh
 python3 -B tools/perf/summarize.py wire-out/batch-a wire-out/batch-b --out wire-out/summary.json
 ```

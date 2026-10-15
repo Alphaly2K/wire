@@ -9,6 +9,7 @@
 - [Windows version 契约](architecture/version.md)：架构 provider 范围、ABI-only 策略与故障提交。
 - [NLS/locale 契约](architecture/nls.md)：转换、字符分类、日历与进程回调的边界。
 - [测试与性能工具](architecture/validation-tools.md)：领域测试名映射、公共测量库、freeze 输入和兼容入口。
+- [稳定启动测量协议](reports/refactoring-launch-protocol-2026-10-16.md)：相同哈希副本的偏差调查、可选 argv/cwd 协议和跨模式证据隔离。
 - [模块身份与生命周期](architecture/modules.md)：31 个 export 的冷绑定契约、动态查询差异、私有 owner 与引用/pin 提交。
 - [模块 API 契约验收](reports/refactoring-module-catalog-2026-10-14.md)：模块 catalog、控制请求与独立性能调查。
 - [文件状态与标准句柄](architecture/files.md)：Win64 filesystem、属性元数据、endpoint/alias 寿命和输出提交顺序。

@@ -15,7 +15,7 @@ import sys
 
 sys.dont_write_bytecode = True
 from amd64_perf import fixtures, pe64
-from perf.measurement import digest, paired_order, run_command
+from perf.measurement import digest, launch_protocol, paired_order, run_command, stable_command
 
 MASK = (1 << 64) - 1
 CONST = 0x1122334455667788
@@ -118,8 +118,11 @@ def nls_conversion_fixture(work):
     return image, dict(rax=hex(65 + 2 * n), retired=11 * n + 11, work=12 * n + 11, api_calls=n, startup=True)
 
 
-def replay(binary, exe, expected, folder, mode, timeout, cache=None, qos_clamp=None):
+def replay(binary, exe, expected, folder, mode, timeout, cache=None, qos_clamp=None,
+           stable_launch=False):
     folder.mkdir(parents=True, exist_ok=True)
+    if stable_launch:
+        folder, exe = folder.resolve(), exe.resolve()
     command = [str(binary), 'probe64', str(exe), '--max-instr', str(expected['work'] + 100)]
     if mode != 'timing':
         command.append('--cpu-stats' if mode == 'stats' else '--cpu-diagnostics')
@@ -127,9 +130,12 @@ def replay(binary, exe, expected, folder, mode, timeout, cache=None, qos_clamp=N
         command.append('--startup')
     if cache:
         command += ['--translation-cache', cache]
+    if stable_launch:
+        command = stable_command(command)
     if qos_clamp:
         command = [shutil.which('taskpolicy'), '-c', qos_clamp] + command
-    result = run_command(command, folder / 'report.txt', timeout)
+    result = run_command(command, folder / 'report.txt', timeout,
+                         cwd=folder if stable_launch else None)
     report = (folder / 'report.txt').read_text()
     returned = re.search(r'entry returned RAX=(0x[0-9a-f]+); retired=(\d+)', report)
     execution = re.search(r'AMD64 execution: retired=(\d+) work=(\d+)', report)
@@ -162,6 +168,8 @@ def main():
     p.add_argument('--timeout', type=float, default=120)
     p.add_argument('--qos-clamp', choices=['utility', 'background', 'maintenance'],
                    help='optional macOS taskpolicy clamp applied equally to every binary')
+    p.add_argument('--stable-launch', action='store_true',
+                   help='fix guest argv0 and use each run directory as host cwd')
     args = p.parse_args()
     if args.work < 1 or args.pairs < 1 or args.timeout <= 0:
         p.error('work, pairs and timeout must be positive')
@@ -252,6 +260,7 @@ def main():
                     taskpolicy_sha256=digest(Path(shutil.which('taskpolicy'))) if args.qos_clamp else None,
                     inputs={})
     results = {}
+    manifest['launch'] = launch_protocol(args.stable_launch)
     for name, data, expected in entries:
         exe = args.out / f'{name}.exe'; exe.write_bytes(data)
         manifest['inputs'][name] = dict(sha256=digest(exe), **expected)
@@ -262,7 +271,7 @@ def main():
             for version in order:
                 r = replay(binaries[version], exe, expected,
                            args.out / name / f'pair-{pair}-{version}', args.mode, args.timeout,
-                           caches.get(version), args.qos_clamp)
+                           caches.get(version), args.qos_clamp, args.stable_launch)
                 if runs and (r['rax'], r['retired'], r['work']) != (
                         runs[0]['rax'], runs[0]['retired'], runs[0]['work']):
                     raise RuntimeError(f'guest state differs: {name} {version}')
