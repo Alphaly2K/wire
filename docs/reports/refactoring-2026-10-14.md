@@ -190,3 +190,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 两张 `(TID, slot)` map 与两个递增计数器收进私有 LocalSlots32，只提供 allocate/get/set/free；adapter 保留 TID、LastError、callback 说明、trace 及 frame 提交，不新增资源限制或锁。Win64 状态保持。完整 release 448、debug 296、native 7、工具 19 项及 fmt/strict Clippy 通过。
 
 28 条性能路径全部校验；context/IR 初筛 +3.673% 扩为 150M 三标签轮换后为 −1.542%，同哈希对照 +3.201% 和明显离散轮次全部保留。其余最大回退 +2.715%，RSS 最多 +80KiB。Alice 200M 三对保持预算出口、隐藏窗口和零 Draw/Present；冻结的 233 个已注册 Rust 文件核对一致。完整接受决定见 [状态拆分验收](refactoring-locals32-owner-2026-10-16.md)。
+
+## R2 事件与信号量
+
+16 项接口接入 SyncObjectApi，删除重复 ABI/arity/DWORD 与字符串 handler；PE32 十项 typed、六项 ABI-only，Win64 十五项 typed、PulseEvent absent。原命名对象、per-alias access、count、waiter wake 和故障提交顺序保持。四项旧行为基线先通过，完整 release 452、debug 300、native 7、工具 19 项与 fmt/strict Clippy 通过。
+
+31 条性能路径全部校验；module/raw 初筛 +3.743% 经 150M 三标签扩样为 +0.527%，control/before +0.070%。Win64 固定 event 网关循环 −21.989%，其余最大回退 +2.725%，RSS 最多 +256KiB。Alice 200M 三对保持预算出口、隐藏窗口和零 Draw/Present，CPU +0.306%；冻结的 235 个 Rust 文件核对一致。完整接受决定见 [同步对象验收](refactoring-sync-objects-2026-10-16.md)。

@@ -31,6 +31,7 @@ mod resources;
 mod snapshot;
 mod sockets;
 mod sspi;
+mod sync_objects;
 mod threads;
 mod time;
 mod timers;
@@ -437,9 +438,6 @@ fn import_arity(name: &str) -> Option<usize> {
         | "SetThreadDescription"
         | "GetThreadDescription"
         | "GetThreadContext" => 2,
-        "CreateSemaphoreExW" | "CreateSemaphoreExA" => 6,
-        "CreateSemaphoreW" | "CreateSemaphoreA" => 4,
-        "OpenSemaphoreW" | "OpenSemaphoreA" | "ReleaseSemaphore" => 3,
         "GetLogicalProcessorInformationEx" => 3,
         "GetActiveProcessorCount" | "GetMaximumProcessorCount" => 1,
         "GetActiveProcessorGroupCount" | "GetMaximumProcessorGroupCount" => 0,
@@ -479,15 +477,10 @@ fn import_arity(name: &str) -> Option<usize> {
         "VirtualAlloc" | "VirtualProtect" | "VirtualFreeEx" | "VirtualQueryEx" => 4,
         "VirtualAllocEx" | "VirtualProtectEx" => 5,
         "VirtualFree" | "VirtualQuery" => 3,
-        "CreateEventW"
-        | "CreateEventA"
-        | "CreateEventExW"
-        | "CreateEventExA"
-        | "WaitForMultipleObjects" => 4,
+        "WaitForMultipleObjects" => 4,
         "WaitForMultipleObjectsEx" => 5,
-        "OpenEventW" | "OpenEventA" | "WaitForSingleObjectEx" => 3,
+        "WaitForSingleObjectEx" => 3,
         "WaitForSingleObject" => 2,
-        "SetEvent" | "ResetEvent" => 1,
         "CreatePipe" => 4,
         "InitializeProcThreadAttributeList" => 4,
         "UpdateProcThreadAttribute" => 7,
@@ -568,10 +561,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "CreateThread" => &[4],
         "Sleep" | "ExitThread" => &[0],
         "SetThreadPriority" => &[1],
-        "CreateSemaphoreExW" | "CreateSemaphoreExA" => &[1, 2, 4, 5],
-        "CreateSemaphoreW" | "CreateSemaphoreA" => &[1, 2],
-        "OpenSemaphoreW" | "OpenSemaphoreA" => &[0, 1],
-        "ReleaseSemaphore" => &[1],
         "GetLogicalProcessorInformationEx" => &[0],
         "BCryptGenRandom" => &[2, 3],
         "BCryptOpenAlgorithmProvider" => &[3],
@@ -589,9 +578,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "UpdateProcThreadAttribute" => &[1],
         "CreateProcessW" => &[4, 5],
         "CreatePipe" => &[3],
-        "CreateEventW" | "CreateEventA" => &[1, 2],
-        "CreateEventExW" | "CreateEventExA" => &[2, 3],
-        "OpenEventW" | "OpenEventA" => &[0, 1],
         "WaitForSingleObject" => &[1],
         "WaitForSingleObjectEx" => &[1, 2],
         "SleepEx" => &[0, 1],
@@ -1034,6 +1020,7 @@ impl Runtime64 {
             ApiId::Interlocked(id) => crate::win32::x64::interlocked::call(mem, id, args),
             ApiId::Clock(id) => crate::win32::x64::clocks::call(id, args, mem, &self.start),
             ApiId::Local(id) => self.local_call(id, args, mem),
+            ApiId::SyncObject(id) => self.sync_object_call(id, args, mem),
             ApiId::Context(id) => {
                 use crate::win32::catalog::ContextApi;
                 Ok(match id {
@@ -3214,126 +3201,6 @@ impl Runtime64 {
                 }
             }
             _ if binding.groups & (1 << 15) != 0 => self.timer_call(mem, name, args)?,
-            "CreateEventW" | "CreateEventA" | "CreateEventExW" | "CreateEventExA"
-            | "OpenEventW" | "OpenEventA" => {
-                let extended = name.contains("Ex");
-                let opening = name.starts_with("Open");
-                if !opening && args[0] != 0 {
-                    return Err("Win64 event SECURITY_ATTRIBUTES not implemented".into());
-                }
-                let pointer = args[if opening {
-                    2
-                } else if extended {
-                    1
-                } else {
-                    3
-                }];
-                let event_name = if pointer == 0 {
-                    None
-                } else if name.ends_with('W') {
-                    Some(Self::utf16(mem, pointer)?)
-                } else {
-                    let bytes = Self::string_bytes(mem, pointer, u32::MAX as u64, 1)?;
-                    Some(
-                        crate::codepage::decode(&bytes[..bytes.len() - 1], 932)
-                            .map_err(|e| format!("event codepage error {e}"))?,
-                    )
-                };
-                let result = if opening {
-                    if let Some(event_name) = event_name {
-                        self.events
-                            .open(event_name, args[0] as u32, false)
-                            .map(|h| (h, false))
-                    } else {
-                        Err(87)
-                    }
-                } else if extended && args[2] & !3 != 0 {
-                    Err(87)
-                } else {
-                    let (manual, initial, access) = if extended {
-                        (args[2] & 1 != 0, args[2] & 2 != 0, args[3] as u32)
-                    } else {
-                        (args[1] != 0, args[2] != 0, 0x1f0003)
-                    };
-                    self.events.create(manual, initial, event_name, access)
-                };
-                match result {
-                    Ok((handle, existed)) => {
-                        self.set_error(mem, if existed { 183 } else { 0 })?;
-                        handle
-                    }
-                    Err(error) => {
-                        self.set_error(mem, error)?;
-                        0
-                    }
-                }
-            }
-            "CreateSemaphoreW" | "CreateSemaphoreA" | "CreateSemaphoreExW"
-            | "CreateSemaphoreExA" | "OpenSemaphoreW" | "OpenSemaphoreA" => {
-                let opening = name.starts_with("Open");
-                if !opening && args[0] != 0 {
-                    return Err("Win64 semaphore SECURITY_ATTRIBUTES not implemented".into());
-                }
-                let pointer = args[if opening { 2 } else { 3 }];
-                let object_name = if pointer == 0 {
-                    None
-                } else if name.ends_with('W') {
-                    Some(Self::utf16(mem, pointer)?)
-                } else {
-                    let bytes = Self::string_bytes(mem, pointer, u32::MAX as u64, 1)?;
-                    Some(
-                        crate::codepage::decode(&bytes[..bytes.len() - 1], 932)
-                            .map_err(|e| format!("semaphore codepage error {e}"))?,
-                    )
-                };
-                let result = if opening {
-                    object_name.ok_or(87u32).and_then(|n| {
-                        self.events
-                            .open(n, args[0] as u32, true)
-                            .map(|h| (h, false))
-                    })
-                } else if name.contains("Ex") && args[4] != 0 {
-                    Err(87)
-                } else {
-                    let access = if name.contains("Ex") {
-                        args[5] as u32
-                    } else {
-                        0x1f0003
-                    };
-                    self.events
-                        .semaphore(args[1] as i32, args[2] as i32, object_name, access)
-                };
-                match result {
-                    Ok((handle, existed)) => {
-                        self.set_error(mem, if existed { 183 } else { 0 })?;
-                        handle
-                    }
-                    Err(error) => {
-                        self.set_error(mem, error)?;
-                        0
-                    }
-                }
-            }
-            "ReleaseSemaphore" => match self.events.release_count(args[0], args[1] as i32) {
-                Ok(previous) => {
-                    if args[2] != 0 {
-                        mem.write_int(args[2], 4, previous as u64)?;
-                    }
-                    self.events.release(args[0], args[1] as i32);
-                    1
-                }
-                Err(error) => {
-                    self.set_error(mem, error)?;
-                    0
-                }
-            },
-            "SetEvent" | "ResetEvent" => match self.events.change(args[0], name == "SetEvent") {
-                Ok(result) => result,
-                Err(error) => {
-                    self.set_error(mem, error)?;
-                    0
-                }
-            },
             "WaitForSingleObject"
             | "WaitForSingleObjectEx"
             | "WaitForMultipleObjects"

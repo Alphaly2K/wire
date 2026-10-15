@@ -665,13 +665,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("FreeResource", 4),
                 ("FormatMessageA", 28),
                 ("FormatMessageW", 28),
-                ("CreateEventA", 16),
-                ("CreateEventW", 16),
-                ("SetEvent", 4),
-                ("ResetEvent", 4),
-                ("OpenEventA", 12),
-                ("OpenEventW", 12),
-                ("PulseEvent", 4),
                 ("CreateMutexA", 12),
                 ("CreateMutexW", 12),
                 ("ReleaseMutex", 4),
@@ -683,7 +676,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("SleepEx", 8),
                 ("GetExitCodeThread", 8),
                 ("TerminateThread", 8),
-                ("CreateSemaphoreA", 16),
                 ("GetDiskFreeSpaceA", 20),
                 ("GetDiskFreeSpaceW", 20),
                 ("GetDriveTypeA", 4),
@@ -704,9 +696,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("RtlUnwind", 16),
                 ("InitializeCriticalSectionEx", 12),
                 ("GetCurrentPackageId", 8),
-                ("CreateSemaphoreW", 16),
-                ("CreateSemaphoreExW", 24),
-                ("ReleaseSemaphore", 12),
                 ("CreateThreadpoolTimer", 12),
                 ("SetThreadpoolTimer", 16),
                 ("WaitForThreadpoolTimerCallbacks", 8),
@@ -1995,74 +1984,122 @@ pub fn dispatch(
                 return Ok(());
             }
         }
-        // --- events ---
-        ("kernel32.dll", "CreateEventA") | ("kernel32.dll", "CreateEventW") => {
-            let wide = name.ends_with('W');
-            let nm = read_str(mem, args[3], wide);
-            let (h, existed) = state.create_named(&nm, || HandleObj::Event {
-                manual: args[1] != 0,
-                signaled: args[2] != 0,
-            });
-            note = format!(
-                "event \"{nm}\" manual={} signaled={}{}",
-                args[1] != 0,
-                args[2] != 0,
-                if existed { " (already exists)" } else { "" }
-            );
-            ret = h;
-        }
-        ("kernel32.dll", "OpenEventA") | ("kernel32.dll", "OpenEventW") => {
-            let wide = name.ends_with('W');
-            let nm = read_str(mem, args[2], wide);
-            match state.named_objs.get(&nm) {
-                Some(&h) => {
-                    ret = h;
-                    note = format!("event \"{nm}\"");
+        // --- events and semaphores: resolved once by the catalog ---
+        _ if matches!(
+            binding.typed,
+            Some(crate::win32::catalog::ApiId::SyncObject(_))
+        ) =>
+        {
+            let Some(crate::win32::catalog::ApiId::SyncObject(id)) = binding.typed else {
+                unreachable!();
+            };
+            use crate::win32::catalog::SyncObjectApi::*;
+            ret = match id {
+                CreateEventA | CreateEventW => {
+                    let nm = read_str(mem, args[3], id.wide());
+                    let (h, existed) = state.create_named(&nm, || HandleObj::Event {
+                        manual: args[1] != 0,
+                        signaled: args[2] != 0,
+                    });
+                    note = format!(
+                        "event \"{nm}\" manual={} signaled={}{}",
+                        args[1] != 0,
+                        args[2] != 0,
+                        if existed { " (already exists)" } else { "" }
+                    );
+                    h
                 }
-                None => {
-                    state.last_error = 2; // ERROR_FILE_NOT_FOUND
-                    ret = 0;
-                    note = format!("event \"{nm}\" not found");
+                OpenEventA | OpenEventW => {
+                    let nm = read_str(mem, args[2], id.wide());
+                    match state.named_objs.get(&nm) {
+                        Some(&h) => {
+                            note = format!("event \"{nm}\"");
+                            h
+                        }
+                        None => {
+                            state.last_error = 2; // ERROR_FILE_NOT_FOUND
+                            note = format!("event \"{nm}\" not found");
+                            0
+                        }
+                    }
                 }
-            }
+                SetEvent => match state.handles.get_mut(&args[0]) {
+                    Some(HandleObj::Event { manual, signaled }) => {
+                        let manual = *manual;
+                        *signaled = true;
+                        let woken =
+                            wake_obj_waiters(sched, args[0], if manual { usize::MAX } else { 1 });
+                        note = format!("woke {woken} waiter(s)");
+                        1
+                    }
+                    _ => {
+                        state.last_error = 6;
+                        note = "bad event handle".into();
+                        0
+                    }
+                },
+                ResetEvent => match state.handles.get_mut(&args[0]) {
+                    Some(HandleObj::Event { signaled, .. }) => {
+                        *signaled = false;
+                        1
+                    }
+                    _ => {
+                        state.last_error = 6;
+                        0
+                    }
+                },
+                PulseEvent => match state.handles.get_mut(&args[0]) {
+                    Some(HandleObj::Event { manual, signaled }) => {
+                        let manual = *manual;
+                        *signaled = false;
+                        let woken =
+                            wake_obj_waiters(sched, args[0], if manual { usize::MAX } else { 1 });
+                        note = format!("woke {woken} waiter(s)");
+                        1
+                    }
+                    _ => {
+                        state.last_error = 6;
+                        0
+                    }
+                },
+                CreateSemaphoreW | CreateSemaphoreA => {
+                    let nm = read_str(mem, args[3], id.wide());
+                    let (initial, max) = (args[1] as i32, args[2] as i32);
+                    let (h, existed) = state.create_named(&nm, || HandleObj::Semaphore {
+                        count: initial,
+                        max,
+                    });
+                    note = format!(
+                        "semaphore \"{nm}\" {initial}/{max}{}",
+                        if existed { " (already exists)" } else { "" }
+                    );
+                    h
+                }
+                ReleaseSemaphore => match state.handles.get_mut(&args[0]) {
+                    Some(HandleObj::Semaphore { count, max }) => {
+                        let prev = *count;
+                        let n = args[1] as i32;
+                        *count = (*count + n).min(*max);
+                        if args[2] != 0 {
+                            mem.write_u32(args[2], prev as u32)
+                                .map_err(|e| e.to_string())?;
+                        }
+                        let woken = wake_obj_waiters(sched, args[0], n.max(0) as usize);
+                        note = format!("count {prev} -> {}, woke {woken}", *count);
+                        1
+                    }
+                    _ => {
+                        state.last_error = 6;
+                        note = "bad semaphore handle".into();
+                        0
+                    }
+                },
+                CreateEventExA | CreateEventExW | CreateSemaphoreExA | CreateSemaphoreExW
+                | OpenSemaphoreA | OpenSemaphoreW => {
+                    unreachable!("ABI-only exports use the legacy unimplemented policy")
+                }
+            };
         }
-        ("kernel32.dll", "SetEvent") => match state.handles.get_mut(&args[0]) {
-            Some(HandleObj::Event { manual, signaled }) => {
-                let manual = *manual;
-                *signaled = true;
-                let woken = wake_obj_waiters(sched, args[0], if manual { usize::MAX } else { 1 });
-                note = format!("woke {woken} waiter(s)");
-                ret = 1;
-            }
-            _ => {
-                state.last_error = 6;
-                ret = 0;
-                note = "bad event handle".into();
-            }
-        },
-        ("kernel32.dll", "ResetEvent") => match state.handles.get_mut(&args[0]) {
-            Some(HandleObj::Event { signaled, .. }) => {
-                *signaled = false;
-                ret = 1;
-            }
-            _ => {
-                state.last_error = 6;
-                ret = 0;
-            }
-        },
-        ("kernel32.dll", "PulseEvent") => match state.handles.get_mut(&args[0]) {
-            Some(HandleObj::Event { manual, signaled }) => {
-                let manual = *manual;
-                *signaled = false;
-                let woken = wake_obj_waiters(sched, args[0], if manual { usize::MAX } else { 1 });
-                note = format!("woke {woken} waiter(s)");
-                ret = 1;
-            }
-            _ => {
-                state.last_error = 6;
-                ret = 0;
-            }
-        },
         // --- mutexes ---
         ("kernel32.dll", "CreateMutexA") | ("kernel32.dll", "CreateMutexW") => {
             let wide = name.ends_with('W');
@@ -2102,40 +2139,6 @@ pub fn dispatch(
                 }
             }
         }
-        // --- semaphores ---
-        ("kernel32.dll", "CreateSemaphoreW") | ("kernel32.dll", "CreateSemaphoreA") => {
-            let wide = name.ends_with('W');
-            let nm = read_str(mem, args[3], wide);
-            let (initial, max) = (args[1] as i32, args[2] as i32);
-            let (h, existed) = state.create_named(&nm, || HandleObj::Semaphore {
-                count: initial,
-                max,
-            });
-            note = format!(
-                "semaphore \"{nm}\" {initial}/{max}{}",
-                if existed { " (already exists)" } else { "" }
-            );
-            ret = h;
-        }
-        ("kernel32.dll", "ReleaseSemaphore") => match state.handles.get_mut(&args[0]) {
-            Some(HandleObj::Semaphore { count, max }) => {
-                let prev = *count;
-                let n = args[1] as i32;
-                *count = (*count + n).min(*max);
-                if args[2] != 0 {
-                    mem.write_u32(args[2], prev as u32)
-                        .map_err(|e| e.to_string())?;
-                }
-                let woken = wake_obj_waiters(sched, args[0], n.max(0) as usize);
-                note = format!("count {prev} -> {}, woke {woken}", *count);
-                ret = 1;
-            }
-            _ => {
-                state.last_error = 6;
-                ret = 0;
-                note = "bad semaphore handle".into();
-            }
-        },
         // --- waits ---
         ("kernel32.dll", "WaitForSingleObject" | "WaitForSingleObjectEx") => {
             let (h, timeout) = (args[0], args[1]);
