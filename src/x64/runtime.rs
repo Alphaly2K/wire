@@ -477,10 +477,6 @@ fn import_arity(name: &str) -> Option<usize> {
         "VirtualAlloc" | "VirtualProtect" | "VirtualFreeEx" | "VirtualQueryEx" => 4,
         "VirtualAllocEx" | "VirtualProtectEx" => 5,
         "VirtualFree" | "VirtualQuery" => 3,
-        "WaitForMultipleObjects" => 4,
-        "WaitForMultipleObjectsEx" => 5,
-        "WaitForSingleObjectEx" => 3,
-        "WaitForSingleObject" => 2,
         "CreatePipe" => 4,
         "InitializeProcThreadAttributeList" => 4,
         "UpdateProcThreadAttribute" => 7,
@@ -578,11 +574,7 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "UpdateProcThreadAttribute" => &[1],
         "CreateProcessW" => &[4, 5],
         "CreatePipe" => &[3],
-        "WaitForSingleObject" => &[1],
-        "WaitForSingleObjectEx" => &[1, 2],
         "SleepEx" => &[0, 1],
-        "WaitForMultipleObjects" => &[0, 2, 3],
-        "WaitForMultipleObjectsEx" => &[0, 2, 3, 4],
         "VirtualAlloc" => &[2, 3],
         "VirtualProtect" | "VirtualFree" => &[2],
         "VirtualAllocEx" => &[3, 4],
@@ -1006,6 +998,7 @@ impl Runtime64 {
             ApiId::Handle(_) => unreachable!("handle calls are handled by the bound gateway"),
             ApiId::Path(_) => unreachable!("path helpers have no Win64 binding"),
             ApiId::Mutex(_) => unreachable!("mutexes have no Win64 binding"),
+            ApiId::Wait(_) => unreachable!("waits use the bound process control route"),
             ApiId::Guid(id) => crate::win32::x64::guid::call(mem, id, args),
             ApiId::Identity(id) => {
                 crate::win32::x64::identity::call(mem, id, args, &self.profile, self.teb() + 0x68)
@@ -3202,12 +3195,14 @@ impl Runtime64 {
                 }
             }
             _ if binding.groups & (1 << 15) != 0 => self.timer_call(mem, name, args)?,
-            "WaitForSingleObject"
-            | "WaitForSingleObjectEx"
-            | "WaitForMultipleObjects"
-            | "WaitForMultipleObjectsEx"
-            | "WSAWaitForMultipleEvents" => {
-                let winsock = name == "WSAWaitForMultipleEvents";
+            _ if matches!(binding.control, gateways::ControlImport::Wait(_))
+                || name == "WSAWaitForMultipleEvents" =>
+            {
+                let wait = match binding.control {
+                    gateways::ControlImport::Wait(id) => Some(id),
+                    _ => None,
+                };
+                let winsock = wait.is_none();
                 if winsock && self.winsock_refs == 0 {
                     self.set_error(mem, 10093)?;
                     returned.regs[0] = u32::MAX as u64;
@@ -3216,7 +3211,8 @@ impl Runtime64 {
                     self.record(dll, name, args, u32::MAX as u64);
                     return Ok(Control::Returned);
                 }
-                let multiple = winsock || name.starts_with("WaitForMultiple");
+                let multiple =
+                    winsock || wait.is_some_and(crate::win32::catalog::WaitApi::multiple);
                 let (handles, all, timeout) = if multiple {
                     if args[0] == 0 || args[0] > 64 {
                         self.set_error(mem, if winsock { 10022 } else { 87 })?;
@@ -3237,8 +3233,9 @@ impl Runtime64 {
                 } else {
                     (vec![args[0]], false, args[1])
                 };
-                let alertable =
-                    (winsock || name.ends_with("Ex")) && args[if multiple { 4 } else { 2 }] != 0;
+                let alertable = (winsock
+                    || wait.is_some_and(crate::win32::catalog::WaitApi::alertable))
+                    && args[if multiple { 4 } else { 2 }] != 0;
                 if alertable && self.wait_objects(&handles, all, false).is_ok() {
                     if let Some(control) =
                         self.deliver_apcs(mem, dll, name, args, &returned, cpu)?

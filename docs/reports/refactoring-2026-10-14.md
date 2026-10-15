@@ -202,3 +202,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 七项接口接入 MutexApi，删除 PE32 重复 ABI 与名称 handler；三项 typed、四项 ABI-only，Win64 全部 absent。实际 guest 线程的旧行为基线覆盖递归所有权、同名 create、逐层释放、error 288 和 release 在返回槽 fault 前提交。完整 release 454、debug 302、native 7、工具 19 项及 fmt/strict Clippy 通过。
 
 33 条性能路径全部结果校验；最大回退 +1.712%，mutex IR/raw +0.714%/+0.681%，RSS 最多 +64KiB。Alice 200M 三对保持预算出口、隐藏窗口和零 Draw/Present，CPU +2.204%、wall +2.873%。236 个冻结 Rust 文件核对一致；下一组 Wait 草稿未混入验收。独立发现的 event fixture 重复导入保留原数据，后续单独修正。完整接受决定见 [Mutex 验收](refactoring-mutexes-2026-10-16.md)。
+
+## R2 WaitFor* 进程控制
+
+四项接口接入 WaitApi，删除重复 ABI/arity/DWORD 与名称路由。Win64 冷绑定 ControlImport 保留原 saved return frame、APC、deadline、block/unblock 和 trace/counter 顺序，PE32 保留空数组/count clamp、SingleEx ignored alertable 及 MultipleEx ABI-only。三项独立旧行为基线与三种实际 guest APC 等待路径先通过，完整 release 457、debug 305、native 7、工具 20 项及 fmt/strict Clippy 通过。
+
+36 条性能路径全部校验；local/raw 初筛 +5.031% 经 150M 三标签轮换为 +0.376%，同哈希 control/before +0.764%，离散首轮全部保留。其它最大回退 +2.662%，RSS 最多 +112KiB；Wait 网关 Win64 −2.072%，PE32 IR/raw −1.941%/−0.219%。Alice 200M 三对保持预算出口、隐藏窗口和零 Draw/Present，CPU −0.631%。245 个 manifest Rust 文件（src/tests 237 个）核对一致，后续 Delay 基线未混入候选。完整接受决定见 [WaitFor* 验收](refactoring-waits-2026-10-16.md)。

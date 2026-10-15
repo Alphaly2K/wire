@@ -1,15 +1,15 @@
 # 当前状态
 
-更新日期：2026-10-16。重构前基线为 `2e78377`；最新已验收运行时为 [Mutex 契约](reports/refactoring-mutexes-2026-10-16.md)，该报告记录冻结源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
+更新日期：2026-10-16。重构前基线为 `2e78377`；最新已验收运行时为 [WaitFor* 契约](reports/refactoring-waits-2026-10-16.md)，该报告记录冻结源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
 
-七项 Mutex 契约已交付，PE32 递归所有权、逐层释放、错误和 wake/frame 顺序保持，Win64 仍 absent。下一组 WaitFor* 的阻塞、APC 与故障边界基线正在准备。Mono 原生化已撤回，本轮继续排除。
+四项 WaitFor* 契约已交付，Win64 冷绑定进程控制请求，原阻塞、APC、故障及架构差异保持。下一组 Sleep/SleepEx/线程让出的旧行为基线正在验证。Mono 原生化已撤回，本轮继续排除。
 
 ## 重构范围
 
 | 阶段 | 已交付 | 剩余范围 |
 | --- | --- | --- |
 | R0/R1 | 冻结输入、原创正式 fixture、领域测试 harness、GUID 唯一契约和双架构适配 | 随后续家族维护独立基线 |
-| R2 | 已验收 212 个 export 的契约；明细见下表 | 其余内存、同步、USER、COM、图形等 legacy 家族 |
+| R2 | 已验收 216 个 export 的契约；明细见下表 | 其余内存、同步、USER、COM、图形等 legacy 家族 |
 | R3 | guest environment、双架构模块状态、Win64 文件状态、PE32 TLS/FLS 私有 owner | PE32 其余资源、线程/COM 等；PE32 kernel 大范围抽取曾因性能撤回 |
 | R4/R5 | Process32 编排边界、owned host UI 请求、GDI 与像素状态分离 | 领域分发与资源 owner 随 R2/R3 继续收敛 |
 | R6 | 按用户要求忽略 | 不重建原生 Mono 路径 |
@@ -30,6 +30,7 @@
 | TLS / FLS | 8 | [local-slot 边界](architecture/locals.md)及[验收](reports/refactoring-locals-2026-10-16.md) |
 | event / semaphore | 16 | [同步对象边界](architecture/sync-objects.md)及[验收](reports/refactoring-sync-objects-2026-10-16.md) |
 | mutex | 7 | [所有权与释放边界](architecture/mutexes.md)及[验收](reports/refactoring-mutexes-2026-10-16.md) |
+| WaitFor* | 4 | [进程控制与等待边界](architecture/waits.md)及[验收](reports/refactoring-waits-2026-10-16.md) |
 
 ## 当前执行路径与能力
 
@@ -46,9 +47,9 @@
 
 ## 验证与性能
 
-最近已验收的 Mutex 批次：release **454 passed / 7 ignored**，debug Win32/AMD64/FPU **302 passed**，显式 native **7 passed**，工具 **19 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。
+最近已验收的 WaitFor* 批次：release **457 passed / 7 ignored**，debug Win32/AMD64/FPU **305 passed**，显式 native **7 passed**，工具 **20 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。
 
-Mutex 的 33 条性能路径全部结果校验，CPU 中位数最大回退 +1.712%，RSS 中位数最多增加 64KiB；mutex IR/raw 为 +0.714%/+0.681%，游戏前缀 CPU +2.204%、wall +2.873%。各批次使用自己的基线，历史局部成本与离散轮次继续保留在对应报告，未将结构调整解释为游戏 FPS 提升。随后独立修正 AMD64 event fixture 的重复导入，20 项工具测试及前后运行时 smoke 通过；旧验收保持冻结输入，后续按新哈希独立测量，详见[工具边界](architecture/validation-tools.md)。
+WaitFor* 的 36 条性能路径全部结果校验；local/raw 初筛 +5.031% 经 150M 三标签扩样后为 +0.376%，同哈希 control/before +0.764%，其它最大回退 +2.662%，RSS 中位数最多增加 112KiB。Wait 网关 Win64 −2.072%、PE32 IR/raw −1.941%/−0.219%，游戏前缀 CPU −0.631%。各批次使用自己的基线，历史局部成本与离散轮次继续保留在对应报告，未将结构调整解释为游戏 FPS 提升。AMD64 event fixture 的重复导入已独立修正；旧验收保持冻结输入，本批按新哈希配对，详见[工具边界](architecture/validation-tools.md)。
 
 后续正式比较使用显式 [稳定启动协议](reports/refactoring-launch-protocol-2026-10-16.md)，固定 argv0、参数和 child cwd，并记录 shell SHA。默认工具行为保持；旧协议数据独立保留，汇总不跨协议或不同 work 合并。编译、正式计时、采样与 runtime diagnostics 串行执行。每个结构候选先完成正确性，再按至少三对轮换检查结果、CPU/wall/RSS 与输入哈希；超过门槛先调查，不把失败候选扩大到其它领域。
 

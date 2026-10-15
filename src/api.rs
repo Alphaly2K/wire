@@ -665,9 +665,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("FreeResource", 4),
                 ("FormatMessageA", 28),
                 ("FormatMessageW", 28),
-                ("WaitForSingleObject", 8),
-                ("WaitForSingleObjectEx", 12),
-                ("WaitForMultipleObjects", 16),
                 ("SleepEx", 8),
                 ("GetExitCodeThread", 8),
                 ("TerminateThread", 8),
@@ -2144,7 +2141,13 @@ pub fn dispatch(
             };
         }
         // --- waits ---
-        ("kernel32.dll", "WaitForSingleObject" | "WaitForSingleObjectEx") => {
+        _ if matches!(
+            binding.typed,
+            Some(crate::win32::catalog::ApiId::Wait(
+                crate::win32::catalog::WaitApi::Single | crate::win32::catalog::WaitApi::SingleEx
+            ))
+        ) =>
+        {
             let (h, timeout) = (args[0], args[1]);
             match sched.take_wake() {
                 Some(Wake::Completed(r)) => {
@@ -2180,7 +2183,11 @@ pub fn dispatch(
                 }
             }
         }
-        ("kernel32.dll", "WaitForMultipleObjects") => {
+        _ if binding.typed
+            == Some(crate::win32::catalog::ApiId::Wait(
+                crate::win32::catalog::WaitApi::Multiple,
+            )) =>
+        {
             let (n, ptr, wait_all, timeout) = (args[0], args[1], args[2] != 0, args[3]);
             let mut hs = Vec::new();
             for i in 0..n.min(64) {

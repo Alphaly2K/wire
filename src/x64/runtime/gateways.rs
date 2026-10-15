@@ -25,6 +25,7 @@ pub(crate) enum ControlImport {
     None,
     LocaleEnumeration,
     Module(crate::win32::catalog::ModuleApi),
+    Wait(crate::win32::catalog::WaitApi),
 }
 pub(crate) struct BoundImport {
     pub export: Arc<str>,
@@ -107,6 +108,7 @@ impl BoundImport {
                     crate::win32::catalog::NlsApi::EnumSystemLocalesEx,
                 ) => None,
                 crate::win32::catalog::ApiId::Module(id) if id.control() => None,
+                crate::win32::catalog::ApiId::Wait(_) => None,
                 _ => Some(c.id),
             }),
             control: match contract.map(|c| c.id) {
@@ -116,6 +118,7 @@ impl BoundImport {
                 Some(crate::win32::catalog::ApiId::Module(id)) if id.control() => {
                     ControlImport::Module(id)
                 }
+                Some(crate::win32::catalog::ApiId::Wait(id)) => ControlImport::Wait(id),
                 _ => ControlImport::None,
             },
             valid,

@@ -14,6 +14,7 @@ mod nls;
 mod paths;
 mod sync_objects;
 mod version;
+mod waits;
 pub use clocks::{ClockApi, CLOCK_CONTRACTS};
 pub use context::{ContextApi, CONTEXT_CONTRACTS};
 pub use files::{FileApi, FILE_CONTRACTS};
@@ -28,6 +29,7 @@ pub use nls::{NlsApi, NLS_CONTRACTS};
 pub use paths::{PathApi, PATH_CONTRACTS};
 pub use sync_objects::{SyncObjectApi, SYNC_OBJECT_CONTRACTS};
 pub use version::{VersionApi, VERSION_CONTRACTS};
+pub use waits::{WaitApi, WAIT_CONTRACTS};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Architecture {
@@ -76,6 +78,7 @@ pub enum ApiId {
     Local(LocalApi),
     SyncObject(SyncObjectApi),
     Mutex(MutexApi),
+    Wait(WaitApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -228,6 +231,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(LOCAL_CONTRACTS.iter())
         .chain(SYNC_OBJECT_CONTRACTS.iter())
         .chain(MUTEX_CONTRACTS.iter())
+        .chain(WAIT_CONTRACTS.iter())
 }
 
 #[cfg(test)]
