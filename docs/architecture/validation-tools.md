@@ -24,3 +24,11 @@ PE32、AMD64 和 V2 的公开脚本入口保持不变，正式 fixture 位于 `t
 2026-10-15：PE32 和 AMD64 测量入口均接受可选 `--qos-clamp utility|background|maintenance`，通过 macOS taskpolicy 对每个被测 child 施加同样的调度上限；默认不改变 QoS。manifest 明确记录模式与 taskpolicy hash，逐轮 command 保留 wrapper，不把受控调度结果混成默认前台吞吐量。
 
 PE32 headless 整数 fixture 的同二进制 700M 对照曾出现 2.31–7.28s 两档，而 IR/fallback/scalar-run 计数完全相同。开启采样后没有复现慢档；原生 UI 初始化另有显式 USER_INITIATED QoS。因此调查必须保持 headless/UI、采样和调度条件一致，不能沿用 capture 默认 UI 的结果替代 headless 计时，也不能直接认定为代码回退。utility 同二进制三对的差异约 +0.70%/−1.88%/+2.49%，该受控条件可用于后续成对调查；默认条件的失败、离散轮次仍全部保留。
+
+`tools/perf/summarize.py` 汇总上述三个正式入口的 manifest/compare.json，兼容 `binary` 与 `version` 标签。只合并架构、raw/IR、输入及预期 work/retired、QoS、日志/cache 协议和测量源码 hash 一致的样本；不同规模分别出行。每轮保留原 source/pair，输出样本数、min/median/max、成对变化、CPU/RSS 差异和同二进制 control 的漂移；没有跨负载总分，也不自动作接入决定。
+
+工具拒绝重复目录/轮次、不完整 pair、未验证或 timeout 的样本、同标签不同 binary hash 和非 timing 报告；`--out` 必须是新文件，已有证据不会覆盖。它核对记录的哈希与校验标志，原 fixture 仍负责 guest 结果验证，冻结工具仍负责保存源码与 binary。汇总无需启动 guest 或重跑性能测试。
+
+```sh
+python3 -B tools/perf/summarize.py wire-out/batch-a wire-out/batch-b --out wire-out/summary.json
+```
