@@ -9,6 +9,8 @@ use support::{d3d_com, dll_export, test_dll, test_window, Vm, CODE, DATA, RET};
 
 #[path = "win32/audio.rs"]
 mod audio;
+#[path = "win32/clocks.rs"]
+mod clocks;
 #[path = "win32/com.rs"]
 mod com;
 #[path = "win32/crt.rs"]

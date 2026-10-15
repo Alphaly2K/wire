@@ -110,6 +110,9 @@ def nls_conversion_fixture(work):
     return image, dict(eax=(65 + 2 * n) & 0xffffffff, retired=11 * n + 10)
 
 def fixture(name,work):
+    if name=='gateway-clock':
+        from perf.fixtures.clock_gateway import x86
+        return x86(work,pe32)
     if name=='gateway-slist':
         from perf.fixtures.slist_gateway import x86
         return x86(work,pe32)

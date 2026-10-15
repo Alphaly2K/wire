@@ -6,6 +6,8 @@ use wire::x64::{
     memory::{Memory, EXECUTE, READ, WRITE},
     pe::Pe64,
 };
+#[path = "x64/clocks.rs"]
+mod clocks;
 #[path = "x64/com.rs"]
 mod com;
 #[path = "x64/cpu.rs"]
