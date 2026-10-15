@@ -3,6 +3,104 @@
 use super::*;
 
 #[test]
+fn search_contract_baseline_keeps_win64_widths_precedence_and_return_alias() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let root = std::env::temp_dir().join(format!("wire64-search-contract-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("a.bound"), b"a").unwrap();
+    runtime.set_filesystem(wire::fs::GuestFs::new(&root).unwrap());
+    let pattern = STACK + 0x100;
+    let frame = STACK + 0x1000;
+    let high = 0xface0000_00000000;
+    mem.write(pattern, b"C:\\*.bound\0").unwrap();
+    // Invalid flags and invalid handles precede path/output faults.
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "kernelbase.dll",
+            "FindFirstFileExA",
+            &[0xdead0000, high, 0xdead1000, high, 0, high | 4]
+        ),
+        u64::MAX
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        87
+    );
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "kernelbase.dll",
+            "FindNextFileA",
+            &[0xdead0000, 0xdead1000]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        6
+    );
+    startup_call(&mut mem, &mut cpu, &mut runtime, "SetLastError", &[0x55]);
+    // Output covers the return slot and the two stack arguments. All carriers
+    // and the return frame must be captured before the find-data write.
+    cpu.regs[4] = frame;
+    mem.write_int(frame, 8, BASE).unwrap();
+    cpu.regs[1] = pattern;
+    cpu.regs[2] = high | 1;
+    cpu.regs[8] = frame;
+    cpu.regs[9] = high;
+    mem.write_int(frame + 40, 8, 0).unwrap();
+    mem.write_int(frame + 48, 8, high | 2).unwrap();
+    let calls = runtime.api_calls;
+    assert_eq!(
+        runtime
+            .dispatch("kernelbase.dll", "FindFirstFileExA", &mut cpu, &mut mem)
+            .unwrap(),
+        wire::x64::runtime::Control::Returned
+    );
+    let handle = cpu.regs[0];
+    assert!(handle > u32::MAX as u64 && handle != u64::MAX);
+    assert_eq!(cpu.rip, BASE);
+    assert_eq!(cpu.regs[4], frame + 8);
+    assert_eq!(runtime.api_calls, calls + 1);
+    let mut filename = [0; 7];
+    mem.read(frame + 44, &mut filename).unwrap();
+    assert_eq!(&filename, b"a.bound");
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        0x55
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "FindClose", &[handle]),
+        1
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "FindClose", &[handle]),
+        0
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+        6
+    );
+    for name in [
+        "FindFirstFileA",
+        "FindFirstFileW",
+        "FindFirstFileExA",
+        "FindFirstFileExW",
+        "FindNextFileA",
+        "FindNextFileW",
+        "FindClose",
+    ] {
+        assert!(!wire::x64::runtime::import_supported("user32.dll", name));
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn mutation_contract_baseline_keeps_win64_flag_width_and_path_fault_order() {
     let (mut mem, mut cpu, mut runtime) = startup();
     let root =

@@ -3,6 +3,57 @@
 use super::*;
 
 #[test]
+fn search_contract_baseline_keeps_pe32_cleanup_flags_and_handle_type() {
+    let mut v = Vm::new();
+    std::fs::write(v.dir.join("a.bound"), b"a").unwrap();
+    std::fs::write(v.dir.join("b.bound"), b"b").unwrap();
+    let output = DATA + 512;
+    v.mem.write_bytes(output, &[0xa5; 320]).unwrap();
+    // Invalid Ex flags precede path decoding and any output access.
+    assert_eq!(
+        v.k("FindFirstFileExA", &[0x30000, 0, output, 0, 0, 4]),
+        u32::MAX
+    );
+    assert_eq!(v.state.last_error, 87);
+    assert_eq!(v.mem.read_u32(output).unwrap(), 0xa5a5a5a5);
+    assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 28);
+    v.mem.write_bytes(DATA, b"C:\\*.bound\0").unwrap();
+    v.k("SetLastError", &[0x55]);
+    let search = v.k("FindFirstFileExA", &[DATA, 1, output, 0, 0, 2]);
+    assert_ne!(search, u32::MAX);
+    assert_eq!(v.state.last_error, 0x55);
+    assert_eq!(v.mem.read_cstr(output + 44, 260).unwrap(), "a.bound");
+    assert_eq!(v.k("FindNextFileA", &[search, output]), 1);
+    assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 12);
+    assert_eq!(v.mem.read_cstr(output + 44, 260).unwrap(), "b.bound");
+    assert_eq!(v.k("FindClose", &[search]), 1);
+    assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 8);
+    assert_eq!(v.k("FindNextFileA", &[search, 0x30000]), 0);
+    assert_eq!(v.state.last_error, 6);
+
+    v.mem.write_bytes(DATA, b"C:\\a.bound\0").unwrap();
+    let file = v.k("CreateFileA", &[DATA, 0x80000000, 0, 0, 3, 0x80, 0]);
+    assert_ne!(file, u32::MAX);
+    assert_eq!(v.k("FindClose", &[file]), 0);
+    assert_eq!(v.state.last_error, 6);
+    assert_eq!(v.k("ReadFile", &[file, DATA + 128, 1, DATA + 256, 0]), 1);
+    assert_eq!(v.mem.read_u8(DATA + 128).unwrap(), b'a');
+    assert_eq!(v.k("CloseHandle", &[file]), 1);
+    for name in [
+        "FindFirstFileA",
+        "FindFirstFileW",
+        "FindFirstFileExA",
+        "FindFirstFileExW",
+        "FindNextFileA",
+        "FindNextFileW",
+        "FindClose",
+    ] {
+        assert_eq!(v.call("kernelbase.dll", name, &[0x30000; 6]), 0);
+        assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 4);
+    }
+}
+
+#[test]
 fn abi_only_file_binding_rebinds_when_public_entry_changes_execution_policy() {
     let mut v = Vm::new();
     assert_eq!(v.k("GetFileAttributesExA", &[0x30000, 1, DATA]), 0);
