@@ -2,6 +2,8 @@
 
 更新日期：2026-10-15。重构前固定代码基线 `2e78377`；本轮进度见 [重构记录](reports/refactoring-2026-10-14.md)。
 
+最新已提交的运行时代码仍为目录枚举契约 `240e4ac`。其后独立补齐路径/句柄、section、Interlocked/SLIST 的 ABI 与故障基线；最近 `90658e2` 的三项 Interlocked/SLIST 测试在旧 handler 上通过，原创 gateway-slist 的双架构 smoke 也已校验。路径/句柄、网关边界、页槽/helper 布局及 section 首版候选均未合入。release 单编译单元候选完成 429 项正确性、native 7 项与 45 条性能路径后，因顺序轮换的三组 bit 长样本均回退超过 5% 而撤回。当前原构建配置下的 section 复核仍在进行，不计入已接受 API 数量。
+
 R0/R1、R4、R5 已完成：正式 fixture、测试 harness、GUID 唯一契约、PE32 Process32、owned host UI 请求与 GDI/像素状态分离。R2/R3 已迁移 identity、guest environment、version、42 个 NLS/locale、31 个模块和 45 个文件 export，另完成双架构模块及 Win64 文件状态归属；PE32 内核/文件状态及其余家族仍待迁移。R7 已完成当前 PE32 内核目录、领域测试和公共性能工具的整理，后续目录随其余领域迁移继续推进。最新目录枚举契约批次完整 release 为 417 passed / 7 ignored，debug Win32/AMD64/FPU/Unicorn 302 项、fmt 与 strict Clippy 通过；7 项外部图形测试再次显式执行，全部通过。工具12 已在新增 fixture 基线提交验证。
 
 R5 的 29 个解释器 case/path 已做三对 AB/BA，work/retired/checksum 全部校验；扩样后的最大 CPU 中位数回退为 +2.66%。R4 的 memory 成本在 R5 的 700M 复测中已消退：相对 R4 -6.04%，相对最初基线 -2.94%。这是结构调整后的代码生成/布局结果，不推断完整游戏 FPS；调查与全部轮次见 [重构记录](reports/refactoring-2026-10-14.md)。
