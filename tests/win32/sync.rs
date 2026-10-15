@@ -3,6 +3,90 @@
 use super::*;
 
 #[test]
+fn mutexes_keep_recursive_ownership_across_actual_guest_threads() {
+    let mut v = Vm::new();
+    v.mem.write_bytes(DATA, b"wire-mutex\0").unwrap();
+    v.wide(DATA + 128, "wire-mutex");
+    let mutex = v.k("CreateMutexA", &[0, 1, DATA]);
+    assert_eq!(v.k("WaitForSingleObject", &[mutex, 0]), 0);
+    v.k("CreateThread", &[0, 0, CODE, 0, 0, 0]);
+    assert!(v.sched.round_robin(&mut v.cpu));
+    assert_eq!(v.k("ReleaseMutex", &[mutex]), 0);
+    assert_eq!(v.state.last_error, 288);
+    assert_eq!(v.k("WaitForSingleObject", &[mutex, 0]), 258);
+    assert_eq!(v.k("CreateMutexW", &[0, 1, DATA + 128]), mutex);
+    assert_eq!(v.state.last_error, 183);
+    assert_eq!(v.k("WaitForSingleObject", &[mutex, 0]), 258);
+    assert!(v.sched.round_robin(&mut v.cpu));
+    assert_eq!(v.k("ReleaseMutex", &[mutex]), 1);
+    assert!(v.sched.round_robin(&mut v.cpu));
+    assert_eq!(v.k("WaitForSingleObject", &[mutex, 0]), 258);
+    assert!(v.sched.round_robin(&mut v.cpu));
+    assert_eq!(v.k("ReleaseMutex", &[mutex]), 1);
+    assert_eq!(v.k("ReleaseMutex", &[mutex]), 0);
+    assert_eq!(v.state.last_error, 288);
+    assert!(v.sched.round_robin(&mut v.cpu));
+    assert_eq!(v.k("WaitForSingleObject", &[mutex, 0]), 0);
+    assert_eq!(v.k("ReleaseMutex", &[mutex]), 1);
+}
+
+#[test]
+fn mutexes_keep_release_before_return_fault_and_abi_only_exports() {
+    let mut v = Vm::new();
+    let mutex = v.k("CreateMutexW", &[0, 1, 0]);
+    v.k("CreateThread", &[0, 0, CODE, 0, 0, 0]);
+    let address = v.api.register("kernel32.dll", Some("ReleaseMutex"), None);
+    let index = v.api.stub_index(address).unwrap();
+    let sp = DATA + 4092;
+    v.mem.write_u32(sp + 4, mutex).unwrap();
+    v.mem
+        .virtual_protect(DATA, 4096, wire::mem::PAGE_NOACCESS)
+        .unwrap();
+    v.cpu.set_esp(sp);
+    v.cpu.eip = address;
+    assert!(api::dispatch(
+        index,
+        &mut v.cpu,
+        &mut v.mem,
+        &mut v.api,
+        &mut v.state,
+        &mut v.log,
+        &mut v.sched,
+        1_000_000,
+    )
+    .is_err());
+    assert_eq!(v.cpu.regs[0], 1);
+    assert_eq!(v.cpu.esp(), sp);
+    assert_eq!(v.cpu.eip, address);
+    assert!(v.sched.round_robin(&mut v.cpu));
+    assert_eq!(v.k("WaitForSingleObject", &[mutex, 0]), 0);
+    for (name, bytes) in [
+        ("CreateMutexExA", 16),
+        ("CreateMutexExW", 16),
+        ("OpenMutexA", 12),
+        ("OpenMutexW", 12),
+    ] {
+        assert!(api::native_export("kernel32.dll", name));
+        assert_eq!(v.k(name, &[0, 0, 0, 0]), 0, "{name}");
+        assert_eq!(v.state.last_error, 120, "{name}");
+        assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 4 + bytes);
+    }
+    for name in [
+        "CreateMutexA",
+        "CreateMutexW",
+        "CreateMutexExA",
+        "CreateMutexExW",
+        "OpenMutexA",
+        "OpenMutexW",
+        "ReleaseMutex",
+    ] {
+        for dll in ["kernel32.dll", "kernelbase.dll"] {
+            assert!(!wire::x64::runtime::import_supported(dll, name));
+        }
+    }
+}
+
+#[test]
 fn sync_objects_keep_pe32_semaphore_clamping_and_commit_before_output_fault() {
     let mut v = Vm::new();
     v.k("SetLastError", &[0x55]);
