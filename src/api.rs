@@ -619,10 +619,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("DeleteCriticalSection", 4),
                 ("InitializeCriticalSectionAndSpinCount", 8),
                 ("TryEnterCriticalSection", 4),
-                ("TlsAlloc", 0),
-                ("TlsGetValue", 4),
-                ("TlsSetValue", 8),
-                ("TlsFree", 4),
                 ("VirtualAlloc", 16),
                 ("VirtualFree", 12),
                 ("VirtualProtect", 16),
@@ -708,10 +704,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GlobalMemoryStatusEx", 4),
                 ("EncodePointer", 4),
                 ("DecodePointer", 4),
-                ("FlsAlloc", 4),
-                ("FlsGetValue", 4),
-                ("FlsSetValue", 8),
-                ("FlsFree", 4),
                 ("IsWow64Process", 8),
                 ("GetLogicalProcessorInformation", 8),
                 ("RaiseException", 16),
@@ -1662,6 +1654,55 @@ pub fn dispatch(
                 ContextApi::SetLastError => {
                     state.last_error = args[0];
                     0
+                }
+            };
+        }
+        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Local(_))) => {
+            let Some(crate::win32::catalog::ApiId::Local(id)) = binding.typed else {
+                unreachable!();
+            };
+            use crate::win32::catalog::LocalApi::*;
+            ret = match id {
+                TlsAlloc => {
+                    let value = state.next_tls;
+                    state.next_tls += 1;
+                    value
+                }
+                TlsSet => {
+                    state.tls.insert((sched.current_tid(), args[0]), args[1]);
+                    1
+                }
+                TlsGet => {
+                    let value = state
+                        .tls
+                        .get(&(sched.current_tid(), args[0]))
+                        .copied()
+                        .unwrap_or(0);
+                    state.last_error = 0;
+                    value
+                }
+                TlsFree => {
+                    state.tls.retain(|&(_, slot), _| slot != args[0]);
+                    1
+                }
+                FlsAlloc => {
+                    let value = state.next_fls;
+                    state.next_fls += 1;
+                    note = "callback not invoked".into();
+                    value
+                }
+                FlsSet => {
+                    state.fls.insert((sched.current_tid(), args[0]), args[1]);
+                    1
+                }
+                FlsGet => state
+                    .fls
+                    .get(&(sched.current_tid(), args[0]))
+                    .copied()
+                    .unwrap_or(0),
+                FlsFree => {
+                    state.fls.retain(|&(_, slot), _| slot != args[0]);
+                    1
                 }
             };
         }
@@ -2640,47 +2681,6 @@ pub fn dispatch(
             mem.write_u32(cs + 4, u32::MAX).map_err(|e| e.to_string())?;
             mem.write_u32(cs + 12, 0).map_err(|e| e.to_string())?;
             ret = 0; // void
-        }
-        // --- TLS / FLS ---
-        ("kernel32.dll", "TlsAlloc") => {
-            ret = state.next_tls;
-            state.next_tls += 1;
-        }
-        ("kernel32.dll", "TlsSetValue") => {
-            state.tls.insert((sched.current_tid(), args[0]), args[1]);
-            ret = 1;
-        }
-        ("kernel32.dll", "TlsGetValue") => {
-            ret = state
-                .tls
-                .get(&(sched.current_tid(), args[0]))
-                .copied()
-                .unwrap_or(0);
-            state.last_error = 0;
-        }
-        ("kernel32.dll", "TlsFree") => {
-            state.tls.retain(|&(_, slot), _| slot != args[0]);
-            ret = 1;
-        }
-        ("kernel32.dll", "FlsAlloc") => {
-            ret = state.next_fls;
-            state.next_fls += 1;
-            note = "callback not invoked".into();
-        }
-        ("kernel32.dll", "FlsSetValue") => {
-            state.fls.insert((sched.current_tid(), args[0]), args[1]);
-            ret = 1;
-        }
-        ("kernel32.dll", "FlsGetValue") => {
-            ret = state
-                .fls
-                .get(&(sched.current_tid(), args[0]))
-                .copied()
-                .unwrap_or(0)
-        }
-        ("kernel32.dll", "FlsFree") => {
-            state.fls.retain(|&(_, slot), _| slot != args[0]);
-            ret = 1;
         }
         ("kernel32.dll", "GetCurrentPackageId") => {
             ret = 0x3d54; // APPMODEL_ERROR_NO_PACKAGE (desktop app)

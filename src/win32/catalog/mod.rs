@@ -7,6 +7,7 @@ mod guid;
 mod handles;
 mod identity;
 mod interlocked;
+mod locals;
 mod modules;
 mod nls;
 mod paths;
@@ -18,6 +19,7 @@ pub use guid::{GuidApi, GUID_CONTRACTS};
 pub use handles::{HandleApi, HANDLE_CONTRACTS};
 pub use identity::{IdentityApi, IDENTITY_CONTRACTS};
 pub use interlocked::{InterlockedApi, INTERLOCKED_CONTRACTS};
+pub use locals::{LocalApi, LOCAL_CONTRACTS};
 pub use modules::{ModuleApi, ModuleQueryApi, MODULE_CONTRACTS, MODULE_QUERY_CONTRACTS};
 pub use nls::{NlsApi, NLS_CONTRACTS};
 pub use paths::{PathApi, PATH_CONTRACTS};
@@ -67,6 +69,7 @@ pub enum ApiId {
     Path(PathApi),
     Clock(ClockApi),
     Context(ContextApi),
+    Local(LocalApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -216,6 +219,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(PATH_CONTRACTS.iter())
         .chain(CLOCK_CONTRACTS.iter())
         .chain(CONTEXT_CONTRACTS.iter())
+        .chain(LOCAL_CONTRACTS.iter())
 }
 
 #[cfg(test)]

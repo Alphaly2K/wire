@@ -172,10 +172,7 @@ impl Runtime64 {
                         || (provider == "winmm.dll"
                             && matches!(
                                 function.as_str(),
-                                "timeGetTime"
-                                    | "timeBeginPeriod"
-                                    | "timeEndPeriod"
-                                    | "timeGetDevCaps"
+                                "timeBeginPeriod" | "timeEndPeriod" | "timeGetDevCaps"
                             ))
                         || (provider == "user32.dll" && display::arity(&function).is_some())
                         || (provider == "user32.dll" && user::arity(&function).is_some())
@@ -200,10 +197,6 @@ impl Runtime64 {
                                     | "WakeByAddressSingle"
                                     | "WakeByAddressAll"
                                     | "AreFileApisANSI"
-                                    | "FlsAlloc"
-                                    | "FlsGetValue"
-                                    | "FlsSetValue"
-                                    | "FlsFree"
                                     | "InitializeCriticalSectionEx"
                             ))
                         || self.gateways.values().any(|export| {

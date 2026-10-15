@@ -22,6 +22,7 @@ mod find;
 mod gateways;
 mod guid;
 mod heap;
+mod locals;
 mod mapping;
 mod modules;
 mod pipes;
@@ -453,8 +454,7 @@ fn import_arity(name: &str) -> Option<usize> {
         "RoInitialize" | "CoInitialize" => 1,
         "CoInitializeEx" => 2,
         "RoUninitialize" | "CoUninitialize" => 0,
-        "GetCommandLineA" | "GetCommandLineW" | "TlsAlloc" | "GetProcessHeap"
-        | "AreFileApisANSI" => 0,
+        "GetCommandLineA" | "GetCommandLineW" | "GetProcessHeap" | "AreFileApisANSI" => 0,
         "GetErrorMode" => 0,
         "SetErrorMode" => 1,
         "GetThreadErrorMode" => 0,
@@ -493,8 +493,8 @@ fn import_arity(name: &str) -> Option<usize> {
         "UpdateProcThreadAttribute" => 7,
         "DeleteProcThreadAttributeList" => 1,
         "CreateProcessW" => 10,
-        "FlsAlloc" | "FlsGetValue" | "FlsFree" | "FreeEnvironmentStringsW" => 1,
-        "FlsSetValue" | "GetConsoleMode" | "GetTempPathW" | "GetTempPath2W" => 2,
+        "FreeEnvironmentStringsW" => 1,
+        "GetConsoleMode" | "GetTempPathW" | "GetTempPath2W" => 2,
         "GetSystemTimes" => 3,
         "GetSystemTimePreciseAsFileTime"
         | "GetSystemTime"
@@ -504,8 +504,6 @@ fn import_arity(name: &str) -> Option<usize> {
         | "GetStartupInfoW"
         | "GetStartupInfoA"
         | "IsProcessorFeaturePresent"
-        | "TlsGetValue"
-        | "TlsFree"
         | "EncodePointer"
         | "DecodePointer"
         | "SetUnhandledExceptionFilter"
@@ -513,7 +511,7 @@ fn import_arity(name: &str) -> Option<usize> {
         | "EnterCriticalSection"
         | "LeaveCriticalSection"
         | "DeleteCriticalSection" => 1,
-        "TlsSetValue" | "InitializeCriticalSectionAndSpinCount" => 2,
+        "InitializeCriticalSectionAndSpinCount" => 2,
         "HeapAlloc" | "HeapFree" | "HeapSize" | "InitializeCriticalSectionEx" => 3,
         "HeapReAlloc" => 4,
         "WriteConsoleW" => 5,
@@ -603,16 +601,7 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "VirtualProtect" | "VirtualFree" => &[2],
         "VirtualAllocEx" => &[3, 4],
         "VirtualProtectEx" | "VirtualFreeEx" => &[3],
-        "GetTempPathW"
-        | "GetTempPath2W"
-        | "IsProcessorFeaturePresent"
-        | "TlsGetValue"
-        | "TlsSetValue"
-        | "TlsFree"
-        | "FlsGetValue"
-        | "FlsSetValue"
-        | "FlsFree"
-        | "ExitProcess" => &[0],
+        "GetTempPathW" | "GetTempPath2W" | "IsProcessorFeaturePresent" | "ExitProcess" => &[0],
         "HeapAlloc"
         | "HeapFree"
         | "HeapSize"
@@ -1044,6 +1033,7 @@ impl Runtime64 {
             ApiId::ModuleQuery(id) => self.module_query(mem, id, args),
             ApiId::Interlocked(id) => crate::win32::x64::interlocked::call(mem, id, args),
             ApiId::Clock(id) => crate::win32::x64::clocks::call(id, args, mem, &self.start),
+            ApiId::Local(id) => self.local_call(id, args, mem),
             ApiId::Context(id) => {
                 use crate::win32::catalog::ContextApi;
                 Ok(match id {
@@ -4066,86 +4056,6 @@ impl Runtime64 {
                 let previous = self.exception_filter;
                 self.exception_filter = args[0];
                 previous
-            }
-            "TlsAlloc" => {
-                if let Some(index) = self.tls.iter().position(Option::is_none) {
-                    for t in self.threads.entries.values().filter(|t| t.exit.is_none()) {
-                        mem.check(t.teb + 0x1480 + index as u64 * 8, 8, WRITE)?;
-                    }
-                    for t in self.threads.entries.values().filter(|t| t.exit.is_none()) {
-                        mem.write_int(t.teb + 0x1480 + index as u64 * 8, 8, 0)?;
-                    }
-                    self.tls[index] = Some(0);
-                    index as u64
-                } else {
-                    self.set_error(mem, 8)?;
-                    u32::MAX as u64
-                }
-            }
-            "FlsAlloc" => {
-                if let Some(index) = self.fls.iter().position(Option::is_none) {
-                    for t in self.threads.entries.values().filter(|t| t.exit.is_none()) {
-                        mem.check(t.teb + PAGE + index as u64 * 8, 8, WRITE)?;
-                    }
-                    for t in self.threads.entries.values().filter(|t| t.exit.is_none()) {
-                        mem.write_int(t.teb + PAGE + index as u64 * 8, 8, 0)?;
-                    }
-                    self.fls[index] = Some((0, args[0]));
-                    index as u64
-                } else {
-                    self.set_error(mem, 8)?;
-                    u32::MAX as u64
-                }
-            }
-            "FlsGetValue" | "FlsSetValue" | "FlsFree" => {
-                let index = args[0] as u32 as usize;
-                if index >= self.fls.len() || self.fls[index].is_none() {
-                    self.set_error(mem, 87)?;
-                    0
-                } else {
-                    let value = mem.read_int(self.teb() + PAGE + index as u64 * 8, 8)?;
-                    let (_, callback) = self.fls[index].unwrap();
-                    match name {
-                        "FlsGetValue" => {
-                            self.set_error(mem, 0)?;
-                            value
-                        }
-                        "FlsSetValue" => {
-                            mem.write_int(self.teb() + PAGE + index as u64 * 8, 8, args[1])?;
-                            1
-                        }
-                        _ => {
-                            if callback != 0 {
-                                for t in self.threads.entries.values().filter(|t| t.exit.is_none())
-                                {
-                                    if mem.read_int(t.teb + PAGE + index as u64 * 8, 8)? != 0 {
-                                        return Err(
-                                            "Win64 FlsFree callbacks not implemented".into()
-                                        );
-                                    }
-                                }
-                            }
-                            self.fls[index] = None;
-                            1
-                        }
-                    }
-                }
-            }
-            "TlsGetValue" | "TlsSetValue" | "TlsFree" => {
-                let index = args[0] as u32 as usize;
-                if index >= self.tls.len() || self.tls[index].is_none() {
-                    self.set_error(mem, 87)?;
-                    0
-                } else if name == "TlsGetValue" {
-                    let value = mem.read_int(self.teb() + 0x1480 + index as u64 * 8, 8)?;
-                    self.set_error(mem, 0)?;
-                    value
-                } else {
-                    let value = if name == "TlsFree" { 0 } else { args[1] };
-                    mem.write_int(self.teb() + 0x1480 + index as u64 * 8, 8, value)?;
-                    self.tls[index] = if name == "TlsFree" { None } else { Some(value) };
-                    1
-                }
             }
             "InitializeCriticalSection"
             | "InitializeCriticalSectionAndSpinCount"

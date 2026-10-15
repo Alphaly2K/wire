@@ -52,7 +52,7 @@ impl BoundImport {
     }
     fn build(dll: &str, original: &str, export: &str, valid: bool) -> Self {
         use crate::win32::catalog::{
-            resolve, ApiId, Architecture, ClockApi, ContextApi, Resolution,
+            resolve, ApiId, Architecture, ClockApi, ContextApi, LocalApi, Resolution,
         };
         let name = super::normalize_symbol(dll, original);
         let contract = match resolve(Architecture::X64, dll, name) {
@@ -76,12 +76,13 @@ impl BoundImport {
                 ContextApi::SetLastError => HotImport::ErrorSet,
                 ContextApi::DebuggerPresent => HotImport::General,
             },
-            _ => match name {
-                "TlsGetValue" => HotImport::TlsGet,
-                "TlsSetValue" => HotImport::TlsSet,
-                "TlsFree" => HotImport::TlsFree,
+            Some(ApiId::Local(id)) => match id {
+                LocalApi::TlsGet => HotImport::TlsGet,
+                LocalApi::TlsSet => HotImport::TlsSet,
+                LocalApi::TlsFree => HotImport::TlsFree,
                 _ => HotImport::General,
             },
+            _ => HotImport::General,
         };
         Self {
             export: export.into(),
