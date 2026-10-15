@@ -12,6 +12,8 @@ mod com;
 mod cpu;
 #[path = "x64/files.rs"]
 mod files;
+#[path = "x64/handles.rs"]
+mod handles;
 #[path = "x64/kernel.rs"]
 mod kernel;
 #[path = "x64/memory.rs"]

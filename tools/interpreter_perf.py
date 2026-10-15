@@ -219,6 +219,10 @@ def main():
         from perf.fixtures.metadata_gateway import x64
         data, meta = x64(args.work)
         entries.append(('gateway-metadata', data, meta))
+    if args.cases and 'gateway-std-handle' in args.cases:
+        from perf.fixtures.handle_gateway import x64
+        data, meta = x64(args.work)
+        entries.append(('gateway-std-handle', data, meta))
     if args.cases and 'gateway-search' in args.cases:
         from perf.fixtures.search_gateway import x64
         data, meta = x64(args.work)
