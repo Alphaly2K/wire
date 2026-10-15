@@ -17,3 +17,5 @@
 这是独立、显式的测量协议，默认行为保持。测量包含 shell 启动开销，所有对照同样包含。manifest 保存 launch 模式和 shell SHA；汇总工具保留该字段并拒绝跨模式合并。原始离散与失败证据不删除，也不借此宣称运行时或整数算法提速。
 
 工具 **19 项通过**，新增回归验证实际 argv0、带空格/引号/命令替换文字的原样传参、child cwd 与 parent/report 隔离，以及汇总不混合不同 launch/shell。双架构 12K smoke **40 条路径**通过：PE32 12 个 case 的 raw/IR、Win64 12 个 case、V2 四个 case；其中真实文件类型查询与路径网关覆盖 cwd 调整。没有复制游戏，也没有修改 fixture 字节、预期 retired/work 或默认 case 集合。
+
+正式入口的 700M integer/IR 三对再次同时执行 before、after、同 after 哈希的 clone 与同 before 哈希的 control：CPU 中位数分别为 2.267107s、2.303733s、2.306495s、2.268824s。clone/after 为 +0.120%，control/before 为 +0.076%，after/before 为 +1.616%。12 轮 guest 结果全部校验；完整 manifest、命令、输出与汇总位于 `r7-stable-launch-identical-copy/` 及同名 `-metrics.json`。后续时钟完整矩阵使用该协议重新测量；本条结果不替代其它路径验收。

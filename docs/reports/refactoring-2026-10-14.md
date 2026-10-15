@@ -166,3 +166,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 在 section/Interlocked 基线上接入 13 项 PathApi 和六项 HandleApi，删除重复 ABI 与名称路由。PE32 路径适配器用互斥 Core/Helper ID；Win64 句柄仍由原资源 owner 处理，保留保护位、错误顺序、提前返回与 unblock。完整 release 432、debug 280、外部 native 7 项、fmt、strict Clippy 通过，新增时钟草稿尚未注册。
 
 46 条性能路径全部结果校验；三项短样本扩为三标签长样本后，SSE/raw +1.554%、module/raw +1.679%、section/IR +3.078%。section/IR 的相同计数诊断和 +3.178% after/control 成本明确保留；没有三组均超过 5%。RSS 中位数最多 +96KiB，Alice 200M 三对保持预算出口、隐藏窗口和零 Draw/Present。冻结 SHA、历史失败候选、全部轮次与接受决定见 [路径与句柄验收](refactoring-paths-handles-2026-10-15.md)。R7 随后增加离线性能汇总工具，16 项工具测试通过，不改变 runtime 或 fixture。
+
+## R2 时钟契约
+
+六项时钟 API 的 provider、scalar ABI 和 typed ID 汇入 catalog，删除旧表及字符串 handler；Win64 冷绑定原热路由，输出/frame、PE32 EDX:EAX 和 timeGetTime lookup 差异保持。release 437、debug 285、外部 native 7、工具 19 项及 fmt/strict Clippy 通过。
+
+旧协议出现相同哈希副本仍有明显差异后，独立引入可选稳定启动协议，保留所有失败数据。新协议 49 条路径全部校验；bit/path-helper IR 的 700M 顺序轮换为 +0.586%/−1.201%，其余最大回退 +2.776%，RSS 最多 +144KiB。Alice 200M 三对保持原预算出口、隐藏窗口和零 Draw/Present。完整过程、体积与哈希见 [时钟验收](refactoring-clocks-2026-10-15.md)。R6/Mono 继续跳过。

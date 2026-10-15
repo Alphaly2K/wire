@@ -276,10 +276,7 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
         && !(dll.eq_ignore_ascii_case("ws2_32.dll") && sockets::is_call(name))
         && !(dll.eq_ignore_ascii_case("secur32.dll") && sspi::arity(name).is_some())
         && !(dll.eq_ignore_ascii_case("winmm.dll")
-            && matches!(
-                name,
-                "timeGetTime" | "timeBeginPeriod" | "timeEndPeriod" | "timeGetDevCaps"
-            ))
+            && matches!(name, "timeBeginPeriod" | "timeEndPeriod" | "timeGetDevCaps"))
         && !(dll.eq_ignore_ascii_case("dxgi.dll") && dxgi::export(name))
         && !(dll.eq_ignore_ascii_case("d3d12.dll") && dxgi::d3d12_export(name))
         && !(dll.eq_ignore_ascii_case("d3d11.dll") && dxgi::d3d11_export(name))
@@ -416,7 +413,6 @@ fn import_arity(name: &str) -> Option<usize> {
         "SHGetKnownFolderPath" => 4,
         "CoTaskMemAlloc" | "CoTaskMemFree" => 1,
         "CoCreateInstance" => 5,
-        "timeGetTime" => 0,
         "timeBeginPeriod" | "timeEndPeriod" => 1,
         "timeGetDevCaps" => 2,
         "CreateToolhelp32Snapshot"
@@ -464,8 +460,6 @@ fn import_arity(name: &str) -> Option<usize> {
         | "GetLastError"
         | "GetCommandLineA"
         | "GetCommandLineW"
-        | "GetTickCount"
-        | "GetTickCount64"
         | "IsDebuggerPresent"
         | "TlsAlloc"
         | "GetProcessHeap"
@@ -511,14 +505,11 @@ fn import_arity(name: &str) -> Option<usize> {
         "FlsAlloc" | "FlsGetValue" | "FlsFree" | "FreeEnvironmentStringsW" => 1,
         "FlsSetValue" | "GetConsoleMode" | "GetTempPathW" | "GetTempPath2W" => 2,
         "GetSystemTimes" => 3,
-        "GetSystemTimeAsFileTime"
-        | "GetSystemTimePreciseAsFileTime"
+        "GetSystemTimePreciseAsFileTime"
         | "GetSystemTime"
         | "GetLocalTime"
         | "GetSystemInfo"
         | "GetNativeSystemInfo"
-        | "QueryPerformanceCounter"
-        | "QueryPerformanceFrequency"
         | "GetStartupInfoW"
         | "GetStartupInfoA"
         | "SetLastError"
@@ -1063,6 +1054,7 @@ impl Runtime64 {
             ApiId::Module(id) => self.scalar_module_call(mem, id, args),
             ApiId::ModuleQuery(id) => self.module_query(mem, id, args),
             ApiId::Interlocked(id) => crate::win32::x64::interlocked::call(mem, id, args),
+            ApiId::Clock(id) => crate::win32::x64::clocks::call(id, args, mem, &self.start),
         }
     }
 
@@ -3583,17 +3575,13 @@ impl Runtime64 {
                 mem.write(args[0], &info)?;
                 0
             }
-            "GetSystemTimeAsFileTime" | "GetSystemTimePreciseAsFileTime" => {
+            "GetSystemTimePreciseAsFileTime" => {
                 let elapsed = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map_err(|e| e.to_string())?;
                 let time = 116444736000000000u64 + (elapsed.as_nanos() / 100) as u64;
                 mem.write_int(args[0], 8, time)?;
                 0
-            }
-            "QueryPerformanceCounter" => {
-                mem.write_int(args[0], 8, (self.start.elapsed().as_nanos() / 100) as u64)?;
-                1
             }
             "GetSystemTimes" => {
                 for &pointer in &args[..3] {
@@ -3616,16 +3604,11 @@ impl Runtime64 {
                     }
                 }
             }
-            "QueryPerformanceFrequency" => {
-                mem.write_int(args[0], 8, 10_000_000)?;
-                1
-            }
             "GetCurrentProcessId" => PID,
             "GetCurrentThreadId" => self.threads.active,
             "GetCurrentProcess" => u64::MAX,
             "GetCurrentThread" => u64::MAX - 1,
             "IsDebuggerPresent" => mem.read_int(PEB + 2, 1)?,
-            "GetTickCount" | "timeGetTime" => self.start.elapsed().as_millis() as u32 as u64,
             "timeGetDevCaps" => {
                 if args[1] < 8 || args[0] == 0 {
                     97
@@ -3664,7 +3647,6 @@ impl Runtime64 {
                     97
                 }
             }
-            "GetTickCount64" => self.start.elapsed().as_millis() as u64,
             "GetLastError" => mem.read_int(self.teb() + 0x68, 4)?,
             "SetLastError" => {
                 self.set_error(mem, args[0] as u32)?;

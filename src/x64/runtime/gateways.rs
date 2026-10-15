@@ -51,27 +51,32 @@ impl BoundImport {
         Self::build(dll, original, &format!("{dll}!{original}"), true)
     }
     fn build(dll: &str, original: &str, export: &str, valid: bool) -> Self {
-        use crate::win32::catalog::{resolve, Architecture, Resolution};
+        use crate::win32::catalog::{resolve, ApiId, Architecture, ClockApi, Resolution};
         let name = super::normalize_symbol(dll, original);
         let contract = match resolve(Architecture::X64, dll, name) {
             Resolution::Bound(contract) => Some(contract),
             Resolution::WrongDll(_) | Resolution::Legacy => None,
         };
-        let hot = match name {
-            "GetCurrentThreadId" => HotImport::ThreadId,
-            "GetCurrentProcessId" => HotImport::ProcessId,
-            "GetCurrentThread" => HotImport::ThreadHandle,
-            "GetCurrentProcess" => HotImport::ProcessHandle,
-            "QueryPerformanceCounter" => HotImport::Counter,
-            "QueryPerformanceFrequency" => HotImport::Frequency,
-            "GetTickCount64" => HotImport::Tick64,
-            "GetTickCount" | "timeGetTime" => HotImport::Tick32,
-            "TlsGetValue" => HotImport::TlsGet,
-            "TlsSetValue" => HotImport::TlsSet,
-            "TlsFree" => HotImport::TlsFree,
-            "GetLastError" => HotImport::ErrorGet,
-            "SetLastError" => HotImport::ErrorSet,
-            _ => HotImport::General,
+        let hot = match contract.map(|contract| contract.id) {
+            Some(ApiId::Clock(id)) => match id {
+                ClockApi::TickCount | ClockApi::MultimediaTick => HotImport::Tick32,
+                ClockApi::TickCount64 => HotImport::Tick64,
+                ClockApi::PerformanceCounter => HotImport::Counter,
+                ClockApi::PerformanceFrequency => HotImport::Frequency,
+                ClockApi::SystemFileTime => HotImport::General,
+            },
+            _ => match name {
+                "GetCurrentThreadId" => HotImport::ThreadId,
+                "GetCurrentProcessId" => HotImport::ProcessId,
+                "GetCurrentThread" => HotImport::ThreadHandle,
+                "GetCurrentProcess" => HotImport::ProcessHandle,
+                "TlsGetValue" => HotImport::TlsGet,
+                "TlsSetValue" => HotImport::TlsSet,
+                "TlsFree" => HotImport::TlsFree,
+                "GetLastError" => HotImport::ErrorGet,
+                "SetLastError" => HotImport::ErrorSet,
+                _ => HotImport::General,
+            },
         };
         Self {
             export: export.into(),

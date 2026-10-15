@@ -521,15 +521,6 @@ impl ApiLogger {
     }
 }
 
-fn filetime_now() -> u64 {
-    // 100-ns intervals since 1601-01-01
-    let unix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    unix / 100 + 116_444_736_000_000_000
-}
-
 pub(crate) fn read_str(mem: &GuestMem, addr: u32, wide: bool) -> String {
     if addr == 0 {
         return String::new();
@@ -620,11 +611,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetCurrentThreadId", 0),
                 ("GetCurrentProcess", 0),
                 ("GetCurrentThread", 0),
-                ("GetTickCount", 0),
-                ("GetTickCount64", 0),
-                ("QueryPerformanceCounter", 4),
-                ("QueryPerformanceFrequency", 4),
-                ("GetSystemTimeAsFileTime", 4),
                 ("GetLocalTime", 4),
                 ("GetSystemTime", 4),
                 ("SystemTimeToFileTime", 8),
@@ -1199,7 +1185,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
         add(
             "winmm.dll",
             &[
-                ("timeGetTime", 0),
                 ("timeBeginPeriod", 4),
                 ("timeEndPeriod", 4),
                 ("timeGetDevCaps", 8),
@@ -1661,6 +1646,19 @@ pub fn dispatch(
                 unreachable!();
             };
             ret = crate::win32::x86::interlocked::call(id, &args, mem)?;
+        }
+        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Clock(_))) => {
+            let Some(crate::win32::catalog::ApiId::Clock(id)) = binding.typed else {
+                unreachable!();
+            };
+            use crate::win32::x86::clocks::ClockReturn;
+            match crate::win32::x86::clocks::call(id, &args, mem, &state.start)? {
+                ClockReturn::Dword(value) => ret = value,
+                ClockReturn::Qword(value) => {
+                    cpu.regs[EDX] = (value >> 32) as u32;
+                    ret = value as u32;
+                }
+            }
         }
         _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Guid(_))) => {
             let Some(crate::win32::catalog::ApiId::Guid(id)) = binding.typed else {
@@ -2291,14 +2289,6 @@ pub fn dispatch(
             ret = 4242;
             note = "fake pid".into();
         }
-        ("kernel32.dll", "GetTickCount") | ("winmm.dll", "timeGetTime") => {
-            ret = state.start.elapsed().as_millis() as u32;
-        }
-        ("kernel32.dll", "GetTickCount64") => {
-            let ticks = state.start.elapsed().as_millis() as u64;
-            cpu.regs[EDX] = (ticks >> 32) as u32;
-            ret = ticks as u32;
-        }
         ("kernel32.dll", "GetCommandLineA") => ret = state.cmdline_a,
         ("kernel32.dll", "GetCommandLineW") => ret = state.cmdline_w,
         ("kernel32.dll", "IsProcessorFeaturePresent") => {
@@ -2398,21 +2388,6 @@ pub fn dispatch(
         ("kernel32.dll", "LockResource") => ret = args[0],
         ("kernel32.dll", "FreeResource") => ret = 0,
         ("kernel32.dll", "IsDebuggerPresent") => ret = 0,
-        ("kernel32.dll", "GetSystemTimeAsFileTime") => {
-            mem.write_u64(args[0], filetime_now())
-                .map_err(|e| e.to_string())?;
-            ret = 0;
-        }
-        ("kernel32.dll", "QueryPerformanceCounter") => {
-            let v = (state.start.elapsed().as_nanos() / 100) as u64;
-            mem.write_u64(args[0], v).map_err(|e| e.to_string())?;
-            ret = 1;
-        }
-        ("kernel32.dll", "QueryPerformanceFrequency") => {
-            mem.write_u64(args[0], 10_000_000)
-                .map_err(|e| e.to_string())?;
-            ret = 1;
-        }
         ("kernel32.dll", "GetStartupInfoA") | ("kernel32.dll", "GetStartupInfoW") => {
             let mut si = [0u8; 68];
             si[0..4].copy_from_slice(&68u32.to_le_bytes());
