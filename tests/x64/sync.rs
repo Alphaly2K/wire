@@ -73,6 +73,129 @@ fn win64_critical_section_ex_ignores_low_flags_and_preserves_recursive_ownership
 }
 
 #[test]
+fn timers_keep_win64_names_access_widths_and_due_fault_before_checks() {
+    for dll in ["kernel32.dll", "kernelbase.dll"] {
+        for suffix in ["A", "W"] {
+            let (mut mem, mut cpu, mut runtime) = startup();
+            let data = STACK + 0x200;
+            let high = 0xfacefeed_00000000;
+            mem.write_int(data, 8, 0).unwrap();
+            let name = if suffix == "W" {
+                "Timer\0"
+                    .encode_utf16()
+                    .flat_map(u16::to_le_bytes)
+                    .collect::<Vec<_>>()
+            } else {
+                b"Timer\0".to_vec()
+            };
+            mem.write(data + 32, &name).unwrap();
+            let create = format!("CreateWaitableTimer{suffix}");
+            let h = startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                dll,
+                &create,
+                &[0, high | 1, data + 32],
+            );
+            assert_ne!(h, 0);
+            let create_ex = format!("CreateWaitableTimerEx{suffix}");
+            let alias = startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                dll,
+                &create_ex,
+                &[0, data + 32, high, high | 0x100000],
+            );
+            assert_ne!(alias, 0);
+            assert_eq!(
+                mem.read_int(wire::x64::runtime::TEB + 0x68, 4).unwrap(),
+                183
+            );
+            assert_eq!(
+                startup_dll_call(
+                    &mut mem,
+                    &mut cpu,
+                    &mut runtime,
+                    dll,
+                    "CancelWaitableTimer",
+                    &[alias]
+                ),
+                0
+            );
+            assert_eq!(mem.read_int(wire::x64::runtime::TEB + 0x68, 4).unwrap(), 5);
+            let open = format!("OpenWaitableTimer{suffix}");
+            let setter = startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                dll,
+                &open,
+                &[high | 2, high, data + 32],
+            );
+            assert_ne!(setter, 0);
+            assert_eq!(
+                startup_dll_call(
+                    &mut mem,
+                    &mut cpu,
+                    &mut runtime,
+                    dll,
+                    "CancelWaitableTimer",
+                    &[setter]
+                ),
+                1
+            );
+            assert_eq!(mem.read_int(wire::x64::runtime::TEB + 0x68, 4).unwrap(), 5);
+            for (name, args, error) in [
+                (
+                    "SetWaitableTimer",
+                    vec![h, data, high | u32::MAX as u64, high, 0, 0],
+                    87,
+                ),
+                ("SetWaitableTimer", vec![h, data, high, high, 0, high], 50),
+                (
+                    "SetWaitableTimerEx",
+                    vec![h, data, high, 0, 0, high, high],
+                    50,
+                ),
+                ("CancelWaitableTimer", vec![high | h], 6),
+            ] {
+                assert_eq!(
+                    startup_dll_call(&mut mem, &mut cpu, &mut runtime, dll, name, &args),
+                    0
+                );
+                assert_eq!(
+                    mem.read_int(wire::x64::runtime::TEB + 0x68, 4).unwrap(),
+                    error
+                );
+                assert!(!wire::x64::runtime::import_supported("user32.dll", name));
+            }
+            // A due-time fault precedes the invalid handle/period/APC checks.
+            cpu.regs[4] = STACK + 0x1f88;
+            mem.write_int(cpu.regs[4], 8, BASE).unwrap();
+            for (reg, value) in [1, 2, 8, 9]
+                .into_iter()
+                .zip([high | h, 2, u32::MAX as u64, high])
+            {
+                cpu.regs[reg] = value;
+            }
+            for offset in [32, 40, 48] {
+                mem.write_int(cpu.regs[4] + 8 + offset, 8, 0).unwrap();
+            }
+            let before = cpu.clone();
+            let calls = runtime.api_calls;
+            for name in ["SetWaitableTimer", "SetWaitableTimerEx"] {
+                assert!(runtime.dispatch(dll, name, &mut cpu, &mut mem).is_err());
+                assert_eq!(cpu, before);
+                assert_eq!(runtime.api_calls, calls);
+                assert_eq!(mem.read_int(wire::x64::runtime::TEB + 0x68, 4).unwrap(), 6);
+            }
+        }
+    }
+}
+
+#[test]
 fn win64_waitable_timers_reset_consume_cancel_and_share_named_object_identity() {
     let (mut mem, mut cpu, mut runtime) = startup();
     let data = STACK + 0x200;

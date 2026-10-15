@@ -3,6 +3,32 @@
 use super::*;
 
 #[test]
+fn timers_keep_pe32_abi_only_errors_and_independent_stack_sizes() {
+    for (name, args, bytes) in [
+        ("CreateWaitableTimerA", vec![0, 1, 0], 12),
+        ("CreateWaitableTimerW", vec![0, 1, 0], 12),
+        ("OpenWaitableTimerA", vec![2, 0, 0], 12),
+        ("OpenWaitableTimerW", vec![2, 0, 0], 12),
+        ("CreateWaitableTimerExA", vec![0, 0, 1, 2], 16),
+        ("CreateWaitableTimerExW", vec![0, 0, 1, 2], 16),
+        ("SetWaitableTimer", vec![0, DATA, 0, 0, 0, 0], 24),
+        ("SetWaitableTimerEx", vec![0, DATA, 0, 0, 0, 0, 0], 28),
+        ("CancelWaitableTimer", vec![0], 4),
+    ] {
+        let mut v = Vm::new();
+        v.mem.write_u32(DATA, 0x12345678).unwrap();
+        assert_eq!(v.k(name, &args), 0, "{name}");
+        assert_eq!(v.state.last_error, 120, "{name}");
+        assert_eq!(
+            v.cpu.esp(),
+            STACK_BASE + STACK_SIZE - 256 + 4 + bytes,
+            "{name}"
+        );
+        assert_eq!(v.mem.read_u32(DATA).unwrap(), 0x12345678);
+    }
+}
+
+#[test]
 fn delays_keep_pe32_fault_before_yield_and_ignored_alertable() {
     for (name, args, result) in [
         ("Sleep", vec![0], 0),
