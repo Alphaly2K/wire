@@ -1,65 +1,55 @@
 # 当前状态
 
-更新日期：2026-10-16。重构前固定代码基线 `2e78377`；本轮进度见 [重构记录](reports/refactoring-2026-10-14.md)。
+更新日期：2026-10-16。重构前基线为 `2e78377`；最近已验收的运行时提交为 `e2839d5`（进程身份/LastError）。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
 
-最新一批完成七项进程身份/LastError 契约，保留原状态 owner、伪句柄宽度、TEB/PEB 和 frame 故障顺序。release **442 passed / 7 ignored**，debug **290**、外部 native **7**、工具 **19**，fmt/strict Clippy 通过。25 条性能路径全部校验；SSE 的 2.1B 三标签扩样仍有 +2.358% 局部成本，其余最大回退 +2.505%，RSS 最多 +160KiB。Alice 200M 三对保持隐藏窗口、预算出口和零 Draw/Present。完整证据见 [上下文验收](reports/refactoring-context-2026-10-16.md)。
+当前在验收八项 TLS/FLS 契约候选：正确性已通过，28 条性能路径及异常项扩样尚未完成，尚未提交运行时代码。独立旧行为基线已提交为 `2b65653`。Mono 原生化已撤回，本轮继续排除。
 
-时钟批次完成六项 API 契约迁移，保留 Win64 热路由、PE32 EDX:EAX、provider 差异与输出/frame 提交顺序。release **437 passed / 7 ignored**，debug **285**、外部 native **7**、工具 **19**，fmt/strict Clippy 通过。稳定启动协议下 49 条性能路径全部校验；两项短样本超阈值经 700M 顺序轮换补证后为 +0.586%/−1.201%，其余最大回退 +2.776%，RSS 最多 +144KiB。Alice 200M 三对保持隐藏窗口和预算出口，CPU −0.403%。旧启动协议的同哈希差异与全部失败轮次独立保留，见 [时钟验收](reports/refactoring-clocks-2026-10-15.md)及[测量协议](reports/refactoring-launch-protocol-2026-10-16.md)。
+## 重构范围
 
-目录枚举契约 `240e4ac` 之后，已独立补齐路径/句柄、section、Interlocked/SLIST 的 ABI 与故障基线；`90658e2` 的三项 Interlocked/SLIST 测试及原创 gateway-slist 双架构 smoke 均在旧 handler 上通过。网关边界、页槽/helper 布局候选保持撤回。release 单编译单元候选完成 429 项正确性、native 7 项与 45 条性能路径后，因顺序轮换的三组 bit 长样本均回退超过 5% 而撤回。文件 section 在原构建配置下补足八项超阈值路径的顺序平衡长样本后接受，raw 整数相对 control 的 +4.18% 局部成本仍明确保留。路径/句柄的历史失败候选保留，新版已在 section/Interlocked 基线上完成独立验收。
+| 阶段 | 已交付 | 剩余范围 |
+| --- | --- | --- |
+| R0/R1 | 冻结输入、原创正式 fixture、领域测试 harness、GUID 唯一契约和双架构适配 | 随后续家族维护独立基线 |
+| R2 | 已验收 181 个 export 的契约；明细见下表 | TLS/FLS 候选；其余内存、同步、USER、COM、图形等 legacy 家族 |
+| R3 | guest environment、双架构模块状态、Win64 文件状态 owner | PE32 其余资源、线程/COM 等；PE32 kernel 大范围抽取曾因性能撤回 |
+| R4/R5 | Process32 编排边界、owned host UI 请求、GDI 与像素状态分离 | 领域分发与资源 owner 随 R2/R3 继续收敛 |
+| R6 | 按用户要求忽略 | 不重建原生 Mono 路径 |
+| R7 | PE32 内核目录、领域测试、公共性能工具、当前/历史文档入口 | 后续目录和工具随领域迁移继续整理 |
 
-R0/R1、R4、R5 已完成：正式 fixture、测试 harness、GUID 唯一契约、PE32 Process32、owned host UI 请求与 GDI/像素状态分离。R2/R3 已迁移 identity、guest environment、version、42 个 NLS/locale、31 个模块、53 个文件、六个 Interlocked/SLIST、13 个路径辅助和六个通用句柄 export，另完成双架构模块及 Win64 文件状态归属；PE32 内核/文件状态及其余家族仍待迁移。R7 已完成当前 PE32 内核目录、领域测试和公共性能工具的整理，后续目录随其余领域迁移继续推进。最新路径/句柄批次完整 release 为 432 passed / 7 ignored，debug Win32/AMD64/FPU 280 项、fmt 与 strict Clippy 通过；7 项外部图形测试再次显式执行，全部通过，工具 12 项通过。随后离线性能汇总工具独立通过 16 项工具测试。
+已迁移的 export 是契约覆盖范围；typed、ABI-only 与 absent 的架构策略分别记录，不能按数量推导完整 Windows 兼容性。
 
-路径/句柄新版 46 条性能路径全部结果校验，长样本 section/IR 保留 +3.078% 局部成本；独立 diagnostics 的退休、API、IR 与 fallback 计数相同。SSE/raw 与 module/raw 扩样为 +1.554%/+1.679%，RSS 中位数最多 +96KiB。Alice 200M 三对保持隐藏窗口与预算出口，CPU −0.881%。全部初筛、扩样及同二进制 control 均保留，见 [完整验收](reports/refactoring-paths-handles-2026-10-15.md)。
+| 已验收家族 | export 数 | 契约与证据 |
+| --- | ---: | --- |
+| GUID | 3 | [新增 API 指引](architecture/adding-api.md) |
+| identity / version / NLS | 6 / 8 / 42 | [环境与架构](architecture/runtime.md)、[版本](architecture/version.md)、[NLS](architecture/nls.md) |
+| module | 31 | [模块](architecture/modules.md) |
+| file | 53 | [文件及标准句柄](architecture/files.md)；包含 metadata、目录/变更、枚举和 section |
+| Interlocked / SLIST | 6 | [同步原语边界](architecture/interlocked.md) |
+| 路径辅助 / 通用句柄 | 13 / 6 | [路径与句柄](architecture/paths-handles.md) |
+| 时钟 | 6 | [时钟](architecture/clocks.md)及[验收](reports/refactoring-clocks-2026-10-15.md) |
+| 进程身份 / LastError | 7 | [上下文](architecture/context.md)及[验收](reports/refactoring-context-2026-10-16.md) |
 
-Interlocked/SLIST 的 25 条性能路径全部结果校验。SSE/IR 初筛回退经静态代码、独立宿主硬件计数和六组顺序轮换调查后为 +1.949%；integer/IR 的 700M 扩样为 +2.732%。thread-ID 的 700M 仍有 +4.557% 局部成本，已明确记录接受；Win64 SLIST 固定网关负载 −27.837%，RSS 中位数最多 +64KiB。Alice 200M 三对保持隐藏窗口与预算出口，见 [完整验收](reports/refactoring-interlocked-catalog-2026-10-15.md)。
+## 当前执行路径与能力
 
-R5 的 29 个解释器 case/path 已做三对 AB/BA，work/retired/checksum 全部校验；扩样后的最大 CPU 中位数回退为 +2.66%。R4 的 memory 成本在 R5 的 700M 复测中已消退：相对 R4 -6.04%，相对最初基线 -2.94%。这是结构调整后的代码生成/布局结果，不推断完整游戏 FPS；调查与全部轮次见 [重构记录](reports/refactoring-2026-10-14.md)。
-
-version 的 11 个受影响 case/path 三对均校验通过；PE32 SSE raw 初筛 +4.39%，700M 扩样后为 +2.50%，相对最初基线 -6.72%。其它初筛回退低于 2%，RSS 无实质增长。版本查询、ABI-only 校验函数和两架构故障差异见 [version 契约](architecture/version.md)。
-
-NLS 的 14 个 case/path 三对均校验通过；Win64 查询/转换负载 CPU 中位数 -33.08%/-11.31%。memory 扩样相对 version +3.14%、相对最初 +1.80%，已调查 IR/cache 计数及段反汇编，记录该布局成本。没有修改 ISA/cache 实现；回调和转换契约见 [NLS](architecture/nls.md)。
-
-R7 的 38 个 case/path 三对全部校验通过；large-code 初筛超 3% 后扩为 2B work，成本降至 +0.22%，相对最初 +1.23%。扩样后的全矩阵最大 CPU 中位数回退 +2.41%，RSS 最大增加 32KiB。完整证据见 [R7 记录](reports/refactoring-r7-2026-10-14.md)。
-
-模块状态批次的首个候选因 SSE 回退被拒绝；修复编译内联并消除引用更新的重复查表后，23 个 case/path 三对校验通过。相对 R7，700M SSE IR/raw 的 CPU 中位数 -13.56%/-2.78%，其它负载最大回退 +1.71%，RSS 最大增加 208KiB。失败候选、修复及最终 native/启动证据见 [模块记录](reports/refactoring-modules-2026-10-14.md)。
-
-模块契约批次以独立布局调整后的 `c1af099` 为基线，26 个 case/path 三对校验通过；integer/memory/data-alias 初筛超过 3%，扩样后分别为 −0.10%/+2.31%/−0.72%，最终最大 CPU 中位数回退 +2.31%，RSS 最多增加 96KiB。bit-test 2.1B 为 +0.13%；静态导入与 fresh-provider 动态 lookup 的历史差异、已有 gateway fallback、全部失败/扩样轮次见 [模块 catalog 验收](reports/refactoring-module-catalog-2026-10-14.md)。
-
-## 主路径和能力
-
-macOS PE32 的五个实际执行边界已分别隔离到对齐代码节，SIMD 以 execute/EIP 回滚边界为准。28 个 case/path 三对及 integer/bit 700M 扩样全部校验，最终最大 CPU 中位数回退 +2.01%、RSS 最多增加 128KiB。实际生成代码与完整证据见 [布局记录](reports/refactoring-ir-layout-2026-10-14.md)。
-
-核心文件 catalog 在上述新基线上独立验收：28 个路径三对校验，整数/GUID 的默认短样本经过同二进制噪声、采样及 utility QoS 扩样调查；受控 700M 结果 +2.32%/−1.38%，最终最大 CPU 中位数回退 +2.32%、RSS 最多增加 224KiB。两种调度模式分别记录，全部失败与离散样本保留。该批 PE32 全部 11 个 typed，Win64 9 个 typed、SetFilePointer/SetEndOfFile 保持 absent。见 [文件 catalog 验收](reports/refactoring-file-catalog-2026-10-15.md)。
-
-路径/属性 catalog 新增 10 个 export，该批文件契约合计 PE32 21 typed、Win64 17 typed/4 absent。31 个 case/path 校验，整数 IR 的 700M 九对 +4.77% 经同二进制噪声与 2.1B 长样本调查；长样本中位数 −4.86%，仍有单轮离散，不宣称整数提速。最终矩阵最大 CPU 中位数回退 +1.91%、RSS 最多增加 80KiB。Alice 200M 保持隐藏窗口和预算出口，完整证据见 [路径/属性验收](reports/refactoring-file-path-catalog-2026-10-15.md)。
-
-macOS AMD64 寄存器段执行器现独立放入 4KiB 对齐的 Mach-O 代码节，保持循环 body 与 guest 语义。该独立批次 release 403、debug 288、外部 GPU 7 项通过；26 个 case/path 三对校验，最大 CPU 中位数回退 +2.12%。它用于减轻 Win32 handler 重构引发的布局敏感性，模块 catalog 仍单独验收。见 [布局记录](reports/refactoring-ir-layout-2026-10-14.md)。
-
-受检段也已独立隔离，并补齐两个节的显式代码属性。该补充批次 release 403、debug 288、native GPU 7 项通过；26 个 case/path 校验，memory +0.07%。SSE 扩样仍有 +3.63% 局部成本，已核对相同 IR/cache 计数及 2925 条指令的 opcode 序列并记录接受；其它最终结果最大回退 +2.63%，资源/cache 上限保持。模块组合以这批为新基线。
-
-PE32 kernel 资源 owner 的多版抽取因持续回退被拒绝。最新重试基于五执行边界和核心文件契约 `6e16790`，correctness 408/293/native7 通过，但 utility 条件的三对 integer/FP/bit IR 中位数仍为 +206.81%/+8.30%/+10.23%，全部撤回。已提交的文件契约与布局保持，资源 owner 迁移暂缓；全部历史采样、回退与撤回证据见 [拒绝记录](reports/refactoring-pe32-kernel-rejected-2026-10-14.md)。独立故障/寿命回归和原创 event fixture 保留。
-
-Win64 文件状态批次的首版因 AMD64 memory 持续回退被拒绝；恢复小型页查询 getter 内联后，24 个 case/path 三对全部校验。扩样的 memory −0.64%、PE32 integer/IR +0.38%、data-alias −2.12%，其余最终矩阵最大 CPU 中位数回退 +2.71%，RSS 最大增加 128KiB。标准 endpoint/alias 故障基线、短样本调查和全部证据见 [文件记录](reports/refactoring-files-2026-10-14.md)。
-
-| 范围 | 当前入口与边界 |
+| 范围 | 入口与边界 |
 | --- | --- |
-| PE32 | `wire run <exe>`；`wire prepare <exe> --out <wir>` 后可用静态 IR。raw/IR 均解释执行，`.wir v3` 持久格式不变 |
-| AMD64 | `wire probe64 <exe> --startup`，已有受检稀疏内存、typed IR、DLL/TLS、合作线程、异常与 Win64 服务；仍是实验入口 |
-| 图形 | PE32 GDI/D3D9、AMD64 DXGI/D3D11 子集；Vulkan/MoltenVK 加速需显式提供已构建的 native graphics 库，未宣称完整 DirectX 符合性 |
-| Mono | 执行游戏自带的原始 guest Mono；原生 ARM64 Mono 桥接已撤回，本轮不重构或重建该实验 |
+| PE32 | `wire run <exe>`；`wire prepare <exe> --out <wir>` 后可用静态 IR。raw/IR 均解释执行，`.wir v3` 持久格式保持 |
+| AMD64 | `wire probe64 <exe> --startup`；受检稀疏内存、typed IR、DLL/TLS、合作线程、异常与 Win64 服务；仍为实验入口 |
+| 图形 | PE32 GDI/D3D9、AMD64 DXGI/D3D11 子集；Vulkan/MoltenVK 加速需显式提供已构建的 native graphics 库 |
+| Mono | 执行游戏自带的原始 guest Mono；[原生 ARM64 桥接撤回记录](mono-native-rollback-2026-10-14.md) |
 | Wasm | JSC 可选加速研究与原创循环 fixture；主程序默认走解释器 |
-| 文件/设备 | 受限 guest 文件系统；虚拟身份、单 CPU 和无设备/transport 行为按现有 API 契约处理 |
+| 文件/设备 | 受限 guest 文件系统；虚拟身份、单 CPU 和设备/transport 子集按所属 API 契约处理 |
 
-真实游戏兼容与性能的历史结果从 [文档入口](index.md) 查阅。当前基线的 Alice 启动 smoke 到 200M work 正常按预算停止，原始 Mono DLL/TLS 已执行；该前缀未进入 Draw/Present。
+最近已验收的 Alice smoke 使用现有 runtime 目录，三对均到 200M work 预算出口，窗口隐藏且 client 314×211，Draw/Present 为 0。该启动前缀未进入实际绘制；游戏 logo/加载/渲染的历史推进结果应按报告中的提交与输入判断。
 
-元数据契约追加五个 export，文件合计 PE32 21 typed/5 ABI-only、Win64 22 typed/4 absent。34 个 case/path 三对全部校验，PE32 metadata IR/raw 的 CPU 中位数 −17.85%/−9.02%；AMD64 thread-id 700M 扩样仍有 +4.10% 局部成本，独立 diagnostics 计数一致，已调查并记录接受，其余最终路径最大回退 +2.72%。RSS 中位数最多增加 144KiB，Alice 200M 保持隐藏窗口和预算出口。完整结果和失败候选见 [元数据验收](reports/refactoring-file-metadata-catalog-2026-10-15.md)。目录/变更/枚举、section、标准句柄等契约仍待迁移。
+## 验证与性能
 
-目录与文件变更追加 12 个 export，该批文件合计 PE32 25 typed/13 ABI-only、Win64 32 typed/6 absent。34 个 case/path 三对全部校验，事件 raw 初筛 +4.76% 经 210M 扩样后 +0.15%，最终最大 CPU 中位数回退 +2.25%、RSS 中位数最多增加 96KiB。单轮离散和宿主负载条件完整保留，不据此宣称解释器算法提速，见 [目录/文件变更验收](reports/refactoring-file-mutation-catalog-2026-10-15.md)。
+最近已验收的上下文批次：release **442 passed / 7 ignored**，debug Win32/AMD64/FPU **290 passed**，显式 native **7 passed**，工具 **19 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。TLS/FLS 候选另有 release 448 / debug 296 的正确性结果，性能验收尚未完成，见 [候选记录](reports/refactoring-locals-2026-10-16.md)。
 
-目录枚举追加 7 个 export，文件契约累计 45 个：PE32 32 typed/13 ABI-only、Win64 39 typed/6 absent。首版因 AMD64 memory 成本未接受，最终按契约 ID 冷绑定原 group bit，保留句柄类型、cursor/output 和返回 frame 顺序。37 条性能路径全部校验；整数同二进制调查、GUID/path 六对合并与 metadata 700M 后，最大 CPU 中位数回退 +2.79%、RSS 最多增加 32KiB。FindClose 固定负载 PE32 IR/raw、AMD64 的 CPU 中位数分别 −16.23%/−12.73%/−12.45%；Alice 200M 保持隐藏窗口和预算出口。section、SHLWAPI/imagehlp、标准句柄及 CloseHandle 等仍待迁移，详见 [目录枚举验收](reports/refactoring-file-search-catalog-2026-10-15.md)。
+上下文的 25 条性能路径全部结果校验。AMD64 SSE 初筛 +3.006% 后扩为 2.1B 三标签轮换，中位数仍有 **+2.358%** 局部成本，其余最大回退 +2.505%，RSS 中位数最多增加 160KiB。各批次保留自己的基线、失败轮次和局部成本，未将结构调整解释为游戏 FPS 提升。
 
-## 必需验证
+后续正式比较使用显式 [稳定启动协议](reports/refactoring-launch-protocol-2026-10-16.md)，固定 argv0、参数和 child cwd，并记录 shell SHA。默认工具行为保持；旧协议数据独立保留，汇总不跨协议或不同 work 合并。编译、正式计时、采样与 runtime diagnostics 串行执行。每个结构候选先完成正确性，再按至少三对轮换检查结果、CPU/wall/RSS 与输入哈希；超过门槛先调查，不把失败候选扩大到其它领域。
+
+必需检查：
 
 ```sh
 cargo fmt --all -- --check
@@ -68,12 +58,8 @@ cargo clippy --all-targets --all-features --locked -- -D warnings
 python3 -B -m unittest discover -s tools -p 'test_*.py'
 ```
 
-`2e78377` 的完整 release 结果为 382 passed、0 failed、7 ignored；构建、fmt 和 strict Clippy 通过。Unicorn 参照测试在受限 macOS 沙箱可能触发 SIGILL，必须在允许参照执行的环境完成验证。发布运行时不使用 Unicorn。
+七个默认 ignored 均需外部条件：两项 Metal/software 像素对照需真实 Metal device；三项 native GPU 资源/Shader/owner 及两项 Win64 DXGI draw/swapchain 需 native graphics、MoltenVK 与原创 DXBC/GS fixture。涉及这些边界时显式提供环境执行，不能将 ignored 计为通过。Unicorn 参照测试在受限 macOS 沙箱可能触发 SIGILL，已验收批次在允许参照执行的环境验证；发布运行时不使用 Unicorn。
 
-7 个 ignored 均有外部条件：2 个 Metal/software 像素对照需要真实 Metal device；3 个 native GPU 资源/Shader/owner 测试需要 native graphics、MoltenVK 与原创 DXBC/GS fixture；2 个 Win64 DXGI draw/swapchain 测试也需要上述 native 输入。涉及相应边界时显式提供环境运行，不将默认 ignored 计作通过。图形工具可从 `tools/build_native_graphics.py` 和 `tools/probe_*graphics*.py` 复现；第三方版本由 `third_party` 记录。
+## 证据存储
 
-## 测试与性能存储
-
-本轮 baseline executable、manifest、完整测试名及后续结果保存在 `wire-out/refactoring-2026-10-14/`。before 仅冻结一份已构建小型可执行文件，不复制游戏。已有游戏隔离目录通过软链接/原路径复用，原始素材保持只读。
-
-任何影响 gateway、回调或执行布局的结构调整，按至少三对串行 AB/BA 检查 work/checksum、CPU/wall/RSS 和输入哈希。计时与 Cargo、采样、diagnostics 分开；持续回退先调查，不带着失败设计扩大迁移范围。
+本轮冻结 executable、source/input manifest、完整测试日志和性能轮次位于 `wire-out/refactoring-2026-10-14/`。该目录日期是证据批次标识，后续日期继续复用。只冻结小型运行时与源码，游戏素材通过原路径/软链接复用，不复制或硬链接。历史候选拒绝、布局/调度调查及全部性能报告统一从 [文档入口](index.md) 查阅。
