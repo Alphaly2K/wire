@@ -33,6 +33,8 @@ mod handles;
 mod interlocked;
 #[path = "win32/kernel.rs"]
 mod kernel;
+#[path = "win32/locals.rs"]
+mod locals;
 #[path = "win32/memory.rs"]
 mod memory;
 #[path = "win32/modules.rs"]

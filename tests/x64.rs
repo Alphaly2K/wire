@@ -22,6 +22,8 @@ mod handles;
 mod interlocked;
 #[path = "x64/kernel.rs"]
 mod kernel;
+#[path = "x64/locals.rs"]
+mod locals;
 #[path = "x64/memory.rs"]
 mod memory;
 #[path = "x64/modules.rs"]

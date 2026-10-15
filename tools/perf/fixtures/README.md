@@ -35,5 +35,9 @@ n=`max(1, work//6)`；PE32 raw/IR 和 Win64 均在旧 handler 上独立预检。
 校验累计值、退休数和 API count。PE32 的 n=`max(1, work//4)`、
 retired=`4*n+8`；Win64 的 n=`max(1, work//5)`、retired=`4*n+11`、
 work=`5*n+11`。它也在旧 handler 上完成双架构 12K smoke。
+`local_gateway.py` 使用三个真实导入，先分配 TLS、写入 42，再循环读取累计。
+PE32 的 n=`max(1, work//5)`、retired=`5*n+14`；Win64 的
+n=`max(1, work//6)`、retired=`5*n+17`、work=`6*n+19`，
+两端 API count=`n+2`。双架构在旧 TLS handler 上完成 12K smoke。
 这些 case 需显式选择，默认 case 集合不变。PE32 正式 API 计时可加
 `--discard-api-log`：仍格式化 trace、记录频率和计数，将全量 trace 写入空设备。
