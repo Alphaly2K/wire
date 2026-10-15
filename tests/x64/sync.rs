@@ -352,6 +352,52 @@ fn amd64_suspended_thread_context_reads_saved_guest_registers_across_small_and_l
 }
 
 #[test]
+fn delays_keep_win64_dword_controls_and_return_fault_before_dispatch() {
+    use wire::x64::runtime::Control;
+    let high = 0xfacefeed_00000000;
+    for dll in ["kernel32.dll", "kernelbase.dll"] {
+        for (name, args, expected) in [
+            ("Sleep", vec![high], Control::Yielded),
+            ("SleepEx", vec![high, high], Control::Returned),
+            ("SwitchToThread", vec![], Control::SwitchThread(dll.into())),
+        ] {
+            let (mut mem, mut cpu, mut runtime) = startup();
+            mem.write_int(wire::x64::runtime::TEB + 0x68, 4, 123)
+                .unwrap();
+            for (reg, value) in [1, 2, 8, 9].into_iter().zip(args) {
+                cpu.regs[reg] = value;
+            }
+            cpu.regs[0] = 0x8877665544332211;
+            let sp = cpu.regs[4];
+            assert_eq!(
+                runtime.dispatch(dll, name, &mut cpu, &mut mem).unwrap(),
+                expected
+            );
+            assert_eq!(cpu.regs[0], 0);
+            assert_eq!(cpu.regs[4], sp + 8);
+            assert_eq!(cpu.rip, BASE);
+            assert_eq!(runtime.api_calls, 1);
+            assert_eq!(
+                mem.read_int(wire::x64::runtime::TEB + 0x68, 4).unwrap(),
+                123
+            );
+            assert!(!wire::x64::runtime::import_supported("user32.dll", name));
+
+            cpu.regs[4] = 0xdeadbeef;
+            cpu.regs[0] = 0x1122334455667788;
+            let before = cpu.clone();
+            assert!(runtime.dispatch(dll, name, &mut cpu, &mut mem).is_err());
+            assert_eq!(cpu, before);
+            assert_eq!(runtime.api_calls, 1);
+            assert_eq!(
+                mem.read_int(wire::x64::runtime::TEB + 0x68, 4).unwrap(),
+                123
+            );
+        }
+    }
+}
+
+#[test]
 fn waits_keep_win64_dword_counts_full_handles_and_array_fault_before_acquire() {
     let (mut mem, mut cpu, mut runtime) = startup();
     let event = startup_call(

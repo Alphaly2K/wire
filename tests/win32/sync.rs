@@ -3,6 +3,48 @@
 use super::*;
 
 #[test]
+fn delays_keep_pe32_fault_before_yield_and_ignored_alertable() {
+    for (name, args, result) in [
+        ("Sleep", vec![0], 0),
+        ("SleepEx", vec![0, u32::MAX], 0),
+        ("SwitchToThread", vec![], 1),
+    ] {
+        let mut v = Vm::new();
+        v.k("CreateThread", &[0, 0, CODE + 16, 0x98765432, 0, 0]);
+        v.k("SetLastError", &[123]);
+        let address = v.api.register("kernel32.dll", Some(name), None);
+        let index = v.api.stub_index(address).unwrap();
+        let sp = DATA + 4092;
+        for (i, value) in args.into_iter().enumerate() {
+            v.mem.write_u32(sp + 4 + i as u32 * 4, value).unwrap();
+        }
+        v.mem
+            .virtual_protect(DATA, 4096, wire::mem::PAGE_NOACCESS)
+            .unwrap();
+        v.cpu.set_esp(sp);
+        v.cpu.eip = address;
+        v.cpu.regs[0] = 0x12345678;
+        assert!(api::dispatch(
+            index,
+            &mut v.cpu,
+            &mut v.mem,
+            &mut v.api,
+            &mut v.state,
+            &mut v.log,
+            &mut v.sched,
+            1_000_000,
+        )
+        .is_err());
+        assert_eq!(v.cpu.regs[0], result, "{name}");
+        assert_eq!(v.cpu.esp(), sp);
+        assert_eq!(v.cpu.eip, address);
+        assert_eq!(v.sched.current, 0, "{name} must not switch after fault");
+        assert_eq!(v.state.last_error, 123);
+        assert_eq!(v.mem.read_u32(TEB_ADDR + 0x34).unwrap(), 123);
+    }
+}
+
+#[test]
 fn waits_keep_pe32_empty_arrays_count_clamp_and_extended_abi_only_policy() {
     let mut v = Vm::new();
     assert_eq!(v.k("WaitForMultipleObjects", &[0, 0, 1, 0]), 0);
