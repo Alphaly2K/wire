@@ -28,6 +28,18 @@ pub enum FileApi {
     GetFileInformationByHandle,
     GetFileInformationByHandleEx,
     GetFileTime,
+    CreateDirectoryA,
+    CreateDirectoryW,
+    DeleteFileA,
+    DeleteFileW,
+    MoveFileA,
+    MoveFileW,
+    MoveFileExA,
+    MoveFileExW,
+    RemoveDirectoryA,
+    RemoveDirectoryW,
+    CopyFileA,
+    CopyFileW,
 }
 
 impl FileApi {
@@ -41,6 +53,12 @@ impl FileApi {
                 | Self::GetFileAttributesW
                 | Self::SetFileAttributesW
                 | Self::GetFileAttributesExW
+                | Self::CreateDirectoryW
+                | Self::DeleteFileW
+                | Self::MoveFileW
+                | Self::MoveFileExW
+                | Self::RemoveDirectoryW
+                | Self::CopyFileW
         )
     }
 }
@@ -89,7 +107,32 @@ const fn metadata(id: FileApi, name: &'static str, parameters: &'static [Paramet
     )
 }
 
-pub static FILE_CONTRACTS: [Contract; 26] = [
+const fn mutation(
+    id: FileApi,
+    name: &'static str,
+    parameters: &'static [Parameter],
+    win64: bool,
+) -> Contract {
+    Contract::new(
+        ApiId::File(id),
+        name,
+        parameters,
+        B,
+        "PE32 known ABI with legacy unimplemented return; Win64 confined path mutations, existing flags/sharing/cwd checks and metadata update order; CopyFile remains absent on Win64",
+        [
+            ArchitecturePlan {
+                dlls: &["kernel32.dll"],
+                execution: ExecutionPolicy::LegacyUnimplemented,
+            },
+            ArchitecturePlan {
+                dlls: if win64 { &["kernel32.dll", "kernelbase.dll"] } else { &[] },
+                execution: if win64 { ExecutionPolicy::Typed } else { ExecutionPolicy::Absent },
+            },
+        ],
+    )
+}
+
+pub static FILE_CONTRACTS: [Contract; 38] = [
     declaration(
         FileApi::CreateFileA,
         "CreateFileA",
@@ -216,4 +259,28 @@ pub static FILE_CONTRACTS: [Contract; 26] = [
         &[P, D, P, D],
     ),
     metadata(FileApi::GetFileTime, "GetFileTime", &[P, P, P, P]),
+    declaration(
+        FileApi::CreateDirectoryA,
+        "CreateDirectoryA",
+        &[P, P],
+        B,
+        true,
+    ),
+    declaration(
+        FileApi::CreateDirectoryW,
+        "CreateDirectoryW",
+        &[P, P],
+        B,
+        true,
+    ),
+    declaration(FileApi::DeleteFileA, "DeleteFileA", &[P], B, true),
+    declaration(FileApi::DeleteFileW, "DeleteFileW", &[P], B, true),
+    mutation(FileApi::MoveFileA, "MoveFileA", &[P, P], true),
+    mutation(FileApi::MoveFileW, "MoveFileW", &[P, P], true),
+    mutation(FileApi::MoveFileExA, "MoveFileExA", &[P, P, D], true),
+    mutation(FileApi::MoveFileExW, "MoveFileExW", &[P, P, D], true),
+    mutation(FileApi::RemoveDirectoryA, "RemoveDirectoryA", &[P], true),
+    mutation(FileApi::RemoveDirectoryW, "RemoveDirectoryW", &[P], true),
+    mutation(FileApi::CopyFileA, "CopyFileA", &[P, P, I], false),
+    mutation(FileApi::CopyFileW, "CopyFileW", &[P, P, I], false),
 ];

@@ -1,6 +1,6 @@
 # 新增 Win32 API：GUID 试点
 
-`StringFromGUID2`、`CLSIDFromString`、`IIDFromString`、六个身份、八个版本、42 个 NLS、31 个模块和 26 个文件 export 已迁入新边界。普通 scalar API 的操作步骤如下；其它家族目前仍使用旧分发器，不能将 ABI 已知当作完整实现。
+`StringFromGUID2`、`CLSIDFromString`、`IIDFromString`、六个身份、八个版本、42 个 NLS、31 个模块和 38 个文件 export 已迁入新边界。普通 scalar API 的操作步骤如下；其它家族目前仍使用旧分发器，不能将 ABI 已知当作完整实现。
 
 1. 在 `src/win32/catalog/` 的所属领域声明 export、DLL/架构范围、typed ID、参数类型、返回约定和限制。GUID 的一份声明派生 PE32 stdcall 清栈和 Win64 DWORD 截断，执行时不查询字符串表。
 2. 把不依赖 guest 内存和进程状态的算法放入领域纯核。GUID 的 Windows little-endian 布局、canonical parser/formatter 位于 `win32/com/guid.rs`；纯核不读 CPU，不写 LastError。

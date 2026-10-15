@@ -115,11 +115,7 @@ pub fn dispatch(
         || dll == "kernel32.dll"
             && matches!(
                 name,
-                "CreateDirectoryA"
-                    | "CreateDirectoryW"
-                    | "DeleteFileA"
-                    | "DeleteFileW"
-                    | "FindFirstFileA"
+                "FindFirstFileA"
                     | "FindFirstFileW"
                     | "FindFirstFileExA"
                     | "FindFirstFileExW"
@@ -529,7 +525,7 @@ fn execute(
                 write_string(mem, a[0], 260, &text, wide)?;
                 Ok((1, text))
             }
-            (None, "DeleteFileA" | "DeleteFileW") => {
+            (Some(FileApi::DeleteFileA | FileApi::DeleteFileW), _) => {
                 let text = read_name(mem, a[0], wide)?;
                 let path = state.fs.as_ref().ok_or(3u32)?.resolve(&text)?;
                 let info = path.metadata().map_err(|e| win_error(&e))?;
@@ -561,7 +557,7 @@ fn execute(
                 std::fs::set_permissions(path, permissions).map_err(|e| win_error(&e))?;
                 Ok((1, text))
             }
-            (None, "CreateDirectoryA" | "CreateDirectoryW") => {
+            (Some(FileApi::CreateDirectoryA | FileApi::CreateDirectoryW), _) => {
                 let text = read_name(mem, a[0], wide)?;
                 let path = state.fs.as_ref().ok_or(3u32)?.resolve(&text)?;
                 std::fs::create_dir(path).map_err(|e| win_error(&e))?;

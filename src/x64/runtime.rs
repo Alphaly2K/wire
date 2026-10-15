@@ -414,9 +414,6 @@ fn import_arity(name: &str) -> Option<usize> {
         "OpenProcessToken" => 3,
         "OpenThreadToken" => 4,
         "GetTokenInformation" => 5,
-        "MoveFileExW" | "MoveFileExA" => 3,
-        "MoveFileW" | "MoveFileA" => 2,
-        "DeleteFileW" | "DeleteFileA" | "RemoveDirectoryW" | "RemoveDirectoryA" => 1,
         "DuplicateHandle" => 7,
         "SHGetKnownFolderPath" => 4,
         "CoTaskMemAlloc" | "CoTaskMemFree" => 1,
@@ -424,7 +421,6 @@ fn import_arity(name: &str) -> Option<usize> {
         "timeGetTime" => 0,
         "timeBeginPeriod" | "timeEndPeriod" => 1,
         "timeGetDevCaps" => 2,
-        "CreateDirectoryW" | "CreateDirectoryA" => 2,
         "CreateToolhelp32Snapshot"
         | "Process32First"
         | "Process32Next"
@@ -601,7 +597,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "OpenProcessToken" => &[1],
         "OpenThreadToken" => &[1, 2],
         "GetTokenInformation" => &[1, 3],
-        "MoveFileExW" | "MoveFileExA" => &[2],
         "DuplicateHandle" => &[4, 5, 6],
         "SHGetKnownFolderPath" => &[1],
         "CreateToolhelp32Snapshot" => &[0, 1],
@@ -1599,21 +1594,44 @@ impl Runtime64 {
                     }
                 }
             }
-            "MoveFileExW" | "MoveFileExA" | "MoveFileW" | "MoveFileA" | "DeleteFileW"
-            | "DeleteFileA" | "RemoveDirectoryW" | "RemoveDirectoryA" => {
-                let path = Self::path_name(mem, args[0], name.ends_with('W'))?;
-                let moving = name.starts_with("Move");
+            _ if matches!(
+                file,
+                Some(
+                    FileApi::MoveFileExW
+                        | FileApi::MoveFileExA
+                        | FileApi::MoveFileW
+                        | FileApi::MoveFileA
+                        | FileApi::DeleteFileW
+                        | FileApi::DeleteFileA
+                        | FileApi::RemoveDirectoryW
+                        | FileApi::RemoveDirectoryA
+                )
+            ) =>
+            {
+                let id = file.unwrap();
+                let path = Self::path_name(mem, args[0], id.wide())?;
+                let moving = matches!(
+                    id,
+                    FileApi::MoveFileA
+                        | FileApi::MoveFileW
+                        | FileApi::MoveFileExA
+                        | FileApi::MoveFileExW
+                );
                 let destination = if moving && args[1] != 0 {
-                    Some(Self::path_name(mem, args[1], name.ends_with('W'))?)
+                    Some(Self::path_name(mem, args[1], id.wide())?)
                 } else {
                     None
                 };
                 let mutation = if moving {
                     files::PathMutation::Move {
                         destination: destination.as_deref(),
-                        flags: if name.contains("Ex") { args[2] } else { 0 },
+                        flags: if matches!(id, FileApi::MoveFileExA | FileApi::MoveFileExW) {
+                            args[2]
+                        } else {
+                            0
+                        },
                     }
-                } else if name.starts_with("RemoveDirectory") {
+                } else if matches!(id, FileApi::RemoveDirectoryA | FileApi::RemoveDirectoryW) {
                     files::PathMutation::RemoveDirectory
                 } else {
                     files::PathMutation::DeleteFile
@@ -1799,7 +1817,11 @@ impl Runtime64 {
                     }
                 }
             }
-            "CreateDirectoryW" | "CreateDirectoryA" => {
+            _ if matches!(
+                file,
+                Some(FileApi::CreateDirectoryW | FileApi::CreateDirectoryA)
+            ) =>
+            {
                 if args[1] != 0 {
                     // CreateDirectory consumes only lpSecurityDescriptor.
                     // nLength and bInheritHandle do not affect this operation.
@@ -1821,7 +1843,7 @@ impl Runtime64 {
                         return Ok(Control::Returned);
                     }
                 }
-                let path = Self::path_name(mem, args[0], name.ends_with('W'))?;
+                let path = Self::path_name(mem, args[0], file.unwrap().wide())?;
                 let result = self
                     .files
                     .filesystem()

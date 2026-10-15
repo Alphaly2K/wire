@@ -18,13 +18,15 @@ Win64 的 `x64::runtime::files::Files` 拥有真实文件描述符、sharing/acc
 
 核心文件 API 的 11 个 export 由 `win32/catalog/files.rs` 统一声明：CreateFileA/W、ReadFile、WriteFile、GetFileSize/Ex、SetFilePointer/Ex、SetEndOfFile、FlushFileBuffers、GetFileType。PE32 全部为 typed 路由，DLL 保持 kernel32；Win64 其中 9 个为 typed，DLL 保持 kernel32/kernelbase，SetFilePointer 与 SetEndOfFile 仍为 absent。Int64 参数明确描述 SetFilePointerEx 的有符号距离，PE32 占两个栈 slot，Win64 占一个 64 位 carrier；DWORD 截断只在 gateway 取参时进行。
 
-路径与属性的 10 个 export 也由同一契约声明：GetCurrentDirectoryA/W、SetCurrentDirectoryA/W、GetFullPathNameA/W、GetFileAttributesA/W、SetFileAttributesA/W。PE32 全部 typed/kernel32，Win64 新增 8 个 typed/kernel32+kernelbase，GetFullPathNameA/W 保持 absent；文件契约合计 21 个 export，Win64 17 typed、4 absent。查询容量和属性 flags 是 DWORD，指针不截断，A/W 选择由绑定 ID 决定。
+路径与属性的 10 个 export 也由同一契约声明：GetCurrentDirectoryA/W、SetCurrentDirectoryA/W、GetFullPathNameA/W、GetFileAttributesA/W、SetFileAttributesA/W。PE32 全部 typed/kernel32，Win64 其中 8 个 typed/kernel32+kernelbase，GetFullPathNameA/W 保持 absent。查询容量和属性 flags 是 DWORD，指针不截断，A/W 选择由绑定 ID 决定。
 
 PE32 GetFullPathName 的小 buffer 只返回所需容量；成功写字符串后再写可选 file-part 指针，因此第二个输出 fault 时字符串已提交。现有宽字符 file-part 偏移也原样保留。Win64 CWD 输出可以覆盖 guest return slot，gateway 继续使用提前保存的返回地址；成功调用保持 LastError。
 
-元数据的五个 export 也已迁入契约：GetFileAttributesExA/W、GetFileInformationByHandle、GetFileInformationByHandleEx、GetFileTime。文件契约合计 26 个 export；PE32 为 21 typed、5 LegacyUnimplemented，Win64 为 22 typed、4 absent。PE32 保留清栈、零返回、LastError=120 与输出不变；Win64 保留原信息类子集、目录 class 14/15 cursor、长度检查、可选时间输出及故障顺序。GetFileAttributesEx 的无效信息类先于路径/输出检查，GetFileTime 先检查全部非空输出再写出；返回槽别名继续使用提前保存的 frame。
+元数据的五个 export 也已迁入契约：GetFileAttributesExA/W、GetFileInformationByHandle、GetFileInformationByHandleEx、GetFileTime。PE32 五个均为 LegacyUnimplemented，Win64 五个均为 typed。PE32 保留清栈、零返回、LastError=120 与输出不变；Win64 保留原信息类子集、目录 class 14/15 cursor、长度检查、可选时间输出及故障顺序。GetFileAttributesEx 的无效信息类先于路径/输出检查，GetFileTime 先检查全部非空输出再写出；返回槽别名继续使用提前保存的 frame。
 
 PE32 的 immutable binding 同时缓存 LegacyUnimplemented 执行策略，在读取原参数后直接执行旧未实现返回，保留原诊断和 frame 提交。公开 ApiEntry 变化时重新绑定；未知 ABI 与未迁移 API 仍走旧策略。公开 file facade 仅将 Typed 声明当作可执行实现。
+
+目录与文件变更另有 12 个 export：CreateDirectoryA/W、DeleteFileA/W、MoveFileA/W、MoveFileExA/W、RemoveDirectoryA/W、CopyFileA/W。文件契约合计 38 个，PE32 25 Typed/13 ABI-only，Win64 32 Typed/6 Absent。PE32 仅 CreateDirectory/DeleteFile 使用 typed 路由；其余保留未实现策略。Win64 CopyFile 保持 absent。PE32 CreateDirectory 继续忽略 SECURITY_ATTRIBUTES，Win64 先读取 lpSecurityDescriptor 并拒绝显式 descriptor；后者提前完成时的 unblock/API count/trace 不变。MoveFileEx flags 是 DWORD，source/destination 解码先于 flags/空目标校验，Files 的 mutation 和 metadata 提交顺序保持。
 
 PE32 adapter 暂留 `file_api.rs` 的原领域调用边界：主 gateway 用 bound FileApi ID 调用，公开 `file_api::dispatch` 保留原来的大小写/DLL 和函数范围，作为冷解析 facade。内部执行器区分 typed ID 与尚未迁移的目录/SHLWAPI 名称，已迁移调用不再解析 DLL 或 export。GetFileType 仍由主 gateway 执行，invalid/non-file handle 返回 0 并保持 LastError。读写先清零 count，再查 handle/权限和数据 buffer；SetFilePointer/Ex 先定位并清 LastError，再写可选输出，输出失败时定位已提交。错误仍映射成原来的返回值、LastError 和日志文本。
 
@@ -32,4 +34,4 @@ Win64 adapter 暂留 Runtime64 的原 gateway 分支位置，分支由 bound Fil
 
 Win64 普通文件读写和管道写入继续在原位置提前返回 Control::Returned，gateway 提交提前保存的 CPU return frame、计数和 trace，保留这些 endpoint 原来不调用 scheduler unblock 的行为。管道读入和标准输出写入走原来的通用 unblock/提交路径。没有新建文件完成框架或另移 CPU 提交；这项边界保留是前几个候选性能失败后的渐进取舍。WriteConsoleW 保持原来的拒绝结果，没有借迁移扩展 console 能力。
 
-PE32 目前仍使用 ApiState 的混合 HandleObj 表与 filesystem 字段，属于后续 R3 工作。目录创建/变更/枚举、文件 section、SHLWAPI、标准句柄和跨资源 CloseHandle 等 API 的 catalog 迁移仍待完成，本页不表示整个文件领域已完成。
+PE32 目前仍使用 ApiState 的混合 HandleObj 表与 filesystem 字段，属于后续 R3 工作。目录枚举、文件 section、SHLWAPI、标准句柄和跨资源 CloseHandle 等 API 的 catalog 迁移仍待完成，本页不表示整个文件领域已完成。
