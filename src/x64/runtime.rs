@@ -453,16 +453,7 @@ fn import_arity(name: &str) -> Option<usize> {
         "RoInitialize" | "CoInitialize" => 1,
         "CoInitializeEx" => 2,
         "RoUninitialize" | "CoUninitialize" => 0,
-        "GetCurrentProcessId"
-        | "GetCurrentThreadId"
-        | "GetCurrentProcess"
-        | "GetCurrentThread"
-        | "GetLastError"
-        | "GetCommandLineA"
-        | "GetCommandLineW"
-        | "IsDebuggerPresent"
-        | "TlsAlloc"
-        | "GetProcessHeap"
+        "GetCommandLineA" | "GetCommandLineW" | "TlsAlloc" | "GetProcessHeap"
         | "AreFileApisANSI" => 0,
         "GetErrorMode" => 0,
         "SetErrorMode" => 1,
@@ -512,7 +503,6 @@ fn import_arity(name: &str) -> Option<usize> {
         | "GetNativeSystemInfo"
         | "GetStartupInfoW"
         | "GetStartupInfoA"
-        | "SetLastError"
         | "IsProcessorFeaturePresent"
         | "TlsGetValue"
         | "TlsFree"
@@ -613,8 +603,7 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "VirtualProtect" | "VirtualFree" => &[2],
         "VirtualAllocEx" => &[3, 4],
         "VirtualProtectEx" | "VirtualFreeEx" => &[3],
-        "SetLastError"
-        | "GetTempPathW"
+        "GetTempPathW"
         | "GetTempPath2W"
         | "IsProcessorFeaturePresent"
         | "TlsGetValue"
@@ -1055,6 +1044,21 @@ impl Runtime64 {
             ApiId::ModuleQuery(id) => self.module_query(mem, id, args),
             ApiId::Interlocked(id) => crate::win32::x64::interlocked::call(mem, id, args),
             ApiId::Clock(id) => crate::win32::x64::clocks::call(id, args, mem, &self.start),
+            ApiId::Context(id) => {
+                use crate::win32::catalog::ContextApi;
+                Ok(match id {
+                    ContextApi::ProcessId => PID,
+                    ContextApi::ThreadId => self.threads.active,
+                    ContextApi::ProcessHandle => u64::MAX,
+                    ContextApi::ThreadHandle => u64::MAX - 1,
+                    ContextApi::DebuggerPresent => mem.read_int(PEB + 2, 1)?,
+                    ContextApi::GetLastError => mem.read_int(self.teb() + 0x68, 4)?,
+                    ContextApi::SetLastError => {
+                        self.set_error(mem, args[0] as u32)?;
+                        0
+                    }
+                })
+            }
         }
     }
 
@@ -3604,11 +3608,6 @@ impl Runtime64 {
                     }
                 }
             }
-            "GetCurrentProcessId" => PID,
-            "GetCurrentThreadId" => self.threads.active,
-            "GetCurrentProcess" => u64::MAX,
-            "GetCurrentThread" => u64::MAX - 1,
-            "IsDebuggerPresent" => mem.read_int(PEB + 2, 1)?,
             "timeGetDevCaps" => {
                 if args[1] < 8 || args[0] == 0 {
                     97
@@ -3646,11 +3645,6 @@ impl Runtime64 {
                 } else {
                     97
                 }
-            }
-            "GetLastError" => mem.read_int(self.teb() + 0x68, 4)?,
-            "SetLastError" => {
-                self.set_error(mem, args[0] as u32)?;
-                0
             }
             "GetCommandLineA" => COMMAND_A,
             "GetCommandLineW" => COMMAND_W,

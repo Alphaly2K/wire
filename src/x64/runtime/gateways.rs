@@ -51,7 +51,9 @@ impl BoundImport {
         Self::build(dll, original, &format!("{dll}!{original}"), true)
     }
     fn build(dll: &str, original: &str, export: &str, valid: bool) -> Self {
-        use crate::win32::catalog::{resolve, ApiId, Architecture, ClockApi, Resolution};
+        use crate::win32::catalog::{
+            resolve, ApiId, Architecture, ClockApi, ContextApi, Resolution,
+        };
         let name = super::normalize_symbol(dll, original);
         let contract = match resolve(Architecture::X64, dll, name) {
             Resolution::Bound(contract) => Some(contract),
@@ -65,16 +67,19 @@ impl BoundImport {
                 ClockApi::PerformanceFrequency => HotImport::Frequency,
                 ClockApi::SystemFileTime => HotImport::General,
             },
+            Some(ApiId::Context(id)) => match id {
+                ContextApi::ThreadId => HotImport::ThreadId,
+                ContextApi::ProcessId => HotImport::ProcessId,
+                ContextApi::ThreadHandle => HotImport::ThreadHandle,
+                ContextApi::ProcessHandle => HotImport::ProcessHandle,
+                ContextApi::GetLastError => HotImport::ErrorGet,
+                ContextApi::SetLastError => HotImport::ErrorSet,
+                ContextApi::DebuggerPresent => HotImport::General,
+            },
             _ => match name {
-                "GetCurrentThreadId" => HotImport::ThreadId,
-                "GetCurrentProcessId" => HotImport::ProcessId,
-                "GetCurrentThread" => HotImport::ThreadHandle,
-                "GetCurrentProcess" => HotImport::ProcessHandle,
                 "TlsGetValue" => HotImport::TlsGet,
                 "TlsSetValue" => HotImport::TlsSet,
                 "TlsFree" => HotImport::TlsFree,
-                "GetLastError" => HotImport::ErrorGet,
-                "SetLastError" => HotImport::ErrorSet,
                 _ => HotImport::General,
             },
         };

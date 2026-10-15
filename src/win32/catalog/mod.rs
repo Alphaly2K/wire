@@ -1,6 +1,7 @@
 //! Export identity and ABI plans are resolved during binding, not execution.
 //! Unconverted families remain on explicit legacy routes.
 mod clocks;
+mod context;
 mod files;
 mod guid;
 mod handles;
@@ -11,6 +12,7 @@ mod nls;
 mod paths;
 mod version;
 pub use clocks::{ClockApi, CLOCK_CONTRACTS};
+pub use context::{ContextApi, CONTEXT_CONTRACTS};
 pub use files::{FileApi, FILE_CONTRACTS};
 pub use guid::{GuidApi, GUID_CONTRACTS};
 pub use handles::{HandleApi, HANDLE_CONTRACTS};
@@ -64,6 +66,7 @@ pub enum ApiId {
     Handle(HandleApi),
     Path(PathApi),
     Clock(ClockApi),
+    Context(ContextApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -212,6 +215,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(HANDLE_CONTRACTS.iter())
         .chain(PATH_CONTRACTS.iter())
         .chain(CLOCK_CONTRACTS.iter())
+        .chain(CONTEXT_CONTRACTS.iter())
 }
 
 #[cfg(test)]

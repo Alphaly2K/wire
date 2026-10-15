@@ -172,3 +172,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 六项时钟 API 的 provider、scalar ABI 和 typed ID 汇入 catalog，删除旧表及字符串 handler；Win64 冷绑定原热路由，输出/frame、PE32 EDX:EAX 和 timeGetTime lookup 差异保持。release 437、debug 285、外部 native 7、工具 19 项及 fmt/strict Clippy 通过。
 
 旧协议出现相同哈希副本仍有明显差异后，独立引入可选稳定启动协议，保留所有失败数据。新协议 49 条路径全部校验；bit/path-helper IR 的 700M 顺序轮换为 +0.586%/−1.201%，其余最大回退 +2.776%，RSS 最多 +144KiB。Alice 200M 三对保持原预算出口、隐藏窗口和零 Draw/Present。完整过程、体积与哈希见 [时钟验收](refactoring-clocks-2026-10-15.md)。R6/Mono 继续跳过。
+
+## R2 进程身份与 LastError
+
+七项 API 收敛到 ContextApi，删除重复 ABI/arity/DWORD 和名称 handler。原 scheduler、TEB/PEB 和进程状态保持，Win64 按 typed ID 冷绑定六个原热路由。独立旧行为基线先通过，再验证切换后的 release 442、debug 290、native 7、工具 19 项及 fmt/strict Clippy。
+
+25 条性能路径全部校验；SSE 700M 初筛 +3.006% 后扩为 2.1B 三标签轮换，仍有 +2.358% 局部成本，其余最大回退 +2.505%，RSS 最多 +160KiB。Alice 200M 三对保持预算出口、隐藏窗口和零 Draw/Present；228 个已注册 Rust 文件与冻结 SHA 一致。全部轮次和接受决定见 [上下文验收](refactoring-context-2026-10-16.md)。

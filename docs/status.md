@@ -2,7 +2,9 @@
 
 更新日期：2026-10-16。重构前固定代码基线 `2e78377`；本轮进度见 [重构记录](reports/refactoring-2026-10-14.md)。
 
-最新一批完成六项时钟 API 契约迁移，保留 Win64 热路由、PE32 EDX:EAX、provider 差异与输出/frame 提交顺序。release **437 passed / 7 ignored**，debug **285**、外部 native **7**、工具 **19**，fmt/strict Clippy 通过。稳定启动协议下 49 条性能路径全部校验；两项短样本超阈值经 700M 顺序轮换补证后为 +0.586%/−1.201%，其余最大回退 +2.776%，RSS 最多 +144KiB。Alice 200M 三对保持隐藏窗口和预算出口，CPU −0.403%。旧启动协议的同哈希差异与全部失败轮次独立保留，见 [时钟验收](reports/refactoring-clocks-2026-10-15.md)及[测量协议](reports/refactoring-launch-protocol-2026-10-16.md)。
+最新一批完成七项进程身份/LastError 契约，保留原状态 owner、伪句柄宽度、TEB/PEB 和 frame 故障顺序。release **442 passed / 7 ignored**，debug **290**、外部 native **7**、工具 **19**，fmt/strict Clippy 通过。25 条性能路径全部校验；SSE 的 2.1B 三标签扩样仍有 +2.358% 局部成本，其余最大回退 +2.505%，RSS 最多 +160KiB。Alice 200M 三对保持隐藏窗口、预算出口和零 Draw/Present。完整证据见 [上下文验收](reports/refactoring-context-2026-10-16.md)。
+
+时钟批次完成六项 API 契约迁移，保留 Win64 热路由、PE32 EDX:EAX、provider 差异与输出/frame 提交顺序。release **437 passed / 7 ignored**，debug **285**、外部 native **7**、工具 **19**，fmt/strict Clippy 通过。稳定启动协议下 49 条性能路径全部校验；两项短样本超阈值经 700M 顺序轮换补证后为 +0.586%/−1.201%，其余最大回退 +2.776%，RSS 最多 +144KiB。Alice 200M 三对保持隐藏窗口和预算出口，CPU −0.403%。旧启动协议的同哈希差异与全部失败轮次独立保留，见 [时钟验收](reports/refactoring-clocks-2026-10-15.md)及[测量协议](reports/refactoring-launch-protocol-2026-10-16.md)。
 
 目录枚举契约 `240e4ac` 之后，已独立补齐路径/句柄、section、Interlocked/SLIST 的 ABI 与故障基线；`90658e2` 的三项 Interlocked/SLIST 测试及原创 gateway-slist 双架构 smoke 均在旧 handler 上通过。网关边界、页槽/helper 布局候选保持撤回。release 单编译单元候选完成 429 项正确性、native 7 项与 45 条性能路径后，因顺序轮换的三组 bit 长样本均回退超过 5% 而撤回。文件 section 在原构建配置下补足八项超阈值路径的顺序平衡长样本后接受，raw 整数相对 control 的 +4.18% 局部成本仍明确保留。路径/句柄的历史失败候选保留，新版已在 section/Interlocked 基线上完成独立验收。
 

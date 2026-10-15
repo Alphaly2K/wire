@@ -607,10 +607,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("SetHandleCount", 4),
                 ("GetTempPathA", 8),
                 ("GetTempPathW", 8),
-                ("GetCurrentProcessId", 0),
-                ("GetCurrentThreadId", 0),
-                ("GetCurrentProcess", 0),
-                ("GetCurrentThread", 0),
                 ("GetLocalTime", 4),
                 ("GetSystemTime", 4),
                 ("SystemTimeToFileTime", 8),
@@ -627,8 +623,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("TlsGetValue", 4),
                 ("TlsSetValue", 8),
                 ("TlsFree", 4),
-                ("GetLastError", 0),
-                ("SetLastError", 4),
                 ("VirtualAlloc", 16),
                 ("VirtualFree", 12),
                 ("VirtualProtect", 16),
@@ -654,7 +648,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("TerminateProcess", 8),
                 ("SetUnhandledExceptionFilter", 4),
                 ("UnhandledExceptionFilter", 4),
-                ("IsDebuggerPresent", 0),
                 ("DebugBreak", 0),
                 ("OutputDebugStringA", 4),
                 ("OutputDebugStringW", 4),
@@ -1647,6 +1640,31 @@ pub fn dispatch(
             };
             ret = crate::win32::x86::interlocked::call(id, &args, mem)?;
         }
+        _ if matches!(
+            binding.typed,
+            Some(crate::win32::catalog::ApiId::Context(_))
+        ) =>
+        {
+            let Some(crate::win32::catalog::ApiId::Context(id)) = binding.typed else {
+                unreachable!();
+            };
+            use crate::win32::catalog::ContextApi;
+            ret = match id {
+                ContextApi::ProcessId => {
+                    note = "fake pid".into();
+                    4242
+                }
+                ContextApi::ThreadId => sched.current_tid(),
+                ContextApi::ProcessHandle => u32::MAX,
+                ContextApi::ThreadHandle => u32::MAX - 1,
+                ContextApi::DebuggerPresent => 0,
+                ContextApi::GetLastError => state.last_error,
+                ContextApi::SetLastError => {
+                    state.last_error = args[0];
+                    0
+                }
+            };
+        }
         _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Clock(_))) => {
             let Some(crate::win32::catalog::ApiId::Clock(id)) = binding.typed else {
                 unreachable!();
@@ -1882,8 +1900,6 @@ pub fn dispatch(
                 ret = handle;
             }
         }
-        ("kernel32.dll", "GetCurrentThread") => ret = 0xffff_fffe,
-        ("kernel32.dll", "GetCurrentThreadId") => ret = sched.current_tid(),
         ("kernel32.dll", "GetExitCodeThread") => {
             let (code, running) = match sched.thread_index_by_handle(args[0]) {
                 Some(i) => match sched.threads[i].state {
@@ -2279,16 +2295,6 @@ pub fn dispatch(
             note = "no-op (cooperative scheduler)".into();
         }
         ("kernel32.dll", "GetThreadPriority") => ret = 0, // THREAD_PRIORITY_NORMAL
-        ("kernel32.dll", "GetLastError") => ret = state.last_error,
-        ("kernel32.dll", "SetLastError") => {
-            state.last_error = args[0];
-            ret = 0;
-        }
-        ("kernel32.dll", "GetCurrentProcess") => ret = 0xffff_ffff,
-        ("kernel32.dll", "GetCurrentProcessId") => {
-            ret = 4242;
-            note = "fake pid".into();
-        }
         ("kernel32.dll", "GetCommandLineA") => ret = state.cmdline_a,
         ("kernel32.dll", "GetCommandLineW") => ret = state.cmdline_w,
         ("kernel32.dll", "IsProcessorFeaturePresent") => {
@@ -2387,7 +2393,6 @@ pub fn dispatch(
         }
         ("kernel32.dll", "LockResource") => ret = args[0],
         ("kernel32.dll", "FreeResource") => ret = 0,
-        ("kernel32.dll", "IsDebuggerPresent") => ret = 0,
         ("kernel32.dll", "GetStartupInfoA") | ("kernel32.dll", "GetStartupInfoW") => {
             let mut si = [0u8; 68];
             si[0..4].copy_from_slice(&68u32.to_le_bytes());

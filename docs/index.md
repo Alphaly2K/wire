@@ -22,6 +22,7 @@
 - [文件 section 契约验收](reports/refactoring-file-section-catalog-2026-10-15.md)：八项映射 API、首轮暂缓、顺序平衡补样和保留的 raw 局部成本。
 - [Interlocked/SLIST 边界](architecture/interlocked.md)与[契约验收](reports/refactoring-interlocked-catalog-2026-10-15.md)：六项契约、故障提交、25 条性能路径和 SSE/thread-ID 调查。
 - [时钟调用边界](architecture/clocks.md)与[契约验收](reports/refactoring-clocks-2026-10-15.md)：六项契约、架构返回/故障顺序、稳定启动协议下的 49 条路径与长样本。
+- [进程身份与 LastError 边界](architecture/context.md)及[契约验收](reports/refactoring-context-2026-10-16.md)：七项契约、伪句柄/TEB/PEB、25 条性能路径及 SSE 长样本。
 - [release 编译单元候选](reports/refactoring-release-codegen-2026-10-15.md)：独立构建配置、同二进制对照及长样本调查。
 - [网关边界候选](reports/refactoring-gateway-boundary-2026-10-15.md)、[页缓存内联候选](reports/refactoring-page-cache-inline-2026-10-15.md)、[helper 布局候选](reports/refactoring-memory-helper-layout-2026-10-15.md)：已撤回实现和保留的测量证据。
 - [本次渐进重构记录](reports/refactoring-2026-10-14.md)：阶段交付、行为差异与验收结果。
