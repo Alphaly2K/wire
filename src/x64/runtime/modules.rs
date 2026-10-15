@@ -1,7 +1,7 @@
 //! Queries describe loaded guest images and the logical built-in service providers.
 use super::{
     automation, com_export, devices, display, dxgi, guid, kernel_export, registry, sockets, sspi,
-    timers, unwind, user, winhttp, winrt,
+    unwind, user, winhttp, winrt,
 };
 use super::{Memory, Runtime64, WRITE};
 
@@ -143,8 +143,6 @@ impl Runtime64 {
                     .to_owned();
                     let known = (matches!(provider.as_str(), "kernel32.dll" | "kernelbase.dll")
                         && kernel_export(&function))
-                        || (matches!(provider.as_str(), "kernel32.dll" | "kernelbase.dll")
-                            && timers::arity(&function).is_some())
                         || (matches!(
                             provider.as_str(),
                             "ntdll.dll" | "kernel32.dll" | "kernelbase.dll"

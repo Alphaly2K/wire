@@ -369,7 +369,6 @@ fn import_arity(name: &str) -> Option<usize> {
         name if devices::arity(name).is_some() => devices::arity(name).unwrap(),
         name if winrt::arity(name).is_some() => winrt::arity(name).unwrap(),
         name if guid::arity(name).is_some() => guid::arity(name).unwrap(),
-        name if timers::arity(name).is_some() => timers::arity(name).unwrap(),
         name if dxgi::arity(name).is_some() => dxgi::arity(name).unwrap(),
         name if user::arity(name).is_some() => user::arity(name).unwrap(),
         name if registry::arity(name).is_some() => registry::arity(name).unwrap(),
@@ -565,7 +564,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "CoCreateInstance" => &[2],
         "timeBeginPeriod" | "timeEndPeriod" => &[0],
         "timeGetDevCaps" => &[1],
-        name if timers::arity(name).is_some() => timers::dwords(name),
         "SetErrorMode" | "SetThreadErrorMode" => &[0],
         "InitializeProcThreadAttributeList" => &[1, 2],
         "UpdateProcThreadAttribute" => &[1],
@@ -604,7 +602,7 @@ fn import_groups(name: &str) -> u32 {
         display::arity(name).is_some(),
         sspi::arity(name).is_some(),
         sockets::is_call(name),
-        timers::arity(name).is_some(),
+        false, // timers moved to catalog typed IDs; preserve legacy bit positions
     ];
     predicates
         .into_iter()
@@ -1012,6 +1010,7 @@ impl Runtime64 {
             ApiId::Clock(id) => crate::win32::x64::clocks::call(id, args, mem, &self.start),
             ApiId::Local(id) => self.local_call(id, args, mem),
             ApiId::SyncObject(id) => self.sync_object_call(id, args, mem),
+            ApiId::Timer(id) => self.timer_call(mem, id, args),
             ApiId::Context(id) => {
                 use crate::win32::catalog::ContextApi;
                 Ok(match id {
@@ -3197,7 +3196,6 @@ impl Runtime64 {
                     }
                 }
             }
-            _ if binding.groups & (1 << 15) != 0 => self.timer_call(mem, name, args)?,
             _ if matches!(binding.control, gateways::ControlImport::Wait(_))
                 || name == "WSAWaitForMultipleEvents" =>
             {

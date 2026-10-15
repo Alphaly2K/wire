@@ -14,6 +14,7 @@ mod mutexes;
 mod nls;
 mod paths;
 mod sync_objects;
+mod timers;
 mod version;
 mod waits;
 pub use clocks::{ClockApi, CLOCK_CONTRACTS};
@@ -30,6 +31,7 @@ pub use mutexes::{MutexApi, MUTEX_CONTRACTS};
 pub use nls::{NlsApi, NLS_CONTRACTS};
 pub use paths::{PathApi, PATH_CONTRACTS};
 pub use sync_objects::{SyncObjectApi, SYNC_OBJECT_CONTRACTS};
+pub use timers::{TimerApi, TIMER_CONTRACTS};
 pub use version::{VersionApi, VERSION_CONTRACTS};
 pub use waits::{WaitApi, WAIT_CONTRACTS};
 
@@ -82,6 +84,7 @@ pub enum ApiId {
     Mutex(MutexApi),
     Wait(WaitApi),
     Delay(DelayApi),
+    Timer(TimerApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -236,6 +239,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(MUTEX_CONTRACTS.iter())
         .chain(WAIT_CONTRACTS.iter())
         .chain(DELAY_CONTRACTS.iter())
+        .chain(TIMER_CONTRACTS.iter())
 }
 
 #[cfg(test)]

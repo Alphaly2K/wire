@@ -29,6 +29,7 @@
 - [Mutex 所有权与释放边界](architecture/mutexes.md)及[契约验收](reports/refactoring-mutexes-2026-10-16.md)：七项接口、递归 owner/错误/唤醒顺序、33 条性能路径和启动前缀。
 - [WaitFor* 进程控制边界](architecture/waits.md)及[契约验收](reports/refactoring-waits-2026-10-16.md)：四项接口、阻塞/APC/数组及返回槽故障、36 条性能路径和 local 长样本。
 - [Sleep/线程让出边界](architecture/delays.md)及[契约验收](reports/refactoring-delays-2026-10-16.md)：三项接口、返回帧与调度/APC 顺序、24 条性能路径和启动前缀。
+- [Waitable timer 边界](architecture/timers.md)及[契约验收](reports/refactoring-timers-2026-10-16.md)：九项接口、命名/access/deadline 与故障顺序、动态查询收敛、25 条性能路径。
 - [release 编译单元候选](reports/refactoring-release-codegen-2026-10-15.md)：独立构建配置、同二进制对照及长样本调查。
 - [网关边界候选](reports/refactoring-gateway-boundary-2026-10-15.md)、[页缓存内联候选](reports/refactoring-page-cache-inline-2026-10-15.md)、[helper 布局候选](reports/refactoring-memory-helper-layout-2026-10-15.md)：已撤回实现和保留的测量证据。
 - [本次渐进重构记录](reports/refactoring-2026-10-14.md)：阶段交付、行为差异与验收结果。

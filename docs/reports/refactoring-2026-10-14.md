@@ -214,3 +214,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 三项接口接入 DelayApi，删除重复 ABI/arity/DWORD 和名称分支。Win64 冷绑定 ControlImport 保留 Returned/Yielded/SwitchThread/Blocked 的原控制结果，PE32 保留 wake/deadline、ignored alertable 与返回帧后 round-robin；trace/counter 和 fault 顺序保持。两项旧行为基线、实际线程让出/APC/timeout 先通过，完整 release 459、debug 307、native 7、工具 20 项及 fmt/strict Clippy 通过。
 
 24 条相关性能路径全部校验，最大回退 +1.063%，RSS 最多 +16KiB；Delay 网关 Win64 −0.717%，PE32 IR/raw −3.387%/−1.001%。Alice 200M 三对保持预算出口、隐藏窗口和零 Draw/Present，CPU +0.325%。246 个 manifest Rust 文件（src/tests 238 个）核对一致；体积增加 704 bytes。完整接受决定见 [Sleep/线程让出验收](refactoring-delays-2026-10-16.md)。
+
+## R2 Waitable timer
+
+九项接口接入 TimerApi，PE32 全部 ABI-only、Win64 typed；删除 timer arity/DWORD、group 15、名称解析和 GetProcAddress 特例，保留 Events owner 及原 access/deadline/故障顺序。两项独立基线先通过，35 项同步/12 项模块及完整 release 461、debug 309、native 7、工具 20 项通过。残留动态查询引用和 unused import 的检查失败日志保留，修正后 fmt/strict Clippy 与 build 通过。
+
+25 条性能路径全部校验，最大回退 +2.525%，RSS 最多 +128KiB，Win64 取消网关 −18.748%。Alice 200M 三对保持预算出口、隐藏窗口和零 Draw/Present，CPU +0.270%。247 个 manifest Rust 文件（src/tests 239 个）核对一致，体积增加 368 bytes，后续虚拟内存草稿未混入。完整接受决定见 [Timer 验收](refactoring-timers-2026-10-16.md)。

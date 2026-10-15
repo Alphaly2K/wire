@@ -1,45 +1,23 @@
 //! Waitable timers use monotonic deadlines and the cooperative wait scheduler.
 use super::{Memory, Runtime64, SystemTime, UNIX_EPOCH};
+use crate::win32::catalog::TimerApi;
 use std::time::{Duration, Instant};
 
-pub(super) fn arity(name: &str) -> Option<usize> {
-    Some(match name {
-        "CreateWaitableTimerA"
-        | "CreateWaitableTimerW"
-        | "OpenWaitableTimerA"
-        | "OpenWaitableTimerW" => 3,
-        "CreateWaitableTimerExA" | "CreateWaitableTimerExW" => 4,
-        "SetWaitableTimer" => 6,
-        "SetWaitableTimerEx" => 7,
-        "CancelWaitableTimer" => 1,
-        _ => return None,
-    })
-}
-pub(super) fn dwords(name: &str) -> &'static [usize] {
-    match name {
-        "CreateWaitableTimerA" | "CreateWaitableTimerW" => &[1],
-        "OpenWaitableTimerA" | "OpenWaitableTimerW" => &[0, 1],
-        "CreateWaitableTimerExA" | "CreateWaitableTimerExW" => &[2, 3],
-        "SetWaitableTimer" => &[2, 5],
-        "SetWaitableTimerEx" => &[2, 6],
-        _ => &[],
-    }
-}
 impl Runtime64 {
     pub(super) fn timer_call(
         &mut self,
         mem: &mut Memory,
-        name: &str,
+        id: TimerApi,
         a: &[u64],
     ) -> Result<u64, String> {
-        let result = if name.starts_with("Create") || name.starts_with("Open") {
-            let opening = name.starts_with("Open");
-            let extended = name.contains("Ex");
+        let result = if id.creating() || id.opening() {
+            let opening = id.opening();
+            let extended = id.extended();
             let pointer = a[if extended { 1 } else { 2 }];
             let object_name = if pointer == 0 {
                 None
             } else {
-                Some(Self::path_name(mem, pointer, name.ends_with('W'))?)
+                Some(Self::path_name(mem, pointer, id.wide())?)
             };
             if opening {
                 object_name
@@ -57,7 +35,7 @@ impl Runtime64 {
                     if extended { a[3] as u32 } else { 0x1f0003 },
                 )
             }
-        } else if name == "CancelWaitableTimer" {
+        } else if id == TimerApi::Cancel {
             self.events
                 .set_timer(a[0], None, Duration::ZERO)
                 .map(|()| (1, false))
@@ -94,7 +72,7 @@ impl Runtime64 {
         };
         match result {
             Ok((value, existed)) => {
-                if name.starts_with("Create") {
+                if id.creating() {
                     self.set_error(mem, if existed { 183 } else { 0 })?;
                 }
                 Ok(value)
