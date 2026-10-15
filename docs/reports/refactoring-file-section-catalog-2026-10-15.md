@@ -37,4 +37,29 @@ raw 整数/SSE/bit、Win64 version/search 和 PE32 GUID/path raw 的短样本超
 
 raw 整数 100M 的中位数为 +6.919%；700M 长样本仍为 +8.221%，三对分别 +30.68%/+3.89%/+10.36%，control 为 +4.364%，候选相对 control 为 +3.695%。第一组 before/control 15.443/19.687 CPU 秒的差异保留为明显宿主波动。候选在两个规模下均未通过性能门槛，因此拒绝本版，停止没有必要的其余扩样与 Alice smoke；没有用 IR 或新 section 网关的局部改善抵消 raw 成本。
 
-八项 API 的独立基线和 fixture 保留在 main，契约/handler 改动及对应架构说明当时暂时撤回。随后独立评估 release 单 codegen unit，因顺序平衡的三组 bit 长样本均回退超过 5% 而拒绝，见 [构建候选记录](refactoring-release-codegen-2026-10-15.md)。当前恢复本批 source，继续使用原构建配置独立复核，重点补足 raw 整数与 SSE 的顺序平衡长样本；尚未接受第二次验收，不改变上述首版失败记录。
+八项 API 的独立基线和 fixture 保留在 main，契约/handler 改动及对应架构说明当时暂时撤回。随后独立评估 release 单 codegen unit，因顺序平衡的三组 bit 长样本均回退超过 5% 而拒绝，见 [构建候选记录](refactoring-release-codegen-2026-10-15.md)。其后恢复本批 source，继续使用原构建配置独立复核，补足全部八项超阈值路径的顺序平衡长样本；首轮记录和失败数据保持。
+
+## 补样后的接受决定
+
+以 `2b74440` 为验收基线，完整 release **432 passed / 7 ignored**、debug Win32/AMD64/FPU **280 passed**、native GPU/Metal **7 passed**；fmt、strict all-target/all-feature Clippy、工具 12 项及最终 build 均通过。新增三项 Interlocked/SLIST 基线仍使用旧 handler，与本批迁移独立。
+
+`r2-section-recheck-wire/wire` 的 SHA256 仍为 `920df7a11e17ef25b6411809dcc51b5ab83bc3a993261d24e6d7ed4554423810`，与首轮冻结 after 逐字节相同，三份运行时源文件也逐字节相同。因此沿用已有 45 条完整路径的原始证据，集中补足失败调查。before 仍为 SHA256 `927662997fbc71b5102113ab1b5ca2f8f9f5c86d723010d177d7f56be659438f`。
+
+每项新补样各三组，排列为 after/before/control、before/control/after、control/after/before。raw 整数与 SSE/IR 为 700M work；raw SSE/bit 和 AMD64 version/search 为 300M；PE32 GUID/path raw 为 70M。所有 control 均复用同一 before binary/hash。同 work/QoS 的补样完整合并，不同规模的初筛仍保留在结果的 initial 字段。
+
+| 最终调查路径 | after / before CPU 中位数 | after / control |
+| --- | ---: | ---: |
+| PE32 SSE/IR，700M 九组 | +1.945% | +0.167% |
+| PE32 integer/raw，700M 六组 | +6.597% | +4.180% |
+| PE32 SSE/raw，300M | +2.060% | +2.436% |
+| PE32 bit/raw，300M | +4.078% | +3.215% |
+| AMD64 version，300M | +0.115% | −0.086% |
+| AMD64 search，300M | −0.579% | −0.168% |
+| PE32 GUID/raw，70M | −0.857% | +0.523% |
+| PE32 path/raw，70M | −0.306% | −0.038% |
+
+raw 整数的新三组 after/before 为 +0.689%/+8.777%/+5.030%，after/control 为 −2.054%/+4.495%/+4.667%；宿主漂移和原首组 +30.68% 均保留。相对 control 的 +4.18% 成本尚未消除；raw bit 的 +3.215% 成本也继续记录。五个执行器的 opcode 序列和 guest 工作不变，完整反汇编保留外部 helper 调用目标及常量重定位变化，CPU/IR/cache 源码没有改动。
+
+按计划“超过 3% 调查、三组均超过 5% 默认拒绝”的门槛，新三组未触发持续拒绝条件，接受本次维护性迁移并记录上述布局/宿主成本。此决定基于补充调查，不以其它路径的改善抵消 raw 成本。45 条路径全部结果校验，汇总为 `r2-section-recheck-final-metrics.json`；其它路径最大 CPU 中位数回退 +2.089%，RSS 中位数最多增加 192KiB。首轮、长样本、顺序轮换及 control 的来源均可定位。
+
+Alice 相同 200M 启动前缀三对 AB/BA 全部校验预算出口、隐藏的 314×211 bootstrap 窗口及 Draw/Present=0。CPU 中位数 2.6320s → 2.6056s（−1.00%），wall 2.7420s → 2.6588s，RSS 未增长。输入哈希、命令和每轮输出保存在 `r2-section-recheck-alice/`，复用现有游戏目录及素材；该前缀仍是启动 smoke。

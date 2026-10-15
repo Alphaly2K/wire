@@ -38,4 +38,8 @@ Win64 adapter 暂留 Runtime64 的原 gateway 分支位置，分支由 bound Fil
 
 Win64 普通文件读写和管道写入继续在原位置提前返回 Control::Returned，gateway 提交提前保存的 CPU return frame、计数和 trace，保留这些 endpoint 原来不调用 scheduler unblock 的行为。管道读入和标准输出写入走原来的通用 unblock/提交路径。没有新建文件完成框架或另移 CPU 提交；这项边界保留是前几个候选性能失败后的渐进取舍。WriteConsoleW 保持原来的拒绝结果，没有借迁移扩展 console 能力。
 
-PE32 目前仍使用 ApiState 的混合 HandleObj 表与 filesystem 字段，属于后续 R3 工作。文件 section、SHLWAPI/imagehlp、标准句柄和跨资源 CloseHandle 等 API 的 catalog 迁移仍待完成，本页不表示整个文件领域已完成。
+文件 section 的八个 export 也由 FileApi 声明：CreateFileMappingA/W、OpenFileMappingA/W、MapViewOfFile/Ex、UnmapViewOfFile、FlushViewOfFile。文件契约合计 53 个，PE32 32 Typed/21 ABI-only，Win64 45 Typed/8 Absent。PE32 八项均保留未实现策略；Win64 OpenFileMappingA/W 保持 absent，其余为原有 unnamed、read-only、file-backed 子集。HANDLE、view size 和可选 base 保留指针宽度，protection/access/offset high/low 使用 DWORD；SECURITY_ATTRIBUTES、access/alignment、handle 查询、错误码和故障提交顺序保持。
+
+Mappings 独立拥有 section/view 与 retained file descriptor，view 持有 section 引用，文件或 section handle 关闭后已有 view 继续存活。guest WriteFile 更新同 inode 的活动 view；64 位 offset、64KiB 对齐、资源上限及原 backing 生命周期保持。adapter 按冷绑定 ID 调用原 Mappings 方法，不新增通用结果框架。独立行为与性能证据见 [section 验收](../reports/refactoring-file-section-catalog-2026-10-15.md)。
+
+PE32 目前仍使用 ApiState 的混合 HandleObj 表与 filesystem 字段，属于后续 R3 工作。SHLWAPI/imagehlp、标准句柄和跨资源 CloseHandle 的 catalog 候选因性能门槛暂缓，本页不表示整个文件领域已完成。

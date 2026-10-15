@@ -47,6 +47,14 @@ pub enum FileApi {
     FindNextFileA,
     FindNextFileW,
     FindClose,
+    CreateFileMappingA,
+    CreateFileMappingW,
+    OpenFileMappingA,
+    OpenFileMappingW,
+    MapViewOfFile,
+    MapViewOfFileEx,
+    UnmapViewOfFile,
+    FlushViewOfFile,
 }
 
 impl FileApi {
@@ -171,7 +179,27 @@ const fn search(
     )
 }
 
-pub static FILE_CONTRACTS: [Contract; 45] = [
+const fn section(
+    id: FileApi,
+    name: &'static str,
+    parameters: &'static [Parameter],
+    returns: ReturnConvention,
+    win64: bool,
+) -> Contract {
+    Contract::new(
+        ApiId::File(id), name, parameters, returns,
+        "PE32 known ABI with legacy unimplemented return; Win64 unnamed read-only file-backed sections, retained backing/view lifetime and file-write coherence; preserve security/access/alignment checks, pointer widths and fault/LastError order; OpenFileMapping remains absent on Win64",
+        [
+            ArchitecturePlan { dlls: &["kernel32.dll"], execution: ExecutionPolicy::LegacyUnimplemented },
+            ArchitecturePlan {
+                dlls: if win64 { &["kernel32.dll", "kernelbase.dll"] } else { &[] },
+                execution: if win64 { ExecutionPolicy::Typed } else { ExecutionPolicy::Absent },
+            },
+        ],
+    )
+}
+
+pub static FILE_CONTRACTS: [Contract; 53] = [
     declaration(
         FileApi::CreateFileA,
         "CreateFileA",
@@ -339,4 +367,54 @@ pub static FILE_CONTRACTS: [Contract; 45] = [
     search(FileApi::FindNextFileA, "FindNextFileA", &[P, P], B),
     search(FileApi::FindNextFileW, "FindNextFileW", &[P, P], B),
     search(FileApi::FindClose, "FindClose", &[P], B),
+    section(
+        FileApi::CreateFileMappingA,
+        "CreateFileMappingA",
+        &[P, P, D, D, D, P],
+        R,
+        true,
+    ),
+    section(
+        FileApi::CreateFileMappingW,
+        "CreateFileMappingW",
+        &[P, P, D, D, D, P],
+        R,
+        true,
+    ),
+    section(
+        FileApi::OpenFileMappingA,
+        "OpenFileMappingA",
+        &[D, I, P],
+        R,
+        false,
+    ),
+    section(
+        FileApi::OpenFileMappingW,
+        "OpenFileMappingW",
+        &[D, I, P],
+        R,
+        false,
+    ),
+    section(
+        FileApi::MapViewOfFile,
+        "MapViewOfFile",
+        &[P, D, D, D, P],
+        R,
+        true,
+    ),
+    section(
+        FileApi::MapViewOfFileEx,
+        "MapViewOfFileEx",
+        &[P, D, D, D, P, P],
+        R,
+        true,
+    ),
+    section(FileApi::UnmapViewOfFile, "UnmapViewOfFile", &[P], B, true),
+    section(
+        FileApi::FlushViewOfFile,
+        "FlushViewOfFile",
+        &[P, P],
+        B,
+        true,
+    ),
 ];

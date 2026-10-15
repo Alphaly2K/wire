@@ -2,6 +2,14 @@
 
 按用户提供的 2026-10-11 计划实施，原生 Mono/R6 忽略。用户要求直接在本地 main 分批提交；不创建 worktree，不 push。用户未跟踪设计文档、PDF、IDE 与系统文件保持现状。
 
+## 最新文件 section 批次
+
+八项映射 API 汇入唯一文件契约，文件 export 累计 53 个；删除重复 ABI/arity/DWORD 表，按冷绑定 FileApi ID 使用原 handler，保留 Mappings 的资源寿命、错误顺序和输出提交。PE32 八项仍为 ABI-only；Win64 六项 typed、两项 absent。
+
+原构建配置下 release 432、debug 280、native GPU 7 项及严格检查通过。冻结二进制与首轮完全相同，沿用 45 条路径并补足八项超阈值路径的顺序轮换长样本。raw 整数六组 CPU 中位数 +6.597%、control +2.319%、after/control +4.180%，raw bit after/control +3.215%；这些成本经调查后明确记录接受，新三组未全部超过 5% 拒绝门槛。其它最终路径最大回退 +2.089%，RSS 最多增加 192KiB。Alice 200M 三对保持同一预算出口和隐藏窗口，CPU 中位数 −1.00%。完整首轮拒绝、补样及接受依据见 [section 报告](refactoring-file-section-catalog-2026-10-15.md)。
+
+独立 release 单编译单元实验因顺序平衡的三组 bit 长样本均回退超过 5% 而撤回，见 [构建候选报告](refactoring-release-codegen-2026-10-15.md)。此前路径/句柄、网关边界及 helper 布局候选也保持撤回；这些实验没有混入本批代码。
+
 模块 API catalog 扩展前新增独立的 [IR 布局隔离](refactoring-ir-layout-2026-10-14.md)：仅改变 macOS 寄存器段执行器的节归属/对齐，26 个 case/path 三对验收，最大 CPU 中位数回退 +2.12%，release 403、debug 288、native GPU 7 项通过。原 module 候选因 bit-test 持续回退没有接受，后续以该独立批次为新基线继续验收。
 
 后续 module 候选又暴露受检段的布局敏感性；在 `ff7495a` 上独立隔离 `CheckedSegment::execute` 并声明正确 Mach-O 代码属性。26 个 case/path 全部校验，memory +0.07%；SSE +3.63% 经 700M/IR 计数/机器码调查后记录接受。两项布局调整均没有更改 ISA/fault/预算行为，详情和失败轮次继续保存在同一报告。

@@ -453,10 +453,6 @@ fn import_arity(name: &str) -> Option<usize> {
         "SetEnvironmentVariableW" | "SetEnvironmentVariableA" => 2,
         "GlobalMemoryStatusEx" => 1,
         "NtQueryDirectoryFile" => 11,
-        "CreateFileMappingW" | "CreateFileMappingA" | "MapViewOfFileEx" => 6,
-        "MapViewOfFile" => 5,
-        "UnmapViewOfFile" => 1,
-        "FlushViewOfFile" => 2,
         "CommandLineToArgvW" => 2,
         "LocalFree" => 1,
         "RoInitialize" | "CoInitialize" => 1,
@@ -613,8 +609,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "BCryptCloseAlgorithmProvider" => &[1],
         "GetEnvironmentVariableW" | "GetEnvironmentVariableA" => &[2],
         "NtQueryDirectoryFile" => &[6, 7],
-        "CreateFileMappingW" | "CreateFileMappingA" => &[2, 3, 4],
-        "MapViewOfFile" | "MapViewOfFileEx" => &[1, 2, 3],
         "RoInitialize" => &[0],
         "CoInitializeEx" => &[1],
         "CoCreateInstance" => &[2],
@@ -2365,7 +2359,11 @@ impl Runtime64 {
                     1
                 }
             }
-            "CreateFileMappingW" | "CreateFileMappingA" => {
+            _ if matches!(
+                file,
+                Some(FileApi::CreateFileMappingW | FileApi::CreateFileMappingA)
+            ) =>
+            {
                 let inherit = if args[1] == 0 {
                     false
                 } else {
@@ -2390,14 +2388,22 @@ impl Runtime64 {
                     }
                 }
             }
-            "MapViewOfFile" | "MapViewOfFileEx" => {
+            _ if matches!(
+                file,
+                Some(FileApi::MapViewOfFile | FileApi::MapViewOfFileEx)
+            ) =>
+            {
                 match self.mappings.map(
                     mem,
                     args[0],
                     args[1] as u32,
                     args[2] << 32 | args[3],
                     args[4],
-                    if name.ends_with("Ex") { args[5] } else { 0 },
+                    if file == Some(FileApi::MapViewOfFileEx) {
+                        args[5]
+                    } else {
+                        0
+                    },
                 ) {
                     Ok(base) => base,
                     Err(error) => {
@@ -2406,7 +2412,7 @@ impl Runtime64 {
                     }
                 }
             }
-            "UnmapViewOfFile" => {
+            _ if file == Some(FileApi::UnmapViewOfFile) => {
                 if self.mappings.contains_view(args[0]) {
                     self.mappings.unmap(mem, args[0])?;
                     1
@@ -2415,13 +2421,15 @@ impl Runtime64 {
                     0
                 }
             }
-            "FlushViewOfFile" => match self.mappings.flush(args[0], args[1]) {
-                Ok(()) => 1,
-                Err(error) => {
-                    self.set_error(mem, error)?;
-                    0
+            _ if file == Some(FileApi::FlushViewOfFile) => {
+                match self.mappings.flush(args[0], args[1]) {
+                    Ok(()) => 1,
+                    Err(error) => {
+                        self.set_error(mem, error)?;
+                        0
+                    }
                 }
-            },
+            }
             _ if matches!(file, Some(FileApi::CreateFileW | FileApi::CreateFileA)) => {
                 if args[6] != 0 {
                     return Err("Win64 file template handle not implemented".into());
