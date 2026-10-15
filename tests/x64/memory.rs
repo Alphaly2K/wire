@@ -3,6 +3,67 @@
 use super::*;
 
 #[test]
+fn virtual_memory_keeps_win64_size_t_handles_and_saved_protect_return_alias() {
+    for dll in ["kernel32.dll", "kernelbase.dll"] {
+        let (mut mem, mut cpu, mut runtime) = startup();
+        let high = 0xfacefeed_00000000;
+        let page = startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            dll,
+            "VirtualAlloc",
+            &[0, 4096, high | 0x3000, high | 4],
+        );
+        assert_ne!(page, 0);
+        let output = STACK + 0x100;
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                dll,
+                "VirtualQuery",
+                &[page, output, 0x100000000]
+            ),
+            48
+        );
+        assert_eq!(mem.read_int(output, 8).unwrap(), page);
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                dll,
+                "VirtualProtectEx",
+                &[high | u32::MAX as u64, page, 4096, 2, 0]
+            ),
+            0
+        );
+        assert_eq!(mem.read_int(wire::x64::runtime::TEB + 0x68, 4).unwrap(), 6);
+
+        let sp = STACK + 0x1f88;
+        cpu.regs[4] = sp;
+        mem.write_int(sp, 8, BASE).unwrap();
+        for (reg, value) in [1, 2, 8, 9].into_iter().zip([page, 4096, high | 2, sp]) {
+            cpu.regs[reg] = value;
+        }
+        assert_eq!(
+            runtime
+                .dispatch(dll, "VirtualProtect", &mut cpu, &mut mem)
+                .unwrap(),
+            wire::x64::runtime::Control::Returned
+        );
+        assert_eq!(cpu.regs[0], 1);
+        assert_eq!(cpu.rip, BASE); // Win64 saved the return before the output write.
+        assert_eq!(cpu.regs[4], sp + 8);
+        assert_eq!(mem.read_int(sp, 4).unwrap(), 4);
+        assert!(mem.write_int(page, 4, 0).is_err());
+        assert_eq!(mem.read_int(wire::x64::runtime::TEB + 0x68, 4).unwrap(), 6);
+    }
+}
+
+#[test]
 fn sparse_high_address_memory_is_checked_and_cross_page_writes_are_atomic() {
     let mut m = Memory::default();
     m.map(BASE, 8192, READ | WRITE).unwrap();

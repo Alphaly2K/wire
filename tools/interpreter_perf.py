@@ -251,6 +251,10 @@ def main():
         from perf.fixtures.timer_gateway import x64
         data, meta = x64(args.work)
         entries.append(('gateway-timer', data, meta))
+    if args.cases and 'gateway-vmem' in args.cases:
+        from perf.fixtures.virtual_memory_gateway import x64
+        data, meta = x64(args.work)
+        entries.append(('gateway-vmem', data, meta))
     if args.cases and 'gateway-context' in args.cases:
         from perf.fixtures.context_gateway import x64
         data, meta = x64(args.work)

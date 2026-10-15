@@ -41,3 +41,9 @@ n=`max(1, work//6)`、retired=`5*n+17`、work=`6*n+19`，
 两端 API count=`n+2`。双架构在旧 TLS handler 上完成 12K smoke。
 这些 case 需显式选择，默认 case 集合不变。PE32 正式 API 计时可加
 `--discard-api-log`：仍格式化 trace、记录频率和计数，将全量 trace 写入空设备。
+
+`virtual_memory_gateway.py` 的双架构 `gateway-vmem` 先分配 4096 字节，
+再循环 VirtualQuery，累计返回结构大小以及查询 BaseAddress 与实际分配地址的差值。
+PE32 返回值为 `28*n`、retired=`11*n+17`；Win64 返回值为 `48*n`、
+retired=`10*n+18`、work=`11*n+19`，其中 n=`max(1, work//11)`，
+API count 均为 `n+1`。不依赖宿主分配地址，需显式选择。

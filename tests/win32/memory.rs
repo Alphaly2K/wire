@@ -3,6 +3,45 @@
 use super::*;
 
 #[test]
+fn virtual_memory_keeps_pe32_protect_return_alias_and_remote_error_order() {
+    let mut v = Vm::new();
+    let page = v.k("VirtualAlloc", &[0, 4096, 0x3000, 4]);
+    assert_ne!(page, 0);
+    v.k("SetLastError", &[123]);
+    let sp = STACK_BASE + STACK_SIZE - 256;
+    let address = v.api.register("kernel32.dll", Some("VirtualProtect"), None);
+    v.cpu.eip = address;
+    v.cpu.set_esp(sp);
+    v.mem.write_u32(sp, RET).unwrap();
+    for (i, value) in [page, 4096, 2, sp].into_iter().enumerate() {
+        v.mem.write_u32(sp + 4 + i as u32 * 4, value).unwrap();
+    }
+    let index = v.api.stub_index(address).unwrap();
+    api::dispatch(
+        index,
+        &mut v.cpu,
+        &mut v.mem,
+        &mut v.api,
+        &mut v.state,
+        &mut v.log,
+        &mut v.sched,
+        1_000_000,
+    )
+    .unwrap();
+    assert_eq!(v.cpu.regs[0], 1);
+    assert_eq!(v.cpu.eip, 4); // Output overwrites the unsaved legacy return slot.
+    assert_eq!(v.cpu.esp(), sp + 20);
+    assert_eq!(v.mem.read_u32(sp).unwrap(), 4);
+    assert_eq!(v.mem.virtual_query(page).unwrap().protect, 2);
+    assert_eq!(v.state.last_error, 123);
+    assert_eq!(v.k("VirtualProtectEx", &[123, page, 4096, 4, 0]), 0);
+    assert_eq!(v.state.last_error, 6);
+    assert_eq!(v.mem.virtual_query(page).unwrap().protect, 2);
+    assert_eq!(v.k("VirtualQueryEx", &[123, page, 0, 0]), 0);
+    assert_eq!(v.state.last_error, 6);
+}
+
+#[test]
 fn pe32_dep_policy_interprets_legacy_data_but_preserves_nx_noaccess_guard_and_ir_invalidation() {
     use wire::mem::{MEM_COMMIT, MEM_RESERVE, PAGE_GUARD, PAGE_NOACCESS, PAGE_READWRITE};
     let v = Vm::new();
