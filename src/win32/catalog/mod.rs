@@ -9,6 +9,7 @@ mod identity;
 mod interlocked;
 mod locals;
 mod modules;
+mod mutexes;
 mod nls;
 mod paths;
 mod sync_objects;
@@ -22,6 +23,7 @@ pub use identity::{IdentityApi, IDENTITY_CONTRACTS};
 pub use interlocked::{InterlockedApi, INTERLOCKED_CONTRACTS};
 pub use locals::{LocalApi, LOCAL_CONTRACTS};
 pub use modules::{ModuleApi, ModuleQueryApi, MODULE_CONTRACTS, MODULE_QUERY_CONTRACTS};
+pub use mutexes::{MutexApi, MUTEX_CONTRACTS};
 pub use nls::{NlsApi, NLS_CONTRACTS};
 pub use paths::{PathApi, PATH_CONTRACTS};
 pub use sync_objects::{SyncObjectApi, SYNC_OBJECT_CONTRACTS};
@@ -73,6 +75,7 @@ pub enum ApiId {
     Context(ContextApi),
     Local(LocalApi),
     SyncObject(SyncObjectApi),
+    Mutex(MutexApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -224,6 +227,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(CONTEXT_CONTRACTS.iter())
         .chain(LOCAL_CONTRACTS.iter())
         .chain(SYNC_OBJECT_CONTRACTS.iter())
+        .chain(MUTEX_CONTRACTS.iter())
 }
 
 #[cfg(test)]

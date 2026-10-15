@@ -1005,6 +1005,7 @@ impl Runtime64 {
             ApiId::File(_) => unreachable!("core file calls are handled by the bound gateway"),
             ApiId::Handle(_) => unreachable!("handle calls are handled by the bound gateway"),
             ApiId::Path(_) => unreachable!("path helpers have no Win64 binding"),
+            ApiId::Mutex(_) => unreachable!("mutexes have no Win64 binding"),
             ApiId::Guid(id) => crate::win32::x64::guid::call(mem, id, args),
             ApiId::Identity(id) => {
                 crate::win32::x64::identity::call(mem, id, args, &self.profile, self.teb() + 0x68)

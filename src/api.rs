@@ -665,11 +665,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("FreeResource", 4),
                 ("FormatMessageA", 28),
                 ("FormatMessageW", 28),
-                ("CreateMutexA", 12),
-                ("CreateMutexW", 12),
-                ("ReleaseMutex", 4),
-                ("OpenMutexA", 12),
-                ("OpenMutexW", 12),
                 ("WaitForSingleObject", 8),
                 ("WaitForSingleObjectEx", 12),
                 ("WaitForMultipleObjects", 16),
@@ -2100,44 +2095,53 @@ pub fn dispatch(
                 }
             };
         }
-        // --- mutexes ---
-        ("kernel32.dll", "CreateMutexA") | ("kernel32.dll", "CreateMutexW") => {
-            let wide = name.ends_with('W');
-            let nm = read_str(mem, args[2], wide);
-            let me = sched.current_tid();
-            let own = args[1] != 0;
-            let (h, existed) = state.create_named(&nm, || HandleObj::Mutex {
-                owner: if own { Some(me) } else { None },
-                count: if own { 1 } else { 0 },
-            });
-            note = format!(
-                "mutex \"{nm}\"{}",
-                if existed { " (already exists)" } else { "" }
-            );
-            ret = h;
-        }
-        ("kernel32.dll", "ReleaseMutex") => {
-            let me = sched.current_tid();
-            match state.handles.get_mut(&args[0]) {
-                Some(HandleObj::Mutex { owner, count }) if *owner == Some(me) => {
-                    *count -= 1;
-                    if *count == 0 {
-                        *owner = None;
-                        wake_obj_waiters(sched, args[0], 1);
+        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Mutex(_))) => {
+            let Some(crate::win32::catalog::ApiId::Mutex(id)) = binding.typed else {
+                unreachable!();
+            };
+            use crate::win32::catalog::MutexApi::*;
+            ret = match id {
+                CreateA | CreateW => {
+                    let nm = read_str(mem, args[2], id == CreateW);
+                    let me = sched.current_tid();
+                    let own = args[1] != 0;
+                    let (h, existed) = state.create_named(&nm, || HandleObj::Mutex {
+                        owner: if own { Some(me) } else { None },
+                        count: if own { 1 } else { 0 },
+                    });
+                    note = format!(
+                        "mutex \"{nm}\"{}",
+                        if existed { " (already exists)" } else { "" }
+                    );
+                    h
+                }
+                Release => {
+                    let me = sched.current_tid();
+                    match state.handles.get_mut(&args[0]) {
+                        Some(HandleObj::Mutex { owner, count }) if *owner == Some(me) => {
+                            *count -= 1;
+                            if *count == 0 {
+                                *owner = None;
+                                wake_obj_waiters(sched, args[0], 1);
+                            }
+                            1
+                        }
+                        Some(HandleObj::Mutex { .. }) => {
+                            state.last_error = 288; // ERROR_NOT_OWNER
+                            note = "not the owner".into();
+                            0
+                        }
+                        _ => {
+                            state.last_error = 6;
+                            note = "bad mutex handle".into();
+                            0
+                        }
                     }
-                    ret = 1;
                 }
-                Some(HandleObj::Mutex { .. }) => {
-                    state.last_error = 288; // ERROR_NOT_OWNER
-                    ret = 0;
-                    note = "not the owner".into();
+                CreateExA | CreateExW | OpenA | OpenW => {
+                    unreachable!("ABI-only exports use the legacy unimplemented policy")
                 }
-                _ => {
-                    state.last_error = 6;
-                    ret = 0;
-                    note = "bad mutex handle".into();
-                }
-            }
+            };
         }
         // --- waits ---
         ("kernel32.dll", "WaitForSingleObject" | "WaitForSingleObjectEx") => {

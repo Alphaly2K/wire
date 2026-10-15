@@ -196,3 +196,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 16 项接口接入 SyncObjectApi，删除重复 ABI/arity/DWORD 与字符串 handler；PE32 十项 typed、六项 ABI-only，Win64 十五项 typed、PulseEvent absent。原命名对象、per-alias access、count、waiter wake 和故障提交顺序保持。四项旧行为基线先通过，完整 release 452、debug 300、native 7、工具 19 项与 fmt/strict Clippy 通过。
 
 31 条性能路径全部校验；module/raw 初筛 +3.743% 经 150M 三标签扩样为 +0.527%，control/before +0.070%。Win64 固定 event 网关循环 −21.989%，其余最大回退 +2.725%，RSS 最多 +256KiB。Alice 200M 三对保持预算出口、隐藏窗口和零 Draw/Present，CPU +0.306%；冻结的 235 个 Rust 文件核对一致。完整接受决定见 [同步对象验收](refactoring-sync-objects-2026-10-16.md)。
+
+## R2 Mutex
+
+七项接口接入 MutexApi，删除 PE32 重复 ABI 与名称 handler；三项 typed、四项 ABI-only，Win64 全部 absent。实际 guest 线程的旧行为基线覆盖递归所有权、同名 create、逐层释放、error 288 和 release 在返回槽 fault 前提交。完整 release 454、debug 302、native 7、工具 19 项及 fmt/strict Clippy 通过。
+
+33 条性能路径全部结果校验；最大回退 +1.712%，mutex IR/raw +0.714%/+0.681%，RSS 最多 +64KiB。Alice 200M 三对保持预算出口、隐藏窗口和零 Draw/Present，CPU +2.204%、wall +2.873%。236 个冻结 Rust 文件核对一致；下一组 Wait 草稿未混入验收。独立发现的 event fixture 重复导入保留原数据，后续单独修正。完整接受决定见 [Mutex 验收](refactoring-mutexes-2026-10-16.md)。
