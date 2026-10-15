@@ -239,6 +239,10 @@ def main():
         from perf.fixtures.kernel_gateway import x64
         data, meta = x64(args.work)
         entries.append(('gateway-event', data, meta))
+    if args.cases and 'gateway-wait' in args.cases:
+        from perf.fixtures.wait_gateway import x64
+        data, meta = x64(args.work)
+        entries.append(('gateway-wait', data, meta))
     if args.cases and 'gateway-context' in args.cases:
         from perf.fixtures.context_gateway import x64
         data, meta = x64(args.work)

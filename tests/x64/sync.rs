@@ -352,6 +352,81 @@ fn amd64_suspended_thread_context_reads_saved_guest_registers_across_small_and_l
 }
 
 #[test]
+fn waits_keep_win64_dword_counts_full_handles_and_array_fault_before_acquire() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let event = startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "CreateEventW",
+        &[0, 0, 1, 0],
+    );
+    let high = 0xfacefeed_00000000;
+    for dll in ["kernel32.dll", "kernelbase.dll"] {
+        for (name, args, error) in [
+            ("WaitForSingleObject", vec![high | event, high], 6),
+            ("WaitForSingleObjectEx", vec![high | event, high, high], 6),
+            ("WaitForMultipleObjects", vec![high, 2, high, high], 87),
+            (
+                "WaitForMultipleObjectsEx",
+                vec![high | 65, 2, high, high, high],
+                87,
+            ),
+        ] {
+            assert_eq!(
+                startup_dll_call(&mut mem, &mut cpu, &mut runtime, dll, name, &args),
+                u32::MAX as u64,
+                "{dll}!{name}"
+            );
+            assert_eq!(
+                mem.read_int(wire::x64::runtime::TEB + 0x68, 4).unwrap(),
+                error
+            );
+            assert!(!wire::x64::runtime::import_supported("user32.dll", name));
+        }
+    }
+    let array = STACK + 8192 - 8;
+    mem.write_int(array, 8, event).unwrap();
+    cpu.regs[1] = 2;
+    cpu.regs[2] = array;
+    cpu.regs[8] = 0;
+    cpu.regs[9] = 0;
+    mem.write_int(cpu.regs[4], 8, BASE).unwrap();
+    let before = cpu.clone();
+    let calls = runtime.api_calls;
+    assert!(runtime
+        .dispatch(
+            "kernelbase.dll",
+            "WaitForMultipleObjects",
+            &mut cpu,
+            &mut mem
+        )
+        .is_err());
+    assert_eq!(cpu, before);
+    assert_eq!(runtime.api_calls, calls);
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "WaitForSingleObjectEx",
+            &[event, high, high]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "WaitForSingleObject",
+            &[event, 0]
+        ),
+        258
+    );
+}
+
+#[test]
 fn amd64_user_apc_wakes_alertable_target_and_preserves_64_bit_parameter_and_return() {
     use wire::x64::process::{Outcome, Process64};
     const CODE: u64 = 0x5a0000000;
@@ -372,65 +447,94 @@ fn amd64_user_apc_wakes_alertable_target_and_preserves_64_bit_parameter_and_retu
         mov(code, 0, p.runtime.register("kernel32.dll", name));
         code.extend([0xff, 0xd0]);
     }
-    let path = std::env::temp_dir().join(format!("wire-apc64-{}.exe", std::process::id()));
-    std::fs::write(&path, fixture()).unwrap();
-    let mut p = Process64::load(&path, false).unwrap();
-    p.memory
-        .map(CODE, 3 * 4096, READ | WRITE | EXECUTE)
-        .unwrap();
-    let mut main = vec![0x48, 0x83, 0xec, 0x38];
-    call(&mut p, &mut main, "SetErrorMode", &[1]);
-    call(&mut p, &mut main, "CreateThread", &[0, 0, WORKER, 0, 4, 0]);
-    main.extend([0x49, 0x89, 0xc4, 0x4c, 0x89, 0xe1]);
-    call(&mut p, &mut main, "ResumeThread", &[]);
-    call(&mut p, &mut main, "SwitchToThread", &[]);
-    mov(&mut main, 1, CALLBACK);
-    main.extend([0x4c, 0x89, 0xe2]); // rdx=r12 target thread
-    mov(&mut main, 8, 0x8877665544332211);
-    call(&mut p, &mut main, "QueueUserAPC", &[]);
-    main.extend([0x4c, 0x89, 0xe1]);
-    mov(&mut main, 2, u32::MAX as u64);
-    call(&mut p, &mut main, "WaitForSingleObject", &[]);
-    call(&mut p, &mut main, "GetThreadErrorMode", &[]);
-    main.extend([0x48, 0x83, 0xc4, 0x38, 0xc3]);
-    p.memory.write(CODE, &main).unwrap();
-    let mut worker = vec![0x48, 0x83, 0xec, 0x28];
-    call(&mut p, &mut worker, "GetThreadErrorMode", &[]);
-    mov(&mut worker, 7, DATA + 24);
-    worker.extend([0x48, 0x89, 0x07]);
-    call(&mut p, &mut worker, "SetThreadErrorMode", &[0x8000, 0]);
-    call(&mut p, &mut worker, "SleepEx", &[u32::MAX as u64, 1]);
-    mov(&mut worker, 7, DATA + 16);
-    worker.extend([0x48, 0x89, 0x07, 0x48, 0x83, 0xc4, 0x28, 0xc3]);
-    p.memory.write(WORKER, &worker).unwrap();
-    let mut callback = vec![0x48, 0x83, 0xec, 0x28];
-    mov(&mut callback, 0, DATA);
-    callback.extend([0x48, 0x89, 0x08]);
-    call(&mut p, &mut callback, "GetCurrentThreadId", &[]);
-    mov(&mut callback, 7, DATA + 8);
-    callback.extend([0x48, 0x89, 0x07]);
-    call(&mut p, &mut callback, "GetThreadErrorMode", &[]);
-    mov(&mut callback, 7, DATA + 32);
-    callback.extend([
-        0x48, 0x89, 0x07, 0xb8, 99, 0, 0, 0, 0x48, 0x83, 0xc4, 0x28, 0xc3,
-    ]);
-    p.memory.write(CALLBACK, &callback).unwrap();
-    p.cpu.rip = CODE;
-    loop {
-        match p.run(p.cpu.work + 1).unwrap() {
-            Outcome::Budget => assert!(p.cpu.work < 1000),
-            result => {
-                assert_eq!(result, Outcome::Returned(0));
-                break;
+    for wait in [
+        "SleepEx",
+        "WaitForSingleObjectEx",
+        "WaitForMultipleObjectsEx",
+    ] {
+        let path =
+            std::env::temp_dir().join(format!("wire-apc64-{}-{wait}.exe", std::process::id()));
+        std::fs::write(&path, fixture()).unwrap();
+        let mut p = Process64::load(&path, false).unwrap();
+        p.memory
+            .map(CODE, 3 * 4096, READ | WRITE | EXECUTE)
+            .unwrap();
+        let mut main = vec![0x48, 0x83, 0xec, 0x38];
+        if wait != "SleepEx" {
+            call(&mut p, &mut main, "CreateEventW", &[0, 1, 0, 0]);
+            mov(&mut main, 7, DATA + 40);
+            main.extend([0x48, 0x89, 0x07]);
+        }
+        call(&mut p, &mut main, "SetErrorMode", &[1]);
+        call(&mut p, &mut main, "CreateThread", &[0, 0, WORKER, 0, 4, 0]);
+        main.extend([0x49, 0x89, 0xc4, 0x4c, 0x89, 0xe1]);
+        call(&mut p, &mut main, "ResumeThread", &[]);
+        call(&mut p, &mut main, "SwitchToThread", &[]);
+        mov(&mut main, 1, CALLBACK);
+        main.extend([0x4c, 0x89, 0xe2]); // rdx=r12 target thread
+        mov(&mut main, 8, 0x8877665544332211);
+        call(&mut p, &mut main, "QueueUserAPC", &[]);
+        main.extend([0x4c, 0x89, 0xe1]);
+        mov(&mut main, 2, u32::MAX as u64);
+        call(&mut p, &mut main, "WaitForSingleObject", &[]);
+        call(&mut p, &mut main, "GetThreadErrorMode", &[]);
+        main.extend([0x48, 0x83, 0xc4, 0x38, 0xc3]);
+        p.memory.write(CODE, &main).unwrap();
+        let mut worker = vec![0x48, 0x83, 0xec, 0x28];
+        call(&mut p, &mut worker, "GetThreadErrorMode", &[]);
+        mov(&mut worker, 7, DATA + 24);
+        worker.extend([0x48, 0x89, 0x07]);
+        call(&mut p, &mut worker, "SetThreadErrorMode", &[0x8000, 0]);
+        match wait {
+            "WaitForSingleObjectEx" => {
+                mov(&mut worker, 1, DATA + 40);
+                worker.extend([0x48, 0x8b, 0x09]);
+                mov(&mut worker, 2, u32::MAX as u64);
+                mov(&mut worker, 8, 1);
+                call(&mut p, &mut worker, wait, &[]);
+            }
+            "WaitForMultipleObjectsEx" => {
+                call(
+                    &mut p,
+                    &mut worker,
+                    wait,
+                    &[1, DATA + 40, 0, u32::MAX as u64, 1],
+                );
+            }
+            _ => call(&mut p, &mut worker, wait, &[u32::MAX as u64, 1]),
+        }
+        mov(&mut worker, 7, DATA + 16);
+        worker.extend([0x48, 0x89, 0x07, 0x48, 0x83, 0xc4, 0x28, 0xc3]);
+        p.memory.write(WORKER, &worker).unwrap();
+        let mut callback = vec![0x48, 0x83, 0xec, 0x28];
+        mov(&mut callback, 0, DATA);
+        callback.extend([0x48, 0x89, 0x08]);
+        call(&mut p, &mut callback, "GetCurrentThreadId", &[]);
+        mov(&mut callback, 7, DATA + 8);
+        callback.extend([0x48, 0x89, 0x07]);
+        call(&mut p, &mut callback, "GetThreadErrorMode", &[]);
+        mov(&mut callback, 7, DATA + 32);
+        callback.extend([
+            0x48, 0x89, 0x07, 0xb8, 99, 0, 0, 0, 0x48, 0x83, 0xc4, 0x28, 0xc3,
+        ]);
+        p.memory.write(CALLBACK, &callback).unwrap();
+        p.cpu.rip = CODE;
+        loop {
+            match p.run(p.cpu.work + 1).unwrap() {
+                Outcome::Budget => assert!(p.cpu.work < 1000),
+                result => {
+                    assert_eq!(result, Outcome::Returned(0));
+                    break;
+                }
             }
         }
+        assert_eq!(p.memory.read_int(DATA, 8).unwrap(), 0x8877665544332211);
+        assert_eq!(p.memory.read_int(DATA + 8, 8).unwrap(), 2);
+        assert_eq!(p.memory.read_int(DATA + 16, 8).unwrap(), 0xc0);
+        assert_eq!(p.memory.read_int(DATA + 24, 8).unwrap(), 1);
+        assert_eq!(p.memory.read_int(DATA + 32, 8).unwrap(), 0x8000);
+        std::fs::remove_file(path).unwrap();
     }
-    assert_eq!(p.memory.read_int(DATA, 8).unwrap(), 0x8877665544332211);
-    assert_eq!(p.memory.read_int(DATA + 8, 8).unwrap(), 2);
-    assert_eq!(p.memory.read_int(DATA + 16, 8).unwrap(), 0xc0);
-    assert_eq!(p.memory.read_int(DATA + 24, 8).unwrap(), 1);
-    assert_eq!(p.memory.read_int(DATA + 32, 8).unwrap(), 0x8000);
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]

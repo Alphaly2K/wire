@@ -3,6 +3,64 @@
 use super::*;
 
 #[test]
+fn waits_keep_pe32_empty_arrays_count_clamp_and_extended_abi_only_policy() {
+    let mut v = Vm::new();
+    assert_eq!(v.k("WaitForMultipleObjects", &[0, 0, 1, 0]), 0);
+    assert_eq!(v.k("WaitForMultipleObjects", &[0, 0, 0, 0]), 258);
+    let event = v.k("CreateEventW", &[0, 1, 1, 0]);
+    let array = DATA + 4096 - 64 * 4;
+    for i in 0..64 {
+        v.mem.write_u32(array + i * 4, event).unwrap();
+    }
+    v.mem
+        .virtual_protect(DATA + 4096, 4096, wire::mem::PAGE_NOACCESS)
+        .unwrap();
+    assert_eq!(v.k("WaitForMultipleObjects", &[65, array, 1, 0]), 0);
+    assert_eq!(v.k("WaitForSingleObject", &[event, 0]), 0);
+    assert_eq!(v.k("WaitForMultipleObjectsEx", &[0, 0, 0, 0, 0]), 0);
+    assert_eq!(v.state.last_error, 120);
+    assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 24);
+}
+
+#[test]
+fn waits_keep_pe32_ignored_alertable_and_acquire_before_return_fault() {
+    let mut v = Vm::new();
+    let event = v.k("CreateEventW", &[0, 0, 1, 0]);
+    assert_eq!(v.k("WaitForSingleObjectEx", &[event, 0, u32::MAX]), 0);
+    assert_eq!(v.k("WaitForSingleObject", &[event, 0]), 258);
+    v.k("SetEvent", &[event]);
+    let address = v
+        .api
+        .register("kernel32.dll", Some("WaitForSingleObjectEx"), None);
+    let index = v.api.stub_index(address).unwrap();
+    let sp = DATA + 4092;
+    for (i, value) in [event, 0, u32::MAX].into_iter().enumerate() {
+        v.mem.write_u32(sp + 4 + i as u32 * 4, value).unwrap();
+    }
+    v.mem
+        .virtual_protect(DATA, 4096, wire::mem::PAGE_NOACCESS)
+        .unwrap();
+    v.cpu.set_esp(sp);
+    v.cpu.eip = address;
+    v.cpu.regs[0] = 0x12345678;
+    assert!(api::dispatch(
+        index,
+        &mut v.cpu,
+        &mut v.mem,
+        &mut v.api,
+        &mut v.state,
+        &mut v.log,
+        &mut v.sched,
+        1_000_000,
+    )
+    .is_err());
+    assert_eq!(v.cpu.regs[0], 0);
+    assert_eq!(v.cpu.esp(), sp);
+    assert_eq!(v.cpu.eip, address);
+    assert_eq!(v.k("WaitForSingleObject", &[event, 0]), 258);
+}
+
+#[test]
 fn mutexes_keep_recursive_ownership_across_actual_guest_threads() {
     let mut v = Vm::new();
     v.mem.write_bytes(DATA, b"wire-mutex\0").unwrap();
