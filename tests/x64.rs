@@ -14,6 +14,8 @@ mod cpu;
 mod files;
 #[path = "x64/handles.rs"]
 mod handles;
+#[path = "x64/interlocked.rs"]
+mod interlocked;
 #[path = "x64/kernel.rs"]
 mod kernel;
 #[path = "x64/memory.rs"]

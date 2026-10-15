@@ -25,6 +25,8 @@ mod gdi;
 mod gdiplus;
 #[path = "win32/handles.rs"]
 mod handles;
+#[path = "win32/interlocked.rs"]
+mod interlocked;
 #[path = "win32/kernel.rs"]
 mod kernel;
 #[path = "win32/memory.rs"]
