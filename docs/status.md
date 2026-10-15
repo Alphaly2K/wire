@@ -4,7 +4,9 @@
 
 目录枚举契约 `240e4ac` 之后，已独立补齐路径/句柄、section、Interlocked/SLIST 的 ABI 与故障基线；`90658e2` 的三项 Interlocked/SLIST 测试及原创 gateway-slist 双架构 smoke 均在旧 handler 上通过。路径/句柄、网关边界、页槽/helper 布局候选保持撤回。release 单编译单元候选完成 429 项正确性、native 7 项与 45 条性能路径后，因顺序轮换的三组 bit 长样本均回退超过 5% 而撤回。文件 section 在原构建配置下补足八项超阈值路径的顺序平衡长样本后接受，raw 整数相对 control 的 +4.18% 局部成本仍明确保留。
 
-R0/R1、R4、R5 已完成：正式 fixture、测试 harness、GUID 唯一契约、PE32 Process32、owned host UI 请求与 GDI/像素状态分离。R2/R3 已迁移 identity、guest environment、version、42 个 NLS/locale、31 个模块和 53 个文件 export，另完成双架构模块及 Win64 文件状态归属；PE32 内核/文件状态及其余家族仍待迁移。R7 已完成当前 PE32 内核目录、领域测试和公共性能工具的整理，后续目录随其余领域迁移继续推进。最新 section 批次完整 release 为 432 passed / 7 ignored，debug Win32/AMD64/FPU 280 项、fmt 与 strict Clippy 通过；7 项外部图形测试再次显式执行，全部通过，工具 12 项通过。
+R0/R1、R4、R5 已完成：正式 fixture、测试 harness、GUID 唯一契约、PE32 Process32、owned host UI 请求与 GDI/像素状态分离。R2/R3 已迁移 identity、guest environment、version、42 个 NLS/locale、31 个模块、53 个文件及六个 Interlocked/SLIST export，另完成双架构模块及 Win64 文件状态归属；PE32 内核/文件状态及其余家族仍待迁移。R7 已完成当前 PE32 内核目录、领域测试和公共性能工具的整理，后续目录随其余领域迁移继续推进。最新 Interlocked 批次完整 release 为 432 passed / 7 ignored，debug Win32/AMD64/FPU 280 项、fmt 与 strict Clippy 通过；7 项外部图形测试再次显式执行，全部通过，工具 12 项通过。
+
+Interlocked/SLIST 的 25 条性能路径全部结果校验。SSE/IR 初筛回退经静态代码、独立宿主硬件计数和六组顺序轮换调查后为 +1.949%；integer/IR 的 700M 扩样为 +2.732%。thread-ID 的 700M 仍有 +4.557% 局部成本，已明确记录接受；Win64 SLIST 固定网关负载 −27.837%，RSS 中位数最多 +64KiB。Alice 200M 三对保持隐藏窗口与预算出口，见 [完整验收](reports/refactoring-interlocked-catalog-2026-10-15.md)。
 
 R5 的 29 个解释器 case/path 已做三对 AB/BA，work/retired/checksum 全部校验；扩样后的最大 CPU 中位数回退为 +2.66%。R4 的 memory 成本在 R5 的 700M 复测中已消退：相对 R4 -6.04%，相对最初基线 -2.94%。这是结构调整后的代码生成/布局结果，不推断完整游戏 FPS；调查与全部轮次见 [重构记录](reports/refactoring-2026-10-14.md)。
 

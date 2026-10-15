@@ -3,12 +3,14 @@
 mod files;
 mod guid;
 mod identity;
+mod interlocked;
 mod modules;
 mod nls;
 mod version;
 pub use files::{FileApi, FILE_CONTRACTS};
 pub use guid::{GuidApi, GUID_CONTRACTS};
 pub use identity::{IdentityApi, IDENTITY_CONTRACTS};
+pub use interlocked::{InterlockedApi, INTERLOCKED_CONTRACTS};
 pub use modules::{ModuleApi, ModuleQueryApi, MODULE_CONTRACTS, MODULE_QUERY_CONTRACTS};
 pub use nls::{NlsApi, NLS_CONTRACTS};
 pub use version::{VersionApi, VERSION_CONTRACTS};
@@ -39,6 +41,8 @@ pub enum ReturnConvention {
     Uint32,
     Uint64,
     Ntstatus,
+    /// No ABI result; the adapter preserves its historical trace carrier.
+    Void,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,6 +54,7 @@ pub enum ApiId {
     Module(ModuleApi),
     ModuleQuery(ModuleQueryApi),
     File(FileApi),
+    Interlocked(InterlockedApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -194,6 +199,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(MODULE_CONTRACTS.iter())
         .chain(MODULE_QUERY_CONTRACTS.iter())
         .chain(FILE_CONTRACTS.iter())
+        .chain(INTERLOCKED_CONTRACTS.iter())
 }
 
 #[cfg(test)]

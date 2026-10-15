@@ -54,6 +54,12 @@
 
 PE32 `Vm` 与固定内存布局移入 `tests/support/x86.rs`；PE64 原创 builder、startup 和 Win64 调用 frame helper 移入 `tests/support/x64.rs`。原 integration target 和测试函数名保持不变；全部 389 个测试名逐名一致。Win32/AMD64 239 项行为测试通过，两个 target 的 strict Clippy 和 fmt 通过。没有变更 runtime 代码。
 
+## R2 Interlocked / SLIST 契约
+
+以文件 section 契约 `619957f` 为基线接入六项契约，PE32 六项 Typed，Win64 仅 InitializeSListHead Typed。两端适配器只借用参数与内存；LONG 回绕、比较失败只读、SLIST 对齐与序列回绕、LastError 和返回槽别名的架构差异保持。独立行为基线先于迁移提交为 `90658e2`。
+
+完整 release 432 / ignored7、debug 280、native7、fmt、strict Clippy 与工具12通过。25 条性能路径全部校验；SSE 的静态代码变化、硬件计数与全部六组计时保留。最终 SSE/IR +1.949%、integer/IR +2.732%，thread-ID 的 +4.557% 局部成本调查后明确接受。Win64 SLIST 固定负载 −27.837%，不推断整体游戏性能。Alice 200M 三对保持隐藏窗口和预算出口，详细结果见 [独立报告](refactoring-interlocked-catalog-2026-10-15.md)。
+
 ## R0 fixture 验收
 
 原创生成器已进入 `tools/perf/fixtures/amd64_audit.py`，默认 V2 replay 不再需要 ignored audit 输入。旧 `--audit-probes PATH` 保留；两个入口的 7 个 input manifest 完全一致。`test_perf_fixtures.py` 对照迁移前固定的 12K/100M SHA-256 和结果，工具测试 6 项通过。源函数内容保持原样，没有修改任何 runtime 热路径。

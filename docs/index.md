@@ -19,6 +19,7 @@
 - [目录枚举 API 契约验收](reports/refactoring-file-search-catalog-2026-10-15.md)：7 个追加 export、句柄类型、游标提交、返回槽别名与独立 FindClose fixture。
 - [路径与句柄候选](reports/refactoring-paths-handles-2026-10-15.md)：19 个 export 的独立行为基线、性能回退及暂缓状态。
 - [文件 section 契约验收](reports/refactoring-file-section-catalog-2026-10-15.md)：八项映射 API、首轮暂缓、顺序平衡补样和保留的 raw 局部成本。
+- [Interlocked/SLIST 边界](architecture/interlocked.md)与[契约验收](reports/refactoring-interlocked-catalog-2026-10-15.md)：六项契约、故障提交、25 条性能路径和 SSE/thread-ID 调查。
 - [release 编译单元候选](reports/refactoring-release-codegen-2026-10-15.md)：独立构建配置、同二进制对照及长样本调查。
 - [网关边界候选](reports/refactoring-gateway-boundary-2026-10-15.md)、[页缓存内联候选](reports/refactoring-page-cache-inline-2026-10-15.md)、[helper 布局候选](reports/refactoring-memory-helper-layout-2026-10-15.md)：已撤回实现和保留的测量证据。
 - [本次渐进重构记录](reports/refactoring-2026-10-14.md)：阶段交付、行为差异与验收结果。

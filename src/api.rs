@@ -690,12 +690,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("ExitThread", 4),
                 ("GetSystemInfo", 4),
                 ("GetNativeSystemInfo", 4),
-                ("InterlockedIncrement", 4),
-                ("InterlockedDecrement", 4),
-                ("InterlockedExchange", 8),
-                ("InterlockedCompareExchange", 12),
-                ("InitializeSListHead", 4),
-                ("InterlockedFlushSList", 4),
                 ("LoadResource", 8),
                 ("FindResourceA", 12),
                 ("FindResourceW", 12),
@@ -1664,6 +1658,16 @@ pub fn dispatch(
             };
             (ret, note) = crate::file_api::call(id, &args, mem, state);
         }
+        _ if matches!(
+            binding.typed,
+            Some(crate::win32::catalog::ApiId::Interlocked(_))
+        ) =>
+        {
+            let Some(crate::win32::catalog::ApiId::Interlocked(id)) = binding.typed else {
+                unreachable!();
+            };
+            ret = crate::win32::x86::interlocked::call(id, &args, mem)?;
+        }
         _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Guid(_))) => {
             let Some(crate::win32::catalog::ApiId::Guid(id)) = binding.typed else {
                 unreachable!();
@@ -2136,23 +2140,6 @@ pub fn dispatch(
                         return Ok(());
                     }
                 }
-            }
-        }
-        // Cooperative execution makes each host API operation atomic. The
-        // x86 header is Next:u32, Depth:u16, Sequence:u16 (8-byte aligned).
-        ("kernel32.dll", "InitializeSListHead" | "InterlockedFlushSList") => {
-            if args[0] & 7 != 0 {
-                return Err("unaligned SLIST_HEADER".into());
-            }
-            let previous = mem.read_u64(args[0]).map_err(|e| e.to_string())?;
-            if name == "InitializeSListHead" {
-                mem.write_u64(args[0], 0).map_err(|e| e.to_string())?;
-                ret = 0;
-            } else {
-                let sequence = ((previous >> 48) as u16).wrapping_add(1);
-                mem.write_u64(args[0], (sequence as u64) << 48)
-                    .map_err(|e| e.to_string())?;
-                ret = previous as u32;
             }
         }
         ("kernel32.dll", "WaitForMultipleObjects") => {
@@ -2716,34 +2703,6 @@ pub fn dispatch(
         ("kernel32.dll", "GetCurrentPackageId") => {
             ret = 0x3d54; // APPMODEL_ERROR_NO_PACKAGE (desktop app)
             note = "not a packaged app".into();
-        }
-        ("kernel32.dll", "InterlockedIncrement") => {
-            let v = mem
-                .read_u32(args[0])
-                .map_err(|e| e.to_string())?
-                .wrapping_add(1);
-            mem.write_u32(args[0], v).map_err(|e| e.to_string())?;
-            ret = v;
-        }
-        ("kernel32.dll", "InterlockedDecrement") => {
-            let v = mem
-                .read_u32(args[0])
-                .map_err(|e| e.to_string())?
-                .wrapping_sub(1);
-            mem.write_u32(args[0], v).map_err(|e| e.to_string())?;
-            ret = v;
-        }
-        ("kernel32.dll", "InterlockedExchange") => {
-            let old = mem.read_u32(args[0]).map_err(|e| e.to_string())?;
-            mem.write_u32(args[0], args[1]).map_err(|e| e.to_string())?;
-            ret = old;
-        }
-        ("kernel32.dll", "InterlockedCompareExchange") => {
-            let old = mem.read_u32(args[0]).map_err(|e| e.to_string())?;
-            if old == args[2] {
-                mem.write_u32(args[0], args[1]).map_err(|e| e.to_string())?;
-            }
-            ret = old;
         }
         ("user32.dll", "GetProcessWindowStation") => {
             ret = 0x7007_0000;

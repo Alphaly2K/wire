@@ -527,7 +527,6 @@ fn import_arity(name: &str) -> Option<usize> {
         | "GetNativeSystemInfo"
         | "QueryPerformanceCounter"
         | "QueryPerformanceFrequency"
-        | "InitializeSListHead"
         | "GetStartupInfoW"
         | "GetStartupInfoA"
         | "SetLastError"
@@ -1073,6 +1072,7 @@ impl Runtime64 {
             }
             ApiId::Module(id) => self.scalar_module_call(mem, id, args),
             ApiId::ModuleQuery(id) => self.module_query(mem, id, args),
+            ApiId::Interlocked(id) => crate::win32::x64::interlocked::call(mem, id, args),
         }
     }
 
@@ -4064,13 +4064,6 @@ impl Runtime64 {
                         }
                     }
                 }
-            }
-            "InitializeSListHead" => {
-                if !args[0].is_multiple_of(16) {
-                    return Err("unaligned Win64 SLIST_HEADER".into());
-                }
-                mem.write(args[0], &[0; 16])?;
-                0
             }
             "GetStartupInfoW" | "GetStartupInfoA" => {
                 let mut info = [0; 104];
