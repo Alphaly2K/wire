@@ -23,6 +23,11 @@ pub enum FileApi {
     GetFileAttributesW,
     SetFileAttributesA,
     SetFileAttributesW,
+    GetFileAttributesExA,
+    GetFileAttributesExW,
+    GetFileInformationByHandle,
+    GetFileInformationByHandleEx,
+    GetFileTime,
 }
 
 impl FileApi {
@@ -35,6 +40,7 @@ impl FileApi {
                 | Self::GetFullPathNameW
                 | Self::GetFileAttributesW
                 | Self::SetFileAttributesW
+                | Self::GetFileAttributesExW
         )
     }
 }
@@ -63,7 +69,27 @@ use Parameter::{Int32 as I, Int64 as Q, Pointer as P, Uint32 as D};
 use ReturnConvention::CharacterCount as C;
 use ReturnConvention::{BoolLastError as B, Pointer as R, Uint32 as U};
 
-pub static FILE_CONTRACTS: [Contract; 21] = [
+const fn metadata(id: FileApi, name: &'static str, parameters: &'static [Parameter]) -> Contract {
+    Contract::new(
+        ApiId::File(id),
+        name,
+        parameters,
+        B,
+        "PE32 known ABI with legacy unimplemented return; Win64 confined host metadata, supported information classes and directory cursor semantics; preserve output preflight, return-frame alias and LastError order",
+        [
+            ArchitecturePlan {
+                dlls: &["kernel32.dll"],
+                execution: ExecutionPolicy::LegacyUnimplemented,
+            },
+            ArchitecturePlan {
+                dlls: &["kernel32.dll", "kernelbase.dll"],
+                execution: ExecutionPolicy::Typed,
+            },
+        ],
+    )
+}
+
+pub static FILE_CONTRACTS: [Contract; 26] = [
     declaration(
         FileApi::CreateFileA,
         "CreateFileA",
@@ -169,4 +195,25 @@ pub static FILE_CONTRACTS: [Contract; 21] = [
         B,
         true,
     ),
+    metadata(
+        FileApi::GetFileAttributesExA,
+        "GetFileAttributesExA",
+        &[P, D, P],
+    ),
+    metadata(
+        FileApi::GetFileAttributesExW,
+        "GetFileAttributesExW",
+        &[P, D, P],
+    ),
+    metadata(
+        FileApi::GetFileInformationByHandle,
+        "GetFileInformationByHandle",
+        &[P, P],
+    ),
+    metadata(
+        FileApi::GetFileInformationByHandleEx,
+        "GetFileInformationByHandleEx",
+        &[P, D, P, D],
+    ),
+    metadata(FileApi::GetFileTime, "GetFileTime", &[P, P, P, P]),
 ];

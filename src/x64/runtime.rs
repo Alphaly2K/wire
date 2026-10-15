@@ -457,14 +457,11 @@ fn import_arity(name: &str) -> Option<usize> {
         "GetEnvironmentVariableW" | "GetEnvironmentVariableA" => 3,
         "SetEnvironmentVariableW" | "SetEnvironmentVariableA" => 2,
         "GlobalMemoryStatusEx" => 1,
-        "GetFileInformationByHandle" => 2,
-        "GetFileInformationByHandleEx" | "GetFileTime" => 4,
         "NtQueryDirectoryFile" => 11,
         "CreateFileMappingW" | "CreateFileMappingA" | "MapViewOfFileEx" => 6,
         "MapViewOfFile" => 5,
         "UnmapViewOfFile" => 1,
         "FlushViewOfFile" => 2,
-        "GetFileAttributesExW" | "GetFileAttributesExA" => 3,
         "CommandLineToArgvW" => 2,
         "LocalFree" => 1,
         "RoInitialize" | "CoInitialize" => 1,
@@ -622,11 +619,9 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "BCryptOpenAlgorithmProvider" => &[3],
         "BCryptCloseAlgorithmProvider" => &[1],
         "GetEnvironmentVariableW" | "GetEnvironmentVariableA" => &[2],
-        "GetFileInformationByHandleEx" => &[1, 3],
         "NtQueryDirectoryFile" => &[6, 7],
         "CreateFileMappingW" | "CreateFileMappingA" => &[2, 3, 4],
         "MapViewOfFile" | "MapViewOfFileEx" => &[1, 2, 3],
-        "GetFileAttributesExW" | "GetFileAttributesExA" => &[1],
         "RoInitialize" => &[0],
         "CoInitializeEx" => &[1],
         "CoCreateInstance" => &[2],
@@ -2457,10 +2452,20 @@ impl Runtime64 {
                 }
             }
             "NtQueryDirectoryFile" => self.nt_query_directory(mem, args)?,
-            "GetFileInformationByHandleEx" if matches!(args[1], 14 | 15) => {
+            _ if file == Some(FileApi::GetFileInformationByHandleEx)
+                && matches!(args[1], 14 | 15) =>
+            {
                 self.full_directory_info(mem, args)?
             }
-            "GetFileInformationByHandle" | "GetFileInformationByHandleEx" | "GetFileTime" => {
+            _ if matches!(
+                file,
+                Some(
+                    FileApi::GetFileInformationByHandle
+                        | FileApi::GetFileInformationByHandleEx
+                        | FileApi::GetFileTime
+                )
+            ) =>
+            {
                 let result = (|| -> Result<Vec<u8>, u32> {
                     let (meta, path) = self.files.metadata(args[0])?;
                     let attributes = files::attributes(
@@ -2469,13 +2474,13 @@ impl Runtime64 {
                             .ok()
                             .is_some_and(|p| self.files.is_not_indexed(&p)),
                     );
-                    let kind = if name == "GetFileInformationByHandleEx" {
+                    let kind = if file == Some(FileApi::GetFileInformationByHandleEx) {
                         args[1]
                     } else {
                         u64::MAX
                     };
                     let mut data = match kind {
-                        u64::MAX if name == "GetFileTime" => vec![0; 24],
+                        u64::MAX if file == Some(FileApi::GetFileTime) => vec![0; 24],
                         u64::MAX => vec![0; 52],
                         0 => vec![0; 40],  // FILE_BASIC_INFO
                         1 => vec![0; 24],  // FILE_STANDARD_INFO
@@ -2483,11 +2488,13 @@ impl Runtime64 {
                         18 => vec![0; 24], // FILE_ID_INFO: real host volume and inode identity.
                         _ => return Err(50),
                     };
-                    if name == "GetFileInformationByHandleEx" && args[3] < data.len() as u64 {
+                    if file == Some(FileApi::GetFileInformationByHandleEx)
+                        && args[3] < data.len() as u64
+                    {
                         return Err(24);
                     }
                     if kind == u64::MAX || kind == 0 {
-                        let offset = if name == "GetFileInformationByHandle" {
+                        let offset = if file == Some(FileApi::GetFileInformationByHandle) {
                             4
                         } else {
                             0
@@ -2497,14 +2504,14 @@ impl Runtime64 {
                             .enumerate()
                         {
                             // GetFileTime permits independent null outputs.
-                            if name != "GetFileTime" || args[n + 1] != 0 {
+                            if file != Some(FileApi::GetFileTime) || args[n + 1] != 0 {
                                 data[offset + n * 8..offset + n * 8 + 8]
                                     .copy_from_slice(&files::filetime(time)?.to_le_bytes());
                             }
                         }
                     }
                     match kind {
-                        u64::MAX if name == "GetFileTime" => {}
+                        u64::MAX if file == Some(FileApi::GetFileTime) => {}
                         u64::MAX => {
                             let (volume, index, links, _) = files::identity(&meta)?;
                             data[..4].copy_from_slice(&attributes.to_le_bytes());
@@ -2543,7 +2550,7 @@ impl Runtime64 {
                         self.set_error(mem, error)?;
                         0
                     }
-                    Ok(data) if name == "GetFileTime" => {
+                    Ok(data) if file == Some(FileApi::GetFileTime) => {
                         for &address in &args[1..4] {
                             if address != 0 {
                                 mem.check(address, 8, WRITE)?;
@@ -2558,7 +2565,7 @@ impl Runtime64 {
                     }
                     Ok(data) => {
                         mem.write(
-                            args[if name == "GetFileInformationByHandle" {
+                            args[if file == Some(FileApi::GetFileInformationByHandle) {
                                 1
                             } else {
                                 2
@@ -2621,15 +2628,23 @@ impl Runtime64 {
             }
             _ if matches!(
                 file,
-                Some(FileApi::GetFileAttributesW | FileApi::GetFileAttributesA)
-            ) || matches!(name, "GetFileAttributesExW" | "GetFileAttributesExA") =>
+                Some(
+                    FileApi::GetFileAttributesW
+                        | FileApi::GetFileAttributesA
+                        | FileApi::GetFileAttributesExW
+                        | FileApi::GetFileAttributesExA
+                )
+            ) =>
             {
-                let extended = file.is_none();
+                let extended = matches!(
+                    file,
+                    Some(FileApi::GetFileAttributesExW | FileApi::GetFileAttributesExA)
+                );
                 if extended && args[1] != 0 {
                     self.set_error(mem, 87)?;
                     0
                 } else {
-                    let wide = file.map_or_else(|| name.ends_with('W'), |id| id.wide());
+                    let wide = file.unwrap().wide();
                     let path = Self::path_name(mem, args[0], wide)?;
                     let fs = self
                         .files

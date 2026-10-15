@@ -12,6 +12,8 @@
 
 后续核心文件契约以 `3dcd3c0` 布局为基线完成接入：11 个 export 统一 DLL/ABI/typed ID，Win64 的两个 absent export 保持；release 408、debug 293、native7、工具12 通过。28 个路径三对校验，两个 PE32 IR 路径经同二进制噪声与 utility 700M 调查，最终最大 CPU 中位数回退 +2.32%，RSS 最多增加 224KiB；Alice 200M 保持预算出口。全部失败、调度条件和最终证据见 [核心文件 catalog](refactoring-file-catalog-2026-10-15.md)。PE32 资源状态与其余文件家族仍待迁移。
 
+路径/属性与元数据继续追加 15 个文件 export，合计 26 个；最新完整 release 415、debug 300、native7、工具12 通过。PE32 缓存 ABI-only 执行策略，公开条目改动仍重新绑定；34 个 case/path 三对校验，metadata IR/raw 中位数 −17.85%/−9.02%。AMD64 thread-id 700M 扩样保留 +4.10% 局部成本，其余最终路径最大回退 +2.72%，全部失败、污染和扩样轮次见 [元数据验收](refactoring-file-metadata-catalog-2026-10-15.md)。Alice 200M 保持隐藏窗口/预算出口，目录变更等剩余契约继续迁移。
+
 ## R0 固定基线
 
 - 代码：`2e78377`，tracked working tree 干净。
@@ -29,7 +31,7 @@
 | --- | --- |
 | R0 入口/fixture | 已完成；12 组 golden 输入一致，默认与旧路径各 7 个运行 smoke 通过 |
 | R1 GUID 契约试点 | 已完成唯一契约、双架构冷绑定、纯语义/适配器、行为及性能验收 |
-| R2 分发收敛 | GUID + 6 个 identity + 8 个 version + 42 个 NLS + 31 个 module + 21 个 file export 已迁移；其余 file/同步/USER/COM/图形等仍 legacy |
+| R2 分发收敛 | GUID + 6 个 identity + 8 个 version + 42 个 NLS + 31 个 module + 26 个 file export 已迁移；其余 file/同步/USER/COM/图形等仍 legacy |
 | R3 状态归属 | identity/profile、环境变量、双架构 module 和 Win64 file 已有 owner；PE32 file/thread/COM 等仍待迁移 |
 | R4 PE32 Process | 已完成装载/执行编排提取；旧 Cpu 方法只保留委托 facade |
 | R5 host/graphics | 已完成 owned UI 请求/事件与 GDI adapter 分离，真实 native 验证通过 |

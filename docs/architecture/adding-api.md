@@ -1,6 +1,6 @@
 # 新增 Win32 API：GUID 试点
 
-`StringFromGUID2`、`CLSIDFromString`、`IIDFromString`、六个身份、八个版本、42 个 NLS、31 个模块和 21 个文件 export 已迁入新边界。普通 scalar API 的操作步骤如下；其它家族目前仍使用旧分发器，不能将 ABI 已知当作完整实现。
+`StringFromGUID2`、`CLSIDFromString`、`IIDFromString`、六个身份、八个版本、42 个 NLS、31 个模块和 26 个文件 export 已迁入新边界。普通 scalar API 的操作步骤如下；其它家族目前仍使用旧分发器，不能将 ABI 已知当作完整实现。
 
 1. 在 `src/win32/catalog/` 的所属领域声明 export、DLL/架构范围、typed ID、参数类型、返回约定和限制。GUID 的一份声明派生 PE32 stdcall 清栈和 Win64 DWORD 截断，执行时不查询字符串表。
 2. 把不依赖 guest 内存和进程状态的算法放入领域纯核。GUID 的 Windows little-endian 布局、canonical parser/formatter 位于 `win32/com/guid.rs`；纯核不读 CPU，不写 LastError。
@@ -25,7 +25,7 @@
 
 这些差异属于本次冻结行为，未来若要修正 Windows 符合性，应另做语义提交。`CoCreateGuid`、`StringFromCLSID/IID` 的 allocator/entropy 契约仍走 legacy，只共享格式化纯核。
 
-PE32 `ApiTable.entries` 公开可修改，为兼容旧调用方，内部 immutable binding 在条目变化时重建；未变化调用只读取已绑定描述符。stub 地址、ordinal 别名和 CRT data export 不变。Win64 `Gateways::insert` 同时更新原始导出视图和冷绑定计划。
+PE32 `ApiTable.entries` 公开可修改，为兼容旧调用方，内部 immutable binding 在条目变化时重建；未变化调用只读取已绑定描述符，包括 Typed 与 LegacyUnimplemented 执行策略。ABI-only 调用保留原参数读取、零返回/LastError=120、诊断与返回 frame 提交；变更同一 stub 的执行策略也必须重新绑定。stub 地址、ordinal 别名和 CRT data export 不变。Win64 `Gateways::insert` 同时更新原始导出视图和冷绑定计划。
 
 Win64 的 raw 字符串 codec 已提取到 `win32/x64/text.rs`，旧 Runtime64 静态 helper 委托它。GUID 适配器只借用架构内存，完全不依赖总运行状态。UTF-16 codec 和共享 parser 分开，以保持 fault 与 HRESULT 策略。
 

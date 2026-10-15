@@ -43,6 +43,7 @@ struct BoundEntry {
     entry: ApiEntry,
     typed: Option<crate::win32::catalog::ApiId>,
     stack_bytes: Option<u32>,
+    unimplemented: bool,
 }
 impl BoundEntry {
     fn new(entry: ApiEntry) -> Self {
@@ -54,6 +55,9 @@ impl BoundEntry {
         let typed = contract
             .filter(|c| c.execution(Architecture::X86) == ExecutionPolicy::Typed)
             .map(|c| c.id);
+        let unimplemented = contract.is_some_and(|c| {
+            c.execution(Architecture::X86) == ExecutionPolicy::LegacyUnimplemented
+        });
         let stack_bytes = contract.map_or_else(
             || legacy_stack_args_bytes(&entry.dll, &entry.name),
             |c| Some(c.stdcall_bytes()),
@@ -62,6 +66,7 @@ impl BoundEntry {
             entry,
             typed,
             stack_bytes,
+            unimplemented,
         }
     }
 }
@@ -813,7 +818,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("SearchPathW", 24),
                 ("GetSystemDirectoryW", 8),
                 ("GetWindowsDirectoryW", 8),
-                ("GetFileAttributesExW", 12),
                 ("RemoveDirectoryW", 4),
                 ("GetExitCodeProcess", 8),
                 ("CreateProcessW", 40),
@@ -1667,6 +1671,13 @@ pub fn dispatch(
     let mut yield_after_return = false;
     let ret: u32;
     match (dll, name) {
+        _ if binding.unimplemented => {
+            // The catalog already resolved this ABI-only export during binding.
+            // Preserve its legacy error, return, trace and frame submission.
+            implemented = false;
+            state.last_error = 120;
+            ret = if dll == "ole32.dll" { 0x80004001 } else { 0 };
+        }
         _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::File(_))) => {
             let Some(crate::win32::catalog::ApiId::File(id)) = binding.typed else {
                 unreachable!();

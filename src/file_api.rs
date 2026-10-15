@@ -93,13 +93,19 @@ pub fn dispatch(
     mem: &GuestMem,
     state: &mut ApiState,
 ) -> Option<(u32, String)> {
-    use crate::win32::catalog::{resolve, ApiId, Architecture, FileApi, Resolution};
+    use crate::win32::catalog::{
+        resolve, ApiId, Architecture, ExecutionPolicy, FileApi, Resolution,
+    };
     let core = if dll == "kernel32.dll" {
         match resolve(Architecture::X86, dll, name) {
-            Resolution::Bound(contract) => match contract.id {
-                ApiId::File(id) if id != FileApi::GetFileType => Some(id),
-                _ => None,
-            },
+            Resolution::Bound(contract)
+                if contract.execution(Architecture::X86) == ExecutionPolicy::Typed =>
+            {
+                match contract.id {
+                    ApiId::File(id) if id != FileApi::GetFileType => Some(id),
+                    _ => None,
+                }
+            }
             _ => None,
         }
     } else {

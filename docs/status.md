@@ -2,7 +2,7 @@
 
 更新日期：2026-10-15。重构前固定代码基线 `2e78377`；本轮进度见 [重构记录](reports/refactoring-2026-10-14.md)。
 
-R0/R1、R4、R5 已完成：正式 fixture、测试 harness、GUID 唯一契约、PE32 Process32、owned host UI 请求与 GDI/像素状态分离。R2/R3 已迁移 identity、guest environment、version、42 个 NLS/locale、31 个模块和 21 个文件 export，另完成双架构模块及 Win64 文件状态归属；PE32 内核/文件状态及其余家族仍待迁移。R7 已完成当前 PE32 内核目录、领域测试和公共性能工具的整理，后续目录随其余领域迁移继续推进。最新路径/属性契约批次完整 release 为 410 passed / 7 ignored，debug Win32/AMD64/FPU/Unicorn 295 项、fmt 与 strict Clippy 通过；7 项外部图形测试再次显式执行，全部通过，工具12 通过。
+R0/R1、R4、R5 已完成：正式 fixture、测试 harness、GUID 唯一契约、PE32 Process32、owned host UI 请求与 GDI/像素状态分离。R2/R3 已迁移 identity、guest environment、version、42 个 NLS/locale、31 个模块和 26 个文件 export，另完成双架构模块及 Win64 文件状态归属；PE32 内核/文件状态及其余家族仍待迁移。R7 已完成当前 PE32 内核目录、领域测试和公共性能工具的整理，后续目录随其余领域迁移继续推进。最新元数据契约与 ABI-only 绑定批次完整 release 为 415 passed / 7 ignored，debug Win32/AMD64/FPU/Unicorn 300 项、fmt 与 strict Clippy 通过；7 项外部图形测试再次显式执行，全部通过，工具12 通过。
 
 R5 的 29 个解释器 case/path 已做三对 AB/BA，work/retired/checksum 全部校验；扩样后的最大 CPU 中位数回退为 +2.66%。R4 的 memory 成本在 R5 的 700M 复测中已消退：相对 R4 -6.04%，相对最初基线 -2.94%。这是结构调整后的代码生成/布局结果，不推断完整游戏 FPS；调查与全部轮次见 [重构记录](reports/refactoring-2026-10-14.md)。
 
@@ -42,6 +42,8 @@ Win64 文件状态批次的首版因 AMD64 memory 持续回退被拒绝；恢复
 | 文件/设备 | 受限 guest 文件系统；虚拟身份、单 CPU 和无设备/transport 行为按现有 API 契约处理 |
 
 真实游戏兼容与性能的历史结果从 [文档入口](index.md) 查阅。当前基线的 Alice 启动 smoke 到 200M work 正常按预算停止，原始 Mono DLL/TLS 已执行；该前缀未进入 Draw/Present。
+
+元数据契约追加五个 export，文件合计 PE32 21 typed/5 ABI-only、Win64 22 typed/4 absent。34 个 case/path 三对全部校验，PE32 metadata IR/raw 的 CPU 中位数 −17.85%/−9.02%；AMD64 thread-id 700M 扩样仍有 +4.10% 局部成本，独立 diagnostics 计数一致，已调查并记录接受，其余最终路径最大回退 +2.72%。RSS 中位数最多增加 144KiB，Alice 200M 保持隐藏窗口和预算出口。完整结果和失败候选见 [元数据验收](reports/refactoring-file-metadata-catalog-2026-10-15.md)。目录/变更/枚举、section、标准句柄等契约仍待迁移。
 
 ## 必需验证
 

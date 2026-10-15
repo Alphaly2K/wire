@@ -22,5 +22,8 @@ PE 容器与其余生成器复用 `tools/amd64_perf.py`、`tools/interpreter_per
 `kernel_gateway.py` 的 PE32 CreateEvent → SetEvent/ResetEvent 循环校验共享 handle 寿命和每次返回值。
 `path_gateway.py` 的双架构 GetCurrentDirectoryA(0, NULL) 循环校验根目录
 `C:\` 的四字符容量、累计 checksum、退休数和 API count，不访问外部素材。
+`metadata_gateway.py` 对 GetFileAttributesExA 使用无效信息类和空指针：
+Win64 按现有顺序返回错误，PE32 保持 ABI-only 零返回；两架构均校验
+累计返回值、退休数和每一次 API 调用，不访问 host 文件或时间戳。
 这些 case 需显式选择，默认 case 集合不变。PE32 正式 API 计时可加
 `--discard-api-log`：仍格式化 trace、记录频率和计数，将全量 trace 写入空设备。
