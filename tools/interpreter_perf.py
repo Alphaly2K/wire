@@ -231,6 +231,10 @@ def main():
         from perf.fixtures.handle_gateway import x64
         data, meta = x64(args.work)
         entries.append(('gateway-std-handle', data, meta))
+    if args.cases and 'gateway-context' in args.cases:
+        from perf.fixtures.context_gateway import x64
+        data, meta = x64(args.work)
+        entries.append(('gateway-context', data, meta))
     if args.cases and 'gateway-clock' in args.cases:
         from perf.fixtures.clock_gateway import x64
         data, meta = x64(args.work)

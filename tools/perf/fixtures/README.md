@@ -31,5 +31,9 @@ API count，经过真实目录枚举错误分支，不访问 host 文件或时�
 累计 BOOL 返回、退休数和 API count，不读取宿主变化的时间戳。PE32 的
 retired=`6*n+11`，Win64 的 retired=`5*n+11`、work=`6*n+11`，其中
 n=`max(1, work//6)`；PE32 raw/IR 和 Win64 均在旧 handler 上独立预检。
+`context_gateway.py` 先直接写 TEB LastError 为 42，再循环 GetLastError，
+校验累计值、退休数和 API count。PE32 的 n=`max(1, work//4)`、
+retired=`4*n+8`；Win64 的 n=`max(1, work//5)`、retired=`4*n+11`、
+work=`5*n+11`。它也在旧 handler 上完成双架构 12K smoke。
 这些 case 需显式选择，默认 case 集合不变。PE32 正式 API 计时可加
 `--discard-api-log`：仍格式化 trace、记录频率和计数，将全量 trace 写入空设备。

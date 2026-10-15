@@ -13,6 +13,8 @@ mod audio;
 mod clocks;
 #[path = "win32/com.rs"]
 mod com;
+#[path = "win32/context.rs"]
+mod context;
 #[path = "win32/crt.rs"]
 mod crt;
 #[path = "win32/d3d9.rs"]
