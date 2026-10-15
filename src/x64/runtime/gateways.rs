@@ -26,6 +26,7 @@ pub(crate) enum ControlImport {
     LocaleEnumeration,
     Module(crate::win32::catalog::ModuleApi),
     Wait(crate::win32::catalog::WaitApi),
+    Delay(crate::win32::catalog::DelayApi),
 }
 pub(crate) struct BoundImport {
     pub export: Arc<str>,
@@ -109,6 +110,7 @@ impl BoundImport {
                 ) => None,
                 crate::win32::catalog::ApiId::Module(id) if id.control() => None,
                 crate::win32::catalog::ApiId::Wait(_) => None,
+                crate::win32::catalog::ApiId::Delay(_) => None,
                 _ => Some(c.id),
             }),
             control: match contract.map(|c| c.id) {
@@ -119,6 +121,7 @@ impl BoundImport {
                     ControlImport::Module(id)
                 }
                 Some(crate::win32::catalog::ApiId::Wait(id)) => ControlImport::Wait(id),
+                Some(crate::win32::catalog::ApiId::Delay(id)) => ControlImport::Delay(id),
                 _ => ControlImport::None,
             },
             valid,

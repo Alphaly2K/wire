@@ -650,8 +650,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("SetEnvironmentVariableA", 8),
                 ("SetEnvironmentVariableW", 8),
                 ("CreateThread", 24),
-                ("Sleep", 4),
-                ("SwitchToThread", 0),
                 ("ExitThread", 4),
                 ("GetSystemInfo", 4),
                 ("GetNativeSystemInfo", 4),
@@ -665,7 +663,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("FreeResource", 4),
                 ("FormatMessageA", 28),
                 ("FormatMessageW", 28),
-                ("SleepEx", 8),
                 ("GetExitCodeThread", 8),
                 ("TerminateThread", 8),
                 ("GetDiskFreeSpaceA", 20),
@@ -1942,12 +1939,20 @@ pub fn dispatch(
                 ret = u32::MAX;
             }
         }
-        ("kernel32.dll", "SwitchToThread") => {
+        _ if binding.typed
+            == Some(crate::win32::catalog::ApiId::Delay(
+                crate::win32::catalog::DelayApi::SwitchThread,
+            )) =>
+        {
             sched.poll_timeouts();
             ret = sched.any_other_runnable() as u32;
             yield_after_return = ret != 0;
         }
-        ("kernel32.dll", "Sleep") => {
+        _ if binding.typed
+            == Some(crate::win32::catalog::ApiId::Delay(
+                crate::win32::catalog::DelayApi::Sleep,
+            )) =>
+        {
             if sched.take_wake().is_some() {
                 ret = 0; // void; woke after the full delay
             } else if args[0] == 0 {
@@ -1964,7 +1969,11 @@ pub fn dispatch(
                 return Ok(());
             }
         }
-        ("kernel32.dll", "SleepEx") => {
+        _ if binding.typed
+            == Some(crate::win32::catalog::ApiId::Delay(
+                crate::win32::catalog::DelayApi::SleepEx,
+            )) =>
+        {
             if sched.take_wake().is_some() {
                 ret = 0;
             } else if args[0] == 0 {

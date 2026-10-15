@@ -208,3 +208,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 四项接口接入 WaitApi，删除重复 ABI/arity/DWORD 与名称路由。Win64 冷绑定 ControlImport 保留原 saved return frame、APC、deadline、block/unblock 和 trace/counter 顺序，PE32 保留空数组/count clamp、SingleEx ignored alertable 及 MultipleEx ABI-only。三项独立旧行为基线与三种实际 guest APC 等待路径先通过，完整 release 457、debug 305、native 7、工具 20 项及 fmt/strict Clippy 通过。
 
 36 条性能路径全部校验；local/raw 初筛 +5.031% 经 150M 三标签轮换为 +0.376%，同哈希 control/before +0.764%，离散首轮全部保留。其它最大回退 +2.662%，RSS 最多 +112KiB；Wait 网关 Win64 −2.072%，PE32 IR/raw −1.941%/−0.219%。Alice 200M 三对保持预算出口、隐藏窗口和零 Draw/Present，CPU −0.631%。245 个 manifest Rust 文件（src/tests 237 个）核对一致，后续 Delay 基线未混入候选。完整接受决定见 [WaitFor* 验收](refactoring-waits-2026-10-16.md)。
+
+## R2 Sleep 与线程让出
+
+三项接口接入 DelayApi，删除重复 ABI/arity/DWORD 和名称分支。Win64 冷绑定 ControlImport 保留 Returned/Yielded/SwitchThread/Blocked 的原控制结果，PE32 保留 wake/deadline、ignored alertable 与返回帧后 round-robin；trace/counter 和 fault 顺序保持。两项旧行为基线、实际线程让出/APC/timeout 先通过，完整 release 459、debug 307、native 7、工具 20 项及 fmt/strict Clippy 通过。
+
+24 条相关性能路径全部校验，最大回退 +1.063%，RSS 最多 +16KiB；Delay 网关 Win64 −0.717%，PE32 IR/raw −3.387%/−1.001%。Alice 200M 三对保持预算出口、隐藏窗口和零 Draw/Present，CPU +0.325%。246 个 manifest Rust 文件（src/tests 238 个）核对一致；体积增加 704 bytes。完整接受决定见 [Sleep/线程让出验收](refactoring-delays-2026-10-16.md)。

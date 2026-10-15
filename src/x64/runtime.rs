@@ -427,11 +427,8 @@ fn import_arity(name: &str) -> Option<usize> {
         "SystemParametersInfoA" | "SystemParametersInfoW" => 4,
         "GetSystemMetrics" => 1,
         "CreateThread" => 6,
-        "Sleep" | "ExitThread" | "ResumeThread" | "SuspendThread" | "GetThreadId"
-        | "GetThreadPriority" => 1,
-        "SwitchToThread" => 0,
+        "ExitThread" | "ResumeThread" | "SuspendThread" | "GetThreadId" | "GetThreadPriority" => 1,
         "QueueUserAPC" => 3,
-        "SleepEx" => 2,
         "GetExitCodeThread"
         | "SetThreadPriority"
         | "SetThreadAffinityMask"
@@ -555,7 +552,7 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "SystemParametersInfoA" | "SystemParametersInfoW" => &[0, 1, 3],
         "GetSystemMetrics" => &[0],
         "CreateThread" => &[4],
-        "Sleep" | "ExitThread" => &[0],
+        "ExitThread" => &[0],
         "SetThreadPriority" => &[1],
         "GetLogicalProcessorInformationEx" => &[0],
         "BCryptGenRandom" => &[2, 3],
@@ -574,7 +571,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "UpdateProcThreadAttribute" => &[1],
         "CreateProcessW" => &[4, 5],
         "CreatePipe" => &[3],
-        "SleepEx" => &[0, 1],
         "VirtualAlloc" => &[2, 3],
         "VirtualProtect" | "VirtualFree" => &[2],
         "VirtualAllocEx" => &[3, 4],
@@ -999,6 +995,7 @@ impl Runtime64 {
             ApiId::Path(_) => unreachable!("path helpers have no Win64 binding"),
             ApiId::Mutex(_) => unreachable!("mutexes have no Win64 binding"),
             ApiId::Wait(_) => unreachable!("waits use the bound process control route"),
+            ApiId::Delay(_) => unreachable!("delays use the bound process control route"),
             ApiId::Guid(id) => crate::win32::x64::guid::call(mem, id, args),
             ApiId::Identity(id) => {
                 crate::win32::x64::identity::call(mem, id, args, &self.profile, self.teb() + 0x68)
@@ -1112,7 +1109,7 @@ impl Runtime64 {
                 args: args.to_vec(),
             });
         }
-        use crate::win32::catalog::{ApiId, FileApi, HandleApi};
+        use crate::win32::catalog::{ApiId, DelayApi, FileApi, HandleApi};
         let file = match binding.api {
             Some(ApiId::File(id)) => Some(id),
             _ => None,
@@ -1991,7 +1988,7 @@ impl Runtime64 {
                 }
             }
             "QueueUserAPC" => self.queue_apc(mem, args)?,
-            "SleepEx" => {
+            _ if binding.control == gateways::ControlImport::Delay(DelayApi::SleepEx) => {
                 if args[1] != 0 {
                     if let Some(control) =
                         self.deliver_apcs(mem, dll, name, args, &returned, cpu)?
@@ -2021,8 +2018,14 @@ impl Runtime64 {
                 self.record(dll, name, args, args[0]);
                 return Ok(Control::ThreadExited(args[0] as u32));
             }
-            "Sleep" | "SwitchToThread" => {
-                if name == "Sleep" && args[0] != 0 {
+            _ if matches!(
+                binding.control,
+                gateways::ControlImport::Delay(DelayApi::Sleep | DelayApi::SwitchThread)
+            ) =>
+            {
+                if binding.control == gateways::ControlImport::Delay(DelayApi::Sleep)
+                    && args[0] != 0
+                {
                     let deadline = match &self.threads.entries[&self.threads.active].block {
                         Some(threads::Block::Sleep(d)) => *d,
                         _ => Instant::now() + std::time::Duration::from_millis(args[0]),
@@ -2036,7 +2039,7 @@ impl Runtime64 {
                 returned.regs[0] = 0;
                 *cpu = returned;
                 self.api_calls += 1;
-                if name == "SwitchToThread" {
+                if binding.control == gateways::ControlImport::Delay(DelayApi::SwitchThread) {
                     return Ok(Control::SwitchThread(dll.into()));
                 }
                 self.record(dll, name, args, 0);
