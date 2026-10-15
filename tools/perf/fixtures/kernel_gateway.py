@@ -25,11 +25,16 @@ def x64(work):
     code += bytes.fromhex('0f85') + struct.pack('<i', loop - at - 6)
     code += bytes.fromhex('4c89f0 4883c420 415f 415e 415c c3')
     code.extend(bytes(512 - len(code)))
-    for table in [0x180, 0x190]:
+    # Three 64-bit thunks plus a terminator need 32 bytes per table.
+    # Keep the lookup table separate from the IAT at 0x1190.
+    for table in [0x140, 0x190]:
+        struct.pack_into('<Q', code, table, 0x11d0)
         struct.pack_into('<QQ', code, table + 8, 0x11e0, 0x11f0)
     code[0x1e2:0x1ed] = b'ResetEvent\0'
     code[0x1f2:0x1ff] = b'CreateEventW\0'
-    return image(code, pe64, 8, b'SetEvent\0'), dict(
+    result = image(code, pe64, 8, b'SetEvent\0')
+    struct.pack_into('<I', result, 0x200 + 0x100, 0x1140)
+    return result, dict(
         rax=hex(2 * n), retired=8 * n + 18, work=10 * n + 19,
         api_calls=2 * n + 1, startup=True)
 

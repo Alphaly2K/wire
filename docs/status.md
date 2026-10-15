@@ -48,7 +48,7 @@
 
 最近已验收的 Mutex 批次：release **454 passed / 7 ignored**，debug Win32/AMD64/FPU **302 passed**，显式 native **7 passed**，工具 **19 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。
 
-Mutex 的 33 条性能路径全部结果校验，CPU 中位数最大回退 +1.712%，RSS 中位数最多增加 64KiB；mutex IR/raw 为 +0.714%/+0.681%，游戏前缀 CPU +2.204%、wall +2.873%。各批次使用自己的基线，历史局部成本与离散轮次继续保留在对应报告，未将结构调整解释为游戏 FPS 提升。AMD64 event fixture 另发现重复导入，当前验收保留冻结输入，后续修正按新哈希独立测量。
+Mutex 的 33 条性能路径全部结果校验，CPU 中位数最大回退 +1.712%，RSS 中位数最多增加 64KiB；mutex IR/raw 为 +0.714%/+0.681%，游戏前缀 CPU +2.204%、wall +2.873%。各批次使用自己的基线，历史局部成本与离散轮次继续保留在对应报告，未将结构调整解释为游戏 FPS 提升。随后独立修正 AMD64 event fixture 的重复导入，20 项工具测试及前后运行时 smoke 通过；旧验收保持冻结输入，后续按新哈希独立测量，详见[工具边界](architecture/validation-tools.md)。
 
 后续正式比较使用显式 [稳定启动协议](reports/refactoring-launch-protocol-2026-10-16.md)，固定 argv0、参数和 child cwd，并记录 shell SHA。默认工具行为保持；旧协议数据独立保留，汇总不跨协议或不同 work 合并。编译、正式计时、采样与 runtime diagnostics 串行执行。每个结构候选先完成正确性，再按至少三对轮换检查结果、CPU/wall/RSS 与输入哈希；超过门槛先调查，不把失败候选扩大到其它领域。
 
