@@ -3,6 +3,40 @@
 use super::*;
 
 #[test]
+fn path_helpers_remain_absent_on_win64_without_committing_a_call() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    for name in [
+        "PathFileExistsA",
+        "PathFileExistsW",
+        "PathIsDirectoryA",
+        "PathIsDirectoryW",
+        "PathRemoveFileSpecA",
+        "PathRemoveFileSpecW",
+        "PathRenameExtensionA",
+        "PathRenameExtensionW",
+        "PathAddExtensionA",
+        "PathAddExtensionW",
+        "PathUnquoteSpacesA",
+        "PathUnquoteSpacesW",
+        "MakeSureDirectoryPathExists",
+    ] {
+        for dll in [
+            "shlwapi.dll",
+            "imagehlp.dll",
+            "kernel32.dll",
+            "kernelbase.dll",
+        ] {
+            assert!(!wire::x64::runtime::import_supported(dll, name));
+            let before = cpu.clone();
+            let calls = runtime.api_calls;
+            assert!(runtime.dispatch(dll, name, &mut cpu, &mut mem).is_err());
+            assert_eq!(cpu, before);
+            assert_eq!(runtime.api_calls, calls);
+        }
+    }
+}
+
+#[test]
 fn search_contract_baseline_keeps_win64_widths_precedence_and_return_alias() {
     let (mut mem, mut cpu, mut runtime) = startup();
     let root = std::env::temp_dir().join(format!("wire64-search-contract-{}", std::process::id()));
