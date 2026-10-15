@@ -184,3 +184,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 八项 API 迁入 LocalApi，删除重复 ABI/arity/DWORD、名称 handler 及 fresh-provider 的 FLS/timeGetTime 名单。Win64 保留三个 TLS hot body 与原 TEB/slot 资源，general 路由按 typed ID 执行；PE32 保留线程 map 与各自的 error/callback 策略。六项旧行为基线先通过，完整 release 448、debug 296、native 7、工具 19 项及 fmt/strict Clippy 通过。
 
 28 条性能路径全部校验。memory/data-alias 的 2.1B/900M 扩样仍有 +3.511%/+3.071% 局部成本；独立 IR/cache 计数一致，静态段助记符序列一致，其它路径最大回退 +1.884%，RSS 最多 +208KiB。Alice 200M 三对保持预算出口、隐藏窗口和零 Draw/Present；232 个已注册 Rust 文件与冻结 SHA 一致。接受决定和全部失败/扩样数据见 [TLS/FLS 验收](refactoring-locals-2026-10-16.md)。状态 owner 下一批独立处理。
+
+## R3 PE32 TLS/FLS 状态
+
+两张 `(TID, slot)` map 与两个递增计数器收进私有 LocalSlots32，只提供 allocate/get/set/free；adapter 保留 TID、LastError、callback 说明、trace 及 frame 提交，不新增资源限制或锁。Win64 状态保持。完整 release 448、debug 296、native 7、工具 19 项及 fmt/strict Clippy 通过。
+
+28 条性能路径全部校验；context/IR 初筛 +3.673% 扩为 150M 三标签轮换后为 −1.542%，同哈希对照 +3.201% 和明显离散轮次全部保留。其余最大回退 +2.715%，RSS 最多 +80KiB。Alice 200M 三对保持预算出口、隐藏窗口和零 Draw/Present；冻结的 233 个已注册 Rust 文件核对一致。完整接受决定见 [状态拆分验收](refactoring-locals32-owner-2026-10-16.md)。

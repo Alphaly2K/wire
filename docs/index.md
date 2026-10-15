@@ -24,6 +24,7 @@
 - [时钟调用边界](architecture/clocks.md)与[契约验收](reports/refactoring-clocks-2026-10-15.md)：六项契约、架构返回/故障顺序、稳定启动协议下的 49 条路径与长样本。
 - [进程身份与 LastError 边界](architecture/context.md)及[契约验收](reports/refactoring-context-2026-10-16.md)：七项契约、伪句柄/TEB/PEB、25 条性能路径及 SSE 长样本。
 - [TLS/FLS 边界](architecture/locals.md)及[契约验收](reports/refactoring-locals-2026-10-16.md)：八项接口、架构槽位/回调差异、28 条性能路径与 memory/data-alias 成本调查。
+- [PE32 TLS/FLS 状态归属](reports/refactoring-locals32-owner-2026-10-16.md)：私有 map/索引组件、28 条性能路径、context 顺序扩样与启动前缀。
 - [release 编译单元候选](reports/refactoring-release-codegen-2026-10-15.md)：独立构建配置、同二进制对照及长样本调查。
 - [网关边界候选](reports/refactoring-gateway-boundary-2026-10-15.md)、[页缓存内联候选](reports/refactoring-page-cache-inline-2026-10-15.md)、[helper 布局候选](reports/refactoring-memory-helper-layout-2026-10-15.md)：已撤回实现和保留的测量证据。
 - [本次渐进重构记录](reports/refactoring-2026-10-14.md)：阶段交付、行为差异与验收结果。

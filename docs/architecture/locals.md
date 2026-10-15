@@ -1,6 +1,8 @@
 # TLS/FLS 调用边界
 
-八个 TLS/FLS export 的 provider、scalar ABI 与 typed ID 已汇入 `win32/catalog/locals.rs`，保持原 Runtime64、ApiState、调度器及 guest TEB 的状态归属。独立基线、切换和完整验收见 [迁移记录](../reports/refactoring-locals-2026-10-16.md)。
+八个 TLS/FLS export 的 provider、scalar ABI 与 typed ID 已汇入 `win32/catalog/locals.rs`。独立基线、切换和完整验收见 [迁移记录](../reports/refactoring-locals-2026-10-16.md)。
+
+PE32 的两张 map 与两个递增计数器由 `win32/kernel/locals32::LocalSlots32` 私有持有，ApiState 通过组件组合，旧四个公开内部字段不再暴露。allocate/get/set/free 只接收 LocalKind、TID、索引和值；不借用 CPU、guest 内存、ApiState、调度器或 LastError。适配器负责获取当前 TID、维护错误/trace/callback 说明及提交返回 frame。Win64 继续使用原 Runtime64/TEB owner；没有统一两端槽位策略。[状态拆分验收](../reports/refactoring-locals32-owner-2026-10-16.md)独立记录性能与故障语义。
 
 | 行为 | PE32 | Win64 |
 | --- | --- | --- |

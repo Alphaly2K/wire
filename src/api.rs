@@ -262,10 +262,7 @@ pub struct ApiState {
     pub process_heap: u32,
     pub heap: crate::heap::GuestHeap,
     pub fs: Option<crate::fs::GuestFs>,
-    pub tls: HashMap<(u32, u32), u32>,
-    pub next_tls: u32,
-    pub fls: HashMap<(u32, u32), u32>,
-    pub next_fls: u32,
+    pub(crate) locals: crate::win32::kernel::locals32::LocalSlots32,
     pub handles: HashMap<u32, HandleObj>,
     pub named_objs: HashMap<String, u32>, // event/mutex/semaphore name -> handle
     pub next_handle: u32,
@@ -302,10 +299,7 @@ impl ApiState {
             process_heap: 0x7005_0000,
             heap: crate::heap::GuestHeap::new(0x7005_0000),
             fs: None,
-            tls: HashMap::new(),
-            next_tls: 1,
-            fls: HashMap::new(),
-            next_fls: 1,
+            locals: crate::win32::kernel::locals32::LocalSlots32::default(),
             handles: HashMap::new(),
             named_objs: HashMap::new(),
             next_handle: 0x100,
@@ -1662,46 +1656,34 @@ pub fn dispatch(
                 unreachable!();
             };
             use crate::win32::catalog::LocalApi::*;
+            use crate::win32::kernel::locals32::LocalKind::{Fls, Tls};
             ret = match id {
-                TlsAlloc => {
-                    let value = state.next_tls;
-                    state.next_tls += 1;
-                    value
-                }
+                TlsAlloc => state.locals.allocate(Tls),
                 TlsSet => {
-                    state.tls.insert((sched.current_tid(), args[0]), args[1]);
+                    state.locals.set(Tls, sched.current_tid(), args[0], args[1]);
                     1
                 }
                 TlsGet => {
-                    let value = state
-                        .tls
-                        .get(&(sched.current_tid(), args[0]))
-                        .copied()
-                        .unwrap_or(0);
+                    let value = state.locals.get(Tls, sched.current_tid(), args[0]);
                     state.last_error = 0;
                     value
                 }
                 TlsFree => {
-                    state.tls.retain(|&(_, slot), _| slot != args[0]);
+                    state.locals.free(Tls, args[0]);
                     1
                 }
                 FlsAlloc => {
-                    let value = state.next_fls;
-                    state.next_fls += 1;
+                    let value = state.locals.allocate(Fls);
                     note = "callback not invoked".into();
                     value
                 }
                 FlsSet => {
-                    state.fls.insert((sched.current_tid(), args[0]), args[1]);
+                    state.locals.set(Fls, sched.current_tid(), args[0], args[1]);
                     1
                 }
-                FlsGet => state
-                    .fls
-                    .get(&(sched.current_tid(), args[0]))
-                    .copied()
-                    .unwrap_or(0),
+                FlsGet => state.locals.get(Fls, sched.current_tid(), args[0]),
                 FlsFree => {
-                    state.fls.retain(|&(_, slot), _| slot != args[0]);
+                    state.locals.free(Fls, args[0]);
                     1
                 }
             };

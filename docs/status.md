@@ -1,8 +1,8 @@
 # 当前状态
 
-更新日期：2026-10-16。重构前基线为 `2e78377`；最新已验收运行时为 [TLS/FLS 契约批次](reports/refactoring-locals-2026-10-16.md)，该报告记录冻结源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
+更新日期：2026-10-16。重构前基线为 `2e78377`；最新已验收运行时为 [PE32 TLS/FLS 状态拆分](reports/refactoring-locals32-owner-2026-10-16.md)，该报告记录冻结源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
 
-八项 TLS/FLS 契约已完成正确性、28 条性能路径、扩样、独立诊断与 Alice smoke 验收。下一批准备收拢 PE32 TLS/FLS 状态 owner，尚未计入交付。Mono 原生化已撤回，本轮继续排除。
+八项 TLS/FLS 契约和 PE32 私有状态 owner 均已交付。下一组 16 项事件/信号量契约的四项独立基线及双架构 event fixture 已通过，迁移尚未验收。Mono 原生化已撤回，本轮继续排除。
 
 ## 重构范围
 
@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | R0/R1 | 冻结输入、原创正式 fixture、领域测试 harness、GUID 唯一契约和双架构适配 | 随后续家族维护独立基线 |
 | R2 | 已验收 189 个 export 的契约；明细见下表 | 其余内存、同步、USER、COM、图形等 legacy 家族 |
-| R3 | guest environment、双架构模块状态、Win64 文件状态 owner | PE32 其余资源、线程/COM 等；PE32 kernel 大范围抽取曾因性能撤回 |
+| R3 | guest environment、双架构模块状态、Win64 文件状态、PE32 TLS/FLS 私有 owner | PE32 其余资源、线程/COM 等；PE32 kernel 大范围抽取曾因性能撤回 |
 | R4/R5 | Process32 编排边界、owned host UI 请求、GDI 与像素状态分离 | 领域分发与资源 owner 随 R2/R3 继续收敛 |
 | R6 | 按用户要求忽略 | 不重建原生 Mono 路径 |
 | R7 | PE32 内核目录、领域测试、公共性能工具、当前/历史文档入口 | 后续目录和工具随领域迁移继续整理 |
@@ -44,9 +44,9 @@
 
 ## 验证与性能
 
-最近已验收的 TLS/FLS 批次：release **448 passed / 7 ignored**，debug Win32/AMD64/FPU **296 passed**，显式 native **7 passed**，工具 **19 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。
+最近已验收的 PE32 TLS/FLS owner 批次：release **448 passed / 7 ignored**，debug Win32/AMD64/FPU **296 passed**，显式 native **7 passed**，工具 **19 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。
 
-TLS/FLS 的 28 条性能路径全部结果校验。memory/data-alias 扩为 2.1B/900M 三标签轮换后，CPU 中位数仍有 **+3.511%/+3.071%** 局部成本，独立 IR/cache 计数一致；其余最大回退 +1.884%，RSS 中位数最多增加 208KiB。各批次保留自己的基线、失败轮次和局部成本，未将结构调整解释为游戏 FPS 提升。
+状态拆分的 28 条性能路径全部结果校验。context/IR 的初筛 +3.673% 经 150M 三标签轮换后为 −1.542%，同哈希对照仍有 +3.201% 差异，全部离散轮次保留；其余最大回退 +2.715%，RSS 中位数最多增加 80KiB。上一批 TLS/FLS 契约曾记录 memory/data-alias 的 +3.511%/+3.071% 局部成本，继续保留在对应报告。各批次使用自己的基线，未将结构调整解释为游戏 FPS 提升。
 
 后续正式比较使用显式 [稳定启动协议](reports/refactoring-launch-protocol-2026-10-16.md)，固定 argv0、参数和 child cwd，并记录 shell SHA。默认工具行为保持；旧协议数据独立保留，汇总不跨协议或不同 work 合并。编译、正式计时、采样与 runtime diagnostics 串行执行。每个结构候选先完成正确性，再按至少三对轮换检查结果、CPU/wall/RSS 与输入哈希；超过门槛先调查，不把失败候选扩大到其它领域。
 
