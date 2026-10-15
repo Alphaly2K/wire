@@ -16,6 +16,7 @@
 - [路径与属性 API 契约验收](reports/refactoring-file-path-catalog-2026-10-15.md)：10 个追加 export、独立故障基线、31 条路径及整数长样本调查。
 - [文件元数据 API 契约验收](reports/refactoring-file-metadata-catalog-2026-10-15.md)：五个追加 export、ABI-only 冷绑定与完整性能对照。
 - [目录与文件变更 API 契约验收](reports/refactoring-file-mutation-catalog-2026-10-15.md)：12 个追加 export、原架构能力范围与错误顺序、34 条性能路径及事件扩样。
+- [目录枚举 API 契约验收](reports/refactoring-file-search-catalog-2026-10-15.md)：7 个追加 export、句柄类型、游标提交、返回槽别名与独立 FindClose fixture。
 - [本次渐进重构记录](reports/refactoring-2026-10-14.md)：阶段交付、行为差异与验收结果。
 - [R7 稳定边界整理](reports/refactoring-r7-2026-10-14.md)：PE32 目录、领域测试、freeze/replay 工具及完整对照。
 - [PE32 kernel 候选拒绝记录](reports/refactoring-pe32-kernel-rejected-2026-10-14.md)：独立资源故障基线、性能回退调查及运行时代码撤回。

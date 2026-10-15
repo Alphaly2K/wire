@@ -40,6 +40,13 @@ pub enum FileApi {
     RemoveDirectoryW,
     CopyFileA,
     CopyFileW,
+    FindFirstFileA,
+    FindFirstFileW,
+    FindFirstFileExA,
+    FindFirstFileExW,
+    FindNextFileA,
+    FindNextFileW,
+    FindClose,
 }
 
 impl FileApi {
@@ -59,6 +66,22 @@ impl FileApi {
                 | Self::MoveFileExW
                 | Self::RemoveDirectoryW
                 | Self::CopyFileW
+                | Self::FindFirstFileW
+                | Self::FindFirstFileExW
+                | Self::FindNextFileW
+        )
+    }
+
+    pub(crate) fn is_search(self) -> bool {
+        matches!(
+            self,
+            Self::FindFirstFileA
+                | Self::FindFirstFileW
+                | Self::FindFirstFileExA
+                | Self::FindFirstFileExW
+                | Self::FindNextFileA
+                | Self::FindNextFileW
+                | Self::FindClose
         )
     }
 }
@@ -132,7 +155,23 @@ const fn mutation(
     )
 }
 
-pub static FILE_CONTRACTS: [Contract; 38] = [
+const fn search(
+    id: FileApi,
+    name: &'static str,
+    parameters: &'static [Parameter],
+    returns: ReturnConvention,
+) -> Contract {
+    Contract::new(
+        ApiId::File(id), name, parameters, returns,
+        "confined directory search; existing basic/extended information and flags subset; independent search handles; output before handle allocation or cursor advancement; architecture-specific fault/return-frame order and metadata limits",
+        [
+            ArchitecturePlan { dlls: &["kernel32.dll"], execution: ExecutionPolicy::Typed },
+            ArchitecturePlan { dlls: &["kernel32.dll", "kernelbase.dll"], execution: ExecutionPolicy::Typed },
+        ],
+    )
+}
+
+pub static FILE_CONTRACTS: [Contract; 45] = [
     declaration(
         FileApi::CreateFileA,
         "CreateFileA",
@@ -283,4 +322,21 @@ pub static FILE_CONTRACTS: [Contract; 38] = [
     mutation(FileApi::RemoveDirectoryW, "RemoveDirectoryW", &[P], true),
     mutation(FileApi::CopyFileA, "CopyFileA", &[P, P, I], false),
     mutation(FileApi::CopyFileW, "CopyFileW", &[P, P, I], false),
+    search(FileApi::FindFirstFileA, "FindFirstFileA", &[P, P], R),
+    search(FileApi::FindFirstFileW, "FindFirstFileW", &[P, P], R),
+    search(
+        FileApi::FindFirstFileExA,
+        "FindFirstFileExA",
+        &[P, D, P, D, P, D],
+        R,
+    ),
+    search(
+        FileApi::FindFirstFileExW,
+        "FindFirstFileExW",
+        &[P, D, P, D, P, D],
+        R,
+    ),
+    search(FileApi::FindNextFileA, "FindNextFileA", &[P, P], B),
+    search(FileApi::FindNextFileW, "FindNextFileW", &[P, P], B),
+    search(FileApi::FindClose, "FindClose", &[P], B),
 ];

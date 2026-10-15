@@ -1,5 +1,6 @@
 //! Confined directory searches with 64-bit handles and fault-atomic cursor advancement.
 use super::{files, Memory, Runtime64, WRITE};
+use crate::win32::catalog::FileApi;
 use std::{collections::BTreeMap, path::PathBuf};
 struct Search {
     entries: Vec<PathBuf>,
@@ -16,14 +17,6 @@ impl Default for Searches {
             next: super::TEB + 0x670000,
         }
     }
-}
-pub(super) fn arity(name: &str) -> Option<usize> {
-    Some(match name {
-        "FindFirstFileA" | "FindFirstFileW" | "FindNextFileA" | "FindNextFileW" => 2,
-        "FindFirstFileExA" | "FindFirstFileExW" => 6,
-        "FindClose" => 1,
-        _ => return None,
-    })
 }
 impl Runtime64 {
     fn find_data(&self, path: &std::path::Path, wide: bool) -> Result<Vec<u8>, u32> {
@@ -66,12 +59,18 @@ impl Runtime64 {
     pub(super) fn find_call(
         &mut self,
         mem: &mut Memory,
-        name: &str,
+        id: FileApi,
         args: &[u64],
     ) -> Result<u64, String> {
-        let wide = name.ends_with('W');
-        let first = name.starts_with("FindFirst");
-        if name == "FindClose" {
+        let wide = id.wide();
+        let first = matches!(
+            id,
+            FileApi::FindFirstFileA
+                | FileApi::FindFirstFileW
+                | FileApi::FindFirstFileExA
+                | FileApi::FindFirstFileExW
+        );
+        if id == FileApi::FindClose {
             if self.searches.handles.remove(&args[0]).is_some() {
                 return Ok(1);
             }
@@ -82,7 +81,7 @@ impl Runtime64 {
             self.set_error(mem, 6)?;
             return Ok(0);
         }
-        let extended = name.contains("Ex");
+        let extended = matches!(id, FileApi::FindFirstFileExA | FileApi::FindFirstFileExW);
         if first && extended && (args[1] > 1 || args[3] != 0 || args[4] != 0 || args[5] & !2 != 0) {
             self.set_error(mem, 87)?;
             return Ok(u64::MAX);

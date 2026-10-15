@@ -112,17 +112,6 @@ pub fn dispatch(
         None
     };
     let supported = core.is_some()
-        || dll == "kernel32.dll"
-            && matches!(
-                name,
-                "FindFirstFileA"
-                    | "FindFirstFileW"
-                    | "FindFirstFileExA"
-                    | "FindFirstFileExW"
-                    | "FindNextFileA"
-                    | "FindNextFileW"
-                    | "FindClose"
-            )
         || dll == "shlwapi.dll"
             && matches!(
                 name,
@@ -174,10 +163,11 @@ fn execute(
                 | FileApi::SetFilePointer
                 | FileApi::GetFileAttributesA
                 | FileApi::GetFileAttributesW
+                | FileApi::FindFirstFileA
+                | FileApi::FindFirstFileW
+                | FileApi::FindFirstFileExA
+                | FileApi::FindFirstFileExW
         )
-    ) || matches!(
-        name,
-        "FindFirstFileA" | "FindFirstFileW" | "FindFirstFileExA" | "FindFirstFileExW"
     ) {
         u32::MAX
     } else {
@@ -564,10 +554,18 @@ fn execute(
                 Ok((1, text))
             }
             (
-                None,
-                "FindFirstFileA" | "FindFirstFileW" | "FindFirstFileExA" | "FindFirstFileExW",
+                Some(
+                    FileApi::FindFirstFileA
+                    | FileApi::FindFirstFileW
+                    | FileApi::FindFirstFileExA
+                    | FileApi::FindFirstFileExW,
+                ),
+                _,
             ) => {
-                let extended = name.starts_with("FindFirstFileEx");
+                let extended = matches!(
+                    core,
+                    Some(FileApi::FindFirstFileExA | FileApi::FindFirstFileExW)
+                );
                 if extended && (a[1] > 1 || a[3] != 0 || a[4] != 0 || a[5] & !2 != 0) {
                     return Err(87);
                 }
@@ -601,7 +599,7 @@ fn execute(
                     text,
                 ))
             }
-            (None, "FindNextFileA" | "FindNextFileW") => {
+            (Some(FileApi::FindNextFileA | FileApi::FindNextFileW), _) => {
                 let Some(HandleObj::Search { entries, next }) = state.handles.get_mut(&a[0]) else {
                     return Err(6);
                 };
@@ -610,7 +608,7 @@ fn execute(
                 *next += 1;
                 Ok((1, String::new()))
             }
-            (None, "FindClose") => {
+            (Some(FileApi::FindClose), _) => {
                 if !matches!(state.handles.get(&a[0]), Some(HandleObj::Search { .. })) {
                     return Err(6);
                 }

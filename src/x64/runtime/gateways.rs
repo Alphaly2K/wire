@@ -82,7 +82,14 @@ impl BoundImport {
             arity: contract.map_or_else(|| super::import_arity(name), |c| Some(c.parameters.len())),
             supported: valid && super::import_supported(dll, name),
             dwords: contract.map_or_else(|| super::import_dwords(name), |c| c.win64_dwords()),
-            groups: super::import_groups(name),
+            groups: super::import_groups(name)
+                | if contract.is_some_and(|contract| {
+                    matches!(contract.id, crate::win32::catalog::ApiId::File(id) if id.is_search())
+                }) {
+                    1 << 8
+                } else {
+                    0
+                },
             hot,
             api: contract.and_then(|c| match c.id {
                 crate::win32::catalog::ApiId::Nls(

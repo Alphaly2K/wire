@@ -372,7 +372,6 @@ fn import_arity(name: &str) -> Option<usize> {
         name if guid::arity(name).is_some() => guid::arity(name).unwrap(),
         name if timers::arity(name).is_some() => timers::arity(name).unwrap(),
         name if dxgi::arity(name).is_some() => dxgi::arity(name).unwrap(),
-        name if find::arity(name).is_some() => find::arity(name).unwrap(),
         name if user::arity(name).is_some() => user::arity(name).unwrap(),
         name if registry::arity(name).is_some() => registry::arity(name).unwrap(),
         name if display::arity(name).is_some() => display::arity(name).unwrap(),
@@ -568,7 +567,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         name if devices::arity(name).is_some() => devices::dwords(name),
         name if winrt::arity(name).is_some() => winrt::dwords(name),
         name if dxgi::arity(name).is_some() => dxgi::dwords(name),
-        "FindFirstFileExA" | "FindFirstFileExW" => &[1, 3, 5],
         name if user::arity(name).is_some() => user::dwords(name),
         name if registry::arity(name).is_some() => registry::dwords(name),
         name if display::arity(name).is_some() => display::dwords(name),
@@ -675,7 +673,7 @@ fn import_groups(name: &str) -> u32 {
         winrt::arity(name).is_some(),
         guid::arity(name).is_some(),
         dxgi::arity(name).is_some(),
-        find::arity(name).is_some(),
+        false, // bound directory-search contracts supply bit 8; preserve bit positions
         user::is_callback(name),
         user::arity(name).is_some(),
         registry::arity(name).is_some(),
@@ -1223,7 +1221,7 @@ impl Runtime64 {
             _ if binding.groups & (1 << 5) != 0 => self.winrt_call(mem, name, args)?,
             _ if binding.groups & (1 << 6) != 0 => self.guid_call(mem, name, args)?,
             _ if binding.groups & (1 << 7) != 0 => self.dxgi_call(mem, name, args)?,
-            _ if binding.groups & (1 << 8) != 0 => self.find_call(mem, name, args)?,
+            _ if binding.groups & (1 << 8) != 0 => self.find_call(mem, file.unwrap(), args)?,
             _ if binding.groups & (1 << 9) != 0 => {
                 match self.window_start(mem, name, args, &returned)? {
                     user::WindowResult::Value(value) => value,

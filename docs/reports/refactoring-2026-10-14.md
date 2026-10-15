@@ -16,6 +16,8 @@
 
 目录/文件变更再追加 12 个 export，文件合计 38 个；完整 release 415、debug 300、native7、fmt/strict Clippy/build 通过。34 个 case/path 三对校验，事件 raw 210M 扩样未复现初筛回退，最终最大 CPU 中位数回退 +2.25%、RSS 中位数最多增加 96KiB。现有 CopyFile、PE32 ABI-only 与架构错误顺序保持，全部扩样和宿主条件见 [目录/变更验收](refactoring-file-mutation-catalog-2026-10-15.md)。
 
+目录枚举再追加 7 个 export，文件合计 45 个；完整 release 417、debug 302、native7、fmt/strict Clippy/build 通过。首版的 AMD64 memory 成本未接受，最终以契约 ID 冷绑定原 route bit。37 条路径校验，整数补样/同二进制噪声、GUID/path 六对合并和 metadata 700M 后，最大 CPU 中位数回退 +2.79%、RSS 最多增加 32KiB；FindClose 固定负载 PE32 IR/raw、AMD64 分别 −16.23%/−12.73%/−12.45%。Alice 200M 保持隐藏窗口/预算出口，273 个构建输入 hash 核对一致，完整失败与最终证据见 [目录枚举验收](refactoring-file-search-catalog-2026-10-15.md)。
+
 ## R0 固定基线
 
 - 代码：`2e78377`，tracked working tree 干净。
@@ -33,7 +35,7 @@
 | --- | --- |
 | R0 入口/fixture | 已完成；12 组 golden 输入一致，默认与旧路径各 7 个运行 smoke 通过 |
 | R1 GUID 契约试点 | 已完成唯一契约、双架构冷绑定、纯语义/适配器、行为及性能验收 |
-| R2 分发收敛 | GUID + 6 个 identity + 8 个 version + 42 个 NLS + 31 个 module + 38 个 file export 已迁移；其余 file/同步/USER/COM/图形等仍 legacy |
+| R2 分发收敛 | GUID + 6 个 identity + 8 个 version + 42 个 NLS + 31 个 module + 45 个 file export 已迁移；其余 file/同步/USER/COM/图形等仍 legacy |
 | R3 状态归属 | identity/profile、环境变量、双架构 module 和 Win64 file 已有 owner；PE32 file/thread/COM 等仍待迁移 |
 | R4 PE32 Process | 已完成装载/执行编排提取；旧 Cpu 方法只保留委托 facade |
 | R5 host/graphics | 已完成 owned UI 请求/事件与 GDI adapter 分离，真实 native 验证通过 |
