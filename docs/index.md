@@ -17,7 +17,7 @@
 - [文件元数据 API 契约验收](reports/refactoring-file-metadata-catalog-2026-10-15.md)：五个追加 export、ABI-only 冷绑定与完整性能对照。
 - [目录与文件变更 API 契约验收](reports/refactoring-file-mutation-catalog-2026-10-15.md)：12 个追加 export、原架构能力范围与错误顺序、34 条性能路径及事件扩样。
 - [目录枚举 API 契约验收](reports/refactoring-file-search-catalog-2026-10-15.md)：7 个追加 export、句柄类型、游标提交、返回槽别名与独立 FindClose fixture。
-- [路径与句柄候选](reports/refactoring-paths-handles-2026-10-15.md)：19 个 export 的独立行为基线、性能回退及暂缓状态。
+- [路径与句柄边界](architecture/paths-handles.md)与[完整验收](reports/refactoring-paths-handles-2026-10-15.md)：19 个 export、故障/资源提交、历史拒绝候选及新基线上的 46 条性能路径。
 - [文件 section 契约验收](reports/refactoring-file-section-catalog-2026-10-15.md)：八项映射 API、首轮暂缓、顺序平衡补样和保留的 raw 局部成本。
 - [Interlocked/SLIST 边界](architecture/interlocked.md)与[契约验收](reports/refactoring-interlocked-catalog-2026-10-15.md)：六项契约、故障提交、25 条性能路径和 SSE/thread-ID 调查。
 - [release 编译单元候选](reports/refactoring-release-codegen-2026-10-15.md)：独立构建配置、同二进制对照及长样本调查。

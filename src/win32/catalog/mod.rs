@@ -2,17 +2,21 @@
 //! Unconverted families remain on explicit legacy routes.
 mod files;
 mod guid;
+mod handles;
 mod identity;
 mod interlocked;
 mod modules;
 mod nls;
+mod paths;
 mod version;
 pub use files::{FileApi, FILE_CONTRACTS};
 pub use guid::{GuidApi, GUID_CONTRACTS};
+pub use handles::{HandleApi, HANDLE_CONTRACTS};
 pub use identity::{IdentityApi, IDENTITY_CONTRACTS};
 pub use interlocked::{InterlockedApi, INTERLOCKED_CONTRACTS};
 pub use modules::{ModuleApi, ModuleQueryApi, MODULE_CONTRACTS, MODULE_QUERY_CONTRACTS};
 pub use nls::{NlsApi, NLS_CONTRACTS};
+pub use paths::{PathApi, PATH_CONTRACTS};
 pub use version::{VersionApi, VERSION_CONTRACTS};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +59,8 @@ pub enum ApiId {
     ModuleQuery(ModuleQueryApi),
     File(FileApi),
     Interlocked(InterlockedApi),
+    Handle(HandleApi),
+    Path(PathApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -200,6 +206,8 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(MODULE_QUERY_CONTRACTS.iter())
         .chain(FILE_CONTRACTS.iter())
         .chain(INTERLOCKED_CONTRACTS.iter())
+        .chain(HANDLE_CONTRACTS.iter())
+        .chain(PATH_CONTRACTS.iter())
 }
 
 #[cfg(test)]

@@ -9,6 +9,7 @@
 use crate::api::{ApiState, HandleObj};
 use crate::fs::win_error;
 use crate::mem::GuestMem;
+use crate::win32::catalog::{FileApi, PathApi};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
@@ -93,70 +94,63 @@ pub fn dispatch(
     mem: &GuestMem,
     state: &mut ApiState,
 ) -> Option<(u32, String)> {
-    use crate::win32::catalog::{
-        resolve, ApiId, Architecture, ExecutionPolicy, FileApi, Resolution,
-    };
-    let core = if dll == "kernel32.dll" {
-        match resolve(Architecture::X86, dll, name) {
-            Resolution::Bound(contract)
-                if contract.execution(Architecture::X86) == ExecutionPolicy::Typed =>
-            {
-                match contract.id {
-                    ApiId::File(id) if id != FileApi::GetFileType => Some(id),
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
-    } else {
-        None
-    };
-    let supported = core.is_some()
-        || dll == "shlwapi.dll"
-            && matches!(
-                name,
-                "PathFileExistsA"
-                    | "PathFileExistsW"
-                    | "PathIsDirectoryA"
-                    | "PathIsDirectoryW"
-                    | "PathRemoveFileSpecA"
-                    | "PathRemoveFileSpecW"
-                    | "PathRenameExtensionA"
-                    | "PathRenameExtensionW"
-                    | "PathAddExtensionA"
-                    | "PathAddExtensionW"
-                    | "PathUnquoteSpacesA"
-                    | "PathUnquoteSpacesW"
-            )
-        || (dll == "imagehlp.dll" && name == "MakeSureDirectoryPathExists");
-    if !supported {
+    use crate::win32::catalog::{resolve, ApiId, Architecture, ExecutionPolicy, Resolution};
+    // Preserve the public facade's exact, lowercase provider scope.
+    if !matches!(dll, "kernel32.dll" | "shlwapi.dll" | "imagehlp.dll") {
         return None;
     }
-    Some(execute(core, name, a, mem, state))
+    let Resolution::Bound(contract) = resolve(Architecture::X86, dll, name) else {
+        return None;
+    };
+    if contract.execution(Architecture::X86) != ExecutionPolicy::Typed {
+        return None;
+    }
+    match contract.id {
+        ApiId::File(id) if id != FileApi::GetFileType => Some(call(id, a, mem, state)),
+        ApiId::Path(id) => Some(call_path(id, a, mem, state)),
+        _ => None,
+    }
 }
 
 /// Bound core IDs bypass the public legacy facade's cold name/DLL resolution.
 pub(crate) fn call(
-    id: crate::win32::catalog::FileApi,
+    id: FileApi,
     a: &crate::api::Args,
     mem: &GuestMem,
     state: &mut ApiState,
 ) -> (u32, String) {
-    execute(Some(id), "", a, mem, state)
+    execute(Operation::Core(id), a, mem, state)
+}
+
+pub(crate) fn call_path(
+    id: PathApi,
+    a: &crate::api::Args,
+    mem: &GuestMem,
+    state: &mut ApiState,
+) -> (u32, String) {
+    execute(Operation::Helper(id), a, mem, state)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Operation {
+    Core(FileApi),
+    Helper(PathApi),
 }
 
 fn execute(
-    core: Option<crate::win32::catalog::FileApi>,
-    name: &str,
+    operation: Operation,
     a: &crate::api::Args,
     mem: &GuestMem,
     state: &mut ApiState,
 ) -> (u32, String) {
-    use crate::win32::catalog::FileApi;
-    let wide = core.map_or_else(|| name.ends_with('W'), |id| id.wide());
+    use Operation::{Core, Helper};
+    let wide = match operation {
+        Core(id) => id.wide(),
+        Helper(id) => id.wide(),
+    };
     let failure = if matches!(
-        core,
-        Some(
+        operation,
+        Core(
             FileApi::CreateFileA
                 | FileApi::CreateFileW
                 | FileApi::GetFileSize
@@ -174,8 +168,8 @@ fn execute(
         0
     };
     let result = (|| -> Result<(u32, String), u32> {
-        match (core, name) {
-            (None, "PathRemoveFileSpecA" | "PathRemoveFileSpecW") => {
+        match operation {
+            Helper(PathApi::RemoveFileSpecA | PathApi::RemoveFileSpecW) => {
                 if a[0] == 0 {
                     return Ok((0, String::new()));
                 }
@@ -279,7 +273,7 @@ fn execute(
                 }
                 Ok((1, "removed last path component".into()))
             }
-            (Some(FileApi::CreateFileA | FileApi::CreateFileW), _) => {
+            Core(FileApi::CreateFileA | FileApi::CreateFileW) => {
                 if a[6] != 0 || a[5] & 0x4000_0000 != 0 {
                     return Err(50);
                 } // OVERLAPPED not implemented
@@ -319,7 +313,7 @@ fn execute(
                 });
                 Ok((h, format!("file {text:?}")))
             }
-            (Some(FileApi::ReadFile | FileApi::WriteFile), _) => {
+            Core(FileApi::ReadFile | FileApi::WriteFile) => {
                 if a[4] != 0 {
                     return Err(50);
                 }
@@ -335,7 +329,7 @@ fn execute(
                 else {
                     return Err(6);
                 };
-                let reading = core == Some(FileApi::ReadFile);
+                let reading = operation == Core(FileApi::ReadFile);
                 if reading && !*readable || !reading && !*writable {
                     return Err(5);
                 }
@@ -350,12 +344,12 @@ fn execute(
                 mem.write_u32(a[3], n as u32).map_err(|_| 87u32)?;
                 Ok((1, format!("{n} bytes")))
             }
-            (Some(FileApi::GetFileSize | FileApi::GetFileSizeEx), _) => {
+            Core(FileApi::GetFileSize | FileApi::GetFileSizeEx) => {
                 let Some(HandleObj::File { file, .. }) = state.handles.get(&a[0]) else {
                     return Err(6);
                 };
                 let n = file.metadata().map_err(|e| win_error(&e))?.len();
-                if core == Some(FileApi::GetFileSizeEx) {
+                if operation == Core(FileApi::GetFileSizeEx) {
                     mem.write_u64(a[1], n).map_err(|_| 87u32)?;
                     Ok((1, String::new()))
                 } else {
@@ -366,8 +360,8 @@ fn execute(
                     Ok((n as u32, String::new()))
                 }
             }
-            (Some(FileApi::SetFilePointer | FileApi::SetFilePointerEx), _) => {
-                let ex = core == Some(FileApi::SetFilePointerEx);
+            Core(FileApi::SetFilePointer | FileApi::SetFilePointerEx) => {
+                let ex = operation == Core(FileApi::SetFilePointerEx);
                 let distance = if ex {
                     ((a[2] as u64) << 32 | a[1] as u64) as i64
                 } else if a[2] != 0 {
@@ -400,7 +394,7 @@ fn execute(
                     Ok((pos as u32, String::new()))
                 }
             }
-            (Some(FileApi::SetEndOfFile | FileApi::FlushFileBuffers), _) => {
+            Core(FileApi::SetEndOfFile | FileApi::FlushFileBuffers) => {
                 let Some(HandleObj::File { file, writable, .. }) = state.handles.get_mut(&a[0])
                 else {
                     return Err(6);
@@ -408,7 +402,7 @@ fn execute(
                 if !*writable {
                     return Err(5);
                 }
-                if core == Some(FileApi::SetEndOfFile) {
+                if operation == Core(FileApi::SetEndOfFile) {
                     let n = file.stream_position().map_err(|e| win_error(&e))?;
                     file.set_len(n).map_err(|e| win_error(&e))?;
                 } else {
@@ -416,16 +410,16 @@ fn execute(
                 }
                 Ok((1, String::new()))
             }
-            (Some(FileApi::GetCurrentDirectoryA | FileApi::GetCurrentDirectoryW), _) => {
+            Core(FileApi::GetCurrentDirectoryA | FileApi::GetCurrentDirectoryW) => {
                 let cwd = state.fs.as_ref().ok_or(3u32)?.cwd();
                 Ok((write_string(mem, a[1], a[0], &cwd, wide)?, cwd))
             }
-            (Some(FileApi::SetCurrentDirectoryA | FileApi::SetCurrentDirectoryW), _) => {
+            Core(FileApi::SetCurrentDirectoryA | FileApi::SetCurrentDirectoryW) => {
                 let text = read_name(mem, a[0], wide)?;
                 state.fs.as_mut().ok_or(3u32)?.set_cwd(&text)?;
                 Ok((1, text))
             }
-            (Some(FileApi::GetFullPathNameA | FileApi::GetFullPathNameW), _) => {
+            Core(FileApi::GetFullPathNameA | FileApi::GetFullPathNameW) => {
                 let text = read_name(mem, a[0], wide)?;
                 let fs = state.fs.as_ref().ok_or(3u32)?;
                 let path = fs.resolve(&text)?;
@@ -442,28 +436,28 @@ fn execute(
                 }
                 Ok((ret, full))
             }
-            (Some(FileApi::GetFileAttributesA | FileApi::GetFileAttributesW), _)
-            | (
-                None,
-                "PathFileExistsA" | "PathFileExistsW" | "PathIsDirectoryA" | "PathIsDirectoryW",
+            Core(FileApi::GetFileAttributesA | FileApi::GetFileAttributesW)
+            | Helper(
+                PathApi::FileExistsA
+                | PathApi::FileExistsW
+                | PathApi::IsDirectoryA
+                | PathApi::IsDirectoryW,
             ) => {
                 let text = read_name(mem, a[0], wide)?;
                 let path = state.fs.as_ref().ok_or(3u32)?.resolve(&text)?;
                 let attr = attributes(&path)?;
                 Ok((
-                    if core.is_some() {
-                        attr
-                    } else if name.starts_with("PathIsDirectory") {
-                        (attr & 0x10 != 0) as u32
-                    } else if name.starts_with("Path") {
-                        1
-                    } else {
-                        attr
+                    match operation {
+                        Helper(PathApi::IsDirectoryA | PathApi::IsDirectoryW) => {
+                            (attr & 0x10 != 0) as u32
+                        }
+                        Helper(PathApi::FileExistsA | PathApi::FileExistsW) => 1,
+                        _ => attr,
                     },
                     text,
                 ))
             }
-            (None, "MakeSureDirectoryPathExists") => {
+            Helper(PathApi::MakeSureDirectoryPathExists) => {
                 let text = read_name(mem, a[0], false)?;
                 let path = state.fs.as_ref().ok_or(3u32)?.resolve(&text)?;
                 let directory = if text.ends_with(['\\', '/']) {
@@ -474,7 +468,7 @@ fn execute(
                 std::fs::create_dir_all(directory).map_err(|e| win_error(&e))?;
                 Ok((1, text))
             }
-            (None, "PathUnquoteSpacesA" | "PathUnquoteSpacesW") => {
+            Helper(PathApi::UnquoteSpacesA | PathApi::UnquoteSpacesW) => {
                 if a[0] == 0 {
                     return Ok((0, String::new()));
                 }
@@ -484,12 +478,11 @@ fn execute(
                 }
                 Ok((0, text))
             }
-            (
-                None,
-                "PathRenameExtensionA"
-                | "PathRenameExtensionW"
-                | "PathAddExtensionA"
-                | "PathAddExtensionW",
+            Helper(
+                PathApi::RenameExtensionA
+                | PathApi::RenameExtensionW
+                | PathApi::AddExtensionA
+                | PathApi::AddExtensionW,
             ) => {
                 if a[0] == 0 || a[1] == 0 {
                     return Ok((0, String::new()));
@@ -498,7 +491,10 @@ fn execute(
                 let ext = read_name(mem, a[1], wide)?;
                 let start = text.rfind(['\\', '/', ' ']).map_or(0, |n| n + 1);
                 if let Some(dot) = text[start..].rfind('.') {
-                    if name.starts_with("PathAdd") {
+                    if matches!(
+                        operation,
+                        Helper(PathApi::AddExtensionA | PathApi::AddExtensionW)
+                    ) {
                         return Ok((0, text));
                     }
                     text.truncate(start + dot);
@@ -515,7 +511,7 @@ fn execute(
                 write_string(mem, a[0], 260, &text, wide)?;
                 Ok((1, text))
             }
-            (Some(FileApi::DeleteFileA | FileApi::DeleteFileW), _) => {
+            Core(FileApi::DeleteFileA | FileApi::DeleteFileW) => {
                 let text = read_name(mem, a[0], wide)?;
                 let path = state.fs.as_ref().ok_or(3u32)?.resolve(&text)?;
                 let info = path.metadata().map_err(|e| win_error(&e))?;
@@ -525,7 +521,7 @@ fn execute(
                 std::fs::remove_file(path).map_err(|e| win_error(&e))?;
                 Ok((1, text))
             }
-            (Some(FileApi::SetFileAttributesA | FileApi::SetFileAttributesW), _) => {
+            Core(FileApi::SetFileAttributesA | FileApi::SetFileAttributesW) => {
                 let text = read_name(mem, a[0], wide)?;
                 let path = state.fs.as_ref().ok_or(3u32)?.resolve(&text)?;
                 if a[1] & !0x81 != 0 {
@@ -547,24 +543,21 @@ fn execute(
                 std::fs::set_permissions(path, permissions).map_err(|e| win_error(&e))?;
                 Ok((1, text))
             }
-            (Some(FileApi::CreateDirectoryA | FileApi::CreateDirectoryW), _) => {
+            Core(FileApi::CreateDirectoryA | FileApi::CreateDirectoryW) => {
                 let text = read_name(mem, a[0], wide)?;
                 let path = state.fs.as_ref().ok_or(3u32)?.resolve(&text)?;
                 std::fs::create_dir(path).map_err(|e| win_error(&e))?;
                 Ok((1, text))
             }
-            (
-                Some(
-                    FileApi::FindFirstFileA
-                    | FileApi::FindFirstFileW
-                    | FileApi::FindFirstFileExA
-                    | FileApi::FindFirstFileExW,
-                ),
-                _,
+            Core(
+                FileApi::FindFirstFileA
+                | FileApi::FindFirstFileW
+                | FileApi::FindFirstFileExA
+                | FileApi::FindFirstFileExW,
             ) => {
                 let extended = matches!(
-                    core,
-                    Some(FileApi::FindFirstFileExA | FileApi::FindFirstFileExW)
+                    operation,
+                    Core(FileApi::FindFirstFileExA | FileApi::FindFirstFileExW)
                 );
                 if extended && (a[1] > 1 || a[3] != 0 || a[4] != 0 || a[5] & !2 != 0) {
                     return Err(87);
@@ -599,7 +592,7 @@ fn execute(
                     text,
                 ))
             }
-            (Some(FileApi::FindNextFileA | FileApi::FindNextFileW), _) => {
+            Core(FileApi::FindNextFileA | FileApi::FindNextFileW) => {
                 let Some(HandleObj::Search { entries, next }) = state.handles.get_mut(&a[0]) else {
                     return Err(6);
                 };
@@ -608,14 +601,14 @@ fn execute(
                 *next += 1;
                 Ok((1, String::new()))
             }
-            (Some(FileApi::FindClose), _) => {
+            Core(FileApi::FindClose) => {
                 if !matches!(state.handles.get(&a[0]), Some(HandleObj::Search { .. })) {
                     return Err(6);
                 }
                 state.handles.remove(&a[0]);
                 Ok((1, String::new()))
             }
-            (Some(FileApi::GetFileType), _) => Ok((
+            Core(FileApi::GetFileType) => Ok((
                 matches!(state.handles.get(&a[0]), Some(HandleObj::File { .. })) as u32,
                 String::new(),
             )),
@@ -626,7 +619,7 @@ fn execute(
         Ok(v) => v,
         Err(e) => {
             state.last_error = e;
-            let path = if matches!(core, Some(FileApi::CreateFileA | FileApi::CreateFileW)) {
+            let path = if matches!(operation, Core(FileApi::CreateFileA | FileApi::CreateFileW)) {
                 read_name(mem, a[0], wide)
                     .map(|path| format!("; file {path:?}"))
                     .unwrap_or_default()

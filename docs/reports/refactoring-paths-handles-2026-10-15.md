@@ -35,3 +35,29 @@ before 复用 `r2-file-search-cold-route-wire/wire`，SHA256 `927662997fbc71b510
 单独路径首版、网关边界三个候选、页缓存命中内联候选均因持续性能成本未接受，相应运行时代码已撤出本批。原始结果分别见 [路径首版](refactoring-path-helper-catalog-2026-10-15.md)、[网关边界](refactoring-gateway-boundary-2026-10-15.md)、[页缓存候选](refactoring-page-cache-inline-2026-10-15.md)，不能沿用它们的性能作为本批通过证据。
 
 后续独立的四个访存 helper 布局候选也因 PE32 SSE 三对持续回退而拒绝，见 [helper 布局记录](refactoring-memory-helper-layout-2026-10-15.md)。本批 19 项迁移继续暂缓，架构说明恢复为已合入的实际状态；完整补丁、契约源码和测试保留。先推进可独立验收的八项文件 section 契约，后续再调整本批的接入结构。
+
+## section / Interlocked 新基线上的接入
+
+以 `9f7a0ac` 的运行时为基线重新接入这 19 项。文件契约已为 53 项，另有六项 Interlocked/SLIST；新增 Handle/Path variant 追加到现有 ApiId 末尾，保留已合入家族的顺序，复用现有 Void 返回约定。R7 离线报告工具随后独立提交为 `537b1b8`，没有改变运行时或性能 fixture。
+
+本版完整 release **432 passed / 7 ignored**、debug Win32/AMD64/FPU **280 passed**、外部 native GPU/Metal **7 passed**；fmt、strict all-target/all-feature Clippy、工具 12 项与 release build 通过。后续新增的性能汇总工具另有 16 项工具测试全部通过。下一批时钟测试和 fixture 正在准备，尚未注册，不计入本版 432/280 结果。
+
+before 为 `r2-interlocked-verify-wire/wire`，SHA256 `983447a76ef302526b79f76568dabe03614f117aff7be77d4a49e10bcb331780`；after 为 `r2-paths-handles-v2-wire/wire`，SHA256 `fe24dec579585793f92866a893b500fbd53447a53297e72236eb40fe50cfd074`，5,842,536 bytes，减少 75,520 bytes。路径辅助与标准句柄的双架构 12K smoke 均通过；复测使用这一版 binary，不沿用旧候选的通过计时。
+
+先完成六条敏感路径的 700M 三组轮换和同二进制 control：AMD64 memory −0.467%、thread-ID +1.901%、version −0.051%、file-type +0.240%。PE32 SSE/IR 初筛中位数 +5.789%，control 也比同一 before 慢 11.154%；追加相同规模三组后，六组完整合并为 −7.759%。保留全部离散轮次，不将这个变化宣称为 SSE 算法改善。integer/IR 的初筛为 −5.956%，after/control +0.289%。汇总位于 `r2-paths-handles-v2-sensitive{,-final}-metrics.json`。
+
+正式计时结束后独立检查五个 PE32 执行节。before/after 的静态指令数为 ir32 2203/2207、mixed 502/502、SIMD 1664/1666、raw 2238/2238、0f 6213/6212；仅 raw 的 opcode 序列完全相同，其余节有代码生成差异。ISA、SIMD、IR、cache 源码均未修改；原始汇编和摘要位于 `r2-paths-handles-v2-{before,after}-__wire_*.asm` 与 `r2-paths-handles-v2-pe32-code-summary.json`。
+
+其余 40 条路径已完成三对 AB/BA，完整矩阵共 46 条不同 case/path，全部通过 work、retired、返回值和适用的 API count 校验。SSE/raw 的 100M 初筛 +4.757%、module/raw 的 50M 初筛 +6.070%、section/IR 的 50M 初筛 +5.100%，分别追加 300M/210M/210M 三组顺序轮换和相同 before/hash 的 control。不同规模不混合中位数，原始初筛继续保留。
+
+| 补样路径 | after/before CPU 中位数 | 样本 |
+| --- | ---: | --- |
+| PE32 SSE/raw | +1.554% | 300M，三组轮换 |
+| PE32 module/raw | +1.679% | 210M，三组轮换 |
+| PE32 section/IR | +3.078% | 210M，三组轮换 |
+
+section/IR 相对 control 为 +3.178%，三个 paired 变化为 −21.029%/+4.407%/+2.932%。首组 before 明显偏慢，全部样本保留。长样本仍有约 3.1% 局部成本，按计划调查后接受，没有三组均超过 5%。计时结束后独立 12K diagnostics 的 IR=12007、fallback=1、CALL_NATIVE=2000、compact operations=10007、API count=2000 完全相同，结果为零；此前静态执行节调查显示生成代码有变化，ISA/cache 源码未修改。诊断单独存于 `r2-paths-handles-v2-section-diagnostics/`。
+
+离线汇总工具读取全部 24 个计时目录，形成 49 个按工作量区分的组、46 条不同 case/path；完整来源、min/median/max、paired 轮次和 control 位于 `r2-paths-handles-v2-complete-metrics.{json,txt}`。采用上述长样本后的最大 CPU 中位数成本为 section/IR 的 +3.078%，最大 RSS 中位数增加 96KiB。没有用其它路径的下降抵消该成本，也不将离散的 IR/SSE 结果称为算法提速。
+
+Alice 200M 启动前缀三对全部保持原预算出口、隐藏的 314×211 bootstrap 窗口和 Draw/Present=0，无新增 API/访存错误。CPU 中位数 2.6205s → 2.5974s（−0.881%），wall 2.6801s → 2.6633s，RSS +176KiB；输入哈希与输出在 `r2-paths-handles-v2-alice/`。继续复用已有 runtime 与原始 guest Mono，未复制或硬链接游戏。当前六个迁移源码的 SHA 与冻结候选逐项一致。本版 19 项正式接受；下一批时钟草稿未注册，也未混入本批验证。

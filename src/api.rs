@@ -606,7 +606,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 m.insert((dll, *n), *b);
             }
         };
-        add("imagehlp.dll", &[("MakeSureDirectoryPathExists", 4)]);
         add(
             "kernel32.dll",
             &[
@@ -614,10 +613,7 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetStartupInfoW", 4),
                 ("GetCommandLineA", 0),
                 ("GetCommandLineW", 0),
-                ("GetStdHandle", 4),
                 ("SetHandleCount", 4),
-                ("SetStdHandle", 8),
-                ("CloseHandle", 4),
                 ("GetTempPathA", 8),
                 ("GetTempPathW", 8),
                 ("GetCurrentProcessId", 0),
@@ -723,9 +719,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetDiskFreeSpaceW", 20),
                 ("GetDriveTypeA", 4),
                 ("GetDriveTypeW", 4),
-                ("DuplicateHandle", 28),
-                ("GetHandleInformation", 8),
-                ("SetHandleInformation", 12),
                 ("DeviceIoControl", 32),
                 ("GetOverlappedResult", 16),
                 ("IsProcessorFeaturePresent", 4),
@@ -1293,14 +1286,9 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
             &[
                 ("PathCombineA", 12),
                 ("PathCombineW", 12),
-                ("PathFileExistsA", 4),
-                ("PathFileExistsW", 4),
                 ("PathFindExtensionA", 4),
                 ("PathFindFileNameA", 4),
-                ("PathIsDirectoryA", 4),
-                ("PathIsDirectoryW", 4),
                 ("PathRemoveExtensionA", 4),
-                ("PathRemoveFileSpecA", 4),
                 ("StrStrIA", 8),
                 ("StrStrIW", 8),
             ],
@@ -1657,6 +1645,12 @@ pub fn dispatch(
                 unreachable!();
             };
             (ret, note) = crate::file_api::call(id, &args, mem, state);
+        }
+        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Path(_))) => {
+            let Some(crate::win32::catalog::ApiId::Path(id)) = binding.typed else {
+                unreachable!();
+            };
+            (ret, note) = crate::file_api::call_path(id, &args, mem, state);
         }
         _ if matches!(
             binding.typed,
@@ -2268,7 +2262,11 @@ pub fn dispatch(
                 note = "checked object/message wait".into();
             }
         }
-        ("kernel32.dll", "CloseHandle") => {
+        _ if binding.typed
+            == Some(crate::win32::catalog::ApiId::Handle(
+                crate::win32::catalog::HandleApi::CloseHandle,
+            )) =>
+        {
             if state.handles.remove(&args[0]).is_some() {
                 state.named_objs.retain(|_, handle| *handle != args[0]);
                 ret = 1;
@@ -2436,7 +2434,11 @@ pub fn dispatch(
                 _ => return Ok(()),
             }
         }
-        ("kernel32.dll", "GetStdHandle") => {
+        _ if binding.typed
+            == Some(crate::win32::catalog::ApiId::Handle(
+                crate::win32::catalog::HandleApi::GetStdHandle,
+            )) =>
+        {
             ret = 0;
             note = "fake null handle".into();
         }

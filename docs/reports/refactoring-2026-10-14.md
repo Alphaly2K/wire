@@ -160,3 +160,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 - 新 `gateway-nls` 和 `nls-conversion` 原创 fixture 在前后两版先做低 work 功能预检；正式 14 个 case/path 使用 100M work、三对 AB/BA，全部 work/retired/checksum/API count 校验。查询 fixture 累加固定 CP932 返回值；转换 fixture 同时校验 UTF-16 输出和返回 count。默认 case 集合保持原样。
 - 相对 version，Win64 查询/转换 CPU 中位数 -33.08%/-11.31%，PE32 相应 raw/IR -0.81% 至 -2.11%；普通整数/SSE/thread-ID 初筛回退均低于 1%。这些是确定 fixture 的变化。
 - AMD64 memory 初筛 +3.08% 触发 700M 扩样：相对 version +3.14%、相对最初基线 +1.80%，各对约 +3.07%/+3.39%/+2.72%，RSS 无实质增长。独立 diagnostics 的 IR=12008、fallback=0、translations=16、invalidations=0，以及 cold/epoch/byte/mapping 原因一致。CheckedSegment 与 RegisterSegment 各为 2156/2925 条指令，opcode 序列一致；地址及常量重定位变化，原始反汇编保留为 `r2-nls-*-segment-*.txt`。ISA/cache 源码未改，按调查门槛接受并记录这项成本，未发生三对均回退超过 5%。全部轮次在 `r2-nls-*-timing`、`r2-nls-memory-investigation`，诊断分开运行。
+
+## R2 路径辅助与通用句柄
+
+在 section/Interlocked 基线上接入 13 项 PathApi 和六项 HandleApi，删除重复 ABI 与名称路由。PE32 路径适配器用互斥 Core/Helper ID；Win64 句柄仍由原资源 owner 处理，保留保护位、错误顺序、提前返回与 unblock。完整 release 432、debug 280、外部 native 7 项、fmt、strict Clippy 通过，新增时钟草稿尚未注册。
+
+46 条性能路径全部结果校验；三项短样本扩为三标签长样本后，SSE/raw +1.554%、module/raw +1.679%、section/IR +3.078%。section/IR 的相同计数诊断和 +3.178% after/control 成本明确保留；没有三组均超过 5%。RSS 中位数最多 +96KiB，Alice 200M 三对保持预算出口、隐藏窗口和零 Draw/Present。冻结 SHA、历史失败候选、全部轮次与接受决定见 [路径与句柄验收](refactoring-paths-handles-2026-10-15.md)。R7 随后增加离线性能汇总工具，16 项工具测试通过，不改变 runtime 或 fixture。

@@ -413,7 +413,6 @@ fn import_arity(name: &str) -> Option<usize> {
         "OpenProcessToken" => 3,
         "OpenThreadToken" => 4,
         "GetTokenInformation" => 5,
-        "DuplicateHandle" => 7,
         "SHGetKnownFolderPath" => 4,
         "CoTaskMemAlloc" | "CoTaskMemFree" => 1,
         "CoCreateInstance" => 5,
@@ -505,19 +504,12 @@ fn import_arity(name: &str) -> Option<usize> {
         "WaitForSingleObject" => 2,
         "SetEvent" | "ResetEvent" => 1,
         "CreatePipe" => 4,
-        "GetHandleInformation" => 2,
-        "SetHandleInformation" => 3,
         "InitializeProcThreadAttributeList" => 4,
         "UpdateProcThreadAttribute" => 7,
         "DeleteProcThreadAttributeList" => 1,
         "CreateProcessW" => 10,
-        "FlsAlloc"
-        | "FlsGetValue"
-        | "FlsFree"
-        | "GetStdHandle"
-        | "CloseHandle"
-        | "FreeEnvironmentStringsW" => 1,
-        "FlsSetValue" | "SetStdHandle" | "GetConsoleMode" | "GetTempPathW" | "GetTempPath2W" => 2,
+        "FlsAlloc" | "FlsGetValue" | "FlsFree" | "FreeEnvironmentStringsW" => 1,
+        "FlsSetValue" | "GetConsoleMode" | "GetTempPathW" | "GetTempPath2W" => 2,
         "GetSystemTimes" => 3,
         "GetSystemTimeAsFileTime"
         | "GetSystemTimePreciseAsFileTime"
@@ -590,7 +582,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "OpenProcessToken" => &[1],
         "OpenThreadToken" => &[1, 2],
         "GetTokenInformation" => &[1, 3],
-        "DuplicateHandle" => &[4, 5, 6],
         "SHGetKnownFolderPath" => &[1],
         "CreateToolhelp32Snapshot" => &[0, 1],
         "SystemParametersInfoA" | "SystemParametersInfoW" => &[0, 1, 3],
@@ -619,7 +610,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "UpdateProcThreadAttribute" => &[1],
         "CreateProcessW" => &[4, 5],
         "CreatePipe" => &[3],
-        "SetHandleInformation" => &[1, 2],
         "CreateEventW" | "CreateEventA" => &[1, 2],
         "CreateEventExW" | "CreateEventExA" => &[2, 3],
         "OpenEventW" | "OpenEventA" => &[0, 1],
@@ -642,8 +632,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         | "FlsGetValue"
         | "FlsSetValue"
         | "FlsFree"
-        | "GetStdHandle"
-        | "SetStdHandle"
         | "ExitProcess" => &[0],
         "HeapAlloc"
         | "HeapFree"
@@ -1060,6 +1048,8 @@ impl Runtime64 {
         use crate::win32::catalog::ApiId;
         match id {
             ApiId::File(_) => unreachable!("core file calls are handled by the bound gateway"),
+            ApiId::Handle(_) => unreachable!("handle calls are handled by the bound gateway"),
+            ApiId::Path(_) => unreachable!("path helpers have no Win64 binding"),
             ApiId::Guid(id) => crate::win32::x64::guid::call(mem, id, args),
             ApiId::Identity(id) => {
                 crate::win32::x64::identity::call(mem, id, args, &self.profile, self.teb() + 0x68)
@@ -1155,13 +1145,17 @@ impl Runtime64 {
                 args: args.to_vec(),
             });
         }
-        use crate::win32::catalog::{ApiId, FileApi};
+        use crate::win32::catalog::{ApiId, FileApi, HandleApi};
         let file = match binding.api {
             Some(ApiId::File(id)) => Some(id),
             _ => None,
         };
+        let handle = match binding.api {
+            Some(ApiId::Handle(id)) => Some(id),
+            _ => None,
+        };
         let ret = match name {
-            _ if binding.api.is_some() && file.is_none() => {
+            _ if binding.api.is_some() && file.is_none() && handle.is_none() => {
                 self.catalog_call(mem, binding.api.unwrap(), args)?
             }
             _ if matches!(binding.control, gateways::ControlImport::Module(_)) => {
@@ -1637,7 +1631,7 @@ impl Runtime64 {
                     }
                 }
             }
-            "DuplicateHandle" => {
+            _ if handle == Some(HandleApi::DuplicateHandle) => {
                 mem.check(args[3], 8, WRITE)?;
                 let copied = (|| -> Result<u64, u32> {
                     if args[0] != u64::MAX || args[2] != u64::MAX {
@@ -3083,7 +3077,7 @@ impl Runtime64 {
                     }
                 }
             }
-            "GetHandleInformation" => {
+            _ if handle == Some(HandleApi::GetHandleInformation) => {
                 if let Some(flags) = self
                     .pipes
                     .flags(args[0])
@@ -3102,7 +3096,7 @@ impl Runtime64 {
                     0
                 }
             }
-            "SetHandleInformation" => {
+            _ if handle == Some(HandleApi::SetHandleInformation) => {
                 if let Some((_, flags)) = self.tokens.get_mut(&args[0]) {
                     let result = if args[1] & !3 != 0 {
                         0
@@ -3848,7 +3842,11 @@ impl Runtime64 {
                     1
                 }
             }
-            "GetStdHandle" | "SetStdHandle" => {
+            _ if matches!(
+                handle,
+                Some(HandleApi::GetStdHandle | HandleApi::SetStdHandle)
+            ) =>
+            {
                 let index = match args[0] as u32 {
                     0xfffffff6 => Some(0),
                     0xfffffff5 => Some(1),
@@ -3856,7 +3854,7 @@ impl Runtime64 {
                     _ => None,
                 };
                 if let Some(index) = index {
-                    if name == "GetStdHandle" {
+                    if handle == Some(HandleApi::GetStdHandle) {
                         self.files.standard().redirect(index)
                     } else {
                         self.files.standard_mut().set_redirect(index, args[1]);
@@ -3864,7 +3862,7 @@ impl Runtime64 {
                     }
                 } else {
                     self.set_error(mem, 87)?;
-                    if name == "GetStdHandle" {
+                    if handle == Some(HandleApi::GetStdHandle) {
                         u64::MAX
                     } else {
                         0
@@ -3872,7 +3870,8 @@ impl Runtime64 {
                 }
             }
             _ if file == Some(FileApi::GetFileType)
-                || matches!(name, "GetConsoleMode" | "CloseHandle") =>
+                || handle == Some(HandleApi::CloseHandle)
+                || name == "GetConsoleMode" =>
             {
                 let index = self.files.standard().index(args[0]);
                 if index.is_some() {
@@ -3893,13 +3892,15 @@ impl Runtime64 {
                 } else if self.files.flags(args[0]).is_some() {
                     match name {
                         _ if file == Some(FileApi::GetFileType) => 1,
-                        "CloseHandle" => match self.files.close(args[0]) {
-                            Ok(()) => 1,
-                            Err(error) => {
-                                self.set_error(mem, error)?;
-                                0
+                        _ if handle == Some(HandleApi::CloseHandle) => {
+                            match self.files.close(args[0]) {
+                                Ok(()) => 1,
+                                Err(error) => {
+                                    self.set_error(mem, error)?;
+                                    0
+                                }
                             }
-                        },
+                        }
                         _ => {
                             self.set_error(mem, 6)?;
                             0
@@ -3908,19 +3909,23 @@ impl Runtime64 {
                 } else if self.pipes.flags(args[0]).is_some() {
                     match name {
                         _ if file == Some(FileApi::GetFileType) => 3,
-                        "CloseHandle" => match self.pipes.close(args[0]) {
-                            Ok(()) => 1,
-                            Err(error) => {
-                                self.set_error(mem, error)?;
-                                0
+                        _ if handle == Some(HandleApi::CloseHandle) => {
+                            match self.pipes.close(args[0]) {
+                                Ok(()) => 1,
+                                Err(error) => {
+                                    self.set_error(mem, error)?;
+                                    0
+                                }
                             }
-                        },
+                        }
                         _ => {
                             self.set_error(mem, 6)?;
                             0
                         }
                     }
-                } else if name == "CloseHandle" && self.mappings.flags(args[0]).is_some() {
+                } else if handle == Some(HandleApi::CloseHandle)
+                    && self.mappings.flags(args[0]).is_some()
+                {
                     match self.mappings.close(args[0]) {
                         Ok(()) => 1,
                         Err(error) => {
@@ -3928,7 +3933,9 @@ impl Runtime64 {
                             0
                         }
                     }
-                } else if name == "CloseHandle" && self.tokens.contains_key(&args[0]) {
+                } else if handle == Some(HandleApi::CloseHandle)
+                    && self.tokens.contains_key(&args[0])
+                {
                     if self.tokens[&args[0]].1 & 2 != 0 {
                         self.set_error(mem, 6)?;
                         0
@@ -3936,7 +3943,9 @@ impl Runtime64 {
                         self.tokens.remove(&args[0]);
                         1
                     }
-                } else if name == "CloseHandle" && self.snapshots.contains_key(&args[0]) {
+                } else if handle == Some(HandleApi::CloseHandle)
+                    && self.snapshots.contains_key(&args[0])
+                {
                     if self.snapshots[&args[0]].flags & 2 != 0 {
                         self.set_error(mem, 5)?;
                         0
@@ -3944,7 +3953,9 @@ impl Runtime64 {
                         self.snapshots.remove(&args[0]);
                         1
                     }
-                } else if name == "CloseHandle" && self.threads.flags(args[0]).is_some() {
+                } else if handle == Some(HandleApi::CloseHandle)
+                    && self.threads.flags(args[0]).is_some()
+                {
                     match self.threads.close(args[0]) {
                         Ok(()) => 1,
                         Err(error) => {
@@ -3952,7 +3963,7 @@ impl Runtime64 {
                             0
                         }
                     }
-                } else if name == "CloseHandle" && self.events.close(args[0]) {
+                } else if handle == Some(HandleApi::CloseHandle) && self.events.close(args[0]) {
                     1
                 } else {
                     self.set_error(mem, 6)?;

@@ -2,9 +2,11 @@
 
 更新日期：2026-10-15。重构前固定代码基线 `2e78377`；本轮进度见 [重构记录](reports/refactoring-2026-10-14.md)。
 
-目录枚举契约 `240e4ac` 之后，已独立补齐路径/句柄、section、Interlocked/SLIST 的 ABI 与故障基线；`90658e2` 的三项 Interlocked/SLIST 测试及原创 gateway-slist 双架构 smoke 均在旧 handler 上通过。路径/句柄、网关边界、页槽/helper 布局候选保持撤回。release 单编译单元候选完成 429 项正确性、native 7 项与 45 条性能路径后，因顺序轮换的三组 bit 长样本均回退超过 5% 而撤回。文件 section 在原构建配置下补足八项超阈值路径的顺序平衡长样本后接受，raw 整数相对 control 的 +4.18% 局部成本仍明确保留。
+目录枚举契约 `240e4ac` 之后，已独立补齐路径/句柄、section、Interlocked/SLIST 的 ABI 与故障基线；`90658e2` 的三项 Interlocked/SLIST 测试及原创 gateway-slist 双架构 smoke 均在旧 handler 上通过。网关边界、页槽/helper 布局候选保持撤回。release 单编译单元候选完成 429 项正确性、native 7 项与 45 条性能路径后，因顺序轮换的三组 bit 长样本均回退超过 5% 而撤回。文件 section 在原构建配置下补足八项超阈值路径的顺序平衡长样本后接受，raw 整数相对 control 的 +4.18% 局部成本仍明确保留。路径/句柄的历史失败候选保留，新版已在 section/Interlocked 基线上完成独立验收。
 
-R0/R1、R4、R5 已完成：正式 fixture、测试 harness、GUID 唯一契约、PE32 Process32、owned host UI 请求与 GDI/像素状态分离。R2/R3 已迁移 identity、guest environment、version、42 个 NLS/locale、31 个模块、53 个文件及六个 Interlocked/SLIST export，另完成双架构模块及 Win64 文件状态归属；PE32 内核/文件状态及其余家族仍待迁移。R7 已完成当前 PE32 内核目录、领域测试和公共性能工具的整理，后续目录随其余领域迁移继续推进。最新 Interlocked 批次完整 release 为 432 passed / 7 ignored，debug Win32/AMD64/FPU 280 项、fmt 与 strict Clippy 通过；7 项外部图形测试再次显式执行，全部通过，工具 12 项通过。
+R0/R1、R4、R5 已完成：正式 fixture、测试 harness、GUID 唯一契约、PE32 Process32、owned host UI 请求与 GDI/像素状态分离。R2/R3 已迁移 identity、guest environment、version、42 个 NLS/locale、31 个模块、53 个文件、六个 Interlocked/SLIST、13 个路径辅助和六个通用句柄 export，另完成双架构模块及 Win64 文件状态归属；PE32 内核/文件状态及其余家族仍待迁移。R7 已完成当前 PE32 内核目录、领域测试和公共性能工具的整理，后续目录随其余领域迁移继续推进。最新路径/句柄批次完整 release 为 432 passed / 7 ignored，debug Win32/AMD64/FPU 280 项、fmt 与 strict Clippy 通过；7 项外部图形测试再次显式执行，全部通过，工具 12 项通过。随后离线性能汇总工具独立通过 16 项工具测试。
+
+路径/句柄新版 46 条性能路径全部结果校验，长样本 section/IR 保留 +3.078% 局部成本；独立 diagnostics 的退休、API、IR 与 fallback 计数相同。SSE/raw 与 module/raw 扩样为 +1.554%/+1.679%，RSS 中位数最多 +96KiB。Alice 200M 三对保持隐藏窗口与预算出口，CPU −0.881%。全部初筛、扩样及同二进制 control 均保留，见 [完整验收](reports/refactoring-paths-handles-2026-10-15.md)。
 
 Interlocked/SLIST 的 25 条性能路径全部结果校验。SSE/IR 初筛回退经静态代码、独立宿主硬件计数和六组顺序轮换调查后为 +1.949%；integer/IR 的 700M 扩样为 +2.732%。thread-ID 的 700M 仍有 +4.557% 局部成本，已明确记录接受；Win64 SLIST 固定网关负载 −27.837%，RSS 中位数最多 +64KiB。Alice 200M 三对保持隐藏窗口与预算出口，见 [完整验收](reports/refactoring-interlocked-catalog-2026-10-15.md)。
 

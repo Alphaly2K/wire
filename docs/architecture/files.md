@@ -32,7 +32,7 @@ PE32 的 immutable binding 同时缓存 LegacyUnimplemented 执行策略，在�
 
 枚举保持无效 handle/Ex flags 先于路径和输出检查，成功输出后才分配搜索句柄或推进游标。PE32 FindClose 不会删除普通文件句柄；搜索输出仍按原顺序分步写入，保留可能的部分提交。Win64 先检查整块输出再读取路径，输出可覆盖返回槽和栈参数，gateway 使用预先保存的参数及返回 frame。原搜索句柄空间、entry/handle 上限、metadata 和 LastError 行为不变，Searches 继续拥有 Win64 的枚举状态。
 
-PE32 adapter 暂留 `file_api.rs` 的原领域调用边界：主 gateway 用 bound FileApi ID 调用，公开 `file_api::dispatch` 保留原来的大小写/DLL 和函数范围，作为冷解析 facade。内部执行器区分 typed ID 与尚未迁移的 SHLWAPI/imagehlp 名称，已迁移调用不再解析 DLL 或 export。GetFileType 仍由主 gateway 执行，invalid/non-file handle 返回 0 并保持 LastError。读写先清零 count，再查 handle/权限和数据 buffer；SetFilePointer/Ex 先定位并清 LastError，再写可选输出，输出失败时定位已提交。错误仍映射成原来的返回值、LastError 和日志文本。
+PE32 adapter 暂留 `file_api.rs` 的原领域调用边界：主 gateway 用 bound FileApi/PathApi ID 调用，公开 `file_api::dispatch` 保留原来的大小写/DLL 和函数范围，作为冷解析 facade。内部互斥 Core/Helper ID 区分文件与 SHLWAPI/imagehlp 操作，已迁移调用不再解析 DLL 或 export。GetFileType 仍由主 gateway 执行，invalid/non-file handle 返回 0 并保持 LastError。读写先清零 count，再查 handle/权限和数据 buffer；SetFilePointer/Ex 先定位并清 LastError，再写可选输出，输出失败时定位已提交。错误仍映射成原来的返回值、LastError 和日志文本。
 
 Win64 adapter 暂留 Runtime64 的原 gateway 分支位置，分支由 bound FileApi ID 选择，继续借用已存在的 Files、Pipes、Mappings、标准 endpoint owner 和 guest 内存。打开/读取/写入的权限、sharing、16MiB transfer 上限、section coherence、可选输出及 confined path 保持。定位输出先检查，再改变 offset；GetFileSize 清 LastError 的次序保持。GetFileType 按 standard → file → pipe 查询，未知 handle 返回 0/LastError=6。
 
@@ -42,4 +42,4 @@ Win64 普通文件读写和管道写入继续在原位置提前返回 Control::R
 
 Mappings 独立拥有 section/view 与 retained file descriptor，view 持有 section 引用，文件或 section handle 关闭后已有 view 继续存活。guest WriteFile 更新同 inode 的活动 view；64 位 offset、64KiB 对齐、资源上限及原 backing 生命周期保持。adapter 按冷绑定 ID 调用原 Mappings 方法，不新增通用结果框架。独立行为与性能证据见 [section 验收](../reports/refactoring-file-section-catalog-2026-10-15.md)。
 
-PE32 目前仍使用 ApiState 的混合 HandleObj 表与 filesystem 字段，属于后续 R3 工作。SHLWAPI/imagehlp、标准句柄和跨资源 CloseHandle 的 catalog 候选因性能门槛暂缓，本页不表示整个文件领域已完成。
+SHLWAPI/imagehlp 的 13 项与六项通用句柄契约已在 section/Interlocked 新基线上通过验收，详见 [路径与句柄边界](paths-handles.md)。标准句柄及跨资源 CloseHandle 按冷绑定 HandleApi 选择原 owner 的分支，保留保护位、查询顺序和故障提交。PE32 目前仍使用 ApiState 的混合 HandleObj 表与 filesystem 字段，属于后续 R3 工作。
