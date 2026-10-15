@@ -3,6 +3,89 @@
 use super::*;
 
 #[test]
+fn sync_objects_keep_pe32_semaphore_clamping_and_commit_before_output_fault() {
+    let mut v = Vm::new();
+    v.k("SetLastError", &[0x55]);
+    let sem = v.k("CreateSemaphoreA", &[0, 1, 3, 0]);
+    assert_ne!(sem, 0);
+    assert_eq!(v.state.last_error, 0x55);
+    assert_eq!(v.k("ReleaseSemaphore", &[sem, 5, DATA]), 1);
+    assert_eq!(v.mem.read_u32(DATA).unwrap(), 1);
+    assert_eq!(v.k("ReleaseSemaphore", &[sem, u32::MAX, DATA]), 1);
+    assert_eq!(v.mem.read_u32(DATA).unwrap(), 3);
+    v.mem
+        .virtual_protect(DATA, 4096, wire::mem::PAGE_READONLY)
+        .unwrap();
+    v.cpu.regs[0] = 0x12345678;
+    assert!(v
+        .try_call("kernel32.dll", "ReleaseSemaphore", &[sem, 1, DATA])
+        .is_err());
+    assert_eq!(v.cpu.regs[0], 0x12345678);
+    assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256);
+    assert_eq!(v.mem.read_u32(DATA).unwrap(), 3);
+    assert_eq!(v.state.last_error, 0x55);
+    // The failing write follows the increment in the historical PE32 adapter.
+    for _ in 0..3 {
+        assert_eq!(v.k("WaitForSingleObject", &[sem, 0]), 0);
+    }
+    assert_eq!(v.k("WaitForSingleObject", &[sem, 0]), 258);
+}
+
+#[test]
+fn sync_objects_keep_pe32_pulse_and_abi_only_stack_cleanup() {
+    let mut v = Vm::new();
+    v.mem.write_bytes(DATA, b"wire-event\0").unwrap();
+    let event = v.k("CreateEventA", &[0, 1, 1, DATA]);
+    assert_eq!(v.k("OpenEventA", &[0, 0, DATA]), event);
+    assert_eq!(v.k("PulseEvent", &[event]), 1);
+    assert_eq!(v.k("WaitForSingleObject", &[event, 0]), 258);
+    for (name, bytes) in [
+        ("CreateEventExA", 16),
+        ("CreateEventExW", 16),
+        ("CreateSemaphoreExA", 24),
+        ("CreateSemaphoreExW", 24),
+        ("OpenSemaphoreA", 12),
+        ("OpenSemaphoreW", 12),
+    ] {
+        assert!(api::native_export("kernel32.dll", name), "{name}");
+        assert_eq!(v.k(name, &[0, 0, 0, 0, 0, 0]), 0, "{name}");
+        assert_eq!(v.state.last_error, 120, "{name}");
+        assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 4 + bytes);
+    }
+}
+
+#[test]
+fn sync_objects_keep_pe32_signal_before_bad_return_slot() {
+    let mut v = Vm::new();
+    let event = v.k("CreateEventW", &[0, 0, 0, 0]);
+    let address = v.api.register("kernel32.dll", Some("SetEvent"), None);
+    let index = v.api.stub_index(address).unwrap();
+    let sp = DATA + 4092;
+    v.mem.write_u32(sp + 4, event).unwrap();
+    v.mem
+        .virtual_protect(DATA, 4096, wire::mem::PAGE_NOACCESS)
+        .unwrap();
+    v.cpu.set_esp(sp);
+    v.cpu.eip = address;
+    assert!(api::dispatch(
+        index,
+        &mut v.cpu,
+        &mut v.mem,
+        &mut v.api,
+        &mut v.state,
+        &mut v.log,
+        &mut v.sched,
+        1_000_000,
+    )
+    .is_err());
+    assert_eq!(v.cpu.regs[0], 1);
+    assert_eq!(v.cpu.esp(), sp);
+    assert_eq!(v.cpu.eip, address);
+    assert_eq!(v.k("WaitForSingleObject", &[event, 0]), 0);
+    assert_eq!(v.k("WaitForSingleObject", &[event, 0]), 258);
+}
+
+#[test]
 fn shared_kernel_handle_namespace_keeps_named_identity_and_close_lifetimes() {
     let mut v = Vm::new();
     v.wide(DATA, "shared-object");

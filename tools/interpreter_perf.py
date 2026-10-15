@@ -235,6 +235,10 @@ def main():
         from perf.fixtures.local_gateway import x64
         data, meta = x64(args.work)
         entries.append(('gateway-local', data, meta))
+    if args.cases and 'gateway-event' in args.cases:
+        from perf.fixtures.kernel_gateway import x64
+        data, meta = x64(args.work)
+        entries.append(('gateway-event', data, meta))
     if args.cases and 'gateway-context' in args.cases:
         from perf.fixtures.context_gateway import x64
         data, meta = x64(args.work)

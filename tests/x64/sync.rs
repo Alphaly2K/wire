@@ -777,6 +777,143 @@ fn win64_thread_handle_duplicates_keep_identity_and_independent_flags_without_cl
 }
 
 #[test]
+fn sync_objects_keep_win64_extended_ansi_calls_dword_carriers_and_provider_scope() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let name = STACK + 0x400;
+    let high = 0xfacefeed_00000000;
+    for dll in ["kernel32.dll", "kernelbase.dll"] {
+        mem.write(name, format!("{dll}-event\0").as_bytes())
+            .unwrap();
+        let event = startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            dll,
+            "CreateEventExA",
+            &[0, name, high | 3, high | 0x1f0003],
+        );
+        assert_ne!(event, 0);
+        let alias = startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            dll,
+            "OpenEventA",
+            &[high | 0x100000, high, name],
+        );
+        assert_ne!(alias, 0);
+        for _ in 0..2 {
+            assert_eq!(
+                startup_call(
+                    &mut mem,
+                    &mut cpu,
+                    &mut runtime,
+                    "WaitForSingleObject",
+                    &[alias, 0]
+                ),
+                0
+            );
+        }
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                dll,
+                "ResetEvent",
+                &[event]
+            ),
+            1
+        );
+        assert_eq!(
+            startup_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "WaitForSingleObject",
+                &[alias, 0]
+            ),
+            258
+        );
+        mem.write(name, format!("{dll}-semaphore\0").as_bytes())
+            .unwrap();
+        let sem = startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            dll,
+            "CreateSemaphoreExA",
+            &[0, high | 1, high | 2, name, high, high | 0x1f0003],
+        );
+        assert_ne!(sem, 0);
+        let alias = startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            dll,
+            "OpenSemaphoreA",
+            &[high | 0x1f0003, high, name],
+        );
+        assert_ne!(alias, 0);
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                dll,
+                "ReleaseSemaphore",
+                &[alias, high | 1, name + 0x100],
+            ),
+            1
+        );
+        assert_eq!(mem.read_int(name + 0x100, 4).unwrap(), 1);
+        for _ in 0..2 {
+            assert_eq!(
+                startup_call(
+                    &mut mem,
+                    &mut cpu,
+                    &mut runtime,
+                    "WaitForSingleObject",
+                    &[sem, 0]
+                ),
+                0
+            );
+        }
+        assert_eq!(
+            startup_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "WaitForSingleObject",
+                &[sem, 0]
+            ),
+            258
+        );
+        assert!(!wire::x64::runtime::import_supported(dll, "PulseEvent"));
+    }
+    for name in [
+        "CreateEventA",
+        "CreateEventW",
+        "CreateEventExA",
+        "CreateEventExW",
+        "OpenEventA",
+        "OpenEventW",
+        "SetEvent",
+        "ResetEvent",
+        "PulseEvent",
+        "CreateSemaphoreA",
+        "CreateSemaphoreW",
+        "CreateSemaphoreExA",
+        "CreateSemaphoreExW",
+        "OpenSemaphoreA",
+        "OpenSemaphoreW",
+        "ReleaseSemaphore",
+    ] {
+        assert!(!wire::x64::runtime::import_supported("user32.dll", name));
+    }
+}
+
+#[test]
 fn win64_events_share_named_state_consume_auto_reset_and_validate_wait_access() {
     let (mut mem, mut cpu, mut runtime) = startup();
     let name = STACK + 0x100;
