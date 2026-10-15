@@ -24,6 +24,8 @@ mod modules;
 mod network;
 #[path = "x64/process.rs"]
 mod process;
+#[path = "x64/sections.rs"]
+mod sections;
 #[path = "x64/simd.rs"]
 mod simd;
 #[path = "x64/sync.rs"]

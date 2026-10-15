@@ -33,6 +33,8 @@ mod memory;
 mod modules;
 #[path = "win32/paths.rs"]
 mod paths;
+#[path = "win32/sections.rs"]
+mod sections;
 #[path = "win32/sync.rs"]
 mod sync;
 #[path = "win32/user.rs"]
