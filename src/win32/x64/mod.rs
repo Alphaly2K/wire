@@ -6,3 +6,4 @@ pub(crate) mod modules;
 pub(crate) mod nls;
 pub(crate) mod text;
 pub(crate) mod version;
+pub(crate) mod virtual_memory;

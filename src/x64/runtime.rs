@@ -470,9 +470,6 @@ fn import_arity(name: &str) -> Option<usize> {
         "SystemTimeToTzSpecificLocalTime" | "TzSpecificLocalTimeToSystemTime" => 3,
         "GetTimeZoneInformation" => 1,
         "SetThreadStackGuarantee" => 1,
-        "VirtualAlloc" | "VirtualProtect" | "VirtualFreeEx" | "VirtualQueryEx" => 4,
-        "VirtualAllocEx" | "VirtualProtectEx" => 5,
-        "VirtualFree" | "VirtualQuery" => 3,
         "CreatePipe" => 4,
         "InitializeProcThreadAttributeList" => 4,
         "UpdateProcThreadAttribute" => 7,
@@ -569,10 +566,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "UpdateProcThreadAttribute" => &[1],
         "CreateProcessW" => &[4, 5],
         "CreatePipe" => &[3],
-        "VirtualAlloc" => &[2, 3],
-        "VirtualProtect" | "VirtualFree" => &[2],
-        "VirtualAllocEx" => &[3, 4],
-        "VirtualProtectEx" | "VirtualFreeEx" => &[3],
         "GetTempPathW" | "GetTempPath2W" | "IsProcessorFeaturePresent" | "ExitProcess" => &[0],
         "HeapAlloc"
         | "HeapFree"
@@ -1011,6 +1004,9 @@ impl Runtime64 {
             ApiId::Local(id) => self.local_call(id, args, mem),
             ApiId::SyncObject(id) => self.sync_object_call(id, args, mem),
             ApiId::Timer(id) => self.timer_call(mem, id, args),
+            ApiId::VirtualMemory(id) => {
+                crate::win32::x64::virtual_memory::call(mem, id, args, self.teb() + 0x68)
+            }
             ApiId::Context(id) => {
                 use crate::win32::catalog::ContextApi;
                 Ok(match id {
@@ -3266,54 +3262,6 @@ impl Runtime64 {
                     Err(error) => {
                         self.set_error(mem, error)?;
                         u32::MAX as u64
-                    }
-                }
-            }
-            "VirtualAlloc" | "VirtualAllocEx" | "VirtualFree" | "VirtualFreeEx"
-            | "VirtualProtect" | "VirtualProtectEx" | "VirtualQuery" | "VirtualQueryEx" => {
-                let extended = name.ends_with("Ex");
-                let virtual_name = name.strip_suffix("Ex").unwrap_or(name);
-                let offset = extended as usize;
-                let result: Result<u64, u32> = if extended && args[0] != u64::MAX {
-                    Err(6)
-                } else {
-                    let a = &args[offset..];
-                    match virtual_name {
-                        "VirtualAlloc" => mem.virtual_alloc(a[0], a[1], a[2] as u32, a[3] as u32),
-                        "VirtualFree" => mem.virtual_free(a[0], a[1], a[2] as u32).map(|()| 1),
-                        "VirtualProtect" => {
-                            mem.check(a[3], 4, WRITE)?;
-                            match mem.validate_protect(a[0], a[1], a[2] as u32) {
-                                Ok(old) => {
-                                    // Preflight every page and copy out before applying the
-                                    // change, including when the output aliases the target.
-                                    mem.write_int(a[3], 4, old as u64)?;
-                                    mem.virtual_protect(a[0], a[1], a[2] as u32).map(|_| 1)
-                                }
-                                Err(error) => Err(error),
-                            }
-                        }
-                        "VirtualQuery" => {
-                            if a[2] < 48 {
-                                Err(24)
-                            } else {
-                                match mem.virtual_query(a[0]) {
-                                    Ok(info) => {
-                                        mem.write(a[1], &info)?;
-                                        Ok(48)
-                                    }
-                                    Err(error) => Err(error),
-                                }
-                            }
-                        }
-                        _ => unreachable!(),
-                    }
-                };
-                match result {
-                    Ok(value) => value,
-                    Err(error) => {
-                        self.set_error(mem, error)?;
-                        0
                     }
                 }
             }

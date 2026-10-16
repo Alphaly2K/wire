@@ -16,6 +16,7 @@ mod paths;
 mod sync_objects;
 mod timers;
 mod version;
+mod virtual_memory;
 mod waits;
 pub use clocks::{ClockApi, CLOCK_CONTRACTS};
 pub use context::{ContextApi, CONTEXT_CONTRACTS};
@@ -33,6 +34,7 @@ pub use paths::{PathApi, PATH_CONTRACTS};
 pub use sync_objects::{SyncObjectApi, SYNC_OBJECT_CONTRACTS};
 pub use timers::{TimerApi, TIMER_CONTRACTS};
 pub use version::{VersionApi, VERSION_CONTRACTS};
+pub use virtual_memory::{VirtualMemoryApi, VIRTUAL_MEMORY_CONTRACTS};
 pub use waits::{WaitApi, WAIT_CONTRACTS};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +87,7 @@ pub enum ApiId {
     Wait(WaitApi),
     Delay(DelayApi),
     Timer(TimerApi),
+    VirtualMemory(VirtualMemoryApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -240,6 +243,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(WAIT_CONTRACTS.iter())
         .chain(DELAY_CONTRACTS.iter())
         .chain(TIMER_CONTRACTS.iter())
+        .chain(VIRTUAL_MEMORY_CONTRACTS.iter())
 }
 
 #[cfg(test)]

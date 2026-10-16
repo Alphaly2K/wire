@@ -613,14 +613,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("DeleteCriticalSection", 4),
                 ("InitializeCriticalSectionAndSpinCount", 8),
                 ("TryEnterCriticalSection", 4),
-                ("VirtualAlloc", 16),
-                ("VirtualFree", 12),
-                ("VirtualProtect", 16),
-                ("VirtualQuery", 12),
-                ("VirtualAllocEx", 20),
-                ("VirtualFreeEx", 16),
-                ("VirtualProtectEx", 20),
-                ("VirtualQueryEx", 16),
                 ("HeapCreate", 12),
                 ("HeapAlloc", 12),
                 ("HeapFree", 12),
@@ -1581,6 +1573,17 @@ pub fn dispatch(
             implemented = false;
             state.last_error = 120;
             ret = if dll == "ole32.dll" { 0x80004001 } else { 0 };
+        }
+        _ if matches!(
+            binding.typed,
+            Some(crate::win32::catalog::ApiId::VirtualMemory(_))
+        ) =>
+        {
+            let Some(crate::win32::catalog::ApiId::VirtualMemory(id)) = binding.typed else {
+                unreachable!();
+            };
+            (ret, note) =
+                crate::win32::x86::virtual_memory::call(id, &args, mem, &mut state.last_error);
         }
         _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::File(_))) => {
             let Some(crate::win32::catalog::ApiId::File(id)) = binding.typed else {
@@ -2843,9 +2846,6 @@ pub fn dispatch(
                 ret = v;
                 note = msg;
                 implemented = supported;
-            } else if let Some((v, msg)) = crate::vmem_api::dispatch(dll, name, &args, mem, state) {
-                ret = v;
-                note = msg;
             } else if let Some((v, msg)) = crate::file_api::dispatch(dll, name, &args, mem, state) {
                 ret = v;
                 note = msg;

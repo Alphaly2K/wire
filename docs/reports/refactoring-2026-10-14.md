@@ -220,3 +220,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 九项接口接入 TimerApi，PE32 全部 ABI-only、Win64 typed；删除 timer arity/DWORD、group 15、名称解析和 GetProcAddress 特例，保留 Events owner 及原 access/deadline/故障顺序。两项独立基线先通过，35 项同步/12 项模块及完整 release 461、debug 309、native 7、工具 20 项通过。残留动态查询引用和 unused import 的检查失败日志保留，修正后 fmt/strict Clippy 与 build 通过。
 
 25 条性能路径全部校验，最大回退 +2.525%，RSS 最多 +128KiB，Win64 取消网关 −18.748%。Alice 200M 三对保持预算出口、隐藏窗口和零 Draw/Present，CPU +0.270%。247 个 manifest Rust 文件（src/tests 239 个）核对一致，体积增加 368 bytes，后续虚拟内存草稿未混入。完整接受决定见 [Timer 验收](refactoring-timers-2026-10-16.md)。
+
+## R2 虚拟内存
+
+八项 VirtualAlloc/Free/Protect/Query 及 Ex 接入 VirtualMemoryApi，删除重复 ABI/arity/DWORD 和名称/后缀分发。两架构适配器只借内存、参数与错误槽，保持原 SIZE_T、handle、错误/查询布局、输出/返回帧顺序及内存/缓存 owner。两项独立旧行为基线及 16 项领域回归通过，完整 release 463、debug 311、native 7、工具 20 项和 fmt/strict Clippy 通过。编译导入路径与 GUID legacy 标记的失败记录及修正均保留。
+
+28 条初筛路径全部校验，三项超门槛后再测长样本三标签对照；delay −1.227%、local/IR +1.569%，integer/IR +3.548% 而同哈希 control +4.749%，按调查后门槛接受并保留残留差异。其余初筛最大回退 +2.679%，RSS 最多 +96KiB。Alice 前缀 CPU +0.771%，保持隐藏窗口和零 Draw/Present；249 个 Rust 文件哈希核对，体积减少 2,000 bytes。完整结果见 [虚拟内存验收](refactoring-virtual-memory-2026-10-16.md)。

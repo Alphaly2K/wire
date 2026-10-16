@@ -1,15 +1,15 @@
 # 当前状态
 
-更新日期：2026-10-16。重构前基线为 `2e78377`；最新已验收运行时为 [Waitable timer 契约](reports/refactoring-timers-2026-10-16.md)，该报告记录冻结源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
+更新日期：2026-10-16。重构前基线为 `2e78377`；最新已验收运行时为 [虚拟内存契约](reports/refactoring-virtual-memory-2026-10-16.md)，该报告记录冻结源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
 
-九项 waitable timer 契约已交付，移除重复 ABI/arity/DWORD、名称和动态查询特例；PE32 维持 ABI-only，Win64 原命名/access/deadline/故障顺序保持。下一组虚拟内存接口正在验证旧行为基线。Mono 原生化已撤回，本轮继续排除。
+八项虚拟内存契约已交付，移除重复 ABI/arity/DWORD 与名称/Ex 后缀分发；保留双架构内存/缓存 owner、查询布局、错误及输出/返回槽差异。下一组堆接口正在准备旧行为基线。Mono 原生化已撤回，本轮继续排除。
 
 ## 重构范围
 
 | 阶段 | 已交付 | 剩余范围 |
 | --- | --- | --- |
 | R0/R1 | 冻结输入、原创正式 fixture、领域测试 harness、GUID 唯一契约和双架构适配 | 随后续家族维护独立基线 |
-| R2 | 已验收 228 个 export 的契约；明细见下表 | 其余内存、同步、USER、COM、图形等 legacy 家族 |
+| R2 | 已验收 236 个 export 的契约；明细见下表 | 其余内存、同步、USER、COM、图形等 legacy 家族 |
 | R3 | guest environment、双架构模块状态、Win64 文件状态、PE32 TLS/FLS 私有 owner | PE32 其余资源、线程/COM 等；PE32 kernel 大范围抽取曾因性能撤回 |
 | R4/R5 | Process32 编排边界、owned host UI 请求、GDI 与像素状态分离 | 领域分发与资源 owner 随 R2/R3 继续收敛 |
 | R6 | 按用户要求忽略 | 不重建原生 Mono 路径 |
@@ -33,6 +33,7 @@
 | WaitFor* | 4 | [进程控制与等待边界](architecture/waits.md)及[验收](reports/refactoring-waits-2026-10-16.md) |
 | Sleep / 线程让出 | 3 | [调度与返回帧边界](architecture/delays.md)及[验收](reports/refactoring-delays-2026-10-16.md) |
 | waitable timer | 9 | [状态与调用边界](architecture/timers.md)及[验收](reports/refactoring-timers-2026-10-16.md) |
+| virtual memory | 8 | [内存与返回槽边界](architecture/virtual-memory.md)及[验收](reports/refactoring-virtual-memory-2026-10-16.md) |
 
 ## 当前执行路径与能力
 
@@ -49,9 +50,9 @@
 
 ## 验证与性能
 
-最近已验收的 waitable timer 批次：release **461 passed / 7 ignored**，debug Win32/AMD64/FPU **309 passed**，显式 native **7 passed**，工具 **20 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。
+最近已验收的 virtual memory 批次：release **463 passed / 7 ignored**，debug Win32/AMD64/FPU **311 passed**，显式 native **7 passed**，工具 **20 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。
 
-Timer 的 25 条性能路径全部结果校验，最大回退 +2.525%，RSS 中位数最多增加 128KiB；Win64 取消网关 −18.748%，游戏前缀 CPU +0.270%。各批次使用自己的基线，历史局部成本与离散轮次继续保留在对应报告，未将结构调整解释为游戏 FPS 提升。AMD64 event fixture 的重复导入已独立修正；旧验收保持冻结输入，后续按新哈希配对，详见[工具边界](architecture/validation-tools.md)。
+虚拟内存的 28 条初筛及三条扩样路径全部结果校验；三项初筛回退经长样本调查收窄，integer/IR 残留 +3.548%，同哈希 control +4.749%，接受理由与全部轮次见报告。其它初筛最大回退 +2.679%，RSS 最多增加 96KiB；游戏前缀 CPU +0.771%。各批次使用自己的基线，历史局部成本与离散轮次继续保留在对应报告，未将结构调整解释为游戏 FPS 提升。AMD64 event fixture 的重复导入已独立修正；旧验收保持冻结输入，后续按新哈希配对，详见[工具边界](architecture/validation-tools.md)。
 
 后续正式比较使用显式 [稳定启动协议](reports/refactoring-launch-protocol-2026-10-16.md)，固定 argv0、参数和 child cwd，并记录 shell SHA。默认工具行为保持；旧协议数据独立保留，汇总不跨协议或不同 work 合并。编译、正式计时、采样与 runtime diagnostics 串行执行。每个结构候选先完成正确性，再按至少三对轮换检查结果、CPU/wall/RSS 与输入哈希；超过门槛先调查，不把失败候选扩大到其它领域。
 

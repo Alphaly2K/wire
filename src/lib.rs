@@ -34,7 +34,6 @@ mod user32_enum;
 mod user32_geometry;
 mod user32_paint;
 mod version;
-mod vmem_api;
 pub mod win32;
 mod win32_abi;
 mod wmi;

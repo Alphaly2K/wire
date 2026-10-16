@@ -178,7 +178,7 @@ fn catalog_keeps_dll_scopes_distinct_from_known_abi_and_legacy_entries() {
         ));
     }
     assert!(matches!(
-        catalog::resolve(Architecture::X64, "kernel32.dll", "VirtualAlloc"),
+        catalog::resolve(Architecture::X64, "kernel32.dll", "WireUnregisteredExport"),
         Resolution::Legacy
     ));
 }
