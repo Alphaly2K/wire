@@ -392,4 +392,25 @@ impl Sched {
     pub fn thread_index_by_handle(&self, handle: u32) -> Option<usize> {
         self.threads.iter().position(|t| t.handle == handle)
     }
+
+    pub(crate) fn exit_code(&self, handle: u32) -> (u32, bool) {
+        match self.thread_index_by_handle(handle) {
+            Some(i) => match self.threads[i].state {
+                ThreadState::Exited(code) => (code, false),
+                _ => (259, true),
+            },
+            None => (0, false),
+        }
+    }
+
+    pub(crate) fn set_suspended(&mut self, handle: u32, suspended: bool) -> Result<(), u32> {
+        let i = self.thread_index_by_handle(handle).ok_or(6u32)?;
+        let state = &mut self.threads[i].state;
+        if suspended && *state == ThreadState::Runnable {
+            *state = ThreadState::Suspended;
+        } else if !suspended && *state == ThreadState::Suspended {
+            *state = ThreadState::Runnable;
+        }
+        Ok(())
+    }
 }

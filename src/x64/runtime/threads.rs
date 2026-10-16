@@ -5,6 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 mod address;
+mod properties;
 
 pub(crate) struct Spawn {
     pub id: u64,
@@ -51,7 +52,7 @@ pub(super) struct Thread {
     pub resources: Option<(u64, u64, Vec<u64>)>,
     pub description: String,
     pub apcs: std::collections::VecDeque<(u64, u64)>,
-    pub error_mode: u32,
+    error_mode: u32,
 }
 pub(super) struct Threads {
     pub entries: BTreeMap<u64, Thread>,

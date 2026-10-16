@@ -408,14 +408,9 @@ fn import_arity(name: &str) -> Option<usize> {
         "SystemParametersInfoA" | "SystemParametersInfoW" => 4,
         "GetSystemMetrics" => 1,
         "CreateThread" => 6,
-        "ExitThread" | "ResumeThread" | "SuspendThread" | "GetThreadId" | "GetThreadPriority" => 1,
+        "ExitThread" => 1,
         "QueueUserAPC" => 3,
-        "GetExitCodeThread"
-        | "SetThreadPriority"
-        | "SetThreadAffinityMask"
-        | "SetThreadDescription"
-        | "GetThreadDescription"
-        | "GetThreadContext" => 2,
+        "SetThreadDescription" | "GetThreadDescription" | "GetThreadContext" => 2,
         "GetLogicalProcessorInformationEx" => 3,
         "GetActiveProcessorCount" | "GetMaximumProcessorCount" => 1,
         "GetActiveProcessorGroupCount" | "GetMaximumProcessorGroupCount" => 0,
@@ -431,8 +426,6 @@ fn import_arity(name: &str) -> Option<usize> {
         "GetCommandLineA" | "GetCommandLineW" | "AreFileApisANSI" => 0,
         "GetErrorMode" => 0,
         "SetErrorMode" => 1,
-        "GetThreadErrorMode" => 0,
-        "SetThreadErrorMode" => 2,
         "GetEnvironmentStringsW" => 0,
         "SetThreadStackGuarantee" => 1,
         "CreatePipe" => 4,
@@ -498,7 +491,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "GetSystemMetrics" => &[0],
         "CreateThread" => &[4],
         "ExitThread" => &[0],
-        "SetThreadPriority" => &[1],
         "GetLogicalProcessorInformationEx" => &[0],
         "BCryptGenRandom" => &[2, 3],
         "BCryptOpenAlgorithmProvider" => &[3],
@@ -508,7 +500,7 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "RoInitialize" => &[0],
         "CoInitializeEx" => &[1],
         "CoCreateInstance" => &[2],
-        "SetErrorMode" | "SetThreadErrorMode" => &[0],
+        "SetErrorMode" => &[0],
         "InitializeProcThreadAttributeList" => &[1, 2],
         "UpdateProcThreadAttribute" => &[1],
         "CreateProcessW" => &[4, 5],
@@ -960,6 +952,10 @@ impl Runtime64 {
             }
             ApiId::Multimedia(id) => {
                 crate::win32::x64::multimedia::call(id, args, mem, &mut self.timer_periods)
+            }
+            ApiId::ThreadProperty(id) => {
+                let error_slot = self.teb() + 0x68;
+                self.threads.property_call(mem, id, args, error_slot)
             }
             ApiId::Context(id) => {
                 use crate::win32::catalog::ContextApi;
@@ -1844,27 +1840,6 @@ impl Runtime64 {
                 _ => 0,
             },
             "CreateThread" => self.create_thread(mem, args)?,
-            "GetThreadErrorMode" => self.threads.entries[&self.threads.active].error_mode as u64,
-            "SetThreadErrorMode" => {
-                if args[0] & !0x8007 != 0 {
-                    self.set_error(mem, 87)?;
-                    0
-                } else {
-                    if args[1] != 0 {
-                        mem.check(args[1], 4, WRITE)?;
-                    }
-                    let old = self.threads.entries[&self.threads.active].error_mode;
-                    if args[1] != 0 {
-                        mem.write_int(args[1], 4, old as u64)?;
-                    }
-                    self.threads
-                        .entries
-                        .get_mut(&self.threads.active)
-                        .unwrap()
-                        .error_mode = args[0] as u32;
-                    1
-                }
-            }
             "QueueUserAPC" => self.queue_apc(mem, args)?,
             _ if binding.control == gateways::ControlImport::Delay(DelayApi::SleepEx) => {
                 if args[1] != 0 {
@@ -1923,68 +1898,6 @@ impl Runtime64 {
                 self.record(dll, name, args, 0);
                 return Ok(Control::Yielded);
             }
-            "ResumeThread"
-            | "SuspendThread"
-            | "GetThreadId"
-            | "GetThreadPriority"
-            | "SetThreadPriority"
-            | "GetExitCodeThread"
-            | "SetThreadAffinityMask" => match self.threads.id(args[0]) {
-                Err(error) => {
-                    self.set_error(mem, error)?;
-                    if matches!(name, "ResumeThread" | "SuspendThread") {
-                        u32::MAX as u64
-                    } else if name == "GetThreadPriority" {
-                        0x7fffffff
-                    } else {
-                        0
-                    }
-                }
-                Ok(id) => {
-                    let t = self.threads.entries.get_mut(&id).unwrap();
-                    match name {
-                        "GetThreadId" => id,
-                        "GetThreadPriority" => t.priority as u32 as u64,
-                        "SetThreadPriority" => {
-                            let priority = args[1] as i32;
-                            if !matches!(priority, -15 | -2..=2 | 15) {
-                                self.set_error(mem, 87)?;
-                                0
-                            } else {
-                                t.priority = priority;
-                                1
-                            }
-                        }
-                        "GetExitCodeThread" => {
-                            mem.write_int(args[1], 4, t.exit.unwrap_or(259) as u64)?;
-                            1
-                        }
-                        "SetThreadAffinityMask" => {
-                            if args[1] != 1 {
-                                self.set_error(mem, 87)?;
-                                0
-                            } else {
-                                1
-                            }
-                        }
-                        _ => {
-                            let old = t.suspended;
-                            if name == "SuspendThread" {
-                                if old >= 127 {
-                                    self.set_error(mem, 87)?;
-                                    u32::MAX as u64
-                                } else {
-                                    t.suspended += 1;
-                                    old as u64
-                                }
-                            } else {
-                                t.suspended = old.saturating_sub(1);
-                                old as u64
-                            }
-                        }
-                    }
-                }
-            },
             "GetThreadContext" => match self.threads.id(args[0]) {
                 Err(error) => {
                     self.set_error(mem, error)?;

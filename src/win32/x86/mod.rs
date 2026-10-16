@@ -10,5 +10,6 @@ pub(crate) mod modules;
 pub(crate) mod multimedia;
 pub(crate) mod nls;
 pub(crate) mod system_profile;
+pub(crate) mod thread_properties;
 pub(crate) mod version;
 pub(crate) mod virtual_memory;

@@ -628,7 +628,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("FreeResource", 4),
                 ("FormatMessageA", 28),
                 ("FormatMessageW", 28),
-                ("GetExitCodeThread", 8),
                 ("TerminateThread", 8),
                 ("GetDiskFreeSpaceA", 20),
                 ("GetDiskFreeSpaceW", 20),
@@ -659,13 +658,8 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetCurrentProcessorNumber", 0),
                 ("SetThreadStackGuarantee", 4),
                 ("SetDefaultDllDirectories", 4),
-                ("SetThreadPriority", 8),
-                ("GetThreadPriority", 4),
-                ("SuspendThread", 4),
-                ("ResumeThread", 4),
                 ("OpenProcess", 12),
                 ("GetProcessAffinityMask", 12),
-                ("SetThreadAffinityMask", 8),
                 ("SetThreadIdealProcessor", 8),
                 ("GlobalAddAtomW", 4),
                 ("GlobalDeleteAtom", 4),
@@ -1782,6 +1776,22 @@ pub fn dispatch(
                 }
             }
         }
+        _ if matches!(
+            binding.typed,
+            Some(crate::win32::catalog::ApiId::ThreadProperty(_))
+        ) =>
+        {
+            let Some(crate::win32::catalog::ApiId::ThreadProperty(id)) = binding.typed else {
+                unreachable!();
+            };
+            (ret, note) = crate::win32::x86::thread_properties::call(
+                id,
+                &args,
+                mem,
+                sched,
+                &mut state.last_error,
+            )?;
+        }
         (
             "winmm.dll",
             "mciSendCommandA" | "mciSendCommandW" | "mciSendStringA" | "mciSendStringW",
@@ -1954,44 +1964,6 @@ pub fn dispatch(
                     if flags & 4 != 0 { " (suspended)" } else { "" }
                 );
                 ret = handle;
-            }
-        }
-        ("kernel32.dll", "GetExitCodeThread") => {
-            let (code, running) = match sched.thread_index_by_handle(args[0]) {
-                Some(i) => match sched.threads[i].state {
-                    ThreadState::Exited(c) => (c, false),
-                    _ => (0x103, true), // STILL_ACTIVE
-                },
-                None => (0, false),
-            };
-            mem.write_u32(args[1], code).map_err(|e| e.to_string())?;
-            ret = 1;
-            note = if running {
-                "STILL_ACTIVE".into()
-            } else {
-                format!("exited, code {code:#x}")
-            };
-        }
-        ("kernel32.dll", "SuspendThread") => {
-            if let Some(i) = sched.thread_index_by_handle(args[0]) {
-                if matches!(sched.threads[i].state, ThreadState::Runnable) {
-                    sched.threads[i].state = ThreadState::Suspended;
-                }
-                ret = 0;
-            } else {
-                state.last_error = 6;
-                ret = u32::MAX;
-            }
-        }
-        ("kernel32.dll", "ResumeThread") => {
-            if let Some(i) = sched.thread_index_by_handle(args[0]) {
-                if sched.threads[i].state == ThreadState::Suspended {
-                    sched.threads[i].state = ThreadState::Runnable;
-                }
-                ret = 0;
-            } else {
-                state.last_error = 6;
-                ret = u32::MAX;
             }
         }
         _ if binding.typed
@@ -2391,11 +2363,6 @@ pub fn dispatch(
                 note = "unknown handle".into();
             }
         }
-        ("kernel32.dll", "SetThreadPriority") => {
-            ret = 1;
-            note = "no-op (cooperative scheduler)".into();
-        }
-        ("kernel32.dll", "GetThreadPriority") => ret = 0, // THREAD_PRIORITY_NORMAL
         ("kernel32.dll", "GetCommandLineA") => ret = state.cmdline_a,
         ("kernel32.dll", "GetCommandLineW") => ret = state.cmdline_w,
         ("kernel32.dll", "IsProcessorFeaturePresent") => {

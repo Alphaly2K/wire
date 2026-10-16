@@ -183,8 +183,6 @@ impl Runtime64 {
                             && matches!(
                                 function.as_str(),
                                 "GetErrorMode"
-                                    | "GetThreadErrorMode"
-                                    | "SetThreadErrorMode"
                                     | "GetTempPath2W"
                                     | "WaitOnAddress"
                                     | "WakeByAddressSingle"

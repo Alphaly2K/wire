@@ -103,7 +103,6 @@ pub(crate) fn dispatch(
                 | "OpenProcess"
                 | "GetProcessAffinityMask"
                 | "SetProcessAffinityMask"
-                | "SetThreadAffinityMask"
                 | "SetThreadIdealProcessor"
                 | "GetProcessId"
                 | "GetExitCodeProcess"
@@ -236,19 +235,14 @@ pub(crate) fn dispatch(
                     }
                 }
             }
-            "SetThreadAffinityMask" | "SetThreadIdealProcessor" => {
+            "SetThreadIdealProcessor" => {
                 if a[0] != 0xfffffffe && sched.thread_index_by_handle(a[0]).is_none() {
                     return Err(6);
                 }
-                let valid = if name == "SetThreadAffinityMask" {
-                    a[1] == 1
-                } else {
-                    matches!(a[1], 0 | u32::MAX)
-                };
-                if !valid {
+                if !matches!(a[1], 0 | u32::MAX) {
                     return Err(87);
                 }
-                Ok((name == "SetThreadAffinityMask") as u32)
+                Ok(0)
             }
             "GetActiveProcessorCount" | "GetMaximumProcessorCount" => {
                 if !matches!(a[0], 0 | 0xffff) {

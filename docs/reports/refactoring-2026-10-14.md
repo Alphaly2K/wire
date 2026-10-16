@@ -274,3 +274,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 三项 export 接入 AddressWaitApi，删除根 provider 特例、arity/DWORD 与名称分发；PE32 保持 unknown ABI 和零参数清栈。地址队列、私有序号及阻塞注册由 Threads owner 管理，helper 脱离总 Runtime64，CPU/公共返回仍在进程层。四项领域回归及完整 release 488、debug 335、native 7、工具 20 项和 fmt/strict Clippy/build 通过。
 
 40 条性能路径全部校验，新网关 CPU −0.351%，最大回退 +1.907%，RSS 最多增加 80KiB；Alice 前缀 CPU −0.408%、wall +0.460%，保持隐藏窗口和零 Draw/Present。274 个 Rust 文件核对一致，体积增加 1,904 bytes，契约累计 304 个 export。2026-10-17 接受，完整记录见[地址等待验收](refactoring-address-waits-2026-10-17.md)。
+
+## R2/R3 线程查询与设置
+
+九项 export 接入 ThreadPropertyApi，删除重复 ABI/arity/DWORD、动态查询特例与根名称分发。PE32 六项 typed、三项 ABI-only，adapter 只借内存、Sched 与 LastError；挂起状态切换和 exit 读取由 Sched 管理。Win64 scalar 操作归 Threads owner，error mode 字段私有，CPU/返回/unblock/trace 保持进程提交；创建、退出和 APC/CONTEXT/description 保留专用边界。六项独立旧行为回归及完整 release 494、debug 341、native 7、工具 20 项和 fmt/strict Clippy/build 通过。
+
+43 条初筛路径全部结果校验，四项超门槛后同哈希三顺序扩样；PE32 HeapSize/raw +1.938%、FP/raw −3.254%、线程网关/IR +1.148%，Win64 HeapSize 保留 +4.063% 局部成本（after/control +3.763%）。IR/cache 计数与执行器助记符序列保持，具体成本机制尚未确证；新 Win64 线程网关 −6.625%，初筛 RSS 最多 +112KiB。Alice 前缀 CPU −0.544%、wall −0.043%，保持隐藏窗口和零 Draw/Present；279 个 Rust 文件核对一致，二进制减少 24,496 bytes，契约累计 313 个 export。2026-10-17 接受，完整决定与全部轮次见[线程查询与设置验收](refactoring-thread-properties-2026-10-17.md)。
