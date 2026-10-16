@@ -3,6 +3,86 @@
 use super::*;
 
 #[test]
+fn system_profile_keeps_pe32_layouts_public_dispatch_and_output_errors() {
+    let mut v = Vm::new();
+    v.k("SetLastError", &[77]);
+    for name in ["GetSystemInfo", "GetNativeSystemInfo"] {
+        v.mem.write_bytes(DATA, &[0xa5; 56]).unwrap();
+        assert_eq!(v.k(name, &[DATA]), 0);
+        for (offset, value) in [
+            (0, 0),
+            (4, 4096),
+            (8, 0x10000),
+            (12, 0x7ffeffff),
+            (16, 1),
+            (20, 1),
+            (24, 586),
+            (28, 65536),
+        ] {
+            assert_eq!(
+                v.mem.read_u32(DATA + offset).unwrap(),
+                value,
+                "{name}+{offset}"
+            );
+        }
+        assert_eq!(v.mem.read_u16(DATA + 32).unwrap(), 6);
+        assert_eq!(v.mem.read_u16(DATA + 34).unwrap(), 0x3a09);
+        assert_eq!(v.mem.read_u32(DATA + 36).unwrap(), 0xa5a5a5a5);
+        assert_eq!(v.state.last_error, 77);
+    }
+    let mut args = [0; 16];
+    args[0] = DATA;
+    assert!(
+        wire::system::dispatch("KERNEL32.dll", "GetSystemInfo", &args, &v.mem, &mut v.state)
+            .is_none()
+    );
+    assert!(wire::system::dispatch(
+        "kernelbase.dll",
+        "GetSystemInfo",
+        &args,
+        &v.mem,
+        &mut v.state
+    )
+    .is_none());
+    let result =
+        wire::system::dispatch("kernel32.dll", "GetSystemInfo", &args, &v.mem, &mut v.state)
+            .unwrap();
+    assert_eq!(
+        result,
+        (0, "x86 guest hardware / monotonic clock profile".into())
+    );
+    let sp = STACK_BASE + STACK_SIZE - 256;
+    assert_eq!(v.k("GetSystemInfo", &[sp]), 0);
+    assert_eq!(v.cpu.eip, 0); // Legacy return slot now contains processor architecture.
+    assert_eq!(v.cpu.esp(), sp + 8);
+    assert_eq!(v.k("GetSystemInfo", &[0]), 0);
+    assert_eq!(v.state.last_error, 87);
+    assert_eq!(v.k("GlobalMemoryStatusEx", &[0]), 0);
+    assert_eq!(v.state.last_error, 87);
+    v.mem.write_bytes(DATA, &[0xa5; 72]).unwrap();
+    assert_eq!(v.k("GlobalMemoryStatus", &[DATA]), 0);
+    assert_eq!(v.mem.read_u32(DATA).unwrap(), 32);
+    assert_eq!(v.mem.read_u32(DATA + 8).unwrap(), 512 * 1024 * 1024);
+    assert_eq!(v.mem.read_u32(DATA + 24).unwrap(), 0x7fff0000);
+    assert_eq!(v.mem.read_u32(DATA + 32).unwrap(), 0xa5a5a5a5);
+    v.mem.write_u32(DATA, 63).unwrap();
+    let mut before = [0; 64];
+    v.mem.read_bytes(DATA, &mut before).unwrap();
+    assert_eq!(v.k("GlobalMemoryStatusEx", &[DATA]), 0);
+    let mut after = [0; 64];
+    v.mem.read_bytes(DATA, &mut after).unwrap();
+    assert_eq!(after, before);
+    v.mem.write_u32(DATA, 64).unwrap();
+    assert_eq!(v.k("GlobalMemoryStatusEx", &[DATA]), 1);
+    assert_eq!(v.mem.read_u32(DATA + 8).unwrap(), 512 * 1024 * 1024);
+    assert_eq!(v.mem.read_u32(DATA + 12).unwrap(), 0);
+    assert_eq!(v.mem.read_u32(DATA + 40).unwrap(), 0x7fff0000);
+    assert_eq!(v.mem.read_u32(DATA + 44).unwrap(), 0);
+    assert_eq!(v.mem.read_u32(DATA + 64).unwrap(), 0xa5a5a5a5);
+    assert_eq!(v.state.last_error, 87);
+}
+
+#[test]
 fn wine_path_extensions_and_unquoting_preserve_existing_names() {
     let mut v = Vm::new();
     v.mem.write_bytes(DATA, b"dir.with.dot\\name\0").unwrap();

@@ -3,6 +3,100 @@
 use super::*;
 
 #[test]
+fn system_profile_keeps_win64_layout_saved_frame_and_checked_output_faults() {
+    for dll in ["kernel32.dll", "kernelbase.dll"] {
+        let (mut mem, mut cpu, mut runtime) = startup();
+        let output = STACK + 0x100;
+        let error = wire::x64::runtime::TEB + 0x68;
+        mem.write_int(error, 4, 77).unwrap();
+        for name in ["GetSystemInfo", "GetNativeSystemInfo"] {
+            mem.write(output, &[0xa5; 56]).unwrap();
+            assert_eq!(
+                startup_dll_call(&mut mem, &mut cpu, &mut runtime, dll, name, &[output]),
+                0
+            );
+            assert_eq!(mem.read_int(output, 4).unwrap(), 9);
+            assert_eq!(mem.read_int(output + 4, 4).unwrap(), 4096);
+            assert_eq!(mem.read_int(output + 8, 8).unwrap(), 0x10000);
+            assert_eq!(mem.read_int(output + 16, 8).unwrap(), (1 << 47) - 65537);
+            assert_eq!(mem.read_int(output + 24, 8).unwrap(), 1);
+            for (offset, value) in [(32, 1), (36, 8664), (40, 65536), (44, 6)] {
+                assert_eq!(
+                    mem.read_int(output + offset, 4).unwrap(),
+                    value,
+                    "{name}+{offset}"
+                );
+            }
+            assert_eq!(mem.read_int(output + 48, 8).unwrap(), 0xa5a5a5a5a5a5a5a5);
+            assert_eq!(mem.read_int(error, 4).unwrap(), 77);
+        }
+        let sp = STACK + 0x1f88;
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                dll,
+                "GetSystemInfo",
+                &[sp]
+            ),
+            0
+        );
+        assert_eq!(cpu.rip, BASE);
+        assert_eq!(mem.read_int(sp, 4).unwrap(), 9);
+        for name in ["GetSystemInfo", "GlobalMemoryStatusEx"] {
+            cpu.regs[4] = sp;
+            mem.write_int(sp, 8, BASE).unwrap();
+            cpu.regs[1] = 0;
+            let before = cpu.clone();
+            let calls = runtime.api_calls;
+            assert!(runtime.dispatch(dll, name, &mut cpu, &mut mem).is_err());
+            assert_eq!(cpu, before);
+            assert_eq!(runtime.api_calls, calls);
+            assert_eq!(mem.read_int(error, 4).unwrap(), 77);
+        }
+        mem.write(output, &[0xa5; 72]).unwrap();
+        mem.write_int(output, 4, 63).unwrap();
+        let mut before = [0; 64];
+        mem.read(output, &mut before).unwrap();
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                dll,
+                "GlobalMemoryStatusEx",
+                &[output]
+            ),
+            0
+        );
+        let mut after = [0; 64];
+        mem.read(output, &mut after).unwrap();
+        assert_eq!(after, before);
+        assert_eq!(mem.read_int(error, 4).unwrap(), 87);
+        mem.write_int(output, 4, 64).unwrap();
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                dll,
+                "GlobalMemoryStatusEx",
+                &[output]
+            ),
+            1
+        );
+        assert_eq!(mem.read_int(output, 4).unwrap(), 64);
+        assert_eq!(mem.read_int(output + 64, 8).unwrap(), 0xa5a5a5a5a5a5a5a5);
+        assert_eq!(mem.read_int(error, 4).unwrap(), 87);
+        assert!(!wire::x64::runtime::import_supported(
+            dll,
+            "GlobalMemoryStatus"
+        ));
+    }
+}
+
+#[test]
 fn win64_isolated_identity_names_validate_lengths_domains_exports_and_output_faults() {
     let (mut m, mut cpu, mut r) = startup();
     let out = STACK + 0x100;

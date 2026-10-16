@@ -263,6 +263,10 @@ def main():
         from perf.fixtures.local_memory_gateway import x64
         data, meta = x64(args.work)
         entries.append(('gateway-local-memory', data, meta))
+    if args.cases and 'gateway-system-profile' in args.cases:
+        from perf.fixtures.system_profile_gateway import x64
+        data, meta = x64(args.work)
+        entries.append(('gateway-system-profile', data, meta))
     if args.cases and 'gateway-context' in args.cases:
         from perf.fixtures.context_gateway import x64
         data, meta = x64(args.work)
