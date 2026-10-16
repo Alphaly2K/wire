@@ -448,7 +448,7 @@ fn import_arity(name: &str) -> Option<usize> {
         "RoInitialize" | "CoInitialize" => 1,
         "CoInitializeEx" => 2,
         "RoUninitialize" | "CoUninitialize" => 0,
-        "GetCommandLineA" | "GetCommandLineW" | "GetProcessHeap" | "AreFileApisANSI" => 0,
+        "GetCommandLineA" | "GetCommandLineW" | "AreFileApisANSI" => 0,
         "GetErrorMode" => 0,
         "SetErrorMode" => 1,
         "GetThreadErrorMode" => 0,
@@ -494,8 +494,7 @@ fn import_arity(name: &str) -> Option<usize> {
         | "LeaveCriticalSection"
         | "DeleteCriticalSection" => 1,
         "InitializeCriticalSectionAndSpinCount" => 2,
-        "HeapAlloc" | "HeapFree" | "HeapSize" | "InitializeCriticalSectionEx" => 3,
-        "HeapReAlloc" => 4,
+        "InitializeCriticalSectionEx" => 3,
         "WriteConsoleW" => 5,
         _ => return None,
     })
@@ -567,11 +566,7 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "CreateProcessW" => &[4, 5],
         "CreatePipe" => &[3],
         "GetTempPathW" | "GetTempPath2W" | "IsProcessorFeaturePresent" | "ExitProcess" => &[0],
-        "HeapAlloc"
-        | "HeapFree"
-        | "HeapSize"
-        | "HeapReAlloc"
-        | "InitializeCriticalSectionAndSpinCount" => &[1],
+        "InitializeCriticalSectionAndSpinCount" => &[1],
         "InitializeCriticalSectionEx" => &[1, 2],
         "WriteConsoleW" => &[2],
         "InitOnceBeginInitialize" | "InitOnceComplete" => &[1],
@@ -1007,6 +1002,7 @@ impl Runtime64 {
             ApiId::VirtualMemory(id) => {
                 crate::win32::x64::virtual_memory::call(mem, id, args, self.teb() + 0x68)
             }
+            ApiId::Heap(id) => self.guest_heap_call(mem, id, args),
             ApiId::Context(id) => {
                 use crate::win32::catalog::ContextApi;
                 Ok(match id {
@@ -3453,7 +3449,6 @@ impl Runtime64 {
             "GetCommandLineA" => COMMAND_A,
             "GetCommandLineW" => COMMAND_W,
             "EncodePointer" | "DecodePointer" => args[0], // Optional pointer obfuscation; inverse identity.
-            "GetProcessHeap" => PROCESS_HEAP,
             "InitializeConditionVariable"
             | "WakeConditionVariable"
             | "WakeAllConditionVariable" => {
@@ -3944,12 +3939,6 @@ impl Runtime64 {
                 mem.write(args[0], &section)?;
                 self.unblock();
                 (name == "TryEnterCriticalSection") as u64
-            }
-            "HeapAlloc" | "HeapFree" | "HeapSize" | "HeapReAlloc" => {
-                if args[0] != PROCESS_HEAP || args[1] & !9 != 0 {
-                    return Err("unsupported Win64 heap/flags".into());
-                }
-                self.guest_heap_call(mem, name, args)?
             }
             "ExitProcess" => {
                 self.api_calls += 1;

@@ -1,6 +1,7 @@
 //! Guest process heap packs small allocations in owned data slabs.
 //! Native callback/COM allocations retain their separate page ownership.
-use super::{Memory, Runtime64};
+use super::{Memory, Runtime64, PROCESS_HEAP};
+use crate::win32::catalog::HeapApi;
 use std::collections::BTreeMap;
 const SLAB: u64 = 65536;
 #[derive(Clone, Copy)]
@@ -124,17 +125,23 @@ impl Runtime64 {
     pub(super) fn guest_heap_call(
         &mut self,
         mem: &mut Memory,
-        name: &str,
+        id: HeapApi,
         a: &[u64],
     ) -> Result<u64, String> {
-        if name == "HeapAlloc" {
+        if id == HeapApi::Process {
+            return Ok(PROCESS_HEAP);
+        }
+        if a[0] != PROCESS_HEAP || a[1] & !9 != 0 {
+            return Err("unsupported Win64 heap/flags".into());
+        }
+        if id == HeapApi::Alloc {
             return self.guest_heap_allocate(
                 mem,
                 a[2].min(usize::MAX as u64) as usize,
                 a[1] & 8 != 0,
             );
         }
-        if name == "HeapFree" && a[2] == 0 {
+        if id == HeapApi::Free && a[2] == 0 {
             return Ok(1);
         }
         let block = *self
@@ -142,13 +149,14 @@ impl Runtime64 {
             .blocks
             .get(&a[2])
             .ok_or("invalid Win64 heap allocation")?;
-        if name == "HeapSize" {
+        if id == HeapApi::Size {
             return Ok(block.size as u64);
         }
-        if name == "HeapFree" {
+        if id == HeapApi::Free {
             self.guest_heap_free(mem, a[2])?;
             return Ok(1);
         }
+        debug_assert_eq!(id, HeapApi::ReAlloc);
         let size = a[3];
         if size <= block.capacity as u64 {
             if a[1] & 8 != 0 && size > block.size as u64 {

@@ -1,5 +1,6 @@
 pub(crate) mod clocks;
 pub(crate) mod guid;
+pub(crate) mod heaps;
 pub(crate) mod host;
 pub(crate) mod interlocked;
 pub(crate) mod modules;

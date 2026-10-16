@@ -6,6 +6,7 @@ mod delays;
 mod files;
 mod guid;
 mod handles;
+mod heaps;
 mod identity;
 mod interlocked;
 mod locals;
@@ -24,6 +25,7 @@ pub use delays::{DelayApi, DELAY_CONTRACTS};
 pub use files::{FileApi, FILE_CONTRACTS};
 pub use guid::{GuidApi, GUID_CONTRACTS};
 pub use handles::{HandleApi, HANDLE_CONTRACTS};
+pub use heaps::{HeapApi, HEAP_CONTRACTS};
 pub use identity::{IdentityApi, IDENTITY_CONTRACTS};
 pub use interlocked::{InterlockedApi, INTERLOCKED_CONTRACTS};
 pub use locals::{LocalApi, LOCAL_CONTRACTS};
@@ -88,6 +90,7 @@ pub enum ApiId {
     Delay(DelayApi),
     Timer(TimerApi),
     VirtualMemory(VirtualMemoryApi),
+    Heap(HeapApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -244,6 +247,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(DELAY_CONTRACTS.iter())
         .chain(TIMER_CONTRACTS.iter())
         .chain(VIRTUAL_MEMORY_CONTRACTS.iter())
+        .chain(HEAP_CONTRACTS.iter())
 }
 
 #[cfg(test)]

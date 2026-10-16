@@ -613,15 +613,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("DeleteCriticalSection", 4),
                 ("InitializeCriticalSectionAndSpinCount", 8),
                 ("TryEnterCriticalSection", 4),
-                ("HeapCreate", 12),
-                ("HeapAlloc", 12),
-                ("HeapFree", 12),
-                ("HeapDestroy", 4),
-                ("GetProcessHeap", 0),
-                ("HeapSize", 12),
-                ("HeapReAlloc", 16),
-                ("HeapValidate", 12),
-                ("GetProcessHeaps", 8),
                 ("LocalAlloc", 8),
                 ("LocalFree", 4),
                 ("GlobalAlloc", 8),
@@ -730,10 +721,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("lstrcmpA", 8),
                 ("lstrlenW", 4),
                 ("lstrlenA", 4),
-                ("HeapSetInformation", 16),
-                ("HeapQueryInformation", 20),
-                ("HeapCompact", 8),
-                ("HeapWalk", 8),
                 ("GetLargePageMinimum", 0),
             ],
         );
@@ -1584,6 +1571,19 @@ pub fn dispatch(
             };
             (ret, note) =
                 crate::win32::x86::virtual_memory::call(id, &args, mem, &mut state.last_error);
+        }
+        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Heap(_))) => {
+            let Some(crate::win32::catalog::ApiId::Heap(id)) = binding.typed else {
+                unreachable!();
+            };
+            (ret, note) = crate::win32::x86::heaps::call(
+                id,
+                &args,
+                mem,
+                &mut state.heap,
+                state.process_heap,
+                &mut state.last_error,
+            )?;
         }
         _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::File(_))) => {
             let Some(crate::win32::catalog::ApiId::File(id)) = binding.typed else {
@@ -2476,36 +2476,6 @@ pub fn dispatch(
             ret = args[0];
             note = "automatic handle table capacity".into();
         }
-        ("kernel32.dll", "GetProcessHeap") => ret = state.process_heap,
-        ("kernel32.dll", "HeapAlloc") => {
-            ret = state.heap.alloc(mem, args[0], args[2], args[1] & 8 != 0)?;
-            if ret == 0 {
-                state.last_error = 8;
-            }
-        }
-        ("kernel32.dll", "HeapReAlloc") => {
-            ret = state
-                .heap
-                .realloc(mem, args[0], args[2], args[3], args[1])?;
-            if ret == 0 {
-                state.last_error = 8;
-            }
-        }
-        ("kernel32.dll", "HeapFree") => {
-            ret = state.heap.free(args[0], args[2]) as u32;
-            if ret == 0 {
-                state.last_error = 87;
-            }
-        }
-        ("kernel32.dll", "HeapDestroy") => {
-            ret = (args[0] != state.process_heap && state.heap.destroy(args[0])) as u32;
-            if ret == 0 {
-                state.last_error = 87;
-            }
-        }
-        ("kernel32.dll", "HeapCreate") => ret = state.heap.create(args[2]),
-        ("kernel32.dll", "HeapSize") => ret = state.heap.size(args[0], args[2]).unwrap_or(u32::MAX),
-        ("kernel32.dll", "HeapValidate") => ret = state.heap.valid(args[0], args[2]) as u32,
         ("kernel32.dll", "LocalAlloc") | ("kernel32.dll", "GlobalAlloc") => {
             if args[0] & 2 != 0 {
                 return Err("movable Local/GlobalAlloc is unsupported".into());
@@ -2526,13 +2496,6 @@ pub fn dispatch(
         }
         ("kernel32.dll", "LocalLock") | ("kernel32.dll", "GlobalLock") => ret = args[0],
         ("kernel32.dll", "LocalUnlock") | ("kernel32.dll", "GlobalUnlock") => ret = 0,
-        ("kernel32.dll", "GetProcessHeaps") => {
-            ret = 1;
-            note = "fake: single heap".into();
-            if args[0] >= 1 {
-                mem.write_u32(args[1], state.process_heap).ok();
-            }
-        }
         ("kernel32.dll", "EncodePointer") | ("kernel32.dll", "DecodePointer") => {
             ret = args[0];
             note = "identity encoding".into();

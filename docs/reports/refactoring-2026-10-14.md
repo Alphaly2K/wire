@@ -226,3 +226,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 八项 VirtualAlloc/Free/Protect/Query 及 Ex 接入 VirtualMemoryApi，删除重复 ABI/arity/DWORD 和名称/后缀分发。两架构适配器只借内存、参数与错误槽，保持原 SIZE_T、handle、错误/查询布局、输出/返回帧顺序及内存/缓存 owner。两项独立旧行为基线及 16 项领域回归通过，完整 release 463、debug 311、native 7、工具 20 项和 fmt/strict Clippy 通过。编译导入路径与 GUID legacy 标记的失败记录及修正均保留。
 
 28 条初筛路径全部校验，三项超门槛后再测长样本三标签对照；delay −1.227%、local/IR +1.569%，integer/IR +3.548% 而同哈希 control +4.749%，按调查后门槛接受并保留残留差异。其余初筛最大回退 +2.679%，RSS 最多 +96KiB。Alice 前缀 CPU +0.771%，保持隐藏窗口和零 Draw/Present；249 个 Rust 文件哈希核对，体积减少 2,000 bytes。完整结果见 [虚拟内存验收](refactoring-virtual-memory-2026-10-16.md)。
+
+## R2 Heap
+
+13 项 heap export 接入 HeapApi，删除重复 ABI/arity/DWORD 及根名称分支，PE32 adapter 只借原 GuestHeap、内存、进程堆 handle 和 LastError；Win64 原 slab/block helper 改按 ID 分发。保留 PE32 九项 typed/四项 ABI-only、Win64 五项 typed/其余 absent，以及错误、归属、枚举输出和返回帧顺序。两项独立旧行为基线与八项领域回归通过，完整 release 465、debug 313、native 7、工具 20 项和 fmt/strict Clippy 通过。
+
+28 条初筛路径全部校验，FP/IR 初筛 +3.736% 经 900M 三标签扩样为 +0.265%、同哈希 control −0.046%；其余最大回退 +2.181%，RSS 最多 +128KiB。HeapSize 网关 Win64 −25.973%、PE32 IR/raw −2.316%/−2.573%；Alice 前缀 CPU −0.323%，保持隐藏窗口和零 Draw/Present。251 个 Rust 文件哈希核对，体积增加 1,840 bytes，后续 Local/Global 草稿未混入。完整接受决定见 [Heap 验收](refactoring-heaps-2026-10-16.md)。
