@@ -630,8 +630,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("SetEnvironmentVariableW", 8),
                 ("CreateThread", 24),
                 ("ExitThread", 4),
-                ("GetSystemInfo", 4),
-                ("GetNativeSystemInfo", 4),
                 ("LoadResource", 8),
                 ("FindResourceA", 12),
                 ("FindResourceW", 12),
@@ -654,8 +652,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("SetConsoleCtrlHandler", 8),
                 ("GetProcessTimes", 20),
                 ("GetProcessWorkingSetSize", 12),
-                ("GlobalMemoryStatus", 4),
-                ("GlobalMemoryStatusEx", 4),
                 ("EncodePointer", 4),
                 ("DecodePointer", 4),
                 ("IsWow64Process", 8),
@@ -1735,6 +1731,17 @@ pub fn dispatch(
             )?;
             ret = value.value;
             note = value.note;
+        }
+        _ if matches!(
+            binding.typed,
+            Some(crate::win32::catalog::ApiId::SystemProfile(_))
+        ) =>
+        {
+            let Some(crate::win32::catalog::ApiId::SystemProfile(id)) = binding.typed else {
+                unreachable!();
+            };
+            (ret, note) =
+                crate::win32::x86::system_profile::call(id, args[0], mem, &mut state.last_error);
         }
         (
             "winmm.dll",

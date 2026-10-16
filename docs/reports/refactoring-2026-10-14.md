@@ -238,3 +238,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 14 项 export 接入七个 LocalMemoryApi ID，删除 PE32 十项重复 ABI、Win64 arity/DWORD 及名称/后缀分发；保留 PE32 进程 GuestHeap 共享与四项 ABI-only、Win64 local block 归属及错误/返回帧顺序。两项独立旧行为基线和 20 项内存回归先通过，完整 release 467、debug 315、native 7、工具 20 项及 fmt/strict Clippy 通过。
 
 28 条性能路径全部结果校验，最大 CPU 回退 +2.979%，RSS 最多 +112KiB；LocalAlloc/GlobalSize 网关 Win64 −2.624%、PE32 IR/raw +0.555%/−2.166%。Alice 前缀 CPU −3.619%，保持隐藏窗口和零 Draw/Present；254 个 Rust 文件哈希核对，体积增加 16,992 bytes，后续系统信息基线未混入。完整接受决定见 [Local/Global 验收](refactoring-local-memory-2026-10-16.md)。
+
+## R2 系统信息与内存状态
+
+四项 export 接入三个 SystemProfileApi ID，删除重复 ABI/arity 和名称分发；双架构 adapter 只借内存和错误槽，保留硬件布局、内存记账、public facade 与各自返回帧顺序。独立旧行为基线先通过，完整 release 471、debug 319、native 7、工具 20 项及 fmt/strict Clippy/build 通过。
+
+首版 Local/Global IR 存在 +7.747% 回退，拒绝后将新增 guard 追加到已有 scalar typed 路由之后；三顺序同哈希复测为 −1.118%。第二版完整 31 条路径全部校验，最大回退 +2.602%，RSS 最多 +80KiB；GetSystemInfo 网关 Win64 −14.393%、PE32 IR/raw −19.368%/−17.740%。Alice 前缀 CPU −0.740%，保持隐藏窗口和零 Draw/Present；257 个 Rust 文件哈希核对，体积增加 400 bytes，Calendar 草稿未混入。完整接受决定见 [系统信息验收](refactoring-system-profile-2026-10-16.md)。

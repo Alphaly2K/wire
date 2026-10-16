@@ -438,7 +438,6 @@ fn import_arity(name: &str) -> Option<usize> {
         "BCryptCloseAlgorithmProvider" => 2,
         "GetEnvironmentVariableW" | "GetEnvironmentVariableA" => 3,
         "SetEnvironmentVariableW" | "SetEnvironmentVariableA" => 2,
-        "GlobalMemoryStatusEx" => 1,
         "NtQueryDirectoryFile" => 11,
         "CommandLineToArgvW" => 2,
         "RoInitialize" | "CoInitialize" => 1,
@@ -477,8 +476,6 @@ fn import_arity(name: &str) -> Option<usize> {
         "GetSystemTimePreciseAsFileTime"
         | "GetSystemTime"
         | "GetLocalTime"
-        | "GetSystemInfo"
-        | "GetNativeSystemInfo"
         | "GetStartupInfoW"
         | "GetStartupInfoA"
         | "IsProcessorFeaturePresent"
@@ -998,6 +995,9 @@ impl Runtime64 {
             }
             ApiId::Heap(id) => self.guest_heap_call(mem, id, args),
             ApiId::LocalMemory(id) => self.local_memory_call(mem, id, args),
+            ApiId::SystemProfile(id) => {
+                crate::win32::x64::system_profile::call(mem, id, args, self.teb() + 0x68)
+            }
             ApiId::Context(id) => {
                 use crate::win32::catalog::ContextApi;
                 Ok(match id {
@@ -2219,16 +2219,6 @@ impl Runtime64 {
                     }
                 }
             }
-            "GlobalMemoryStatusEx" => {
-                if mem.read_int(args[0], 4)? != 64 {
-                    self.set_error(mem, 87)?;
-                    0
-                } else {
-                    let status = mem.memory_status();
-                    mem.write(args[0], &status)?;
-                    1
-                }
-            }
             _ if matches!(
                 file,
                 Some(FileApi::CreateFileMappingW | FileApi::CreateFileMappingA)
@@ -3263,20 +3253,6 @@ impl Runtime64 {
                     Ordering::Equal => 0,
                     Ordering::Greater => 1,
                 }
-            }
-            "GetSystemInfo" | "GetNativeSystemInfo" => {
-                let mut info = [0; 48];
-                info[..2].copy_from_slice(&9u16.to_le_bytes()); // PROCESSOR_ARCHITECTURE_AMD64
-                info[4..8].copy_from_slice(&(PAGE as u32).to_le_bytes());
-                info[8..16].copy_from_slice(&0x10000u64.to_le_bytes());
-                info[16..24].copy_from_slice(&((1u64 << 47) - 65537).to_le_bytes());
-                info[24..32].copy_from_slice(&1u64.to_le_bytes()); // One virtual guest CPU.
-                info[32..36].copy_from_slice(&1u32.to_le_bytes());
-                info[36..40].copy_from_slice(&8664u32.to_le_bytes()); // PROCESSOR_AMD_X8664
-                info[40..44].copy_from_slice(&65536u32.to_le_bytes());
-                info[44..46].copy_from_slice(&6u16.to_le_bytes());
-                mem.write(args[0], &info)?;
-                0
             }
             "GetSystemTimePreciseAsFileTime" => {
                 let elapsed = SystemTime::now()

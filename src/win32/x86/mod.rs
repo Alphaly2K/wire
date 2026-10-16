@@ -6,5 +6,6 @@ pub(crate) mod interlocked;
 pub(crate) mod local_memory;
 pub(crate) mod modules;
 pub(crate) mod nls;
+pub(crate) mod system_profile;
 pub(crate) mod version;
 pub(crate) mod virtual_memory;

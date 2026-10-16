@@ -16,6 +16,7 @@ mod mutexes;
 mod nls;
 mod paths;
 mod sync_objects;
+mod system_profile;
 mod timers;
 mod version;
 mod virtual_memory;
@@ -36,6 +37,7 @@ pub use mutexes::{MutexApi, MUTEX_CONTRACTS};
 pub use nls::{NlsApi, NLS_CONTRACTS};
 pub use paths::{PathApi, PATH_CONTRACTS};
 pub use sync_objects::{SyncObjectApi, SYNC_OBJECT_CONTRACTS};
+pub use system_profile::{SystemProfileApi, SYSTEM_PROFILE_CONTRACTS};
 pub use timers::{TimerApi, TIMER_CONTRACTS};
 pub use version::{VersionApi, VERSION_CONTRACTS};
 pub use virtual_memory::{VirtualMemoryApi, VIRTUAL_MEMORY_CONTRACTS};
@@ -94,6 +96,7 @@ pub enum ApiId {
     VirtualMemory(VirtualMemoryApi),
     Heap(HeapApi),
     LocalMemory(LocalMemoryApi),
+    SystemProfile(SystemProfileApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -252,6 +255,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(VIRTUAL_MEMORY_CONTRACTS.iter())
         .chain(HEAP_CONTRACTS.iter())
         .chain(LOCAL_MEMORY_CONTRACTS.iter())
+        .chain(SYSTEM_PROFILE_CONTRACTS.iter())
 }
 
 #[cfg(test)]

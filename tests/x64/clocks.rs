@@ -2,6 +2,96 @@
 use super::*;
 
 #[test]
+fn calendar_keeps_win64_saved_frame_compare_carrier_and_checked_output_faults() {
+    for dll in ["kernel32.dll", "kernelbase.dll"] {
+        let (mut mem, mut cpu, mut runtime) = startup();
+        let source = STACK + 0x100;
+        let output = STACK + 0x200;
+        let sp = STACK + 0x1f88;
+        let error = wire::x64::runtime::TEB + 0x68;
+        mem.write_int(error, 4, 77).unwrap();
+        for (a, b, expected) in [(0, u64::MAX, u32::MAX as u64), (9, 9, 0), (u64::MAX, 0, 1)] {
+            mem.write_int(source, 8, a).unwrap();
+            mem.write_int(output, 8, b).unwrap();
+            assert_eq!(
+                startup_dll_call(
+                    &mut mem,
+                    &mut cpu,
+                    &mut runtime,
+                    dll,
+                    "CompareFileTime",
+                    &[source, output]
+                ),
+                expected
+            );
+        }
+        let calendar: Vec<_> = [1970u16, 1, 0, 1, 0, 0, 0, 0]
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        mem.write(source, &calendar).unwrap();
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                dll,
+                "SystemTimeToFileTime",
+                &[source, sp]
+            ),
+            1
+        );
+        assert_eq!(cpu.rip, BASE);
+        assert_eq!(mem.read_int(sp, 8).unwrap(), 116444736000000000);
+        for name in [
+            "GetSystemTime",
+            "GetLocalTime",
+            "GetSystemTimePreciseAsFileTime",
+        ] {
+            mem.write(output, &[0xa5; 24]).unwrap();
+            assert_eq!(
+                startup_dll_call(&mut mem, &mut cpu, &mut runtime, dll, name, &[output]),
+                0
+            );
+            if name == "GetSystemTimePreciseAsFileTime" {
+                assert!(mem.read_int(output, 8).unwrap() > 116444736000000000);
+                assert_eq!(mem.read_int(output + 8, 8).unwrap(), 0xa5a5a5a5a5a5a5a5);
+            } else {
+                assert!(mem.read_int(output, 2).unwrap() >= 2026);
+                assert_eq!(mem.read_int(output + 16, 8).unwrap(), 0xa5a5a5a5a5a5a5a5);
+            }
+            assert_eq!(mem.read_int(error, 4).unwrap(), 77);
+        }
+        for (name, args) in [
+            ("GetSystemTime", vec![0]),
+            ("GetLocalTime", vec![0]),
+            ("GetSystemTimePreciseAsFileTime", vec![0]),
+            ("SystemTimeToFileTime", vec![source, 0]),
+            ("CompareFileTime", vec![source, 0]),
+        ] {
+            cpu.regs[4] = sp;
+            mem.write_int(sp, 8, BASE).unwrap();
+            for (i, value) in args.into_iter().enumerate() {
+                cpu.regs[[1, 2, 8, 9][i]] = value;
+            }
+            let before = cpu.clone();
+            let calls = runtime.api_calls;
+            assert!(
+                runtime.dispatch(dll, name, &mut cpu, &mut mem).is_err(),
+                "{name}"
+            );
+            assert_eq!(cpu, before, "{name}");
+            assert_eq!(runtime.api_calls, calls, "{name}");
+            assert_eq!(mem.read_int(error, 4).unwrap(), 77, "{name}");
+        }
+        assert!(!wire::x64::runtime::import_supported(
+            dll,
+            "FileTimeToLocalFileTime"
+        ));
+    }
+}
+
+#[test]
 fn clocks_keep_win64_hot_output_alias_full_pointer_and_fault_preflight() {
     let (mut mem, mut cpu, mut runtime) = startup();
     let sp = STACK + 0x1f88;
