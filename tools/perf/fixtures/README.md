@@ -47,3 +47,8 @@ n=`max(1, work//6)`、retired=`5*n+17`、work=`6*n+19`，
 PE32 返回值为 `28*n`、retired=`11*n+17`；Win64 返回值为 `48*n`、
 retired=`10*n+18`、work=`11*n+19`，其中 n=`max(1, work//11)`，
 API count 均为 `n+1`。不依赖宿主分配地址，需显式选择。
+
+`heap_gateway.py` 的双架构 `gateway-heap` 先取进程堆并分配 23 字节，
+再循环 HeapSize 累加原始分配长度。n=`max(1, work//8)`，两端返回值为 `23*n`，
+API count 为 `n+2`；PE32 retired=`7*n+18`，Win64 retired=`7*n+21`、
+work=`8*n+23`。使用独立 OFT/IAT 和三项导入，不依赖实际分配地址。

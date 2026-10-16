@@ -3,6 +3,56 @@
 use super::*;
 
 #[test]
+fn heap_contract_keeps_pe32_errors_enumeration_alias_and_abi_only_extensions() {
+    let mut v = Vm::new();
+    let process = v.k("GetProcessHeap", &[]);
+    assert_eq!(process, 0x70050000);
+    let private = v.k("HeapCreate", &[u32::MAX, u32::MAX, 32]);
+    assert_ne!(private, process);
+    v.k("SetLastError", &[123]);
+    let block = v.k("HeapAlloc", &[private, u32::MAX, 23]);
+    assert_ne!(block, 0);
+    assert_eq!(v.mem.read_u32(block).unwrap(), 0);
+    assert_eq!(v.state.last_error, 123);
+    assert_eq!(v.k("HeapAlloc", &[private, 0, 16]), 0);
+    assert_eq!(v.state.last_error, 8);
+    assert_eq!(v.k("HeapFree", &[process, 0, block]), 0);
+    assert_eq!(v.state.last_error, 87);
+    assert_eq!(v.k("HeapSize", &[process, 0, block]), u32::MAX);
+    assert_eq!(v.k("HeapValidate", &[private, u32::MAX, block]), 1);
+    assert_eq!(v.state.last_error, 87);
+    assert_eq!(v.k("GetProcessHeaps", &[1, 0]), 1); // Legacy ignores copy-out faults.
+    assert_eq!(v.state.last_error, 87);
+    let sp = STACK_BASE + STACK_SIZE - 256;
+    assert_eq!(v.k("GetProcessHeaps", &[1, sp]), 1);
+    assert_eq!(v.cpu.eip, process); // Enumeration overwrites the unsaved return slot.
+    assert_eq!(v.cpu.esp(), sp + 12);
+    assert_eq!(v.k("HeapDestroy", &[process]), 0);
+    assert_eq!(v.state.last_error, 87);
+    assert_eq!(v.k("HeapDestroy", &[private]), 1);
+    assert_eq!(v.k("HeapValidate", &[private, 0, block]), 0);
+    assert_eq!(v.state.last_error, 87);
+    for (name, args, bytes) in [
+        ("HeapSetInformation", vec![process, 0, DATA, 4], 16),
+        (
+            "HeapQueryInformation",
+            vec![process, 0, DATA, 4, DATA + 8],
+            20,
+        ),
+        ("HeapCompact", vec![process, 0], 8),
+        ("HeapWalk", vec![process, DATA], 8),
+    ] {
+        v.mem.write_bytes(DATA, &[0xa5; 16]).unwrap();
+        assert_eq!(v.k(name, &args), 0, "{name}");
+        assert_eq!(v.state.last_error, 120, "{name}");
+        assert_eq!(v.cpu.esp(), sp + 4 + bytes, "{name}");
+        let mut output = [0; 16];
+        v.mem.read_bytes(DATA, &mut output).unwrap();
+        assert_eq!(output, [0xa5; 16], "{name}");
+    }
+}
+
+#[test]
 fn virtual_memory_keeps_pe32_protect_return_alias_and_remote_error_order() {
     let mut v = Vm::new();
     let page = v.k("VirtualAlloc", &[0, 4096, 0x3000, 4]);

@@ -3,6 +3,100 @@
 use super::*;
 
 #[test]
+fn heap_contract_keeps_win64_handles_size_t_flags_and_free_frame_preflight() {
+    for dll in ["kernel32.dll", "kernelbase.dll"] {
+        let (mut mem, mut cpu, mut runtime) = startup();
+        let heap = startup_dll_call(&mut mem, &mut cpu, &mut runtime, dll, "GetProcessHeap", &[]);
+        assert!(heap > u32::MAX as u64);
+        let block = startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            dll,
+            "HeapAlloc",
+            &[heap, 0xfacefeed00000008, 23],
+        );
+        assert_ne!(block, 0);
+        assert_eq!(mem.read_int(block, 8).unwrap(), 0);
+        for args in [[heap as u32 as u64, 0, block], [heap, 2, block]] {
+            cpu.regs[4] = STACK + 0x1f88;
+            mem.write_int(cpu.regs[4], 8, BASE).unwrap();
+            for (reg, value) in [1, 2, 8].into_iter().zip(args) {
+                cpu.regs[reg] = value;
+            }
+            let before = cpu.clone();
+            let calls = runtime.api_calls;
+            assert!(runtime
+                .dispatch(dll, "HeapFree", &mut cpu, &mut mem)
+                .is_err());
+            assert_eq!(cpu, before);
+            assert_eq!(runtime.api_calls, calls);
+        }
+        cpu.regs[4] = 0;
+        cpu.regs[1] = heap;
+        cpu.regs[2] = 0;
+        cpu.regs[8] = block;
+        let before = cpu.clone();
+        let calls = runtime.api_calls;
+        assert!(runtime
+            .dispatch(dll, "HeapFree", &mut cpu, &mut mem)
+            .is_err());
+        assert_eq!(cpu, before);
+        assert_eq!(runtime.api_calls, calls);
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                dll,
+                "HeapSize",
+                &[heap, 0, block],
+            ),
+            23
+        );
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                dll,
+                "HeapAlloc",
+                &[heap, 0, 0x100000000],
+            ),
+            0
+        );
+        assert_eq!(mem.read_int(wire::x64::runtime::TEB + 0x68, 4).unwrap(), 8);
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                dll,
+                "HeapFree",
+                &[heap, 0, block],
+            ),
+            1
+        );
+        assert_eq!(mem.read_int(wire::x64::runtime::TEB + 0x68, 4).unwrap(), 8);
+        for name in [
+            "HeapCreate",
+            "HeapDestroy",
+            "HeapValidate",
+            "GetProcessHeaps",
+            "HeapSetInformation",
+            "HeapQueryInformation",
+            "HeapCompact",
+            "HeapWalk",
+        ] {
+            assert!(
+                !wire::x64::runtime::import_supported(dll, name),
+                "{dll}!{name}"
+            );
+        }
+    }
+}
+
+#[test]
 fn virtual_memory_keeps_win64_size_t_handles_and_saved_protect_return_alias() {
     for dll in ["kernel32.dll", "kernelbase.dll"] {
         let (mut mem, mut cpu, mut runtime) = startup();
