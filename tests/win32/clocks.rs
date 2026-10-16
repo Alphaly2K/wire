@@ -43,6 +43,43 @@ fn calendar_keeps_pe32_public_dispatch_errors_and_abi_only_conversions() {
     assert_eq!(zone[172..], [0xa5; 20]);
     assert_eq!(v.k("GetTimeZoneInformation", &[0]), 0);
     assert_eq!(v.state.last_error, 87);
+    let mut args = [0; 16];
+    args[0] = DATA;
+    v.k("SetLastError", &[77]);
+    v.mem.write_bytes(DATA, &[0xa5; 192]).unwrap();
+    assert_eq!(
+        wire::nls::dispatch(
+            "kernel32.dll",
+            "GetTimeZoneInformation",
+            &args,
+            &mut v.mem,
+            &mut v.state
+        ),
+        Some((0, "code-page / sandbox directory shim".into()))
+    );
+    assert_eq!(v.state.last_error, 77);
+    v.mem.read_bytes(DATA, &mut zone).unwrap();
+    assert_eq!(zone[..172], [0; 172]);
+    assert_eq!(zone[172..], [0xa5; 20]);
+    for dll in ["KERNEL32.dll", "kernelbase.dll"] {
+        assert!(wire::nls::dispatch(
+            dll,
+            "GetTimeZoneInformation",
+            &args,
+            &mut v.mem,
+            &mut v.state
+        )
+        .is_none());
+    }
+    for name in [
+        "GetTimeZoneInformation",
+        "SystemTimeToFileTime",
+        "GetSystemTimes",
+    ] {
+        assert!(
+            wire::system::dispatch("kernel32.dll", name, &args, &v.mem, &mut v.state).is_none()
+        );
+    }
     for (name, arity) in [
         ("SystemTimeToFileTime", 2),
         ("FileTimeToSystemTime", 2),

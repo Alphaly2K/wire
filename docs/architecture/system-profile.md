@@ -6,6 +6,6 @@ PE32 适配器只借 GuestMem 和 LastError 槽。保留 36-byte SYSTEM_INFO、3
 
 Win64 适配器只借 Memory 与 active TEB 的 LastError 地址。保留 48-byte SYSTEM_INFO、AMD64 地址范围与单虚拟 CPU；Ex 继续由 Memory::memory_status 计算。公共 gateway 在 handler 前保存返回帧，受检访存失败不提交 CPU/API count；length 错误写 error 87 后正常返回。各架构的内存模型与虚拟硬件值分别保持。
 
-`wire::system::dispatch` 是既有 public facade，继续存在并保留 DLL 精确大小写匹配。它从该家族契约冷解析 ID，再委托 PE32 adapter；正常已绑定执行直接调用 typed adapter。GetSystemTime/GetLocalTime 和 winmm period/caps 留在原 legacy 实现。迁移后的名字只出现在 catalog 声明，根分发器和 ABI/arity 表不再重复维护这四项。
+`wire::system::dispatch` 是既有 public facade，继续存在并保留 DLL 精确大小写匹配。它从该家族契约冷解析 ID，再委托 PE32 adapter；正常已绑定执行直接调用 typed adapter。GetSystemTime/GetLocalTime 随[日历家族](calendar.md)迁移，winmm period/caps 留在原 legacy 实现。迁移后的名字只出现在 catalog 声明，根分发器和 ABI/arity 表不再重复维护这四项。
 
 独立旧行为基线、GetSystemInfo 输出校验循环及验收结果见[系统信息报告](../reports/refactoring-system-profile-2026-10-16.md)。

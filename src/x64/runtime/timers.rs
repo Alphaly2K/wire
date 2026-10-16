@@ -1,6 +1,7 @@
 //! Waitable timers use monotonic deadlines and the cooperative wait scheduler.
-use super::{Memory, Runtime64, SystemTime, UNIX_EPOCH};
+use super::{Memory, Runtime64, UNIX_EPOCH};
 use crate::win32::catalog::TimerApi;
+use std::time::SystemTime;
 use std::time::{Duration, Instant};
 
 impl Runtime64 {

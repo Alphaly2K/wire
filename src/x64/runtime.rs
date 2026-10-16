@@ -6,7 +6,7 @@ use super::{
 };
 use std::{
     collections::BTreeMap,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Instant, UNIX_EPOCH},
 };
 mod address;
 mod apc;
@@ -34,7 +34,6 @@ mod sockets;
 mod sspi;
 mod sync_objects;
 mod threads;
-mod time;
 mod timers;
 mod token;
 mod trace;
@@ -461,9 +460,6 @@ fn import_arity(name: &str) -> Option<usize> {
         | "InitializeSRWLock" => 1,
         "InitOnceBeginInitialize" => 4,
         "InitOnceComplete" => 3,
-        "SystemTimeToFileTime" | "FileTimeToSystemTime" | "CompareFileTime" => 2,
-        "SystemTimeToTzSpecificLocalTime" | "TzSpecificLocalTimeToSystemTime" => 3,
-        "GetTimeZoneInformation" => 1,
         "SetThreadStackGuarantee" => 1,
         "CreatePipe" => 4,
         "InitializeProcThreadAttributeList" => 4,
@@ -472,11 +468,7 @@ fn import_arity(name: &str) -> Option<usize> {
         "CreateProcessW" => 10,
         "FreeEnvironmentStringsW" => 1,
         "GetConsoleMode" | "GetTempPathW" | "GetTempPath2W" => 2,
-        "GetSystemTimes" => 3,
-        "GetSystemTimePreciseAsFileTime"
-        | "GetSystemTime"
-        | "GetLocalTime"
-        | "GetStartupInfoW"
+        "GetStartupInfoW"
         | "GetStartupInfoA"
         | "IsProcessorFeaturePresent"
         | "EncodePointer"
@@ -921,12 +913,6 @@ impl Runtime64 {
     fn string_bytes(mem: &Memory, ptr: u64, count: u64, width: usize) -> Result<Vec<u8>, String> {
         crate::win32::x64::text::string_bytes(mem, ptr, count, width)
     }
-    fn calendar_to_ticks(fields: [u16; 8]) -> Option<u64> {
-        crate::win32::kernel::calendar::calendar_to_ticks(fields)
-    }
-    fn ticks_to_calendar(ticks: u64) -> Option<[u16; 8]> {
-        crate::win32::kernel::calendar::ticks_to_calendar(ticks)
-    }
     fn processor_information(relation: u32) -> Option<Vec<u8>> {
         if !matches!(relation, 0 | 1 | 2 | 3 | 4 | 6 | 0xffff) {
             return None;
@@ -997,6 +983,9 @@ impl Runtime64 {
             ApiId::LocalMemory(id) => self.local_memory_call(mem, id, args),
             ApiId::SystemProfile(id) => {
                 crate::win32::x64::system_profile::call(mem, id, args, self.teb() + 0x68)
+            }
+            ApiId::Calendar(id) => {
+                crate::win32::x64::calendar::call(mem, id, args, self.teb() + 0x68)
             }
             ApiId::Context(id) => {
                 use crate::win32::catalog::ContextApi;
@@ -3150,44 +3139,6 @@ impl Runtime64 {
                     }
                 }
             }
-            "GetSystemTime" | "GetLocalTime" => {
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_err(|e| e.to_string())?;
-                let instant: libc::time_t = now
-                    .as_secs()
-                    .try_into()
-                    .map_err(|_| "host time out of range")?;
-                let mut calendar: libc::tm = unsafe { std::mem::zeroed() };
-                unsafe {
-                    let result = if name == "GetLocalTime" {
-                        libc::localtime_r(&instant, &mut calendar)
-                    } else {
-                        libc::gmtime_r(&instant, &mut calendar)
-                    };
-                    if result.is_null() {
-                        return Err("host calendar conversion failed".into());
-                    }
-                }
-                let fields = [
-                    calendar.tm_year + 1900,
-                    calendar.tm_mon + 1,
-                    calendar.tm_wday,
-                    calendar.tm_mday,
-                    calendar.tm_hour,
-                    calendar.tm_min,
-                    calendar.tm_sec,
-                    now.subsec_millis() as i32,
-                ];
-                let mut output = [0; 16];
-                for (n, value) in fields.into_iter().enumerate() {
-                    let value =
-                        u16::try_from(value).map_err(|_| "Win64 calendar value out of range")?;
-                    output[n * 2..n * 2 + 2].copy_from_slice(&value.to_le_bytes());
-                }
-                mem.write(args[0], &output)?;
-                0
-            }
             "SetThreadStackGuarantee" => {
                 let requested = mem.read_int(args[0], 4)?;
                 if requested == 0 {
@@ -3198,89 +3149,6 @@ impl Runtime64 {
                 } else {
                     self.set_error(mem, 50)?;
                     0
-                }
-            }
-            "GetTimeZoneInformation" => match Self::host_zone() {
-                Ok((mode, data)) => {
-                    mem.write(args[0], &data)?;
-                    mode
-                }
-                Err(error) => {
-                    self.set_error(mem, error)?;
-                    u32::MAX as u64
-                }
-            },
-            "SystemTimeToTzSpecificLocalTime" | "TzSpecificLocalTimeToSystemTime" => {
-                match self.convert_zone(mem, args, name == "TzSpecificLocalTimeToSystemTime")? {
-                    Ok(output) => {
-                        mem.write(args[2], &output)?;
-                        1
-                    }
-                    Err(error) => {
-                        self.set_error(mem, error)?;
-                        0
-                    }
-                }
-            }
-            "SystemTimeToFileTime" => {
-                let mut bytes = [0; 16];
-                mem.read(args[0], &mut bytes)?;
-                let fields =
-                    std::array::from_fn(|n| u16::from_le_bytes([bytes[n * 2], bytes[n * 2 + 1]]));
-                if let Some(ticks) = Self::calendar_to_ticks(fields) {
-                    mem.write_int(args[1], 8, ticks)?;
-                    1
-                } else {
-                    self.set_error(mem, 87)?;
-                    0
-                }
-            }
-            "FileTimeToSystemTime" => {
-                let ticks = mem.read_int(args[0], 8)?;
-                if let Some(fields) = Self::ticks_to_calendar(ticks) {
-                    let bytes: Vec<u8> = fields.into_iter().flat_map(u16::to_le_bytes).collect();
-                    mem.write(args[1], &bytes)?;
-                    1
-                } else {
-                    self.set_error(mem, 87)?;
-                    0
-                }
-            }
-            "CompareFileTime" => {
-                use std::cmp::Ordering;
-                match mem.read_int(args[0], 8)?.cmp(&mem.read_int(args[1], 8)?) {
-                    Ordering::Less => u32::MAX as u64,
-                    Ordering::Equal => 0,
-                    Ordering::Greater => 1,
-                }
-            }
-            "GetSystemTimePreciseAsFileTime" => {
-                let elapsed = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_err(|e| e.to_string())?;
-                let time = 116444736000000000u64 + (elapsed.as_nanos() / 100) as u64;
-                mem.write_int(args[0], 8, time)?;
-                0
-            }
-            "GetSystemTimes" => {
-                for &pointer in &args[..3] {
-                    if pointer != 0 {
-                        mem.check(pointer, 8, WRITE)?;
-                    }
-                }
-                match time::system_cpu_times() {
-                    Ok(times) => {
-                        for (&pointer, ticks) in args[..3].iter().zip(times) {
-                            if pointer != 0 {
-                                mem.write_int(pointer, 8, ticks)?;
-                            }
-                        }
-                        1
-                    }
-                    Err(error) => {
-                        self.set_error(mem, error)?;
-                        0
-                    }
                 }
             }
             "timeGetDevCaps" => {

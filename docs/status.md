@@ -1,15 +1,15 @@
 # 当前状态
 
-更新日期：2026-10-16。重构前基线为 `2e78377`；最新已验收运行时为 [系统信息契约](reports/refactoring-system-profile-2026-10-16.md)，该报告记录冻结源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
+更新日期：2026-10-16。重构前基线为 `2e78377`；最新已验收运行时为 [日历与时区契约](reports/refactoring-calendar-2026-10-16.md)，该报告记录冻结源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
 
-四项系统信息契约已交付，移除重复 ABI/arity 及名称分支；保留各架构硬件布局、内存记账、public facade 和返回帧顺序。下一组日历与时区接口正在准备旧行为基线。Mono 原生化已撤回，本轮继续排除。
+11 项日历/时区契约已交付，移除重复 ABI/arity 及名称分支；时区转换脱离 Runtime64，宿主 CPU 计时独立至 host/cpu_time，保留 public facade、校验/输出顺序及各架构差异。下一组多媒体计时器正在准备旧行为基线。Mono 原生化已撤回，本轮继续排除。
 
 ## 重构范围
 
 | 阶段 | 已交付 | 剩余范围 |
 | --- | --- | --- |
 | R0/R1 | 冻结输入、原创正式 fixture、领域测试 harness、GUID 唯一契约和双架构适配 | 随后续家族维护独立基线 |
-| R2 | 已验收 267 个 export 的契约；明细见下表 | 日历/时区、其余同步、USER、COM、图形等 legacy 家族 |
+| R2 | 已验收 278 个 export 的契约；明细见下表 | 多媒体计时器、其余同步、USER、COM、图形等 legacy 家族 |
 | R3 | guest environment、双架构模块状态、Win64 文件状态、PE32 TLS/FLS 私有 owner | PE32 其余资源、线程/COM 等；PE32 kernel 大范围抽取曾因性能撤回 |
 | R4/R5 | Process32 编排边界、owned host UI 请求、GDI 与像素状态分离 | 领域分发与资源 owner 随 R2/R3 继续收敛 |
 | R6 | 按用户要求忽略 | 不重建原生 Mono 路径 |
@@ -37,6 +37,7 @@
 | heap | 13 | [资源与调用边界](architecture/heaps.md)及[验收](reports/refactoring-heaps-2026-10-16.md) |
 | Local / Global memory | 14 | [共享资源与调用边界](architecture/local-memory.md)及[验收](reports/refactoring-local-memory-2026-10-16.md) |
 | 系统信息 / 内存状态 | 4 | [布局与调用边界](architecture/system-profile.md)及[验收](reports/refactoring-system-profile-2026-10-16.md) |
+| 日历 / 时区 / CPU 计时 | 11 | [调用与宿主边界](architecture/calendar.md)及[验收](reports/refactoring-calendar-2026-10-16.md) |
 
 ## 当前执行路径与能力
 
@@ -53,9 +54,9 @@
 
 ## 验证与性能
 
-最近已验收的系统信息批次：release **471 passed / 7 ignored**，debug Win32/AMD64/FPU **319 passed**，显式 native **7 passed**，工具 **20 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。
+最近已验收的日历批次：release **471 passed / 7 ignored**，debug Win32/AMD64/FPU **319 passed**，显式 native **7 passed**，工具 **20 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。
 
-系统信息的 31 条性能路径全部结果校验；最大回退 +2.602%，RSS 最多增加 80KiB；游戏前缀 CPU −0.740%，启动终点保持。首版 Local/Global IR 回退经路由顺序修正和同哈希对照消除，全部失败数据保留。各批次使用自己的基线，历史局部成本与离散轮次继续保留在对应报告，未将结构调整解释为游戏 FPS 提升。AMD64 event fixture 的重复导入已独立修正；旧验收保持冻结输入，后续按新哈希配对，详见[工具边界](architecture/validation-tools.md)。
+日历的 32 条性能路径全部结果校验；日历转换网关 CPU −14.970%，RSS 最多增加 208KiB。三个 Win64 网关初筛回退经三顺序同哈希扩样后为 +1.647%/+4.570%/+2.630%；Local/Global 相对 control 为 +3.018%，记录有限局部成本。IR/cache 计数保持、专用段助记符序列一致；游戏前缀 CPU −0.121%，启动终点保持。各批次使用自己的基线，历史局部成本与离散轮次继续保留在对应报告，未将结构调整解释为游戏 FPS 提升。AMD64 event fixture 的重复导入已独立修正；旧验收保持冻结输入，后续按新哈希配对，详见[工具边界](architecture/validation-tools.md)。
 
 后续正式比较使用显式 [稳定启动协议](reports/refactoring-launch-protocol-2026-10-16.md)，固定 argv0、参数和 child cwd，并记录 shell SHA。默认工具行为保持；旧协议数据独立保留，汇总不跨协议或不同 work 合并。编译、正式计时、采样与 runtime diagnostics 串行执行。每个结构候选先完成正确性，再按至少三对轮换检查结果、CPU/wall/RSS 与输入哈希；超过门槛先调查，不把失败候选扩大到其它领域。
 

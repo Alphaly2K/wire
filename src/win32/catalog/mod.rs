@@ -1,5 +1,6 @@
 //! Export identity and ABI plans are resolved during binding, not execution.
 //! Unconverted families remain on explicit legacy routes.
+mod calendar;
 mod clocks;
 mod context;
 mod delays;
@@ -21,6 +22,7 @@ mod timers;
 mod version;
 mod virtual_memory;
 mod waits;
+pub use calendar::{CalendarApi, CALENDAR_CONTRACTS};
 pub use clocks::{ClockApi, CLOCK_CONTRACTS};
 pub use context::{ContextApi, CONTEXT_CONTRACTS};
 pub use delays::{DelayApi, DELAY_CONTRACTS};
@@ -97,6 +99,7 @@ pub enum ApiId {
     Heap(HeapApi),
     LocalMemory(LocalMemoryApi),
     SystemProfile(SystemProfileApi),
+    Calendar(CalendarApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -256,6 +259,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(HEAP_CONTRACTS.iter())
         .chain(LOCAL_MEMORY_CONTRACTS.iter())
         .chain(SYSTEM_PROFILE_CONTRACTS.iter())
+        .chain(CALENDAR_CONTRACTS.iter())
 }
 
 #[cfg(test)]

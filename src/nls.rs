@@ -52,26 +52,29 @@ pub fn dispatch(
             },
         );
     }
-    if !((dll == "kernel32.dll" && matches!(name, "GetTimeZoneInformation"))
-        || (dll == "shell32.dll"
-            && matches!(
-                name,
-                "SHGetSpecialFolderPathA"
-                    | "SHGetSpecialFolderPathW"
-                    | "SHGetFolderPathA"
-                    | "SHGetFolderPathW"
-                    | "SHGetKnownFolderPath"
-            ))
+    if dll == "kernel32.dll" && name == "GetTimeZoneInformation" {
+        return Some(crate::win32::x86::calendar::call(
+            crate::win32::catalog::CalendarApi::TimeZone,
+            a[0],
+            mem,
+            &mut state.last_error,
+        ));
+    }
+    if !((dll == "shell32.dll"
+        && matches!(
+            name,
+            "SHGetSpecialFolderPathA"
+                | "SHGetSpecialFolderPathW"
+                | "SHGetFolderPathA"
+                | "SHGetFolderPathW"
+                | "SHGetKnownFolderPath"
+        ))
         || (dll == "ole32.dll" && matches!(name, "CoTaskMemAlloc" | "CoTaskMemFree")))
     {
         return None;
     }
     let result = (|| -> Result<u32, u32> {
         match name {
-            "GetTimeZoneInformation" => {
-                mem.write_bytes(a[0], &[0; 172]).map_err(|_| 87u32)?;
-                Ok(0)
-            }
             "IsValidCodePage" => Ok(matches!(a[0], 932 | 1252 | 65001) as u32),
             "GetUserDefaultLCID"
             | "GetSystemDefaultLCID"

@@ -601,12 +601,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("SetHandleCount", 4),
                 ("GetTempPathA", 8),
                 ("GetTempPathW", 8),
-                ("GetLocalTime", 4),
-                ("GetSystemTime", 4),
-                ("SystemTimeToFileTime", 8),
-                ("FileTimeToSystemTime", 8),
-                ("FileTimeToLocalFileTime", 8),
-                ("GetTimeZoneInformation", 4),
                 ("InitializeCriticalSection", 4),
                 ("EnterCriticalSection", 4),
                 ("LeaveCriticalSection", 4),
@@ -1742,6 +1736,17 @@ pub fn dispatch(
             };
             (ret, note) =
                 crate::win32::x86::system_profile::call(id, args[0], mem, &mut state.last_error);
+        }
+        _ if matches!(
+            binding.typed,
+            Some(crate::win32::catalog::ApiId::Calendar(_))
+        ) =>
+        {
+            let Some(crate::win32::catalog::ApiId::Calendar(id)) = binding.typed else {
+                unreachable!();
+            };
+            (ret, note) =
+                crate::win32::x86::calendar::call(id, args[0], mem, &mut state.last_error);
         }
         (
             "winmm.dll",

@@ -244,3 +244,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 四项 export 接入三个 SystemProfileApi ID，删除重复 ABI/arity 和名称分发；双架构 adapter 只借内存和错误槽，保留硬件布局、内存记账、public facade 与各自返回帧顺序。独立旧行为基线先通过，完整 release 471、debug 319、native 7、工具 20 项及 fmt/strict Clippy/build 通过。
 
 首版 Local/Global IR 存在 +7.747% 回退，拒绝后将新增 guard 追加到已有 scalar typed 路由之后；三顺序同哈希复测为 −1.118%。第二版完整 31 条路径全部校验，最大回退 +2.602%，RSS 最多 +80KiB；GetSystemInfo 网关 Win64 −14.393%、PE32 IR/raw −19.368%/−17.740%。Alice 前缀 CPU −0.740%，保持隐藏窗口和零 Draw/Present；257 个 Rust 文件哈希核对，体积增加 400 bytes，Calendar 草稿未混入。完整接受决定见 [系统信息验收](refactoring-system-profile-2026-10-16.md)。
+
+## R2 日历、时区与 CPU 计时
+
+11 项 export 接入 CalendarApi，移除重复 ABI/arity 和名称分发；PE32 三项 typed、八项 ABI-only，Win64 十项 typed。时区转换脱离 Runtime64，宿主 CPU 计时迁至 host；两个 public facade 保留原范围，校验/DST/错误及返回帧顺序保持。七项独立旧行为回归先通过，完整 release 471、debug 319、native 7、工具 20 项及 fmt/strict Clippy/build 通过。
+
+32 条性能路径全部校验，日历转换网关 −14.970%，RSS 最多 +208KiB。三个 Win64 网关初筛超过 3%，同哈希三顺序扩样后为 +1.647%/+4.570%/+2.630%；记录 Local/Global 相对 control +3.018% 的局部成本，IR/cache 计数与专用段助记符序列保持。Alice 前缀 CPU −0.121%，保持隐藏窗口和零 Draw/Present；261 个 Rust 文件核对一致，体积增加 3,808 bytes，后续多媒体草稿未混入。接受决定和完整调查见[日历验收](refactoring-calendar-2026-10-16.md)。
