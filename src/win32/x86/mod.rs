@@ -1,5 +1,6 @@
 pub(crate) mod calendar;
 pub(crate) mod clocks;
+pub(crate) mod critical_sections;
 pub(crate) mod guid;
 pub(crate) mod heaps;
 pub(crate) mod host;

@@ -601,12 +601,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("SetHandleCount", 4),
                 ("GetTempPathA", 8),
                 ("GetTempPathW", 8),
-                ("InitializeCriticalSection", 4),
-                ("EnterCriticalSection", 4),
-                ("LeaveCriticalSection", 4),
-                ("DeleteCriticalSection", 4),
-                ("InitializeCriticalSectionAndSpinCount", 8),
-                ("TryEnterCriticalSection", 4),
                 ("ExitProcess", 4),
                 ("TerminateProcess", 8),
                 ("SetUnhandledExceptionFilter", 4),
@@ -652,7 +646,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetLogicalProcessorInformation", 8),
                 ("RaiseException", 16),
                 ("RtlUnwind", 16),
-                ("InitializeCriticalSectionEx", 12),
                 ("GetCurrentPackageId", 8),
                 ("CreateThreadpoolTimer", 12),
                 ("SetThreadpoolTimer", 16),
@@ -1755,6 +1748,40 @@ pub fn dispatch(
             };
             (ret, note) = crate::win32::x86::multimedia::call(id, &args, mem);
         }
+        _ if matches!(
+            binding.typed,
+            Some(crate::win32::catalog::ApiId::CriticalSection(_))
+        ) =>
+        {
+            use crate::win32::x86::critical_sections::{call, Outcome};
+            let Some(crate::win32::catalog::ApiId::CriticalSection(id)) = binding.typed else {
+                unreachable!();
+            };
+            match call(id, &args, mem, sched.current_tid())? {
+                Outcome::Value(value) => ret = value,
+                Outcome::Block { address: cs, owner } => {
+                    sched.take_wake();
+                    log.note(&format!(
+                        "thread {} blocks on CRITICAL_SECTION {cs:#x} (owner tid {owner})",
+                        sched.current_tid()
+                    ));
+                    sched.block_current(cpu, WaitTarget::CriticalSection(cs), None)?;
+                    return Ok(());
+                }
+                Outcome::WakeOne(cs) => {
+                    for i in 0..sched.threads.len() {
+                        if matches!(&sched.threads[i].state, ThreadState::Waiting {
+                            target: WaitTarget::CriticalSection(a), ..
+                        } if *a == cs)
+                        {
+                            sched.wake_thread(i, Wake::Retest);
+                            break;
+                        }
+                    }
+                    ret = 0;
+                }
+            }
+        }
         (
             "winmm.dll",
             "mciSendCommandA" | "mciSendCommandW" | "mciSendStringA" | "mciSendStringW",
@@ -2566,97 +2593,6 @@ pub fn dispatch(
         ("kernel32.dll", "RtlUnwind") | ("ntdll.dll", "RtlUnwind") => {
             log.log_call(idx, dll, name, &args[..4], args[3], true, "SEH unwind");
             return crate::seh::unwind(cpu, mem, api, state, log, sched, &args, max_instr);
-        }
-        // --- critical sections: real owner/recursion bookkeeping in the guest
-        // CRITICAL_SECTION struct; contention blocks cooperatively. The
-        // LockCount field only distinguishes free (-1) vs held (0); waiter
-        // counts are not maintained (documented simplification).
-        ("kernel32.dll", "InitializeCriticalSection") => {
-            let cs = args[0];
-            mem.write_u32(cs, 0).map_err(|e| e.to_string())?;
-            mem.write_u32(cs + 4, u32::MAX).map_err(|e| e.to_string())?; // LockCount = -1
-            mem.write_u32(cs + 8, 0).map_err(|e| e.to_string())?; // RecursionCount
-            mem.write_u32(cs + 12, 0).map_err(|e| e.to_string())?; // OwningThread
-            mem.write_u32(cs + 16, 0).map_err(|e| e.to_string())?; // LockSemaphore
-            mem.write_u32(cs + 20, 0).map_err(|e| e.to_string())?; // SpinCount
-            ret = 0; // void
-        }
-        ("kernel32.dll", "InitializeCriticalSectionAndSpinCount")
-        | ("kernel32.dll", "InitializeCriticalSectionEx") => {
-            let cs = args[0];
-            let spin = args[1];
-            mem.write_u32(cs, 0).map_err(|e| e.to_string())?;
-            mem.write_u32(cs + 4, u32::MAX).map_err(|e| e.to_string())?;
-            mem.write_u32(cs + 8, 0).map_err(|e| e.to_string())?;
-            mem.write_u32(cs + 12, 0).map_err(|e| e.to_string())?;
-            mem.write_u32(cs + 16, 0).map_err(|e| e.to_string())?;
-            mem.write_u32(cs + 20, spin).map_err(|e| e.to_string())?;
-            ret = 1;
-        }
-        ("kernel32.dll", "EnterCriticalSection") => {
-            let cs = args[0];
-            let me = sched.current_tid();
-            let owner = mem.read_u32(cs + 12).map_err(|e| e.to_string())?;
-            if owner == 0 || owner == me {
-                let rc = mem.read_u32(cs + 8).map_err(|e| e.to_string())?;
-                mem.write_u32(cs + 12, me).map_err(|e| e.to_string())?;
-                mem.write_u32(cs + 8, rc + 1).map_err(|e| e.to_string())?;
-                mem.write_u32(cs + 4, 0).map_err(|e| e.to_string())?;
-                ret = 0; // void
-            } else {
-                sched.take_wake(); // discard Retest; fall through to re-test
-                log.note(&format!(
-                    "thread {} blocks on CRITICAL_SECTION {cs:#x} (owner tid {owner})",
-                    sched.current_tid()
-                ));
-                sched.block_current(cpu, WaitTarget::CriticalSection(cs), None)?;
-                return Ok(());
-            }
-        }
-        ("kernel32.dll", "LeaveCriticalSection") => {
-            let cs = args[0];
-            let rc = mem
-                .read_u32(cs + 8)
-                .map_err(|e| e.to_string())?
-                .saturating_sub(1);
-            mem.write_u32(cs + 8, rc).map_err(|e| e.to_string())?;
-            if rc == 0 {
-                mem.write_u32(cs + 12, 0).map_err(|e| e.to_string())?;
-                mem.write_u32(cs + 4, u32::MAX).map_err(|e| e.to_string())?;
-                for i in 0..sched.threads.len() {
-                    if matches!(
-                        &sched.threads[i].state,
-                        ThreadState::Waiting {
-                            target: WaitTarget::CriticalSection(a),
-                            ..
-                        } if *a == cs
-                    ) {
-                        sched.wake_thread(i, Wake::Retest);
-                        break;
-                    }
-                }
-            }
-            ret = 0; // void
-        }
-        ("kernel32.dll", "TryEnterCriticalSection") => {
-            let cs = args[0];
-            let me = sched.current_tid();
-            let owner = mem.read_u32(cs + 12).map_err(|e| e.to_string())?;
-            if owner == 0 || owner == me {
-                let rc = mem.read_u32(cs + 8).map_err(|e| e.to_string())?;
-                mem.write_u32(cs + 12, me).map_err(|e| e.to_string())?;
-                mem.write_u32(cs + 8, rc + 1).map_err(|e| e.to_string())?;
-                mem.write_u32(cs + 4, 0).map_err(|e| e.to_string())?;
-                ret = 1;
-            } else {
-                ret = 0;
-            }
-        }
-        ("kernel32.dll", "DeleteCriticalSection") => {
-            let cs = args[0];
-            mem.write_u32(cs + 4, u32::MAX).map_err(|e| e.to_string())?;
-            mem.write_u32(cs + 12, 0).map_err(|e| e.to_string())?;
-            ret = 0; // void
         }
         ("kernel32.dll", "GetCurrentPackageId") => {
             ret = 0x3d54; // APPMODEL_ERROR_NO_PACKAGE (desktop app)

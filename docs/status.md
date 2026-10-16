@@ -1,15 +1,15 @@
 # 当前状态
 
-更新日期：2026-10-16。重构前基线为 `2e78377`；最新已验收运行时为 [内联同步契约](reports/refactoring-inline-sync-2026-10-16.md)，该报告记录冻结源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
+更新日期：2026-10-17。重构前基线为 `2e78377`；最新已验收运行时为 [Critical section 契约](reports/refactoring-critical-sections-2026-10-16.md)，该报告记录冻结源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
 
-十二项 SRW、条件变量和 InitOnce 契约已交付，移除重复 arity/DWORD 与名称分支；Win64 SRW 状态收进私有 owner，调度和返回帧保留在进程层。PE32 保持 ABI-only。后续继续处理 critical section、地址等待、USER、COM、图形等 legacy 家族。Mono 原生化已撤回，本轮继续排除。
+八项 critical section 契约与双架构 adapter 已交付，移除重复 ABI/arity/DWORD 与名称分支；保留架构布局、部分写入与返回故障差异，调度和返回帧仍在进程层。后续继续处理地址等待、线程、USER、COM、图形等 legacy 家族。Mono 原生化已撤回，本轮继续排除。
 
 ## 重构范围
 
 | 阶段 | 已交付 | 剩余范围 |
 | --- | --- | --- |
 | R0/R1 | 冻结输入、原创正式 fixture、领域测试 harness、GUID 唯一契约和双架构适配 | 随后续家族维护独立基线 |
-| R2 | 已验收 293 个 export 的契约；明细见下表 | 其余同步、USER、COM、图形等 legacy 家族 |
+| R2 | 已验收 301 个 export 的契约；明细见下表 | 其余同步、线程、USER、COM、图形等 legacy 家族 |
 | R3 | guest environment、双架构模块状态、Win64 文件、period 请求与 SRW 状态、PE32 TLS/FLS 私有 owner | PE32 其余资源、线程/COM 等；PE32 kernel 大范围抽取曾因性能撤回 |
 | R4/R5 | Process32 编排边界、owned host UI 请求、GDI 与像素状态分离 | 领域分发与资源 owner 随 R2/R3 继续收敛 |
 | R6 | 按用户要求忽略 | 不重建原生 Mono 路径 |
@@ -40,6 +40,7 @@
 | 日历 / 时区 / CPU 计时 | 11 | [调用与宿主边界](architecture/calendar.md)及[验收](reports/refactoring-calendar-2026-10-16.md) |
 | 多媒体计时器 | 3 | [调用与资源边界](architecture/multimedia.md)及[验收](reports/refactoring-multimedia-2026-10-16.md) |
 | SRW / 条件变量 / InitOnce | 12 | [状态与调度边界](architecture/inline-sync.md)及[验收](reports/refactoring-inline-sync-2026-10-16.md) |
+| Critical section | 8 | [调用与调度边界](architecture/critical-sections.md)及[验收](reports/refactoring-critical-sections-2026-10-16.md) |
 
 ## 当前执行路径与能力
 
@@ -56,9 +57,9 @@
 
 ## 验证与性能
 
-最近已验收的内联同步批次：release **479 passed / 7 ignored**，debug Win32/AMD64/FPU **326 passed**，显式 native **7 passed**，工具 **20 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。
+最近已验收的 critical section 批次：release **486 passed / 7 ignored**，debug Win32/AMD64/FPU **333 passed**，显式 native **7 passed**，工具 **20 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。
 
-内联同步的 36 条性能路径全部结果校验；SRW 网关 CPU −0.570%，最大回退 +1.837%，RSS 最多增加 176KiB；游戏前缀 CPU −1.825%，启动终点保持。各批次使用自己的基线，日历批次的 Local/Global 局部成本与其它历史离散轮次继续保留在对应报告，未将结构调整解释为游戏 FPS 提升。AMD64 event fixture 的重复导入已独立修正；旧验收保持冻结输入，后续按新哈希配对，详见[工具边界](architecture/validation-tools.md)。
+critical section 的 39 条性能路径全部结果校验；锁网关 CPU Win64 −3.853%、PE32 IR/raw −1.418%/−0.813%，最大回退 +2.234%，RSS 最多增加 128KiB；游戏前缀 CPU −0.149%，启动终点保持。各批次使用自己的基线，日历批次的 Local/Global 局部成本与其它历史离散轮次继续保留在对应报告，未将结构调整解释为游戏 FPS 提升。AMD64 event fixture 的重复导入已独立修正；旧验收保持冻结输入，后续按新哈希配对，详见[工具边界](architecture/validation-tools.md)。
 
 后续正式比较使用显式 [稳定启动协议](reports/refactoring-launch-protocol-2026-10-16.md)，固定 argv0、参数和 child cwd，并记录 shell SHA。默认工具行为保持；旧协议数据独立保留，汇总不跨协议或不同 work 合并。编译、正式计时、采样与 runtime diagnostics 串行执行。每个结构候选先完成正确性，再按至少三对轮换检查结果、CPU/wall/RSS 与输入哈希；超过门槛先调查，不把失败候选扩大到其它领域。
 

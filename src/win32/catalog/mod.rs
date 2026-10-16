@@ -3,6 +3,7 @@
 mod calendar;
 mod clocks;
 mod context;
+mod critical_sections;
 mod delays;
 mod files;
 mod guid;
@@ -27,6 +28,7 @@ mod waits;
 pub use calendar::{CalendarApi, CALENDAR_CONTRACTS};
 pub use clocks::{ClockApi, CLOCK_CONTRACTS};
 pub use context::{ContextApi, CONTEXT_CONTRACTS};
+pub use critical_sections::{CriticalSectionApi, CRITICAL_SECTION_CONTRACTS};
 pub use delays::{DelayApi, DELAY_CONTRACTS};
 pub use files::{FileApi, FILE_CONTRACTS};
 pub use guid::{GuidApi, GUID_CONTRACTS};
@@ -106,6 +108,7 @@ pub enum ApiId {
     Calendar(CalendarApi),
     Multimedia(MultimediaApi),
     InlineSync(InlineSyncApi),
+    CriticalSection(CriticalSectionApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -268,6 +271,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(CALENDAR_CONTRACTS.iter())
         .chain(MULTIMEDIA_CONTRACTS.iter())
         .chain(INLINE_SYNC_CONTRACTS.iter())
+        .chain(CRITICAL_SECTION_CONTRACTS.iter())
 }
 
 #[cfg(test)]

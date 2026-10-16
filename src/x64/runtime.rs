@@ -380,8 +380,6 @@ fn import_arity(name: &str) -> Option<usize> {
         | "GetSystemWindowsDirectoryW" => 2,
         "WaitOnAddress" => 4,
         "WakeByAddressSingle" | "WakeByAddressAll" => 1,
-        "InitializeCriticalSection" | "TryEnterCriticalSection" => 1,
-        "SetCriticalSectionSpinCount" => 2,
         "AddVectoredExceptionHandler" => 2,
         "RemoveVectoredExceptionHandler" => 1,
         "RaiseException" => 4,
@@ -458,12 +456,7 @@ fn import_arity(name: &str) -> Option<usize> {
         | "EncodePointer"
         | "DecodePointer"
         | "SetUnhandledExceptionFilter"
-        | "ExitProcess"
-        | "EnterCriticalSection"
-        | "LeaveCriticalSection"
-        | "DeleteCriticalSection" => 1,
-        "InitializeCriticalSectionAndSpinCount" => 2,
-        "InitializeCriticalSectionEx" => 3,
+        | "ExitProcess" => 1,
         "WriteConsoleW" => 5,
         _ => return None,
     })
@@ -495,7 +488,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         | "GetSystemWindowsDirectoryW" => &[1],
         "WaitOnAddress" => &[3],
         "WSASetLastError" => &[0],
-        "SetCriticalSectionSpinCount" => &[1],
         "AddVectoredExceptionHandler" => &[0],
         "RaiseException" => &[0, 1, 2],
         "RtlAddFunctionTable" => &[1],
@@ -531,8 +523,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "CreateProcessW" => &[4, 5],
         "CreatePipe" => &[3],
         "GetTempPathW" | "GetTempPath2W" | "IsProcessorFeaturePresent" | "ExitProcess" => &[0],
-        "InitializeCriticalSectionAndSpinCount" => &[1],
-        "InitializeCriticalSectionEx" => &[1, 2],
         "WriteConsoleW" => &[2],
         _ => &[],
     }
@@ -942,6 +932,9 @@ impl Runtime64 {
             ApiId::Delay(_) => unreachable!("delays use the bound process control route"),
             ApiId::InlineSync(_) => {
                 unreachable!("inline sync uses the bound process control route")
+            }
+            ApiId::CriticalSection(_) => {
+                unreachable!("critical sections use the bound process control route")
             }
             ApiId::Guid(id) => crate::win32::x64::guid::call(mem, id, args),
             ApiId::Identity(id) => {
@@ -3463,79 +3456,25 @@ impl Runtime64 {
                 self.exception_filter = args[0];
                 previous
             }
-            "InitializeCriticalSection"
-            | "InitializeCriticalSectionAndSpinCount"
-            | "InitializeCriticalSectionEx" => {
-                // Windows 10's initialization ignores the low 24 flag bits;
-                // Unity's resolver actually passes 1. NO_DEBUG_INFO is the
-                // only high-bit capability in this cooperative implementation.
-                if arity == 3 && args[2] & 0xfe000000 != 0 {
-                    return Err(format!(
-                        "unsupported Win64 critical section flags {:#x}",
-                        args[2]
-                    ));
-                }
-                let mut section = [0; 40];
-                // No debug object; cooperative ownership and recursion are real.
-                section[..8].copy_from_slice(&u64::MAX.to_le_bytes());
-                section[8..12].copy_from_slice(&(-1i32).to_le_bytes());
-                section[32..40].copy_from_slice(
-                    &(args.get(1).copied().unwrap_or(0) as u32 as u64).to_le_bytes(),
-                );
-                mem.write(args[0], &section)?;
-                (name != "InitializeCriticalSection") as u64
-            }
-            "SetCriticalSectionSpinCount" => {
-                mem.check(args[0], 40, READ)?;
-                mem.check(args[0] + 32, 8, WRITE)?;
-                let old = mem.read_int(args[0] + 32, 8)?;
-                mem.write_int(args[0] + 32, 8, args[1])?;
-                old
-            }
-            "EnterCriticalSection"
-            | "TryEnterCriticalSection"
-            | "LeaveCriticalSection"
-            | "DeleteCriticalSection" => {
-                let mut section = [0; 40];
-                mem.read(args[0], &mut section)?;
-                let owner = u64::from_le_bytes(section[16..24].try_into().unwrap());
-                let count = u32::from_le_bytes(section[12..16].try_into().unwrap());
-                let count = if matches!(name, "EnterCriticalSection" | "TryEnterCriticalSection") {
-                    if owner != 0 && owner != self.threads.active {
-                        if name == "TryEnterCriticalSection" {
-                            returned.regs[0] = 0;
-                            *cpu = returned;
-                            self.api_calls += 1;
-                            self.record(dll, name, args, 0);
-                            return Ok(Control::Returned);
-                        }
-                        mem.check(args[0], 40, WRITE)?;
-                        self.block(threads::Block::Critical(args[0]))?;
+            _ if matches!(binding.control, gateways::ControlImport::CriticalSection(_)) => {
+                use crate::win32::x64::critical_sections::{call, Outcome};
+                let gateways::ControlImport::CriticalSection(id) = binding.control else {
+                    unreachable!();
+                };
+                match call(mem, id, args, self.threads.active)? {
+                    Outcome::Value(value) => value,
+                    Outcome::TryFailed => {
+                        returned.regs[0] = 0;
+                        *cpu = returned;
+                        self.api_calls += 1;
+                        self.record(dll, name, args, 0);
+                        return Ok(Control::Returned);
+                    }
+                    Outcome::Block(pointer) => {
+                        self.block(threads::Block::Critical(pointer))?;
                         return Ok(Control::Blocked);
                     }
-                    count
-                        .checked_add(1)
-                        .filter(|&n| n <= i32::MAX as u32)
-                        .ok_or("critical section recursion overflow")?
-                } else if name == "LeaveCriticalSection" {
-                    if owner != self.threads.active || count == 0 {
-                        return Err("Win64 critical section not owned".into());
-                    }
-                    count - 1
-                } else {
-                    if count != 0 {
-                        return Err("deleting an owned Win64 critical section".into());
-                    }
-                    0
-                };
-                section[8..12].copy_from_slice(&(count as i32 - 1).to_le_bytes());
-                section[12..16].copy_from_slice(&count.to_le_bytes());
-                section[16..24].copy_from_slice(
-                    &(if count == 0 { 0 } else { self.threads.active }).to_le_bytes(),
-                );
-                mem.write(args[0], &section)?;
-                self.unblock();
-                (name == "TryEnterCriticalSection") as u64
+                }
             }
             "ExitProcess" => {
                 self.api_calls += 1;

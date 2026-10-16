@@ -262,3 +262,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 十二项 export 接入 InlineSyncApi，删除重复 arity/DWORD 与名称/前后缀分发；Win64 SRW map 收进私有 owner，adapter 成功写 guest token 后提交 owner。显式保留完成、Try失败和两种阻塞 outcome，进程保留 CPU、调度与 trace/API count 顺序；PE32 保持 ABI-only。完整 release 479、debug 326、native 7、工具 20 项及 fmt/strict Clippy/build 通过。
 
 36 条性能路径全部校验，SRW 网关 CPU −0.570%，最大回退 +1.837%，RSS 最多增加 176KiB；Alice 前缀 CPU −1.825%，保持隐藏窗口和零 Draw/Present。268 个 Rust 文件核对一致，体积增加 6,128 bytes，契约累计 293 个 export。完整接受决定见[内联同步验收](refactoring-inline-sync-2026-10-16.md)。
+
+## R2 Critical section
+
+八项 export 接入 CriticalSectionApi，删除重复 ABI/arity/DWORD 和根名称分支；双架构 adapter 只借内存和 tid，保留 24/40 字节布局、逐字段部分故障、权限/flags/归属、返回帧与调度顺序。八项独立领域回归及完整 release 486、debug 333、native 7、工具 20 项和 fmt/strict Clippy/build 通过。
+
+39 条性能路径全部校验，锁网关 CPU Win64 −3.853%、PE32 IR/raw −1.418%/−0.813%，最大回退 +2.234%，RSS 最多增加 128KiB；Alice 前缀 CPU −0.149%，保持隐藏窗口和零 Draw/Present。273 个 Rust 文件核对一致，体积减少 976 bytes，契约累计 301 个 export。2026-10-17 接受，完整记录见[critical section 验收](refactoring-critical-sections-2026-10-16.md)。
