@@ -40,6 +40,8 @@ mod sections;
 mod simd;
 #[path = "x64/sync.rs"]
 mod sync;
+#[path = "x64/thread_properties.rs"]
+mod thread_properties;
 #[path = "x64/user.rs"]
 mod user;
 

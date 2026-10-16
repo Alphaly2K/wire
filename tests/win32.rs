@@ -47,5 +47,7 @@ mod paths;
 mod sections;
 #[path = "win32/sync.rs"]
 mod sync;
+#[path = "win32/thread_properties.rs"]
+mod thread_properties;
 #[path = "win32/user.rs"]
 mod user;
