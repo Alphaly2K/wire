@@ -4,6 +4,7 @@ use std::{
     collections::BTreeMap,
     time::{Duration, Instant},
 };
+mod address;
 
 pub(crate) struct Spawn {
     pub id: u64,
@@ -62,7 +63,7 @@ pub(super) struct Threads {
     pub next: u64,
     pub stack_size: u64,
     pub enabled: bool,
-    pub next_address_wait: u64,
+    next_address_wait: u64,
 }
 impl Threads {
     pub fn new(stack_size: u64) -> Self {
@@ -94,6 +95,17 @@ impl Threads {
             enabled: false,
             next_address_wait: 0,
         }
+    }
+    fn block(&mut self, reason: Block) -> Result<(), String> {
+        if !self.enabled {
+            return Err("Win64 blocking operation requires a thread scheduler".into());
+        }
+        let thread = self.entries.get_mut(&self.active).unwrap();
+        // Preserve the original deadline and retry state.
+        if thread.block.is_none() {
+            thread.block = Some(reason);
+        }
+        Ok(())
     }
     pub fn id(&self, handle: u64) -> Result<u64, u32> {
         if handle == u64::MAX - 1 {
@@ -299,15 +311,7 @@ impl Runtime64 {
             })
     }
     pub(super) fn block(&mut self, reason: Block) -> Result<(), String> {
-        if !self.threads.enabled {
-            return Err("Win64 blocking operation requires a thread scheduler".into());
-        }
-        let t = self.threads.entries.get_mut(&self.threads.active).unwrap();
-        // Preserve a wait's original deadline when retrying a gateway.
-        if t.block.is_none() {
-            t.block = Some(reason);
-        }
-        Ok(())
+        self.threads.block(reason)
     }
     pub(super) fn unblock(&mut self) {
         self.threads

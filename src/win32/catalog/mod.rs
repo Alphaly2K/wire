@@ -1,5 +1,6 @@
 //! Export identity and ABI plans are resolved during binding, not execution.
 //! Unconverted families remain on explicit legacy routes.
+mod address_waits;
 mod calendar;
 mod clocks;
 mod context;
@@ -25,6 +26,7 @@ mod timers;
 mod version;
 mod virtual_memory;
 mod waits;
+pub use address_waits::{AddressWaitApi, ADDRESS_WAIT_CONTRACTS};
 pub use calendar::{CalendarApi, CALENDAR_CONTRACTS};
 pub use clocks::{ClockApi, CLOCK_CONTRACTS};
 pub use context::{ContextApi, CONTEXT_CONTRACTS};
@@ -109,6 +111,7 @@ pub enum ApiId {
     Multimedia(MultimediaApi),
     InlineSync(InlineSyncApi),
     CriticalSection(CriticalSectionApi),
+    AddressWait(AddressWaitApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -272,6 +275,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(MULTIMEDIA_CONTRACTS.iter())
         .chain(INLINE_SYNC_CONTRACTS.iter())
         .chain(CRITICAL_SECTION_CONTRACTS.iter())
+        .chain(ADDRESS_WAIT_CONTRACTS.iter())
 }
 
 #[cfg(test)]

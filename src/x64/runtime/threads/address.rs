@@ -1,15 +1,17 @@
-//! Cooperative WaitOnAddress queues. Guest code runs only in Process64.
-use super::{threads::Block, Memory, Runtime64};
+//! Address wait queues belong to thread metadata; Process64 owns guest execution.
+use super::{Block, Threads};
+use crate::x64::memory::Memory;
 use std::time::{Duration, Instant};
-impl Runtime64 {
+impl Threads {
     /// None means the validated gateway remains blocked without consuming its frame.
-    pub(super) fn wait_address(
+    pub(in crate::x64::runtime) fn wait_address(
         &mut self,
         mem: &mut Memory,
         args: &[u64],
+        last_error: u64,
     ) -> Result<Option<u64>, String> {
         if !matches!(args[2], 1 | 2 | 4 | 8) {
-            self.set_error(mem, 87)?;
+            mem.write_int(last_error, 4, 87)?;
             return Ok(Some(0));
         }
         if let Some(Block::Address {
@@ -17,7 +19,7 @@ impl Runtime64 {
             notified,
             deadline,
             ..
-        }) = &self.threads.entries[&self.threads.active].block
+        }) = &self.entries[&self.active].block
         {
             if *address != args[0] {
                 return Err("Win64 address wait changed while blocked".into());
@@ -26,7 +28,7 @@ impl Runtime64 {
                 return Ok(Some(1));
             }
             if deadline.is_some_and(|d| Instant::now() >= d) {
-                self.set_error(mem, 1460)?;
+                mem.write_int(last_error, 4, 1460)?;
                 return Ok(Some(0));
             }
             return Ok(None);
@@ -39,10 +41,10 @@ impl Runtime64 {
             return Ok(Some(1));
         }
         if args[3] == 0 {
-            self.set_error(mem, 1460)?;
+            mem.write_int(last_error, 4, 1460)?;
             return Ok(Some(0));
         }
-        let ticket = self.threads.next_address_wait;
+        let ticket = self.next_address_wait;
         let next = ticket
             .checked_add(1)
             .ok_or("Win64 address wait sequence exhausted")?;
@@ -53,13 +55,12 @@ impl Runtime64 {
             deadline: (args[3] != u32::MAX as u64)
                 .then(|| Instant::now() + Duration::from_millis(args[3])),
         })?;
-        self.threads.next_address_wait = next;
+        self.next_address_wait = next;
         Ok(None)
     }
-    pub(super) fn wake_address(&mut self, address: u64, all: bool) {
+    pub(in crate::x64::runtime) fn wake_address(&mut self, address: u64, all: bool) {
         let now = Instant::now();
         let first = self
-            .threads
             .entries
             .iter()
             .filter_map(|(&id, thread)| match &thread.block {
@@ -78,7 +79,7 @@ impl Runtime64 {
             })
             .min()
             .map(|(_, id)| id);
-        for (&id, thread) in &mut self.threads.entries {
+        for (&id, thread) in &mut self.entries {
             if all || Some(id) == first {
                 if let Some(Block::Address {
                     address: waiting,

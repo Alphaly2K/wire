@@ -8,7 +8,6 @@ use std::{
     collections::BTreeMap,
     time::{Instant, UNIX_EPOCH},
 };
-mod address;
 mod apc;
 mod automation;
 mod command;
@@ -281,11 +280,6 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
         && !(dll.eq_ignore_ascii_case("d3d12.dll") && dxgi::d3d12_export(name))
         && !(dll.eq_ignore_ascii_case("d3d11.dll") && dxgi::d3d11_export(name))
         && !(dll == dxgi::DLL && dxgi::arity(name).is_some())
-        && !(dll.eq_ignore_ascii_case("api-ms-win-core-synch-l1-2-0.dll")
-            && matches!(
-                name,
-                "WaitOnAddress" | "WakeByAddressSingle" | "WakeByAddressAll"
-            ))
         && !(dll.eq_ignore_ascii_case("bcrypt.dll")
             && matches!(
                 name,
@@ -378,8 +372,6 @@ fn import_arity(name: &str) -> Option<usize> {
         | "GetWindowsDirectoryW"
         | "GetSystemWindowsDirectoryA"
         | "GetSystemWindowsDirectoryW" => 2,
-        "WaitOnAddress" => 4,
-        "WakeByAddressSingle" | "WakeByAddressAll" => 1,
         "AddVectoredExceptionHandler" => 2,
         "RemoveVectoredExceptionHandler" => 1,
         "RaiseException" => 4,
@@ -486,7 +478,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         | "GetWindowsDirectoryW"
         | "GetSystemWindowsDirectoryA"
         | "GetSystemWindowsDirectoryW" => &[1],
-        "WaitOnAddress" => &[3],
         "WSASetLastError" => &[0],
         "AddVectoredExceptionHandler" => &[0],
         "RaiseException" => &[0, 1, 2],
@@ -936,6 +927,9 @@ impl Runtime64 {
             ApiId::CriticalSection(_) => {
                 unreachable!("critical sections use the bound process control route")
             }
+            ApiId::AddressWait(_) => {
+                unreachable!("address waits use the bound process control route")
+            }
             ApiId::Guid(id) => crate::win32::x64::guid::call(mem, id, args),
             ApiId::Identity(id) => {
                 crate::win32::x64::identity::call(mem, id, args, &self.profile, self.teb() + 0x68)
@@ -1201,13 +1195,22 @@ impl Runtime64 {
                     required as u64 - 1
                 }
             }
-            "WaitOnAddress" => match self.wait_address(mem, args)? {
-                Some(value) => value,
-                None => return Ok(Control::Blocked),
-            },
-            "WakeByAddressSingle" | "WakeByAddressAll" => {
-                self.wake_address(args[0], name == "WakeByAddressAll");
-                0
+            _ if matches!(binding.control, gateways::ControlImport::AddressWait(_)) => {
+                use crate::win32::catalog::AddressWaitApi;
+                let gateways::ControlImport::AddressWait(id) = binding.control else {
+                    unreachable!();
+                };
+                if id == AddressWaitApi::Wait {
+                    let last_error = self.teb() + 0x68;
+                    match self.threads.wait_address(mem, args, last_error)? {
+                        Some(value) => value,
+                        None => return Ok(Control::Blocked),
+                    }
+                } else {
+                    self.threads
+                        .wake_address(args[0], id == AddressWaitApi::WakeAll);
+                    0
+                }
             }
             _ if binding.groups & (1 << 14) != 0 && name != "WSAWaitForMultipleEvents" => {
                 self.winsock_call(mem, name, args)?

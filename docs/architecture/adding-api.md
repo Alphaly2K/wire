@@ -1,6 +1,6 @@
 # 新增 Win32 API：GUID 试点
 
-`StringFromGUID2`、`CLSIDFromString`、`IIDFromString`、六个身份、八个版本、42 个 NLS、31 个模块、53 个文件、六个 Interlocked/SLIST、13 个路径辅助、六个通用句柄、六个时钟、七个进程身份/LastError 及八个 TLS/FLS export 已迁入新边界。普通 scalar API 的操作步骤如下；其它家族目前仍使用旧分发器，不能将 ABI 已知当作完整实现。
+已迁移家族及各架构策略见[当前状态](../status.md)，本文保留 GUID 试点说明并补充后续控制路由规则。普通 scalar API 的操作步骤如下；尚未迁移的家族继续走明确的 legacy 路由，ABI 已知与实现能力分别记录。
 
 1. 在 `src/win32/catalog/` 的所属领域声明 export、DLL/架构范围、typed ID、参数类型、返回约定和限制。GUID 的一份声明派生 PE32 stdcall 清栈和 Win64 DWORD 截断，执行时不查询字符串表。
 2. 把不依赖 guest 内存和进程状态的算法放入领域纯核。GUID 的 Windows little-endian 布局、canonical parser/formatter 位于 `win32/com/guid.rs`；纯核不读 CPU，不写 LastError。
@@ -38,3 +38,11 @@ callback API 使用专用架构控制路由。NLS 的 `EnumSystemLocalesEx` 在�
 模块家族把静态导入 DLL 与动态查询 DLL 分开声明：默认一致，有历史差异时显式设置 `lookup_dlls`，且 lookup provider 必须属于 import provider 集合。Win64 fresh-provider 的 PSAPI 查询可见性与已有 gateway registry fallback 分别保持，新增声明不能替换后者。K32 与无前缀名称冷绑定为相同行为 ID。`LoadLibrary`、`FreeLibrary`、`GetProcAddress` 使用模块控制路由，adapter 返回 Value、Returned 或 Load 请求，进程框架保存 frame、API count、trace、unblock 和加载提交顺序。新 API 若产生控制请求，应先固定这些顺序，再选择其专用 outcome；参见 [模块契约](modules.md)。
 
 文件家族先收敛契约与 bound ID，adapter 继续留在原调用边界。`SetFilePointerEx` 的 Int64 参数在 PE32 占两个 DWORD slot，Win64 占一个 carrier；输出检查与定位提交先后按架构保留。普通文件、pipe、标准 endpoint 的完成与 unblock 次序各自保持。扩展契约无需同时抽取结果框架或移动状态 owner；这些工作分别验收。CWD 容量查询、小 buffer、file-part 输出 fault 与 return-slot alias 都有独立行为基线；详见 [文件契约](files.md)。
+
+## 同步与调度控制
+
+阻塞 API 冷绑定为专用 `ControlImport`，普通 `catalog_call -> u64` 不接管它们。adapter 用领域 outcome 表示完成、Try 失败、阻塞或唤醒请求；进程处理 CPU、scheduler、trace 和计数。特别保留 Try 失败是否解除既有 blocked 状态、阻塞是否消费返回帧，以及最后一次递归释放才唤醒等待者等区别。真实 guest 线程与小 work 切片应覆盖重试路径；参见 [SRW/InitOnce](inline-sync.md)和[critical section](critical-sections.md)。
+
+状态 owner 按实际资源形成：SRW 的 map 私有封装，成功写 guest token 后才提交；地址等待的序号、队列和注册属于线程 owner。具有实际内存布局差异的 PE32/Win64 codec 分别保留，不用全结构预检替换既有逐字段写入。owner 只借所需内存和错误槽，避免再次借用整个 Runtime64/ApiState；CPU 执行仍留在进程边界。
+
+PE32 的 `Absent` 与 `LegacyUnimplemented` 对清栈有实际区别。WaitOnAddress 家族原本 ABI 未知，因此即使名字进入 catalog，X86 plan 仍为空 DLL 集合，保留 legacy unknown ABI 的零参数清栈；不得从 Win64 参数表自动补出 PE32 ABI。已有 Wine ABI 的 SRW/InitOnce 则保持 ABI-only。分别固定旧行为再迁移，见[地址等待](address-waits.md)。

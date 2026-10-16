@@ -268,3 +268,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 八项 export 接入 CriticalSectionApi，删除重复 ABI/arity/DWORD 和根名称分支；双架构 adapter 只借内存和 tid，保留 24/40 字节布局、逐字段部分故障、权限/flags/归属、返回帧与调度顺序。八项独立领域回归及完整 release 486、debug 333、native 7、工具 20 项和 fmt/strict Clippy/build 通过。
 
 39 条性能路径全部校验，锁网关 CPU Win64 −3.853%、PE32 IR/raw −1.418%/−0.813%，最大回退 +2.234%，RSS 最多增加 128KiB；Alice 前缀 CPU −0.149%，保持隐藏窗口和零 Draw/Present。273 个 Rust 文件核对一致，体积减少 976 bytes，契约累计 301 个 export。2026-10-17 接受，完整记录见[critical section 验收](refactoring-critical-sections-2026-10-16.md)。
+
+## R2/R3 地址等待
+
+三项 export 接入 AddressWaitApi，删除根 provider 特例、arity/DWORD 与名称分发；PE32 保持 unknown ABI 和零参数清栈。地址队列、私有序号及阻塞注册由 Threads owner 管理，helper 脱离总 Runtime64，CPU/公共返回仍在进程层。四项领域回归及完整 release 488、debug 335、native 7、工具 20 项和 fmt/strict Clippy/build 通过。
+
+40 条性能路径全部校验，新网关 CPU −0.351%，最大回退 +1.907%，RSS 最多增加 80KiB；Alice 前缀 CPU −0.408%、wall +0.460%，保持隐藏窗口和零 Draw/Present。274 个 Rust 文件核对一致，体积增加 1,904 bytes，契约累计 304 个 export。2026-10-17 接受，完整记录见[地址等待验收](refactoring-address-waits-2026-10-17.md)。

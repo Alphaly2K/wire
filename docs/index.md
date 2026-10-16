@@ -38,6 +38,7 @@
 - [多媒体计时器调用与资源边界](architecture/multimedia.md)及[契约验收](reports/refactoring-multimedia-2026-10-16.md)：三项接口、私有 period owner、静态/动态 provider 差异、35 条性能路径与同哈希扩样。
 - [SRW、条件变量与 InitOnce 边界](architecture/inline-sync.md)及[契约验收](reports/refactoring-inline-sync-2026-10-16.md)：十二项接口、私有 SRW owner、真实线程阻塞重试、36 条性能路径。
 - [Critical section 调用与调度边界](architecture/critical-sections.md)及[契约验收](reports/refactoring-critical-sections-2026-10-16.md)：八项接口、双架构部分写入/返回帧差异、真实线程重试与 39 条性能路径。
+- [地址等待与线程状态边界](architecture/address-waits.md)及[契约验收](reports/refactoring-address-waits-2026-10-17.md)：三项接口、线程 owner、重试/到达顺序与 PE32 未知 ABI，40 条性能路径。
 - [release 编译单元候选](reports/refactoring-release-codegen-2026-10-15.md)：独立构建配置、同二进制对照及长样本调查。
 - [网关边界候选](reports/refactoring-gateway-boundary-2026-10-15.md)、[页缓存内联候选](reports/refactoring-page-cache-inline-2026-10-15.md)、[helper 布局候选](reports/refactoring-memory-helper-layout-2026-10-15.md)：已撤回实现和保留的测量证据。
 - [本次渐进重构记录](reports/refactoring-2026-10-14.md)：阶段交付、行为差异与验收结果。
