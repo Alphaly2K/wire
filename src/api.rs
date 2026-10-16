@@ -1101,9 +1101,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
         add(
             "winmm.dll",
             &[
-                ("timeBeginPeriod", 4),
-                ("timeEndPeriod", 4),
-                ("timeGetDevCaps", 8),
                 ("timeSetEvent", 20),
                 ("timeKillEvent", 4),
                 ("waveOutGetNumDevs", 0),
@@ -1747,6 +1744,16 @@ pub fn dispatch(
             };
             (ret, note) =
                 crate::win32::x86::calendar::call(id, args[0], mem, &mut state.last_error);
+        }
+        _ if matches!(
+            binding.typed,
+            Some(crate::win32::catalog::ApiId::Multimedia(_))
+        ) =>
+        {
+            let Some(crate::win32::catalog::ApiId::Multimedia(id)) = binding.typed else {
+                unreachable!();
+            };
+            (ret, note) = crate::win32::x86::multimedia::call(id, &args, mem);
         }
         (
             "winmm.dll",

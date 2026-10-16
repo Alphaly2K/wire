@@ -13,6 +13,7 @@ mod interlocked;
 mod local_memory;
 mod locals;
 mod modules;
+mod multimedia;
 mod mutexes;
 mod nls;
 mod paths;
@@ -35,6 +36,7 @@ pub use interlocked::{InterlockedApi, INTERLOCKED_CONTRACTS};
 pub use local_memory::{LocalMemoryApi, LOCAL_MEMORY_CONTRACTS};
 pub use locals::{LocalApi, LOCAL_CONTRACTS};
 pub use modules::{ModuleApi, ModuleQueryApi, MODULE_CONTRACTS, MODULE_QUERY_CONTRACTS};
+pub use multimedia::{MultimediaApi, MULTIMEDIA_CONTRACTS};
 pub use mutexes::{MutexApi, MUTEX_CONTRACTS};
 pub use nls::{NlsApi, NLS_CONTRACTS};
 pub use paths::{PathApi, PATH_CONTRACTS};
@@ -100,6 +102,7 @@ pub enum ApiId {
     LocalMemory(LocalMemoryApi),
     SystemProfile(SystemProfileApi),
     Calendar(CalendarApi),
+    Multimedia(MultimediaApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -260,6 +263,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(LOCAL_MEMORY_CONTRACTS.iter())
         .chain(SYSTEM_PROFILE_CONTRACTS.iter())
         .chain(CALENDAR_CONTRACTS.iter())
+        .chain(MULTIMEDIA_CONTRACTS.iter())
 }
 
 #[cfg(test)]

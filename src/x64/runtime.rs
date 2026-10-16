@@ -78,7 +78,7 @@ pub struct WindowEvent {
 pub struct Runtime64 {
     api_inventory: Option<BTreeMap<(String, String, String), u64>>,
     start: Instant,
-    timer_periods: BTreeMap<u32, u32>,
+    timer_periods: crate::win32::kernel::multimedia::PeriodRequests,
     image_base: u64,
     next_alloc: u64,
     allocations: BTreeMap<u64, (usize, u64)>,
@@ -277,8 +277,6 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
         && !(dll.eq_ignore_ascii_case("ntdll.dll") && name == "NtQueryDirectoryFile")
         && !(dll.eq_ignore_ascii_case("ws2_32.dll") && sockets::is_call(name))
         && !(dll.eq_ignore_ascii_case("secur32.dll") && sspi::arity(name).is_some())
-        && !(dll.eq_ignore_ascii_case("winmm.dll")
-            && matches!(name, "timeBeginPeriod" | "timeEndPeriod" | "timeGetDevCaps"))
         && !(dll.eq_ignore_ascii_case("dxgi.dll") && dxgi::export(name))
         && !(dll.eq_ignore_ascii_case("d3d12.dll") && dxgi::d3d12_export(name))
         && !(dll.eq_ignore_ascii_case("d3d11.dll") && dxgi::d3d11_export(name))
@@ -410,8 +408,6 @@ fn import_arity(name: &str) -> Option<usize> {
         "SHGetKnownFolderPath" => 4,
         "CoTaskMemAlloc" | "CoTaskMemFree" => 1,
         "CoCreateInstance" => 5,
-        "timeBeginPeriod" | "timeEndPeriod" => 1,
-        "timeGetDevCaps" => 2,
         "CreateToolhelp32Snapshot"
         | "Process32First"
         | "Process32Next"
@@ -541,8 +537,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "RoInitialize" => &[0],
         "CoInitializeEx" => &[1],
         "CoCreateInstance" => &[2],
-        "timeBeginPeriod" | "timeEndPeriod" => &[0],
-        "timeGetDevCaps" => &[1],
         "SetErrorMode" | "SetThreadErrorMode" => &[0],
         "InitializeProcThreadAttributeList" => &[1, 2],
         "UpdateProcThreadAttribute" => &[1],
@@ -626,7 +620,7 @@ impl Runtime64 {
         Ok(Self {
             api_inventory: None,
             start: Instant::now(),
-            timer_periods: BTreeMap::new(),
+            timer_periods: Default::default(),
             image_base,
             next_alloc: 0x400000000,
             allocations: BTreeMap::new(),
@@ -986,6 +980,9 @@ impl Runtime64 {
             }
             ApiId::Calendar(id) => {
                 crate::win32::x64::calendar::call(mem, id, args, self.teb() + 0x68)
+            }
+            ApiId::Multimedia(id) => {
+                crate::win32::x64::multimedia::call(id, args, mem, &mut self.timer_periods)
             }
             ApiId::Context(id) => {
                 use crate::win32::catalog::ContextApi;
@@ -3149,44 +3146,6 @@ impl Runtime64 {
                 } else {
                     self.set_error(mem, 50)?;
                     0
-                }
-            }
-            "timeGetDevCaps" => {
-                if args[1] < 8 || args[0] == 0 {
-                    97
-                } else {
-                    mem.write(
-                        args[0],
-                        &[1u32.to_le_bytes(), u32::MAX.to_le_bytes()].concat(),
-                    )?;
-                    0
-                }
-            }
-            "timeBeginPeriod" => {
-                let period = args[0] as u32;
-                if period == 0
-                    || (self.timer_periods.len() >= 256
-                        && !self.timer_periods.contains_key(&period))
-                {
-                    97
-                } else {
-                    let refs = self.timer_periods.entry(period).or_default();
-                    *refs = refs
-                        .checked_add(1)
-                        .ok_or("multimedia timer reference capacity")?;
-                    0
-                }
-            }
-            "timeEndPeriod" => {
-                let period = args[0] as u32;
-                if let Some(refs) = self.timer_periods.get_mut(&period) {
-                    *refs -= 1;
-                    if *refs == 0 {
-                        self.timer_periods.remove(&period);
-                    }
-                    0
-                } else {
-                    97
                 }
             }
             "GetCommandLineA" => COMMAND_A,

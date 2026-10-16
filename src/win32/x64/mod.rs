@@ -4,6 +4,7 @@ pub(crate) mod guid;
 pub(crate) mod identity;
 pub(crate) mod interlocked;
 pub(crate) mod modules;
+pub(crate) mod multimedia;
 pub(crate) mod nls;
 pub(crate) mod system_profile;
 pub(crate) mod text;

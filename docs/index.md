@@ -35,6 +35,7 @@
 - [Local/Global 共享资源与调用边界](architecture/local-memory.md)及[契约验收](reports/refactoring-local-memory-2026-10-16.md)：14 项接口、成对资源共享、错误及返回顺序、28 条性能路径。
 - [系统信息与内存状态调用边界](architecture/system-profile.md)及[契约验收](reports/refactoring-system-profile-2026-10-16.md)：四项接口、双架构布局、public facade、31 条性能路径与路由顺序调查。
 - [日历、时区与 CPU 计时调用边界](architecture/calendar.md)及[契约验收](reports/refactoring-calendar-2026-10-16.md)：11 项接口、时区独立模块、宿主 CPU 计时、32 条性能路径及局部成本调查。
+- [多媒体计时器调用与资源边界](architecture/multimedia.md)及[契约验收](reports/refactoring-multimedia-2026-10-16.md)：三项接口、私有 period owner、静态/动态 provider 差异、35 条性能路径与同哈希扩样。
 - [release 编译单元候选](reports/refactoring-release-codegen-2026-10-15.md)：独立构建配置、同二进制对照及长样本调查。
 - [网关边界候选](reports/refactoring-gateway-boundary-2026-10-15.md)、[页缓存内联候选](reports/refactoring-page-cache-inline-2026-10-15.md)、[helper 布局候选](reports/refactoring-memory-helper-layout-2026-10-15.md)：已撤回实现和保留的测量证据。
 - [本次渐进重构记录](reports/refactoring-2026-10-14.md)：阶段交付、行为差异与验收结果。

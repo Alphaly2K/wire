@@ -167,11 +167,6 @@ impl Runtime64 {
                         || devices::export(&provider, &function)
                         || winrt::export(&provider, &function)
                         || com_export(&provider, &function)
-                        || (provider == "winmm.dll"
-                            && matches!(
-                                function.as_str(),
-                                "timeBeginPeriod" | "timeEndPeriod" | "timeGetDevCaps"
-                            ))
                         || (provider == "user32.dll" && display::arity(&function).is_some())
                         || (provider == "user32.dll" && user::arity(&function).is_some())
                         || (provider == "imm32.dll" && user::ime_arity(&function).is_some())

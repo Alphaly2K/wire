@@ -44,33 +44,16 @@ pub fn dispatch(
             ));
         }
     }
-    if !(dll == "winmm.dll"
-        && matches!(name, "timeGetDevCaps" | "timeBeginPeriod" | "timeEndPeriod"))
-    {
-        return None;
+    if dll == "winmm.dll" {
+        if let Some(contract) = crate::win32::catalog::MULTIMEDIA_CONTRACTS
+            .iter()
+            .find(|contract| contract.name == name)
+        {
+            let crate::win32::catalog::ApiId::Multimedia(id) = contract.id else {
+                unreachable!();
+            };
+            return Some(crate::win32::x86::multimedia::call(id, a, mem));
+        }
     }
-    let result = (|| -> Result<u32, u32> {
-        match name {
-            "timeGetDevCaps" => {
-                if a[1] < 8 {
-                    return Ok(97);
-                }
-                let bytes = [1u32.to_le_bytes(), u32::MAX.to_le_bytes()].concat();
-                Ok(if mem.write_bytes(a[0], &bytes).is_ok() {
-                    0
-                } else {
-                    97
-                })
-            }
-            "timeBeginPeriod" | "timeEndPeriod" => Ok(if a[0] == 0 { 97 } else { 0 }),
-            _ => unreachable!(),
-        }
-    })();
-    Some(match result {
-        Ok(v) => (v, "x86 guest hardware / monotonic clock profile".into()),
-        Err(e) => {
-            state.last_error = e;
-            (0, format!("Win32 error {e}"))
-        }
-    })
+    None
 }

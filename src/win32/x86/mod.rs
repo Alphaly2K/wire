@@ -6,6 +6,7 @@ pub(crate) mod host;
 pub(crate) mod interlocked;
 pub(crate) mod local_memory;
 pub(crate) mod modules;
+pub(crate) mod multimedia;
 pub(crate) mod nls;
 pub(crate) mod system_profile;
 pub(crate) mod version;
