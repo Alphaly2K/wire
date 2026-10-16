@@ -3,6 +3,153 @@
 use super::*;
 
 #[test]
+fn local_memory_keeps_win64_aliases_errors_full_width_and_free_frame_preflight() {
+    for dll in ["kernel32.dll", "kernelbase.dll"] {
+        for prefix in ["Local", "Global"] {
+            let (mut mem, mut cpu, mut runtime) = startup();
+            let alloc = format!("{prefix}Alloc");
+            let free = format!("{prefix}Free");
+            let block = startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                dll,
+                &alloc,
+                &[0xfacefeed00000040, 23],
+            );
+            assert_ne!(block, 0);
+            assert_eq!(mem.read_int(block, 8).unwrap(), 0);
+            assert_eq!(
+                startup_dll_call(
+                    &mut mem,
+                    &mut cpu,
+                    &mut runtime,
+                    dll,
+                    &format!("{prefix}Size"),
+                    &[block]
+                ),
+                23
+            );
+            assert_eq!(
+                startup_dll_call(
+                    &mut mem,
+                    &mut cpu,
+                    &mut runtime,
+                    dll,
+                    &format!("{prefix}Lock"),
+                    &[block]
+                ),
+                block
+            );
+            assert_eq!(
+                startup_dll_call(
+                    &mut mem,
+                    &mut cpu,
+                    &mut runtime,
+                    dll,
+                    &format!("{prefix}Flags"),
+                    &[block]
+                ),
+                0
+            );
+            assert_eq!(
+                startup_dll_call(
+                    &mut mem,
+                    &mut cpu,
+                    &mut runtime,
+                    dll,
+                    &format!("{prefix}Unlock"),
+                    &[block]
+                ),
+                0
+            );
+            assert_eq!(
+                mem.read_int(wire::x64::runtime::TEB + 0x68, 4).unwrap(),
+                158
+            );
+            let invalid = 0xfacefeed12345678;
+            assert_eq!(
+                startup_dll_call(
+                    &mut mem,
+                    &mut cpu,
+                    &mut runtime,
+                    dll,
+                    &format!("{prefix}Flags"),
+                    &[invalid]
+                ),
+                0x8000
+            );
+            assert_eq!(mem.read_int(wire::x64::runtime::TEB + 0x68, 4).unwrap(), 6);
+            assert_eq!(
+                startup_dll_call(&mut mem, &mut cpu, &mut runtime, dll, &free, &[invalid]),
+                invalid
+            );
+            assert_eq!(
+                startup_dll_call(&mut mem, &mut cpu, &mut runtime, dll, &alloc, &[2, 23]),
+                0
+            );
+            assert_eq!(mem.read_int(wire::x64::runtime::TEB + 0x68, 4).unwrap(), 50);
+            assert_eq!(
+                startup_dll_call(
+                    &mut mem,
+                    &mut cpu,
+                    &mut runtime,
+                    dll,
+                    &alloc,
+                    &[0, 0x100000000]
+                ),
+                0
+            );
+            assert_eq!(mem.read_int(wire::x64::runtime::TEB + 0x68, 4).unwrap(), 8);
+            cpu.regs[4] = 0;
+            cpu.regs[1] = block;
+            let before = cpu.clone();
+            let calls = runtime.api_calls;
+            assert!(runtime.dispatch(dll, &free, &mut cpu, &mut mem).is_err());
+            assert_eq!(cpu, before);
+            assert_eq!(runtime.api_calls, calls);
+            assert_eq!(
+                startup_dll_call(
+                    &mut mem,
+                    &mut cpu,
+                    &mut runtime,
+                    dll,
+                    "GlobalSize",
+                    &[block]
+                ),
+                23
+            );
+            mem.write_int(block, 8, 0x123456789abcdef0).unwrap();
+            let grown = startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                dll,
+                &format!("{prefix}ReAlloc"),
+                &[block, 8192, 0xfacefeed00000042],
+            );
+            assert_ne!(grown, 0);
+            assert_ne!(grown, block);
+            assert_eq!(mem.read_int(grown, 8).unwrap(), 0x123456789abcdef0);
+            assert_eq!(mem.read_int(grown + 23, 1).unwrap(), 0);
+            assert!(mem.read_int(block, 1).is_err());
+            assert_eq!(
+                startup_dll_call(
+                    &mut mem,
+                    &mut cpu,
+                    &mut runtime,
+                    dll,
+                    "GlobalFree",
+                    &[grown]
+                ),
+                0
+            );
+            assert_eq!(mem.read_int(wire::x64::runtime::TEB + 0x68, 4).unwrap(), 8);
+        }
+    }
+}
+
+#[test]
 fn heap_contract_keeps_win64_handles_size_t_flags_and_free_frame_preflight() {
     for dll in ["kernel32.dll", "kernelbase.dll"] {
         let (mut mem, mut cpu, mut runtime) = startup();

@@ -52,3 +52,8 @@ API count 均为 `n+1`。不依赖宿主分配地址，需显式选择。
 再循环 HeapSize 累加原始分配长度。n=`max(1, work//8)`，两端返回值为 `23*n`，
 API count 为 `n+2`；PE32 retired=`7*n+18`，Win64 retired=`7*n+21`、
 work=`8*n+23`。使用独立 OFT/IAT 和三项导入，不依赖实际分配地址。
+
+`local_memory_gateway.py` 的双架构 `gateway-local-memory` 先 LocalAlloc(0x40, 23)，
+再循环 GlobalSize，验证成对接口共享同一分配归属。n=`max(1, work//6)`，
+返回值为 `23*n`、API count=`n+1`；PE32 retired=`5*n+13`，
+Win64 retired=`5*n+16`、work=`6*n+17`。默认 case 集合保持。

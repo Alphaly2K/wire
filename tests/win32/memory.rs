@@ -3,6 +3,52 @@
 use super::*;
 
 #[test]
+fn local_memory_keeps_pe32_shared_heap_identity_and_abi_only_realloc_flags() {
+    let mut v = Vm::new();
+    for prefix in ["Local", "Global"] {
+        v.k("SetLastError", &[77]);
+        let block = v.k(&format!("{prefix}Alloc"), &[0x80000040, 23]);
+        assert_ne!(block, 0);
+        assert_eq!(v.mem.read_u32(block).unwrap(), 0);
+        assert_eq!(v.k(&format!("{prefix}Size"), &[block]), 23);
+        assert_eq!(v.k(&format!("{prefix}Lock"), &[block]), block);
+        assert_eq!(v.k(&format!("{prefix}Lock"), &[0x12345678]), 0x12345678);
+        assert_eq!(v.k(&format!("{prefix}Unlock"), &[0x12345678]), 0);
+        assert_eq!(v.k(&format!("{prefix}Free"), &[0x12345678]), 0x12345678);
+        assert_eq!(v.state.last_error, 77);
+        assert_eq!(v.k(&format!("{prefix}Size"), &[0x12345678]), 0);
+        assert_eq!(v.state.last_error, 77);
+        assert_eq!(v.k(&format!("{prefix}Alloc"), &[0, u32::MAX]), 0);
+        assert_eq!(v.state.last_error, 77);
+        for (suffix, args, bytes) in [
+            ("ReAlloc", vec![block, 4096, 0x42], 12),
+            ("Flags", vec![block], 4),
+        ] {
+            assert_eq!(v.k(&format!("{prefix}{suffix}"), &args), 0);
+            assert_eq!(v.state.last_error, 120);
+            assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 252 + bytes);
+            assert_eq!(v.k(&format!("{prefix}Size"), &[block]), 23);
+        }
+        assert_eq!(v.k("GlobalFree", &[block]), 0);
+        assert_eq!(v.state.last_error, 120);
+        assert_eq!(
+            v.try_call("kernel32.dll", &format!("{prefix}Alloc"), &[2, 23])
+                .unwrap_err(),
+            "movable Local/GlobalAlloc is unsupported"
+        );
+    }
+    let process = v.k("GetProcessHeap", &[]);
+    let from_heap = v.k("HeapAlloc", &[process, 0, 16]);
+    assert_eq!(v.k("LocalSize", &[from_heap]), 16);
+    assert_eq!(v.k("LocalFree", &[from_heap]), 0);
+    let private = v.k("HeapCreate", &[0, 0, 0]);
+    let from_private = v.k("HeapAlloc", &[private, 0, 16]);
+    assert_eq!(v.k("LocalSize", &[from_private]), 0);
+    assert_eq!(v.k("LocalFree", &[from_private]), from_private);
+    assert_eq!(v.k("HeapFree", &[private, 0, from_private]), 1);
+}
+
+#[test]
 fn heap_contract_keeps_pe32_errors_enumeration_alias_and_abi_only_extensions() {
     let mut v = Vm::new();
     let process = v.k("GetProcessHeap", &[]);
