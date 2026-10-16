@@ -2,6 +2,53 @@
 use super::*;
 
 #[test]
+fn multimedia_keeps_pe32_stateless_periods_output_errors_and_public_scope() {
+    let mut v = Vm::new();
+    let sp = STACK_BASE + STACK_SIZE - 256;
+    v.k("SetLastError", &[77]);
+    for period in [0, 1, 999, u32::MAX] {
+        for name in [
+            "timeEndPeriod",
+            "timeBeginPeriod",
+            "timeEndPeriod",
+            "timeEndPeriod",
+        ] {
+            assert_eq!(
+                v.call("winmm.dll", name, &[period]),
+                if period == 0 { 97 } else { 0 }
+            );
+            assert_eq!(v.cpu.esp(), sp + 8);
+            assert_eq!(v.state.last_error, 77);
+        }
+    }
+    v.mem.write_bytes(DATA, &[0xa5; 16]).unwrap();
+    assert_eq!(v.call("winmm.dll", "timeGetDevCaps", &[DATA, 7]), 97);
+    assert_eq!(v.mem.read_u64(DATA).unwrap(), 0xa5a5a5a5a5a5a5a5);
+    assert_eq!(v.call("winmm.dll", "timeGetDevCaps", &[DATA, 16]), 0);
+    assert_eq!(v.mem.read_u32(DATA).unwrap(), 1);
+    assert_eq!(v.mem.read_u32(DATA + 4).unwrap(), u32::MAX);
+    assert_eq!(v.mem.read_u64(DATA + 8).unwrap(), 0xa5a5a5a5a5a5a5a5);
+    assert_eq!(v.cpu.esp(), sp + 12);
+    assert_eq!(v.call("winmm.dll", "timeGetDevCaps", &[0, 8]), 97);
+    v.mem
+        .virtual_protect(DATA, 4096, wire::mem::PAGE_READONLY)
+        .unwrap();
+    assert_eq!(v.call("winmm.dll", "timeGetDevCaps", &[DATA, 8]), 97);
+    assert_eq!(v.state.last_error, 77);
+    let mut args = [0; 16];
+    args[0] = 1;
+    assert_eq!(
+        wire::system::dispatch("winmm.dll", "timeEndPeriod", &args, &v.mem, &mut v.state),
+        Some((0, "x86 guest hardware / monotonic clock profile".into()))
+    );
+    for dll in ["WINMM.dll", "kernel32.dll", "kernelbase.dll"] {
+        assert!(
+            wire::system::dispatch(dll, "timeEndPeriod", &args, &v.mem, &mut v.state).is_none()
+        );
+    }
+}
+
+#[test]
 fn calendar_keeps_pe32_public_dispatch_errors_and_abi_only_conversions() {
     let mut v = Vm::new();
     let sp = STACK_BASE + STACK_SIZE - 256;

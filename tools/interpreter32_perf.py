@@ -170,6 +170,9 @@ def fixture(name,work):
     if name=='gateway-module':
         from perf.fixtures.module_gateway import x86
         return x86(work,pe32)
+    if name=='gateway-multimedia':
+        from perf.fixtures.multimedia_gateway import x86
+        return x86(work,pe32)
     if name == 'gateway-nls':
         return version_gateway_fixture(work, nls=True)
     if name == 'nls-conversion':
