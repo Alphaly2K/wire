@@ -14,6 +14,8 @@ mod com;
 mod context;
 #[path = "x64/cpu.rs"]
 mod cpu;
+#[path = "x64/critical_sections.rs"]
+mod critical_sections;
 #[path = "x64/files.rs"]
 mod files;
 #[path = "x64/handles.rs"]

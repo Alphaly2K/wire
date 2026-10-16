@@ -279,6 +279,10 @@ def main():
         from perf.fixtures.inline_sync_gateway import x64
         data, meta = x64(args.work)
         entries.append(('gateway-inline-sync', data, meta))
+    if args.cases and 'gateway-critical-section' in args.cases:
+        from perf.fixtures.critical_section_gateway import x64
+        data, meta = x64(args.work)
+        entries.append(('gateway-critical-section', data, meta))
     if args.cases and 'gateway-context' in args.cases:
         from perf.fixtures.context_gateway import x64
         data, meta = x64(args.work)
