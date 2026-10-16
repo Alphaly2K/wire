@@ -267,6 +267,10 @@ def main():
         from perf.fixtures.system_profile_gateway import x64
         data, meta = x64(args.work)
         entries.append(('gateway-system-profile', data, meta))
+    if args.cases and 'gateway-calendar' in args.cases:
+        from perf.fixtures.calendar_gateway import x64
+        data, meta = x64(args.work)
+        entries.append(('gateway-calendar', data, meta))
     if args.cases and 'gateway-context' in args.cases:
         from perf.fixtures.context_gateway import x64
         data, meta = x64(args.work)
