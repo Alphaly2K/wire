@@ -32,6 +32,7 @@
 - [Waitable timer 边界](architecture/timers.md)及[契约验收](reports/refactoring-timers-2026-10-16.md)：九项接口、命名/access/deadline 与故障顺序、动态查询收敛、25 条性能路径。
 - [虚拟内存调用边界](architecture/virtual-memory.md)及[契约验收](reports/refactoring-virtual-memory-2026-10-16.md)：八项接口、架构位宽/查询布局/返回槽差异、31 条性能路径与同哈希对照。
 - [Heap 资源与调用边界](architecture/heaps.md)及[契约验收](reports/refactoring-heaps-2026-10-16.md)：13 项接口、私有堆/slab 所有权、ABI-only/absent 策略及 29 条性能路径。
+- [Local/Global 共享资源与调用边界](architecture/local-memory.md)及[契约验收](reports/refactoring-local-memory-2026-10-16.md)：14 项接口、成对资源共享、错误及返回顺序、28 条性能路径。
 - [release 编译单元候选](reports/refactoring-release-codegen-2026-10-15.md)：独立构建配置、同二进制对照及长样本调查。
 - [网关边界候选](reports/refactoring-gateway-boundary-2026-10-15.md)、[页缓存内联候选](reports/refactoring-page-cache-inline-2026-10-15.md)、[helper 布局候选](reports/refactoring-memory-helper-layout-2026-10-15.md)：已撤回实现和保留的测量证据。
 - [本次渐进重构记录](reports/refactoring-2026-10-14.md)：阶段交付、行为差异与验收结果。

@@ -232,3 +232,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 13 项 heap export 接入 HeapApi，删除重复 ABI/arity/DWORD 及根名称分支，PE32 adapter 只借原 GuestHeap、内存、进程堆 handle 和 LastError；Win64 原 slab/block helper 改按 ID 分发。保留 PE32 九项 typed/四项 ABI-only、Win64 五项 typed/其余 absent，以及错误、归属、枚举输出和返回帧顺序。两项独立旧行为基线与八项领域回归通过，完整 release 465、debug 313、native 7、工具 20 项和 fmt/strict Clippy 通过。
 
 28 条初筛路径全部校验，FP/IR 初筛 +3.736% 经 900M 三标签扩样为 +0.265%、同哈希 control −0.046%；其余最大回退 +2.181%，RSS 最多 +128KiB。HeapSize 网关 Win64 −25.973%、PE32 IR/raw −2.316%/−2.573%；Alice 前缀 CPU −0.323%，保持隐藏窗口和零 Draw/Present。251 个 Rust 文件哈希核对，体积增加 1,840 bytes，后续 Local/Global 草稿未混入。完整接受决定见 [Heap 验收](refactoring-heaps-2026-10-16.md)。
+
+## R2 Local/Global 内存
+
+14 项 export 接入七个 LocalMemoryApi ID，删除 PE32 十项重复 ABI、Win64 arity/DWORD 及名称/后缀分发；保留 PE32 进程 GuestHeap 共享与四项 ABI-only、Win64 local block 归属及错误/返回帧顺序。两项独立旧行为基线和 20 项内存回归先通过，完整 release 467、debug 315、native 7、工具 20 项及 fmt/strict Clippy 通过。
+
+28 条性能路径全部结果校验，最大 CPU 回退 +2.979%，RSS 最多 +112KiB；LocalAlloc/GlobalSize 网关 Win64 −2.624%、PE32 IR/raw +0.555%/−2.166%。Alice 前缀 CPU −3.619%，保持隐藏窗口和零 Draw/Present；254 个 Rust 文件哈希核对，体积增加 16,992 bytes，后续系统信息基线未混入。完整接受决定见 [Local/Global 验收](refactoring-local-memory-2026-10-16.md)。

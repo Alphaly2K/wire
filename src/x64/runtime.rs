@@ -22,6 +22,7 @@ mod find;
 mod gateways;
 mod guid;
 mod heap;
+mod local_memory;
 mod locals;
 mod mapping;
 mod modules;
@@ -404,10 +405,6 @@ fn import_arity(name: &str) -> Option<usize> {
         | "IsValidSid"
         | "GetLengthSid"
         | "GetSidLengthRequired" => 1,
-        "LocalAlloc" | "GlobalAlloc" => 2,
-        "LocalReAlloc" | "GlobalReAlloc" => 3,
-        "LocalSize" | "GlobalSize" | "LocalLock" | "GlobalLock" | "LocalUnlock"
-        | "GlobalUnlock" | "GlobalFree" | "LocalFlags" | "GlobalFlags" => 1,
         "OpenProcessToken" => 3,
         "OpenThreadToken" => 4,
         "GetTokenInformation" => 5,
@@ -444,7 +441,6 @@ fn import_arity(name: &str) -> Option<usize> {
         "GlobalMemoryStatusEx" => 1,
         "NtQueryDirectoryFile" => 11,
         "CommandLineToArgvW" => 2,
-        "LocalFree" => 1,
         "RoInitialize" | "CoInitialize" => 1,
         "CoInitializeEx" => 2,
         "RoUninitialize" | "CoUninitialize" => 0,
@@ -537,8 +533,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "FormatMessageA" | "FormatMessageW" => &[0, 2, 3, 5],
         "GetSidSubAuthority" => &[1],
         "CopySid" => &[0],
-        "LocalAlloc" | "GlobalAlloc" => &[0],
-        "LocalReAlloc" | "GlobalReAlloc" => &[2],
         "OpenProcessToken" => &[1],
         "OpenThreadToken" => &[1, 2],
         "GetTokenInformation" => &[1, 3],
@@ -1003,6 +997,7 @@ impl Runtime64 {
                 crate::win32::x64::virtual_memory::call(mem, id, args, self.teb() + 0x68)
             }
             ApiId::Heap(id) => self.guest_heap_call(mem, id, args),
+            ApiId::LocalMemory(id) => self.local_memory_call(mem, id, args),
             ApiId::Context(id) => {
                 use crate::win32::catalog::ContextApi;
                 Ok(match id {
@@ -1393,86 +1388,6 @@ impl Runtime64 {
                         self.set_error(mem, error)?;
                         0
                     }
-                }
-            }
-            "LocalAlloc" | "GlobalAlloc" => {
-                if args[0] & !0x40 != 0 {
-                    self.set_error(mem, 50)?;
-                    0
-                } else {
-                    let pointer = self.heap_alloc(mem, args[1])?;
-                    if pointer != 0 {
-                        self.local_blocks.insert(pointer);
-                    }
-                    pointer
-                }
-            }
-            "LocalSize" | "GlobalSize" | "LocalLock" | "GlobalLock" | "LocalFlags"
-            | "GlobalFlags" | "LocalUnlock" | "GlobalUnlock" => {
-                if let Some(&(size, _)) = self
-                    .allocations
-                    .get(&args[0])
-                    .filter(|_| self.local_blocks.contains(&args[0]))
-                {
-                    if name.ends_with("Size") {
-                        size as u64
-                    } else if name.ends_with("Unlock") {
-                        self.set_error(mem, 158)?;
-                        0
-                    } else if name.ends_with("Lock") {
-                        args[0]
-                    } else {
-                        0
-                    }
-                } else {
-                    self.set_error(mem, 6)?;
-                    if name.ends_with("Flags") {
-                        0x8000
-                    } else {
-                        0
-                    }
-                }
-            }
-            "LocalReAlloc" | "GlobalReAlloc" => {
-                if args[2] & !0x42 != 0 {
-                    self.set_error(mem, 50)?;
-                    0
-                } else if let Some(&(old_size, span)) = self
-                    .allocations
-                    .get(&args[0])
-                    .filter(|_| self.local_blocks.contains(&args[0]))
-                {
-                    if args[1] > 16 * 1024 * 1024 {
-                        self.set_error(mem, 8)?;
-                        0
-                    } else if args[1] <= span {
-                        if args[2] & 0x40 != 0 && args[1] > old_size as u64 {
-                            mem.write(
-                                args[0] + old_size as u64,
-                                &vec![0; args[1] as usize - old_size],
-                            )?;
-                        }
-                        self.allocations.insert(args[0], (args[1] as usize, span));
-                        args[0]
-                    } else if args[2] & 2 == 0 {
-                        self.set_error(mem, 8)?;
-                        0
-                    } else {
-                        let mut data = vec![0; old_size.min(args[1] as usize)];
-                        mem.read(args[0], &mut data)?;
-                        let pointer = self.heap_alloc(mem, args[1])?;
-                        if pointer != 0 {
-                            mem.write(pointer, &data)?;
-                            mem.unmap(args[0], span)?;
-                            self.allocations.remove(&args[0]);
-                            self.local_blocks.remove(&args[0]);
-                            self.local_blocks.insert(pointer);
-                        }
-                        pointer
-                    }
-                } else {
-                    self.set_error(mem, 6)?;
-                    0
                 }
             }
             "OpenProcessToken" => {
@@ -2777,22 +2692,6 @@ impl Runtime64 {
                     mem.write_int(args[1], 4, words.len() as u64)?;
                     self.local_blocks.insert(block);
                     block
-                }
-            }
-            "LocalFree" | "GlobalFree" => {
-                if args[0] == 0 {
-                    0
-                } else if self.local_blocks.contains(&args[0])
-                    && self.allocations.contains_key(&args[0])
-                {
-                    let span = self.allocations[&args[0]].1;
-                    mem.unmap(args[0], span)?;
-                    self.allocations.remove(&args[0]);
-                    self.local_blocks.remove(&args[0]);
-                    0
-                } else {
-                    self.set_error(mem, 6)?;
-                    args[0]
                 }
             }
             "CoCreateInstance" => {

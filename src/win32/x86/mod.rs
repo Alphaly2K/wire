@@ -3,6 +3,7 @@ pub(crate) mod guid;
 pub(crate) mod heaps;
 pub(crate) mod host;
 pub(crate) mod interlocked;
+pub(crate) mod local_memory;
 pub(crate) mod modules;
 pub(crate) mod nls;
 pub(crate) mod version;

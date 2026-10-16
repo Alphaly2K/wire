@@ -9,6 +9,7 @@ mod handles;
 mod heaps;
 mod identity;
 mod interlocked;
+mod local_memory;
 mod locals;
 mod modules;
 mod mutexes;
@@ -28,6 +29,7 @@ pub use handles::{HandleApi, HANDLE_CONTRACTS};
 pub use heaps::{HeapApi, HEAP_CONTRACTS};
 pub use identity::{IdentityApi, IDENTITY_CONTRACTS};
 pub use interlocked::{InterlockedApi, INTERLOCKED_CONTRACTS};
+pub use local_memory::{LocalMemoryApi, LOCAL_MEMORY_CONTRACTS};
 pub use locals::{LocalApi, LOCAL_CONTRACTS};
 pub use modules::{ModuleApi, ModuleQueryApi, MODULE_CONTRACTS, MODULE_QUERY_CONTRACTS};
 pub use mutexes::{MutexApi, MUTEX_CONTRACTS};
@@ -91,6 +93,7 @@ pub enum ApiId {
     Timer(TimerApi),
     VirtualMemory(VirtualMemoryApi),
     Heap(HeapApi),
+    LocalMemory(LocalMemoryApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -248,6 +251,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(TIMER_CONTRACTS.iter())
         .chain(VIRTUAL_MEMORY_CONTRACTS.iter())
         .chain(HEAP_CONTRACTS.iter())
+        .chain(LOCAL_MEMORY_CONTRACTS.iter())
 }
 
 #[cfg(test)]

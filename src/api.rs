@@ -613,10 +613,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("DeleteCriticalSection", 4),
                 ("InitializeCriticalSectionAndSpinCount", 8),
                 ("TryEnterCriticalSection", 4),
-                ("LocalAlloc", 8),
-                ("LocalFree", 4),
-                ("GlobalAlloc", 8),
-                ("GlobalFree", 4),
                 ("ExitProcess", 4),
                 ("TerminateProcess", 8),
                 ("SetUnhandledExceptionFilter", 4),
@@ -700,12 +696,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetConsoleTitleW", 8),
                 ("GetConsoleProcessList", 8),
                 ("ReadConsoleW", 20),
-                ("GlobalLock", 4),
-                ("GlobalUnlock", 4),
-                ("LocalSize", 4),
-                ("LocalLock", 4),
-                ("LocalUnlock", 4),
-                ("GlobalSize", 4),
                 ("IsBadReadPtr", 8),
                 ("AreFileApisANSI", 0),
                 ("GetVolumeInformationW", 32),
@@ -1583,6 +1573,22 @@ pub fn dispatch(
                 &mut state.heap,
                 state.process_heap,
                 &mut state.last_error,
+            )?;
+        }
+        _ if matches!(
+            binding.typed,
+            Some(crate::win32::catalog::ApiId::LocalMemory(_))
+        ) =>
+        {
+            let Some(crate::win32::catalog::ApiId::LocalMemory(id)) = binding.typed else {
+                unreachable!();
+            };
+            ret = crate::win32::x86::local_memory::call(
+                id,
+                &args,
+                mem,
+                &mut state.heap,
+                state.process_heap,
             )?;
         }
         _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::File(_))) => {
@@ -2476,26 +2482,6 @@ pub fn dispatch(
             ret = args[0];
             note = "automatic handle table capacity".into();
         }
-        ("kernel32.dll", "LocalAlloc") | ("kernel32.dll", "GlobalAlloc") => {
-            if args[0] & 2 != 0 {
-                return Err("movable Local/GlobalAlloc is unsupported".into());
-            }
-            ret = state
-                .heap
-                .alloc(mem, state.process_heap, args[1], args[0] & 0x40 != 0)?;
-        }
-        ("kernel32.dll", "LocalFree") | ("kernel32.dll", "GlobalFree") => {
-            ret = if state.heap.free(state.process_heap, args[0]) {
-                0
-            } else {
-                args[0]
-            };
-        }
-        ("kernel32.dll", "LocalSize") | ("kernel32.dll", "GlobalSize") => {
-            ret = state.heap.size(state.process_heap, args[0]).unwrap_or(0);
-        }
-        ("kernel32.dll", "LocalLock") | ("kernel32.dll", "GlobalLock") => ret = args[0],
-        ("kernel32.dll", "LocalUnlock") | ("kernel32.dll", "GlobalUnlock") => ret = 0,
         ("kernel32.dll", "EncodePointer") | ("kernel32.dll", "DecodePointer") => {
             ret = args[0];
             note = "identity encoding".into();
