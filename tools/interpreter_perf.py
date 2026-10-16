@@ -275,6 +275,10 @@ def main():
         from perf.fixtures.multimedia_gateway import x64
         data, meta = x64(args.work)
         entries.append(('gateway-multimedia', data, meta))
+    if args.cases and 'gateway-inline-sync' in args.cases:
+        from perf.fixtures.inline_sync_gateway import x64
+        data, meta = x64(args.work)
+        entries.append(('gateway-inline-sync', data, meta))
     if args.cases and 'gateway-context' in args.cases:
         from perf.fixtures.context_gateway import x64
         data, meta = x64(args.work)

@@ -2,6 +2,395 @@
 
 use super::*;
 
+fn inline_sync_frame(mem: &mut Memory, cpu: &mut Cpu64, args: &[u64]) {
+    cpu.regs[4] = STACK + 0x1f88;
+    mem.write_int(cpu.regs[4], 8, BASE).unwrap();
+    for (reg, &value) in [1, 2, 8, 9].into_iter().zip(args) {
+        cpu.regs[reg] = value;
+    }
+}
+
+#[test]
+fn inline_sync_keeps_win64_providers_return_faults_and_condition_tokens() {
+    for dll in ["kernel32.dll", "KERNELBASE.dll"] {
+        let (mut mem, mut cpu, mut runtime) = startup();
+        let pointer = STACK + 0x100;
+        for (name, args) in [
+            ("InitializeSRWLock", vec![pointer]),
+            ("AcquireSRWLockExclusive", vec![pointer]),
+            ("AcquireSRWLockShared", vec![pointer]),
+            ("ReleaseSRWLockExclusive", vec![pointer]),
+            ("ReleaseSRWLockShared", vec![pointer]),
+            ("TryAcquireSRWLockExclusive", vec![pointer]),
+            ("TryAcquireSRWLockShared", vec![pointer]),
+            ("InitializeConditionVariable", vec![pointer]),
+            ("WakeConditionVariable", vec![pointer]),
+            ("WakeAllConditionVariable", vec![pointer]),
+            (
+                "InitOnceBeginInitialize",
+                vec![pointer, 0, pointer + 8, pointer + 16],
+            ),
+            ("InitOnceComplete", vec![pointer, 0, 0]),
+        ] {
+            assert!(wire::x64::runtime::import_supported(dll, name));
+            assert!(!wire::x64::runtime::import_supported("user32.dll", name));
+            mem.write(pointer, &[0xaa; 24]).unwrap();
+            inline_sync_frame(&mut mem, &mut cpu, &args);
+            cpu.regs[4] = 0xdeadbeef;
+            let before = cpu.clone();
+            assert!(runtime.dispatch(dll, name, &mut cpu, &mut mem).is_err());
+            assert_eq!(cpu, before, "{name}");
+            assert_eq!(runtime.api_calls, 0);
+            let mut bytes = [0; 24];
+            mem.read(pointer, &mut bytes).unwrap();
+            assert_eq!(bytes, [0xaa; 24]);
+        }
+        mem.write_int(wire::x64::runtime::TEB + 0x68, 4, 123)
+            .unwrap();
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                dll,
+                "InitializeConditionVariable",
+                &[pointer]
+            ),
+            0
+        );
+        for name in ["WakeConditionVariable", "WakeAllConditionVariable"] {
+            assert_eq!(
+                startup_dll_call(&mut mem, &mut cpu, &mut runtime, dll, name, &[pointer]),
+                0
+            );
+            mem.write_int(pointer, 8, 1).unwrap();
+            inline_sync_frame(&mut mem, &mut cpu, &[pointer]);
+            let before = cpu.clone();
+            let calls = runtime.api_calls;
+            assert!(runtime
+                .dispatch(dll, name, &mut cpu, &mut mem)
+                .unwrap_err()
+                .contains("condition-variable wait list"));
+            assert_eq!(cpu, before);
+            assert_eq!(runtime.api_calls, calls);
+            mem.write_int(pointer, 8, 0).unwrap();
+        }
+        assert_eq!(
+            mem.read_int(wire::x64::runtime::TEB + 0x68, 4).unwrap(),
+            123
+        );
+        // Output may alias the saved return address.
+        inline_sync_frame(&mut mem, &mut cpu, &[STACK + 0x1f88]);
+        assert_eq!(
+            runtime
+                .dispatch(dll, "InitializeConditionVariable", &mut cpu, &mut mem)
+                .unwrap(),
+            wire::x64::runtime::Control::Returned
+        );
+        assert_eq!(cpu.rip, BASE);
+        assert_eq!(mem.read_int(STACK + 0x1f88, 8).unwrap(), 0);
+    }
+}
+
+#[test]
+fn inline_sync_keeps_srw_tokens_ownership_and_blocked_frame_accounting() {
+    use wire::x64::runtime::Control;
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let lock = STACK + 0x100;
+    for expected in [6, 10] {
+        assert_eq!(
+            startup_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "AcquireSRWLockShared",
+                &[lock]
+            ),
+            0
+        );
+        assert_eq!(mem.read_int(lock, 8).unwrap(), expected);
+    }
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "TryAcquireSRWLockExclusive",
+            &[lock]
+        ),
+        0
+    );
+    for (name, token, error) in [
+        ("ReleaseSRWLockExclusive", 10, "unowned Win64 exclusive"),
+        ("AcquireSRWLockShared", 7, "invalid Win64 SRW"),
+    ] {
+        mem.write_int(lock, 8, token).unwrap();
+        inline_sync_frame(&mut mem, &mut cpu, &[lock]);
+        let before = cpu.clone();
+        let calls = runtime.api_calls;
+        assert!(runtime
+            .dispatch("kernel32.dll", name, &mut cpu, &mut mem)
+            .unwrap_err()
+            .contains(error));
+        assert_eq!(cpu, before);
+        assert_eq!(runtime.api_calls, calls);
+    }
+    mem.write_int(lock, 8, 10).unwrap();
+    inline_sync_frame(&mut mem, &mut cpu, &[lock]);
+    let before = cpu.clone();
+    let calls = runtime.api_calls;
+    assert!(runtime
+        .dispatch(
+            "kernel32.dll",
+            "AcquireSRWLockExclusive",
+            &mut cpu,
+            &mut mem
+        )
+        .unwrap_err()
+        .contains("requires a thread scheduler"));
+    runtime.enable_scheduler();
+    assert_eq!(
+        runtime
+            .dispatch(
+                "kernel32.dll",
+                "AcquireSRWLockExclusive",
+                &mut cpu,
+                &mut mem
+            )
+            .unwrap(),
+        Control::Blocked
+    );
+    assert_eq!(cpu, before);
+    assert_eq!(runtime.api_calls, calls);
+    assert_eq!(mem.read_int(lock, 8).unwrap(), 10);
+    for expected in [6, 0] {
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "ReleaseSRWLockShared",
+            &[lock],
+        );
+        assert_eq!(mem.read_int(lock, 8).unwrap(), expected);
+    }
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "TryAcquireSRWLockExclusive",
+            &[lock]
+        ),
+        1
+    );
+    mem.protect(STACK, 4096, READ).unwrap();
+    inline_sync_frame(&mut mem, &mut cpu, &[lock]);
+    let before = cpu.clone();
+    assert!(runtime
+        .dispatch(
+            "kernel32.dll",
+            "ReleaseSRWLockExclusive",
+            &mut cpu,
+            &mut mem
+        )
+        .is_err());
+    assert_eq!(cpu, before);
+    mem.protect(STACK, 4096, READ | WRITE).unwrap();
+    assert_eq!(mem.read_int(lock, 8).unwrap(), 1);
+    startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "ReleaseSRWLockExclusive",
+        &[lock],
+    );
+    assert_eq!(mem.read_int(lock, 8).unwrap(), 0);
+}
+
+#[test]
+fn inline_sync_keeps_init_once_widths_short_circuit_and_ordered_alias_writes() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let once = STACK + 0x100;
+    let pending = once + 16;
+    let context = once + 24;
+    let error = wire::x64::runtime::TEB + 0x68;
+    let high = 0xfacefeed_00000000;
+    mem.write_int(pending, 8, u64::MAX).unwrap();
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "InitOnceBeginInitialize",
+            &[once, high | 1, pending, context]
+        ),
+        0
+    );
+    assert_eq!(mem.read_int(error, 4).unwrap(), 31);
+    assert_eq!(mem.read_int(pending, 8).unwrap(), u64::MAX);
+    // All output checks precede state publication.
+    inline_sync_frame(&mut mem, &mut cpu, &[once, 0, pending, 0xdeadbeef]);
+    let before = cpu.clone();
+    let calls = runtime.api_calls;
+    assert!(runtime
+        .dispatch(
+            "kernel32.dll",
+            "InitOnceBeginInitialize",
+            &mut cpu,
+            &mut mem
+        )
+        .is_err());
+    assert_eq!(cpu, before);
+    assert_eq!(runtime.api_calls, calls);
+    assert_eq!(mem.read_int(once, 8).unwrap(), 0);
+    assert_eq!(mem.read_int(pending, 8).unwrap(), u64::MAX);
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "InitOnceBeginInitialize",
+            &[once, high, pending, context]
+        ),
+        1
+    );
+    assert_eq!(mem.read_int(pending, 8).unwrap(), 0xffffffff00000001);
+    // Invalid controls reject before touching an invalid state pointer.
+    for (flags, value) in [(2, 0), (0, 1), (4, 4)] {
+        assert_eq!(
+            startup_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "InitOnceComplete",
+                &[0xdeadbeef, high | flags, value]
+            ),
+            0
+        );
+        assert_eq!(mem.read_int(error, 4).unwrap(), 87);
+    }
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "InitOnceComplete",
+            &[once, high | 4, 0]
+        ),
+        1
+    );
+    assert_eq!(mem.read_int(once, 8).unwrap(), 0);
+    // pending aliases state; context writes last and may overwrite pending.
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "InitOnceBeginInitialize",
+            &[once, 0, once, once]
+        ),
+        1
+    );
+    assert_eq!(mem.read_int(once, 8).unwrap(), 0);
+    mem.write_int(once, 8, 0x123456780002).unwrap();
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "InitOnceBeginInitialize",
+            &[once, 1, once, once]
+        ),
+        1
+    );
+    assert_eq!(mem.read_int(once, 8).unwrap(), 0x123456780000);
+}
+
+#[test]
+fn inline_sync_retries_srw_and_init_once_across_actual_guest_threads() {
+    use wire::x64::process::{Outcome, Process64};
+    const CODE: u64 = 0x591000000;
+    const WORKER: u64 = CODE + 4096;
+    const DATA: u64 = CODE + 8192;
+    const CONTEXT: u64 = 0x123456780000;
+    fn mov(code: &mut Vec<u8>, register: u8, value: u64) {
+        code.extend([0x48 | (register >> 3), 0xb8 | (register & 7)]);
+        code.extend(value.to_le_bytes());
+    }
+    fn call(p: &mut Process64, code: &mut Vec<u8>, name: &str, args: &[u64]) {
+        for (n, &value) in args.iter().enumerate() {
+            mov(code, if n < 4 { [1, 2, 8, 9][n] } else { 0 }, value);
+            if n >= 4 {
+                code.extend([0x48, 0x89, 0x44, 0x24, 32 + (n as u8 - 4) * 8]);
+            }
+        }
+        mov(code, 0, p.runtime.register("kernelbase.dll", name));
+        code.extend([0xff, 0xd0]);
+    }
+    let path = std::env::temp_dir().join(format!("wire-inline-sync64-{}.exe", std::process::id()));
+    std::fs::write(&path, fixture()).unwrap();
+    for slice in [1, 100_000] {
+        let mut p = Process64::load(&path, false).unwrap();
+        p.memory
+            .map(CODE, 3 * 4096, READ | WRITE | EXECUTE)
+            .unwrap();
+        let mut main = vec![0x48, 0x83, 0xec, 0x38];
+        call(&mut p, &mut main, "AcquireSRWLockExclusive", &[DATA]);
+        call(
+            &mut p,
+            &mut main,
+            "InitOnceBeginInitialize",
+            &[DATA + 8, 0, DATA + 16, 0],
+        );
+        call(&mut p, &mut main, "CreateThread", &[0, 0, WORKER, 0, 0, 0]);
+        main.extend([0x49, 0x89, 0xc4]); // r12 = worker handle
+        call(&mut p, &mut main, "SwitchToThread", &[]);
+        call(&mut p, &mut main, "ReleaseSRWLockExclusive", &[DATA]);
+        call(&mut p, &mut main, "SwitchToThread", &[]);
+        call(
+            &mut p,
+            &mut main,
+            "InitOnceComplete",
+            &[DATA + 8, 0, CONTEXT],
+        );
+        main.extend([0x4c, 0x89, 0xe1]); // rcx = worker handle
+        mov(&mut main, 2, u32::MAX as u64);
+        call(&mut p, &mut main, "WaitForSingleObject", &[]);
+        mov(&mut main, 0, DATA + 32);
+        main.extend([0x48, 0x8b, 0x00, 0x48, 0x83, 0xc4, 0x38, 0xc3]);
+        let mut worker = vec![0x48, 0x83, 0xec, 0x28];
+        call(&mut p, &mut worker, "AcquireSRWLockShared", &[DATA]);
+        call(&mut p, &mut worker, "ReleaseSRWLockShared", &[DATA]);
+        call(
+            &mut p,
+            &mut worker,
+            "InitOnceBeginInitialize",
+            &[DATA + 8, 0, DATA + 24, DATA + 32],
+        );
+        worker.extend([0x48, 0x83, 0xc4, 0x28, 0xc3]);
+        p.memory.write(CODE, &main).unwrap();
+        p.memory.write(WORKER, &worker).unwrap();
+        p.cpu.rip = CODE;
+        loop {
+            match p.run(p.cpu.work + slice).unwrap() {
+                Outcome::Budget => assert!(p.cpu.work < 20000),
+                result => {
+                    assert_eq!(result, Outcome::Returned(CONTEXT));
+                    break;
+                }
+            }
+        }
+        assert_eq!(p.memory.read_int(DATA, 8).unwrap(), 0);
+        assert_eq!(p.memory.read_int(DATA + 8, 8).unwrap(), CONTEXT | 2);
+        assert_eq!(p.memory.read_int(DATA + 16, 4).unwrap(), 1);
+        assert_eq!(p.memory.read_int(DATA + 24, 4).unwrap(), 0);
+        let completed = |name: &str| p.runtime.trace.iter().filter(|r| r.contains(name)).count();
+        assert_eq!(completed("!AcquireSRWLockShared "), 1);
+        assert_eq!(completed("!InitOnceBeginInitialize "), 2);
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
 #[test]
 fn win64_critical_section_ex_ignores_low_flags_and_preserves_recursive_ownership_and_faults() {
     let (mut m, mut cpu, mut r) = startup();

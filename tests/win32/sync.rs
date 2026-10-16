@@ -3,6 +3,41 @@
 use super::*;
 
 #[test]
+fn inline_sync_keeps_pe32_abi_only_stack_cleanup_and_untouched_outputs() {
+    let mut v = Vm::new();
+    for (name, args) in [
+        ("InitializeSRWLock", vec![DATA]),
+        ("AcquireSRWLockExclusive", vec![DATA]),
+        ("AcquireSRWLockShared", vec![DATA]),
+        ("ReleaseSRWLockExclusive", vec![DATA]),
+        ("ReleaseSRWLockShared", vec![DATA]),
+        ("TryAcquireSRWLockExclusive", vec![DATA]),
+        ("TryAcquireSRWLockShared", vec![DATA]),
+        ("InitializeConditionVariable", vec![DATA]),
+        ("WakeConditionVariable", vec![DATA]),
+        ("WakeAllConditionVariable", vec![DATA]),
+        (
+            "InitOnceBeginInitialize",
+            vec![DATA, 0, DATA + 8, DATA + 16],
+        ),
+        ("InitOnceComplete", vec![DATA, 0, 0]),
+    ] {
+        v.mem.write_bytes(DATA, &[0xaa; 24]).unwrap();
+        v.k("SetLastError", &[123]);
+        assert_eq!(v.k(name, &args), 0, "{name}");
+        assert_eq!(
+            v.cpu.esp(),
+            STACK_BASE + STACK_SIZE - 256 + 4 + args.len() as u32 * 4
+        );
+        assert_eq!(v.state.last_error, 120, "{name}");
+        assert_eq!(v.mem.read_u32(TEB_ADDR + 0x34).unwrap(), 120);
+        for offset in (0..24).step_by(4) {
+            assert_eq!(v.mem.read_u32(DATA + offset).unwrap(), 0xaaaaaaaa, "{name}");
+        }
+    }
+}
+
+#[test]
 fn timers_keep_pe32_abi_only_errors_and_independent_stack_sizes() {
     for (name, args, bytes) in [
         ("CreateWaitableTimerA", vec![0, 1, 0], 12),
