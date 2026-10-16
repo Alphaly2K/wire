@@ -3,4 +3,5 @@ pub(crate) mod calendar;
 pub(crate) mod locals32;
 pub(crate) mod multimedia;
 pub(crate) mod nls;
+pub(crate) mod srw;
 pub(crate) mod version;

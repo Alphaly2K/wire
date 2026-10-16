@@ -108,7 +108,7 @@ pub struct Runtime64 {
     static_tls: Vec<(Vec<u8>, u64, u64)>,
     threads: threads::Threads,
     delay_hooks: BTreeMap<u64, (String, u64, u64)>,
-    srw: BTreeMap<u64, (u64, u32)>,
+    srw: crate::win32::kernel::srw::SrwLocks,
     exception_filter: u64,
     error_mode: u32,
     apartment: Option<u32>,
@@ -444,18 +444,6 @@ fn import_arity(name: &str) -> Option<usize> {
         "GetThreadErrorMode" => 0,
         "SetThreadErrorMode" => 2,
         "GetEnvironmentStringsW" => 0,
-        "AcquireSRWLockExclusive"
-        | "WakeAllConditionVariable"
-        | "WakeConditionVariable"
-        | "InitializeConditionVariable"
-        | "ReleaseSRWLockExclusive"
-        | "AcquireSRWLockShared"
-        | "ReleaseSRWLockShared"
-        | "TryAcquireSRWLockExclusive"
-        | "TryAcquireSRWLockShared"
-        | "InitializeSRWLock" => 1,
-        "InitOnceBeginInitialize" => 4,
-        "InitOnceComplete" => 3,
         "SetThreadStackGuarantee" => 1,
         "CreatePipe" => 4,
         "InitializeProcThreadAttributeList" => 4,
@@ -546,7 +534,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "InitializeCriticalSectionAndSpinCount" => &[1],
         "InitializeCriticalSectionEx" => &[1, 2],
         "WriteConsoleW" => &[2],
-        "InitOnceBeginInitialize" | "InitOnceComplete" => &[1],
         _ => &[],
     }
 }
@@ -650,7 +637,7 @@ impl Runtime64 {
             static_tls: Vec::new(),
             threads: threads::Threads::new(stack_size),
             delay_hooks: BTreeMap::new(),
-            srw: BTreeMap::new(),
+            srw: Default::default(),
             exception_filter: 0,
             error_mode: 0,
             apartment: None,
@@ -953,6 +940,9 @@ impl Runtime64 {
             ApiId::Mutex(_) => unreachable!("mutexes have no Win64 binding"),
             ApiId::Wait(_) => unreachable!("waits use the bound process control route"),
             ApiId::Delay(_) => unreachable!("delays use the bound process control route"),
+            ApiId::InlineSync(_) => {
+                unreachable!("inline sync uses the bound process control route")
+            }
             ApiId::Guid(id) => crate::win32::x64::guid::call(mem, id, args),
             ApiId::Identity(id) => {
                 crate::win32::x64::identity::call(mem, id, args, &self.profile, self.teb() + 0x68)
@@ -3151,131 +3141,36 @@ impl Runtime64 {
             "GetCommandLineA" => COMMAND_A,
             "GetCommandLineW" => COMMAND_W,
             "EncodePointer" | "DecodePointer" => args[0], // Optional pointer obfuscation; inverse identity.
-            "InitializeConditionVariable"
-            | "WakeConditionVariable"
-            | "WakeAllConditionVariable" => {
-                if name == "InitializeConditionVariable" {
-                    mem.write_int(args[0], 8, 0)?;
-                } else if mem.read_int(args[0], 8)? != 0 {
-                    return Err(
-                        "Win64 condition-variable wait list requires a thread scheduler".into(),
-                    );
-                }
-                // There are no waiting guest threads in this single-thread provider.
-                0
-            }
-            "InitializeSRWLock"
-            | "AcquireSRWLockExclusive"
-            | "ReleaseSRWLockExclusive"
-            | "AcquireSRWLockShared"
-            | "ReleaseSRWLockShared"
-            | "TryAcquireSRWLockExclusive"
-            | "TryAcquireSRWLockShared" => {
-                let pointer = args[0];
-                mem.check(pointer, 8, WRITE)?;
-                let token = mem.read_int(pointer, 8)?;
-                let (owner, readers) = self.srw.get(&pointer).copied().unwrap_or((0, 0));
-                let expected = if owner != 0 {
-                    1
-                } else if readers != 0 {
-                    (readers as u64) * 4 + 2
-                } else {
-                    0
+            _ if matches!(binding.control, gateways::ControlImport::InlineSync(_)) => {
+                use crate::win32::x64::inline_sync::{call, Outcome};
+                let gateways::ControlImport::InlineSync(id) = binding.control else {
+                    unreachable!();
                 };
-                if name != "InitializeSRWLock" && token != expected {
-                    return Err("invalid Win64 SRW lock state".into());
-                }
-                let shared = name.ends_with("Shared");
-                let release = name.starts_with("Release");
-                let attempt = name.starts_with("Try");
-                let state = if name == "InitializeSRWLock" {
-                    (0, 0)
-                } else if release {
-                    if shared {
-                        if readers == 0 || owner != 0 {
-                            return Err("unowned Win64 shared SRW lock".into());
-                        }
-                        (0, readers - 1)
-                    } else {
-                        if owner != self.threads.active || readers != 0 {
-                            return Err("unowned Win64 exclusive SRW lock".into());
-                        }
-                        (0, 0)
+                let last_error = self.teb() + 0x68;
+                match call(
+                    mem,
+                    id,
+                    args,
+                    &mut self.srw,
+                    self.threads.active,
+                    last_error,
+                )? {
+                    Outcome::Value(value) => value,
+                    Outcome::TryFailed => {
+                        returned.regs[0] = 0;
+                        *cpu = returned;
+                        self.api_calls += 1;
+                        self.record(dll, name, args, 0);
+                        return Ok(Control::Returned);
                     }
-                } else if owner != 0 || (!shared && readers != 0) {
-                    if !attempt {
+                    Outcome::BlockSrw { pointer, shared } => {
                         self.block(threads::Block::Srw(pointer, shared))?;
                         return Ok(Control::Blocked);
                     }
-                    returned.regs[0] = 0;
-                    *cpu = returned;
-                    self.api_calls += 1;
-                    self.record(dll, name, args, 0);
-                    return Ok(Control::Returned);
-                } else if shared {
-                    (0, readers.checked_add(1).ok_or("SRW reader overflow")?)
-                } else {
-                    (self.threads.active, 0)
-                };
-                let token = if state.0 != 0 {
-                    1
-                } else if state.1 != 0 {
-                    state.1 as u64 * 4 + 2
-                } else {
-                    0
-                };
-                mem.write_int(pointer, 8, token)?;
-                if token == 0 {
-                    self.srw.remove(&pointer);
-                } else {
-                    self.srw.insert(pointer, state);
-                }
-                self.unblock();
-                attempt as u64
-            }
-            "InitOnceBeginInitialize" => {
-                if args[1] & !1 != 0 {
-                    return Err("Win64 asynchronous InitOnce not implemented".into());
-                }
-                let state = mem.read_int(args[0], 8)?;
-                mem.check(args[2], 4, WRITE)?;
-                if args[3] != 0 {
-                    mem.check(args[3], 8, WRITE)?;
-                }
-                if state & 3 == 2 {
-                    mem.write_int(args[2], 4, 0)?;
-                    if args[3] != 0 {
-                        mem.write_int(args[3], 8, state & !3)?;
+                    Outcome::BlockOnce(pointer) => {
+                        self.block(threads::Block::Once(pointer))?;
+                        return Ok(Control::Blocked);
                     }
-                    1
-                } else if args[1] & 1 != 0 {
-                    self.set_error(mem, 31)?;
-                    0
-                } else if state == 0 {
-                    mem.check(args[0], 8, WRITE)?;
-                    mem.write_int(args[0], 8, 1)?;
-                    mem.write_int(args[2], 4, 1)?;
-                    if args[3] != 0 {
-                        mem.write_int(args[3], 8, 0)?;
-                    }
-                    1
-                } else {
-                    self.block(threads::Block::Once(args[0]))?;
-                    return Ok(Control::Blocked);
-                }
-            }
-            "InitOnceComplete" => {
-                let failed = args[1] & 4 != 0;
-                if args[1] & !4 != 0
-                    || args[2] & 3 != 0
-                    || (failed && args[2] != 0)
-                    || mem.read_int(args[0], 8)? != 1
-                {
-                    self.set_error(mem, 87)?;
-                    0
-                } else {
-                    mem.write_int(args[0], 8, if failed { 0 } else { args[2] | 2 })?;
-                    1
                 }
             }
             "AreFileApisANSI" => 1, // This provider uses its declared ANSI code page for file paths.

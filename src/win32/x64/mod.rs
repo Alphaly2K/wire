@@ -2,6 +2,7 @@ pub(crate) mod calendar;
 pub(crate) mod clocks;
 pub(crate) mod guid;
 pub(crate) mod identity;
+pub(crate) mod inline_sync;
 pub(crate) mod interlocked;
 pub(crate) mod modules;
 pub(crate) mod multimedia;

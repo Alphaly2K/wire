@@ -266,10 +266,7 @@ impl Runtime64 {
                 let owner = mem.read_int(*ptr + 16, 8)?;
                 owner == 0 || owner == id
             }
-            Some(Block::Srw(ptr, shared)) => {
-                let (owner, readers) = self.srw.get(ptr).copied().unwrap_or((0, 0));
-                owner == 0 && (*shared || readers == 0)
-            }
+            Some(Block::Srw(ptr, shared)) => self.srw.available(*ptr, *shared),
             Some(Block::Once(ptr)) => mem.read_int(*ptr, 8)? != 1,
             Some(Block::Messages { window, min, max }) => {
                 self.message_ready(id, *window, *min, *max)

@@ -9,6 +9,7 @@ mod guid;
 mod handles;
 mod heaps;
 mod identity;
+mod inline_sync;
 mod interlocked;
 mod local_memory;
 mod locals;
@@ -32,6 +33,7 @@ pub use guid::{GuidApi, GUID_CONTRACTS};
 pub use handles::{HandleApi, HANDLE_CONTRACTS};
 pub use heaps::{HeapApi, HEAP_CONTRACTS};
 pub use identity::{IdentityApi, IDENTITY_CONTRACTS};
+pub use inline_sync::{InlineSyncApi, INLINE_SYNC_CONTRACTS};
 pub use interlocked::{InterlockedApi, INTERLOCKED_CONTRACTS};
 pub use local_memory::{LocalMemoryApi, LOCAL_MEMORY_CONTRACTS};
 pub use locals::{LocalApi, LOCAL_CONTRACTS};
@@ -103,6 +105,7 @@ pub enum ApiId {
     SystemProfile(SystemProfileApi),
     Calendar(CalendarApi),
     Multimedia(MultimediaApi),
+    InlineSync(InlineSyncApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -264,6 +267,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(SYSTEM_PROFILE_CONTRACTS.iter())
         .chain(CALENDAR_CONTRACTS.iter())
         .chain(MULTIMEDIA_CONTRACTS.iter())
+        .chain(INLINE_SYNC_CONTRACTS.iter())
 }
 
 #[cfg(test)]

@@ -253,6 +253,14 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 
 ## R2/R3 多媒体计时器
 
+（后续内联同步验收见文末。）
+
 三项 export 接入 MultimediaApi，删除重复 ABI/arity/DWORD、provider 与名称分发；Win64 period map 收进私有 PeriodRequests owner，PE32 保留 stateless period 策略。public facade 精确范围、Win64 静态/动态 provider 差异、容量/引用与输出/返回帧顺序保持。五项独立旧行为回归先通过，完整 release 473、debug 321、native 7、工具 20 项及 fmt/strict Clippy/build 通过。
 
 35 条性能路径全部校验，timeGetDevCaps 网关 Win64 −11.752%、PE32 IR/raw −1.193%/−2.279%，初筛 RSS 最多 +16KiB。四条 PE32 IR 初筛超过 3%，三顺序同哈希扩样后为 −0.192%/+0.737%/+0.210%/+1.106%，其余最大回退 +2.395%。Alice 前缀 CPU −0.331%，保持隐藏窗口和零 Draw/Present；265 个 Rust 文件哈希一致，体积增加 4,064 bytes。接受决定与全部初筛数据见[多媒体验收](refactoring-multimedia-2026-10-16.md)。
+
+## R2/R3 SRW、条件变量与 InitOnce
+
+十二项 export 接入 InlineSyncApi，删除重复 arity/DWORD 与名称/前后缀分发；Win64 SRW map 收进私有 owner，adapter 成功写 guest token 后提交 owner。显式保留完成、Try失败和两种阻塞 outcome，进程保留 CPU、调度与 trace/API count 顺序；PE32 保持 ABI-only。完整 release 479、debug 326、native 7、工具 20 项及 fmt/strict Clippy/build 通过。
+
+36 条性能路径全部校验，SRW 网关 CPU −0.570%，最大回退 +1.837%，RSS 最多增加 176KiB；Alice 前缀 CPU −1.825%，保持隐藏窗口和零 Draw/Present。268 个 Rust 文件核对一致，体积增加 6,128 bytes，契约累计 293 个 export。完整接受决定见[内联同步验收](refactoring-inline-sync-2026-10-16.md)。
