@@ -2,6 +2,68 @@
 
 use super::*;
 
+#[test]
+fn address_waits_keep_win64_retry_validation_before_any_second_comparison() {
+    use wire::x64::runtime::Control;
+    for dll in [
+        "kernel32.dll",
+        "KERNELBASE.dll",
+        "API-MS-WIN-CORE-SYNCH-L1-2-0.dll",
+    ] {
+        let (mut mem, mut cpu, mut runtime) = startup();
+        let address = STACK + 0x100;
+        let compare = address + 16;
+        runtime.enable_scheduler();
+        mem.write_int(wire::x64::runtime::TEB + 0x68, 4, 123)
+            .unwrap();
+        inline_sync_frame(&mut mem, &mut cpu, &[address, compare, 8, u32::MAX as u64]);
+        let before = cpu.clone();
+        assert_eq!(
+            runtime
+                .dispatch(dll, "WaitOnAddress", &mut cpu, &mut mem)
+                .unwrap(),
+            Control::Blocked
+        );
+        assert_eq!(cpu, before);
+        cpu.regs[2] = 0xdeadbeef;
+        let before = cpu.clone();
+        assert_eq!(
+            runtime
+                .dispatch(dll, "WaitOnAddress", &mut cpu, &mut mem)
+                .unwrap(),
+            Control::Blocked
+        );
+        assert_eq!(cpu, before);
+        assert_eq!(runtime.api_calls, 0);
+        assert_eq!(
+            mem.read_int(wire::x64::runtime::TEB + 0x68, 4).unwrap(),
+            123
+        );
+        cpu.regs[1] = address + 8;
+        let before = cpu.clone();
+        assert!(runtime
+            .dispatch(dll, "WaitOnAddress", &mut cpu, &mut mem)
+            .unwrap_err()
+            .contains("changed while blocked"));
+        assert_eq!(cpu, before);
+        // Size validation precedes retry identity and all memory reads.
+        cpu.regs[8] = 3;
+        assert_eq!(
+            runtime
+                .dispatch(dll, "WaitOnAddress", &mut cpu, &mut mem)
+                .unwrap(),
+            Control::Returned
+        );
+        assert_eq!(cpu.regs[0], 0);
+        assert_eq!(runtime.api_calls, 1);
+        assert_eq!(mem.read_int(wire::x64::runtime::TEB + 0x68, 4).unwrap(), 87);
+        for name in ["WaitOnAddress", "WakeByAddressSingle", "WakeByAddressAll"] {
+            assert!(wire::x64::runtime::import_supported(dll, name));
+            assert!(!wire::x64::runtime::import_supported("user32.dll", name));
+        }
+    }
+}
+
 fn inline_sync_frame(mem: &mut Memory, cpu: &mut Cpu64, args: &[u64]) {
     cpu.regs[4] = STACK + 0x1f88;
     mem.write_int(cpu.regs[4], 8, BASE).unwrap();

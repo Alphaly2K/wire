@@ -283,6 +283,10 @@ def main():
         from perf.fixtures.critical_section_gateway import x64
         data, meta = x64(args.work)
         entries.append(('gateway-critical-section', data, meta))
+    if args.cases and 'gateway-address-wait' in args.cases:
+        from perf.fixtures.address_wait_gateway import x64
+        data, meta = x64(args.work)
+        entries.append(('gateway-address-wait', data, meta))
     if args.cases and 'gateway-context' in args.cases:
         from perf.fixtures.context_gateway import x64
         data, meta = x64(args.work)

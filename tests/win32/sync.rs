@@ -3,6 +3,28 @@
 use super::*;
 
 #[test]
+fn address_waits_keep_pe32_unknown_abi_and_zero_argument_cleanup() {
+    let mut v = Vm::new();
+    for dll in [
+        "kernel32.dll",
+        "kernelbase.dll",
+        "api-ms-win-core-synch-l1-2-0.dll",
+    ] {
+        for (name, args) in [
+            ("WaitOnAddress", vec![DATA, DATA + 8, 8, 0]),
+            ("WakeByAddressSingle", vec![DATA]),
+            ("WakeByAddressAll", vec![DATA]),
+        ] {
+            v.mem.write_bytes(DATA, &[0xaa; 16]).unwrap();
+            assert_eq!(v.call(dll, name, &args), 0);
+            assert_eq!(v.state.last_error, 120);
+            assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 4);
+            assert_eq!(v.mem.read_u32(DATA).unwrap(), 0xaaaaaaaa);
+        }
+    }
+}
+
+#[test]
 fn inline_sync_keeps_pe32_abi_only_stack_cleanup_and_untouched_outputs() {
     let mut v = Vm::new();
     for (name, args) in [
