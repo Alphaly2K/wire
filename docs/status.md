@@ -1,16 +1,16 @@
 # 当前状态
 
-更新日期：2026-10-17。重构前基线为 `2e78377`；最新已验收运行时为 [WinRT 字符串与 owner](reports/refactoring-winrt-2026-10-17.md)，该报告记录冻结源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
+更新日期：2026-10-17。重构前基线为 `2e78377`；最新已验收运行时为 [BSTR 与资源 owner](reports/refactoring-bstr-2026-10-17.md)，该报告记录冻结源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
 
-本轮追加完成十一项 WinRT 字符串与激活 export，冷绑定调用 ID，移除重复 provider/arity/DWORD 与执行时名称比较。Strings 私有拥有成员、长度、引用数与空 buffer 身份；reference header 每次重读，backing allocator 与故障/返回/trace 顺序保持。静态 provider 分组、动态 API set remapping、PE32 unknown ABI 各自保留。后续继续处理 BSTR、USER、COM、图形及其余 legacy 家族。Mono 原生化已撤回，本轮继续排除。
+本轮追加完成八项 BSTR export，冷绑定调用 ID，移除重复 provider/arity/DWORD 与执行时名称比较，Win64 ordinal alias 收入契约模块。双架构资源记录由私有 owner 管理，Variant/WMI 继续共用原分配入口，保留各自 free/输出/返回顺序及错误。后续继续处理 Variant、USER、COM、图形及其余 legacy 家族。Mono 原生化已撤回，本轮继续排除。
 
 ## 重构范围
 
 | 阶段 | 已交付 | 剩余范围 |
 | --- | --- | --- |
 | R0/R1 | 冻结输入、原创正式 fixture、领域测试 harness、GUID 唯一契约和双架构适配 | 随后续家族维护独立基线 |
-| R2 | 已验收 340 个 export 的契约；明细见下表 | USER、COM、图形等 legacy 家族 |
-| R3 | guest environment、双架构模块状态、Win64 文件、period 请求、SRW、地址等待及 APC 队列、线程标量操作与描述、双架构 apartment、Win64 task/HSTRING 成员、PE32 TLS/FLS 私有 owner | PE32 其余资源、线程资源创建/退出及 COM 其余对象；PE32 kernel 大范围抽取曾因性能撤回 |
+| R2 | 已验收 348 个 export 的契约；明细见下表 | USER、COM、图形等 legacy 家族 |
+| R3 | guest environment、双架构模块状态、Win64 文件、period 请求、SRW、地址等待及 APC 队列、线程标量操作与描述、双架构 apartment/BSTR、Win64 task/HSTRING 成员、PE32 TLS/FLS 私有 owner | PE32 其余资源、线程资源创建/退出及 COM 其余对象；PE32 kernel 大范围抽取曾因性能撤回 |
 | R4/R5 | Process32 编排边界、owned host UI 请求、GDI 与像素状态分离 | 领域分发与资源 owner 随 R2/R3 继续收敛 |
 | R6 | 按用户要求忽略 | 不重建原生 Mono 路径 |
 | R7 | PE32 内核目录、领域测试、公共性能工具、当前/历史文档入口 | 后续目录和工具随领域迁移继续整理 |
@@ -46,6 +46,7 @@
 | 线程创建 / 退出 / APC / CONTEXT / description | 6 | [控制结果与资源边界](architecture/thread-control.md)及[验收](reports/refactoring-thread-control-2026-10-17.md) |
 | COM / WinRT 初始化、工厂、task memory / Ole 策略 | 10 | [调用与资源边界](architecture/com-core.md)及[验收](reports/refactoring-com-core-2026-10-17.md) |
 | WinRT HSTRING / activation | 11 | [字符串与资源边界](architecture/winrt.md)及[验收](reports/refactoring-winrt-2026-10-17.md) |
+| BSTR | 8 | [字符串与资源边界](architecture/bstr.md)及[验收](reports/refactoring-bstr-2026-10-17.md) |
 
 ## 当前执行路径与能力
 
@@ -62,9 +63,9 @@
 
 ## 验证与性能
 
-最近已验收的 WinRT 批次：release **514 passed / 7 ignored**，debug Win32/AMD64/FPU **361 passed**，显式 native **7 passed**，工具 **20 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。
+最近已验收的 BSTR 批次：release **519 passed / 7 ignored**，debug Win32/AMD64/FPU **366 passed**，显式 native **7 passed**，工具 **20 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。
 
-WinRT 的 50 条性能路径全部结果校验，两项单轮离散路径完成同哈希三顺序扩样，共 52 个 workload protocol。新增字符串网关 CPU −2.674%，初筛最大回退 +1.860%；两项扩样为 +0.082%/−0.210%。初筛 RSS 最多增加 64KiB，二进制增加 480 bytes；游戏前缀 CPU −0.840%、wall −0.895%，启动终点保持。各批次使用自己的基线，线程控制批 SSE +3.473%、日历批次 Local/Global +4.570%、线程属性批次 HeapSize +4.063% 等历史成本与离散轮次继续保留在对应报告，未将结构调整解释为游戏 FPS 提升。AMD64 event fixture 的重复导入已独立修正；旧验收保持冻结输入，后续按新哈希配对，详见[工具边界](architecture/validation-tools.md)。
+BSTR 的 53 条性能路径全部结果校验，三项路径完成同哈希三顺序扩样，共 56 个 workload protocol。新增查询网关 CPU Win64 −1.027%、PE32 IR/raw −1.331%/−1.912%；SSE/raw 初筛 +3.715%、扩样保留 +2.871% 局部成本（after/control +2.465%），整数扩样 IR/raw +0.003%/+1.168%。初筛 RSS 最多增加 16KiB，二进制增加 3,664 bytes；游戏前缀 CPU +0.028%、wall −0.325%，启动终点保持。各批次使用自己的基线，线程控制批 SSE +3.473%、日历批次 Local/Global +4.570%、线程属性批次 HeapSize +4.063% 等历史成本与离散轮次继续保留在对应报告，未将结构调整解释为游戏 FPS 提升。AMD64 event fixture 的重复导入已独立修正；旧验收保持冻结输入，后续按新哈希配对，详见[工具边界](architecture/validation-tools.md)。
 
 后续正式比较使用显式 [稳定启动协议](reports/refactoring-launch-protocol-2026-10-16.md)，固定 argv0、参数和 child cwd，并记录 shell SHA。默认工具行为保持；旧协议数据独立保留，汇总不跨协议或不同 work 合并。编译、正式计时、采样与 runtime diagnostics 串行执行。每个结构候选先完成正确性，再按至少三对轮换检查结果、CPU/wall/RSS 与输入哈希；超过门槛先调查，不把失败候选扩大到其它领域。
 

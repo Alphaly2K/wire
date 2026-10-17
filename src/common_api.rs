@@ -11,63 +11,21 @@
 use crate::api::{ApiState, Args, HandleObj};
 use crate::mem::GuestMem;
 use crate::thread::Sched;
+use crate::win32::text::units32 as units;
 use std::cmp::Ordering;
 fn guid_text(mem: &GuestMem, p: u32) -> Result<String, u32> {
     let mut b = [0; 16];
     mem.read_bytes(p, &mut b).map_err(|_| 0x80004003u32)?;
     Ok(crate::win32::com::guid::format_text(b))
 }
-fn units(mem: &GuestMem, p: u32, len: u32) -> Result<Vec<u16>, u32> {
-    if p == 0 {
-        return Err(87);
-    }
-    if len == u32::MAX {
-        return Ok(crate::menu::read_text(mem, p, true)?.unwrap_or_default());
-    }
-    if len > 1 << 20 {
-        return Err(87);
-    }
-    let mut bytes = vec![0; len as usize * 2];
-    mem.read_bytes(p, &mut bytes).map_err(|_| 87u32)?;
-    Ok(bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|b| u16::from_le_bytes(*b))
-        .collect())
-}
 pub(crate) fn allocate_bstr(
     mem: &mut GuestMem,
     state: &mut ApiState,
     text: &[u16],
 ) -> Result<u32, u32> {
-    let length = u32::try_from(text.len())
-        .map_err(|_| 8u32)?
-        .checked_mul(2)
-        .ok_or(8u32)?;
-    let base = state
-        .heap
-        .alloc(
-            mem,
-            state.process_heap,
-            length.checked_add(6).ok_or(8u32)?,
-            true,
-        )
-        .map_err(|_| 8u32)?;
-    if base == 0 {
-        return Err(8);
-    }
-    mem.write_u32(base, length).map_err(|_| 87u32)?;
-    mem.write_bytes(
-        base + 4,
-        &text
-            .iter()
-            .flat_map(|c| c.to_le_bytes())
-            .collect::<Vec<_>>(),
-    )
-    .map_err(|_| 87u32)?;
-    state.bstrs.insert(base + 4, base);
-    Ok(base + 4)
+    state
+        .bstrs
+        .allocate(mem, &mut state.heap, state.process_heap, text)
 }
 
 pub(crate) fn dispatch(
@@ -114,17 +72,7 @@ pub(crate) fn dispatch(
         && !(dll == "oleaut32.dll"
             && matches!(
                 name,
-                "SysAllocString"
-                    | "VariantInit"
-                    | "VariantClear"
-                    | "VariantCopy"
-                    | "VariantChangeType"
-                    | "SysAllocStringLen"
-                    | "SysFreeString"
-                    | "SysStringLen"
-                    | "SysStringByteLen"
-                    | "SysReAllocString"
-                    | "SysReAllocStringLen"
+                "VariantInit" | "VariantClear" | "VariantCopy" | "VariantChangeType"
             ))
     {
         return None;
@@ -374,8 +322,10 @@ pub(crate) fn dispatch(
                     if old_vt == 8 {
                         let old = mem.read_u32(a[0] + 8).map_err(|_| 0x80070057u32)?;
                         if old != 0 {
-                            let base = state.bstrs.remove(&old).ok_or(0x80070057u32)?;
-                            state.heap.free(state.process_heap, base);
+                            state
+                                .bstrs
+                                .release(&mut state.heap, state.process_heap, old)
+                                .ok_or(0x80070057u32)?;
                         }
                     } else if !matches!(old_vt,0..=7|10..=14|16..=23) && old_vt & 0x4000 == 0 {
                         return Err(0x80020008);
@@ -384,9 +334,7 @@ pub(crate) fn dispatch(
                 })();
                 if let Err(e) = clear {
                     if let Some(p) = allocation {
-                        if let Some(base) = state.bstrs.remove(&p) {
-                            state.heap.free(state.process_heap, base);
-                        }
+                        let _ = state.bstrs.release(&mut state.heap, state.process_heap, p);
                     }
                     return Err(e);
                 }
@@ -403,100 +351,16 @@ pub(crate) fn dispatch(
                 if vt == 8 {
                     let p = mem.read_u32(a[0] + 8).map_err(|_| 0x80070057u32)?;
                     if p != 0 {
-                        let base = state.bstrs.remove(&p).ok_or(0x80070057u32)?;
-                        state.heap.free(state.process_heap, base);
+                        state
+                            .bstrs
+                            .release(&mut state.heap, state.process_heap, p)
+                            .ok_or(0x80070057u32)?;
                     }
                 } else if !matches!(vt,0..=7|10..=14|16..=23) && vt & 0x4000 == 0 {
                     return Err(0x80020008);
                 }
                 mem.write_u16(a[0], 0).map_err(|_| 0x80070057u32)?;
                 Ok(0)
-            }
-            "SysAllocString" | "SysAllocStringLen" => {
-                if name == "SysAllocString" && a[0] == 0 {
-                    return Ok(0);
-                }
-                let text = if name == "SysAllocString" {
-                    units(mem, a[0], u32::MAX)?
-                } else if a[1] > 1 << 20 {
-                    return Err(8);
-                } else if a[0] == 0 {
-                    vec![0; a[1] as usize]
-                } else {
-                    units(mem, a[0], a[1])?
-                };
-                allocate_bstr(mem, state, &text)
-            }
-            "SysStringLen" | "SysStringByteLen" => {
-                if a[0] == 0 {
-                    return Ok(0);
-                }
-                let length = mem
-                    .read_u32(a[0].checked_sub(4).ok_or(87u32)?)
-                    .map_err(|_| 87u32)?;
-                Ok(if name == "SysStringLen" {
-                    length / 2
-                } else {
-                    length
-                })
-            }
-            "SysFreeString" => {
-                if a[0] == 0 {
-                    return Ok(0);
-                }
-                let base = state.bstrs.remove(&a[0]).ok_or(87u32)?;
-                if !state.heap.free(state.process_heap, base) {
-                    return Err(87);
-                }
-                Ok(0)
-            }
-            "SysReAllocString" | "SysReAllocStringLen" => {
-                let old = mem.read_u32(a[0]).map_err(|_| 87u32)?;
-                mem.ptr(a[0], 4, true).map_err(|_| 87u32)?;
-                if old != 0 && !state.bstrs.contains_key(&old) {
-                    return Err(87);
-                }
-                if name == "SysReAllocString" && a[1] == 0 {
-                    mem.write_u32(a[0], 0).map_err(|_| 87u32)?;
-                    if let Some(base) = state.bstrs.remove(&old) {
-                        state.heap.free(state.process_heap, base);
-                    }
-                    return Ok(1);
-                }
-                let text = if a[1] == 0 || (name.ends_with("Len") && old != 0 && a[1] == old) {
-                    if name.ends_with("Len") {
-                        if a[2] > 1 << 20 {
-                            return Err(8);
-                        }
-                        let mut text = vec![0; a[2] as usize];
-                        // SysReAllocStringLen(NULL source) preserves the old prefix.
-                        // Newly grown storage is zeroed by wire's allocator.
-                        if old != 0 {
-                            let length = mem.read_u32(old - 4).map_err(|_| 87u32)? / 2;
-                            let prefix = units(mem, old, length.min(a[2]))?;
-                            text[..prefix.len()].copy_from_slice(&prefix);
-                        }
-                        text
-                    } else {
-                        Vec::new()
-                    }
-                } else {
-                    units(
-                        mem,
-                        a[1],
-                        if name.ends_with("Len") {
-                            a[2]
-                        } else {
-                            u32::MAX
-                        },
-                    )?
-                };
-                let p = allocate_bstr(mem, state, &text)?;
-                mem.write_u32(a[0], p).map_err(|_| 87u32)?;
-                if let Some(base) = state.bstrs.remove(&old) {
-                    state.heap.free(state.process_heap, base);
-                }
-                Ok(1)
             }
             _ => unreachable!(),
         }

@@ -1,7 +1,6 @@
 //! Queries describe loaded guest images and the logical built-in service providers.
 use super::{
-    automation, devices, display, dxgi, guid, kernel_export, registry, sockets, sspi, unwind, user,
-    winhttp,
+    devices, display, dxgi, guid, kernel_export, registry, sockets, sspi, unwind, user, winhttp,
 };
 use super::{Memory, Runtime64, WRITE};
 
@@ -122,7 +121,7 @@ impl Runtime64 {
                         } else if module.eq_ignore_ascii_case("d3d12.dll") {
                             dxgi::symbol(module, &symbol).to_owned()
                         } else if module.eq_ignore_ascii_case("oleaut32.dll") {
-                            automation::symbol(module, &symbol).to_owned()
+                            crate::win32::catalog::bstr_symbol(module, &symbol).to_owned()
                         } else {
                             return Err("Win64 native ordinal lookup is not implemented".into());
                         }
@@ -175,7 +174,6 @@ impl Runtime64 {
                                 "DwmGetWindowAttribute" | "DwmIsCompositionEnabled"
                             ))
                         || (provider == "advapi32.dll" && registry::arity(&function).is_some())
-                        || automation::export(&provider, &function)
                         || winhttp::export(&provider, &function)
                         || (matches!(provider.as_str(), "kernel32.dll" | "kernelbase.dll")
                             && matches!(

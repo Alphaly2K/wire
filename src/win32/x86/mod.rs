@@ -1,3 +1,4 @@
+pub(crate) mod bstr;
 pub(crate) mod calendar;
 pub(crate) mod clocks;
 pub(crate) mod com;

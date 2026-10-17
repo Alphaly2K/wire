@@ -4,6 +4,7 @@ use super::{
     cpu::Cpu64,
     memory::{Memory, PAGE, READ, WRITE},
 };
+use crate::win32::catalog::bstr_symbol;
 use std::{
     collections::BTreeMap,
     time::{Instant, UNIX_EPOCH},
@@ -98,7 +99,7 @@ pub struct Runtime64 {
     environment: crate::runtime::environment::EnvironmentVariables,
     local_blocks: std::collections::BTreeSet<u64>,
     task_memory: com::TaskMemory,
-    bstrings: BTreeMap<u64, (u64, usize)>,
+    bstrings: automation::Bstrings,
     hstrings: winrt::Strings,
     devices: devices::Devices,
     rng_handles: std::collections::BTreeSet<u64>,
@@ -183,7 +184,7 @@ pub enum Control {
 /// certify every argument, COM method or optional backend capability.
 pub fn import_supported(dll: &str, name: &str) -> bool {
     use crate::win32::catalog::{resolve, Architecture, Resolution};
-    let name = automation::symbol(dll, dxgi::symbol(dll, sockets::symbol(dll, name)));
+    let name = bstr_symbol(dll, dxgi::symbol(dll, sockets::symbol(dll, name)));
     match resolve(Architecture::X64, dll, name) {
         Resolution::Bound(contract) => {
             return contract.execution(Architecture::X64)
@@ -196,9 +197,6 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
         return false;
     }
     if name == "NtQueryDirectoryFile" && !dll.eq_ignore_ascii_case("ntdll.dll") {
-        return false;
-    }
-    if automation::arity(name).is_some() && !automation::export(dll, name) {
         return false;
     }
     if winhttp::arity(name).is_some() && !winhttp::export(dll, name) {
@@ -266,7 +264,6 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
             ))
         && !guid::export(dll, name)
         && !devices::export(dll, name)
-        && !automation::export(dll, name)
         && !winhttp::export(dll, name)
     {
         return false;
@@ -280,7 +277,6 @@ fn kernel_export(name: &str) -> bool {
             .contains(&"kernel32.dll");
     }
     if devices::arity(name).is_some()
-        || automation::arity(name).is_some()
         || winhttp::arity(name).is_some()
         || guid::arity(name).is_some()
         || user::arity(name).is_some()
@@ -323,7 +319,6 @@ fn import_arity(name: &str) -> Option<usize> {
         return Some(contract.parameters.len());
     }
     Some(match name {
-        name if automation::arity(name).is_some() => automation::arity(name).unwrap(),
         name if winhttp::arity(name).is_some() => winhttp::arity(name).unwrap(),
         name if sockets::arity(name).is_some() => sockets::arity(name).unwrap(),
         name if devices::arity(name).is_some() => devices::arity(name).unwrap(),
@@ -406,14 +401,13 @@ fn import_arity(name: &str) -> Option<usize> {
 }
 
 fn normalize_symbol<'a>(dll: &str, name: &'a str) -> &'a str {
-    automation::symbol(dll, dxgi::symbol(dll, sockets::symbol(dll, name)))
+    bstr_symbol(dll, dxgi::symbol(dll, sockets::symbol(dll, name)))
 }
 fn import_dwords(name: &str) -> &'static [usize] {
     if let Some(contract) = crate::win32::catalog::by_name(name) {
         return contract.win64_dwords();
     }
     match name {
-        name if automation::arity(name).is_some() => automation::dwords(name),
         name if winhttp::arity(name).is_some() => winhttp::dwords(name),
         name if sockets::arity(name).is_some() => sockets::dwords(name),
         name if devices::arity(name).is_some() => devices::dwords(name),
@@ -464,7 +458,7 @@ fn import_dwords(name: &str) -> &'static [usize] {
 }
 fn import_groups(name: &str) -> u32 {
     let predicates = [
-        automation::arity(name).is_some(),
+        false, // BSTR moved to catalog typed IDs; preserve legacy bit positions
         winhttp::arity(name).is_some(),
         devices::arity(name).is_some(),
         user::message_arity(name).is_some(),
@@ -537,7 +531,7 @@ impl Runtime64 {
             next_alloc: 0x400000000,
             allocations: BTreeMap::new(),
             guest_heap: Default::default(),
-            bstrings: BTreeMap::new(),
+            bstrings: Default::default(),
             tls: [None; 64],
             fls: [None; 128],
             modules: crate::win32::x64::modules::Modules::new(TEB + 0x20000),
@@ -786,7 +780,7 @@ impl Runtime64 {
         self.modules.register_provider(name);
     }
     pub fn register(&mut self, dll: &str, name: &str) -> u64 {
-        let name = automation::symbol(dll, dxgi::symbol(dll, sockets::symbol(dll, name)));
+        let name = bstr_symbol(dll, dxgi::symbol(dll, sockets::symbol(dll, name)));
         let export = format!("{dll}!{name}");
         if let Some((&address, _)) = self.gateways.iter().find(|(_, value)| **value == export) {
             return address;
@@ -858,6 +852,7 @@ impl Runtime64 {
         match id {
             ApiId::Com(id) => self.com_call(mem, id, args),
             ApiId::Winrt(id) => self.winrt_call(mem, id, args),
+            ApiId::Bstr(id) => self.bstr_call(mem, id, args),
             ApiId::File(_) => unreachable!("core file calls are handled by the bound gateway"),
             ApiId::Handle(_) => unreachable!("handle calls are handled by the bound gateway"),
             ApiId::Path(_) => unreachable!("path helpers have no Win64 binding"),
@@ -1062,7 +1057,6 @@ impl Runtime64 {
                     }
                 }
             }
-            _ if binding.groups & (1 << 0) != 0 => self.automation_call(mem, name, args)?,
             _ if binding.groups & (1 << 1) != 0 => self.winhttp_call(mem, name, args)?,
             _ if binding.groups & (1 << 2) != 0 => self.device_call(mem, name, args)?,
             _ if binding.groups & (1 << 3) != 0 => match self.message_call(mem, name, args)? {

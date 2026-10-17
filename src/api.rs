@@ -276,7 +276,7 @@ pub struct ApiState {
     pub(crate) wmi: crate::wmi::Wmi,
     pub presenter: crate::host::ui::Presenter,
     pub stop_after_presents: Option<u64>,
-    pub(crate) bstrs: HashMap<u32, u32>,
+    pub(crate) bstrs: crate::win32::com::bstr::Bstrings32,
     pub(crate) apartments: crate::win32::com::apartment::Apartments32,
 }
 
@@ -313,7 +313,7 @@ impl ApiState {
             wmi: crate::wmi::Wmi::default(),
             presenter: crate::host::ui::Presenter::default(),
             stop_after_presents: None,
-            bstrs: HashMap::new(),
+            bstrs: Default::default(),
             apartments: Default::default(),
         };
         for dll in [
@@ -1829,6 +1829,20 @@ pub fn dispatch(
                 ),
                 _ => unreachable!("PE32 COM export has no typed route"),
             };
+        }
+        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Bstr(_))) => {
+            let Some(crate::win32::catalog::ApiId::Bstr(id)) = binding.typed else {
+                unreachable!();
+            };
+            (ret, note) = crate::win32::x86::bstr::call(
+                id,
+                &args,
+                mem,
+                &mut state.heap,
+                &mut state.bstrs,
+                state.process_heap,
+                &mut state.last_error,
+            );
         }
         ("wire.wmi", _) => {
             (ret, note, implemented) =

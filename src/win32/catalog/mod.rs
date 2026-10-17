@@ -1,6 +1,7 @@
 //! Export identity and ABI plans are resolved during binding, not execution.
 //! Unconverted families remain on explicit legacy routes.
 mod address_waits;
+mod bstr;
 mod calendar;
 mod clocks;
 mod com;
@@ -31,6 +32,8 @@ mod virtual_memory;
 mod waits;
 mod winrt;
 pub use address_waits::{AddressWaitApi, ADDRESS_WAIT_CONTRACTS};
+pub(crate) use bstr::symbol as bstr_symbol;
+pub use bstr::{BstrApi, BSTR_CONTRACTS};
 pub use calendar::{CalendarApi, CALENDAR_CONTRACTS};
 pub use clocks::{ClockApi, CLOCK_CONTRACTS};
 pub use com::{ComApi, COM_CONTRACTS};
@@ -95,6 +98,7 @@ pub enum ReturnConvention {
 pub enum ApiId {
     Com(ComApi),
     Winrt(WinrtApi),
+    Bstr(BstrApi),
     Guid(GuidApi),
     Identity(IdentityApi),
     Version(VersionApi),
@@ -292,6 +296,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(THREAD_CONTROL_CONTRACTS.iter())
         .chain(COM_CONTRACTS.iter())
         .chain(WINRT_CONTRACTS.iter())
+        .chain(BSTR_CONTRACTS.iter())
 }
 
 #[cfg(test)]
