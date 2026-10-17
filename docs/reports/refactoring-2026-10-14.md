@@ -316,3 +316,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 三个新增 export 汇入原 GUID 契约，家族合计六项；移除重复 ABI/arity/provider、legacy bit 路由与动态 lookup，资源与返回帧仍按架构协调。四项独立旧行为基线及完整 release 527、debug 374、native 7、工具 20 项和 fmt/strict Clippy/build 通过。
 
 63 条初筛路径全部校验，八项同哈希三顺序扩样，共 71 个 workload protocol；保留 multimedia/IR +3.181%、VirtualQuery/IR +3.584% 的局部成本，独立 diagnostics 的计数、CPU 源码及五个 PE32 执行器节助记符序列保持，具体机制尚未确证。原 GUID/raw 扩样 +1.135%，新错误返回网关 Win64 −0.951%、PE32 IR 扩样 −0.279%；初筛 RSS 最多 +112KiB。Alice 前缀 CPU −0.401%、wall −0.530%，保持隐藏窗口和零 Draw/Present。306 个 Rust 文件核对一致，二进制减少 5,088 bytes，契约累计 355 个 export。2026-10-18 接受，完整轮次与成本见[GUID 资源辅助验收](refactoring-guid-allocation-2026-10-18.md)。
+
+## R2 基础字符串、指针与进程查询
+
+29 项 export 汇入三个契约家族，删除混合 common_api、重复 ABI/arity 与名称分发。WMI 内部 BSTR 直接借共享 owner，PE32 资源请求仍由原入口提交；Win64 仅保留原四项 processor/group-count typed。六项独立旧行为基线及完整 release 533、debug 380、native 7、工具 20 项和 fmt/strict Clippy/build 通过。实现提交 `2999453`。
+
+首版 spec 数据重复和两个持续 code-alias 回退候选拒绝；最终共用 spec 数据、按字段恢复缓存，二进制只增加 48 bytes。68 条初筛与七条同哈希三顺序扩样，共 75 个 workload protocol 全部校验；code-alias −5.378%，新 processor 网关 Win64 −6.369%。保留 memory/SSE +3.612%/+3.853% 局部成本及原始离散轮次，独立 diagnostics 与执行器助记符调查未确证具体机制；首次错误节统计已纠正，受静态分析重叠影响的 bit 全组三顺序重跑。Alice 200M 前缀 CPU −0.876%、wall −2.273%，保持隐藏窗口和零 Draw/Present。314 个 Rust 文件核对一致，契约累计 384 个 export。2026-10-18 接受，完整记录见[基础 helper 验收](refactoring-basic-2026-10-18.md)。

@@ -1,6 +1,6 @@
 # R2 基础字符串、指针与进程查询（2026-10-18）
 
-状态：首版候选因性能回退拒绝；修订版正在验证，尚未验收。
+状态：2026-10-18 接受最终按字段恢复缓存的候选；两个早期候选因持续性能回退拒绝，证据保留。
 
 ## 独立旧行为基线
 
@@ -38,4 +38,24 @@ Win64 只绑定原有四项 processor/group-count API；PE32 八项 process API 
 
 最终候选的 **68 条初筛路径**各三对全部结果校验，初筛 CPU 中位数最大回退 **+4.205%**，RSS 中位数最多增加 **128KiB**。code-alias 中位数 **−5.378%**，三对 **−5.618%/−5.378%/−4.574%**，原持续回退消除。新处理器查询网关 PE32 IR/raw **−0.048%/−1.009%**，新字符串网关 IR/raw **−1.066%/−0.762%**。
 
-memory、SSE、bit、GUID、线程控制、PE32 COM/IR 和 critical-section/IR 共七条路径因中位数超过 3% 或单轮回退超过 5% 而扩样，三倍 work、同哈希 control 和三种顺序各一对。扩样及 Alice 前缀尚在执行，最终接受决定待完成后记录。初筛汇总 `r2-basic-fields-stable-initial-summary.json`。
+memory、SSE、bit、GUID、线程控制、PE32 COM/IR 和 critical-section/IR 共七条路径因中位数超过 3% 或单轮回退超过 5% 而扩样，三倍 work、同哈希 control 和三种顺序各一对：
+
+| 路径 | 请求 work | after/before CPU | control/before CPU | after/control CPU |
+| --- | ---: | ---: | ---: | ---: |
+| AMD64 memory | 2.1B | +3.612% | +0.330% | +3.272% |
+| AMD64 SSE | 2.1B | +3.853% | +0.450% | +3.388% |
+| AMD64 bit | 900M | −0.017% | +0.821% | −0.832% |
+| Win64 GUID | 300M | −0.613% | −0.259% | −0.355% |
+| Win64 thread-control | 300M | +0.427% | −0.427% | +0.858% |
+| PE32 COM/IR | 150M | −2.552% | −1.321% | −1.248% |
+| PE32 critical-section/IR | 150M | +0.753% | −0.735% | +1.499% |
+
+memory 三对 after/before 分别 **+6.403%/+3.340%/+2.800%**，SSE 为 **+3.647%/+5.172%/+3.433%**。两项持续局部成本明确保留，未用其它负载的改善抵消；没有三对均超过 5% 的拒绝路径。COM 首组 after 12.4416 秒，相对 before/control 15.7232/15.4649 秒有明显有利离散；后两组 after 15.3264/15.2719 秒，全部轮次保留，不将该离散表述为稳定大幅收益。critical-section 的最后一组也有 before 较慢的离散，保留逐对结果。
+
+独立 120K diagnostics 中两端 memory 的 IR **120,008**、translations **16**，SSE 的 IR **120,007**、translations **13**，code-alias 的 IR **120,008**、translations **20**；三项 fallback、invalidations 和 eviction/epoch/byte-change/mapping-invalidation 原因均为 **0**，返回 checksum 一致。证据 `r2-basic-fields-diagnostics64` 与 `r2-basic-fields-diagnostics-v2`。静态反汇编中 read_int、write_int、checked_access、Pages::slot、RegisterSegment::execute_mixed 以及两个执行器节的指令数和助记符序列相同；缓存恢复为 434→432，保存为 225→242。这里只比较助记符，未核对全部操作数，memory/SSE 局部成本的具体机制仍未确证。
+
+首次节反汇编误用了会输出整个 executable 的 `--macho --section` 组合，错误统计保留于 `r2-basic-fields-hot-codegen.json`，不采用其中节数据。后续按 Mach-O addr/size 限定范围，`__wire_ir` **1968**、`__wire_irchk` **2156** 条指令，正确结果见 `r2-basic-fields-hot-codegen-corrected.json`。最初静态反汇编与 bit 扩样约有 6 秒重叠，完整重跑无重叠的三种顺序，以 `expanded-bit64-clean-{0,1,2}` 为最终汇总输入；原轮次保留。
+
+Alice 200M 启动前缀三对均保持预算出口、隐藏 client **314×211** 与 Draw/Present **0/0**。CPU 中位数 **−0.876%**、wall **−2.273%**，after CPU **2.615205 秒**、wall **2.677345375 秒**、RSS **417,464,320 bytes**。直接复用原 runtime 目录，未复制游戏；该前缀未进入绘制，未推断游戏 FPS。证据 `r2-basic-fields-stable-alice/compare.json`。
+
+最终 **75 个 workload protocol = 68 条初筛 + 7 条扩样**全部结果校验，不跨 work 混算；新处理器查询网关 Win64 **−6.369%**。初筛和完整汇总分别为 `r2-basic-fields-stable-initial-summary.json` 与 `r2-basic-fields-stable-summary.json`。在保留上述成本、历史失败候选和离散轮次的前提下接受最终冻结，二进制增量 **48 bytes**，本批 **29 exports** 纳入已验收范围，累计 **384 exports**。实现提交 `2999453`；随后未接入的键盘草稿不属于本批验收。
