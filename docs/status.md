@@ -1,16 +1,16 @@
 # 当前状态
 
-更新日期：2026-10-17。重构前基线为 `2e78377`；最新已验收运行时为 [线程控制与 owner](reports/refactoring-thread-control-2026-10-17.md)，该报告记录冻结源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
+更新日期：2026-10-17。重构前基线为 `2e78377`；最新已验收运行时为 [COM 基础与 owner](reports/refactoring-com-core-2026-10-17.md)，该报告记录冻结源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
 
-本轮追加完成六项线程控制 export，冷绑定创建、退出、APC、CONTEXT 和 description。Win64 的 description/APC queue 收进 Threads 私有状态，退出和上下文保持显式进程控制结果；PE32 保留创建/退出顺序及其余四项 ABI-only 策略。两架构的 CPU、回调、TLS、错误与返回提交保持。后续继续处理 USER、COM、图形及其余 legacy 家族。Mono 原生化已撤回，本轮继续排除。
+本轮追加完成十项 COM 基础 export，冷绑定 COM/WinRT 初始化、工厂和 task allocation，明确保留 Ole 的架构策略。Apartment 状态由线程独占，Win64 删除活动线程镜像；task allocation 成员收进私有 owner，PE32 继续共享进程 heap。返回帧、错误、WMI 能力及公开 NLS facade 的原范围保持。后续继续处理 WinRT 字符串、USER、COM、图形及其余 legacy 家族。Mono 原生化已撤回，本轮继续排除。
 
 ## 重构范围
 
 | 阶段 | 已交付 | 剩余范围 |
 | --- | --- | --- |
 | R0/R1 | 冻结输入、原创正式 fixture、领域测试 harness、GUID 唯一契约和双架构适配 | 随后续家族维护独立基线 |
-| R2 | 已验收 319 个 export 的契约；明细见下表 | USER、COM、图形等 legacy 家族 |
-| R3 | guest environment、双架构模块状态、Win64 文件、period 请求、SRW、地址等待及 APC 队列、线程标量操作与描述、PE32 TLS/FLS 私有 owner | PE32 其余资源、线程资源创建/退出与 COM 等；PE32 kernel 大范围抽取曾因性能撤回 |
+| R2 | 已验收 329 个 export 的契约；明细见下表 | USER、COM、图形等 legacy 家族 |
+| R3 | guest environment、双架构模块状态、Win64 文件、period 请求、SRW、地址等待及 APC 队列、线程标量操作与描述、双架构 apartment、Win64 task 成员、PE32 TLS/FLS 私有 owner | PE32 其余资源、线程资源创建/退出及 COM 其余对象；PE32 kernel 大范围抽取曾因性能撤回 |
 | R4/R5 | Process32 编排边界、owned host UI 请求、GDI 与像素状态分离 | 领域分发与资源 owner 随 R2/R3 继续收敛 |
 | R6 | 按用户要求忽略 | 不重建原生 Mono 路径 |
 | R7 | PE32 内核目录、领域测试、公共性能工具、当前/历史文档入口 | 后续目录和工具随领域迁移继续整理 |
@@ -44,6 +44,7 @@
 | 地址等待 | 3 | [队列与线程状态边界](architecture/address-waits.md)及[验收](reports/refactoring-address-waits-2026-10-17.md) |
 | 线程查询 / 设置 | 9 | [调度状态与调用边界](architecture/thread-properties.md)及[验收](reports/refactoring-thread-properties-2026-10-17.md) |
 | 线程创建 / 退出 / APC / CONTEXT / description | 6 | [控制结果与资源边界](architecture/thread-control.md)及[验收](reports/refactoring-thread-control-2026-10-17.md) |
+| COM / WinRT 初始化、工厂、task memory / Ole 策略 | 10 | [调用与资源边界](architecture/com-core.md)及[验收](reports/refactoring-com-core-2026-10-17.md) |
 
 ## 当前执行路径与能力
 
@@ -60,9 +61,9 @@
 
 ## 验证与性能
 
-最近已验收的线程控制批次：release **502 passed / 7 ignored**，debug Win32/AMD64/FPU **349 passed**，显式 native **7 passed**，工具 **20 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。
+最近已验收的 COM 基础批次：release **509 passed / 7 ignored**，debug Win32/AMD64/FPU **356 passed**，显式 native **7 passed**，工具 **20 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。
 
-线程控制的 46 条性能路径全部结果校验，两项 SSE 超门槛路径完成同哈希三顺序扩样。新增 APC 错误返回网关 CPU Win64 +0.489%、PE32 IR/raw −23.845%/−19.707%；PE32 SSE/raw 扩样后 +0.683%，Win64 SSE 保留 +3.473% 局部成本（after/control +3.702%）。诊断计数和执行器助记符序列保持，具体成本机制尚未确证。初筛 RSS 最多增加 160KiB，二进制增加 22,688 bytes；游戏前缀 CPU −0.949%、wall −0.952%，启动终点保持。各批次使用自己的基线，日历批次 Local/Global +4.570%、线程属性批次 HeapSize +4.063% 等历史成本与离散轮次继续保留在对应报告，未将结构调整解释为游戏 FPS 提升。AMD64 event fixture 的重复导入已独立修正；旧验收保持冻结输入，后续按新哈希配对，详见[工具边界](architecture/validation-tools.md)。
+COM 基础的 49 条性能路径全部结果校验，四项单轮离散路径完成同哈希三顺序扩样，共 53 个 workload protocol。新增 COM 网关 CPU Win64 −12.916%、PE32 IR/raw −2.754%/−2.063%；初筛最大回退 +2.129%，扩样最大 +2.367%。初筛 RSS 最多增加 64KiB，二进制增加 1,216 bytes；游戏前缀 CPU +0.024%、wall +0.229%，启动终点保持。各批次使用自己的基线，线程控制批 SSE +3.473%、日历批次 Local/Global +4.570%、线程属性批次 HeapSize +4.063% 等历史成本与离散轮次继续保留在对应报告，未将结构调整解释为游戏 FPS 提升。AMD64 event fixture 的重复导入已独立修正；旧验收保持冻结输入，后续按新哈希配对，详见[工具边界](architecture/validation-tools.md)。
 
 后续正式比较使用显式 [稳定启动协议](reports/refactoring-launch-protocol-2026-10-16.md)，固定 argv0、参数和 child cwd，并记录 shell SHA。默认工具行为保持；旧协议数据独立保留，汇总不跨协议或不同 work 合并。编译、正式计时、采样与 runtime diagnostics 串行执行。每个结构候选先完成正确性，再按至少三对轮换检查结果、CPU/wall/RSS 与输入哈希；超过门槛先调查，不把失败候选扩大到其它领域。
 

@@ -10,6 +10,7 @@ use std::{
 };
 mod apc;
 mod automation;
+mod com;
 mod command;
 mod devices;
 mod display;
@@ -96,7 +97,7 @@ pub struct Runtime64 {
     profile: crate::runtime::environment::GuestEnvironment,
     environment: crate::runtime::environment::EnvironmentVariables,
     local_blocks: std::collections::BTreeSet<u64>,
-    task_blocks: std::collections::BTreeSet<u64>,
+    task_memory: com::TaskMemory,
     bstrings: BTreeMap<u64, (u64, usize)>,
     hstrings: winrt::Strings,
     devices: devices::Devices,
@@ -110,9 +111,6 @@ pub struct Runtime64 {
     srw: crate::win32::kernel::srw::SrwLocks,
     exception_filter: u64,
     error_mode: u32,
-    apartment: Option<u32>,
-    com_refs: u32,
-    winrt_refs: u32,
     screen_reader: bool,
     snapshots: BTreeMap<u64, snapshot::Snapshot>,
     next_snapshot: u64,
@@ -180,22 +178,6 @@ pub enum Control {
         dll: String,
         args: Vec<u64>,
     },
-}
-fn com_export(dll: &str, name: &str) -> bool {
-    matches!(
-        dll.to_ascii_lowercase().as_str(),
-        "ole32.dll" | "combase.dll" | "api-ms-win-core-winrt-l1-1-0.dll"
-    ) && matches!(
-        name,
-        "RoInitialize"
-            | "RoUninitialize"
-            | "CoInitialize"
-            | "CoInitializeEx"
-            | "CoUninitialize"
-            | "CoCreateInstance"
-            | "CoTaskMemAlloc"
-            | "CoTaskMemFree"
-    )
 }
 /// Whether a Win64 import has a dispatch route and known ABI. This does not
 /// certify every argument, COM method or optional backend capability.
@@ -288,7 +270,6 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
         && !guid::export(dll, name)
         && !devices::export(dll, name)
         && !winrt::export(dll, name)
-        && !com_export(dll, name)
         && !automation::export(dll, name)
         && !winhttp::export(dll, name)
     {
@@ -321,14 +302,6 @@ fn kernel_export(name: &str) -> bool {
             name,
             "CommandLineToArgvW"
                 | "SHGetKnownFolderPath"
-                | "CoTaskMemAlloc"
-                | "CoTaskMemFree"
-                | "CoCreateInstance"
-                | "CoInitialize"
-                | "CoInitializeEx"
-                | "CoUninitialize"
-                | "RoInitialize"
-                | "RoUninitialize"
                 | "OpenProcessToken"
                 | "OpenThreadToken"
                 | "GetTokenInformation"
@@ -396,8 +369,6 @@ fn import_arity(name: &str) -> Option<usize> {
         "OpenThreadToken" => 4,
         "GetTokenInformation" => 5,
         "SHGetKnownFolderPath" => 4,
-        "CoTaskMemAlloc" | "CoTaskMemFree" => 1,
-        "CoCreateInstance" => 5,
         "CreateToolhelp32Snapshot"
         | "Process32First"
         | "Process32Next"
@@ -416,9 +387,6 @@ fn import_arity(name: &str) -> Option<usize> {
         "SetEnvironmentVariableW" | "SetEnvironmentVariableA" => 2,
         "NtQueryDirectoryFile" => 11,
         "CommandLineToArgvW" => 2,
-        "RoInitialize" | "CoInitialize" => 1,
-        "CoInitializeEx" => 2,
-        "RoUninitialize" | "CoUninitialize" => 0,
         "GetCommandLineA" | "GetCommandLineW" | "AreFileApisANSI" => 0,
         "GetErrorMode" => 0,
         "SetErrorMode" => 1,
@@ -491,9 +459,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "BCryptCloseAlgorithmProvider" => &[1],
         "GetEnvironmentVariableW" | "GetEnvironmentVariableA" => &[2],
         "NtQueryDirectoryFile" => &[6, 7],
-        "RoInitialize" => &[0],
-        "CoInitializeEx" => &[1],
-        "CoCreateInstance" => &[2],
         "SetErrorMode" => &[0],
         "InitializeProcThreadAttributeList" => &[1, 2],
         "UpdateProcThreadAttribute" => &[1],
@@ -594,7 +559,7 @@ impl Runtime64 {
             profile: crate::runtime::environment::GuestEnvironment::amd64(),
             environment: Default::default(),
             local_blocks: std::collections::BTreeSet::new(),
-            task_blocks: std::collections::BTreeSet::new(),
+            task_memory: Default::default(),
             hstrings: Default::default(),
             devices: Default::default(),
             rng_handles: std::collections::BTreeSet::new(),
@@ -607,9 +572,6 @@ impl Runtime64 {
             srw: Default::default(),
             exception_filter: 0,
             error_mode: 0,
-            apartment: None,
-            com_refs: 0,
-            winrt_refs: 0,
             screen_reader: false,
             snapshots: BTreeMap::new(),
             next_snapshot: 0x7fff1000,
@@ -901,6 +863,7 @@ impl Runtime64 {
     ) -> Result<u64, String> {
         use crate::win32::catalog::ApiId;
         match id {
+            ApiId::Com(id) => self.com_call(mem, id, args),
             ApiId::File(_) => unreachable!("core file calls are handled by the bound gateway"),
             ApiId::Handle(_) => unreachable!("handle calls are handled by the bound gateway"),
             ApiId::Path(_) => unreachable!("path helpers have no Win64 binding"),
@@ -1557,28 +1520,6 @@ impl Runtime64 {
                     }
                 }
             }
-            "CoTaskMemAlloc" => {
-                let p = self.heap_alloc(mem, args[0])?;
-                if p != 0 {
-                    self.task_blocks.insert(p);
-                }
-                p
-            }
-            "CoTaskMemFree" => {
-                if args[0] != 0 {
-                    if !self.task_blocks.contains(&args[0]) {
-                        return Err("invalid Win64 task allocation".into());
-                    }
-                    let &(_, span) = self
-                        .allocations
-                        .get(&args[0])
-                        .ok_or("released Win64 task allocation")?;
-                    mem.unmap(args[0], span)?;
-                    self.allocations.remove(&args[0]);
-                    self.task_blocks.remove(&args[0]);
-                }
-                0
-            }
             "SHGetKnownFolderPath" => {
                 mem.check(args[3], 8, WRITE)?;
                 let mut guid = [0; 16];
@@ -1632,7 +1573,7 @@ impl Runtime64 {
                         } else {
                             mem.write(p, &data)?;
                             mem.write_int(args[3], 8, p)?;
-                            self.task_blocks.insert(p);
+                            self.task_memory.track(p);
                             0
                         }
                     }
@@ -2519,81 +2460,6 @@ impl Runtime64 {
                     self.local_blocks.insert(block);
                     block
                 }
-            }
-            "CoCreateInstance" => {
-                if args[0] == 0 || args[3] == 0 || args[4] == 0 {
-                    0x80070057
-                } else {
-                    mem.check(args[4], 8, WRITE)?;
-                    let mut clsid = [0; 16];
-                    let mut iid = [0; 16];
-                    mem.read(args[0], &mut clsid)?;
-                    mem.read(args[3], &mut iid)?;
-                    self.trace_note(format!("Win64 COM class={clsid:02x?} iid={iid:02x?}: no registered native class factory"));
-                    mem.write_int(args[4], 8, 0)?;
-                    if self.apartment.is_none() {
-                        0x800401f0
-                    } else if args[2] == 0 {
-                        0x80070057
-                    } else {
-                        0x80040154
-                    }
-                }
-            }
-            "RoInitialize" | "CoInitialize" | "CoInitializeEx" => {
-                let winrt = name == "RoInitialize";
-                let flags = if name == "CoInitialize" {
-                    2
-                } else if winrt {
-                    0
-                } else {
-                    args[1]
-                };
-                let invalid = if winrt {
-                    args[0] > 1
-                } else {
-                    args[0] != 0 || flags & !0xe != 0
-                };
-                if invalid {
-                    0x80070057 // E_INVALIDARG
-                } else {
-                    let mode = if winrt {
-                        if args[0] == 0 {
-                            2
-                        } else {
-                            0
-                        }
-                    } else {
-                        flags as u32 & 2
-                    };
-                    if self.apartment.is_some_and(|current| current != mode) {
-                        0x80010106 // RPC_E_CHANGED_MODE, no new reference.
-                    } else {
-                        let result = self.apartment.is_some() as u64;
-                        self.apartment = Some(mode);
-                        let refs = if winrt {
-                            &mut self.winrt_refs
-                        } else {
-                            &mut self.com_refs
-                        };
-                        *refs = refs
-                            .checked_add(1)
-                            .ok_or("Win64 apartment reference overflow")?;
-                        result
-                    }
-                }
-            }
-            "RoUninitialize" | "CoUninitialize" => {
-                let refs = if name == "RoUninitialize" {
-                    &mut self.winrt_refs
-                } else {
-                    &mut self.com_refs
-                };
-                *refs = refs.saturating_sub(1);
-                if self.com_refs == 0 && self.winrt_refs == 0 {
-                    self.apartment = None;
-                }
-                0
             }
             "GetErrorMode" => self.error_mode as u64,
             "SetErrorMode" => {

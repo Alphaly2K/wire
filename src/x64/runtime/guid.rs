@@ -51,7 +51,7 @@ impl Runtime64 {
                     return Ok(0x8007000e);
                 }
                 mem.write(pointer, &data)?;
-                self.task_blocks.insert(pointer);
+                self.task_memory.track(pointer);
                 mem.write_int(args[1], 8, pointer)?;
                 Ok(0)
             }

@@ -2,6 +2,41 @@
 use super::*;
 
 #[test]
+fn com_core_keeps_public_nls_task_facade_scope_and_allocation_notes() {
+    let mut v = Vm::new();
+    let call = |name: &str, value: u32, v: &mut Vm| {
+        let mut args = [0; 16];
+        args[0] = value;
+        wire::nls::dispatch("ole32.dll", name, &args, &mut v.mem, &mut v.state).unwrap()
+    };
+    let (pointer, note) = call("CoTaskMemAlloc", 17, &mut v);
+    assert_ne!(pointer, 0);
+    assert_eq!(note, "code-page / sandbox directory shim");
+    assert_eq!(v.k("HeapSize", &[v.state.process_heap, 0, pointer]), 17);
+    assert_eq!(call("CoTaskMemFree", pointer, &mut v), (0, note));
+    assert_eq!(
+        v.k("HeapSize", &[v.state.process_heap, 0, pointer]),
+        u32::MAX
+    );
+    for dll in ["OLE32.dll", "kernel32.dll", "combase.dll", "user32.dll"] {
+        assert!(
+            wire::nls::dispatch(dll, "CoTaskMemAlloc", &[0; 16], &mut v.mem, &mut v.state)
+                .is_none()
+        );
+    }
+    for name in [
+        "CoInitialize",
+        "CoInitializeEx",
+        "CoUninitialize",
+        "CoCreateInstance",
+    ] {
+        assert!(
+            wire::nls::dispatch("ole32.dll", name, &[0; 16], &mut v.mem, &mut v.state).is_none()
+        );
+    }
+}
+
+#[test]
 fn com_core_keeps_pe32_apartment_error_refs_and_thread_identity() {
     let mut v = Vm::new();
     v.k("SetLastError", &[123]);

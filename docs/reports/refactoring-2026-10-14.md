@@ -286,3 +286,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 六项 export 接入 ThreadControlApi，删除重复 ABI/arity/DWORD 和根名称分支；PE32 Create/Exit typed，其余四项 ABI-only，内部 wire worker-return 单独保留。Win64 冷绑定专用控制 ID，Value/Exit/Context 保留原 CPU/计数/trace/阻塞提交；Threads 私有拥有描述/APC queue，创建/TLS/heap/回调仍按明确资源边界编排。八项独立旧行为基线及完整 release 502、debug 349、native 7、工具 20 项和 fmt/strict Clippy/build 通过。
 
 46 条初筛路径全部校验，两条 SSE 同哈希三顺序扩样；PE32 SSE/raw +0.683%，Win64 SSE 保留 +3.473% 局部成本（after/control +3.702%），诊断计数与执行器助记符序列保持，具体成本机制尚未确证。新 APC 错误返回网关 CPU Win64 +0.489%、PE32 IR/raw −23.845%/−19.707%；初筛 RSS 最多 +160KiB。Alice 前缀 CPU −0.949%、wall −0.952%，保持隐藏窗口和零 Draw/Present。283 个 Rust 文件核对一致，二进制增加 22,688 bytes，契约累计 319 个 export。2026-10-17 接受，完整初筛、扩样和历史成本保留于[线程控制验收](refactoring-thread-control-2026-10-17.md)。
+
+## R2/R3 COM 基础
+
+十项 export 接入 ComApi，删除重复 ABI/arity/DWORD、provider 特例和根名称分发，保留 PE32 Ole ABI-only、Ro absent 及 Win64 Ole absent。双架构 Apartment 由线程独占，删除 Win64 活动镜像；TaskMemory 私有登记成员，原 backing allocator、PE32 进程 heap 共享、WMI 工厂和公开 NLS facade 精确范围保持。七项独立回归及完整 release 509、debug 356、native 7、工具 20 项和 fmt/strict Clippy/build 通过。
+
+49 条初筛路径全部校验，四项单轮离散路径同哈希三顺序扩样，共 53 个 workload protocol；初筛最大 CPU 回退 +2.129%，扩样最大 +2.367%。新 COM 网关 CPU Win64 −12.916%、PE32 IR/raw −2.754%/−2.063%；初筛 RSS 最多 +64KiB。Alice 前缀 CPU +0.024%、wall +0.229%，保持隐藏窗口和零 Draw/Present。289 个 Rust 文件核对一致，二进制增加 1,216 bytes，契约累计 329 个 export。2026-10-17 接受，初筛、扩样和历史成本见[COM 基础验收](refactoring-com-core-2026-10-17.md)。

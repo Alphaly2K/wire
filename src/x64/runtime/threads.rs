@@ -48,9 +48,7 @@ pub(super) struct Thread {
     pub suspended: u32,
     pub block: Option<Block>,
     pub priority: i32,
-    pub apartment: Option<u32>,
-    pub com_refs: u32,
-    pub winrt_refs: u32,
+    apartment: crate::win32::com::apartment::Apartment,
     pub resources: Option<(u64, u64, Vec<u64>)>,
     description: String,
     apcs: std::collections::VecDeque<(u64, u64)>,
@@ -79,9 +77,7 @@ impl Threads {
                     suspended: 0,
                     block: None,
                     priority: 0,
-                    apartment: None,
-                    com_refs: 0,
-                    winrt_refs: 0,
+                    apartment: Default::default(),
                     resources: None,
                     description: String::new(),
                     apcs: Default::default(),
@@ -115,6 +111,12 @@ impl Threads {
             return Ok(self.active);
         }
         self.handles.get(&handle).copied().ok_or(6)
+    }
+    pub fn apartment(&self) -> &crate::win32::com::apartment::Apartment {
+        &self.entries[&self.active].apartment
+    }
+    pub fn apartment_mut(&mut self) -> &mut crate::win32::com::apartment::Apartment {
+        &mut self.entries.get_mut(&self.active).unwrap().apartment
     }
     pub fn flags(&self, handle: u64) -> Option<u32> {
         self.handle_flags.get(&handle).copied()
@@ -197,15 +199,9 @@ impl Runtime64 {
         Ok(())
     }
     pub(crate) fn activate_thread(&mut self, id: u64) {
-        let old = self.threads.entries.get_mut(&self.threads.active).unwrap();
-        old.apartment = self.apartment;
-        old.com_refs = self.com_refs;
-        old.winrt_refs = self.winrt_refs;
+        // Apartment state resides in its thread; there is no active-thread mirror.
+        let _ = &self.threads.entries[&id];
         self.threads.active = id;
-        let new = &self.threads.entries[&id];
-        self.apartment = new.apartment;
-        self.com_refs = new.com_refs;
-        self.winrt_refs = new.winrt_refs;
     }
     pub(crate) fn finish_thread(&mut self, mem: &mut Memory, code: u32) -> Result<(), String> {
         self.user.keyboard.exit64(self.threads.active);
@@ -474,9 +470,7 @@ impl Runtime64 {
                 suspended: (args[4] & 4 != 0) as u32,
                 block: None,
                 priority: 0,
-                apartment: None,
-                com_refs: 0,
-                winrt_refs: 0,
+                apartment: Default::default(),
                 resources: Some((stack, size, tls_blocks)),
                 description: String::new(),
                 apcs: Default::default(),

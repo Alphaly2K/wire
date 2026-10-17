@@ -110,15 +110,7 @@ pub(crate) fn dispatch(
                 | "GetMaximumProcessorCount"
         ))
         && !(dll == "ole32.dll"
-            && matches!(
-                name,
-                "CoCreateGuid"
-                    | "CoInitialize"
-                    | "CoInitializeEx"
-                    | "CoUninitialize"
-                    | "StringFromCLSID"
-                    | "StringFromIID"
-            ))
+            && matches!(name, "CoCreateGuid" | "StringFromCLSID" | "StringFromIID"))
         && !(dll == "oleaut32.dll"
             && matches!(
                 name,
@@ -137,7 +129,6 @@ pub(crate) fn dispatch(
     {
         return None;
     }
-    let tid = sched.current_tid();
     let result = (|| -> Result<u32, u32> {
         match name {
             "lstrlen" | "lstrlenA" | "lstrlenW" | "lstrcpyA" | "lstrcpyW" | "lstrcatA"
@@ -340,31 +331,6 @@ pub(crate) fn dispatch(
                 guid[7] = (guid[7] & 15) | 0x40;
                 guid[8] = (guid[8] & 63) | 0x80;
                 mem.write_bytes(a[0], &guid).map_err(|_| 0x80004003u32)?;
-                Ok(0)
-            }
-            "CoInitialize" | "CoInitializeEx" => {
-                if a[0] != 0 {
-                    return Err(0x80070057);
-                }
-                let mode = if name == "CoInitialize" { 2 } else { a[1] & 2 };
-                if name == "CoInitializeEx" && a[1] & !0xe != 0 {
-                    return Err(0x80070057);
-                }
-                let apartment = state.com_threads.entry(tid).or_insert((mode, 0));
-                if apartment.0 != mode {
-                    return Err(0x80010106);
-                }
-                let old = apartment.1;
-                apartment.1 = apartment.1.checked_add(1).ok_or(0x80004005u32)?;
-                Ok((old != 0) as u32)
-            }
-            "CoUninitialize" => {
-                if let Some((_, count)) = state.com_threads.get_mut(&tid) {
-                    *count = count.saturating_sub(1);
-                    if *count == 0 {
-                        state.com_threads.remove(&tid);
-                    }
-                }
                 Ok(0)
             }
             "VariantCopy" | "VariantChangeType" => {

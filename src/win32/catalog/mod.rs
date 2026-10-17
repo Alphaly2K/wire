@@ -3,6 +3,7 @@
 mod address_waits;
 mod calendar;
 mod clocks;
+mod com;
 mod context;
 mod critical_sections;
 mod delays;
@@ -31,6 +32,7 @@ mod waits;
 pub use address_waits::{AddressWaitApi, ADDRESS_WAIT_CONTRACTS};
 pub use calendar::{CalendarApi, CALENDAR_CONTRACTS};
 pub use clocks::{ClockApi, CLOCK_CONTRACTS};
+pub use com::{ComApi, COM_CONTRACTS};
 pub use context::{ContextApi, CONTEXT_CONTRACTS};
 pub use critical_sections::{CriticalSectionApi, CRITICAL_SECTION_CONTRACTS};
 pub use delays::{DelayApi, DELAY_CONTRACTS};
@@ -89,6 +91,7 @@ pub enum ReturnConvention {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApiId {
+    Com(ComApi),
     Guid(GuidApi),
     Identity(IdentityApi),
     Version(VersionApi),
@@ -284,6 +287,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(ADDRESS_WAIT_CONTRACTS.iter())
         .chain(THREAD_PROPERTY_CONTRACTS.iter())
         .chain(THREAD_CONTROL_CONTRACTS.iter())
+        .chain(COM_CONTRACTS.iter())
 }
 
 #[cfg(test)]

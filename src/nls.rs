@@ -60,7 +60,24 @@ pub fn dispatch(
             &mut state.last_error,
         ));
     }
-    if !((dll == "shell32.dll"
+    // Public legacy facade: task memory moved to its COM adapter, while this
+    // entry retains its original exact provider and export scope.
+    if dll == "ole32.dll" {
+        use crate::win32::catalog::{resolve, ApiId, Architecture, ComApi, Resolution};
+        if let Resolution::Bound(contract) = resolve(Architecture::X86, dll, name) {
+            if let ApiId::Com(id @ (ComApi::TaskAlloc | ComApi::TaskFree)) = contract.id {
+                return Some(crate::win32::x86::com::task_call(
+                    id,
+                    a,
+                    mem,
+                    &mut state.heap,
+                    state.process_heap,
+                    &mut state.last_error,
+                ));
+            }
+        }
+    }
+    if !(dll == "shell32.dll"
         && matches!(
             name,
             "SHGetSpecialFolderPathA"
@@ -69,7 +86,6 @@ pub fn dispatch(
                 | "SHGetFolderPathW"
                 | "SHGetKnownFolderPath"
         ))
-        || (dll == "ole32.dll" && matches!(name, "CoTaskMemAlloc" | "CoTaskMemFree")))
     {
         return None;
     }
@@ -100,14 +116,6 @@ pub fn dispatch(
                 }
                 crate::file_api::write_string(mem, p, 4, "C:\\", true)?;
                 mem.write_u32(a[3], p).map_err(|_| 87u32)?;
-                Ok(0)
-            }
-            "CoTaskMemAlloc" => state
-                .heap
-                .alloc(mem, state.process_heap, a[0], false)
-                .map_err(|_| 8u32),
-            "CoTaskMemFree" => {
-                state.heap.free(state.process_heap, a[0]);
                 Ok(0)
             }
             _ => unreachable!(),

@@ -277,7 +277,7 @@ pub struct ApiState {
     pub presenter: crate::host::ui::Presenter,
     pub stop_after_presents: Option<u64>,
     pub(crate) bstrs: HashMap<u32, u32>,
-    pub(crate) com_threads: HashMap<u32, (u32, u32)>,
+    pub(crate) apartments: crate::win32::com::apartment::Apartments32,
 }
 
 impl ApiState {
@@ -314,7 +314,7 @@ impl ApiState {
             presenter: crate::host::ui::Presenter::default(),
             stop_after_presents: None,
             bstrs: HashMap::new(),
-            com_threads: HashMap::new(),
+            apartments: Default::default(),
         };
         for dll in [
             "kernel32.dll",
@@ -1128,14 +1128,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
         add(
             "ole32.dll",
             &[
-                ("CoInitialize", 4),
-                ("CoInitializeEx", 8),
-                ("CoUninitialize", 0),
-                ("CoCreateInstance", 20),
-                ("CoTaskMemAlloc", 4),
-                ("CoTaskMemFree", 4),
-                ("OleInitialize", 4),
-                ("OleUninitialize", 0),
                 ("CreateStreamOnHGlobal", 12),
                 ("GetHGlobalFromStream", 8),
                 ("StringFromCLSID", 8),
@@ -1811,7 +1803,42 @@ pub fn dispatch(
                 ret = 0;
             }
         }
-        ("wire.wmi", _) | ("ole32.dll", "CoCreateInstance") => {
+        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Com(id)) if id != crate::win32::catalog::ComApi::CreateInstance) =>
+        {
+            use crate::win32::catalog::{ApiId, ComApi};
+            let Some(ApiId::Com(id)) = binding.typed else {
+                unreachable!();
+            };
+            (ret, note) = match id {
+                ComApi::Initialize | ComApi::InitializeEx | ComApi::Uninitialize => {
+                    crate::win32::x86::com::apartment_call(
+                        id,
+                        &args,
+                        &mut state.apartments,
+                        sched.current_tid(),
+                        &mut state.last_error,
+                    )
+                }
+                ComApi::TaskAlloc | ComApi::TaskFree => crate::win32::x86::com::task_call(
+                    id,
+                    &args,
+                    mem,
+                    &mut state.heap,
+                    state.process_heap,
+                    &mut state.last_error,
+                ),
+                _ => unreachable!("PE32 COM export has no typed route"),
+            };
+        }
+        ("wire.wmi", _) => {
+            (ret, note, implemented) =
+                crate::wmi::dispatch(dll, name, &args, mem, api, state).unwrap();
+        }
+        _ if binding.typed
+            == Some(crate::win32::catalog::ApiId::Com(
+                crate::win32::catalog::ComApi::CreateInstance,
+            )) =>
+        {
             (ret, note, implemented) =
                 crate::wmi::dispatch(dll, name, &args, mem, api, state).unwrap();
         }
