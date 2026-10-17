@@ -10,6 +10,8 @@ use wire::x64::{
 mod clocks;
 #[path = "x64/com.rs"]
 mod com;
+#[path = "x64/com_core.rs"]
+mod com_core;
 #[path = "x64/context.rs"]
 mod context;
 #[path = "x64/cpu.rs"]

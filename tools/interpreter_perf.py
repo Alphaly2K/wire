@@ -291,6 +291,10 @@ def main():
         from perf.fixtures.thread_control_gateway import x64
         data, meta = x64(args.work)
         entries.append(('gateway-thread-control', data, meta))
+    if args.cases and 'gateway-com' in args.cases:
+        from perf.fixtures.com_gateway import x64
+        data, meta = x64(args.work)
+        entries.append(('gateway-com', data, meta))
     if args.cases and 'gateway-address-wait' in args.cases:
         from perf.fixtures.address_wait_gateway import x64
         data, meta = x64(args.work)
