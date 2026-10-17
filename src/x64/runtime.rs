@@ -213,9 +213,6 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
     if devices::arity(name).is_some() && !devices::export(dll, name) {
         return false;
     }
-    if guid::arity(name).is_some() && !guid::export(dll, name) {
-        return false;
-    }
     if !dll.eq_ignore_ascii_case("kernel32.dll")
         && !dll.eq_ignore_ascii_case("kernelbase.dll")
         && !(dll.eq_ignore_ascii_case("shell32.dll")
@@ -262,7 +259,6 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
                 name,
                 "BCryptGenRandom" | "BCryptOpenAlgorithmProvider" | "BCryptCloseAlgorithmProvider"
             ))
-        && !guid::export(dll, name)
         && !devices::export(dll, name)
         && !winhttp::export(dll, name)
     {
@@ -278,7 +274,6 @@ fn kernel_export(name: &str) -> bool {
     }
     if devices::arity(name).is_some()
         || winhttp::arity(name).is_some()
-        || guid::arity(name).is_some()
         || user::arity(name).is_some()
         || display::arity(name).is_some()
         || registry::arity(name).is_some()
@@ -322,7 +317,6 @@ fn import_arity(name: &str) -> Option<usize> {
         name if winhttp::arity(name).is_some() => winhttp::arity(name).unwrap(),
         name if sockets::arity(name).is_some() => sockets::arity(name).unwrap(),
         name if devices::arity(name).is_some() => devices::arity(name).unwrap(),
-        name if guid::arity(name).is_some() => guid::arity(name).unwrap(),
         name if dxgi::arity(name).is_some() => dxgi::arity(name).unwrap(),
         name if user::arity(name).is_some() => user::arity(name).unwrap(),
         name if registry::arity(name).is_some() => registry::arity(name).unwrap(),
@@ -464,7 +458,7 @@ fn import_groups(name: &str) -> u32 {
         user::message_arity(name).is_some(),
         false, // identity moved to catalog typed IDs; preserve legacy bit positions
         false, // WinRT moved to catalog typed IDs; preserve legacy bit positions
-        guid::arity(name).is_some(),
+        false, // GUID helpers moved to catalog typed IDs; preserve legacy bit positions
         dxgi::arity(name).is_some(),
         false, // bound directory-search contracts supply bit 8; preserve bit positions
         user::is_callback(name),
@@ -872,7 +866,7 @@ impl Runtime64 {
             ApiId::ThreadControl(_) => {
                 unreachable!("thread control uses the bound process control route")
             }
-            ApiId::Guid(id) => crate::win32::x64::guid::call(mem, id, args),
+            ApiId::Guid(id) => self.guid_call(mem, id, args),
             ApiId::Identity(id) => {
                 crate::win32::x64::identity::call(mem, id, args, &self.profile, self.teb() + 0x68)
             }
@@ -1064,7 +1058,6 @@ impl Runtime64 {
                 Some(value) => value,
                 None => return Ok(Control::Blocked),
             },
-            _ if binding.groups & (1 << 6) != 0 => self.guid_call(mem, name, args)?,
             _ if binding.groups & (1 << 7) != 0 => self.dxgi_call(mem, name, args)?,
             _ if binding.groups & (1 << 8) != 0 => self.find_call(mem, file.unwrap(), args)?,
             _ if binding.groups & (1 << 9) != 0 => {

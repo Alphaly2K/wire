@@ -23,11 +23,15 @@
 | output alias return slot | handler 后读取返回地址 | handler 前保存返回 frame |
 | wrong DLL | 原 unknown ABI/零清栈诊断 | 拒绝 import，CPU/API count 不提交 |
 
-这些差异属于本次冻结行为，未来若要修正 Windows 符合性，应另做语义提交。`CoCreateGuid`、`StringFromCLSID/IID` 的 allocator/entropy 契约仍走 legacy，只共享格式化纯核。
+这些差异属于本次冻结行为，未来若要修正 Windows 符合性，应另做语义提交。
+
+`CoCreateGuid`、`StringFromCLSID/IID` 也由同一 GUID 契约声明并冷绑定。它们保持原有架构差异：PE32 CoCreateGuid 的 null/不可写输出返回 `0x80004003`，entropy 失败返回 `0x80004005`，失败同时写 LastError；Win64 null 返回 `0x80070057`，不可写输出传播访存错误，entropy 失败返回 `0x800706b9`，LastError 保持。UUID v4 的 Windows 字段布局不变。
+
+两个分配型 formatter 都先读取 GUID，允许输入与输出别名。PE32 先将输出置零，再从进程 heap 分配 78 字节，写入/发布失败时回滚；资源继续与 Heap/CoTaskMemFree 共享。Win64 预检 8 字节输出，沿原 allocator 分配，写入后登记到 TaskMemory，再发布完整 64 位指针；分配为零时才清空输出。两端的输出/返回槽别名分别保持 handler 后读返回地址和预先保存 frame 的行为。独立 baseline 使用容量 80 的 PE32 heap、原位输出、高位指针、跨页错误和返回槽别名验证这些边界。
 
 PE32 `ApiTable.entries` 公开可修改，为兼容旧调用方，内部 immutable binding 在条目变化时重建；未变化调用只读取已绑定描述符，包括 Typed 与 LegacyUnimplemented 执行策略。ABI-only 调用保留原参数读取、零返回/LastError=120、诊断与返回 frame 提交；变更同一 stub 的执行策略也必须重新绑定。stub 地址、ordinal 别名和 CRT data export 不变。Win64 `Gateways::insert` 同时更新原始导出视图和冷绑定计划。
 
-Win64 的 raw 字符串 codec 已提取到 `win32/x64/text.rs`，旧 Runtime64 静态 helper 委托它。GUID 适配器只借用架构内存，完全不依赖总运行状态。UTF-16 codec 和共享 parser 分开，以保持 fault 与 HRESULT 策略。
+Win64 的 raw 字符串 codec 已提取到 `win32/x64/text.rs`，旧 Runtime64 静态 helper 委托它。三个 parser/formatter 适配器只借架构内存；资源调用在 `x64/runtime/guid.rs` 协调原 allocator 和 TaskMemory。PE32 适配层只借参数、内存、heap 和进程 heap ID，入口提交 LastError/CPU/trace。UTF-16 codec 和共享 parser 分开，以保持 fault 与 HRESULT 策略。
 
 identity 展示了 ABI 与执行策略分离：相同签名在 PE32 上保留 `LegacyUnimplemented`，在 Win64 上拥有 typed route。PE32 历史 kernel32 GetUserName ABI 登记也保留，不能用 Win64 的 DLL 范围覆盖它。每个新增家族需要先核对这样的差异，再删除旧规则；catalog 的唯一性检查防止 duplicate export/owner 与参数索引越界。
 

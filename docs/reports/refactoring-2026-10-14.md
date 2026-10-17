@@ -310,3 +310,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 四项 PE32 oleaut32 export 接入 VariantApi，移除 common_api 的重复 admission 与名称实现。适配层只借明确资源，通过 Bstrings32 共享 owner 执行深拷贝、释放与失败回滚，保留 scalar 字节、Clear tag、BYREF 生命周期、目标低 WORD、HRESULT/LastError 和返回顺序；Win64 保持 absent。四项独立旧行为基线及完整 release 523、debug 370、native 7、工具 20 项和 fmt/strict Clippy/build 通过。
 
 55 条初筛路径全部校验，五项同哈希三顺序扩样，共 60 个 workload protocol；初筛 CPU 中位数最大回退 +2.137%，扩样最大 +0.625%。新网关 CPU PE32 IR/raw −0.843%/−2.248%，初筛 RSS 最多 +320KiB；Alice 前缀 CPU +0.051%、wall −0.044%，保持隐藏窗口和零 Draw/Present。304 个 Rust 文件核对一致，二进制减少 78,944 bytes，契约累计 352 个 export。2026-10-18 接受，完整轮次与历史成本见[Variant 验收](refactoring-variant-2026-10-18.md)。
+
+## R2 GUID 资源辅助
+
+三个新增 export 汇入原 GUID 契约，家族合计六项；移除重复 ABI/arity/provider、legacy bit 路由与动态 lookup，资源与返回帧仍按架构协调。四项独立旧行为基线及完整 release 527、debug 374、native 7、工具 20 项和 fmt/strict Clippy/build 通过。
+
+63 条初筛路径全部校验，八项同哈希三顺序扩样，共 71 个 workload protocol；保留 multimedia/IR +3.181%、VirtualQuery/IR +3.584% 的局部成本，独立 diagnostics 的计数、CPU 源码及五个 PE32 执行器节助记符序列保持，具体机制尚未确证。原 GUID/raw 扩样 +1.135%，新错误返回网关 Win64 −0.951%、PE32 IR 扩样 −0.279%；初筛 RSS 最多 +112KiB。Alice 前缀 CPU −0.401%、wall −0.530%，保持隐藏窗口和零 Draw/Present。306 个 Rust 文件核对一致，二进制减少 5,088 bytes，契约累计 355 个 export。2026-10-18 接受，完整轮次与成本见[GUID 资源辅助验收](refactoring-guid-allocation-2026-10-18.md)。

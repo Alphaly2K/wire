@@ -1,6 +1,6 @@
 //! Queries describe loaded guest images and the logical built-in service providers.
 use super::{
-    devices, display, dxgi, guid, kernel_export, registry, sockets, sspi, unwind, user, winhttp,
+    devices, display, dxgi, kernel_export, registry, sockets, sspi, unwind, user, winhttp,
 };
 use super::{Memory, Runtime64, WRITE};
 
@@ -162,7 +162,6 @@ impl Runtime64 {
                                 if contract.lookup_dlls(crate::win32::catalog::Architecture::X64)
                                     .contains(&provider.as_str())
                         )
-                        || guid::export(&provider, &function)
                         || devices::export(&provider, &function)
                         || (provider == "user32.dll" && display::arity(&function).is_some())
                         || (provider == "user32.dll" && user::arity(&function).is_some())

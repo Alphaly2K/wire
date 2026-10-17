@@ -1127,11 +1127,7 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
         );
         add(
             "ole32.dll",
-            &[
-                ("CreateStreamOnHGlobal", 12),
-                ("GetHGlobalFromStream", 8),
-                ("StringFromCLSID", 8),
-            ],
+            &[("CreateStreamOnHGlobal", 12), ("GetHGlobalFromStream", 8)],
         );
         add(
             "shell32.dll",
@@ -1263,7 +1259,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("CreateItemMoniker", 12),
                 ("GetRunningObjectTable", 8),
                 ("CoFreeUnusedLibraries", 0),
-                ("CoCreateGuid", 4),
                 ("PropVariantClear", 4),
             ],
         );
@@ -1656,7 +1651,8 @@ pub fn dispatch(
             let Some(crate::win32::catalog::ApiId::Guid(id)) = binding.typed else {
                 unreachable!();
             };
-            match crate::win32::x86::guid::call(id, &args, mem) {
+            match crate::win32::x86::guid::call(id, &args, mem, &mut state.heap, state.process_heap)
+            {
                 Ok(value) => {
                     ret = value;
                     note = "common process/string/COM allocation contract".into();

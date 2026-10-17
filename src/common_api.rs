@@ -13,11 +13,6 @@ use crate::mem::GuestMem;
 use crate::thread::Sched;
 use crate::win32::text::units32 as units;
 use std::cmp::Ordering;
-fn guid_text(mem: &GuestMem, p: u32) -> Result<String, u32> {
-    let mut b = [0; 16];
-    mem.read_bytes(p, &mut b).map_err(|_| 0x80004003u32)?;
-    Ok(crate::win32::com::guid::format_text(b))
-}
 pub(crate) fn allocate_bstr(
     mem: &mut GuestMem,
     state: &mut ApiState,
@@ -67,8 +62,6 @@ pub(crate) fn dispatch(
                 | "GetActiveProcessorCount"
                 | "GetMaximumProcessorCount"
         ))
-        && !(dll == "ole32.dll"
-            && matches!(name, "CoCreateGuid" | "StringFromCLSID" | "StringFromIID"))
     {
         return None;
     }
@@ -247,35 +240,6 @@ pub(crate) fn dispatch(
                 };
                 Ok(i32::try_from(result).map_or(u32::MAX, |n| n as u32))
             }
-            "StringFromCLSID" | "StringFromIID" => {
-                let text = guid_text(mem, a[0])?;
-                let mut bytes: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
-                bytes.extend([0, 0]);
-                mem.write_u32(a[1], 0).map_err(|_| 0x80004003u32)?;
-                let p = state
-                    .heap
-                    .alloc(mem, state.process_heap, 78, false)
-                    .map_err(|_| 0x8007000eu32)?;
-                if p == 0 {
-                    return Err(0x8007000e);
-                }
-                if mem.write_bytes(p, &bytes).is_err() || mem.write_u32(a[1], p).is_err() {
-                    state.heap.free(state.process_heap, p);
-                    return Err(0x80004003);
-                }
-                Ok(0)
-            }
-            "CoCreateGuid" => {
-                mem.ptr(a[0], 16, true).map_err(|_| 0x80004003u32)?;
-                let mut guid = [0; 16];
-                if unsafe { libc::getentropy(guid.as_mut_ptr().cast(), guid.len()) } != 0 {
-                    return Err(0x80004005);
-                }
-                guid[7] = (guid[7] & 15) | 0x40;
-                guid[8] = (guid[8] & 63) | 0x80;
-                mem.write_bytes(a[0], &guid).map_err(|_| 0x80004003u32)?;
-                Ok(0)
-            }
             _ => unreachable!(),
         }
     })();
@@ -288,9 +252,7 @@ pub(crate) fn dispatch(
         Err(error) => {
             state.last_error = error;
             (
-                if dll == "ole32.dll" {
-                    error
-                } else if name == "SetThreadIdealProcessor" {
+                if name == "SetThreadIdealProcessor" {
                     u32::MAX
                 } else {
                     0

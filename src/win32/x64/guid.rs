@@ -59,5 +59,8 @@ pub(crate) fn call(
             }
             Ok(0x800401f3) // CO_E_CLASSSTRING
         }
+        GuidApi::Create | GuidApi::AllocateClsidText | GuidApi::AllocateIidText => {
+            unreachable!("GUID resource calls use the allocation adapter")
+        }
     }
 }

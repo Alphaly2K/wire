@@ -1,15 +1,15 @@
 # 当前状态
 
-更新日期：2026-10-18。重构前基线为 `2e78377`；最新已验收运行时为 [Variant 调用与资源边界](reports/refactoring-variant-2026-10-18.md)，该报告记录冻结源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
+更新日期：2026-10-18。重构前基线为 `2e78377`；最新已验收运行时为 [GUID 资源辅助](reports/refactoring-guid-allocation-2026-10-18.md)，该报告记录冻结源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
 
-本轮追加完成四项 Variant export，冷绑定调用 ID，移除 common_api 中的旧 admission 与名称实现。PE32 适配层只借明确资源，BSTR 深拷贝、释放及失败回滚使用同一 owner，保留原类型集合、BYREF 生命周期、访存和 HRESULT/LastError 顺序，Win64 保持 absent。后续继续处理 GUID 分配辅助、USER、COM、图形及其余 legacy 家族。Mono 原生化已撤回，本轮继续排除。
+本轮追加完成三个 GUID 资源辅助 export，与原三个 parser/formatter 共用唯一契约，移除重复 ABI/arity/provider、legacy bit 与动态 lookup 分支。PE32 保留进程 heap 共享与失败回滚，Win64 保留私有 TaskMemory、完整指针和 saved frame，entropy/HRESULT/LastError 差异保持。下一批基础字符串、指针和进程查询已有独立基线，运行时尚未接入；USER、COM、图形等继续迁移。Mono 原生化已撤回，本轮继续排除。
 
 ## 重构范围
 
 | 阶段 | 已交付 | 剩余范围 |
 | --- | --- | --- |
 | R0/R1 | 冻结输入、原创正式 fixture、领域测试 harness、GUID 唯一契约和双架构适配 | 随后续家族维护独立基线 |
-| R2 | 已验收 352 个 export 的契约；明细见下表 | USER、COM、图形等 legacy 家族 |
+| R2 | 已验收 355 个 export 的契约；明细见下表 | USER、COM、图形等 legacy 家族 |
 | R3 | guest environment、双架构模块状态、Win64 文件、period 请求、SRW、地址等待及 APC 队列、线程标量操作与描述、双架构 apartment/BSTR、Win64 task/HSTRING 成员、PE32 TLS/FLS 私有 owner | PE32 其余资源、线程资源创建/退出及 COM 其余对象；PE32 kernel 大范围抽取曾因性能撤回 |
 | R4/R5 | Process32 编排边界、owned host UI 请求、GDI 与像素状态分离 | 领域分发与资源 owner 随 R2/R3 继续收敛 |
 | R6 | 按用户要求忽略 | 不重建原生 Mono 路径 |
@@ -19,7 +19,7 @@
 
 | 已验收家族 | export 数 | 契约与证据 |
 | --- | ---: | --- |
-| GUID | 3 | [新增 API 指引](architecture/adding-api.md) |
+| GUID | 6 | [新增 API 指引](architecture/adding-api.md)及[资源辅助验收](reports/refactoring-guid-allocation-2026-10-18.md) |
 | identity / version / NLS | 6 / 8 / 42 | [环境与架构](architecture/runtime.md)、[版本](architecture/version.md)、[NLS](architecture/nls.md) |
 | module | 31 | [模块](architecture/modules.md) |
 | file | 53 | [文件及标准句柄](architecture/files.md)；包含 metadata、目录/变更、枚举和 section |
@@ -64,9 +64,9 @@
 
 ## 验证与性能
 
-最近已验收的 Variant 批次：release **523 passed / 7 ignored**，debug Win32/AMD64/FPU **370 passed**，显式 native **7 passed**，工具 **20 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。
+最近已验收的 GUID 资源批次冻结：release **527 passed / 7 ignored**，debug Win32/AMD64/FPU **374 passed**，显式 native **7 passed**，工具 **20 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。随后新增的下一批六项独立基线另行通过，尚未计入该冻结。
 
-Variant 的 55 条初筛性能路径全部结果校验，五项路径完成同哈希三顺序扩样，共 60 个 workload protocol。初筛 CPU 中位数最大回退 +2.137%，扩样最大 +0.625%；新增 scalar copy/clear 网关 CPU PE32 IR/raw −0.843%/−2.248%。初筛 RSS 最多增加 320KiB，二进制减少 78,944 bytes；游戏前缀 CPU +0.051%、wall −0.044%，启动终点保持。各批次使用自己的基线，线程控制批 SSE +3.473%、日历批次 Local/Global +4.570%、线程属性批次 HeapSize +4.063%、BSTR 批次 SSE/raw +2.871% 等历史成本与离散轮次继续保留在对应报告，未将结构调整解释为游戏 FPS 提升。AMD64 event fixture 的重复导入已独立修正；旧验收保持冻结输入，后续按新哈希配对，详见[工具边界](architecture/validation-tools.md)。
+GUID 资源的 63 条初筛路径全部结果校验，八项路径完成同哈希三顺序扩样，共 71 个 workload protocol。新错误返回网关 CPU Win64 −0.951%、PE32 IR/raw +1.452%/−1.379%，IR 扩样 −0.279%；原 GUID/raw 扩样 +1.135%。保留 multimedia/IR +3.181%、VirtualQuery/IR +3.584% 局部成本，diagnostics 计数、CPU 源码和执行器助记符保持，具体机制尚未确证。初筛 RSS 最多增加 112KiB，二进制减少 5,088 bytes；游戏前缀 CPU −0.401%、wall −0.530%，启动终点保持。各批次使用自己的基线，线程控制 SSE、日历 Local/Global、线程属性 HeapSize、BSTR SSE/raw 等历史成本与离散轮次继续保留在对应报告，未推断游戏 FPS。AMD64 event fixture 的重复导入已独立修正；旧验收保持冻结输入，后续按新哈希配对，详见[工具边界](architecture/validation-tools.md)。
 
 后续正式比较使用显式 [稳定启动协议](reports/refactoring-launch-protocol-2026-10-16.md)，固定 argv0、参数和 child cwd，并记录 shell SHA。默认工具行为保持；旧协议数据独立保留，汇总不跨协议或不同 work 合并。编译、正式计时、采样与 runtime diagnostics 串行执行。每个结构候选先完成正确性，再按至少三对轮换检查结果、CPU/wall/RSS 与输入哈希；超过门槛先调查，不把失败候选扩大到其它领域。
 

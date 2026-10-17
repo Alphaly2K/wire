@@ -3,29 +3,18 @@
 //! 3ea3a14941b6a122b892c84141ce9662c008081e (LGPL-2.1-or-later).
 //! No Wine allocator, RPC backend or parser implementation is imported.
 use super::{Memory, Runtime64, WRITE};
-
-pub(super) fn arity(name: &str) -> Option<usize> {
-    Some(match name {
-        "CoCreateGuid" => 1,
-        "StringFromCLSID" | "StringFromIID" => 2,
-        _ => return None,
-    })
-}
-pub(super) fn export(dll: &str, name: &str) -> bool {
-    (dll.eq_ignore_ascii_case("ole32.dll") || dll.eq_ignore_ascii_case("combase.dll"))
-        && arity(name).is_some()
-}
+use crate::win32::catalog::GuidApi;
 
 impl Runtime64 {
     pub(super) fn guid_call(
         &mut self,
         mem: &mut Memory,
-        name: &str,
+        id: GuidApi,
         args: &[u64],
     ) -> Result<u64, String> {
         const INVALIDARG: u64 = 0x80070057;
-        match name {
-            "CoCreateGuid" => {
+        match id {
+            GuidApi::Create => {
                 if args[0] == 0 {
                     return Ok(INVALIDARG);
                 }
@@ -40,7 +29,7 @@ impl Runtime64 {
                 mem.write(args[0], &guid)?;
                 Ok(0)
             }
-            "StringFromCLSID" | "StringFromIID" => {
+            GuidApi::AllocateClsidText | GuidApi::AllocateIidText => {
                 let mut guid = [0; 16];
                 mem.read(args[0], &mut guid)?;
                 let data = crate::win32::com::guid::utf16_bytes(guid);
@@ -56,7 +45,7 @@ impl Runtime64 {
                 Ok(0)
             }
 
-            _ => unreachable!(),
+            _ => crate::win32::x64::guid::call(mem, id, args),
         }
     }
 }
