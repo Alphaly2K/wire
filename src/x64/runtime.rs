@@ -407,10 +407,6 @@ fn import_arity(name: &str) -> Option<usize> {
         | "Thread32Next" => 2,
         "SystemParametersInfoA" | "SystemParametersInfoW" => 4,
         "GetSystemMetrics" => 1,
-        "CreateThread" => 6,
-        "ExitThread" => 1,
-        "QueueUserAPC" => 3,
-        "SetThreadDescription" | "GetThreadDescription" | "GetThreadContext" => 2,
         "GetLogicalProcessorInformationEx" => 3,
         "GetActiveProcessorCount" | "GetMaximumProcessorCount" => 1,
         "GetActiveProcessorGroupCount" | "GetMaximumProcessorGroupCount" => 0,
@@ -489,8 +485,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "CreateToolhelp32Snapshot" => &[0, 1],
         "SystemParametersInfoA" | "SystemParametersInfoW" => &[0, 1, 3],
         "GetSystemMetrics" => &[0],
-        "CreateThread" => &[4],
-        "ExitThread" => &[0],
         "GetLogicalProcessorInformationEx" => &[0],
         "BCryptGenRandom" => &[2, 3],
         "BCryptOpenAlgorithmProvider" => &[3],
@@ -921,6 +915,9 @@ impl Runtime64 {
             }
             ApiId::AddressWait(_) => {
                 unreachable!("address waits use the bound process control route")
+            }
+            ApiId::ThreadControl(_) => {
+                unreachable!("thread control uses the bound process control route")
             }
             ApiId::Guid(id) => crate::win32::x64::guid::call(mem, id, args),
             ApiId::Identity(id) => {
@@ -1839,8 +1836,30 @@ impl Runtime64 {
                 83 => 2,
                 _ => 0,
             },
-            "CreateThread" => self.create_thread(mem, args)?,
-            "QueueUserAPC" => self.queue_apc(mem, args)?,
+            _ if matches!(binding.control, gateways::ControlImport::Thread(_)) => {
+                let gateways::ControlImport::Thread(id) = binding.control else {
+                    unreachable!();
+                };
+                match self.thread_control_call(mem, id, args)? {
+                    threads::ThreadControlResult::Value(value) => value,
+                    threads::ThreadControlResult::Exit(code) => {
+                        self.api_calls += 1;
+                        self.record(dll, name, args, args[0]);
+                        return Ok(Control::ThreadExited(code));
+                    }
+                    threads::ThreadControlResult::Context { thread, flags } => {
+                        returned.regs[0] = 1;
+                        *cpu = returned;
+                        self.api_calls += 1;
+                        return Ok(Control::ThreadContext {
+                            dll: dll.into(),
+                            args: args.to_vec(),
+                            thread,
+                            flags,
+                        });
+                    }
+                }
+            }
             _ if binding.control == gateways::ControlImport::Delay(DelayApi::SleepEx) => {
                 if args[1] != 0 {
                     if let Some(control) =
@@ -1862,14 +1881,6 @@ impl Runtime64 {
                     return Ok(Control::Blocked);
                 }
                 0
-            }
-            "ExitThread" => {
-                if !self.threads.enabled {
-                    return Err("Win64 ExitThread requires a thread scheduler".into());
-                }
-                self.api_calls += 1;
-                self.record(dll, name, args, args[0]);
-                return Ok(Control::ThreadExited(args[0] as u32));
             }
             _ if matches!(
                 binding.control,
@@ -1898,66 +1909,6 @@ impl Runtime64 {
                 self.record(dll, name, args, 0);
                 return Ok(Control::Yielded);
             }
-            "GetThreadContext" => match self.threads.id(args[0]) {
-                Err(error) => {
-                    self.set_error(mem, error)?;
-                    0
-                }
-                Ok(id) => {
-                    let thread = &self.threads.entries[&id];
-                    if id == self.threads.active || thread.suspended == 0 || thread.exit.is_some() {
-                        self.set_error(mem, 50)?;
-                        0
-                    } else if !args[1].is_multiple_of(16) {
-                        self.set_error(mem, 998)?;
-                        0
-                    } else {
-                        mem.check(args[1], exception::CONTEXT_SIZE, WRITE)?;
-                        let flags = mem.read_int(args[1] + 48, 4)? as u32;
-                        self.trace_note(format!("GetThreadContext thread={id} flags={flags:#x}"));
-                        if flags & 0x100000 == 0 || flags & !0x10001f != 0 {
-                            self.set_error(mem, 87)?;
-                            0
-                        } else {
-                            returned.regs[0] = 1;
-                            *cpu = returned;
-                            self.api_calls += 1;
-                            return Ok(Control::ThreadContext {
-                                dll: dll.into(),
-                                args: args.to_vec(),
-                                thread: id,
-                                flags,
-                            });
-                        }
-                    }
-                }
-            },
-            "SetThreadDescription" | "GetThreadDescription" => match self.threads.id(args[0]) {
-                Err(error) => 0x80070000 | error as u64,
-                Ok(id) if name == "SetThreadDescription" => {
-                    let description = Self::utf16(mem, args[1])?;
-                    self.threads.entries.get_mut(&id).unwrap().description = description;
-                    0
-                }
-                Ok(id) => {
-                    mem.check(args[1], 8, WRITE)?;
-                    let data: Vec<_> = self.threads.entries[&id]
-                        .description
-                        .encode_utf16()
-                        .chain(Some(0))
-                        .flat_map(u16::to_le_bytes)
-                        .collect();
-                    let pointer = self.heap_alloc(mem, data.len() as u64)?;
-                    if pointer == 0 {
-                        0x8007000e
-                    } else {
-                        mem.write(pointer, &data)?;
-                        mem.write_int(args[1], 8, pointer)?;
-                        self.local_blocks.insert(pointer);
-                        0
-                    }
-                }
-            },
             "GetActiveProcessorGroupCount" | "GetMaximumProcessorGroupCount" => 1,
             "GetActiveProcessorCount" | "GetMaximumProcessorCount" => {
                 if matches!(args[0] as u16, 0 | 0xffff) {

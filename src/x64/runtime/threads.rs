@@ -5,7 +5,9 @@ use std::{
     time::{Duration, Instant},
 };
 mod address;
+mod control;
 mod properties;
+pub(super) use control::ThreadControlResult;
 
 pub(crate) struct Spawn {
     pub id: u64,
@@ -50,8 +52,8 @@ pub(super) struct Thread {
     pub com_refs: u32,
     pub winrt_refs: u32,
     pub resources: Option<(u64, u64, Vec<u64>)>,
-    pub description: String,
-    pub apcs: std::collections::VecDeque<(u64, u64)>,
+    description: String,
+    apcs: std::collections::VecDeque<(u64, u64)>,
     error_mode: u32,
 }
 pub(super) struct Threads {

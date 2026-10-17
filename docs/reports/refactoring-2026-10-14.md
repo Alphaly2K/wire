@@ -280,3 +280,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 九项 export 接入 ThreadPropertyApi，删除重复 ABI/arity/DWORD、动态查询特例与根名称分发。PE32 六项 typed、三项 ABI-only，adapter 只借内存、Sched 与 LastError；挂起状态切换和 exit 读取由 Sched 管理。Win64 scalar 操作归 Threads owner，error mode 字段私有，CPU/返回/unblock/trace 保持进程提交；创建、退出和 APC/CONTEXT/description 保留专用边界。六项独立旧行为回归及完整 release 494、debug 341、native 7、工具 20 项和 fmt/strict Clippy/build 通过。
 
 43 条初筛路径全部结果校验，四项超门槛后同哈希三顺序扩样；PE32 HeapSize/raw +1.938%、FP/raw −3.254%、线程网关/IR +1.148%，Win64 HeapSize 保留 +4.063% 局部成本（after/control +3.763%）。IR/cache 计数与执行器助记符序列保持，具体成本机制尚未确证；新 Win64 线程网关 −6.625%，初筛 RSS 最多 +112KiB。Alice 前缀 CPU −0.544%、wall −0.043%，保持隐藏窗口和零 Draw/Present；279 个 Rust 文件核对一致，二进制减少 24,496 bytes，契约累计 313 个 export。2026-10-17 接受，完整决定与全部轮次见[线程查询与设置验收](refactoring-thread-properties-2026-10-17.md)。
+
+## R2/R3 线程控制
+
+六项 export 接入 ThreadControlApi，删除重复 ABI/arity/DWORD 和根名称分支；PE32 Create/Exit typed，其余四项 ABI-only，内部 wire worker-return 单独保留。Win64 冷绑定专用控制 ID，Value/Exit/Context 保留原 CPU/计数/trace/阻塞提交；Threads 私有拥有描述/APC queue，创建/TLS/heap/回调仍按明确资源边界编排。八项独立旧行为基线及完整 release 502、debug 349、native 7、工具 20 项和 fmt/strict Clippy/build 通过。
+
+46 条初筛路径全部校验，两条 SSE 同哈希三顺序扩样；PE32 SSE/raw +0.683%，Win64 SSE 保留 +3.473% 局部成本（after/control +3.702%），诊断计数与执行器助记符序列保持，具体成本机制尚未确证。新 APC 错误返回网关 CPU Win64 +0.489%、PE32 IR/raw −23.845%/−19.707%；初筛 RSS 最多 +160KiB。Alice 前缀 CPU −0.949%、wall −0.952%，保持隐藏窗口和零 Draw/Present。283 个 Rust 文件核对一致，二进制增加 22,688 bytes，契约累计 319 个 export。2026-10-17 接受，完整初筛、扩样和历史成本保留于[线程控制验收](refactoring-thread-control-2026-10-17.md)。

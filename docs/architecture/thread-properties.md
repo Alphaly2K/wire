@@ -11,3 +11,5 @@ error mode 校验先于输出访问；有效 mask 为 0x8007。非空输出先�
 PE32 adapter 只借 GuestMem、Sched 和 LastError。Sched 拥有 exit 状态读取和二态挂起切换；已有 Waiting/Exited 状态保持，重复挂起不累加，挂起/恢复成功都返回零；这两项不接受当前线程 pseudo handle。优先级设置保持空操作成功、查询固定零。affinity 接受 pseudo handle 或既有调度 handle，随后检查 mask=1。未知 exit handle 仍成功写零，活动线程写 259，已退出线程写其 code。输出先于返回地址读取，覆盖返回槽会改变返回目标；保持旧日志文本与 fault/清栈顺序。
 
 本批保持上述兼容行为，未增加 Windows 线程功能，详见[独立基线与验收](../reports/refactoring-thread-properties-2026-10-17.md)。
+
+后续六项创建、退出、APC、CONTEXT 和 description 已迁入独立[线程控制边界](thread-control.md)，继续保留专用控制结果和资源提交规则。

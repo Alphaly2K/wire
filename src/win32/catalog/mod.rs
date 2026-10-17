@@ -22,6 +22,7 @@ mod nls;
 mod paths;
 mod sync_objects;
 mod system_profile;
+mod thread_control;
 mod thread_properties;
 mod timers;
 mod version;
@@ -49,6 +50,7 @@ pub use nls::{NlsApi, NLS_CONTRACTS};
 pub use paths::{PathApi, PATH_CONTRACTS};
 pub use sync_objects::{SyncObjectApi, SYNC_OBJECT_CONTRACTS};
 pub use system_profile::{SystemProfileApi, SYSTEM_PROFILE_CONTRACTS};
+pub use thread_control::{ThreadControlApi, THREAD_CONTROL_CONTRACTS};
 pub use thread_properties::{ThreadPropertyApi, THREAD_PROPERTY_CONTRACTS};
 pub use timers::{TimerApi, TIMER_CONTRACTS};
 pub use version::{VersionApi, VERSION_CONTRACTS};
@@ -115,6 +117,7 @@ pub enum ApiId {
     CriticalSection(CriticalSectionApi),
     AddressWait(AddressWaitApi),
     ThreadProperty(ThreadPropertyApi),
+    ThreadControl(ThreadControlApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -280,6 +283,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(CRITICAL_SECTION_CONTRACTS.iter())
         .chain(ADDRESS_WAIT_CONTRACTS.iter())
         .chain(THREAD_PROPERTY_CONTRACTS.iter())
+        .chain(THREAD_CONTROL_CONTRACTS.iter())
 }
 
 #[cfg(test)]

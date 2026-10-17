@@ -30,6 +30,7 @@ pub(crate) enum ControlImport {
     InlineSync(crate::win32::catalog::InlineSyncApi),
     CriticalSection(crate::win32::catalog::CriticalSectionApi),
     AddressWait(crate::win32::catalog::AddressWaitApi),
+    Thread(crate::win32::catalog::ThreadControlApi),
 }
 pub(crate) struct BoundImport {
     pub export: Arc<str>,
@@ -117,6 +118,7 @@ impl BoundImport {
                 crate::win32::catalog::ApiId::InlineSync(_) => None,
                 crate::win32::catalog::ApiId::CriticalSection(_) => None,
                 crate::win32::catalog::ApiId::AddressWait(_) => None,
+                crate::win32::catalog::ApiId::ThreadControl(_) => None,
                 _ => Some(c.id),
             }),
             control: match contract.map(|c| c.id) {
@@ -131,6 +133,7 @@ impl BoundImport {
                 Some(crate::win32::catalog::ApiId::InlineSync(id)) => ControlImport::InlineSync(id),
                 Some(crate::win32::catalog::ApiId::CriticalSection(id)) => ControlImport::CriticalSection(id),
                 Some(crate::win32::catalog::ApiId::AddressWait(id)) => ControlImport::AddressWait(id),
+                Some(crate::win32::catalog::ApiId::ThreadControl(id)) => ControlImport::Thread(id),
                 _ => ControlImport::None,
             },
             valid,

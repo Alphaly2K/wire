@@ -616,8 +616,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetEnvironmentVariableW", 12),
                 ("SetEnvironmentVariableA", 8),
                 ("SetEnvironmentVariableW", 8),
-                ("CreateThread", 24),
-                ("ExitThread", 4),
                 ("LoadResource", 8),
                 ("FindResourceA", 12),
                 ("FindResourceW", 12),
@@ -1926,7 +1924,11 @@ pub fn dispatch(
             cpu.exit_code = Some(args[0]);
             return Ok(());
         }
-        ("kernel32.dll", "ExitThread") => {
+        _ if binding.typed
+            == Some(crate::win32::catalog::ApiId::ThreadControl(
+                crate::win32::catalog::ThreadControlApi::Exit,
+            )) =>
+        {
             log.log_call(idx, dll, name, &args[..1], 0, true, "thread exit");
             match crate::modules::notify_thread(
                 false, false, cpu, mem, api, state, log, sched, max_instr,
@@ -1941,7 +1943,11 @@ pub fn dispatch(
             sched.exit_current(cpu, args[0])?;
             return Ok(());
         }
-        ("kernel32.dll", "CreateThread") => {
+        _ if binding.typed
+            == Some(crate::win32::catalog::ApiId::ThreadControl(
+                crate::win32::catalog::ThreadControlApi::Create,
+            )) =>
+        {
             if !sched.has_thread_capacity() {
                 state.last_error = 8;
                 ret = 0;
