@@ -2,7 +2,9 @@
 
 更新日期：2026-10-18。重构前基线为 `2e78377`；最新已验收运行时为 [GUID 资源辅助](reports/refactoring-guid-allocation-2026-10-18.md)，该报告记录冻结源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
 
-本轮追加完成三个 GUID 资源辅助 export，与原三个 parser/formatter 共用唯一契约，移除重复 ABI/arity/provider、legacy bit 与动态 lookup 分支。PE32 保留进程 heap 共享与失败回滚，Win64 保留私有 TaskMemory、完整指针和 saved frame，entropy/HRESULT/LastError 差异保持。下一批基础字符串、指针和进程查询已有独立基线，运行时尚未接入；USER、COM、图形等继续迁移。Mono 原生化已撤回，本轮继续排除。
+本轮追加完成三个 GUID 资源辅助 export，与原三个 parser/formatter 共用唯一契约，移除重复 ABI/arity/provider、legacy bit 与动态 lookup 分支。PE32 保留进程 heap 共享与失败回滚，Win64 保留私有 TaskMemory、完整指针和 saved frame，entropy/HRESULT/LastError 差异保持。
+
+基础字符串、指针和进程查询 29 项已接入候选运行时，完整正确性及 68 条性能初筛通过结果校验，七项扩样与游戏前缀尚在验收，暂不计入已验收 355 项。早期候选的持续 code-alias 回退已拒绝；当前按字段恢复缓存的候选消除该回退，重复 spec 数据也已收敛，详见[基础 helper 候选记录](reports/refactoring-basic-2026-10-18.md)。后续 USER、COM、图形等继续迁移；键盘基线及实现草稿未接入当前冻结。Mono 原生化已撤回，本轮继续排除。
 
 ## 重构范围
 

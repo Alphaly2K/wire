@@ -3,16 +3,80 @@
 //! entries without parameter types are intentionally not invented.
 use std::collections::HashMap;
 use std::sync::OnceLock;
+
+// Both name/stack and ordinal resolution borrow the same source allocation.
+// Repeating include_str! at each consumer can embed whole specs twice when
+// their callers land in different codegen units.
+static SPECS: [(&str, &str); 14] = [
+    (
+        "winmm.dll",
+        include_str!("../third_party/hangover/winmm.spec"),
+    ),
+    (
+        "advapi32.dll",
+        include_str!("../third_party/hangover/advapi32.spec"),
+    ),
+    (
+        "dsound.dll",
+        include_str!("../third_party/hangover/dsound.spec"),
+    ),
+    (
+        "kernel32.dll",
+        include_str!("../third_party/wine-10.0/abi/kernel32.spec"),
+    ),
+    (
+        "user32.dll",
+        include_str!("../third_party/wine-10.0/abi/user32.spec"),
+    ),
+    (
+        "gdi32.dll",
+        include_str!("../third_party/wine-10.0/abi/gdi32.spec"),
+    ),
+    (
+        "shell32.dll",
+        include_str!("../third_party/wine-10.0/abi/shell32.spec"),
+    ),
+    (
+        "ole32.dll",
+        include_str!("../third_party/wine-10.0/abi/ole32.spec"),
+    ),
+    (
+        "oleaut32.dll",
+        include_str!("../third_party/wine-10.0/abi/oleaut32.spec"),
+    ),
+    (
+        "comdlg32.dll",
+        include_str!("../third_party/wine-10.0/abi/comdlg32.spec"),
+    ),
+    (
+        "shlwapi.dll",
+        include_str!("../third_party/wine-10.0/abi/shlwapi.spec"),
+    ),
+    (
+        "wininet.dll",
+        include_str!("../third_party/wine-10.0/abi/wininet.spec"),
+    ),
+    (
+        "comctl32.dll",
+        include_str!("../third_party/wine-10.0/abi/comctl32.spec"),
+    ),
+    (
+        "mpr.dll",
+        include_str!("../third_party/wine-10.0/abi/mpr.spec"),
+    ),
+];
+
 /// Resolve only explicit, typed i386 exports. `@` exports have no stable ordinal.
 pub(crate) fn ordinal_name(dll: &str, ordinal: u16) -> Option<&'static str> {
-    let spec = match dll {
-        "oleaut32.dll" => include_str!("../third_party/wine-10.0/abi/oleaut32.spec"),
-        "comctl32.dll" => include_str!("../third_party/wine-10.0/abi/comctl32.spec"),
-        "shell32.dll" => include_str!("../third_party/wine-10.0/abi/shell32.spec"),
-        "shlwapi.dll" => include_str!("../third_party/wine-10.0/abi/shlwapi.spec"),
-        "dsound.dll" => include_str!("../third_party/hangover/dsound.spec"),
-        _ => return None,
-    };
+    if !matches!(
+        dll,
+        "oleaut32.dll" | "comctl32.dll" | "shell32.dll" | "shlwapi.dll" | "dsound.dll"
+    ) {
+        return None;
+    }
+    let spec = SPECS
+        .iter()
+        .find_map(|&(provider, spec)| (provider == dll).then_some(spec))?;
     for line in spec.lines() {
         let Some((prefix, _)) = line.split('#').next()?.split_once('(') else {
             continue;
@@ -33,66 +97,8 @@ pub(crate) fn ordinal_name(dll: &str, ordinal: u16) -> Option<&'static str> {
 pub(crate) fn stack_bytes(dll: &str, name: &str) -> Option<u32> {
     static TABLE: OnceLock<HashMap<(&'static str, &'static str), u32>> = OnceLock::new();
     let table = TABLE.get_or_init(|| {
-        let files = [
-            (
-                "winmm.dll",
-                include_str!("../third_party/hangover/winmm.spec"),
-            ),
-            (
-                "advapi32.dll",
-                include_str!("../third_party/hangover/advapi32.spec"),
-            ),
-            (
-                "dsound.dll",
-                include_str!("../third_party/hangover/dsound.spec"),
-            ),
-            (
-                "kernel32.dll",
-                include_str!("../third_party/wine-10.0/abi/kernel32.spec"),
-            ),
-            (
-                "user32.dll",
-                include_str!("../third_party/wine-10.0/abi/user32.spec"),
-            ),
-            (
-                "gdi32.dll",
-                include_str!("../third_party/wine-10.0/abi/gdi32.spec"),
-            ),
-            (
-                "shell32.dll",
-                include_str!("../third_party/wine-10.0/abi/shell32.spec"),
-            ),
-            (
-                "ole32.dll",
-                include_str!("../third_party/wine-10.0/abi/ole32.spec"),
-            ),
-            (
-                "oleaut32.dll",
-                include_str!("../third_party/wine-10.0/abi/oleaut32.spec"),
-            ),
-            (
-                "comdlg32.dll",
-                include_str!("../third_party/wine-10.0/abi/comdlg32.spec"),
-            ),
-            (
-                "shlwapi.dll",
-                include_str!("../third_party/wine-10.0/abi/shlwapi.spec"),
-            ),
-            (
-                "wininet.dll",
-                include_str!("../third_party/wine-10.0/abi/wininet.spec"),
-            ),
-            (
-                "comctl32.dll",
-                include_str!("../third_party/wine-10.0/abi/comctl32.spec"),
-            ),
-            (
-                "mpr.dll",
-                include_str!("../third_party/wine-10.0/abi/mpr.spec"),
-            ),
-        ];
         let mut entries = HashMap::new();
-        for (dll, spec) in files {
+        for &(dll, spec) in &SPECS {
             for line in spec.lines() {
                 let line = line.split('#').next().unwrap_or("").trim();
                 let Some((prefix, rest)) = line.split_once('(') else {

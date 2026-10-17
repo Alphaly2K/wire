@@ -9,7 +9,7 @@ file used below expressly permits LGPL 2.1 or later; wire selects LGPL 2.1.
 
 | Wine file | Local snapshot / adaptation |
 | --- | --- |
-| dlls/oleaut32/oleaut.c | oleaut-bstr.c; BSTR operations in src/common_api.rs |
+| dlls/oleaut32/oleaut.c | oleaut-bstr.c; BSTR owner in src/win32/com/bstr.rs and adapters in src/win32/x86/bstr.rs, src/win32/x86/variant.rs |
 | dlls/win32u/defwnd.c | windowpos.c / geometry.c; default window messages and nonclient geometry |
 | include/d3d9.h | unmodified d3d9.h; derived d3d9-methods.tsv, COM slot/arity ABI only |
 | dlls/kernelbase/path.c | unmodified path.c; PathRemoveFileSpec, PathAddExtension, PathUnquoteSpaces A/W adapted in src/file_api.rs |

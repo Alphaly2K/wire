@@ -1,3 +1,4 @@
+pub(crate) mod basic_strings;
 pub(crate) mod bstr;
 pub(crate) mod calendar;
 pub(crate) mod clocks;
@@ -11,6 +12,8 @@ pub(crate) mod local_memory;
 pub(crate) mod modules;
 pub(crate) mod multimedia;
 pub(crate) mod nls;
+pub(crate) mod pointer_helpers;
+pub(crate) mod process_queries;
 pub(crate) mod system_profile;
 pub(crate) mod thread_properties;
 pub(crate) mod variant;

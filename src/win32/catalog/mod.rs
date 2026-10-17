@@ -1,6 +1,7 @@
 //! Export identity and ABI plans are resolved during binding, not execution.
 //! Unconverted families remain on explicit legacy routes.
 mod address_waits;
+mod basic_strings;
 mod bstr;
 mod calendar;
 mod clocks;
@@ -22,6 +23,8 @@ mod multimedia;
 mod mutexes;
 mod nls;
 mod paths;
+mod pointer_helpers;
+mod process_queries;
 mod sync_objects;
 mod system_profile;
 mod thread_control;
@@ -33,6 +36,7 @@ mod virtual_memory;
 mod waits;
 mod winrt;
 pub use address_waits::{AddressWaitApi, ADDRESS_WAIT_CONTRACTS};
+pub use basic_strings::{BasicStringApi, BASIC_STRING_CONTRACTS};
 pub(crate) use bstr::symbol as bstr_symbol;
 pub use bstr::{BstrApi, BSTR_CONTRACTS};
 pub use calendar::{CalendarApi, CALENDAR_CONTRACTS};
@@ -55,6 +59,8 @@ pub use multimedia::{MultimediaApi, MULTIMEDIA_CONTRACTS};
 pub use mutexes::{MutexApi, MUTEX_CONTRACTS};
 pub use nls::{NlsApi, NLS_CONTRACTS};
 pub use paths::{PathApi, PATH_CONTRACTS};
+pub use pointer_helpers::{PointerHelperApi, POINTER_HELPER_CONTRACTS};
+pub use process_queries::{ProcessQueryApi, PROCESS_QUERY_CONTRACTS};
 pub use sync_objects::{SyncObjectApi, SYNC_OBJECT_CONTRACTS};
 pub use system_profile::{SystemProfileApi, SYSTEM_PROFILE_CONTRACTS};
 pub use thread_control::{ThreadControlApi, THREAD_CONTROL_CONTRACTS};
@@ -81,6 +87,8 @@ pub enum Parameter {
     Uint8,
     Uint64,
     Int64,
+    /// A WORD is consumed by its adapter; retain the historical Win64 carrier.
+    Uint16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,6 +139,9 @@ pub enum ApiId {
     AddressWait(AddressWaitApi),
     ThreadProperty(ThreadPropertyApi),
     ThreadControl(ThreadControlApi),
+    BasicString(BasicStringApi),
+    PointerHelper(PointerHelperApi),
+    ProcessQuery(ProcessQueryApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -301,6 +312,9 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(WINRT_CONTRACTS.iter())
         .chain(BSTR_CONTRACTS.iter())
         .chain(VARIANT_CONTRACTS.iter())
+        .chain(BASIC_STRING_CONTRACTS.iter())
+        .chain(POINTER_HELPER_CONTRACTS.iter())
+        .chain(PROCESS_QUERY_CONTRACTS.iter())
 }
 
 #[cfg(test)]

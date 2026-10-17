@@ -28,6 +28,7 @@ mod locals;
 mod mapping;
 mod modules;
 mod pipes;
+mod process_queries;
 mod registry;
 mod resources;
 mod snapshot;
@@ -362,8 +363,6 @@ fn import_arity(name: &str) -> Option<usize> {
         "SystemParametersInfoA" | "SystemParametersInfoW" => 4,
         "GetSystemMetrics" => 1,
         "GetLogicalProcessorInformationEx" => 3,
-        "GetActiveProcessorCount" | "GetMaximumProcessorCount" => 1,
-        "GetActiveProcessorGroupCount" | "GetMaximumProcessorGroupCount" => 0,
         "BCryptGenRandom" | "BCryptOpenAlgorithmProvider" => 4,
         "BCryptCloseAlgorithmProvider" => 2,
         "GetEnvironmentVariableW" | "GetEnvironmentVariableA" => 3,
@@ -848,6 +847,10 @@ impl Runtime64 {
             ApiId::Winrt(id) => self.winrt_call(mem, id, args),
             ApiId::Bstr(id) => self.bstr_call(mem, id, args),
             ApiId::Variant(_) => unreachable!("Variant helpers have no Win64 binding"),
+            ApiId::ProcessQuery(id) => self.process_query_call(mem, id, args),
+            ApiId::BasicString(_) | ApiId::PointerHelper(_) => {
+                unreachable!("PE32 basic helpers have no Win64 binding")
+            }
             ApiId::File(_) => unreachable!("core file calls are handled by the bound gateway"),
             ApiId::Handle(_) => unreachable!("handle calls are handled by the bound gateway"),
             ApiId::Path(_) => unreachable!("path helpers have no Win64 binding"),
@@ -1830,15 +1833,6 @@ impl Runtime64 {
                 }
                 self.record(dll, name, args, 0);
                 return Ok(Control::Yielded);
-            }
-            "GetActiveProcessorGroupCount" | "GetMaximumProcessorGroupCount" => 1,
-            "GetActiveProcessorCount" | "GetMaximumProcessorCount" => {
-                if matches!(args[0] as u16, 0 | 0xffff) {
-                    1
-                } else {
-                    self.set_error(mem, 87)?;
-                    0
-                }
             }
             "GetLogicalProcessorInformationEx" => {
                 if let Some(data) = Self::processor_information(args[0] as u32) {

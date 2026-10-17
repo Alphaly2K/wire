@@ -46,6 +46,7 @@
 - [BSTR 字符串与资源边界](architecture/bstr.md)及[契约验收](reports/refactoring-bstr-2026-10-17.md)：八项接口、ordinal alias、双架构私有 owner、Variant/WMI 共享分配、53 条性能路径与 SSE/raw 局部成本。
 - [Variant 调用与资源边界](architecture/variants.md)及[契约验收](reports/refactoring-variant-2026-10-18.md)：四项 PE32 接口、BSTR 深拷贝回滚、BYREF 生命周期、Win64 absent、55 条性能路径与五项离散扩样。
 - [GUID 资源辅助验收](reports/refactoring-guid-allocation-2026-10-18.md)：三个追加 export、allocator/TaskMemory、entropy 与返回槽别名、63 条初筛路径和保留的 multimedia/VirtualQuery IR 局部成本。
+- [基础 helper 边界](architecture/basic-helpers.md)及[候选记录](reports/refactoring-basic-2026-10-18.md)：29 项接口、common_api 移除、ABI spec 数据共享与缓存恢复生成代码；七项性能扩样和游戏前缀尚在验收。
 - [release 编译单元候选](reports/refactoring-release-codegen-2026-10-15.md)：独立构建配置、同二进制对照及长样本调查。
 - [网关边界候选](reports/refactoring-gateway-boundary-2026-10-15.md)、[页缓存内联候选](reports/refactoring-page-cache-inline-2026-10-15.md)、[helper 布局候选](reports/refactoring-memory-helper-layout-2026-10-15.md)：已撤回实现和保留的测量证据。
 - [本次渐进重构记录](reports/refactoring-2026-10-14.md)：阶段交付、行为差异与验收结果。

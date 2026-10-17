@@ -341,9 +341,10 @@ pub(crate) fn dispatch(
                 if a[2] != 0 {
                     return Err(0x80041008);
                 }
-                let p = crate::common_api::allocate_bstr(
+                let p = state.bstrs.allocate(
                     mem,
-                    state,
+                    &mut state.heap,
+                    state.process_heap,
                     &text.encode_utf16().collect::<Vec<_>>(),
                 )?;
                 let mut variant = [0; 16];

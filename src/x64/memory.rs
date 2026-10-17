@@ -431,25 +431,33 @@ impl Memory {
             return None;
         }
         let reuse = cache.reuse.get()?;
-        let mut saved = {
+        let SavedTranslation {
+            pc: _,
+            validation_epoch,
+            ir,
+            instruction,
+            generations,
+            segment,
+            mut link,
+        } = {
             let mut reuse = reuse.borrow_mut();
             let entry = &mut reuse[TranslationCache::reuse_hash(address)];
             if !entry.as_ref().is_some_and(|s| s.pc == address) {
                 return None;
             }
-            entry.take().unwrap()
+            entry.take()?
         };
-        if saved.validation_epoch != self.decode_epoch {
+        if validation_epoch != self.decode_epoch {
             let base = address & !(PAGE - 1);
             if !self
                 .pages
                 .get(&base)
-                .is_some_and(|p| p.generation == saved.generations.0)
-                || saved.generations.1 != 0
+                .is_some_and(|p| p.generation == generations.0)
+                || generations.1 != 0
                     && !self
                         .pages
                         .get(&(base + PAGE))
-                        .is_some_and(|p| p.generation == saved.generations.1)
+                        .is_some_and(|p| p.generation == generations.1)
             {
                 return None;
             }
@@ -458,16 +466,16 @@ impl Memory {
         cache.save(slot);
         let identity = cache.advance_identity(slot);
         if cache.generations[slot].get().2 == u64::MAX {
-            saved.link = (u64::MAX, usize::MAX, 0);
+            link = (u64::MAX, usize::MAX, 0);
         }
         let entry = &cache.slots[slot];
         entry.pc.set(address);
         entry.validation_epoch.set(self.decode_epoch);
-        entry.ir.set(saved.ir);
-        cache.instructions[slot].set(saved.instruction);
-        cache.generations[slot].set((saved.generations.0, saved.generations.1, identity));
-        *cache.segments[slot].borrow_mut() = saved.segment;
-        cache.links[slot].set(saved.link);
+        entry.ir.set(ir);
+        cache.instructions[slot].set(instruction);
+        cache.generations[slot].set((generations.0, generations.1, identity));
+        *cache.segments[slot].borrow_mut() = segment;
+        cache.links[slot].set(link);
         self.diagnostic_request(5, address, true);
         Some((slot, entry))
     }

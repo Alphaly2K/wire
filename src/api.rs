@@ -656,12 +656,8 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetCurrentProcessorNumber", 0),
                 ("SetThreadStackGuarantee", 4),
                 ("SetDefaultDllDirectories", 4),
-                ("OpenProcess", 12),
-                ("GetProcessAffinityMask", 12),
-                ("SetThreadIdealProcessor", 8),
                 ("GlobalAddAtomW", 4),
                 ("GlobalDeleteAtom", 4),
-                ("MulDiv", 12),
                 ("FreeConsole", 0),
                 ("AttachConsole", 4),
                 ("GetConsoleMode", 8),
@@ -671,21 +667,15 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetConsoleTitleW", 8),
                 ("GetConsoleProcessList", 8),
                 ("ReadConsoleW", 20),
-                ("IsBadReadPtr", 8),
                 ("AreFileApisANSI", 0),
                 ("GetVolumeInformationW", 32),
                 ("SearchPathW", 24),
                 ("GetSystemDirectoryW", 8),
                 ("GetWindowsDirectoryW", 8),
-                ("GetExitCodeProcess", 8),
                 ("CreateProcessW", 40),
                 ("CreatePipe", 16),
                 ("GetTimeFormatW", 24),
                 ("GetDateFormatW", 24),
-                ("lstrcmpW", 8),
-                ("lstrcmpA", 8),
-                ("lstrlenW", 4),
-                ("lstrlenA", 4),
                 ("GetLargePageMinimum", 0),
             ],
         );
@@ -1858,6 +1848,50 @@ pub fn dispatch(
                 &mut state.last_error,
             );
         }
+        _ if matches!(
+            binding.typed,
+            Some(
+                crate::win32::catalog::ApiId::BasicString(_)
+                    | crate::win32::catalog::ApiId::PointerHelper(_)
+                    | crate::win32::catalog::ApiId::ProcessQuery(_)
+            )
+        ) =>
+        {
+            use crate::win32::catalog::{ApiId, ProcessQueryApi};
+            let id = binding.typed.unwrap();
+            let result = match id {
+                ApiId::BasicString(id) => crate::win32::x86::basic_strings::call(id, &args, mem),
+                ApiId::PointerHelper(id) => {
+                    crate::win32::x86::pointer_helpers::call(id, &args, mem)
+                }
+                ApiId::ProcessQuery(id) => {
+                    use crate::win32::x86::process_queries::ProcessQueryResult;
+                    crate::win32::x86::process_queries::call(id, &args, mem, &state.handles, sched)
+                        .map(|outcome| match outcome {
+                            ProcessQueryResult::Value(value) => value,
+                            ProcessQueryResult::Open { access } => {
+                                state.alloc_handle(HandleObj::Process { access })
+                            }
+                        })
+                }
+                _ => unreachable!(),
+            };
+            match result {
+                Ok(value) => {
+                    ret = value;
+                    note = "common process/string/COM allocation contract".into();
+                }
+                Err(error) => {
+                    state.last_error = error;
+                    ret = if id == ApiId::ProcessQuery(ProcessQueryApi::SetIdealProcessor) {
+                        u32::MAX
+                    } else {
+                        0
+                    };
+                    note = format!("common API error {error:#x}");
+                }
+            }
+        }
         ("wire.wmi", _) => {
             (ret, note, implemented) =
                 crate::wmi::dispatch(dll, name, &args, mem, api, state).unwrap();
@@ -2761,12 +2795,6 @@ pub fn dispatch(
         }
         _ => {
             if let Some((v, msg, supported)) =
-                crate::common_api::dispatch(dll, name, &args, mem, state, sched)
-            {
-                ret = v;
-                note = msg;
-                implemented = supported;
-            } else if let Some((v, msg, supported)) =
                 crate::win32::gdi::x86::dispatch(dll, name, &args, mem, state)
             {
                 ret = v;
