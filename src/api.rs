@@ -785,15 +785,9 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("FillRect", 12),
                 ("FrameRect", 12),
                 ("InvertRect", 8),
-                ("GetKeyState", 4),
-                ("GetAsyncKeyState", 4),
-                ("GetKeyboardState", 4),
                 ("SetKeyboardState", 4),
                 ("VkKeyScanA", 4),
                 ("VkKeyScanW", 4),
-                ("MapVirtualKeyA", 8),
-                ("MapVirtualKeyW", 8),
-                ("GetKeyNameTextA", 12),
                 ("RegisterHotKey", 16),
                 ("UnregisterHotKey", 8),
                 ("CharNextA", 4),
@@ -851,7 +845,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("CheckMenuItem", 12),
                 ("DrawMenuBar", 4),
                 ("TrackPopupMenuEx", 24),
-                ("GetKeyNameTextW", 12),
                 ("LoadMenuA", 8),
                 ("LoadMenuW", 8),
                 ("TrackPopupMenu", 28),
@@ -891,11 +884,8 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("SetWindowsHookExW", 16),
                 ("UnhookWindowsHookEx", 4),
                 ("CallNextHookEx", 16),
-                ("GetKeyboardLayout", 4),
-                ("GetKeyboardLayoutList", 8),
                 ("ActivateKeyboardLayout", 8),
                 ("ToAscii", 20),
-                ("ToUnicode", 24),
                 ("GetDoubleClickTime", 0),
             ],
         );
@@ -1895,6 +1885,19 @@ pub fn dispatch(
         ("wire.wmi", _) => {
             (ret, note, implemented) =
                 crate::wmi::dispatch(dll, name, &args, mem, api, state).unwrap();
+        }
+        _ if matches!(
+            binding.typed,
+            Some(crate::win32::catalog::ApiId::Keyboard(_))
+        ) =>
+        {
+            let Some(crate::win32::catalog::ApiId::Keyboard(id)) = binding.typed else {
+                unreachable!();
+            };
+            ret = state
+                .user32
+                .keyboard_call(id, &args, mem, sched.current_tid())?;
+            note = "host asynchronous / retrieved queue key state".into();
         }
         _ if binding.typed
             == Some(crate::win32::catalog::ApiId::Com(

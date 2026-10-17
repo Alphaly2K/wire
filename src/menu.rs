@@ -423,24 +423,13 @@ pub(crate) fn dispatch(
                 | "TrackPopupMenu"
                 | "TrackPopupMenuEx"
                 | "RedrawWindow"
-                | "MapVirtualKeyA"
-                | "MapVirtualKeyW"
-                | "GetKeyNameTextA"
-                | "GetKeyNameTextW"
         )
     {
         return None;
     }
     let supported = !matches!(
         name,
-        "DrawMenuBar"
-            | "TrackPopupMenu"
-            | "TrackPopupMenuEx"
-            | "RedrawWindow"
-            | "MapVirtualKeyA"
-            | "MapVirtualKeyW"
-            | "GetKeyNameTextA"
-            | "GetKeyNameTextW"
+        "DrawMenuBar" | "TrackPopupMenu" | "TrackPopupMenuEx" | "RedrawWindow"
     );
     let result = (|| -> Result<u32, u32> {
         match name {

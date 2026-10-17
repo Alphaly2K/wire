@@ -8,6 +8,7 @@ pub(crate) mod guid;
 pub(crate) mod heaps;
 pub(crate) mod host;
 pub(crate) mod interlocked;
+pub(crate) mod keyboard;
 pub(crate) mod local_memory;
 pub(crate) mod modules;
 pub(crate) mod multimedia;

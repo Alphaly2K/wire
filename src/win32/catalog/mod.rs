@@ -16,6 +16,7 @@ mod heaps;
 mod identity;
 mod inline_sync;
 mod interlocked;
+mod keyboard;
 mod local_memory;
 mod locals;
 mod modules;
@@ -52,6 +53,7 @@ pub use heaps::{HeapApi, HEAP_CONTRACTS};
 pub use identity::{IdentityApi, IDENTITY_CONTRACTS};
 pub use inline_sync::{InlineSyncApi, INLINE_SYNC_CONTRACTS};
 pub use interlocked::{InterlockedApi, INTERLOCKED_CONTRACTS};
+pub use keyboard::{KeyboardApi, KEYBOARD_CONTRACTS};
 pub use local_memory::{LocalMemoryApi, LOCAL_MEMORY_CONTRACTS};
 pub use locals::{LocalApi, LOCAL_CONTRACTS};
 pub use modules::{ModuleApi, ModuleQueryApi, MODULE_CONTRACTS, MODULE_QUERY_CONTRACTS};
@@ -142,6 +144,7 @@ pub enum ApiId {
     BasicString(BasicStringApi),
     PointerHelper(PointerHelperApi),
     ProcessQuery(ProcessQueryApi),
+    Keyboard(KeyboardApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -315,6 +318,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(BASIC_STRING_CONTRACTS.iter())
         .chain(POINTER_HELPER_CONTRACTS.iter())
         .chain(PROCESS_QUERY_CONTRACTS.iter())
+        .chain(KEYBOARD_CONTRACTS.iter())
 }
 
 #[cfg(test)]

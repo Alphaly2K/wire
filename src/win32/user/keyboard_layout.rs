@@ -6,31 +6,8 @@
 // Frans van Dorsselaer; 1997 David Faure; 1998 Morten Welinder, Ulrich Weigand;
 // 2001 Eric Pouech; 2002 Alexandre Julliard. LGPL-2.1-or-later; wire selects
 // LGPL 2.1. Original notices and source snapshot: third_party/hangover/input.c.
-use super::{Memory, Runtime64};
 
-const HKL: u64 = 0x04090409;
-pub(in crate::x64::runtime) fn arity(name: &str) -> Option<usize> {
-    Some(match name {
-        "GetKeyboardLayout"
-        | "GetKeyboardLayoutNameA"
-        | "GetKeyboardLayoutNameW"
-        | "GetKeyboardType" => 1,
-        "GetKeyboardLayoutList" | "MapVirtualKeyA" | "MapVirtualKeyW" => 2,
-        "MapVirtualKeyExA" | "MapVirtualKeyExW" | "GetKeyNameTextA" | "GetKeyNameTextW" => 3,
-        "ToUnicode" => 6,
-        "ToUnicodeEx" => 7,
-        _ => return None,
-    })
-}
-pub(super) fn dwords(name: &str) -> &'static [usize] {
-    match name {
-        "GetKeyboardLayout" | "GetKeyboardLayoutList" | "GetKeyboardType" => &[0],
-        "MapVirtualKeyA" | "MapVirtualKeyW" | "MapVirtualKeyExA" | "MapVirtualKeyExW" => &[0, 1],
-        "GetKeyNameTextA" | "GetKeyNameTextW" => &[0, 2],
-        "ToUnicode" | "ToUnicodeEx" => &[0, 1, 4, 5],
-        _ => &[],
-    }
-}
+pub(crate) const HKL: u64 = 0x04090409;
 
 // Set-1 scan codes for the virtual keyboard. Navigation VKs share the keypad
 // scans; MapVirtualKey is independent of current NumLock/key state.
@@ -127,7 +104,7 @@ fn vk_to_scan(vk: u32) -> u32 {
         .find(|&s| scan_to_vk(s) == vk)
         .unwrap_or(0)
 }
-fn character(vk: u32, state: &[u8; 256]) -> Option<u16> {
+pub(crate) fn character(vk: u32, state: &[u8; 256]) -> Option<u16> {
     if vk > 255 {
         return None;
     }
@@ -199,7 +176,7 @@ fn character(vk: u32, state: &[u8; 256]) -> Option<u16> {
     };
     Some(pair[shift as usize] as u16)
 }
-fn map_key(code: u32, kind: u32) -> u32 {
+pub(crate) fn map_key(code: u32, kind: u32) -> u32 {
     match kind {
         0 | 4 => {
             let scan = vk_to_scan(code);
@@ -229,7 +206,7 @@ fn map_key(code: u32, kind: u32) -> u32 {
         _ => 0,
     }
 }
-fn key_name(mut scan: u32, dont_care: bool) -> String {
+pub(crate) fn key_name(mut scan: u32, dont_care: bool) -> String {
     if dont_care {
         scan = match scan {
             0x36 => 0x2a,
@@ -296,137 +273,4 @@ fn key_name(mut scan: u32, dont_care: bool) -> String {
         }
     };
     name.to_owned()
-}
-impl Runtime64 {
-    pub(in crate::x64::runtime) fn keyboard_layout_call(
-        &mut self,
-        mem: &mut Memory,
-        name: &str,
-        a: &[u64],
-    ) -> Result<u64, String> {
-        match name {
-            "GetKeyboardLayout" => {
-                let tid = if a[0] == 0 { self.threads.active } else { a[0] };
-                Ok(
-                    if self
-                        .threads
-                        .entries
-                        .get(&tid)
-                        .is_some_and(|t| t.exit.is_none())
-                    {
-                        HKL
-                    } else {
-                        0
-                    },
-                )
-            }
-            "GetKeyboardLayoutList" => {
-                if (a[0] as u32 as i32) < 0 {
-                    self.set_error(mem, 87)?;
-                    return Ok(0);
-                }
-                if a[0] != 0 && a[1] != 0 {
-                    mem.write_int(a[1], 8, HKL)?;
-                }
-                Ok(1)
-            }
-            "GetKeyboardLayoutNameA" | "GetKeyboardLayoutNameW" => {
-                if name.ends_with('W') {
-                    mem.write(
-                        a[0],
-                        &"00000409\0"
-                            .encode_utf16()
-                            .flat_map(u16::to_le_bytes)
-                            .collect::<Vec<_>>(),
-                    )?;
-                } else {
-                    mem.write(a[0], b"00000409\0")?;
-                }
-                Ok(1)
-            }
-            "GetKeyboardType" => Ok(match a[0] {
-                0 => 4,
-                1 => 0,
-                2 => 12,
-                _ => 0,
-            }),
-            "MapVirtualKeyA" | "MapVirtualKeyW" | "MapVirtualKeyExA" | "MapVirtualKeyExW" => {
-                if a.len() == 3 && a[2] != 0 && a[2] != HKL {
-                    self.set_error(mem, 87)?;
-                    return Ok(0);
-                }
-                // All characters in this layout are single-byte ASCII in CP932.
-                Ok(map_key(a[0] as u32, a[1] as u32) as u64)
-            }
-            "ToUnicode" | "ToUnicodeEx" => {
-                if a[4] as u32 as i32 <= 0 {
-                    return Ok(0);
-                }
-                if a[5] & !7 != 0 || (a.len() == 7 && a[6] != 0 && a[6] != HKL) {
-                    self.set_error(mem, 87)?;
-                    return Ok(0);
-                }
-                let mut state = [0; 256];
-                mem.read(a[2], &mut state)?;
-                let text = if a[1] & 0x8000 != 0 && a[5] & 2 == 0 {
-                    None
-                } else {
-                    character(a[0] as u32, &state)
-                };
-                let mut out = text.unwrap_or(0).to_le_bytes().to_vec();
-                if a[4] > 1 {
-                    out.extend_from_slice(&[0, 0]);
-                }
-                mem.write(a[3], &out)?;
-                // The US layout has no dead-key or Alt+numpad composition state.
-                Ok(text.is_some() as u64)
-            }
-            "GetKeyNameTextA" | "GetKeyNameTextW" => {
-                if a[2] as u32 as i32 <= 0 || a[1] == 0 {
-                    return Ok(0);
-                }
-                let scan =
-                    ((a[0] >> 16) & 255) as u32 | if a[0] & (1 << 24) != 0 { 0xe000 } else { 0 };
-                let text = key_name(scan, a[0] & (1 << 25) != 0);
-                let n = text.len().min(a[2] as usize - 1);
-                let mut out = text.as_bytes()[..n].to_vec();
-                out.push(0);
-                if name.ends_with('W') {
-                    out = out
-                        .into_iter()
-                        .flat_map(|c| (c as u16).to_le_bytes())
-                        .collect();
-                }
-                mem.write(a[1], &out)?;
-                Ok(n as u64)
-            }
-            _ => unreachable!(),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::x64::memory::{READ, WRITE};
-    #[test]
-    fn unicode_query_does_not_consume_host_resolved_text_or_change_queued_keys() {
-        let mut m = Memory::default();
-        const DATA: u64 = 0x700000000;
-        m.map(DATA, 8192, READ | WRITE).unwrap();
-        let mut r = Runtime64::new(&mut m, 0x140000000, DATA, 8192, "probe.exe").unwrap();
-        let message = [0x7ffd00630000, 0x100, 65, 1, 123];
-        assert!(r.user.keyboard.host64(message));
-        assert!(!r.user.keyboard.host64([message[0], 0x102, 0x3042, 1, 123]));
-        r.user.keyboard.consumed64(1, 0x100, 65, 1);
-        let before = r.user.keyboard.state64(1);
-        assert_eq!(
-            r.keyboard_layout_call(&mut m, "ToUnicode", &[65, 0x1e, DATA, DATA + 512, 2, 0])
-                .unwrap(),
-            1
-        );
-        assert_eq!(m.read_int(DATA + 512, 2).unwrap(), 97);
-        assert_eq!(r.user.keyboard.state64(1), before);
-        assert_eq!(r.user.keyboard.translate64(message), vec![0x3042]);
-    }
 }

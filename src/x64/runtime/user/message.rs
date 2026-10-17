@@ -28,8 +28,7 @@ pub(in crate::x64::runtime) fn arity(name: &str) -> Option<usize> {
         "PeekMessageA" | "PeekMessageW" => 5,
         "GetMessageA" | "GetMessageW" | "PostMessageA" | "PostMessageW" | "PostThreadMessageA"
         | "PostThreadMessageW" => 4,
-        "PostQuitMessage" | "TranslateMessage" | "GetKeyState" | "GetAsyncKeyState"
-        | "GetKeyboardState" => 1,
+        "PostQuitMessage" | "TranslateMessage" => 1,
         "GetMessageExtraInfo" | "GetMessageTime" | "GetMessagePos" => 0,
         "SetMessageExtraInfo" => 1,
         _ => return None,
@@ -41,7 +40,7 @@ pub(super) fn dwords(name: &str) -> &'static [usize] {
         "GetMessageA" | "GetMessageW" => &[2, 3],
         "PostMessageA" | "PostMessageW" => &[1],
         "PostThreadMessageA" | "PostThreadMessageW" => &[0, 1],
-        "PostQuitMessage" | "GetKeyState" | "GetAsyncKeyState" => &[0],
+        "PostQuitMessage" => &[0],
         _ => &[],
     }
 }
@@ -84,16 +83,6 @@ impl Runtime64 {
             "SetMessageExtraInfo" => {
                 let state = self.user.message_state.entry(tid).or_default();
                 std::mem::replace(&mut state[0], a[0])
-            }
-            "GetAsyncKeyState" => self.user.keyboard.asynchronous(a[0] as u32) as u64,
-            "GetKeyState" => {
-                let keys = self.user.keyboard.state64(tid);
-                let key = keys.get(a[0] as usize).copied().unwrap_or(0);
-                (((key as u16 & 0x80) << 8) | (key as u16 & 1)) as i16 as i32 as u32 as u64
-            }
-            "GetKeyboardState" => {
-                mem.write(a[0], &self.user.keyboard.state64(tid))?;
-                1
             }
             "PostQuitMessage" | "PostMessageA" | "PostMessageW" | "PostThreadMessageA"
             | "PostThreadMessageW" => {
@@ -573,6 +562,7 @@ mod tests {
     }
     #[test]
     fn native_key_state_waits_for_removal_and_host_unicode_waits_for_translation() {
+        use crate::win32::catalog::KeyboardApi::{AsyncState, State};
         let (mut r, mut m) = fixture();
         let out = STACK + 128;
         r.queue_window_event(WindowEvent {
@@ -591,29 +581,20 @@ mod tests {
         .unwrap();
         assert_eq!(r.user.events.len(), 1);
         assert_eq!(
-            r.message_call(&mut m, "GetAsyncKeyState", &[0x41]).unwrap(),
-            Some(0xffff8001)
+            r.keyboard_call(&mut m, AsyncState, &[0x41]).unwrap(),
+            0xffff8001
         );
         assert_eq!(
-            r.message_call(&mut m, "GetAsyncKeyState", &[0x41]).unwrap(),
-            Some(0xffff8000)
+            r.keyboard_call(&mut m, AsyncState, &[0x41]).unwrap(),
+            0xffff8000
         );
-        assert_eq!(
-            r.message_call(&mut m, "GetKeyState", &[0x41]).unwrap(),
-            Some(0)
-        );
+        assert_eq!(r.keyboard_call(&mut m, State, &[0x41]).unwrap(), 0);
         r.message_call(&mut m, "PeekMessageW", &[out, 0, 0, 0, 0])
             .unwrap();
-        assert_eq!(
-            r.message_call(&mut m, "GetKeyState", &[0x41]).unwrap(),
-            Some(0)
-        );
+        assert_eq!(r.keyboard_call(&mut m, State, &[0x41]).unwrap(), 0);
         r.message_call(&mut m, "PeekMessageW", &[out, 0, 0, 0, 1])
             .unwrap();
-        assert_eq!(
-            r.message_call(&mut m, "GetKeyState", &[0x41]).unwrap(),
-            Some(0xffff8000)
-        );
+        assert_eq!(r.keyboard_call(&mut m, State, &[0x41]).unwrap(), 0xffff8000);
         assert_eq!(
             r.message_call(&mut m, "TranslateMessage", &[out]).unwrap(),
             Some(1)
@@ -628,15 +609,9 @@ mod tests {
             lparam: 0xc0000001,
         })
         .unwrap();
-        assert_eq!(
-            r.message_call(&mut m, "GetAsyncKeyState", &[0x41]).unwrap(),
-            Some(0)
-        );
+        assert_eq!(r.keyboard_call(&mut m, AsyncState, &[0x41]).unwrap(), 0);
         r.message_call(&mut m, "PeekMessageW", &[out, 0, 0, 0, 1])
             .unwrap();
-        assert_eq!(
-            r.message_call(&mut m, "GetKeyState", &[0x41]).unwrap(),
-            Some(0)
-        );
+        assert_eq!(r.keyboard_call(&mut m, State, &[0x41]).unwrap(), 0);
     }
 }

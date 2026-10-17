@@ -319,6 +319,18 @@ pub(crate) fn register_system_class(
     Ok(())
 }
 
+impl User32 {
+    pub(crate) fn keyboard_call(
+        &mut self,
+        id: crate::win32::catalog::KeyboardApi,
+        args: &crate::api::Args,
+        mem: &mut GuestMem,
+        tid: u32,
+    ) -> Result<u32, String> {
+        crate::win32::x86::keyboard::call(id, args, mem, &mut self.keyboard, tid)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch(
     dll: &str,
@@ -334,35 +346,6 @@ pub fn dispatch(
 ) -> Option<Result<(GuestCallOutcome, String), String>> {
     if dll != "user32.dll" {
         return None;
-    }
-    if matches!(
-        name,
-        "GetKeyState" | "GetAsyncKeyState" | "GetKeyboardState"
-    ) {
-        return Some((|| {
-            let result = match name {
-                "GetAsyncKeyState" => state.user32.keyboard.asynchronous(a[0]),
-                "GetKeyState" => {
-                    let value = state
-                        .user32
-                        .keyboard
-                        .state(sched.current_tid())
-                        .get(a[0] as usize)
-                        .copied()
-                        .unwrap_or(0) as u16;
-                    (((value & 0x80) << 8) | (value & 1)) as i16 as i32 as u32
-                }
-                _ => {
-                    mem.write_bytes(a[0], &state.user32.keyboard.state(sched.current_tid()))
-                        .map_err(|e| e.to_string())?;
-                    1
-                }
-            };
-            Ok((
-                GuestCallOutcome::Returned(result),
-                "host asynchronous / retrieved queue key state".into(),
-            ))
-        })());
     }
     if matches!(
         name,

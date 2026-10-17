@@ -1,11 +1,9 @@
 //! Checked Win64 USER32 objects. Guest class pointers never become host pointers.
 use super::{Memory, Runtime64, READ};
 mod gdi;
-mod keyboard;
 mod message;
 mod raw;
 mod window;
-pub(super) use keyboard::arity as keyboard_arity;
 pub(super) use message::arity as message_arity;
 use std::collections::BTreeMap;
 pub use window::WindowCall;
@@ -92,9 +90,6 @@ impl Default for User {
     }
 }
 pub(super) fn arity(name: &str) -> Option<usize> {
-    if let Some(arity) = keyboard::arity(name) {
-        return Some(arity);
-    }
     if let Some(arity) = message::arity(name) {
         return Some(arity);
     }
@@ -141,9 +136,6 @@ pub(super) fn arity(name: &str) -> Option<usize> {
     })
 }
 pub(super) fn dwords(name: &str) -> &'static [usize] {
-    if keyboard::arity(name).is_some() {
-        return keyboard::dwords(name);
-    }
     if message::arity(name).is_some() {
         return message::dwords(name);
     }
@@ -195,9 +187,6 @@ impl Runtime64 {
         args: &[u64],
     ) -> Result<u64, String> {
         let wide = name.ends_with('W');
-        if keyboard::arity(name).is_some() {
-            return self.keyboard_layout_call(mem, name, args);
-        }
         if raw::arity(name).is_some() {
             return self.raw_input_call(mem, name, args);
         }

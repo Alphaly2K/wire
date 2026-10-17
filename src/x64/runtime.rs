@@ -23,6 +23,7 @@ mod find;
 mod gateways;
 mod guid;
 mod heap;
+mod keyboard;
 mod local_memory;
 mod locals;
 mod mapping;
@@ -206,9 +207,7 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
     if sockets::is_call(name) && !dll.eq_ignore_ascii_case("ws2_32.dll") {
         return false;
     }
-    if (user::keyboard_arity(name).is_some() || name == "TrackMouseEvent")
-        && !dll.eq_ignore_ascii_case("user32.dll")
-    {
+    if name == "TrackMouseEvent" && !dll.eq_ignore_ascii_case("user32.dll") {
         return false;
     }
     if devices::arity(name).is_some() && !devices::export(dll, name) {
@@ -848,6 +847,7 @@ impl Runtime64 {
             ApiId::Bstr(id) => self.bstr_call(mem, id, args),
             ApiId::Variant(_) => unreachable!("Variant helpers have no Win64 binding"),
             ApiId::ProcessQuery(id) => self.process_query_call(mem, id, args),
+            ApiId::Keyboard(id) => self.keyboard_call(mem, id, args),
             ApiId::BasicString(_) | ApiId::PointerHelper(_) => {
                 unreachable!("PE32 basic helpers have no Win64 binding")
             }

@@ -4,7 +4,7 @@
 
 本轮完成基础字符串、指针和进程查询 29 项契约接入，删除混合 common_api、重复 ABI/arity 与名称分发。PE32 保留参数、错误与资源提交顺序，Win64 只保留原有四项 processor/group-count typed 能力。Wine spec reader 共用静态数据，缓存恢复按字段移动，消除早期候选的持续 code-alias 回退。
 
-本批完整正确性、68 条性能初筛、七条扩样及游戏前缀已验收，累计 384 项。保留 AMD64 memory/SSE +3.612%/+3.853% 的局部成本，详见[基础 helper 验收](reports/refactoring-basic-2026-10-18.md)。后续 USER、COM、图形等继续迁移；键盘基线及实现草稿未接入当前冻结。Mono 原生化已撤回，本轮继续排除。
+本批完整正确性、68 条性能初筛、七条扩样及游戏前缀已验收，累计 384 项。保留 AMD64 memory/SSE +3.612%/+3.853% 的局部成本，详见[基础 helper 验收](reports/refactoring-basic-2026-10-18.md)。后续 USER、COM、图形等继续迁移；[键盘 16 项候选](reports/refactoring-keyboard-2026-10-18.md)已接入，完整 release 537、debug 384、native 7、工具 20 项通过，性能验收尚未完成，暂不计入总数。Mono 原生化已撤回，本轮继续排除。
 
 ## 重构范围
 
@@ -67,7 +67,7 @@
 
 ## 验证与性能
 
-最近已验收的基础 helper 批次冻结：release **533 passed / 7 ignored**，debug Win32/AMD64/FPU **380 passed**，显式 native **7 passed**，工具 **20 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。随后新增的键盘基线及未接入实现草稿不属于该冻结。
+最近已验收的基础 helper 批次冻结：release **533 passed / 7 ignored**，debug Win32/AMD64/FPU **380 passed**，显式 native **7 passed**，工具 **20 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。随后键盘候选的独立基线、实现及检查另记于该候选报告，不属于上述验收冻结。
 
 基础 helper 的 68 条初筛与七条同哈希三顺序扩样，共 75 个 workload protocol 全部结果校验。code-alias CPU −5.378%；新处理器查询 Win64 −6.369%、PE32 IR/raw −0.048%/−1.009%，新字符串 PE32 IR/raw −1.066%/−0.762%。保留 AMD64 memory/SSE 扩样 +3.612%/+3.853%（after/control +3.272%/+3.388%），diagnostics 计数与主要执行器助记符相同，具体成本机制尚未确证。初筛 RSS 最多增加 128KiB，二进制增加 48 bytes；Alice 前缀 CPU −0.876%、wall −2.273%，启动终点保持。各批次使用自己的基线，GUID 资源 multimedia/IR、VirtualQuery/IR，线程控制 SSE、日历 Local/Global、线程属性 HeapSize、BSTR SSE/raw 等历史成本与离散轮次继续保留在对应报告，未推断游戏 FPS。AMD64 event fixture 的重复导入已独立修正；旧验收保持冻结输入，后续按新哈希配对，详见[工具边界](architecture/validation-tools.md)。
 
