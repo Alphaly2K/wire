@@ -70,3 +70,8 @@ retired=`11*n+10`、work=`13*n+10`。旧 handler 上独立通过 13K 预检；
 Win64 n=`max(1, work//10)`、retired=`8*n+10`、work=`10*n+10`；
 PE32 n=`max(1, work//8)`、retired=`8*n+7`。返回值均为 `9*n`（PE32 按 DWORD），
 API count=`2*n`，无每轮资源增长，需显式选择。
+
+`variant_gateway.py` 的 PE32 `gateway-variant` 循环复制 I4 Variant 后清除，
+checksum 同时消费两个返回值、复制后的 tag/payload 和清除后的 tag。
+n=`max(1, work//15)`，返回值为 `45*n`（按 DWORD），retired=`15*n+13`，
+API count=`2*n`，raw/IR 均用旧 handler 独立预检。默认 case 集合保持。
