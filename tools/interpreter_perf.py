@@ -303,6 +303,10 @@ def main():
         from perf.fixtures.com_gateway import x64
         data, meta = x64(args.work)
         entries.append(('gateway-com', data, meta))
+    if args.cases and 'gateway-guid-create' in args.cases:
+        from perf.fixtures.guid_create_gateway import x64
+        data, meta = x64(args.work)
+        entries.append(('gateway-guid-create', data, meta))
     if args.cases and 'gateway-address-wait' in args.cases:
         from perf.fixtures.address_wait_gateway import x64
         data, meta = x64(args.work)

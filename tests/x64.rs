@@ -22,6 +22,8 @@ mod cpu;
 mod critical_sections;
 #[path = "x64/files.rs"]
 mod files;
+#[path = "x64/guid_allocation.rs"]
+mod guid_allocation;
 #[path = "x64/handles.rs"]
 mod handles;
 #[path = "x64/interlocked.rs"]

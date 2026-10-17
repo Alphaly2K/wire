@@ -33,6 +33,8 @@ mod files;
 mod gdi;
 #[path = "win32/gdiplus.rs"]
 mod gdiplus;
+#[path = "win32/guid_allocation.rs"]
+mod guid_allocation;
 #[path = "win32/handles.rs"]
 mod handles;
 #[path = "win32/interlocked.rs"]

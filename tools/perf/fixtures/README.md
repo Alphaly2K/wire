@@ -75,3 +75,4 @@ API count=`2*n`，无每轮资源增长，需显式选择。
 checksum 同时消费两个返回值、复制后的 tag/payload 和清除后的 tag。
 n=`max(1, work//15)`，返回值为 `45*n`（按 DWORD），retired=`15*n+13`，
 API count=`2*n`，raw/IR 均用旧 handler 独立预检。默认 case 集合保持。
+`guid_create_gateway.py` 提供可选 `gateway-guid-create`：反复调用 CoCreateGuid(NULL)，累计各架构原 HRESULT，核对退休数/API 次数与 Win64 work。该路径无随机输入或资源增长，用于 GUID helper 冷绑定后的错误返回开销；不测量宿主 entropy 或 owning string allocation。
