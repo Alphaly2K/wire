@@ -29,6 +29,7 @@ mod timers;
 mod version;
 mod virtual_memory;
 mod waits;
+mod winrt;
 pub use address_waits::{AddressWaitApi, ADDRESS_WAIT_CONTRACTS};
 pub use calendar::{CalendarApi, CALENDAR_CONTRACTS};
 pub use clocks::{ClockApi, CLOCK_CONTRACTS};
@@ -58,6 +59,7 @@ pub use timers::{TimerApi, TIMER_CONTRACTS};
 pub use version::{VersionApi, VERSION_CONTRACTS};
 pub use virtual_memory::{VirtualMemoryApi, VIRTUAL_MEMORY_CONTRACTS};
 pub use waits::{WaitApi, WAIT_CONTRACTS};
+pub use winrt::{WinrtApi, WINRT_CONTRACTS};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Architecture {
@@ -92,6 +94,7 @@ pub enum ReturnConvention {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApiId {
     Com(ComApi),
+    Winrt(WinrtApi),
     Guid(GuidApi),
     Identity(IdentityApi),
     Version(VersionApi),
@@ -288,6 +291,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(THREAD_PROPERTY_CONTRACTS.iter())
         .chain(THREAD_CONTROL_CONTRACTS.iter())
         .chain(COM_CONTRACTS.iter())
+        .chain(WINRT_CONTRACTS.iter())
 }
 
 #[cfg(test)]

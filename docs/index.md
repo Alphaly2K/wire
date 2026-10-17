@@ -42,6 +42,7 @@
 - [线程查询、设置与状态边界](architecture/thread-properties.md)及[契约验收](reports/refactoring-thread-properties-2026-10-17.md)：九项接口、架构挂起/优先级差异、私有 mode、43 条性能路径与 HeapSize 局部成本调查。
 - [线程控制与资源边界](architecture/thread-control.md)及[契约验收](reports/refactoring-thread-control-2026-10-17.md)：六项接口、私有 description/APC queue、退出/CONTEXT 显式结果、46 条性能路径与 SSE 局部成本调查。
 - [COM 基础调用与资源边界](architecture/com-core.md)及[契约验收](reports/refactoring-com-core-2026-10-17.md)：十项接口、线程独占 apartment、task 成员归属、公开 facade、49 条性能路径与四项离散扩样。
+- [WinRT 字符串与资源边界](architecture/winrt.md)及[契约验收](reports/refactoring-winrt-2026-10-17.md)：十一项接口、私有 HSTRING owner、reference header 重读、静态/动态 provider 差异、50 条性能路径与两项离散扩样。
 - [release 编译单元候选](reports/refactoring-release-codegen-2026-10-15.md)：独立构建配置、同二进制对照及长样本调查。
 - [网关边界候选](reports/refactoring-gateway-boundary-2026-10-15.md)、[页缓存内联候选](reports/refactoring-page-cache-inline-2026-10-15.md)、[helper 布局候选](reports/refactoring-memory-helper-layout-2026-10-15.md)：已撤回实现和保留的测量证据。
 - [本次渐进重构记录](reports/refactoring-2026-10-14.md)：阶段交付、行为差异与验收结果。

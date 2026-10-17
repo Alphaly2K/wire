@@ -218,9 +218,6 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
     if guid::arity(name).is_some() && !guid::export(dll, name) {
         return false;
     }
-    if winrt::arity(name).is_some() && !winrt::export(dll, name) {
-        return false;
-    }
     if !dll.eq_ignore_ascii_case("kernel32.dll")
         && !dll.eq_ignore_ascii_case("kernelbase.dll")
         && !(dll.eq_ignore_ascii_case("shell32.dll")
@@ -269,7 +266,6 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
             ))
         && !guid::export(dll, name)
         && !devices::export(dll, name)
-        && !winrt::export(dll, name)
         && !automation::export(dll, name)
         && !winhttp::export(dll, name)
     {
@@ -286,7 +282,6 @@ fn kernel_export(name: &str) -> bool {
     if devices::arity(name).is_some()
         || automation::arity(name).is_some()
         || winhttp::arity(name).is_some()
-        || winrt::arity(name).is_some()
         || guid::arity(name).is_some()
         || user::arity(name).is_some()
         || display::arity(name).is_some()
@@ -332,7 +327,6 @@ fn import_arity(name: &str) -> Option<usize> {
         name if winhttp::arity(name).is_some() => winhttp::arity(name).unwrap(),
         name if sockets::arity(name).is_some() => sockets::arity(name).unwrap(),
         name if devices::arity(name).is_some() => devices::arity(name).unwrap(),
-        name if winrt::arity(name).is_some() => winrt::arity(name).unwrap(),
         name if guid::arity(name).is_some() => guid::arity(name).unwrap(),
         name if dxgi::arity(name).is_some() => dxgi::arity(name).unwrap(),
         name if user::arity(name).is_some() => user::arity(name).unwrap(),
@@ -423,7 +417,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         name if winhttp::arity(name).is_some() => winhttp::dwords(name),
         name if sockets::arity(name).is_some() => sockets::dwords(name),
         name if devices::arity(name).is_some() => devices::dwords(name),
-        name if winrt::arity(name).is_some() => winrt::dwords(name),
         name if dxgi::arity(name).is_some() => dxgi::dwords(name),
         name if user::arity(name).is_some() => user::dwords(name),
         name if registry::arity(name).is_some() => registry::dwords(name),
@@ -476,7 +469,7 @@ fn import_groups(name: &str) -> u32 {
         devices::arity(name).is_some(),
         user::message_arity(name).is_some(),
         false, // identity moved to catalog typed IDs; preserve legacy bit positions
-        winrt::arity(name).is_some(),
+        false, // WinRT moved to catalog typed IDs; preserve legacy bit positions
         guid::arity(name).is_some(),
         dxgi::arity(name).is_some(),
         false, // bound directory-search contracts supply bit 8; preserve bit positions
@@ -864,6 +857,7 @@ impl Runtime64 {
         use crate::win32::catalog::ApiId;
         match id {
             ApiId::Com(id) => self.com_call(mem, id, args),
+            ApiId::Winrt(id) => self.winrt_call(mem, id, args),
             ApiId::File(_) => unreachable!("core file calls are handled by the bound gateway"),
             ApiId::Handle(_) => unreachable!("handle calls are handled by the bound gateway"),
             ApiId::Path(_) => unreachable!("path helpers have no Win64 binding"),
@@ -1075,7 +1069,6 @@ impl Runtime64 {
                 Some(value) => value,
                 None => return Ok(Control::Blocked),
             },
-            _ if binding.groups & (1 << 5) != 0 => self.winrt_call(mem, name, args)?,
             _ if binding.groups & (1 << 6) != 0 => self.guid_call(mem, name, args)?,
             _ if binding.groups & (1 << 7) != 0 => self.dxgi_call(mem, name, args)?,
             _ if binding.groups & (1 << 8) != 0 => self.find_call(mem, file.unwrap(), args)?,

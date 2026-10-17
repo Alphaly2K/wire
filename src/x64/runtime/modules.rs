@@ -1,7 +1,7 @@
 //! Queries describe loaded guest images and the logical built-in service providers.
 use super::{
     automation, devices, display, dxgi, guid, kernel_export, registry, sockets, sspi, unwind, user,
-    winhttp, winrt,
+    winhttp,
 };
 use super::{Memory, Runtime64, WRITE};
 
@@ -165,7 +165,6 @@ impl Runtime64 {
                         )
                         || guid::export(&provider, &function)
                         || devices::export(&provider, &function)
-                        || winrt::export(&provider, &function)
                         || (provider == "user32.dll" && display::arity(&function).is_some())
                         || (provider == "user32.dll" && user::arity(&function).is_some())
                         || (provider == "imm32.dll" && user::ime_arity(&function).is_some())

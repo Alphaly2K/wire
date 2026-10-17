@@ -292,3 +292,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 十项 export 接入 ComApi，删除重复 ABI/arity/DWORD、provider 特例和根名称分发，保留 PE32 Ole ABI-only、Ro absent 及 Win64 Ole absent。双架构 Apartment 由线程独占，删除 Win64 活动镜像；TaskMemory 私有登记成员，原 backing allocator、PE32 进程 heap 共享、WMI 工厂和公开 NLS facade 精确范围保持。七项独立回归及完整 release 509、debug 356、native 7、工具 20 项和 fmt/strict Clippy/build 通过。
 
 49 条初筛路径全部校验，四项单轮离散路径同哈希三顺序扩样，共 53 个 workload protocol；初筛最大 CPU 回退 +2.129%，扩样最大 +2.367%。新 COM 网关 CPU Win64 −12.916%、PE32 IR/raw −2.754%/−2.063%；初筛 RSS 最多 +64KiB。Alice 前缀 CPU +0.024%、wall +0.229%，保持隐藏窗口和零 Draw/Present。289 个 Rust 文件核对一致，二进制增加 1,216 bytes，契约累计 329 个 export。2026-10-17 接受，初筛、扩样和历史成本见[COM 基础验收](refactoring-com-core-2026-10-17.md)。
+
+## R2/R3 WinRT 字符串与激活
+
+十一项 export 接入 WinrtApi，删除重复 provider/arity/DWORD、legacy bit 路由与执行时名称比较，保持动态 API set 到 combase 的旧 remapping 和 PE32 unknown ABI。Strings 私有拥有成员、长度、引用数与空 buffer 身份；header 重读与释放只借 Memory/backing map，分配仍由 adapter 协调。五项独立回归及完整 release 514、debug 361、native 7、工具 20 项和 fmt/strict Clippy/build 通过。
+
+50 条初筛路径全部校验，两项离散路径同哈希三顺序扩样，共 52 个 workload protocol；初筛最大 CPU 回退 +1.860%，扩样 +0.082%/−0.210%。新字符串网关 CPU −2.674%，初筛 RSS 最多 +64KiB。Alice 前缀 CPU −0.840%、wall −0.895%，保持隐藏窗口和零 Draw/Present。293 个 Rust 文件核对一致，二进制增加 480 bytes，契约累计 340 个 export。2026-10-17 接受，完整轮次和历史成本见[WinRT 验收](refactoring-winrt-2026-10-17.md)。
