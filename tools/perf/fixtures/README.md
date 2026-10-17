@@ -64,3 +64,9 @@ UTF-16 输入包含嵌入 NUL 和孤立 surrogate；循环不增加 owned alloca
 n=`max(1, work//13)`，返回值为 `4*n`、API count=`2*n`，
 retired=`11*n+10`、work=`13*n+10`。旧 handler 上独立通过 13K 预检；
 需显式选择，PE32 没有对应已实现路径。
+
+`bstr_gateway.py` 的双架构 `gateway-bstr` 循环查询同一 guest prefix 的字符长度
+和字节长度，消费两次结果。它不要求输入由 BSTR allocator 分配，固定这一旧行为。
+Win64 n=`max(1, work//10)`、retired=`8*n+10`、work=`10*n+10`；
+PE32 n=`max(1, work//8)`、retired=`8*n+7`。返回值均为 `9*n`（PE32 按 DWORD），
+API count=`2*n`，无每轮资源增长，需显式选择。

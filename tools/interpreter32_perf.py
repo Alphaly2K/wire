@@ -110,6 +110,9 @@ def nls_conversion_fixture(work):
     return image, dict(eax=(65 + 2 * n) & 0xffffffff, retired=11 * n + 10)
 
 def fixture(name,work):
+    if name=='gateway-bstr':
+        from perf.fixtures.bstr_gateway import x86
+        return x86(work,pe32)
     if name=='gateway-com':
         from perf.fixtures.com_gateway import x86
         return x86(work,pe32)
