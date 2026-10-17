@@ -6,6 +6,8 @@ use wire::x64::{
     memory::{Memory, EXECUTE, READ, WRITE},
     pe::Pe64,
 };
+#[path = "x64/basic_contract.rs"]
+mod basic_contract;
 #[path = "x64/bstr_contract.rs"]
 mod bstr_contract;
 #[path = "x64/clocks.rs"]

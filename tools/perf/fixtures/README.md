@@ -76,3 +76,5 @@ checksum 同时消费两个返回值、复制后的 tag/payload 和清除后的 
 n=`max(1, work//15)`，返回值为 `45*n`（按 DWORD），retired=`15*n+13`，
 API count=`2*n`，raw/IR 均用旧 handler 独立预检。默认 case 集合保持。
 `guid_create_gateway.py` 提供可选 `gateway-guid-create`：反复调用 CoCreateGuid(NULL)，累计各架构原 HRESULT，核对退休数/API 次数与 Win64 work。该路径无随机输入或资源增长，用于 GUID helper 冷绑定后的错误返回开销；不测量宿主 entropy 或 owning string allocation。
+
+`basic_gateway.py` 提供双架构 `gateway-processor-count`，每轮取 active/maximum processor count，各消费返回值 1；另有 PE32 `gateway-basic-string`，消费同一固定 UTF-16 文本的长度与忽略大小写的比较结果。均无逐轮资源增长，核对 checksum、退休数/API 次数与 Win64 work，默认 case 集合保持。

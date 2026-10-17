@@ -307,6 +307,10 @@ def main():
         from perf.fixtures.guid_create_gateway import x64
         data, meta = x64(args.work)
         entries.append(('gateway-guid-create', data, meta))
+    if args.cases and 'gateway-processor-count' in args.cases:
+        from perf.fixtures.basic_gateway import x64
+        data, meta = x64(args.work)
+        entries.append(('gateway-processor-count', data, meta))
     if args.cases and 'gateway-address-wait' in args.cases:
         from perf.fixtures.address_wait_gateway import x64
         data, meta = x64(args.work)
