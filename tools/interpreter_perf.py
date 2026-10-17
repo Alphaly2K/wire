@@ -311,6 +311,14 @@ def main():
         from perf.fixtures.basic_gateway import x64
         data, meta = x64(args.work)
         entries.append(('gateway-processor-count', data, meta))
+    if args.cases and 'gateway-keyboard' in args.cases:
+        from perf.fixtures.keyboard_gateway import x64
+        data, meta = x64(args.work)
+        entries.append(('gateway-keyboard', data, meta))
+    if args.cases and 'gateway-keyboard-map' in args.cases:
+        from perf.fixtures.keyboard_gateway import x64_layout
+        data, meta = x64_layout(args.work)
+        entries.append(('gateway-keyboard-map', data, meta))
     if args.cases and 'gateway-address-wait' in args.cases:
         from perf.fixtures.address_wait_gateway import x64
         data, meta = x64(args.work)
