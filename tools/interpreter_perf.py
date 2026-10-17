@@ -207,6 +207,10 @@ def main():
     if args.cases and 'nls-conversion' in args.cases:
         data, meta = nls_conversion_fixture(args.work)
         entries.append(('nls-conversion', data, meta))
+    if args.cases and 'gateway-winrt' in args.cases:
+        from perf.fixtures.winrt_gateway import x64
+        data, meta = x64(args.work)
+        entries.append(('gateway-winrt', data, meta))
     if args.cases and 'gateway-guid' in args.cases:
         from perf.fixtures.guid_gateway import fixture
         data, meta = fixture(args.work)

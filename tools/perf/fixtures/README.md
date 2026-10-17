@@ -57,3 +57,10 @@ work=`8*n+23`。使用独立 OFT/IAT 和三项导入，不依赖实际分配地�
 再循环 GlobalSize，验证成对接口共享同一分配归属。n=`max(1, work//6)`，
 返回值为 `23*n`、API count=`n+1`；PE32 retired=`5*n+13`，
 Win64 retired=`5*n+16`、work=`6*n+17`。默认 case 集合保持。
+
+`winrt_gateway.py` 的 Win64 `gateway-winrt` 通过现有 string API set 导入，
+每轮在调用者栈上创建 HSTRING reference，再读取长度并消费返回值。
+UTF-16 输入包含嵌入 NUL 和孤立 surrogate；循环不增加 owned allocation。
+n=`max(1, work//13)`，返回值为 `4*n`、API count=`2*n`，
+retired=`11*n+10`、work=`13*n+10`。旧 handler 上独立通过 13K 预检；
+需显式选择，PE32 没有对应已实现路径。

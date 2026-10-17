@@ -48,6 +48,8 @@ mod thread_control;
 mod thread_properties;
 #[path = "x64/user.rs"]
 mod user;
+#[path = "x64/winrt_contract.rs"]
+mod winrt_contract;
 
 fn mono_trace_pe() -> Vec<u8> {
     let mut b = fixture();
