@@ -304,3 +304,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 八项 export 接入 BstrApi，删除重复 provider/arity/DWORD 与名称分发，Win64 ordinal alias 收入契约模块。双架构资源记录由私有 owner 管理，Variant/WMI 内部 facade 共用原分配入口，保留 heap release、别名重分配及返回/错误差异。五项独立回归及完整 release 519、debug 366、native 7、工具 20 项和 fmt/strict Clippy/build 通过。
 
 53 条初筛路径全部校验，三项同哈希三顺序扩样，共 56 个 workload protocol。SSE/raw 初筛 +3.715%、扩样保留 +2.871% 局部成本（after/control +2.465%），整数 IR/raw 扩样 +0.003%/+1.168%。新查询网关 CPU Win64 −1.027%、PE32 IR/raw −1.331%/−1.912%；初筛 RSS 最多 +16KiB。Alice 前缀 CPU +0.028%、wall −0.325%，保持隐藏窗口和零 Draw/Present。300 个 Rust 文件核对一致，二进制增加 3,664 bytes，契约累计 348 个 export。2026-10-17 接受，完整轮次及历史成本见[BSTR 验收](refactoring-bstr-2026-10-17.md)。
+
+## R2 Variant
+
+四项 PE32 oleaut32 export 接入 VariantApi，移除 common_api 的重复 admission 与名称实现。适配层只借明确资源，通过 Bstrings32 共享 owner 执行深拷贝、释放与失败回滚，保留 scalar 字节、Clear tag、BYREF 生命周期、目标低 WORD、HRESULT/LastError 和返回顺序；Win64 保持 absent。四项独立旧行为基线及完整 release 523、debug 370、native 7、工具 20 项和 fmt/strict Clippy/build 通过。
+
+55 条初筛路径全部校验，五项同哈希三顺序扩样，共 60 个 workload protocol；初筛 CPU 中位数最大回退 +2.137%，扩样最大 +0.625%。新网关 CPU PE32 IR/raw −0.843%/−2.248%，初筛 RSS 最多 +320KiB；Alice 前缀 CPU +0.051%、wall −0.044%，保持隐藏窗口和零 Draw/Present。304 个 Rust 文件核对一致，二进制减少 78,944 bytes，契约累计 352 个 export。2026-10-18 接受，完整轮次与历史成本见[Variant 验收](refactoring-variant-2026-10-18.md)。

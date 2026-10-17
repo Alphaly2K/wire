@@ -27,6 +27,7 @@ mod system_profile;
 mod thread_control;
 mod thread_properties;
 mod timers;
+mod variant;
 mod version;
 mod virtual_memory;
 mod waits;
@@ -59,6 +60,7 @@ pub use system_profile::{SystemProfileApi, SYSTEM_PROFILE_CONTRACTS};
 pub use thread_control::{ThreadControlApi, THREAD_CONTROL_CONTRACTS};
 pub use thread_properties::{ThreadPropertyApi, THREAD_PROPERTY_CONTRACTS};
 pub use timers::{TimerApi, TIMER_CONTRACTS};
+pub use variant::{VariantApi, VARIANT_CONTRACTS};
 pub use version::{VersionApi, VERSION_CONTRACTS};
 pub use virtual_memory::{VirtualMemoryApi, VIRTUAL_MEMORY_CONTRACTS};
 pub use waits::{WaitApi, WAIT_CONTRACTS};
@@ -99,6 +101,7 @@ pub enum ApiId {
     Com(ComApi),
     Winrt(WinrtApi),
     Bstr(BstrApi),
+    Variant(VariantApi),
     Guid(GuidApi),
     Identity(IdentityApi),
     Version(VersionApi),
@@ -297,6 +300,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(COM_CONTRACTS.iter())
         .chain(WINRT_CONTRACTS.iter())
         .chain(BSTR_CONTRACTS.iter())
+        .chain(VARIANT_CONTRACTS.iter())
 }
 
 #[cfg(test)]

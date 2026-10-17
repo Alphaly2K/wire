@@ -853,6 +853,7 @@ impl Runtime64 {
             ApiId::Com(id) => self.com_call(mem, id, args),
             ApiId::Winrt(id) => self.winrt_call(mem, id, args),
             ApiId::Bstr(id) => self.bstr_call(mem, id, args),
+            ApiId::Variant(_) => unreachable!("Variant helpers have no Win64 binding"),
             ApiId::File(_) => unreachable!("core file calls are handled by the bound gateway"),
             ApiId::Handle(_) => unreachable!("handle calls are handled by the bound gateway"),
             ApiId::Path(_) => unreachable!("path helpers have no Win64 binding"),

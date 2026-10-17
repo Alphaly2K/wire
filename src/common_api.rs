@@ -69,11 +69,6 @@ pub(crate) fn dispatch(
         ))
         && !(dll == "ole32.dll"
             && matches!(name, "CoCreateGuid" | "StringFromCLSID" | "StringFromIID"))
-        && !(dll == "oleaut32.dll"
-            && matches!(
-                name,
-                "VariantInit" | "VariantClear" | "VariantCopy" | "VariantChangeType"
-            ))
     {
         return None;
     }
@@ -281,87 +276,6 @@ pub(crate) fn dispatch(
                 mem.write_bytes(a[0], &guid).map_err(|_| 0x80004003u32)?;
                 Ok(0)
             }
-            "VariantCopy" | "VariantChangeType" => {
-                mem.ptr(a[0], 16, true).map_err(|_| 0x80070057u32)?;
-                let mut bytes = [0; 16];
-                mem.read_bytes(a[1], &mut bytes)
-                    .map_err(|_| 0x80070057u32)?;
-                let vt = u16::from_le_bytes(bytes[..2].try_into().unwrap());
-                let target = if name == "VariantCopy" {
-                    vt
-                } else {
-                    a[3] as u16
-                };
-                // Deep-copy BSTR ownership, including aliases. Other managed types
-                // require a backend and return a failure rather than shallow-copying.
-                let mut allocation = None;
-                if vt == 8 && target == 8 {
-                    let old = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-                    let p = if old == 0 {
-                        0
-                    } else {
-                        let len = mem
-                            .read_u32(old.checked_sub(4).ok_or(0x80070057u32)?)
-                            .map_err(|_| 0x80070057u32)?
-                            / 2;
-                        allocate_bstr(mem, state, &units(mem, old, len)?)?
-                    };
-                    allocation = Some(p);
-                    bytes[8..12].copy_from_slice(&p.to_le_bytes());
-                } else if vt == 0 && target == 8 {
-                    let p = allocate_bstr(mem, state, &[])?;
-                    allocation = Some(p);
-                    bytes = [0; 16];
-                    bytes[0] = 8;
-                    bytes[8..12].copy_from_slice(&p.to_le_bytes());
-                } else if vt != target || !matches!(vt,0..=7|10..=14|16..=23) {
-                    return Err(0x80020005);
-                }
-                let old_vt = mem.read_u16(a[0]).map_err(|_| 0x80070057u32)?;
-                let clear = (|| -> Result<(), u32> {
-                    if old_vt == 8 {
-                        let old = mem.read_u32(a[0] + 8).map_err(|_| 0x80070057u32)?;
-                        if old != 0 {
-                            state
-                                .bstrs
-                                .release(&mut state.heap, state.process_heap, old)
-                                .ok_or(0x80070057u32)?;
-                        }
-                    } else if !matches!(old_vt,0..=7|10..=14|16..=23) && old_vt & 0x4000 == 0 {
-                        return Err(0x80020008);
-                    }
-                    Ok(())
-                })();
-                if let Err(e) = clear {
-                    if let Some(p) = allocation {
-                        let _ = state.bstrs.release(&mut state.heap, state.process_heap, p);
-                    }
-                    return Err(e);
-                }
-                mem.write_bytes(a[0], &bytes).map_err(|_| 0x80070057u32)?;
-                Ok(0)
-            }
-            "VariantInit" => {
-                mem.write_bytes(a[0], &[0; 16]).map_err(|_| 0x80070057u32)?;
-                Ok(0)
-            }
-            "VariantClear" => {
-                mem.ptr(a[0], 16, true).map_err(|_| 0x80070057u32)?;
-                let vt = mem.read_u16(a[0]).map_err(|_| 0x80070057u32)?;
-                if vt == 8 {
-                    let p = mem.read_u32(a[0] + 8).map_err(|_| 0x80070057u32)?;
-                    if p != 0 {
-                        state
-                            .bstrs
-                            .release(&mut state.heap, state.process_heap, p)
-                            .ok_or(0x80070057u32)?;
-                    }
-                } else if !matches!(vt,0..=7|10..=14|16..=23) && vt & 0x4000 == 0 {
-                    return Err(0x80020008);
-                }
-                mem.write_u16(a[0], 0).map_err(|_| 0x80070057u32)?;
-                Ok(0)
-            }
             _ => unreachable!(),
         }
     })();
@@ -374,7 +288,7 @@ pub(crate) fn dispatch(
         Err(error) => {
             state.last_error = error;
             (
-                if dll == "ole32.dll" || name.starts_with("Variant") {
+                if dll == "ole32.dll" {
                     error
                 } else if name == "SetThreadIdealProcessor" {
                     u32::MAX

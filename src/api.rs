@@ -1844,6 +1844,24 @@ pub fn dispatch(
                 &mut state.last_error,
             );
         }
+        _ if matches!(
+            binding.typed,
+            Some(crate::win32::catalog::ApiId::Variant(_))
+        ) =>
+        {
+            let Some(crate::win32::catalog::ApiId::Variant(id)) = binding.typed else {
+                unreachable!();
+            };
+            (ret, note) = crate::win32::x86::variant::call(
+                id,
+                &args,
+                mem,
+                &mut state.heap,
+                &mut state.bstrs,
+                state.process_heap,
+                &mut state.last_error,
+            );
+        }
         ("wire.wmi", _) => {
             (ret, note, implemented) =
                 crate::wmi::dispatch(dll, name, &args, mem, api, state).unwrap();
