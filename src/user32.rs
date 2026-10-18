@@ -701,14 +701,6 @@ pub fn dispatch(
             ))
         })());
     }
-    if let Some(result) = crate::user32_geometry::adjust(name, a, mem, state) {
-        return Some(result.map(|n| {
-            (
-                GuestCallOutcome::Returned(n),
-                "96 DPI window frame geometry".into(),
-            )
-        }));
-    }
     if let Some(result) =
         crate::user32_paint::dispatch(name, a, cpu, mem, api, state, log, sched, max_instr)
     {

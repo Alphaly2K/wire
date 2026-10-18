@@ -10,6 +10,7 @@ mod context;
 mod critical_sections;
 mod delays;
 mod files;
+mod geometry;
 mod guid;
 mod handles;
 mod heaps;
@@ -48,6 +49,7 @@ pub use context::{ContextApi, CONTEXT_CONTRACTS};
 pub use critical_sections::{CriticalSectionApi, CRITICAL_SECTION_CONTRACTS};
 pub use delays::{DelayApi, DELAY_CONTRACTS};
 pub use files::{FileApi, FILE_CONTRACTS};
+pub use geometry::{GeometryApi, GEOMETRY_CONTRACTS};
 pub use guid::{GuidApi, GUID_CONTRACTS};
 pub use handles::{HandleApi, HANDLE_CONTRACTS};
 pub use heaps::{HeapApi, HEAP_CONTRACTS};
@@ -149,6 +151,7 @@ pub enum ApiId {
     Keyboard(KeyboardApi),
     RawInput(RawInputApi),
     Ime(ImeApi),
+    Geometry(GeometryApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -325,6 +328,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(KEYBOARD_CONTRACTS.iter())
         .chain(RAW_INPUT_CONTRACTS.iter())
         .chain(IME_CONTRACTS.iter())
+        .chain(GEOMETRY_CONTRACTS.iter())
 }
 
 #[cfg(test)]

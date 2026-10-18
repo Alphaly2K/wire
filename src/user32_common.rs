@@ -249,16 +249,6 @@ pub(crate) fn dispatch(
             | "GetSystemMetrics"
             | "GetDoubleClickTime"
             | "GetDialogBaseUnits"
-            | "SetRect"
-            | "SetRectEmpty"
-            | "CopyRect"
-            | "EqualRect"
-            | "InflateRect"
-            | "OffsetRect"
-            | "PtInRect"
-            | "IsRectEmpty"
-            | "IntersectRect"
-            | "UnionRect"
             | "EnumChildWindows"
             | "MonitorFromWindow"
             | "MonitorFromPoint"
@@ -737,96 +727,7 @@ pub(crate) fn dispatch(
                 }
                 value(1, "child window snapshot")
             }
-            _ => rectangle(name, a, mem),
+            _ => Err(format!("unhandled USER32 common function {name}")),
         }
     })())
-}
-fn rectangle(name: &str, a: &crate::api::Args, mem: &GuestMem) -> ResultValue {
-    let empty = |r: &[i32]| r[0] >= r[2] || r[1] >= r[3];
-    if name == "SetRect" {
-        write_words(
-            mem,
-            a[0],
-            &a[1..5].iter().map(|&n| n as i32).collect::<Vec<_>>(),
-        )?;
-        return value(1, "rectangle");
-    }
-    if name == "SetRectEmpty" {
-        write_words(mem, a[0], &[0; 4])?;
-        return value(1, "rectangle");
-    }
-    let source = if matches!(name, "CopyRect" | "IntersectRect" | "UnionRect") {
-        a[1]
-    } else {
-        a[0]
-    };
-    let mut r = words(mem, source, 4)?;
-    let result = match name {
-        "CopyRect" => 1,
-        "EqualRect" => return value((r == words(mem, a[1], 4)?) as u32, "rectangle equality"),
-        "IsRectEmpty" => return value(empty(&r) as u32, "empty rectangle"),
-        "PtInRect" => {
-            return value(
-                (!empty(&r)
-                    && (a[1] as i32) >= r[0]
-                    && (a[1] as i32) < r[2]
-                    && (a[2] as i32) >= r[1]
-                    && (a[2] as i32) < r[3]) as u32,
-                "point in rectangle",
-            )
-        }
-        "OffsetRect" => {
-            for i in 0..4 {
-                r[i] = r[i].wrapping_add(a[1 + i % 2] as i32);
-            }
-            1
-        }
-        "InflateRect" => {
-            for i in 0..4 {
-                r[i] = if i < 2 {
-                    r[i].wrapping_sub(a[1 + i % 2] as i32)
-                } else {
-                    r[i].wrapping_add(a[1 + i % 2] as i32)
-                };
-            }
-            1
-        }
-        "IntersectRect" => {
-            let s = words(mem, a[2], 4)?;
-            r = vec![
-                r[0].max(s[0]),
-                r[1].max(s[1]),
-                r[2].min(s[2]),
-                r[3].min(s[3]),
-            ];
-            if empty(&r) {
-                r.fill(0);
-                0
-            } else {
-                1
-            }
-        }
-        "UnionRect" => {
-            let s = words(mem, a[2], 4)?;
-            if empty(&r) {
-                r = s;
-            } else if !empty(&s) {
-                r = vec![
-                    r[0].min(s[0]),
-                    r[1].min(s[1]),
-                    r[2].max(s[2]),
-                    r[3].max(s[3]),
-                ];
-            }
-            if empty(&r) {
-                r.fill(0);
-                0
-            } else {
-                1
-            }
-        }
-        _ => return Err(format!("unhandled USER32 common function {name}")),
-    };
-    write_words(mem, a[0], &r)?;
-    value(result, "checked rectangle output")
 }

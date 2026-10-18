@@ -4,7 +4,7 @@
 
 本轮完成 raw input / IME 24 项契约接入，删除重复 ABI/arity/DWORD/provider 与名称分发。raw handler 只借 Memory，IME 无 context 策略独立于 Runtime64；PE32 保留 ABI-only，Win64 保留静态与动态 provider 差异、完整 HWND 及错误/输出顺序。
 
-本批完整正确性、30 条性能初筛、四条扩样及游戏前缀已验收，累计 424 项。保留 FP/IR +2.172%、FP/raw +2.986% 和 Alice CPU +2.813% 的局部成本，SSE 离散与追加双端同哈希复核详见[完整报告](reports/refactoring-input-profile-2026-10-18.md)。后续 USER、COM、图形等继续迁移；矩形/边框的独立基线、fixture 和未接入实现草稿准备中，尚不计入累计数。Mono 原生化已撤回，本轮继续排除。
+本批完整正确性、30 条性能初筛、四条扩样及游戏前缀已验收，累计 424 项。保留 FP/IR +2.172%、FP/raw +2.986% 和 Alice CPU +2.813% 的局部成本，SSE 离散与追加双端同哈希复核详见[完整报告](reports/refactoring-input-profile-2026-10-18.md)。后续 USER、COM、图形等继续迁移；[矩形/边框 13 项候选](reports/refactoring-geometry-2026-10-18.md)已接入，六项独立迁移回归通过，完整验收进行中，尚不计入累计数。Mono 原生化已撤回，本轮继续排除。
 
 ## 重构范围
 

@@ -1,6 +1,7 @@
 pub(crate) mod calendar;
 pub(crate) mod clocks;
 pub(crate) mod critical_sections;
+pub(crate) mod geometry;
 pub(crate) mod guid;
 pub(crate) mod identity;
 pub(crate) mod inline_sync;

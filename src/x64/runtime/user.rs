@@ -1,5 +1,6 @@
 //! Checked Win64 USER32 objects. Guest class pointers never become host pointers.
 use super::{Memory, Runtime64, READ};
+use crate::win32::x64::geometry::{read_rect as rectangle, write_rect};
 mod gdi;
 mod message;
 mod window;
@@ -115,16 +116,6 @@ pub(super) fn arity(name: &str) -> Option<usize> {
         "ClipCursor" | "GetClipCursor" | "GetCursorPos" | "TrackMouseEvent" => 1,
         "DwmGetWindowAttribute" => 4,
         "DwmIsCompositionEnabled" => 1,
-        "AdjustWindowRect" => 3,
-        "AdjustWindowRectEx" => 4,
-        "AdjustWindowRectExForDpi" => 5,
-        "PtInRect" | "CopyRect" | "OffsetRect" => {
-            if name == "OffsetRect" {
-                3
-            } else {
-                2
-            }
-        }
         _ => return None,
     })
 }
@@ -140,28 +131,8 @@ pub(super) fn dwords(name: &str) -> &'static [usize] {
         "DwmGetWindowAttribute" => &[1, 3],
         "ShowCursor" | "EnableMouseInPointer" => &[0],
         "LoadImageA" | "LoadImageW" => &[2, 3, 4, 5],
-        "AdjustWindowRect" => &[1, 2],
-        "AdjustWindowRectEx" => &[1, 2, 3],
-        "AdjustWindowRectExForDpi" => &[1, 2, 3, 4],
-        "OffsetRect" => &[1, 2],
         _ => &[],
     }
-}
-fn rectangle(mem: &Memory, pointer: u64) -> Result<[i32; 4], String> {
-    let mut bytes = [0; 16];
-    mem.read(pointer, &mut bytes)?;
-    Ok(std::array::from_fn(|i| {
-        i32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap())
-    }))
-}
-fn write_rect(mem: &mut Memory, pointer: u64, rect: [i32; 4]) -> Result<(), String> {
-    mem.write(
-        pointer,
-        &rect
-            .into_iter()
-            .flat_map(i32::to_le_bytes)
-            .collect::<Vec<_>>(),
-    )
 }
 impl Runtime64 {
     pub(super) fn user_call(
@@ -562,47 +533,6 @@ impl Runtime64 {
                     self.set_error(mem, 1411)?;
                     Ok(0)
                 }
-            }
-            "AdjustWindowRect" | "AdjustWindowRectEx" | "AdjustWindowRectExForDpi" => {
-                if name.ends_with("ForDpi") && args[4] != 96 {
-                    self.set_error(mem, 50)?;
-                    return Ok(0);
-                }
-                let mut rect = rectangle(mem, args[0])?;
-                let ex = if name == "AdjustWindowRect" {
-                    0
-                } else {
-                    args[3] as u32
-                };
-                let frame = crate::user32_geometry::frame(args[1] as u32, ex, args[2] != 0, false);
-                for i in 0..4 {
-                    rect[i] = if i < 2 {
-                        rect[i].wrapping_sub(frame[i])
-                    } else {
-                        rect[i].wrapping_add(frame[i])
-                    };
-                }
-                write_rect(mem, args[0], rect)?;
-                Ok(1)
-            }
-            "PtInRect" => {
-                let rect = rectangle(mem, args[0])?;
-                let x = args[1] as u32 as i32;
-                let y = (args[1] >> 32) as u32 as i32;
-                Ok((x >= rect[0] && x < rect[2] && y >= rect[1] && y < rect[3]) as u64)
-            }
-            "CopyRect" => {
-                let rect = rectangle(mem, args[1])?;
-                write_rect(mem, args[0], rect)?;
-                Ok(1)
-            }
-            "OffsetRect" => {
-                let mut rect = rectangle(mem, args[0])?;
-                for i in 0..4 {
-                    rect[i] = rect[i].wrapping_add(args[1 + i % 2] as u32 as i32);
-                }
-                write_rect(mem, args[0], rect)?;
-                Ok(1)
             }
             _ => unreachable!(),
         }

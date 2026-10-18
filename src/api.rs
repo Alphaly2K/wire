@@ -775,8 +775,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("LoadAcceleratorsW", 8),
                 ("TranslateAcceleratorA", 12),
                 ("TranslateAcceleratorW", 12),
-                ("AdjustWindowRect", 12),
-                ("AdjustWindowRectEx", 16),
                 ("GetDesktopWindow", 0),
                 ("GetShellWindow", 0),
                 ("GetParent", 4),
@@ -849,14 +847,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("LoadMenuW", 8),
                 ("TrackPopupMenu", 28),
                 ("GetSystemMenu", 8),
-                ("SetRect", 20),
-                ("CopyRect", 8),
-                ("InflateRect", 12),
-                ("OffsetRect", 12),
-                ("PtInRect", 12),
-                ("IsRectEmpty", 4),
-                ("UnionRect", 12),
-                ("IntersectRect", 12),
                 ("GetSysColor", 4),
                 ("GetSysColorBrush", 4),
                 ("EnumWindows", 8),
@@ -1854,6 +1844,18 @@ pub fn dispatch(
                     note = format!("common API error {error:#x}");
                 }
             }
+        }
+        _ if matches!(
+            binding.typed,
+            Some(crate::win32::catalog::ApiId::Geometry(_))
+        ) =>
+        {
+            let Some(crate::win32::catalog::ApiId::Geometry(id)) = binding.typed else {
+                unreachable!()
+            };
+            let result = crate::win32::x86::geometry::call(id, &args, mem, &mut state.last_error)?;
+            ret = result.value;
+            note = result.note.into();
         }
         ("wire.wmi", _) => {
             (ret, note, implemented) =
