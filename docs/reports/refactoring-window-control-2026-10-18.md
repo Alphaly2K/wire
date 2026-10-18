@@ -1,6 +1,6 @@
 # 窗口生命周期与过程调用基线（2026-10-18）
 
-状态：十七项 typed 迁移已接入，独立基线与完整正确性通过，尚待性能验收。日志 `r2-window-control-baseline-tests.txt`；前批文本/输入所有权的初筛与游戏运行结束后才编译。该批冻结源码此前已核对，随后新增的三项测试不属于其 380 文件快照。
+状态：2026-10-19 完成验收，十七项计入累计，合计 573 exports。日志 `r2-window-control-baseline-tests.txt`；前批文本/输入所有权的初筛与游戏运行结束后才编译。该批冻结源码此前已核对，随后新增的三项测试不属于其 380 文件快照。
 
 计划范围十七项：CreateWindowExA/W、DestroyWindow、DefWindowProcA/W、DefDlgProcA/W、CallWindowProcA/W、ShowWindow、UpdateWindow、EnableWindow、SetParent、MoveWindow、SetWindowPos、SendMessageA/W。PE32 保留 callback/block/nonlocal transfer，Win64 保留 callback resume 与四项 absent。创建结构、拒绝回调、嵌套默认位置消息、绘制及跨线程发送已有独立原创回归，本批在此基础上固定额外的验证顺序。
 
@@ -16,4 +16,10 @@
 
 实现 `b3ccab4`。57 条路径、342 次执行全部校验；SendMessage/WNDPROC 网关 Win64、PE32 IR/raw CPU −0.828%/−1.387%/−7.536%，RSS 中位数最多 +176KiB。初筛部分 CPU 与既有网关存在离散或超过 +3% 的中位数成本，继续独立三倍 work、before/after/control 扩样；原始数据 `r2-window-control-fixed-summary.{json,txt}` 全部保留。Win64 GUID/images 的大幅表观加速尚不归因为本批实现。
 
-Alice 200M 六次运行全部校验，同预算出口、隐藏 client 314×211、Draw/Present 0/0；CPU −0.009%、wall −0.636%、RSS −736KiB。证据 `r2-window-control-fixed-alice/compare.json`。复用原 runtime，未复制或硬链接游戏素材。本批暂不计入累计，等待补证。
+Alice 200M 六次运行全部校验，同预算出口、隐藏 client 314×211、Draw/Present 0/0；CPU −0.009%、wall −0.636%、RSS −736KiB。证据 `r2-window-control-fixed-alice/compare.json`。复用原 runtime，未复制或硬链接游戏素材。
+
+补证十二条协议、108 次执行全部校验，总计 69 个协议、450 次执行。Win64 processor-count −1.414%；PE32 integer IR/raw −0.445%/+0.371%，SSE/FP/bit raw +1.544%/+1.723%/+1.552%。SSE/raw 保留一对 +6.181%，相对旧二进制 control 中位数成本 +3.139%，其余两对相对 before +1.544%/+1.415%；没有三对持续超过 +5%。该局部成本如实保留，不用较低的 before 比较值覆盖 control 结果。
+
+PE32 window、gdi-profile、processor-count IR 为 −1.223%/−1.204%/−1.732%，classes 和 window-state raw 为 +0.659%/−1.205%。GDI/IR 相对 before 中位数 +4.357%，三对 +3.818%/+4.357%/+14.166%；相同旧二进制 control/before 同时 +4.708%，after/control −0.336%。保留该时间漂移及全部慢轮。扩样 RSS 中位数最多 +64KiB；证据 `r2-window-control-expanded-summary.{json,txt}`。不同 work 的初筛与扩样各自比较，不混算中位数。
+
+结合旧行为回归、完整检查、受控补证和游戏前缀接受此冻结。后续消息测试、契约及适配代码不属于本批核对的 384 Rust 文件；不使用后来的 live 源码重新证明旧冻结。编译、计时和原生游戏验证严格串行。

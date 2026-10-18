@@ -390,3 +390,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 十六项唯一契约、PE32 状态提交/guest 通知协调与 Win64 scalar adapter 已接入，移除重复 ABI 和名称路由；原两架构 NULL、编码、callback 与 absent 差异保持。基线 `71b53a4`、实现 `fe6b552`，完整 release 600 / debug 446 / native 7 / 工具 23 及 fmt/strict Clippy/build 通过。380 个 Rust 文件核对一致，二进制较上一已验收冻结 +6,736 bytes，在预设 +16KiB 内。
 
 59 个性能协议、369 次执行和三对 Alice 前缀全部校验，长度查询 Win64/PE32 IR/raw CPU +1.614%/−25.612%/−22.253%；PE32 四条扩样成本均在 ±1% 内。Win64 rectangle 的数倍差异同时出现在同一旧二进制 control，不归因为实现收益。Alice CPU +0.083%、wall +10.116%，保持同预算隐藏窗口、零 Draw/Present；启动离散保留。2026-10-18 接受，累计 **556 exports**；见[完整验收](refactoring-window-state-2026-10-18.md)。
+
+## 窗口生命周期与过程控制
+
+十七项唯一契约统一创建、销毁、默认过程、过程转发、显示/更新、位置及同步消息；PE32 协调器保留阻塞/非局部转移和先提交状态再回调的规则，Win64 显式 callback/resume 与 UpdateWindow scalar 例外分别保留。旧 ABI、arity/DWORD/provider 和名称执行分支删除。独立基线 `be59d32`、实现 `b3ccab4`，完整 release 603 / debug 449 / native 7 / 工具 23 与 fmt/strict Clippy/build 通过，384 个 Rust 文件核对一致，二进制减少 12,720 bytes。
+
+69 个协议、450 次执行全部校验，真实 SendMessage/WNDPROC 网关 Win64/PE32 IR/raw CPU −0.828%/−1.387%/−7.536%。SSE/raw 扩样相对 before +1.544%、相对 control +3.139% 局部成本保留；GDI/IR 的 after/before +4.357% 同时伴随旧二进制 control/before +4.708%，after/control −0.336%。Alice CPU/wall −0.009%/−0.636%，保持隐藏窗口和零 Draw/Present 预算出口。2026-10-19 接受，累计 **573 exports**；详见[完整验收](refactoring-window-control-2026-10-18.md)。
