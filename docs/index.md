@@ -62,7 +62,7 @@
 - [窗口文本与输入所有权](architecture/window-state.md)及[完整验收](reports/refactoring-window-state-2026-10-18.md)：十六项契约、59 个性能协议和游戏前缀通过，累计 556 项。
 - [窗口生命周期与过程控制](architecture/window-control.md)及[完整验收](reports/refactoring-window-control-2026-10-18.md)：十七项契约、69 个性能协议和游戏前缀通过，累计 573 项。
 - [消息队列与计时器](architecture/messages.md)及[完整验收](reports/refactoring-messages-2026-10-18.md)：22 项契约、38 个性能协议和游戏前缀通过，累计 595 项。
-- [绘制区域与 paint DC](architecture/painting.md)及[候选记录](reports/refactoring-painting-2026-10-19.md)：六项 typed 适配已接入，旧行为基线和真实 paint 循环通过，完整检查中。
+- [绘制区域与 paint DC](architecture/painting.md)及[拒绝记录](reports/refactoring-painting-2026-10-19.md)：六项迁移因持续浮点性能回退撤回，保留旧行为基线和真实 paint 循环。
 - [固定执行路径的测量协议](reports/refactoring-fixed-executable-slot-2026-10-18.md)：调查同哈希副本的数倍耗时差异，新增显式固定 executable/cwd 模式、逐轮 SHA 检查与临时链接回收。
 - [release 编译单元候选](reports/refactoring-release-codegen-2026-10-15.md)：独立构建配置、同二进制对照及长样本调查。
 - [网关边界候选](reports/refactoring-gateway-boundary-2026-10-15.md)、[页缓存内联候选](reports/refactoring-page-cache-inline-2026-10-15.md)、[helper 布局候选](reports/refactoring-memory-helper-layout-2026-10-15.md)：已撤回实现和保留的测量证据。

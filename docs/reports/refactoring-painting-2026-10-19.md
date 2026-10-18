@@ -1,6 +1,6 @@
 # 绘制区域与 paint DC 基线（2026-10-19）
 
-状态：三项独立旧行为基线和完整正确性通过，六项契约和 typed paint 适配已接入，尚待性能验收。消息队列长样本补证期间仅编辑运行时源码和文档，结束后才开始 Cargo，编译及性能工具修改保持串行。
+状态：迁移拒绝，运行时已恢复原六项实现和 ABI。三项独立旧行为基线及原创 paint fixture 保留，候选与失败轮次可复查。消息队列长样本补证期间仅编辑运行时源码和文档，结束后才开始 Cargo，编译及性能工具修改保持串行。
 
 范围为 InvalidateRect、ValidateRect、GetUpdateRect、BeginPaint、EndPaint、RedrawWindow。保留 PE32 矩形 update/erase、GDI clip/DC 资源与 guest 回调协调，六项 Win64 export 保持 absent，不扩展复杂 region 或非客户区绘制。
 
@@ -41,3 +41,13 @@ ThinLTO 浮点三对仍持续慢约 8%–10%，配置试验拒绝，默认 Cargo
 宿主负载核查发现 RustRover 派生的独立 Cargo PID 45657 持续运行（PPID 45425，观察时 CPU 约 80%）。最新 state-inline 的 control 大幅漂移数据保留为未准入计时，不能据此作最终接受；更早样本的宿主活动没有完整审计，保持候选未接受。后续正式计时先确认后台 Cargo 结束，计时期间也停止后续 Rust 草稿编辑，避免 IDE 自动编译与采样重叠。
 
 固定 iterator 候选完整 release 614 / 7 ignored、debug 460、native 7 和 fmt/strict Clippy/build 通过。395 个 Rust 文件和 executable 核对一致，冻结 `r2-painting-family-wire`，SHA256 `6b0fbbb29533d504371a075f73b38cef8e2daa90ee8996d5ca70636cc9a54792`，5,973,720 bytes，较 before +3,280 bytes，满足原 +24KiB 预算。来源 `r2-painting-family-validation-source-verification.json`。后台 Cargo 退出后先运行旧程序/control/原绘制候选/家族表候选四标签浮点筛查，源码静止，确认是否还存在稳定成本。
+
+空闲后的四标签结果仍显示原绘制及家族表候选均有持续浮点成本，`r2-painting-family-fp-screen` 保留。固定 iterator 稳定了元数据枚举类型，但未解决现有代码生成回退，继续待验收。下一独立配置试验仅通过 Cargo package override 将 Wire 自身 release 编译单元设为 8，依赖 crate 设置不变；默认配置暂不修改，先执行浮点回归、核对 +24KiB 体积预算，再筛查实际性能。全 crate CGU=1 的历史拒绝记录继续有效，不复用该已拒绝方案。
+
+Wire 自身 CGU=8 的三对浮点仍持续慢约 23%–30%，RSS 约增加 5MiB，拒绝该配置；`r2-painting-cgu8-*` 保留，Cargo.toml 未改。停止配置枚举，最后一次定向尝试在现有 SIMD 模块建立两个具体精度的非泛型 arithmetic 入口，并将原泛型 arithmetic/accept 内联进这些入口。调用者保持原先 Single/Double 精度选择和事务提交；目标是让 arithmetic 的生成代码留在自身模块，避免随 USER32 新增泛型实例重新分区。仍先核对浮点/提交边界和原 +24KiB 预算，未通过就撤回未验收绘制路径，不继续堆叠试验。
+
+具体精度入口候选通过 FPU 9 项和 scalar FP descriptor 提交边界测试，冻结 `r2-painting-concrete-wire`，SHA256 `72132f4eae161a38371eef068a82c3e0ef6457e945a2f70011aeeb688c501ebe`，5,954,392 bytes，395 个 Rust 文件一致。300M 三对 CPU 为 5.1446/5.3287/5.3527 秒，before 为 4.6977/4.7313/4.6928 秒；仍三对均回退超过 5%，拒绝。control 为 4.7779/5.0071/4.6924 秒，离散保留，证据 `r2-painting-concrete-*`。
+
+最终撤回 `1b68b11` 的运行时接入及 `0b7d386` 的固定家族 iterator，并撤回所有 SIMD 实验；绘制仍走原 `user32_paint.rs` 和原手工 ABI。完整测试、工具 fixture、失败 profile 与冻结源码保留，累计验收继续为 595。本批暂停，后续独立领域可以继续迁移；不将失败的六项计入完成数量。
+
+回滚后 fmt 与完整 release 614 passed / 7 ignored 通过；全部已注册运行时 Rust 源码与已验收消息冻结一致，重新构建的 5,970,440-byte executable SHA256 也精确恢复为 `e4dc65862bc32f2aecb7da78efc58322a5c994891e5218048ed2ecc376e989db`。因此不再对相同字节重跑计时。保留 `r2-painting-rollback-wire` 和 `r2-painting-rollback-verification.json`，七项新增正确性基线已在原运行时通过。

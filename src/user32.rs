@@ -10,14 +10,12 @@ mod classes;
 mod control;
 mod messages;
 mod objects;
-mod paint;
 mod queries;
 mod window_state;
 pub(crate) use classes::{call as class_call, register_system_class};
 pub use classes::{find_class, WindowClass};
 pub(crate) use control::call as control_call;
 pub(crate) use messages::call as message_call;
-pub(crate) use paint::call as paint_call;
 pub(crate) use queries::desktop as desktop_query;
 pub(crate) use window_state::call as window_state_call;
 
@@ -315,6 +313,11 @@ pub fn dispatch(
 ) -> Option<Result<(GuestCallOutcome, String), String>> {
     if dll != "user32.dll" {
         return None;
+    }
+    if let Some(result) =
+        crate::user32_paint::dispatch(name, a, cpu, mem, api, state, log, sched, max_instr)
+    {
+        return Some(result);
     }
     if let Some(result) =
         crate::user32_common::dispatch(name, a, cpu, mem, api, state, log, sched, max_instr)
