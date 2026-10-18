@@ -1,6 +1,6 @@
 # 矩形与窗口边框边界
 
-状态：13 项契约已接入候选，独立旧行为与迁移回归通过，完整验收见[本批报告](../reports/refactoring-geometry-2026-10-18.md)。
+状态：13 项契约、共享纯核与双架构适配已验收，独立旧行为、完整正确性、30 个性能协议及 Alice 启动前缀见[本批报告](../reports/refactoring-geometry-2026-10-18.md)。
 
 十项 RECT 运算与三项 AdjustWindowRect 变体集中声明。PE32 全部 user32 typed；Win64 保留原六项 copy/offset/point/frame typed，以及七项 absent。六项 Win64 静态 kernel32/kernelbase/user32、动态仅 user32 的范围单独记录。
 

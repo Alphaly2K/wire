@@ -334,3 +334,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 24 项 export 汇入 RawInputApi/ImeApi，删除重复 ABI/arity/DWORD/provider 与名称分发；raw handler 只借 Memory，IME 无 context 策略独立于进程总状态。静态与动态 provider、完整 HWND、PE32 ABI-only 和错误/输出顺序保持。实现 `f6f6fbc`，独立基线 `adac711`；完整 release 542、debug 389、native 7、工具 20 项及 fmt/strict Clippy/build 通过。
 
 30 条初筛和四条扩样全部校验，SSE 扩样额外加入双端同哈希复核；原 +19.803% 中位数与漂移轮次保留，六对合并 −0.822%。保留 FP/IR +2.172%、FP/raw +2.986% 和 Alice CPU/wall +2.813%/+2.631% 的局部成本。27 个核心源文件、执行计数和主要代码生成调查记录在案，具体成本机制未确证；二进制 +8,336 bytes，324 个 Rust 文件核对一致。2026-10-18 接受，累计 424 个 export，详见[完整验收](refactoring-input-profile-2026-10-18.md)。
+
+## R2 矩形与窗口边框
+
+13 项 export 汇入 GeometryApi，删除重复 ABI/arity/DWORD/provider 与名称分发；RECT/frame 纯核只处理值，两端适配器只借明确资源。packed POINT、静态/动态 provider、Win64 七项 absent 与错误/输出顺序保持。实现 `fd3da58`，独立基线 `3e96c84`；完整 release 548、debug 395、native 7、工具 20 项及 fmt/strict Clippy/build 通过。
+
+28 条初筛与两条 900M 同哈希扩样全部校验，bit-test/data-alias 初筛 +3.196%/+3.422%，扩样 +1.039%/−1.246%；新矩形网关 Win64 −2.439%、PE32 IR/raw −19.121%/−17.978%。RSS 最多 +64KiB，Alice CPU/wall −5.910%/−8.017%，保持同一启动终点。330 个 Rust 文件核对一致；二进制 +20,624 bytes 超原 +16KiB 文件预算，经 Mach-O 调查明确修订为 +24KiB，section 使用量合计 +42 bytes，主要成本来自 segment 页对齐与链接元数据。2026-10-18 接受，累计 437 个 export，详见[完整验收](refactoring-geometry-2026-10-18.md)。
