@@ -331,6 +331,10 @@ def main():
         from perf.fixtures.gdi_profile_gateway import x64
         data, meta = x64(args.work)
         entries.append(('gateway-gdi-profile', data, meta))
+    if args.cases and 'gateway-desktop' in args.cases:
+        from perf.fixtures.desktop_gateway import x64
+        data, meta = x64(args.work)
+        entries.append(('gateway-desktop', data, meta))
     for name, ime in [('gateway-raw-input', False), ('gateway-ime', True)]:
         if args.cases and name in args.cases:
             from perf.fixtures.input_profile_gateway import x64
