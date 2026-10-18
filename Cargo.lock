@@ -400,4 +400,13 @@ dependencies = [
  "rustc_apfloat",
  "sha2",
  "unicorn-engine",
+ "wire-simd",
+]
+
+[[package]]
+name = "wire-simd"
+version = "0.1.0"
+dependencies = [
+ "iced-x86",
+ "rustc_apfloat",
 ]

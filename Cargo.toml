@@ -10,9 +10,13 @@ iced-x86 = { version = "1.21.0", default-features = false, features = ["std", "d
 libc = "0.2"
 rustc_apfloat = "0.2.3"
 sha2 = "0.10.9"
+wire-simd = { path = "crates/wire-simd" }
 
 [dev-dependencies]
 unicorn-engine = "2"
 
 [profile.release]
 debug = true
+
+[profile.release.package.wire-simd]
+codegen-units = 1

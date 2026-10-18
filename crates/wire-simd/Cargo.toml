@@ -1,0 +1,11 @@
+[package]
+name = "wire-simd"
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-2.1-only"
+publish = false
+description = "Wire's exact scalar SSE arithmetic and MXCSR transaction"
+
+[dependencies]
+iced-x86 = { version = "1.21.0", default-features = false, features = ["std"] }
+rustc_apfloat = "0.2.3"

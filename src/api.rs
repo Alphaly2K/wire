@@ -732,11 +732,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("CreateDialogParamA", 20),
                 ("CreateDialogParamW", 20),
                 ("EndDialog", 8),
-                ("GetDlgItem", 8),
-                ("SetDlgItemTextA", 12),
-                ("SetDlgItemTextW", 12),
-                ("GetDlgItemTextA", 16),
-                ("GetDlgItemTextW", 16),
                 ("GetMenu", 4),
                 ("SetMenu", 8),
                 ("CreateMenu", 0),
@@ -764,8 +759,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetSystemMenu", 8),
                 ("GetSysColor", 4),
                 ("GetSysColorBrush", 4),
-                ("EnumWindows", 8),
-                ("EnumThreadWindows", 12),
                 ("AttachThreadInput", 12),
                 ("RedrawWindow", 16),
                 ("GetUpdateRect", 12),
@@ -1036,21 +1029,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetClipboardData", 4),
                 ("IsClipboardFormatAvailable", 4),
                 ("GetMenuItemCount", 4),
-                ("CreateDialogIndirectParamW", 20),
-                ("DialogBoxIndirectParamW", 20),
-                ("CreateIconIndirect", 4),
-                ("EnumChildWindows", 12),
-                ("GetDlgCtrlID", 4),
-                ("GetDlgItemInt", 16),
-                ("GetScrollInfo", 12),
-                ("IsDialogMessageW", 8),
-                ("LockWindowUpdate", 4),
-                ("MapDialogRect", 8),
-                ("SendDlgItemMessageW", 20),
-                ("SendDlgItemMessageA", 20),
-                ("SetDlgItemInt", 16),
-                ("SetScrollInfo", 16),
-                ("SetWindowPlacement", 8),
                 ("SetRectEmpty", 4),
                 ("EqualRect", 8),
                 ("SetClipboardData", 8),
@@ -1855,6 +1833,21 @@ pub fn dispatch(
             let (outcome, message) = crate::user32::window_state_call(
                 id, &args, cpu, mem, api, state, log, sched, max_instr,
             )?;
+            match outcome {
+                GuestCallOutcome::Returned(value) => {
+                    ret = value;
+                    note = message;
+                }
+                _ => return Ok(()),
+            }
+        }
+        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Dialog(_))) => {
+            let Some(crate::win32::catalog::ApiId::Dialog(id)) = binding.typed else {
+                unreachable!();
+            };
+            implemented = !id.unavailable();
+            let (outcome, message) =
+                crate::user32::dialog_call(id, &args, cpu, mem, api, state, log, sched, max_instr)?;
             match outcome {
                 GuestCallOutcome::Returned(value) => {
                     ret = value;
@@ -2860,7 +2853,6 @@ pub fn dispatch(
                 dll, name, &args, cpu, mem, api, state, log, sched, max_instr,
             ) {
                 let (outcome, message) = result?;
-                implemented = !crate::user32_common::unimplemented(name);
                 match outcome {
                     crate::cpu::GuestCallOutcome::Returned(value) => {
                         ret = value;

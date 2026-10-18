@@ -5,7 +5,7 @@ use iced_x86::{
     Decoder, DecoderError, DecoderOptions, Instruction, Mnemonic as M, OpKind, Register as R,
 };
 use rustc_apfloat::ieee::{Double, Single};
-use rustc_apfloat::{Float, FloatConvert, Round, StatusAnd};
+use rustc_apfloat::{Float, Round, StatusAnd};
 pub(crate) mod ir;
 mod x87;
 const CF: u64 = 1;
@@ -544,7 +544,7 @@ impl Cpu64 {
         }
         .simd_round()
     }
-    fn simd_accept<F: Float>(
+    fn simd_accept<F: crate::simd::Scalar>(
         &mut self,
         result: StatusAnd<F>,
         flags: u32,
@@ -552,7 +552,7 @@ impl Cpu64 {
     ) -> Result<F, String> {
         self.with_simd(|s| s.simd_accept(result, flags, exception))
     }
-    fn simd_to_integer<F: Float>(
+    fn simd_to_integer<F: crate::simd::Scalar>(
         &mut self,
         value: u64,
         width: u32,
@@ -561,7 +561,7 @@ impl Cpu64 {
     ) -> Result<u64, String> {
         self.with_simd(|s| s.simd_to_integer::<F>(value, width, round, exception))
     }
-    fn simd_arithmetic<F: Float>(
+    fn simd_arithmetic<F: crate::simd::Scalar>(
         &mut self,
         m: M,
         a: u64,
@@ -570,7 +570,7 @@ impl Cpu64 {
     ) -> Result<u64, String> {
         self.with_simd(|s| s.simd_arithmetic::<F>(m, a, b, exception))
     }
-    fn simd_predicate<F: Float>(
+    fn simd_predicate<F: crate::simd::Scalar>(
         &mut self,
         a: u64,
         b: u64,
@@ -579,7 +579,7 @@ impl Cpu64 {
     ) -> Result<bool, String> {
         self.with_simd(|s| s.simd_predicate::<F>(a, b, predicate, exception))
     }
-    fn simd_compare<F: Float>(
+    fn simd_compare<F: crate::simd::Scalar>(
         &mut self,
         m: M,
         a: u64,
@@ -588,14 +588,14 @@ impl Cpu64 {
     ) -> Result<(), String> {
         self.with_simd(|s| s.simd_compare::<F>(m, a, b, exception))
     }
-    fn simd_convert<F: Float + FloatConvert<D>, D: Float>(
+    fn simd_convert<F: crate::simd::ConvertTo<D>, D: crate::simd::Scalar>(
         &mut self,
         bits: u64,
         exception: &mut bool,
     ) -> Result<u64, String> {
         self.with_simd(|s| s.simd_convert::<F, D>(bits, exception))
     }
-    fn simd_sqrt<F: Float>(
+    fn simd_sqrt<F: crate::simd::Scalar>(
         &mut self,
         bits: u64,
         fraction: u32,

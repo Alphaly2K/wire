@@ -12,6 +12,7 @@ mod critical_sections;
 mod cursor;
 mod delays;
 mod desktop;
+mod dialog;
 mod display;
 mod files;
 mod gdi_dc;
@@ -62,6 +63,7 @@ pub use critical_sections::{CriticalSectionApi, CRITICAL_SECTION_CONTRACTS};
 pub use cursor::{CursorApi, CURSOR_CONTRACTS};
 pub use delays::{DelayApi, DELAY_CONTRACTS};
 pub use desktop::{DesktopApi, DESKTOP_CONTRACTS};
+pub use dialog::{DialogApi, DIALOG_CONTRACTS};
 pub use display::{DisplayApi, DISPLAY_CONTRACTS};
 pub use files::{FileApi, FILE_CONTRACTS};
 pub use gdi_dc::{GdiDcApi, GDI_DC_CONTRACTS};
@@ -185,6 +187,7 @@ pub enum ApiId {
     WindowControl(WindowControlApi),
     WindowState(WindowStateApi),
     Message(MessageApi),
+    Dialog(DialogApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -373,6 +376,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(WINDOW_CONTROL_CONTRACTS.iter())
         .chain(WINDOW_STATE_CONTRACTS.iter())
         .chain(MESSAGE_CONTRACTS.iter())
+        .chain(DIALOG_CONTRACTS.iter())
 }
 
 #[cfg(test)]

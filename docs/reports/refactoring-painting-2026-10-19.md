@@ -51,3 +51,7 @@ Wire 自身 CGU=8 的三对浮点仍持续慢约 23%–30%，RSS 约增加 5MiB�
 最终撤回 `1b68b11` 的运行时接入及 `0b7d386` 的固定家族 iterator，并撤回所有 SIMD 实验；绘制仍走原 `user32_paint.rs` 和原手工 ABI。完整测试、工具 fixture、失败 profile 与冻结源码保留，累计验收继续为 595。本批暂停，后续独立领域可以继续迁移；不将失败的六项计入完成数量。
 
 回滚后 fmt 与完整 release 614 passed / 7 ignored 通过；全部已注册运行时 Rust 源码与已验收消息冻结一致，重新构建的 5,970,440-byte executable SHA256 也精确恢复为 `e4dc65862bc32f2aecb7da78efc58322a5c994891e5218048ed2ecc376e989db`。因此不再对相同字节重跑计时。保留 `r2-painting-rollback-wire` 和 `r2-painting-rollback-verification.json`，七项新增正确性基线已在原运行时通过。
+
+后续只读菜单审查又发现一项原基线未覆盖的优先级：PE32 API fallback 先调用 `menu::dispatch`，它也接收 RedrawWindow 并返回未实现/error 120，因此真实网关在有效参数下也会被该入口拦截。原 `user32_paint` 的 RedrawWindow 分支只会由直接 USER facade 到达。已撤回候选把该 export 直接绑定到 paint，会改变这个有效参数行为；当前回归只覆盖了错误 region 的 120，未排除该差异。下次迁移前须独立固定真实网关的优先级和 trace，若修正该旧遮盖，另作行为提交；不能重用此前“完整正确性通过”作为这一路径的等价证明。
+
+[菜单基线](refactoring-menus-2026-10-19.md)已独立通过真实 gateway 与公开 USER facade 的有效参数对照，确认上述遮盖及 unimplemented trace；没有改变运行时行为。

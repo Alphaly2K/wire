@@ -4,6 +4,8 @@
 
 本轮追加验收消息队列、计时器、DispatchMessage 与消息元数据等 22 项，统一契约与 typed 控制。保留 PE32 的阻塞/非局部转移、队列变更的部分提交，以及 Win64 callback/resume、DWORD 与指针宽度和 absent 的差异。
 
+后续 22 项对话框/枚举契约和[精确标量 SSE 编译隔离](reports/refactoring-scalar-codegen-2026-10-19.md)已接入并通过完整正确性，性能仍待复核；FP 初筛通过，宽矩阵若干短样本波动及扩样中的严重同哈希漂移全部保留，未增加已验收计数。[菜单四项独立基线](reports/refactoring-menus-2026-10-19.md)已通过，确认真实 RedrawWindow 网关与公开 facade 的原始差异。
+
 完整正确性、38 条性能协议、237 次执行及三对游戏前缀通过，累计 **595 项**。真实 post/get 网关 Win64/PE32 IR/raw CPU −1.417%/−10.391%/−1.827%；SSE/IR 初筛回退和同哈希 control 漂移全部保留，长样本未出现持续回退，详见本批报告。失败候选与[固定 executable/cwd 协议调查](reports/refactoring-fixed-executable-slot-2026-10-18.md)继续可查。绘制区域与 paint DC 六项迁移正确性通过，但持续浮点性能回退，已撤回运行时改动，保留独立旧行为基线与原创 paint 循环，见[拒绝报告](reports/refactoring-painting-2026-10-19.md)。其余 USER、COM、图形继续迁移。Mono 原生化已撤回，本轮继续排除。
 
 ## 重构范围
