@@ -86,16 +86,6 @@ pub(super) fn dwords(name: &str) -> &'static [usize] {
     }
     &[]
 }
-impl Runtime64 {
-    pub(super) fn user_call(
-        &mut self,
-        mem: &mut Memory,
-        name: &str,
-        args: &[u64],
-    ) -> Result<u64, String> {
-        self.window_query(mem, name, args)
-    }
-}
 pub(super) fn is_callback(name: &str) -> bool {
     window::is_callback(name)
 }

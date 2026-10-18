@@ -684,16 +684,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
             &[
                 ("LoadStringA", 16),
                 ("LoadStringW", 16),
-                ("CreateWindowExA", 48),
-                ("CreateWindowExW", 48),
-                ("DestroyWindow", 4),
-                ("DefWindowProcA", 16),
-                ("DefWindowProcW", 16),
-                ("CallWindowProcA", 20),
-                ("CallWindowProcW", 20),
-                ("ShowWindow", 8),
-                ("UpdateWindow", 4),
-                ("EnableWindow", 8),
                 ("GetProcessWindowStation", 0),
                 ("GetUserObjectInformationW", 20),
                 ("GetUserObjectInformationA", 20),
@@ -705,8 +695,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("DispatchMessageA", 4),
                 ("DispatchMessageW", 4),
                 ("PostQuitMessage", 4),
-                ("SendMessageA", 16),
-                ("SendMessageW", 16),
                 ("PostMessageA", 16),
                 ("PostMessageW", 16),
                 ("PostThreadMessageA", 16),
@@ -720,8 +708,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("MessageBoxExW", 20),
                 ("SetTimer", 16),
                 ("KillTimer", 8),
-                ("MoveWindow", 24),
-                ("SetWindowPos", 28),
                 ("BringWindowToTop", 4),
                 ("WindowFromPoint", 8),
                 ("LoadAcceleratorsA", 8),
@@ -729,7 +715,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("TranslateAcceleratorA", 12),
                 ("TranslateAcceleratorW", 12),
                 ("GetShellWindow", 0),
-                ("SetParent", 8),
                 ("DrawIcon", 16),
                 ("FillRect", 12),
                 ("FrameRect", 12),
@@ -755,8 +740,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("DrawTextW", 20),
                 ("DrawTextExA", 24),
                 ("DrawTextExW", 24),
-                ("DefDlgProcA", 16),
-                ("DefDlgProcW", 16),
                 ("DialogBoxParamA", 20),
                 ("DialogBoxParamW", 20),
                 ("CreateDialogParamA", 20),
@@ -1306,7 +1289,7 @@ pub fn dispatch(
     let dll = entry.dll.as_str();
     let name = entry.name.as_str();
     if dll == "user32.dll"
-        && matches!(
+        && (matches!(
             name,
             "PeekMessageA"
                 | "PeekMessageW"
@@ -1315,9 +1298,13 @@ pub fn dispatch(
                 | "WaitMessage"
                 | "MsgWaitForMultipleObjects"
                 | "MsgWaitForMultipleObjectsEx"
-                | "SendMessageA"
-                | "SendMessageW"
-        )
+        ) || matches!(
+            binding.typed,
+            Some(crate::win32::catalog::ApiId::WindowControl(
+                crate::win32::catalog::WindowControlApi::SendA
+                    | crate::win32::catalog::WindowControlApi::SendW
+            ))
+        ))
         && crate::user32::service_sent(cpu, mem, api, state, log, sched, max_instr)?.is_some()
     {
         return Ok(());
@@ -1861,6 +1848,25 @@ pub fn dispatch(
                     .query_call(id, &args, mem, &mut state.last_error)?
             };
             implemented = id != WindowQueryApi::Placement;
+        }
+        _ if matches!(
+            binding.typed,
+            Some(crate::win32::catalog::ApiId::WindowControl(_))
+        ) =>
+        {
+            let Some(crate::win32::catalog::ApiId::WindowControl(id)) = binding.typed else {
+                unreachable!();
+            };
+            let (outcome, message) = crate::user32::control_call(
+                id, &args, cpu, mem, api, state, log, sched, max_instr,
+            )?;
+            match outcome {
+                GuestCallOutcome::Returned(value) => {
+                    ret = value;
+                    note = message;
+                }
+                _ => return Ok(()),
+            }
         }
         _ if matches!(
             binding.typed,

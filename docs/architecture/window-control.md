@@ -1,0 +1,13 @@
+# 窗口生命周期与过程控制
+
+`win32/catalog/window_control.rs` 是十七项创建、销毁、默认过程、过程转发、显示/更新、启用、父窗口、位置和同步发送接口的唯一 provider、参数宽度及架构策略声明。PE32 的 ABI 清栈和 Win64 的 DWORD 截断由契约生成；Win64 静态兼容 kernel32/kernelbase/user32，动态查询保留仅 user32 的范围。
+
+PE32 `user32/control.rs` 协调原窗口状态和 guest 执行器，返回 `GuestCallOutcome`；只有正常返回才由 API 层完成返回帧，阻塞或非局部转移继续交给进程编排。创建保持 WM_NCCREATE/WM_CREATE 和原清理顺序，后续通知重新读取窗口过程；ShowWindow 和 DestroyWindow 在回调前提交原状态，回调失败时保留该状态。MoveWindow/SetWindowPos 的 guest WINDOWPOS 可在回调中修改，之后才提交位置并发送 WM_WINDOWPOSCHANGED。同步发送保留跨线程排队、唤醒及重新分发。
+
+默认窗口过程复用原文本、非客户区、背景和绘制实现。UpdateWindow 在 PE32 上按原 update region 决定是否执行 WM_PAINT；RedrawWindow 的同步更新也经过同一协调器。窗口记录仍由既有 User32 资源持有，本批收敛控制入口，不重排资源生命周期。
+
+Win64 在冷绑定时把需要过程执行器的操作保存为 `ControlImport::Window(id)`，执行时返回显式 `WindowResult`，由进程处理 callback/resume。先验证执行器及 callback frame，再检查 HWND、参数和过程，保持故障顺序。UpdateWindow 保留原 scalar 行为，不新增 frame 检查；DefDlgProcA/W、EnableWindow、SetParent 保持 absent。DispatchMessage 暂留消息领域，进入 typed SendMessage 协调器时继续执行原有的第二次 frame 检查。
+
+两架构的现有差异继续保留：PE32 ShowWindow 将任意非零模式视为显示，且不要求 owner；Win64 只接受既有模式。PE32 支持原 GDI update region 与同步跨线程发送；Win64 保留原错误及能力范围。后续能力扩展需独立测试和验收，不借本次重构改变行为。
+
+验证与性能证据见[本批记录](../reports/refactoring-window-control-2026-10-18.md)。

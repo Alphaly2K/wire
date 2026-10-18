@@ -8,6 +8,7 @@ use crate::x64::{
 mod position;
 mod queries;
 mod state;
+use crate::win32::catalog::WindowControlApi as W;
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Operation {
     Create {
@@ -48,47 +49,13 @@ pub(in crate::x64::runtime) enum WindowResult {
     },
 }
 pub(in crate::x64::runtime) fn arity(name: &str) -> Option<usize> {
-    Some(match name {
-        "CreateWindowExA" | "CreateWindowExW" => 12,
-        "DefWindowProcA" | "DefWindowProcW" | "SendMessageA" | "SendMessageW" => 4,
-        "CallWindowProcA" | "CallWindowProcW" => 5,
-        "SetWindowPos" => 7,
-        "MoveWindow" => 6,
-        "ShowWindow" => 2,
-        "DestroyWindow" | "DispatchMessageA" | "DispatchMessageW" | "UpdateWindow" => 1,
-        _ => return None,
-    })
+    matches!(name, "DispatchMessageA" | "DispatchMessageW").then_some(1)
 }
-pub(in crate::x64::runtime) fn dwords(name: &str) -> &'static [usize] {
-    match name {
-        "CreateWindowExA" | "CreateWindowExW" => &[0, 3, 4, 5, 6, 7],
-        "DefWindowProcA" | "DefWindowProcW" | "SendMessageA" | "SendMessageW" | "ShowWindow" => {
-            &[1]
-        }
-        "SetWindowPos" => &[2, 3, 4, 5, 6],
-        "MoveWindow" => &[1, 2, 3, 4, 5],
-        "CallWindowProcA" | "CallWindowProcW" => &[2],
-        _ => &[],
-    }
+pub(in crate::x64::runtime) fn dwords(_: &str) -> &'static [usize] {
+    &[]
 }
 pub(in crate::x64::runtime) fn is_callback(name: &str) -> bool {
-    matches!(
-        name,
-        "CreateWindowExA"
-            | "DispatchMessageA"
-            | "DispatchMessageW"
-            | "CreateWindowExW"
-            | "SendMessageA"
-            | "SendMessageW"
-            | "CallWindowProcA"
-            | "CallWindowProcW"
-            | "DestroyWindow"
-            | "ShowWindow"
-            | "SetWindowPos"
-            | "MoveWindow"
-            | "DefWindowProcA"
-            | "DefWindowProcW"
-    )
+    matches!(name, "DispatchMessageA" | "DispatchMessageW")
 }
 impl Runtime64 {
     pub fn window_info(&self) -> Vec<super::super::WindowInfo> {
@@ -169,14 +136,7 @@ impl Runtime64 {
             mem.check(procedure, 1, READ | EXECUTE)
         }
     }
-    pub(in crate::x64::runtime) fn window_start(
-        &mut self,
-        mem: &mut Memory,
-        name: &str,
-        args: &[u64],
-        returned: &Cpu64,
-    ) -> Result<WindowResult, String> {
-        let wide = name.ends_with('W');
+    fn prepare_window_callback(&self, mem: &Memory, returned: &Cpu64) -> Result<(), String> {
         if !self.threads.enabled {
             return Err("Win64 WNDPROC requires a process executor".into());
         }
@@ -186,36 +146,59 @@ impl Runtime64 {
             & !15)
             + 8;
         mem.check(frame, 40, WRITE)?;
-        if name.starts_with("DispatchMessage") {
-            let words = super::message::read(mem, args[0])?;
-            if words[0] == 0 {
-                return Ok(WindowResult::Value(0));
-            }
-            if words[1] == 0x113 && words[3] != 0 {
-                return Err("Win64 timer-procedure dispatch is not implemented".into());
-            }
-            let mut result = self.window_start(
-                mem,
-                if wide { "SendMessageW" } else { "SendMessageA" },
-                &words[..4],
-                returned,
-            )?;
-            if let WindowResult::Callback { call, .. } = &mut result {
-                call.name = name.into();
-                call.args = args.to_vec();
-            }
-            return Ok(result);
+        Ok(())
+    }
+    pub(in crate::x64::runtime) fn dispatch_window(
+        &mut self,
+        mem: &mut Memory,
+        name: &str,
+        args: &[u64],
+        returned: &Cpu64,
+    ) -> Result<WindowResult, String> {
+        self.prepare_window_callback(mem, returned)?;
+        let wide = name == "DispatchMessageW";
+        let words = super::message::read(mem, args[0])?;
+        if words[0] == 0 {
+            return Ok(WindowResult::Value(0));
         }
-        if name.starts_with("DefWindowProc") {
+        if words[1] == 0x113 && words[3] != 0 {
+            return Err("Win64 timer-procedure dispatch is not implemented".into());
+        }
+        let mut result = self.window_start(
+            mem,
+            if wide { W::SendW } else { W::SendA },
+            if wide { "SendMessageW" } else { "SendMessageA" },
+            &words[..4],
+            returned,
+        )?;
+        if let WindowResult::Callback { call, .. } = &mut result {
+            call.name = name.into();
+            call.args = args.to_vec();
+        }
+        Ok(result)
+    }
+    pub(in crate::x64::runtime) fn window_start(
+        &mut self,
+        mem: &mut Memory,
+        id: W,
+        name: &str,
+        args: &[u64],
+        returned: &Cpu64,
+    ) -> Result<WindowResult, String> {
+        let wide = id.wide();
+        self.prepare_window_callback(mem, returned)?;
+        if id.default_procedure() {
             if args[1] == 0x47 {
                 return self.default_position_start(mem, name, args);
             }
-            return self.window_query(mem, name, args).map(WindowResult::Value);
+            return self
+                .window_value_call(mem, id, args)
+                .map(WindowResult::Value);
         }
-        if matches!(name, "SetWindowPos" | "MoveWindow") {
-            return self.position_start(mem, name, args);
+        if matches!(id, W::Position | W::Move) {
+            return self.position_start(mem, id, name, args);
         }
-        let (target, parameters, operation, release) = if name.starts_with("Create") {
+        let (target, parameters, operation, release) = if matches!(id, W::CreateA | W::CreateW) {
             let key = Self::resource_key(mem, args[1], wide)?;
             let key = match &key {
                 super::super::resources::Key::Id(id) => crate::win32::user::classes64::Key::Id(*id),
@@ -333,7 +316,7 @@ impl Runtime64 {
                 },
                 vec![buffer],
             )
-        } else if name.starts_with("CallWindowProc") {
+        } else if matches!(id, W::CallA | W::CallW) {
             self.valid_procedure(mem, args[0])?;
             (
                 args[0],
@@ -350,7 +333,7 @@ impl Runtime64 {
             if window.tid != self.threads.active {
                 return Err("cross-thread Win64 window call is not implemented".into());
             }
-            if name == "DestroyWindow" {
+            if id == W::Destroy {
                 (
                     procedure,
                     [args[0], 2, 0, 0],
@@ -360,7 +343,7 @@ impl Runtime64 {
                     },
                     Vec::new(),
                 )
-            } else if name == "ShowWindow" {
+            } else if id == W::Show {
                 if !matches!(args[1], 0 | 1 | 4 | 5 | 8) {
                     self.set_error(mem, 50)?;
                     return Ok(WindowResult::Value(0));
@@ -540,18 +523,18 @@ impl Runtime64 {
             self.user.foreground = 0;
         }
     }
-    pub(in crate::x64::runtime) fn window_query(
+    pub(in crate::x64::runtime) fn window_value_call(
         &mut self,
         mem: &mut Memory,
-        name: &str,
+        id: W,
         args: &[u64],
     ) -> Result<u64, String> {
         let Some(w) = self.user.windows.get_mut(&args[0]) else {
             self.set_error(mem, 1400)?;
             return Ok(0);
         };
-        match name {
-            "DefWindowProcA" | "DefWindowProcW" => match args[1] {
+        match id {
+            W::DefaultA | W::DefaultW => match args[1] {
                 0x81 => Ok(1),
                 0x83 => {
                     if args[2] > 1 {
@@ -572,7 +555,7 @@ impl Runtime64 {
                 }
                 _ => Ok(0),
             },
-            "UpdateWindow" => Ok(1), // No Win64 GDI update region has been invalidated yet.
+            W::Update => Ok(1), // No Win64 GDI update region has been invalidated yet.
             _ => unreachable!(),
         }
     }

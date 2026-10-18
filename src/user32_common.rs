@@ -51,7 +51,7 @@ pub(crate) fn copy_text(
     Ok(count as u32)
 }
 pub(crate) fn default_text(
-    name: &str,
+    wide: bool,
     a: &crate::api::Args,
     mem: &GuestMem,
     state: &mut ApiState,
@@ -62,7 +62,6 @@ pub(crate) fn default_text(
     let Some(w) = state.user32.windows.get_mut(&a[0]) else {
         return Ok(Some(0));
     };
-    let wide = name.ends_with('W');
     Ok(Some(match a[1] {
         0xc => {
             w.text = crate::menu::read_text(mem, a[3], wide)
@@ -88,10 +87,7 @@ fn child(state: &ApiState, parent: u32, id: u32) -> Option<u32> {
         (w.parent == parent && w.style & 0x40000000 != 0 && w.menu == id).then_some(h)
     })
 }
-fn origin(state: &ApiState, h: u32) -> Result<[i32; 2], String> {
-    crate::user32_geometry::client_origin(state, h)
-}
-fn words(mem: &GuestMem, p: u32, count: usize) -> Result<Vec<i32>, String> {
+pub(crate) fn words(mem: &GuestMem, p: u32, count: usize) -> Result<Vec<i32>, String> {
     let mut bytes = vec![0; count * 4];
     mem.read_bytes(p, &mut bytes).map_err(|e| e.to_string())?;
     Ok(bytes
@@ -101,7 +97,7 @@ fn words(mem: &GuestMem, p: u32, count: usize) -> Result<Vec<i32>, String> {
         .map(|b| i32::from_le_bytes(*b))
         .collect())
 }
-fn write_words(mem: &GuestMem, p: u32, words: &[i32]) -> Result<(), String> {
+pub(crate) fn write_words(mem: &GuestMem, p: u32, words: &[i32]) -> Result<(), String> {
     mem.write_bytes(
         p,
         &words
@@ -216,10 +212,6 @@ pub(crate) fn dispatch(
             | "GetDlgCtrlID"
             | "GetDlgItemInt"
             | "SetDlgItemInt"
-            | "EnableWindow"
-            | "SetParent"
-            | "MoveWindow"
-            | "SetWindowPos"
             | "EnumChildWindows"
             | "DialogBoxIndirectParamW"
             | "CreateDialogIndirectParamW"
@@ -338,144 +330,6 @@ pub(crate) fn dispatch(
                 state.user32.windows.get(&a[0]).map_or(0, |w| w.menu),
                 "control ID",
             ),
-            "EnableWindow" => {
-                let Some(w) = state.user32.windows.get_mut(&a[0]) else {
-                    return failure(state, 1400);
-                };
-                let disabled = w.style & 0x08000000 != 0;
-                if a[1] != 0 {
-                    w.style &= !0x08000000;
-                } else {
-                    w.style |= 0x08000000;
-                }
-                let proc = w.wndproc;
-                if disabled == (a[1] != 0) {
-                    let result = crate::user32::invoke(
-                        cpu,
-                        mem,
-                        api,
-                        state,
-                        log,
-                        sched,
-                        proc,
-                        &[a[0], 0xa, (a[1] != 0) as u32, 0],
-                        max_instr,
-                    )?;
-                    if !matches!(result, GuestCallOutcome::Returned(_)) {
-                        return Ok((result, "WM_ENABLE transferred".into()));
-                    }
-                }
-                value(disabled as u32, "window enabled state")
-            }
-            "SetParent" => {
-                if a[1] != 0 && !state.user32.windows.contains_key(&a[1]) {
-                    return failure(state, 1400);
-                }
-                let mut h = a[1];
-                let mut seen = BTreeSet::new();
-                while h != 0 {
-                    if h == a[0] || !seen.insert(h) {
-                        return failure(state, 87);
-                    }
-                    h = state.user32.windows.get(&h).map_or(0, |w| w.parent);
-                }
-                let screen = origin(state, a[0])?;
-                let parent = origin(state, a[1])?;
-                let Some(w) = state.user32.windows.get_mut(&a[0]) else {
-                    return failure(state, 1400);
-                };
-                let old = w.parent;
-                w.parent = a[1];
-                if w.style & 0x40000000 != 0 {
-                    w.rect[0] = screen[0].wrapping_sub(parent[0]);
-                    w.rect[1] = screen[1].wrapping_sub(parent[1]);
-                }
-                value(old, "parent changed; style retained")
-            }
-            "MoveWindow" | "SetWindowPos" => {
-                let Some(w) = state.user32.windows.get(&a[0]) else {
-                    return failure(state, 1400);
-                };
-                let proc = w.wndproc;
-                let old_rect = w.rect;
-                let flags = if name == "MoveWindow" { 0x14 } else { a[6] };
-                let offset = if name == "MoveWindow" { 1 } else { 2 };
-                let p = state.scratch_alloc(mem, 28, 4);
-                if p == 0 {
-                    return failure(state, 8);
-                }
-                write_words(
-                    mem,
-                    p,
-                    &[
-                        a[0] as i32,
-                        if name == "MoveWindow" { 0 } else { a[1] as i32 },
-                        a[offset] as i32,
-                        a[offset + 1] as i32,
-                        a[offset + 2] as i32,
-                        a[offset + 3] as i32,
-                        flags as i32,
-                    ],
-                )?;
-                if flags & 0x400 == 0 {
-                    let result = crate::user32::invoke(
-                        cpu,
-                        mem,
-                        api,
-                        state,
-                        log,
-                        sched,
-                        proc,
-                        &[a[0], 0x46, 0, p],
-                        max_instr,
-                    )?;
-                    if !matches!(result, GuestCallOutcome::Returned(_)) {
-                        return Ok((result, "WM_WINDOWPOSCHANGING transferred".into()));
-                    }
-                }
-                let pos = words(mem, p, 7)?;
-                let mut flags = pos[6] as u32;
-                let Some(w) = state.user32.windows.get_mut(&a[0]) else {
-                    return failure(state, 1400);
-                };
-                if flags & 2 == 0 {
-                    w.rect[..2].copy_from_slice(&pos[2..4]);
-                }
-                if flags & 1 == 0 {
-                    w.rect[2] = pos[4].max(0);
-                    w.rect[3] = pos[5].max(0);
-                }
-                if flags & 0x40 != 0 {
-                    w.style |= 0x10000000;
-                }
-                if flags & 0x80 != 0 {
-                    w.style &= !0x10000000;
-                }
-                // These internal flags describe actual client changes. Default
-                // WndProc consumes them to emit WM_MOVE/WM_SIZE independently.
-                if w.rect[..2] == old_rect[..2] {
-                    flags |= 0x1000;
-                }
-                if w.rect[2..] == old_rect[2..] {
-                    flags |= 0x800;
-                }
-                mem.write_u32(p + 24, flags).map_err(|e| e.to_string())?;
-                let result = crate::user32::invoke(
-                    cpu,
-                    mem,
-                    api,
-                    state,
-                    log,
-                    sched,
-                    proc,
-                    &[a[0], 0x47, 0, p],
-                    max_instr,
-                )?;
-                if !matches!(result, GuestCallOutcome::Returned(_)) {
-                    return Ok((result, "WM_WINDOWPOSCHANGED transferred".into()));
-                }
-                value(1, "logical window position")
-            }
             "EnumChildWindows" => {
                 let mut seen = BTreeSet::new();
                 let mut pending = vec![a[0]];

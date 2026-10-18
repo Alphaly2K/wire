@@ -8,7 +8,7 @@
  */
 //! Win64 WINDOWPOS/NCCALCSIZE layouts and resumable positioning callbacks.
 use super::{
-    rectangle, write_rect, Memory, Operation, Runtime64, WindowCall, WindowResult, WindowStep,
+    rectangle, write_rect, Memory, Operation, Runtime64, WindowCall, WindowResult, WindowStep, W,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,6 +30,7 @@ impl Runtime64 {
     pub(super) fn position_start(
         &mut self,
         mem: &mut Memory,
+        id: W,
         name: &str,
         args: &[u64],
     ) -> Result<WindowResult, String> {
@@ -40,11 +41,7 @@ impl Runtime64 {
         if w.tid != self.threads.active {
             return Err("cross-thread Win64 window positioning is not implemented".into());
         }
-        let flags = if name == "MoveWindow" {
-            0x14
-        } else {
-            args[6] as u32
-        };
+        let flags = if id == W::Move { 0x14 } else { args[6] as u32 };
         // The presenter can remove topmost status using public NSWindow levels.
         // Relative z-order and asynchronous transitions remain unsupported.
         if flags & !0x7ff != 0 || (flags & 4 == 0 && args[1] != u64::MAX - 1) {
@@ -60,10 +57,10 @@ impl Runtime64 {
             new_rect: w.rect,
         };
         let procedure = w.procedure;
-        let offset = if name == "MoveWindow" { 1 } else { 2 };
+        let offset = if id == W::Move { 1 } else { 2 };
         let mut bytes = [0; 128];
         bytes[..8].copy_from_slice(&args[0].to_le_bytes());
-        if name != "MoveWindow" {
+        if id != W::Move {
             bytes[8..16].copy_from_slice(&args[1].to_le_bytes());
         }
         for n in 0..4 {

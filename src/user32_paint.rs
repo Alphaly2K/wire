@@ -61,7 +61,6 @@ pub(crate) fn dispatch(
         "InvalidateRect"
             | "ValidateRect"
             | "GetUpdateRect"
-            | "UpdateWindow"
             | "BeginPaint"
             | "EndPaint"
             | "RedrawWindow"
@@ -109,8 +108,8 @@ pub(crate) fn dispatch(
                     }
                 }
                 if name == "RedrawWindow" && a[3] & 0x100 != 0 {
-                    return dispatch(
-                        "UpdateWindow",
+                    return crate::user32::control_call(
+                        crate::win32::catalog::WindowControlApi::Update,
                         a,
                         cpu,
                         mem,
@@ -119,8 +118,7 @@ pub(crate) fn dispatch(
                         log,
                         sched,
                         max_instr,
-                    )
-                    .unwrap();
+                    );
                 }
                 value(1)
             }
@@ -138,27 +136,6 @@ pub(crate) fn dispatch(
                     .map_err(|e| e.to_string())?;
                 }
                 value(w.update.is_some() as u32)
-            }
-            "UpdateWindow" => {
-                let w = &state.user32.windows[&a[0]];
-                if w.update.is_none() {
-                    return value(1);
-                }
-                let result = crate::user32::invoke(
-                    cpu,
-                    mem,
-                    api,
-                    state,
-                    log,
-                    sched,
-                    w.wndproc,
-                    &[a[0], 0xf, 0, 0],
-                    max_instr,
-                )?;
-                if !matches!(result, GuestCallOutcome::Returned(_)) {
-                    return Ok((result, "WM_PAINT transferred".into()));
-                }
-                value(1)
             }
             "BeginPaint" => {
                 mem.ptr(a[1], 64, true).map_err(|e| e.to_string())?;

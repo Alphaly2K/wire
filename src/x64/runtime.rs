@@ -437,7 +437,7 @@ fn import_groups(name: &str) -> u32 {
         dxgi::arity(name).is_some(),
         false, // bound directory-search contracts supply bit 8; preserve bit positions
         user::is_callback(name),
-        user::arity(name).is_some(),
+        false, // scalar window controls moved to catalog; preserve bit positions
         registry::arity(name).is_some(),
         false, // display moved to catalog typed/control IDs; preserve bit positions
         sspi::arity(name).is_some(),
@@ -832,6 +832,7 @@ impl Runtime64 {
             ApiId::Class(id) => self.class_call(mem, id, args),
             ApiId::WindowQuery(id) => self.window_query_call(mem, id, args),
             ApiId::WindowState(id) => self.window_state_call(mem, id, args),
+            ApiId::WindowControl(id) => self.window_value_call(mem, id, args),
             ApiId::UserObject(_) => unreachable!("USER names/properties have no Win64 binding"),
             ApiId::RawInput(_) | ApiId::Ime(_) => self.input_profile_call(mem, id, args),
             ApiId::Geometry(id) => {
@@ -1056,8 +1057,15 @@ impl Runtime64 {
             },
             _ if binding.groups & (1 << 7) != 0 => self.dxgi_call(mem, name, args)?,
             _ if binding.groups & (1 << 8) != 0 => self.find_call(mem, file.unwrap(), args)?,
-            _ if binding.groups & (1 << 9) != 0 => {
-                match self.window_start(mem, name, args, &returned)? {
+            _ if binding.groups & (1 << 9) != 0
+                || matches!(binding.control, gateways::ControlImport::Window(_)) =>
+            {
+                let result = if let gateways::ControlImport::Window(id) = binding.control {
+                    self.window_start(mem, id, name, args, &returned)?
+                } else {
+                    self.dispatch_window(mem, name, args, &returned)?
+                };
+                match result {
                     user::WindowResult::Value(value) => value,
                     user::WindowResult::Callback {
                         target,
@@ -1078,7 +1086,6 @@ impl Runtime64 {
                     }
                 }
             }
-            _ if binding.groups & (1 << 10) != 0 => self.user_call(mem, name, args)?,
             _ if binding.groups & (1 << 11) != 0 => self.registry_call(mem, name, args)?,
             _ if binding.control == gateways::ControlImport::MonitorEnumeration => {
                 let enumeration = self.enumerate_monitors(mem, args, &returned)?;

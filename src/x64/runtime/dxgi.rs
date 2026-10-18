@@ -1174,6 +1174,7 @@ mod tests {
         } = r
             .window_start(
                 &mut m,
+                crate::win32::catalog::WindowControlApi::CreateW,
                 "CreateWindowExW",
                 &[
                     0,
@@ -1197,7 +1198,13 @@ mod tests {
         };
         let mut args = parameters;
         let window = loop {
-            let value = r.user_call(&mut m, "DefWindowProcW", &args).unwrap();
+            let value = r
+                .window_value_call(
+                    &mut m,
+                    crate::win32::catalog::WindowControlApi::DefaultW,
+                    &args,
+                )
+                .unwrap();
             match r.window_resume(&mut m, &mut window_call, value).unwrap() {
                 super::super::WindowStep::Next(_, next) => args = next,
                 super::super::WindowStep::Returned(window) => break window,
