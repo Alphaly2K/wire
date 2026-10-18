@@ -1,5 +1,6 @@
 //! Win64 MSGs and per-thread posted/native messages. Guest pointers remain u64.
 use super::{Memory, Runtime64};
+use crate::win32::catalog::MessageApi as M;
 use crate::x64::{
     memory::WRITE,
     runtime::{threads::Block, WindowEvent},
@@ -22,27 +23,6 @@ pub(in crate::x64::runtime) fn read(mem: &Memory, pointer: u64) -> Result<[u64; 
         u64::from_le_bytes(data[24..32].try_into().unwrap()),
         u32::from_le_bytes(data[32..36].try_into().unwrap()) as u64,
     ])
-}
-pub(in crate::x64::runtime) fn arity(name: &str) -> Option<usize> {
-    Some(match name {
-        "PeekMessageA" | "PeekMessageW" => 5,
-        "GetMessageA" | "GetMessageW" | "PostMessageA" | "PostMessageW" | "PostThreadMessageA"
-        | "PostThreadMessageW" => 4,
-        "PostQuitMessage" | "TranslateMessage" => 1,
-        "GetMessageExtraInfo" | "GetMessageTime" | "GetMessagePos" => 0,
-        "SetMessageExtraInfo" => 1,
-        _ => return None,
-    })
-}
-pub(super) fn dwords(name: &str) -> &'static [usize] {
-    match name {
-        "PeekMessageA" | "PeekMessageW" => &[2, 3, 4],
-        "GetMessageA" | "GetMessageW" => &[2, 3],
-        "PostMessageA" | "PostMessageW" => &[1],
-        "PostThreadMessageA" | "PostThreadMessageW" => &[0, 1],
-        "PostQuitMessage" => &[0],
-        _ => &[],
-    }
 }
 impl Runtime64 {
     fn message_index(&self, tid: u64, window: u64, min: u32, max: u32) -> Option<usize> {
@@ -67,27 +47,26 @@ impl Runtime64 {
     pub(in crate::x64::runtime) fn message_call(
         &mut self,
         mem: &mut Memory,
-        name: &str,
+        id: M,
         a: &[u64],
     ) -> Result<Option<u64>, String> {
         let tid = self.threads.active;
-        let value = match name {
-            "GetMessageExtraInfo" | "GetMessageTime" | "GetMessagePos" => {
+        let value = match id {
+            M::Extra | M::Time | M::Position => {
                 let state = self.user.message_state.get(&tid).copied().unwrap_or([0; 3]);
-                state[match name {
-                    "GetMessageExtraInfo" => 0,
-                    "GetMessageTime" => 1,
+                state[match id {
+                    M::Extra => 0,
+                    M::Time => 1,
                     _ => 2,
                 }]
             }
-            "SetMessageExtraInfo" => {
+            M::SetExtra => {
                 let state = self.user.message_state.entry(tid).or_default();
                 std::mem::replace(&mut state[0], a[0])
             }
-            "PostQuitMessage" | "PostMessageA" | "PostMessageW" | "PostThreadMessageA"
-            | "PostThreadMessageW" => {
-                let quit = name == "PostQuitMessage";
-                let thread = name.starts_with("PostThread");
+            M::Quit | M::PostA | M::PostW | M::PostThreadA | M::PostThreadW => {
+                let quit = id == M::Quit;
+                let thread = matches!(id, M::PostThreadA | M::PostThreadW);
                 let window = if quit || thread { 0 } else { a[0] };
                 let owner = if thread {
                     if !self
@@ -131,8 +110,8 @@ impl Runtime64 {
                 });
                 (!quit) as u64
             }
-            "PeekMessageA" | "PeekMessageW" | "GetMessageA" | "GetMessageW" => {
-                let get = name.starts_with("Get");
+            M::PeekA | M::PeekW | M::GetA | M::GetW => {
+                let get = id.get();
                 if (a[1] != 0 && a[1] != u64::MAX && !self.user.windows.contains_key(&a[1]))
                     || ((a[2] != 0 || a[3] != 0) && a[2] > a[3])
                 {
@@ -200,7 +179,7 @@ impl Runtime64 {
                     1
                 }
             }
-            "TranslateMessage" => {
+            M::Translate => {
                 let words = read(mem, a[0])?;
                 if !matches!(words[1], 0x100 | 0x101 | 0x104 | 0x105) {
                     return Ok(Some(0));
@@ -341,48 +320,32 @@ mod tests {
         let (mut r, mut m) = fixture();
         let extra = 0xfedcba9876543210;
         assert_eq!(
-            r.message_call(&mut m, "SetMessageExtraInfo", &[extra])
-                .unwrap(),
+            r.message_call(&mut m, M::SetExtra, &[extra]).unwrap(),
             Some(0)
         );
-        assert_eq!(
-            r.message_call(&mut m, "GetMessageExtraInfo", &[]).unwrap(),
-            Some(extra)
-        );
+        assert_eq!(r.message_call(&mut m, M::Extra, &[]).unwrap(), Some(extra));
         r.threads.active = 2;
-        assert_eq!(
-            r.message_call(&mut m, "GetMessageExtraInfo", &[]).unwrap(),
-            Some(0)
-        );
+        assert_eq!(r.message_call(&mut m, M::Extra, &[]).unwrap(), Some(0));
         r.threads.active = 1;
         r.user.cursor.state.set_position([-10, 240]);
-        r.message_call(&mut m, "PostMessageW", &[HWND, 0x8001, 0, 0])
+        r.message_call(&mut m, M::PostW, &[HWND, 0x8001, 0, 0])
             .unwrap();
         let time = r.user.events[0].time;
         assert!(r
-            .message_call(&mut m, "PeekMessageW", &[STACK + 8180, HWND, 0, 0, 1])
+            .message_call(&mut m, M::PeekW, &[STACK + 8180, HWND, 0, 0, 1])
             .is_err());
         assert_eq!(r.user.events.len(), 1);
-        assert_eq!(
-            r.message_call(&mut m, "GetMessageExtraInfo", &[]).unwrap(),
-            Some(extra)
-        );
-        assert_eq!(
-            r.message_call(&mut m, "GetMessageTime", &[]).unwrap(),
-            Some(0)
-        );
-        r.message_call(&mut m, "PeekMessageW", &[STACK + 128, HWND, 0, 0, 1])
+        assert_eq!(r.message_call(&mut m, M::Extra, &[]).unwrap(), Some(extra));
+        assert_eq!(r.message_call(&mut m, M::Time, &[]).unwrap(), Some(0));
+        r.message_call(&mut m, M::PeekW, &[STACK + 128, HWND, 0, 0, 1])
             .unwrap();
+        assert_eq!(r.message_call(&mut m, M::Extra, &[]).unwrap(), Some(0));
         assert_eq!(
-            r.message_call(&mut m, "GetMessageExtraInfo", &[]).unwrap(),
-            Some(0)
-        );
-        assert_eq!(
-            r.message_call(&mut m, "GetMessageTime", &[]).unwrap(),
+            r.message_call(&mut m, M::Time, &[]).unwrap(),
             Some(time as u64)
         );
         assert_eq!(
-            r.message_call(&mut m, "GetMessagePos", &[]).unwrap(),
+            r.message_call(&mut m, M::Position, &[]).unwrap(),
             Some(0x00f0fff6)
         );
         assert_eq!(m.read_int(STACK + 128 + 32, 4).unwrap(), time as u64);
@@ -457,12 +420,12 @@ mod tests {
         let wparam = 0xfedc112233445566;
         let lparam = 0xff00010000000001;
         assert_eq!(
-            r.message_call(&mut m, "PostMessageW", &[HWND, 0x8001, wparam, lparam])
+            r.message_call(&mut m, M::PostW, &[HWND, 0x8001, wparam, lparam])
                 .unwrap(),
             Some(1)
         );
         assert_eq!(
-            r.message_call(&mut m, "PeekMessageW", &[out, HWND, 0x8001, 0x8001, 0])
+            r.message_call(&mut m, M::PeekW, &[out, HWND, 0x8001, 0x8001, 0])
                 .unwrap(),
             Some(1)
         );
@@ -470,7 +433,7 @@ mod tests {
         assert_eq!(r.user.events.len(), 1);
         m.write(out, &[0x55; 48]).unwrap();
         assert_eq!(
-            r.message_call(&mut m, "PeekMessageW", &[out, 0, 0x8002, 0x8002, 1])
+            r.message_call(&mut m, M::PeekW, &[out, 0, 0x8002, 0x8002, 1])
                 .unwrap(),
             Some(0)
         );
@@ -479,20 +442,19 @@ mod tests {
         m.write(bad, &[0x55; 48]).unwrap();
         m.protect(STACK + 4096, 4096, READ).unwrap();
         assert!(r
-            .message_call(&mut m, "PeekMessageW", &[bad, 0, 0, 0, 1])
+            .message_call(&mut m, M::PeekW, &[bad, 0, 0, 0, 1])
             .is_err());
         assert_eq!(r.user.events.len(), 1);
         assert_eq!(m.read_int(bad, 4).unwrap(), 0x55555555);
         assert_eq!(
-            r.message_call(&mut m, "PeekMessageW", &[out, 0, 0, 0, 1])
+            r.message_call(&mut m, M::PeekW, &[out, 0, 0, 0, 1])
                 .unwrap(),
             Some(1)
         );
         assert!(r.user.events.is_empty());
-        r.message_call(&mut m, "PostQuitMessage", &[0x1234])
-            .unwrap();
+        r.message_call(&mut m, M::Quit, &[0x1234]).unwrap();
         assert_eq!(
-            r.message_call(&mut m, "GetMessageW", &[out, u64::MAX, 0x8001, 0x8001])
+            r.message_call(&mut m, M::GetW, &[out, u64::MAX, 0x8001, 0x8001])
                 .unwrap(),
             Some(0)
         );
@@ -519,12 +481,12 @@ mod tests {
         assert_eq!(cpu.regs, before.regs);
         assert_eq!(cpu.rip, gateway);
         assert!(!r.thread_runnable(1, &m).unwrap());
-        r.message_call(&mut m, "PostMessageW", &[HWND, 0x8002, 1, 2])
+        r.message_call(&mut m, M::PostW, &[HWND, 0x8002, 1, 2])
             .unwrap();
         assert!(!r.thread_runnable(1, &m).unwrap());
         r.message_call(
             &mut m,
-            "PostMessageW",
+            M::PostW,
             &[HWND, 0x8001, 0x1234567812345678, 0xfedcba9876543210],
         )
         .unwrap();
@@ -590,17 +552,17 @@ mod tests {
             0xffff8000
         );
         assert_eq!(r.keyboard_call(&mut m, State, &[0x41]).unwrap(), 0);
-        r.message_call(&mut m, "PeekMessageW", &[out, 0, 0, 0, 0])
+        r.message_call(&mut m, M::PeekW, &[out, 0, 0, 0, 0])
             .unwrap();
         assert_eq!(r.keyboard_call(&mut m, State, &[0x41]).unwrap(), 0);
-        r.message_call(&mut m, "PeekMessageW", &[out, 0, 0, 0, 1])
+        r.message_call(&mut m, M::PeekW, &[out, 0, 0, 0, 1])
             .unwrap();
         assert_eq!(r.keyboard_call(&mut m, State, &[0x41]).unwrap(), 0xffff8000);
         assert_eq!(
-            r.message_call(&mut m, "TranslateMessage", &[out]).unwrap(),
+            r.message_call(&mut m, M::Translate, &[out]).unwrap(),
             Some(1)
         );
-        r.message_call(&mut m, "PeekMessageW", &[out, 0, 0, 0, 1])
+        r.message_call(&mut m, M::PeekW, &[out, 0, 0, 0, 1])
             .unwrap();
         assert_eq!(read(&m, out).unwrap()[..3], [HWND, 0x102, 0x65e5]);
         r.queue_window_event(WindowEvent {
@@ -611,7 +573,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(r.keyboard_call(&mut m, AsyncState, &[0x41]).unwrap(), 0);
-        r.message_call(&mut m, "PeekMessageW", &[out, 0, 0, 0, 1])
+        r.message_call(&mut m, M::PeekW, &[out, 0, 0, 0, 1])
             .unwrap();
         assert_eq!(r.keyboard_call(&mut m, State, &[0x41]).unwrap(), 0);
     }

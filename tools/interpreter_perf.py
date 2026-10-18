@@ -337,6 +337,10 @@ def main():
         from perf.fixtures.gdi_profile_gateway import x64
         data, meta = x64(args.work)
         entries.append(('gateway-gdi-profile', data, meta))
+    if args.cases and 'gateway-messages' in args.cases:
+        from perf.fixtures.messages_gateway import x64
+        data, meta = x64(args.work)
+        entries.append(('gateway-messages', data, meta))
     if args.cases and 'gateway-window-control' in args.cases:
         from perf.fixtures.window_control_gateway import x64
         data, meta = x64(args.work)

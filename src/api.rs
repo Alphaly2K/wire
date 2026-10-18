@@ -687,17 +687,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetProcessWindowStation", 0),
                 ("GetUserObjectInformationW", 20),
                 ("GetUserObjectInformationA", 20),
-                ("GetMessageA", 16),
-                ("GetMessageW", 16),
-                ("PeekMessageA", 20),
-                ("PeekMessageW", 20),
-                ("TranslateMessage", 4),
-                ("DispatchMessageA", 4),
-                ("DispatchMessageW", 4),
-                ("PostQuitMessage", 4),
-                ("PostMessageA", 16),
-                ("PostMessageW", 16),
-                ("PostThreadMessageA", 16),
                 ("BeginPaint", 8),
                 ("EndPaint", 8),
                 ("InvalidateRect", 12),
@@ -706,8 +695,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("MessageBoxW", 16),
                 ("MessageBoxExA", 20),
                 ("MessageBoxExW", 20),
-                ("SetTimer", 16),
-                ("KillTimer", 8),
                 ("BringWindowToTop", 4),
                 ("WindowFromPoint", 8),
                 ("LoadAcceleratorsA", 8),
@@ -1043,14 +1030,11 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
             "user32.dll",
             &[
                 ("SetWindowRgn", 12),
-                ("PostThreadMessageW", 16),
                 ("DestroyCaret", 0),
                 ("OpenClipboard", 4),
                 ("SetCaretPos", 8),
-                ("GetMessageExtraInfo", 0),
                 ("GetClipboardData", 4),
                 ("IsClipboardFormatAvailable", 4),
-                ("MsgWaitForMultipleObjects", 20),
                 ("GetMenuItemCount", 4),
                 ("CreateDialogIndirectParamW", 20),
                 ("DialogBoxIndirectParamW", 20),
@@ -1073,10 +1057,8 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("CloseClipboard", 0),
                 ("GetPriorityClipboardFormat", 8),
                 ("LoadCursorFromFileW", 4),
-                ("GetQueueStatus", 4),
                 ("DestroyAcceleratorTable", 4),
                 ("CreateAcceleratorTableW", 8),
-                ("WaitMessage", 0),
                 ("CreateCaret", 16),
             ],
         );
@@ -1290,14 +1272,8 @@ pub fn dispatch(
     let name = entry.name.as_str();
     if dll == "user32.dll"
         && (matches!(
-            name,
-            "PeekMessageA"
-                | "PeekMessageW"
-                | "GetMessageA"
-                | "GetMessageW"
-                | "WaitMessage"
-                | "MsgWaitForMultipleObjects"
-                | "MsgWaitForMultipleObjectsEx"
+            binding.typed,
+            Some(crate::win32::catalog::ApiId::Message(id)) if id.service_sent()
         ) || matches!(
             binding.typed,
             Some(crate::win32::catalog::ApiId::WindowControl(
@@ -2403,8 +2379,38 @@ pub fn dispatch(
                 }
             }
         }
-        ("user32.dll", "MsgWaitForMultipleObjects" | "MsgWaitForMultipleObjectsEx") => {
-            let (n, ptr, timeout, mask, flags) = if name.ends_with("Ex") {
+        _ if matches!(
+            binding.typed,
+            Some(crate::win32::catalog::ApiId::Message(id))
+                if !matches!(id, crate::win32::catalog::MessageApi::WaitObjects | crate::win32::catalog::MessageApi::WaitObjectsEx)
+        ) =>
+        {
+            let Some(crate::win32::catalog::ApiId::Message(id)) = binding.typed else {
+                unreachable!();
+            };
+            let (outcome, message) = crate::user32::message_call(
+                id, &args, cpu, mem, api, state, log, sched, max_instr,
+            )?;
+            match outcome {
+                GuestCallOutcome::Returned(value) => {
+                    ret = value;
+                    note = message;
+                }
+                _ => return Ok(()),
+            }
+        }
+        _ if matches!(
+            binding.typed,
+            Some(crate::win32::catalog::ApiId::Message(
+                crate::win32::catalog::MessageApi::WaitObjects
+                    | crate::win32::catalog::MessageApi::WaitObjectsEx
+            ))
+        ) =>
+        {
+            let (n, ptr, timeout, mask, flags) = if binding.typed
+                == Some(crate::win32::catalog::ApiId::Message(
+                    crate::win32::catalog::MessageApi::WaitObjectsEx,
+                )) {
                 (args[0], args[1], args[2], args[3], args[4])
             } else {
                 (

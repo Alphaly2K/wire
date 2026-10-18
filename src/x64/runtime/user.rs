@@ -8,7 +8,6 @@ mod gdi;
 mod images;
 mod message;
 mod window;
-pub(super) use message::arity as message_arity;
 use std::collections::BTreeMap;
 pub use window::WindowCall;
 pub(super) use window::WindowResult;
@@ -73,19 +72,4 @@ impl Default for User {
             message_state: BTreeMap::new(),
         }
     }
-}
-pub(super) fn arity(name: &str) -> Option<usize> {
-    message::arity(name).or_else(|| window::arity(name))
-}
-pub(super) fn dwords(name: &str) -> &'static [usize] {
-    if message::arity(name).is_some() {
-        return message::dwords(name);
-    }
-    if window::arity(name).is_some() {
-        return window::dwords(name);
-    }
-    &[]
-}
-pub(super) fn is_callback(name: &str) -> bool {
-    window::is_callback(name)
 }

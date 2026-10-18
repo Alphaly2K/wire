@@ -48,15 +48,6 @@ pub(in crate::x64::runtime) enum WindowResult {
         release: Vec<u64>,
     },
 }
-pub(in crate::x64::runtime) fn arity(name: &str) -> Option<usize> {
-    matches!(name, "DispatchMessageA" | "DispatchMessageW").then_some(1)
-}
-pub(in crate::x64::runtime) fn dwords(_: &str) -> &'static [usize] {
-    &[]
-}
-pub(in crate::x64::runtime) fn is_callback(name: &str) -> bool {
-    matches!(name, "DispatchMessageA" | "DispatchMessageW")
-}
 impl Runtime64 {
     pub fn window_info(&self) -> Vec<super::super::WindowInfo> {
         self.user
@@ -151,12 +142,13 @@ impl Runtime64 {
     pub(in crate::x64::runtime) fn dispatch_window(
         &mut self,
         mem: &mut Memory,
+        id: crate::win32::catalog::MessageApi,
         name: &str,
         args: &[u64],
         returned: &Cpu64,
     ) -> Result<WindowResult, String> {
         self.prepare_window_callback(mem, returned)?;
-        let wide = name == "DispatchMessageW";
+        let wide = id == crate::win32::catalog::MessageApi::DispatchW;
         let words = super::message::read(mem, args[0])?;
         if words[0] == 0 {
             return Ok(WindowResult::Value(0));

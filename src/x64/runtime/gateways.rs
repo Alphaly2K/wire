@@ -33,6 +33,7 @@ pub(crate) enum ControlImport {
     AddressWait(crate::win32::catalog::AddressWaitApi),
     Thread(crate::win32::catalog::ThreadControlApi),
     Window(crate::win32::catalog::WindowControlApi),
+    Message(crate::win32::catalog::MessageApi),
 }
 pub(crate) struct BoundImport {
     pub export: Arc<str>,
@@ -123,6 +124,7 @@ impl BoundImport {
                 crate::win32::catalog::ApiId::AddressWait(_) => None,
                 crate::win32::catalog::ApiId::ThreadControl(_) => None,
                 crate::win32::catalog::ApiId::WindowControl(id) if id.callback() => None,
+                crate::win32::catalog::ApiId::Message(_) => None,
                 _ => Some(c.id),
             }),
             control: match contract.map(|c| c.id) {
@@ -140,6 +142,7 @@ impl BoundImport {
                 Some(crate::win32::catalog::ApiId::AddressWait(id)) => ControlImport::AddressWait(id),
                 Some(crate::win32::catalog::ApiId::ThreadControl(id)) => ControlImport::Thread(id),
                 Some(crate::win32::catalog::ApiId::WindowControl(id)) if id.callback() => ControlImport::Window(id),
+                Some(crate::win32::catalog::ApiId::Message(id)) => ControlImport::Message(id),
                 _ => ControlImport::None,
             },
             valid,

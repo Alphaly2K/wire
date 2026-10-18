@@ -230,7 +230,6 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
                     | "GetSidLengthRequired"
                     | "InitializeSid"
             ))
-        && !(dll.eq_ignore_ascii_case("user32.dll") && user::arity(name).is_some())
         && !(dll.eq_ignore_ascii_case("advapi32.dll") && tracing::is_call(name))
         && !(dll.eq_ignore_ascii_case("advapi32.dll") && registry::arity(name).is_some())
         && !(dll.eq_ignore_ascii_case("ntdll.dll") && unwind::is_call(name))
@@ -261,7 +260,6 @@ fn kernel_export(name: &str) -> bool {
     }
     if devices::arity(name).is_some()
         || winhttp::arity(name).is_some()
-        || user::arity(name).is_some()
         || registry::arity(name).is_some()
         || sockets::is_call(name)
         || sspi::arity(name).is_some()
@@ -301,7 +299,6 @@ fn import_arity(name: &str) -> Option<usize> {
         name if sockets::arity(name).is_some() => sockets::arity(name).unwrap(),
         name if devices::arity(name).is_some() => devices::arity(name).unwrap(),
         name if dxgi::arity(name).is_some() => dxgi::arity(name).unwrap(),
-        name if user::arity(name).is_some() => user::arity(name).unwrap(),
         name if registry::arity(name).is_some() => registry::arity(name).unwrap(),
         name if sspi::arity(name).is_some() => sspi::arity(name).unwrap(),
         "GetSystemDirectoryA"
@@ -384,7 +381,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         name if sockets::arity(name).is_some() => sockets::dwords(name),
         name if devices::arity(name).is_some() => devices::dwords(name),
         name if dxgi::arity(name).is_some() => dxgi::dwords(name),
-        name if user::arity(name).is_some() => user::dwords(name),
         name if registry::arity(name).is_some() => registry::dwords(name),
         name if sspi::arity(name).is_some() => sspi::dwords(name),
         "GetSystemDirectoryA"
@@ -430,13 +426,13 @@ fn import_groups(name: &str) -> u32 {
         false, // BSTR moved to catalog typed IDs; preserve legacy bit positions
         winhttp::arity(name).is_some(),
         devices::arity(name).is_some(),
-        user::message_arity(name).is_some(),
+        false, // message queues moved to catalog control IDs; preserve bit positions
         false, // identity moved to catalog typed IDs; preserve legacy bit positions
         false, // WinRT moved to catalog typed IDs; preserve legacy bit positions
         false, // GUID helpers moved to catalog typed IDs; preserve legacy bit positions
         dxgi::arity(name).is_some(),
         false, // bound directory-search contracts supply bit 8; preserve bit positions
-        user::is_callback(name),
+        false, // WNDPROC controls moved to catalog; preserve bit positions
         false, // scalar window controls moved to catalog; preserve bit positions
         registry::arity(name).is_some(),
         false, // display moved to catalog typed/control IDs; preserve bit positions
@@ -833,6 +829,7 @@ impl Runtime64 {
             ApiId::WindowQuery(id) => self.window_query_call(mem, id, args),
             ApiId::WindowState(id) => self.window_state_call(mem, id, args),
             ApiId::WindowControl(id) => self.window_value_call(mem, id, args),
+            ApiId::Message(_) => unreachable!("message calls use explicit process control"),
             ApiId::UserObject(_) => unreachable!("USER names/properties have no Win64 binding"),
             ApiId::RawInput(_) | ApiId::Ime(_) => self.input_profile_call(mem, id, args),
             ApiId::Geometry(id) => {
@@ -1051,19 +1048,28 @@ impl Runtime64 {
             }
             _ if binding.groups & (1 << 1) != 0 => self.winhttp_call(mem, name, args)?,
             _ if binding.groups & (1 << 2) != 0 => self.device_call(mem, name, args)?,
-            _ if binding.groups & (1 << 3) != 0 => match self.message_call(mem, name, args)? {
-                Some(value) => value,
-                None => return Ok(Control::Blocked),
-            },
+            _ if matches!(binding.control, gateways::ControlImport::Message(id) if !id.dispatch()) =>
+            {
+                let gateways::ControlImport::Message(id) = binding.control else {
+                    unreachable!();
+                };
+                match self.message_call(mem, id, args)? {
+                    Some(value) => value,
+                    None => return Ok(Control::Blocked),
+                }
+            }
             _ if binding.groups & (1 << 7) != 0 => self.dxgi_call(mem, name, args)?,
             _ if binding.groups & (1 << 8) != 0 => self.find_call(mem, file.unwrap(), args)?,
-            _ if binding.groups & (1 << 9) != 0
-                || matches!(binding.control, gateways::ControlImport::Window(_)) =>
+            _ if matches!(binding.control, gateways::ControlImport::Window(_))
+                || matches!(binding.control, gateways::ControlImport::Message(id) if id.dispatch()) =>
             {
                 let result = if let gateways::ControlImport::Window(id) = binding.control {
                     self.window_start(mem, id, name, args, &returned)?
                 } else {
-                    self.dispatch_window(mem, name, args, &returned)?
+                    let gateways::ControlImport::Message(id) = binding.control else {
+                        unreachable!();
+                    };
+                    self.dispatch_window(mem, id, name, args, &returned)?
                 };
                 match result {
                     user::WindowResult::Value(value) => value,
