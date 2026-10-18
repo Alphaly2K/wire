@@ -37,6 +37,8 @@ mod exceptions;
 mod files;
 #[path = "win32/gdi.rs"]
 mod gdi;
+#[path = "win32/gdi_contract.rs"]
+mod gdi_contract;
 #[path = "win32/gdiplus.rs"]
 mod gdiplus;
 #[path = "win32/geometry_contract.rs"]
