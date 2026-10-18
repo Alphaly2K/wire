@@ -10,6 +10,7 @@ mod context;
 mod critical_sections;
 mod cursor;
 mod delays;
+mod desktop;
 mod display;
 mod files;
 mod gdi_dc;
@@ -53,6 +54,7 @@ pub use context::{ContextApi, CONTEXT_CONTRACTS};
 pub use critical_sections::{CriticalSectionApi, CRITICAL_SECTION_CONTRACTS};
 pub use cursor::{CursorApi, CURSOR_CONTRACTS};
 pub use delays::{DelayApi, DELAY_CONTRACTS};
+pub use desktop::{DesktopApi, DESKTOP_CONTRACTS};
 pub use display::{DisplayApi, DISPLAY_CONTRACTS};
 pub use files::{FileApi, FILE_CONTRACTS};
 pub use gdi_dc::{GdiDcApi, GDI_DC_CONTRACTS};
@@ -164,6 +166,7 @@ pub enum ApiId {
     Image(ImageApi),
     Display(DisplayApi),
     GdiDc(GdiDcApi),
+    Desktop(DesktopApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -345,6 +348,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(IMAGE_CONTRACTS.iter())
         .chain(DISPLAY_CONTRACTS.iter())
         .chain(GDI_DC_CONTRACTS.iter())
+        .chain(DESKTOP_CONTRACTS.iter())
 }
 
 #[cfg(test)]

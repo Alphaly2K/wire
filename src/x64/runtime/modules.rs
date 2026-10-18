@@ -162,11 +162,6 @@ impl Runtime64 {
                         )
                         || devices::export(&provider, &function)
                         || (provider == "user32.dll" && user::arity(&function).is_some())
-                        || (provider == "dwmapi.dll"
-                            && matches!(
-                                function.as_str(),
-                                "DwmGetWindowAttribute" | "DwmIsCompositionEnabled"
-                            ))
                         || (provider == "advapi32.dll" && registry::arity(&function).is_some())
                         || winhttp::export(&provider, &function)
                         || (matches!(provider.as_str(), "kernel32.dll" | "kernelbase.dll")

@@ -115,7 +115,6 @@ pub struct Runtime64 {
     srw: crate::win32::kernel::srw::SrwLocks,
     exception_filter: u64,
     error_mode: u32,
-    screen_reader: bool,
     snapshots: BTreeMap<u64, snapshot::Snapshot>,
     next_snapshot: u64,
     pub api_calls: u64,
@@ -231,11 +230,7 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
                     | "GetSidLengthRequired"
                     | "InitializeSid"
             ))
-        && !(dll.eq_ignore_ascii_case("user32.dll")
-            && (user::arity(name).is_some()
-                || matches!(name, "SystemParametersInfoA" | "SystemParametersInfoW")))
-        && !(dll.eq_ignore_ascii_case("dwmapi.dll")
-            && matches!(name, "DwmGetWindowAttribute" | "DwmIsCompositionEnabled"))
+        && !(dll.eq_ignore_ascii_case("user32.dll") && user::arity(name).is_some())
         && !(dll.eq_ignore_ascii_case("advapi32.dll") && tracing::is_call(name))
         && !(dll.eq_ignore_ascii_case("advapi32.dll") && registry::arity(name).is_some())
         && !(dll.eq_ignore_ascii_case("ntdll.dll") && unwind::is_call(name))
@@ -291,8 +286,6 @@ fn kernel_export(name: &str) -> bool {
                 | "EqualSid"
                 | "GetSidLengthRequired"
                 | "InitializeSid"
-                | "SystemParametersInfoA"
-                | "SystemParametersInfoW"
         )
     {
         return false;
@@ -348,7 +341,6 @@ fn import_arity(name: &str) -> Option<usize> {
         | "Process32NextW"
         | "Thread32First"
         | "Thread32Next" => 2,
-        "SystemParametersInfoA" | "SystemParametersInfoW" => 4,
         "GetLogicalProcessorInformationEx" => 3,
         "BCryptGenRandom" | "BCryptOpenAlgorithmProvider" => 4,
         "BCryptCloseAlgorithmProvider" => 2,
@@ -417,7 +409,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "GetTokenInformation" => &[1, 3],
         "SHGetKnownFolderPath" => &[1],
         "CreateToolhelp32Snapshot" => &[0, 1],
-        "SystemParametersInfoA" | "SystemParametersInfoW" => &[0, 1, 3],
         "GetLogicalProcessorInformationEx" => &[0],
         "BCryptGenRandom" => &[2, 3],
         "BCryptOpenAlgorithmProvider" => &[3],
@@ -537,7 +528,6 @@ impl Runtime64 {
             srw: Default::default(),
             exception_filter: 0,
             error_mode: 0,
-            screen_reader: false,
             snapshots: BTreeMap::new(),
             next_snapshot: 0x7fff1000,
             api_calls: 0,
@@ -838,6 +828,7 @@ impl Runtime64 {
             ApiId::Image(id) => self.image_call(mem, id, args),
             ApiId::Display(id) => self.display_call(mem, id, args),
             ApiId::GdiDc(id) => self.gdi_dc_call(mem, id, args),
+            ApiId::Desktop(id) => self.desktop_call(mem, id, args),
             ApiId::RawInput(_) | ApiId::Ime(_) => self.input_profile_call(mem, id, args),
             ApiId::Geometry(id) => {
                 let result = crate::win32::x64::geometry::call(mem, id, args)?;
@@ -1723,23 +1714,6 @@ impl Runtime64 {
                 } else {
                     self.set_error(mem, 6)?;
                     0
-                }
-            }
-            "SystemParametersInfoA" | "SystemParametersInfoW" => {
-                // A process-owned logical desktop setting, never a mutation of host preferences.
-                match args[0] {
-                    0x46 => {
-                        mem.write_int(args[2], 4, self.screen_reader as u64)?;
-                        1
-                    }
-                    0x47 if args[3] == 0 => {
-                        self.screen_reader = args[1] != 0;
-                        1
-                    }
-                    _ => {
-                        self.set_error(mem, 50)?;
-                        0
-                    }
                 }
             }
             _ if matches!(binding.control, gateways::ControlImport::Thread(_)) => {

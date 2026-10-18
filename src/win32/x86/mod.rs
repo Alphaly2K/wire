@@ -5,6 +5,7 @@ pub(crate) mod clocks;
 pub(crate) mod com;
 pub(crate) mod critical_sections;
 pub(crate) mod cursor;
+pub(crate) mod desktop;
 pub(crate) mod display;
 pub(crate) mod geometry;
 pub(crate) mod guid;

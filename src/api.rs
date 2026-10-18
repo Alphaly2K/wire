@@ -741,8 +741,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("MessageBoxExW", 20),
                 ("SetTimer", 16),
                 ("KillTimer", 8),
-                ("SystemParametersInfoA", 16),
-                ("SystemParametersInfoW", 16),
                 ("GetForegroundWindow", 0),
                 ("SetForegroundWindow", 4),
                 ("SetFocus", 4),
@@ -855,7 +853,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("CallNextHookEx", 16),
                 ("ActivateKeyboardLayout", 8),
                 ("ToAscii", 20),
-                ("GetDoubleClickTime", 0),
             ],
         );
         add(
@@ -1127,7 +1124,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("EnumChildWindows", 12),
                 ("GetClassNameW", 12),
                 ("GetClassNameA", 12),
-                ("GetDialogBaseUnits", 0),
                 ("GetDlgCtrlID", 4),
                 ("GetDlgItemInt", 16),
                 ("GetScrollInfo", 12),
@@ -1885,6 +1881,18 @@ pub fn dispatch(
                 },
                 &mut state.last_error,
             );
+        }
+        _ if matches!(
+            binding.typed,
+            Some(crate::win32::catalog::ApiId::Desktop(_))
+        ) =>
+        {
+            let Some(crate::win32::catalog::ApiId::Desktop(id)) = binding.typed else {
+                unreachable!();
+            };
+            let result = crate::win32::x86::desktop::call(id);
+            ret = result.0;
+            note = result.1.into();
         }
         _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Image(_))) => {
             let Some(crate::win32::catalog::ApiId::Image(id)) = binding.typed else {

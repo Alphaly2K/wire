@@ -2,6 +2,7 @@
 use super::{Memory, Runtime64, READ};
 use crate::win32::x64::geometry::{read_rect as rectangle, write_rect};
 mod cursor;
+mod desktop;
 mod gdi;
 mod images;
 mod message;
@@ -36,6 +37,7 @@ pub(super) struct Window {
     ready: bool,
 }
 pub(super) struct User {
+    desktop: crate::win32::user::desktop::Settings,
     images: crate::win32::user::images::Images,
     classes: BTreeMap<u16, Class>,
     next_atom: u16,
@@ -53,6 +55,7 @@ pub(super) struct User {
 impl Default for User {
     fn default() -> Self {
         Self {
+            desktop: Default::default(),
             images: crate::win32::user::images::Images::new(
                 super::TEB + 0x610000,
                 super::TEB + 0x620000,
@@ -90,8 +93,6 @@ pub(super) fn arity(name: &str) -> Option<usize> {
     Some(match name {
         "UnregisterClassA" | "UnregisterClassW" => 2,
         "RegisterClassA" | "RegisterClassW" | "RegisterClassExA" | "RegisterClassExW" => 1,
-        "DwmGetWindowAttribute" => 4,
-        "DwmIsCompositionEnabled" => 1,
         _ => return None,
     })
 }
@@ -102,10 +103,7 @@ pub(super) fn dwords(name: &str) -> &'static [usize] {
     if window::arity(name).is_some() {
         return window::dwords(name);
     }
-    match name {
-        "DwmGetWindowAttribute" => &[1, 3],
-        _ => &[],
-    }
+    &[]
 }
 impl Runtime64 {
     pub(super) fn user_call(
@@ -119,32 +117,6 @@ impl Runtime64 {
             return self.window_query(mem, name, args);
         }
         match name {
-            "DwmIsCompositionEnabled" => {
-                if args[0] == 0 {
-                    return Ok(0x80070057);
-                }
-                mem.write_int(args[0], 4, 0)?; // Guest desktop has no DWM compositor.
-                Ok(0)
-            }
-            "DwmGetWindowAttribute" => {
-                let Some(w) = self.user.windows.get(&args[0]) else {
-                    return Ok(0x80070006);
-                };
-                if args[2] == 0 {
-                    return Ok(0x80070057);
-                }
-                match (args[1], args[3]) {
-                    (9, 16) => {
-                        write_rect(mem, args[2], w.rect)?;
-                        Ok(0)
-                    } // Extended frame bounds.
-                    (14, 4) => {
-                        mem.write_int(args[2], 4, 0)?;
-                        Ok(0)
-                    } // No cloaking service.
-                    _ => Ok(0x80070057),
-                }
-            }
             "RegisterClassA" | "RegisterClassW" | "RegisterClassExA" | "RegisterClassExW" => {
                 let ex = name.contains("Ex");
                 let pointer = args[0];

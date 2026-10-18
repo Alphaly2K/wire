@@ -243,8 +243,6 @@ pub(crate) fn dispatch(
             | "MapWindowPoints"
             | "IsIconic"
             | "IsZoomed"
-            | "GetDoubleClickTime"
-            | "GetDialogBaseUnits"
             | "EnumChildWindows"
             | "DialogBoxIndirectParamW"
             | "CreateDialogIndirectParamW"
@@ -619,8 +617,6 @@ pub(crate) fn dispatch(
                     "logical coordinate mapping",
                 )
             }
-            "GetDoubleClickTime" => value(500, "input timing profile"),
-            "GetDialogBaseUnits" => value(8 | (16 << 16), "initial fixed dialog font units"),
             "EnumChildWindows" => {
                 let mut seen = BTreeSet::new();
                 let mut pending = vec![a[0]];

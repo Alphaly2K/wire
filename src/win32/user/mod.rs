@@ -1,5 +1,6 @@
 //! USER pure helpers, separate from process-owned windows and host input.
 pub(crate) mod cursor;
+pub(crate) mod desktop;
 pub(crate) mod display;
 pub(crate) mod geometry;
 pub(crate) mod images;
