@@ -29,6 +29,8 @@ mod crt;
 mod cursor_contract;
 #[path = "win32/d3d9.rs"]
 mod d3d9;
+#[path = "win32/display_contract.rs"]
+mod display_contract;
 #[path = "win32/exceptions.rs"]
 mod exceptions;
 #[path = "win32/files.rs"]
