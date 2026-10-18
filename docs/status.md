@@ -6,7 +6,7 @@
 
 后续 22 项对话框/枚举契约和[精确标量 SSE 编译隔离](reports/refactoring-scalar-codegen-2026-10-19.md)已接入并通过完整正确性，性能仍待复核；FP 初筛通过，宽矩阵若干短样本波动及扩样中的严重同哈希漂移全部保留，未增加已验收计数。[菜单 27 项契约与 owner](reports/refactoring-menus-2026-10-19.md)随后独立接入，release 619、debug 465、显式 native 7、工具 23 及完整静态检查通过，性能待验收；先固定真实 RedrawWindow 网关与公开 facade 的原始差异及不可用入口的不同 note/返回 frame，分别保存两批候选的冻结与验收。
 
-对话框后续已补齐 35 条完整性能协议 / 234 次执行及三对 Alice 前缀；SSE/raw、messages/IR、GDI/IR 的中位数成本仍超过调查线，全部轮次和同哈希 control 独立保留，继续定位。菜单自身初筛的 raw/IR 三对全部校验，固定菜单循环 CPU −0.144%/−8.735%，宽矩阵仍待完成。累计验收维持 595。
+对话框后续已补齐 35 条完整性能协议 / 234 次执行及三对 Alice 前缀；SSE/raw、messages/IR、GDI/IR 的中位数成本仍超过调查线，全部轮次和同哈希 control 独立保留。随后完成六次真实采样，消息/GDI 成本主要位于 API 路径，SSE/raw 前后热点分布接近；[PE32 分发模式候选](reports/refactoring-direct-dispatch-2026-10-19.md)把 50 个 typed guard 改为直接枚举模式，处理体与次序保持，完整 release 619、debug 465、native 7 和严格检查通过，性能验证进行中。菜单自身初筛的 raw/IR 三对全部校验，固定菜单循环 CPU −0.144%/−8.735%，宽矩阵仍待完成。累计验收维持 595。
 
 完整正确性、38 条性能协议、237 次执行及三对游戏前缀通过，累计 **595 项**。真实 post/get 网关 Win64/PE32 IR/raw CPU −1.417%/−10.391%/−1.827%；SSE/IR 初筛回退和同哈希 control 漂移全部保留，长样本未出现持续回退，详见本批报告。失败候选与[固定 executable/cwd 协议调查](reports/refactoring-fixed-executable-slot-2026-10-18.md)继续可查。绘制区域与 paint DC 六项迁移正确性通过，但持续浮点性能回退，已撤回运行时改动，保留独立旧行为基线与原创 paint 循环，见[拒绝报告](reports/refactoring-painting-2026-10-19.md)。其余 USER、COM、图形继续迁移。Mono 原生化已撤回，本轮继续排除。
 

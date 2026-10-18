@@ -1272,7 +1272,9 @@ pub fn dispatch(
     let mut note = String::new();
     let mut yield_after_return = false;
     let ret: u32;
-    match (dll, name) {
+    // Match the bound API ID directly so typed calls do not walk a guard chain.
+    // Legacy patterns keep their original order and precedence.
+    match (binding.typed, dll, name) {
         _ if binding.unimplemented => {
             // The catalog already resolved this ABI-only export during binding.
             // Preserve its legacy error, return, trace and frame submission.
@@ -1280,18 +1282,14 @@ pub fn dispatch(
             state.last_error = 120;
             ret = if dll == "ole32.dll" { 0x80004001 } else { 0 };
         }
-        _ if matches!(
-            binding.typed,
-            Some(crate::win32::catalog::ApiId::VirtualMemory(_))
-        ) =>
-        {
+        (Some(crate::win32::catalog::ApiId::VirtualMemory(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::VirtualMemory(id)) = binding.typed else {
                 unreachable!();
             };
             (ret, note) =
                 crate::win32::x86::virtual_memory::call(id, &args, mem, &mut state.last_error);
         }
-        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Heap(_))) => {
+        (Some(crate::win32::catalog::ApiId::Heap(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::Heap(id)) = binding.typed else {
                 unreachable!();
             };
@@ -1304,11 +1302,7 @@ pub fn dispatch(
                 &mut state.last_error,
             )?;
         }
-        _ if matches!(
-            binding.typed,
-            Some(crate::win32::catalog::ApiId::LocalMemory(_))
-        ) =>
-        {
+        (Some(crate::win32::catalog::ApiId::LocalMemory(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::LocalMemory(id)) = binding.typed else {
                 unreachable!();
             };
@@ -1320,33 +1314,25 @@ pub fn dispatch(
                 state.process_heap,
             )?;
         }
-        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::File(_))) => {
+        (Some(crate::win32::catalog::ApiId::File(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::File(id)) = binding.typed else {
                 unreachable!();
             };
             (ret, note) = crate::file_api::call(id, &args, mem, state);
         }
-        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Path(_))) => {
+        (Some(crate::win32::catalog::ApiId::Path(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::Path(id)) = binding.typed else {
                 unreachable!();
             };
             (ret, note) = crate::file_api::call_path(id, &args, mem, state);
         }
-        _ if matches!(
-            binding.typed,
-            Some(crate::win32::catalog::ApiId::Interlocked(_))
-        ) =>
-        {
+        (Some(crate::win32::catalog::ApiId::Interlocked(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::Interlocked(id)) = binding.typed else {
                 unreachable!();
             };
             ret = crate::win32::x86::interlocked::call(id, &args, mem)?;
         }
-        _ if matches!(
-            binding.typed,
-            Some(crate::win32::catalog::ApiId::Context(_))
-        ) =>
-        {
+        (Some(crate::win32::catalog::ApiId::Context(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::Context(id)) = binding.typed else {
                 unreachable!();
             };
@@ -1367,7 +1353,7 @@ pub fn dispatch(
                 }
             };
         }
-        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Local(_))) => {
+        (Some(crate::win32::catalog::ApiId::Local(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::Local(id)) = binding.typed else {
                 unreachable!();
             };
@@ -1404,7 +1390,7 @@ pub fn dispatch(
                 }
             };
         }
-        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Clock(_))) => {
+        (Some(crate::win32::catalog::ApiId::Clock(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::Clock(id)) = binding.typed else {
                 unreachable!();
             };
@@ -1417,7 +1403,7 @@ pub fn dispatch(
                 }
             }
         }
-        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Guid(_))) => {
+        (Some(crate::win32::catalog::ApiId::Guid(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::Guid(id)) = binding.typed else {
                 unreachable!();
             };
@@ -1434,11 +1420,7 @@ pub fn dispatch(
                 }
             }
         }
-        _ if matches!(
-            binding.typed,
-            Some(crate::win32::catalog::ApiId::Version(_))
-        ) =>
-        {
+        (Some(crate::win32::catalog::ApiId::Version(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::Version(id)) = binding.typed else {
                 unreachable!();
             };
@@ -1452,7 +1434,7 @@ pub fn dispatch(
             ret = value.value;
             note = value.note.into();
         }
-        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Nls(_))) => {
+        (Some(crate::win32::catalog::ApiId::Nls(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::Nls(id)) = binding.typed else {
                 unreachable!();
             };
@@ -1466,43 +1448,27 @@ pub fn dispatch(
             ret = value.value;
             note = value.note;
         }
-        _ if matches!(
-            binding.typed,
-            Some(crate::win32::catalog::ApiId::SystemProfile(_))
-        ) =>
-        {
+        (Some(crate::win32::catalog::ApiId::SystemProfile(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::SystemProfile(id)) = binding.typed else {
                 unreachable!();
             };
             (ret, note) =
                 crate::win32::x86::system_profile::call(id, args[0], mem, &mut state.last_error);
         }
-        _ if matches!(
-            binding.typed,
-            Some(crate::win32::catalog::ApiId::Calendar(_))
-        ) =>
-        {
+        (Some(crate::win32::catalog::ApiId::Calendar(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::Calendar(id)) = binding.typed else {
                 unreachable!();
             };
             (ret, note) =
                 crate::win32::x86::calendar::call(id, args[0], mem, &mut state.last_error);
         }
-        _ if matches!(
-            binding.typed,
-            Some(crate::win32::catalog::ApiId::Multimedia(_))
-        ) =>
-        {
+        (Some(crate::win32::catalog::ApiId::Multimedia(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::Multimedia(id)) = binding.typed else {
                 unreachable!();
             };
             (ret, note) = crate::win32::x86::multimedia::call(id, &args, mem);
         }
-        _ if matches!(
-            binding.typed,
-            Some(crate::win32::catalog::ApiId::CriticalSection(_))
-        ) =>
-        {
+        (Some(crate::win32::catalog::ApiId::CriticalSection(_)), _, _) => {
             use crate::win32::x86::critical_sections::{call, Outcome};
             let Some(crate::win32::catalog::ApiId::CriticalSection(id)) = binding.typed else {
                 unreachable!();
@@ -1532,11 +1498,7 @@ pub fn dispatch(
                 }
             }
         }
-        _ if matches!(
-            binding.typed,
-            Some(crate::win32::catalog::ApiId::ThreadProperty(_))
-        ) =>
-        {
+        (Some(crate::win32::catalog::ApiId::ThreadProperty(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::ThreadProperty(id)) = binding.typed else {
                 unreachable!();
             };
@@ -1549,6 +1511,7 @@ pub fn dispatch(
             )?;
         }
         (
+            _,
             "winmm.dll",
             "mciSendCommandA" | "mciSendCommandW" | "mciSendStringA" | "mciSendStringW",
         ) => {
@@ -1556,7 +1519,7 @@ pub fn dispatch(
             implemented = false;
             note = "MCI device backend unavailable".into();
         }
-        ("kernel32.dll", "TerminateProcess") => {
+        (_, "kernel32.dll", "TerminateProcess") => {
             if args[0] == u32::MAX
                 || matches!(state.handles.get(&args[0]), Some(HandleObj::Process { .. }))
             {
@@ -1569,7 +1532,8 @@ pub fn dispatch(
                 ret = 0;
             }
         }
-        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Com(id)) if id != crate::win32::catalog::ComApi::CreateInstance) =>
+        (Some(crate::win32::catalog::ApiId::Com(id)), _, _)
+            if id != crate::win32::catalog::ComApi::CreateInstance =>
         {
             use crate::win32::catalog::{ApiId, ComApi};
             let Some(ApiId::Com(id)) = binding.typed else {
@@ -1596,7 +1560,7 @@ pub fn dispatch(
                 _ => unreachable!("PE32 COM export has no typed route"),
             };
         }
-        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Bstr(_))) => {
+        (Some(crate::win32::catalog::ApiId::Bstr(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::Bstr(id)) = binding.typed else {
                 unreachable!();
             };
@@ -1610,11 +1574,7 @@ pub fn dispatch(
                 &mut state.last_error,
             );
         }
-        _ if matches!(
-            binding.typed,
-            Some(crate::win32::catalog::ApiId::Variant(_))
-        ) =>
-        {
+        (Some(crate::win32::catalog::ApiId::Variant(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::Variant(id)) = binding.typed else {
                 unreachable!();
             };
@@ -1628,15 +1588,15 @@ pub fn dispatch(
                 &mut state.last_error,
             );
         }
-        _ if matches!(
-            binding.typed,
+        (
             Some(
                 crate::win32::catalog::ApiId::BasicString(_)
-                    | crate::win32::catalog::ApiId::PointerHelper(_)
-                    | crate::win32::catalog::ApiId::ProcessQuery(_)
-            )
-        ) =>
-        {
+                | crate::win32::catalog::ApiId::PointerHelper(_)
+                | crate::win32::catalog::ApiId::ProcessQuery(_),
+            ),
+            _,
+            _,
+        ) => {
             use crate::win32::catalog::{ApiId, ProcessQueryApi};
             let id = binding.typed.unwrap();
             let result = match id {
@@ -1672,11 +1632,7 @@ pub fn dispatch(
                 }
             }
         }
-        _ if matches!(
-            binding.typed,
-            Some(crate::win32::catalog::ApiId::Geometry(_))
-        ) =>
-        {
+        (Some(crate::win32::catalog::ApiId::Geometry(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::Geometry(id)) = binding.typed else {
                 unreachable!()
             };
@@ -1684,7 +1640,7 @@ pub fn dispatch(
             ret = result.value;
             note = result.note.into();
         }
-        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Cursor(_))) => {
+        (Some(crate::win32::catalog::ApiId::Cursor(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::Cursor(id)) = binding.typed else {
                 unreachable!()
             };
@@ -1699,11 +1655,7 @@ pub fn dispatch(
             ret = result.value;
             note = result.note.into();
         }
-        _ if matches!(
-            binding.typed,
-            Some(crate::win32::catalog::ApiId::Display(_))
-        ) =>
-        {
+        (Some(crate::win32::catalog::ApiId::Display(_)), _, _) => {
             use crate::win32::catalog::{ApiId, DisplayApi};
             let Some(ApiId::Display(id)) = binding.typed else {
                 unreachable!();
@@ -1726,7 +1678,7 @@ pub fn dispatch(
                 note = result.note;
             }
         }
-        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::GdiDc(_))) => {
+        (Some(crate::win32::catalog::ApiId::GdiDc(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::GdiDc(id)) = binding.typed else {
                 unreachable!();
             };
@@ -1744,11 +1696,7 @@ pub fn dispatch(
                 &mut state.last_error,
             );
         }
-        _ if matches!(
-            binding.typed,
-            Some(crate::win32::catalog::ApiId::UserObject(_))
-        ) =>
-        {
+        (Some(crate::win32::catalog::ApiId::UserObject(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::UserObject(id)) = binding.typed else {
                 unreachable!();
             };
@@ -1758,11 +1706,7 @@ pub fn dispatch(
             ret = result.0;
             note = result.1.into();
         }
-        _ if matches!(
-            binding.typed,
-            Some(crate::win32::catalog::ApiId::WindowQuery(_))
-        ) =>
-        {
+        (Some(crate::win32::catalog::ApiId::WindowQuery(_)), _, _) => {
             use crate::win32::catalog::{ApiId, WindowQueryApi};
             let Some(ApiId::WindowQuery(id)) = binding.typed else {
                 unreachable!();
@@ -1776,11 +1720,7 @@ pub fn dispatch(
             };
             implemented = id != WindowQueryApi::Placement;
         }
-        _ if matches!(
-            binding.typed,
-            Some(crate::win32::catalog::ApiId::WindowControl(_))
-        ) =>
-        {
+        (Some(crate::win32::catalog::ApiId::WindowControl(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::WindowControl(id)) = binding.typed else {
                 unreachable!();
             };
@@ -1795,11 +1735,7 @@ pub fn dispatch(
                 _ => return Ok(()),
             }
         }
-        _ if matches!(
-            binding.typed,
-            Some(crate::win32::catalog::ApiId::WindowState(_))
-        ) =>
-        {
+        (Some(crate::win32::catalog::ApiId::WindowState(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::WindowState(id)) = binding.typed else {
                 unreachable!();
             };
@@ -1814,7 +1750,7 @@ pub fn dispatch(
                 _ => return Ok(()),
             }
         }
-        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Dialog(_))) => {
+        (Some(crate::win32::catalog::ApiId::Dialog(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::Dialog(id)) = binding.typed else {
                 unreachable!();
             };
@@ -1829,7 +1765,7 @@ pub fn dispatch(
                 _ => return Ok(()),
             }
         }
-        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Menu(_))) => {
+        (Some(crate::win32::catalog::ApiId::Menu(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::Menu(id)) = binding.typed else {
                 unreachable!();
             };
@@ -1841,17 +1777,13 @@ pub fn dispatch(
                 &mut state.last_error,
             );
         }
-        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Class(_))) => {
+        (Some(crate::win32::catalog::ApiId::Class(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::Class(id)) = binding.typed else {
                 unreachable!();
             };
             (ret, note) = crate::user32::class_call(id, &args, mem, api, state)?;
         }
-        _ if matches!(
-            binding.typed,
-            Some(crate::win32::catalog::ApiId::Desktop(_))
-        ) =>
-        {
+        (Some(crate::win32::catalog::ApiId::Desktop(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::Desktop(id)) = binding.typed else {
                 unreachable!();
             };
@@ -1859,7 +1791,7 @@ pub fn dispatch(
             ret = result.0;
             note = result.1.into();
         }
-        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Image(_))) => {
+        (Some(crate::win32::catalog::ApiId::Image(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::Image(id)) = binding.typed else {
                 unreachable!()
             };
@@ -1868,15 +1800,11 @@ pub fn dispatch(
             note = result.note.into();
             implemented = result.implemented;
         }
-        ("wire.wmi", _) => {
+        (_, "wire.wmi", _) => {
             (ret, note, implemented) =
                 crate::wmi::dispatch(dll, name, &args, mem, api, state).unwrap();
         }
-        _ if matches!(
-            binding.typed,
-            Some(crate::win32::catalog::ApiId::Keyboard(_))
-        ) =>
-        {
+        (Some(crate::win32::catalog::ApiId::Keyboard(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::Keyboard(id)) = binding.typed else {
                 unreachable!();
             };
@@ -1885,15 +1813,15 @@ pub fn dispatch(
                 .keyboard_call(id, &args, mem, sched.current_tid())?;
             note = "host asynchronous / retrieved queue key state".into();
         }
-        _ if binding.typed
-            == Some(crate::win32::catalog::ApiId::Com(
-                crate::win32::catalog::ComApi::CreateInstance,
-            )) =>
-        {
+        (
+            Some(crate::win32::catalog::ApiId::Com(crate::win32::catalog::ComApi::CreateInstance)),
+            _,
+            _,
+        ) => {
             (ret, note, implemented) =
                 crate::wmi::dispatch(dll, name, &args, mem, api, state).unwrap();
         }
-        ("user32.dll", "wsprintfA" | "wsprintfW" | "wvsprintfA" | "wvsprintfW") => {
+        (_, "user32.dll", "wsprintfA" | "wsprintfW" | "wvsprintfA" | "wvsprintfW") => {
             let varargs = if name.starts_with("wvs") {
                 args[2]
             } else {
@@ -1902,7 +1830,7 @@ pub fn dispatch(
             ret = crate::wsprintf::format(mem, args[0], args[1], varargs, name.ends_with('W'))?;
             note = "checked guest Windows varargs formatting".into();
         }
-        ("advapi32.dll", "RegOpenKeyA" | "RegOpenKeyW" | "RegOpenKeyExA" | "RegOpenKeyExW") => {
+        (_, "advapi32.dll", "RegOpenKeyA" | "RegOpenKeyW" | "RegOpenKeyExA" | "RegOpenKeyExW") => {
             let output = if name.contains("Ex") {
                 args[4]
             } else {
@@ -1919,6 +1847,7 @@ pub fn dispatch(
             };
         }
         (
+            _,
             "advapi32.dll",
             "RegQueryValueExA" | "RegQueryValueExW" | "RegQueryValueA" | "RegQueryValueW",
         ) => {
@@ -1929,7 +1858,7 @@ pub fn dispatch(
             };
             note = "isolated registry: no value / invalid key".into();
         }
-        ("advapi32.dll", "RegCloseKey") => {
+        (_, "advapi32.dll", "RegCloseKey") => {
             ret = if matches!(args[0], 0x80000000..=0x80000006) {
                 0
             } else {
@@ -1937,6 +1866,7 @@ pub fn dispatch(
             };
         }
         (
+            _,
             "version.dll",
             "GetFileVersionInfoA"
             | "GetFileVersionInfoW"
@@ -1947,7 +1877,7 @@ pub fn dispatch(
         ) => {
             (ret, note) = crate::version::dispatch(name, &args, mem, state).unwrap();
         }
-        ("wire", "ExitEmulation") => {
+        (_, "wire", "ExitEmulation") => {
             log.log_call(
                 idx,
                 dll,
@@ -1966,7 +1896,7 @@ pub fn dispatch(
             cpu.exit_code = Some(0);
             return Ok(());
         }
-        ("wire", "ExitThread") => {
+        (_, "wire", "ExitThread") => {
             // A worker thread function returned; its EAX is the exit code.
             let code = cpu.regs[0];
             log.log_call(
@@ -1991,7 +1921,7 @@ pub fn dispatch(
             sched.exit_current(cpu, code)?;
             return Ok(());
         }
-        ("kernel32.dll", "ExitProcess") => {
+        (_, "kernel32.dll", "ExitProcess") => {
             log.log_call(idx, dll, name, &args[..1], 0, true, "process exit");
             match crate::modules::notify_process_exit(cpu, mem, api, state, log, sched, max_instr)?
             {
@@ -2002,11 +1932,13 @@ pub fn dispatch(
             cpu.exit_code = Some(args[0]);
             return Ok(());
         }
-        _ if binding.typed
-            == Some(crate::win32::catalog::ApiId::ThreadControl(
+        (
+            Some(crate::win32::catalog::ApiId::ThreadControl(
                 crate::win32::catalog::ThreadControlApi::Exit,
-            )) =>
-        {
+            )),
+            _,
+            _,
+        ) => {
             log.log_call(idx, dll, name, &args[..1], 0, true, "thread exit");
             match crate::modules::notify_thread(
                 false, false, cpu, mem, api, state, log, sched, max_instr,
@@ -2021,11 +1953,13 @@ pub fn dispatch(
             sched.exit_current(cpu, args[0])?;
             return Ok(());
         }
-        _ if binding.typed
-            == Some(crate::win32::catalog::ApiId::ThreadControl(
+        (
+            Some(crate::win32::catalog::ApiId::ThreadControl(
                 crate::win32::catalog::ThreadControlApi::Create,
-            )) =>
-        {
+            )),
+            _,
+            _,
+        ) => {
             if !sched.has_thread_capacity() {
                 state.last_error = 8;
                 ret = 0;
@@ -2050,20 +1984,22 @@ pub fn dispatch(
                 ret = handle;
             }
         }
-        _ if binding.typed
-            == Some(crate::win32::catalog::ApiId::Delay(
+        (
+            Some(crate::win32::catalog::ApiId::Delay(
                 crate::win32::catalog::DelayApi::SwitchThread,
-            )) =>
-        {
+            )),
+            _,
+            _,
+        ) => {
             sched.poll_timeouts();
             ret = sched.any_other_runnable() as u32;
             yield_after_return = ret != 0;
         }
-        _ if binding.typed
-            == Some(crate::win32::catalog::ApiId::Delay(
-                crate::win32::catalog::DelayApi::Sleep,
-            )) =>
-        {
+        (
+            Some(crate::win32::catalog::ApiId::Delay(crate::win32::catalog::DelayApi::Sleep)),
+            _,
+            _,
+        ) => {
             if sched.take_wake().is_some() {
                 ret = 0; // void; woke after the full delay
             } else if args[0] == 0 {
@@ -2080,11 +2016,11 @@ pub fn dispatch(
                 return Ok(());
             }
         }
-        _ if binding.typed
-            == Some(crate::win32::catalog::ApiId::Delay(
-                crate::win32::catalog::DelayApi::SleepEx,
-            )) =>
-        {
+        (
+            Some(crate::win32::catalog::ApiId::Delay(crate::win32::catalog::DelayApi::SleepEx)),
+            _,
+            _,
+        ) => {
             if sched.take_wake().is_some() {
                 ret = 0;
             } else if args[0] == 0 {
@@ -2097,11 +2033,7 @@ pub fn dispatch(
             }
         }
         // --- events and semaphores: resolved once by the catalog ---
-        _ if matches!(
-            binding.typed,
-            Some(crate::win32::catalog::ApiId::SyncObject(_))
-        ) =>
-        {
+        (Some(crate::win32::catalog::ApiId::SyncObject(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::SyncObject(id)) = binding.typed else {
                 unreachable!();
             };
@@ -2212,7 +2144,7 @@ pub fn dispatch(
                 }
             };
         }
-        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Mutex(_))) => {
+        (Some(crate::win32::catalog::ApiId::Mutex(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::Mutex(id)) = binding.typed else {
                 unreachable!();
             };
@@ -2261,13 +2193,13 @@ pub fn dispatch(
             };
         }
         // --- waits ---
-        _ if matches!(
-            binding.typed,
+        (
             Some(crate::win32::catalog::ApiId::Wait(
-                crate::win32::catalog::WaitApi::Single | crate::win32::catalog::WaitApi::SingleEx
-            ))
-        ) =>
-        {
+                crate::win32::catalog::WaitApi::Single | crate::win32::catalog::WaitApi::SingleEx,
+            )),
+            _,
+            _,
+        ) => {
             let (h, timeout) = (args[0], args[1]);
             match sched.take_wake() {
                 Some(Wake::Completed(r)) => {
@@ -2303,11 +2235,11 @@ pub fn dispatch(
                 }
             }
         }
-        _ if binding.typed
-            == Some(crate::win32::catalog::ApiId::Wait(
-                crate::win32::catalog::WaitApi::Multiple,
-            )) =>
-        {
+        (
+            Some(crate::win32::catalog::ApiId::Wait(crate::win32::catalog::WaitApi::Multiple)),
+            _,
+            _,
+        ) => {
             let (n, ptr, wait_all, timeout) = (args[0], args[1], args[2] != 0, args[3]);
             let mut hs = Vec::new();
             for i in 0..n.min(64) {
@@ -2357,11 +2289,12 @@ pub fn dispatch(
                 }
             }
         }
-        _ if matches!(
-            binding.typed,
-            Some(crate::win32::catalog::ApiId::Message(id))
-                if !matches!(id, crate::win32::catalog::MessageApi::WaitObjects | crate::win32::catalog::MessageApi::WaitObjectsEx)
-        ) =>
+        (Some(crate::win32::catalog::ApiId::Message(id)), _, _)
+            if !matches!(
+                id,
+                crate::win32::catalog::MessageApi::WaitObjects
+                    | crate::win32::catalog::MessageApi::WaitObjectsEx
+            ) =>
         {
             let Some(crate::win32::catalog::ApiId::Message(id)) = binding.typed else {
                 unreachable!();
@@ -2377,14 +2310,14 @@ pub fn dispatch(
                 _ => return Ok(()),
             }
         }
-        _ if matches!(
-            binding.typed,
+        (
             Some(crate::win32::catalog::ApiId::Message(
                 crate::win32::catalog::MessageApi::WaitObjects
-                    | crate::win32::catalog::MessageApi::WaitObjectsEx
-            ))
-        ) =>
-        {
+                | crate::win32::catalog::MessageApi::WaitObjectsEx,
+            )),
+            _,
+            _,
+        ) => {
             let (n, ptr, timeout, mask, flags) = if binding.typed
                 == Some(crate::win32::catalog::ApiId::Message(
                     crate::win32::catalog::MessageApi::WaitObjectsEx,
@@ -2463,11 +2396,13 @@ pub fn dispatch(
                 note = "checked object/message wait".into();
             }
         }
-        _ if binding.typed
-            == Some(crate::win32::catalog::ApiId::Handle(
+        (
+            Some(crate::win32::catalog::ApiId::Handle(
                 crate::win32::catalog::HandleApi::CloseHandle,
-            )) =>
-        {
+            )),
+            _,
+            _,
+        ) => {
             if state.handles.remove(&args[0]).is_some() {
                 state.named_objs.retain(|_, handle| *handle != args[0]);
                 ret = 1;
@@ -2477,13 +2412,13 @@ pub fn dispatch(
                 note = "unknown handle".into();
             }
         }
-        ("kernel32.dll", "GetCommandLineA") => ret = state.cmdline_a,
-        ("kernel32.dll", "GetCommandLineW") => ret = state.cmdline_w,
-        ("kernel32.dll", "IsProcessorFeaturePresent") => {
+        (_, "kernel32.dll", "GetCommandLineA") => ret = state.cmdline_a,
+        (_, "kernel32.dll", "GetCommandLineW") => ret = state.cmdline_w,
+        (_, "kernel32.dll", "IsProcessorFeaturePresent") => {
             // SSE/SSE2 subset is enabled; SSE3 still lacks several opcodes.
             ret = matches!(args[0], 6 | 10) as u32;
         }
-        ("user32.dll", "LoadStringW") | ("user32.dll", "LoadStringA") => {
+        (_, "user32.dll", "LoadStringW") | (_, "user32.dll", "LoadStringA") => {
             let base = if args[0] == 0 {
                 state.exe_base
             } else {
@@ -2527,10 +2462,10 @@ pub fn dispatch(
             }
             note = format!("resource string {}: {} UTF-16 units", args[1], len);
         }
-        ("kernel32.dll", "FindResourceA")
-        | ("kernel32.dll", "FindResourceW")
-        | ("kernel32.dll", "FindResourceExA")
-        | ("kernel32.dll", "FindResourceExW") => {
+        (_, "kernel32.dll", "FindResourceA")
+        | (_, "kernel32.dll", "FindResourceW")
+        | (_, "kernel32.dll", "FindResourceExA")
+        | (_, "kernel32.dll", "FindResourceExW") => {
             let base = if args[0] == 0 {
                 state.exe_base
             } else {
@@ -2562,7 +2497,7 @@ pub fn dispatch(
                 state.last_error = 1814;
             }
         }
-        ("kernel32.dll", "LoadResource") | ("kernel32.dll", "SizeofResource") => {
+        (_, "kernel32.dll", "LoadResource") | (_, "kernel32.dll", "SizeofResource") => {
             let base = if args[0] == 0 {
                 state.exe_base
             } else {
@@ -2573,16 +2508,16 @@ pub fn dispatch(
                 .map(|(ptr, size)| if name == "LoadResource" { ptr } else { size })
                 .unwrap_or(0);
         }
-        ("kernel32.dll", "LockResource") => ret = args[0],
-        ("kernel32.dll", "FreeResource") => ret = 0,
-        ("kernel32.dll", "GetStartupInfoA") | ("kernel32.dll", "GetStartupInfoW") => {
+        (_, "kernel32.dll", "LockResource") => ret = args[0],
+        (_, "kernel32.dll", "FreeResource") => ret = 0,
+        (_, "kernel32.dll", "GetStartupInfoA") | (_, "kernel32.dll", "GetStartupInfoW") => {
             let mut si = [0u8; 68];
             si[0..4].copy_from_slice(&68u32.to_le_bytes());
             mem.write_bytes(args[0], &si).map_err(|e| e.to_string())?;
             note = "zeroed STARTUPINFO".into();
             ret = 0;
         }
-        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Module(_))) => {
+        (Some(crate::win32::catalog::ApiId::Module(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::Module(id)) = binding.typed else {
                 unreachable!();
             };
@@ -2596,51 +2531,53 @@ pub fn dispatch(
                 _ => return Ok(()),
             }
         }
-        _ if binding.typed
-            == Some(crate::win32::catalog::ApiId::Handle(
+        (
+            Some(crate::win32::catalog::ApiId::Handle(
                 crate::win32::catalog::HandleApi::GetStdHandle,
-            )) =>
-        {
+            )),
+            _,
+            _,
+        ) => {
             ret = 0;
             note = "fake null handle".into();
         }
-        ("kernel32.dll", "SetHandleCount") => {
+        (_, "kernel32.dll", "SetHandleCount") => {
             // Legacy CRT hint; NT-style handle tables grow automatically.
             ret = args[0];
             note = "automatic handle table capacity".into();
         }
-        ("kernel32.dll", "EncodePointer") | ("kernel32.dll", "DecodePointer") => {
+        (_, "kernel32.dll", "EncodePointer") | (_, "kernel32.dll", "DecodePointer") => {
             ret = args[0];
             note = "identity encoding".into();
         }
-        ("kernel32.dll", "GetEnvironmentStrings") => {
+        (_, "kernel32.dll", "GetEnvironmentStrings") => {
             // empty block: "\0\0"
             let p = state.scratch_alloc(mem, 16, 16);
             mem.write_u16(p, 0).map_err(|e| e.to_string())?;
             ret = p;
             note = "empty environment block".into();
         }
-        ("kernel32.dll", "GetEnvironmentStringsW") => {
+        (_, "kernel32.dll", "GetEnvironmentStringsW") => {
             // empty block: L"\0\0"
             let p = state.scratch_alloc(mem, 16, 16);
             mem.write_u32(p, 0).map_err(|e| e.to_string())?;
             ret = p;
             note = "empty environment block".into();
         }
-        ("kernel32.dll", "FreeEnvironmentStringsA")
-        | ("kernel32.dll", "FreeEnvironmentStringsW") => {
+        (_, "kernel32.dll", "FreeEnvironmentStringsA")
+        | (_, "kernel32.dll", "FreeEnvironmentStringsW") => {
             ret = 1;
         }
-        ("kernel32.dll", "GetEnvironmentVariableA")
-        | ("kernel32.dll", "GetEnvironmentVariableW") => {
+        (_, "kernel32.dll", "GetEnvironmentVariableA")
+        | (_, "kernel32.dll", "GetEnvironmentVariableW") => {
             ret = 0; // not found; GetLastError already 0
             note = "empty environment".into();
         }
-        ("kernel32.dll", "SetUnhandledExceptionFilter") => {
+        (_, "kernel32.dll", "SetUnhandledExceptionFilter") => {
             ret = state.unhandled_filter;
             state.unhandled_filter = args[0];
         }
-        ("kernel32.dll", "RaiseException") => {
+        (_, "kernel32.dll", "RaiseException") => {
             log.log_call(
                 idx,
                 dll,
@@ -2652,7 +2589,7 @@ pub fn dispatch(
             );
             return crate::seh::raise(cpu, mem, api, state, log, sched, &args, max_instr);
         }
-        ("kernel32.dll", "UnhandledExceptionFilter") => {
+        (_, "kernel32.dll", "UnhandledExceptionFilter") => {
             if state.unhandled_filter == 0 {
                 ret = 0;
             } else {
@@ -2671,33 +2608,33 @@ pub fn dispatch(
                 }
             }
         }
-        ("kernel32.dll", "RtlUnwind") | ("ntdll.dll", "RtlUnwind") => {
+        (_, "kernel32.dll", "RtlUnwind") | (_, "ntdll.dll", "RtlUnwind") => {
             log.log_call(idx, dll, name, &args[..4], args[3], true, "SEH unwind");
             return crate::seh::unwind(cpu, mem, api, state, log, sched, &args, max_instr);
         }
-        ("kernel32.dll", "GetCurrentPackageId") => {
+        (_, "kernel32.dll", "GetCurrentPackageId") => {
             ret = 0x3d54; // APPMODEL_ERROR_NO_PACKAGE (desktop app)
             note = "not a packaged app".into();
         }
-        ("user32.dll", "GetProcessWindowStation") => {
+        (_, "user32.dll", "GetProcessWindowStation") => {
             ret = 0x7007_0000;
             note = "fake winsta handle".into();
         }
-        ("user32.dll", "GetUserObjectInformationW") => {
+        (_, "user32.dll", "GetUserObjectInformationW") => {
             ret = 0;
             note = "fake: unsupported winsta query".into();
         }
-        ("user32.dll", "MessageBoxA") | ("user32.dll", "MessageBoxW") => {
+        (_, "user32.dll", "MessageBoxA") | (_, "user32.dll", "MessageBoxW") => {
             let wide = name.ends_with('W');
             let text = read_str(mem, args[1], wide);
             let caption = read_str(mem, args[2], wide);
             note = format!("SHOWN: [{caption}] {text}");
             ret = 1; // IDOK
         }
-        ("mpr.dll", "WNetGetUniversalNameA") | ("mpr.dll", "WNetGetUniversalNameW") => {
+        (_, "mpr.dll", "WNetGetUniversalNameA") | (_, "mpr.dll", "WNetGetUniversalNameW") => {
             ret = 2250; // ERROR_NOT_CONNECTED: sandbox C: is a local drive
         }
-        ("kernel32.dll", "FormatMessageA") | ("kernel32.dll", "FormatMessageW") => {
+        (_, "kernel32.dll", "FormatMessageA") | (_, "kernel32.dll", "FormatMessageW") => {
             let wide = name.ends_with('W');
             let text = if args[0] & 0x400 != 0 {
                 crate::file_api::read_name(mem, args[1], wide)
@@ -2744,13 +2681,13 @@ pub fn dispatch(
             }
             note = text.trim().into();
         }
-        ("mscoree.dll", "CorExitProcess") => {
+        (_, "mscoree.dll", "CorExitProcess") => {
             cpu.halted = true;
             cpu.exit_code = Some(args[0]);
             note = "CLR-style exit".into();
             ret = 0;
         }
-        ("comctl32.dll", "InitCommonControls" | "InitCommonControlsEx") => {
+        (_, "comctl32.dll", "InitCommonControls" | "InitCommonControlsEx") => {
             if name == "InitCommonControlsEx"
                 && mem.read_u32(args[0]).map_err(|e| e.to_string())? != 8
             {
@@ -2776,21 +2713,21 @@ pub fn dispatch(
                 note = "registered controls with basic window/text state".into();
             }
         }
-        ("gdiplus.dll", _) => {
+        (_, "gdiplus.dll", _) => {
             (ret, note, implemented) = crate::gdiplus::dispatch(name, &args, mem, state);
         }
-        ("d3d9.dll", _) => {
+        (_, "d3d9.dll", _) => {
             (ret, note, implemented) =
                 crate::d3d9::dispatch(dll, name, &args, mem, api, state).unwrap();
         }
-        ("dsound.dll", _) => {
+        (_, "dsound.dll", _) => {
             (ret, note, implemented) = crate::dsound::dispatch(name, &args, mem, api, state, sched);
         }
-        ("winmm.dll", "waveOutGetNumDevs") => {
+        (_, "winmm.dll", "waveOutGetNumDevs") => {
             ret = 0;
             note = "no audio output backend".into();
         }
-        ("winmm.dll", "waveOutOpen") => {
+        (_, "winmm.dll", "waveOutOpen") => {
             if args[0] != 0 {
                 mem.write_u32(args[0], 0).map_err(|e| e.to_string())?;
             }
@@ -2799,6 +2736,7 @@ pub fn dispatch(
             note = "wave output backend unavailable".into();
         }
         (
+            _,
             "gdi32.dll",
             "AddFontMemResourceEx"
             | "RemoveFontMemResourceEx"
