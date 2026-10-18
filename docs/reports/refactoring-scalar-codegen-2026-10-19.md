@@ -21,3 +21,5 @@
 目前所有正确性检查通过，性能仍待复核。初筛、完整的 code-alias/bit 扩样和未完成的 SSE 分别保留，bit 的大幅漂移数据不用于验收。宿主检查未发现残留编译或 Wire，观察到桌面 renderer、WindowServer 与用户应用活动；不改动这些应用。接下来可补充与当前 runtime 字节无关的下批行为基线，待宿主负载平稳后再继续性能准入。
 
 计时退出后，菜单四项独立基线通过，确认 RedrawWindow 的真实 gateway 遮盖；root/src/crates、Cargo 输入及 executable SHA 与本冻结仍相同，证据 `r2-menu-baseline-runtime-identity.json`。这四项新测试不包含在原 395 文件来源核对中。随后串行执行 Alice 新旧各一次 200M 功能 smoke，均到相同预算、hidden 314×211、Draw/Present 0/0；临时二进制软链接退出后删除，复用现有 runtime，未复制或硬链接游戏资源。该 smoke 明确仅作功能检查，不用于宿主漂移期间的性能准入。
+
+再次仅复核 900M bit/IR，三标签三对全部结束且结果校验通过，`r2-dialog-recheck-bit-ir` 和独立 metrics 保留。候选 CPU 中位数 −0.420%，但 before/control 同哈希仍从 5.1517 秒漂移到 8.4842 秒，首对 control/before 约 +34%；本轮仍不作为性能准入。计时退出后才编辑菜单新增测试。为继续职责迁移，后续菜单候选将独立冻结，并单独对照本报告冻结；本候选与消息基线之间未解决的性能验收继续保留，累计已验收仍为 595。

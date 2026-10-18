@@ -144,3 +144,38 @@ fn menu_contract_pins_redraw_gateway_shadowing_and_unimplemented_trace() {
         assert!(line.contains("[UNIMPLEMENTED] ; menu/USER32 error 120"));
     }
 }
+
+#[test]
+fn menu_contract_keeps_unavailable_notes_and_stdcall_frames() {
+    let mut v = Vm::new();
+    for (name, slots, menu_note) in [
+        ("DrawMenuBar", 1, true),
+        ("TrackPopupMenu", 7, true),
+        ("TrackPopupMenuEx", 6, true),
+        ("RedrawWindow", 4, true),
+        ("LoadMenuA", 2, false),
+        ("LoadMenuW", 2, false),
+        ("GetSystemMenu", 2, false),
+    ] {
+        v.state.last_error = 0x1234;
+        assert_eq!(v.call("user32.dll", name, &[0xffff_ffff; 7]), 0, "{name}");
+        assert_eq!(v.state.last_error, 120, "{name}");
+        assert_eq!(v.cpu.eip, RET, "{name}");
+        assert_eq!(
+            v.cpu.esp(),
+            wire::loader::STACK_BASE + wire::loader::STACK_SIZE - 256 + 4 + slots * 4,
+            "{name}"
+        );
+        v.log.finish();
+        let trace = std::fs::read_to_string(v.dir.join("api.log")).unwrap();
+        let line = trace
+            .lines()
+            .find(|line| line.starts_with('#') && line.contains(&format!("user32.dll!{name}(")))
+            .unwrap();
+        assert!(line.contains("[UNIMPLEMENTED]"), "{line}");
+        assert_eq!(line.contains("menu/USER32 error 120"), menu_note, "{line}");
+        if !menu_note {
+            assert!(!line.contains(" ; "), "{line}");
+        }
+    }
+}

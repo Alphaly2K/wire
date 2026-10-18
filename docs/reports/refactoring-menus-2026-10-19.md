@@ -9,3 +9,5 @@
 RedrawWindow 存在原始入口差异：API fallback 先由 menu handler 返回 0/error 120，trace 带 `[UNIMPLEMENTED] ; menu/USER32 error 120`，有效 INVALIDATE/VALIDATE flags 也不会更改 update region；直接调用公开 USER facade 则到 paint handler 并更新矩形。测试分别验证两个入口和 trace。后续契约必须显式保留真实 gateway 优先级，修复旧遮盖另作行为提交，不以 typed 迁移代替功能修正。
 
 一项 Win64 基线固定 27 个菜单/跟踪/加载名称在 user32/kernel32/kernelbase 都 absent。证据 `wire-out/refactoring-2026-10-14/r2-menu-baseline-tests.txt`：PE32 3、Win64 1，全部通过；构建后的运行时应与 scalar-isolation 候选保持相同 SHA。未注册下一批菜单契约，没有增加已验收 export 数量。
+
+迁移前追加七个 unavailable 入口的统一行为基线：DrawMenuBar、TrackPopupMenu/Ex、RedrawWindow 保留 menu/USER32 error 120 note，LoadMenuA/W 和 GetSystemMenu 保留空 note；均返回 0、error 120、unimplemented trace，并逐项检查原 stdcall 清栈与返回 EIP。菜单四项 PE32 基线全部通过，日志 `r2-menu-unavailable-baseline.txt`。先固定这些入口差异，再迁移 typed owner。
