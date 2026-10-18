@@ -13,6 +13,8 @@ mod audio;
 mod basic_contract;
 #[path = "win32/bstr_contract.rs"]
 mod bstr_contract;
+#[path = "win32/classes_contract.rs"]
+mod classes_contract;
 #[path = "win32/clocks.rs"]
 mod clocks;
 #[path = "win32/com.rs"]

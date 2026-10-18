@@ -10,6 +10,8 @@ use wire::x64::{
 mod basic_contract;
 #[path = "x64/bstr_contract.rs"]
 mod bstr_contract;
+#[path = "x64/classes_contract.rs"]
+mod classes_contract;
 #[path = "x64/clocks.rs"]
 mod clocks;
 #[path = "x64/com.rs"]

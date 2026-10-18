@@ -331,6 +331,10 @@ def main():
         from perf.fixtures.gdi_profile_gateway import x64
         data, meta = x64(args.work)
         entries.append(('gateway-gdi-profile', data, meta))
+    if args.cases and 'gateway-classes' in args.cases:
+        from perf.fixtures.classes_gateway import x64
+        data, meta = x64(args.work)
+        entries.append(('gateway-classes', data, meta))
     if args.cases and 'gateway-desktop' in args.cases:
         from perf.fixtures.desktop_gateway import x64
         data, meta = x64(args.work)
