@@ -744,7 +744,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("MessageBoxExW", 20),
                 ("SetTimer", 16),
                 ("KillTimer", 8),
-                ("GetSystemMetrics", 4),
                 ("SystemParametersInfoA", 16),
                 ("SystemParametersInfoW", 16),
                 ("GetForegroundWindow", 0),
@@ -851,11 +850,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("ReleaseCapture", 0),
                 ("SetCapture", 4),
                 ("GetCapture", 0),
-                ("MonitorFromWindow", 8),
-                ("GetMonitorInfoA", 8),
-                ("GetMonitorInfoW", 8),
-                ("EnumDisplaySettingsA", 12),
-                ("EnumDisplaySettingsW", 12),
                 ("ChangeDisplaySettingsA", 8),
                 ("ChangeDisplaySettingsW", 8),
                 ("SetWindowsHookExA", 16),
@@ -1131,7 +1125,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetClipboardData", 4),
                 ("IsClipboardFormatAvailable", 4),
                 ("MsgWaitForMultipleObjects", 20),
-                ("EnumDisplaySettingsExW", 16),
                 ("IsWindowEnabled", 4),
                 ("SetPropW", 12),
                 ("GetMenuItemCount", 4),
@@ -1139,7 +1132,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("DialogBoxIndirectParamW", 20),
                 ("CreateIconIndirect", 4),
                 ("EnumChildWindows", 12),
-                ("EnumDisplayMonitors", 16),
                 ("GetClassNameW", 12),
                 ("GetClassNameA", 12),
                 ("GetDialogBaseUnits", 0),
@@ -1150,8 +1142,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("IsDialogMessageW", 8),
                 ("LockWindowUpdate", 4),
                 ("MapDialogRect", 8),
-                ("MonitorFromPoint", 12),
-                ("MonitorFromRect", 8),
                 ("SendDlgItemMessageW", 20),
                 ("SendDlgItemMessageA", 20),
                 ("SetDlgItemInt", 16),
@@ -1857,6 +1847,33 @@ pub fn dispatch(
             )?;
             ret = result.value;
             note = result.note.into();
+        }
+        _ if matches!(
+            binding.typed,
+            Some(crate::win32::catalog::ApiId::Display(_))
+        ) =>
+        {
+            use crate::win32::catalog::{ApiId, DisplayApi};
+            let Some(ApiId::Display(id)) = binding.typed else {
+                unreachable!();
+            };
+            if id == DisplayApi::Monitors {
+                let (outcome, message) = crate::user32::enumerate_monitors(
+                    &args, cpu, mem, api, state, log, sched, max_instr,
+                )?;
+                match outcome {
+                    GuestCallOutcome::Returned(value) => {
+                        ret = value;
+                        note = message;
+                    }
+                    _ => return Ok(()),
+                }
+            } else {
+                let result =
+                    crate::win32::x86::display::call(id, &args, mem, &mut state.last_error)?;
+                ret = result.value;
+                note = result.note;
+            }
         }
         _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Image(_))) => {
             let Some(crate::win32::catalog::ApiId::Image(id)) = binding.typed else {

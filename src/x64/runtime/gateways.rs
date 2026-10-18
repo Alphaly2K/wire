@@ -24,6 +24,7 @@ pub(crate) enum HotImport {
 pub(crate) enum ControlImport {
     None,
     LocaleEnumeration,
+    MonitorEnumeration,
     Module(crate::win32::catalog::ModuleApi),
     Wait(crate::win32::catalog::WaitApi),
     Delay(crate::win32::catalog::DelayApi),
@@ -113,6 +114,7 @@ impl BoundImport {
                     crate::win32::catalog::NlsApi::EnumSystemLocalesEx,
                 ) => None,
                 crate::win32::catalog::ApiId::Module(id) if id.control() => None,
+                crate::win32::catalog::ApiId::Display(crate::win32::catalog::DisplayApi::Monitors) => None,
                 crate::win32::catalog::ApiId::Wait(_) => None,
                 crate::win32::catalog::ApiId::Delay(_) => None,
                 crate::win32::catalog::ApiId::InlineSync(_) => None,
@@ -128,6 +130,7 @@ impl BoundImport {
                 Some(crate::win32::catalog::ApiId::Module(id)) if id.control() => {
                     ControlImport::Module(id)
                 }
+                Some(crate::win32::catalog::ApiId::Display(crate::win32::catalog::DisplayApi::Monitors)) => ControlImport::MonitorEnumeration,
                 Some(crate::win32::catalog::ApiId::Wait(id)) => ControlImport::Wait(id),
                 Some(crate::win32::catalog::ApiId::Delay(id)) => ControlImport::Delay(id),
                 Some(crate::win32::catalog::ApiId::InlineSync(id)) => ControlImport::InlineSync(id),

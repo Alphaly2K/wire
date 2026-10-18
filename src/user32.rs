@@ -328,6 +328,72 @@ impl User32 {
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn enumerate_monitors(
+    a: &crate::api::Args,
+    cpu: &mut Cpu,
+    mem: &mut GuestMem,
+    api: &mut ApiTable,
+    state: &mut ApiState,
+    log: &mut ApiLogger,
+    sched: &mut Sched,
+    max_instr: u64,
+) -> Result<(GuestCallOutcome, String), String> {
+    if a[0] != 0 || a[2] == 0 {
+        state.last_error = if a[0] != 0 { 50 } else { 87 };
+        return Ok((
+            GuestCallOutcome::Returned(0),
+            "unsupported DC or invalid monitor callback".into(),
+        ));
+    }
+    let mut rect = [0i32, 0, 1024, 768];
+    if a[1] != 0 {
+        let mut bytes = [0; 16];
+        mem.read_bytes(a[1], &mut bytes)
+            .map_err(|e| e.to_string())?;
+        let clip: [i32; 4] = std::array::from_fn(|i| {
+            i32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap())
+        });
+        rect = [
+            rect[0].max(clip[0]),
+            rect[1].max(clip[1]),
+            rect[2].min(clip[2]),
+            rect[3].min(clip[3]),
+        ];
+    }
+    if rect[0] >= rect[2] || rect[1] >= rect[3] {
+        return Ok((
+            GuestCallOutcome::Returned(1),
+            "no monitor intersects the clipping rectangle".into(),
+        ));
+    }
+    let p = state
+        .heap
+        .alloc(mem, state.process_heap, 16, false)
+        .map_err(|e| e.to_string())?;
+    mem.write_bytes(
+        p,
+        &rect
+            .into_iter()
+            .flat_map(i32::to_le_bytes)
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|e| e.to_string())?;
+    let result = invoke(
+        cpu,
+        mem,
+        api,
+        state,
+        log,
+        sched,
+        a[2],
+        &[0x40000001, 0, p, a[3]],
+        max_instr,
+    );
+    state.heap.free(state.process_heap, p);
+    result.map(|value| (value, "enumerated the logical 1024x768 monitor".into()))
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch(
     dll: &str,
     name: &str,
@@ -342,66 +408,6 @@ pub fn dispatch(
 ) -> Option<Result<(GuestCallOutcome, String), String>> {
     if dll != "user32.dll" {
         return None;
-    }
-    if name == "EnumDisplayMonitors" {
-        return Some((|| {
-            if a[0] != 0 || a[2] == 0 {
-                state.last_error = if a[0] != 0 { 50 } else { 87 };
-                return Ok((
-                    GuestCallOutcome::Returned(0),
-                    "unsupported DC or invalid monitor callback".into(),
-                ));
-            }
-            let mut rect = [0i32, 0, 1024, 768];
-            if a[1] != 0 {
-                let mut bytes = [0; 16];
-                mem.read_bytes(a[1], &mut bytes)
-                    .map_err(|e| e.to_string())?;
-                let clip: [i32; 4] = std::array::from_fn(|i| {
-                    i32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap())
-                });
-                rect = [
-                    rect[0].max(clip[0]),
-                    rect[1].max(clip[1]),
-                    rect[2].min(clip[2]),
-                    rect[3].min(clip[3]),
-                ];
-            }
-            if rect[0] >= rect[2] || rect[1] >= rect[3] {
-                return Ok((
-                    GuestCallOutcome::Returned(1),
-                    "no monitor intersects the clipping rectangle".into(),
-                ));
-            }
-            let p = state
-                .heap
-                .alloc(mem, state.process_heap, 16, false)
-                .map_err(|e| e.to_string())?;
-            mem.write_bytes(
-                p,
-                &rect
-                    .into_iter()
-                    .flat_map(i32::to_le_bytes)
-                    .collect::<Vec<_>>(),
-            )
-            .map_err(|e| e.to_string())?;
-            let result = invoke(
-                cpu,
-                mem,
-                api,
-                state,
-                log,
-                sched,
-                a[2],
-                &[0x40000001, 0, p, a[3]],
-                max_instr,
-            );
-            state.heap.free(state.process_heap, p);
-            result.map(|value| (value, "enumerated the logical 1024x768 monitor".into()))
-        })());
-    }
-    if let Some((n, note)) = crate::display::dispatch(name, a, mem, state) {
-        return Some(Ok((GuestCallOutcome::Returned(n), note)));
     }
     if matches!(
         name,

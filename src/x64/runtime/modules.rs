@@ -1,7 +1,5 @@
 //! Queries describe loaded guest images and the logical built-in service providers.
-use super::{
-    devices, display, dxgi, kernel_export, registry, sockets, sspi, unwind, user, winhttp,
-};
+use super::{devices, dxgi, kernel_export, registry, sockets, sspi, unwind, user, winhttp};
 use super::{Memory, Runtime64, WRITE};
 
 /// Module adapters request control; the gateway owns CPU, trace and count commits.
@@ -163,7 +161,6 @@ impl Runtime64 {
                                     .contains(&provider.as_str())
                         )
                         || devices::export(&provider, &function)
-                        || (provider == "user32.dll" && display::arity(&function).is_some())
                         || (provider == "user32.dll" && user::arity(&function).is_some())
                         || (provider == "gdi32.dll" && user::gdi_arity(&function).is_some())
                         || (provider == "dwmapi.dll"

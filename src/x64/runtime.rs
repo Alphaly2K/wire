@@ -232,12 +232,8 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
                     | "InitializeSid"
             ))
         && !(dll.eq_ignore_ascii_case("user32.dll")
-            && (display::arity(name).is_some()
-                || user::arity(name).is_some()
-                || matches!(
-                    name,
-                    "SystemParametersInfoA" | "SystemParametersInfoW" | "GetSystemMetrics"
-                )))
+            && (user::arity(name).is_some()
+                || matches!(name, "SystemParametersInfoA" | "SystemParametersInfoW")))
         && !(dll.eq_ignore_ascii_case("dwmapi.dll")
             && matches!(name, "DwmGetWindowAttribute" | "DwmIsCompositionEnabled"))
         && !(dll.eq_ignore_ascii_case("gdi32.dll") && user::gdi_arity(name).is_some())
@@ -272,7 +268,6 @@ fn kernel_export(name: &str) -> bool {
     if devices::arity(name).is_some()
         || winhttp::arity(name).is_some()
         || user::arity(name).is_some()
-        || display::arity(name).is_some()
         || registry::arity(name).is_some()
         || sockets::is_call(name)
         || sspi::arity(name).is_some()
@@ -299,7 +294,6 @@ fn kernel_export(name: &str) -> bool {
                 | "InitializeSid"
                 | "SystemParametersInfoA"
                 | "SystemParametersInfoW"
-                | "GetSystemMetrics"
         )
     {
         return false;
@@ -317,7 +311,6 @@ fn import_arity(name: &str) -> Option<usize> {
         name if dxgi::arity(name).is_some() => dxgi::arity(name).unwrap(),
         name if user::arity(name).is_some() => user::arity(name).unwrap(),
         name if registry::arity(name).is_some() => registry::arity(name).unwrap(),
-        name if display::arity(name).is_some() => display::arity(name).unwrap(),
         name if sspi::arity(name).is_some() => sspi::arity(name).unwrap(),
         "GetSystemDirectoryA"
         | "GetSystemDirectoryW"
@@ -357,7 +350,6 @@ fn import_arity(name: &str) -> Option<usize> {
         | "Thread32First"
         | "Thread32Next" => 2,
         "SystemParametersInfoA" | "SystemParametersInfoW" => 4,
-        "GetSystemMetrics" => 1,
         "GetLogicalProcessorInformationEx" => 3,
         "BCryptGenRandom" | "BCryptOpenAlgorithmProvider" => 4,
         "BCryptCloseAlgorithmProvider" => 2,
@@ -403,7 +395,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         name if dxgi::arity(name).is_some() => dxgi::dwords(name),
         name if user::arity(name).is_some() => user::dwords(name),
         name if registry::arity(name).is_some() => registry::dwords(name),
-        name if display::arity(name).is_some() => display::dwords(name),
         name if sspi::arity(name).is_some() => sspi::dwords(name),
         "GetSystemDirectoryA"
         | "GetSystemDirectoryW"
@@ -428,7 +419,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "SHGetKnownFolderPath" => &[1],
         "CreateToolhelp32Snapshot" => &[0, 1],
         "SystemParametersInfoA" | "SystemParametersInfoW" => &[0, 1, 3],
-        "GetSystemMetrics" => &[0],
         "GetLogicalProcessorInformationEx" => &[0],
         "BCryptGenRandom" => &[2, 3],
         "BCryptOpenAlgorithmProvider" => &[3],
@@ -459,7 +449,7 @@ fn import_groups(name: &str) -> u32 {
         user::is_callback(name),
         user::arity(name).is_some(),
         registry::arity(name).is_some(),
-        display::arity(name).is_some(),
+        false, // display moved to catalog typed/control IDs; preserve bit positions
         sspi::arity(name).is_some(),
         sockets::is_call(name),
         false, // timers moved to catalog typed IDs; preserve legacy bit positions
@@ -847,6 +837,7 @@ impl Runtime64 {
             ApiId::Keyboard(id) => self.keyboard_call(mem, id, args),
             ApiId::Cursor(id) => self.cursor_call(mem, id, args),
             ApiId::Image(id) => self.image_call(mem, id, args),
+            ApiId::Display(id) => self.display_call(mem, id, args),
             ApiId::RawInput(_) | ApiId::Ime(_) => self.input_profile_call(mem, id, args),
             ApiId::Geometry(id) => {
                 let result = crate::win32::x64::geometry::call(mem, id, args)?;
@@ -1094,7 +1085,7 @@ impl Runtime64 {
             }
             _ if binding.groups & (1 << 10) != 0 => self.user_call(mem, name, args)?,
             _ if binding.groups & (1 << 11) != 0 => self.registry_call(mem, name, args)?,
-            "EnumDisplayMonitors" => {
+            _ if binding.control == gateways::ControlImport::MonitorEnumeration => {
                 let enumeration = self.enumerate_monitors(mem, args, &returned)?;
                 if enumeration.calls.is_empty() {
                     enumeration.result
@@ -1113,7 +1104,6 @@ impl Runtime64 {
                     });
                 }
             }
-            _ if binding.groups & (1 << 12) != 0 => self.display_call(mem, name, args)?,
             _ if binding.groups & (1 << 13) != 0 => self.security_call(mem, name, args)?,
             "GetSystemDirectoryA"
             | "GetSystemDirectoryW"
@@ -1752,22 +1742,6 @@ impl Runtime64 {
                     }
                 }
             }
-            "GetSystemMetrics" => match args[0] as u32 {
-                0 | 16 | 61 | 78 => 1024,
-                1 | 17 | 62 | 79 => 768,
-                2 | 3 | 9 | 10 | 20 | 21 => 17,
-                4 => 23,
-                5..=8 => 1,
-                11..=14 => 32,
-                15 => 19,
-                28..=31 => 112,
-                32 | 33 => 4,
-                36 | 37 | 48 | 49 => 16,
-                43 => 3,
-                45 | 46 | 68 | 80 => 1,
-                83 => 2,
-                _ => 0,
-            },
             _ if matches!(binding.control, gateways::ControlImport::Thread(_)) => {
                 let gateways::ControlImport::Thread(id) = binding.control else {
                     unreachable!();

@@ -10,6 +10,7 @@ mod context;
 mod critical_sections;
 mod cursor;
 mod delays;
+mod display;
 mod files;
 mod geometry;
 mod guid;
@@ -51,6 +52,7 @@ pub use context::{ContextApi, CONTEXT_CONTRACTS};
 pub use critical_sections::{CriticalSectionApi, CRITICAL_SECTION_CONTRACTS};
 pub use cursor::{CursorApi, CURSOR_CONTRACTS};
 pub use delays::{DelayApi, DELAY_CONTRACTS};
+pub use display::{DisplayApi, DISPLAY_CONTRACTS};
 pub use files::{FileApi, FILE_CONTRACTS};
 pub use geometry::{GeometryApi, GEOMETRY_CONTRACTS};
 pub use guid::{GuidApi, GUID_CONTRACTS};
@@ -158,6 +160,7 @@ pub enum ApiId {
     Geometry(GeometryApi),
     Cursor(CursorApi),
     Image(ImageApi),
+    Display(DisplayApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -337,6 +340,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(GEOMETRY_CONTRACTS.iter())
         .chain(CURSOR_CONTRACTS.iter())
         .chain(IMAGE_CONTRACTS.iter())
+        .chain(DISPLAY_CONTRACTS.iter())
 }
 
 #[cfg(test)]

@@ -1,60 +1,9 @@
-//! One virtual 1024x768/32-bit/60-Hz desktop; Win64 handles and checked outputs.
-//! This describes the guest display profile, not a native GPU or swap chain.
+//! Virtual desktop queries and explicit process-owned monitor callbacks.
 use super::{Cpu64, Memory, Runtime64, READ, WRITE};
+pub(in crate::x64::runtime) use crate::win32::user::display::{DEVICE, HEIGHT, REFRESH_HZ, WIDTH};
+use crate::win32::x64::geometry::read_rect as rect;
+use crate::win32::{catalog::DisplayApi, user::display as profile};
 pub(in crate::x64::runtime) const MONITOR: u64 = super::TEB + 0x600008;
-pub(in crate::x64::runtime) const DEVICE: &str = "\\\\.\\DISPLAY1";
-pub(in crate::x64::runtime) const WIDTH: u32 = 1024;
-pub(in crate::x64::runtime) const HEIGHT: u32 = 768;
-pub(in crate::x64::runtime) const REFRESH_HZ: u32 = 60;
-pub(super) fn arity(name: &str) -> Option<usize> {
-    Some(match name {
-        "EnumDisplayDevicesA"
-        | "EnumDisplayDevicesW"
-        | "EnumDisplaySettingsExA"
-        | "EnumDisplaySettingsExW"
-        | "EnumDisplayMonitors" => 4,
-        "EnumDisplaySettingsA" | "EnumDisplaySettingsW" => 3,
-        "MonitorFromPoint" | "MonitorFromRect" | "MonitorFromWindow" | "GetMonitorInfoA"
-        | "GetMonitorInfoW" => 2,
-        "GetDisplayConfigBufferSizes" => 3,
-        "QueryDisplayConfig" => 6,
-        "DisplayConfigGetDeviceInfo" => 1,
-        _ => return None,
-    })
-}
-pub(super) fn dwords(name: &str) -> &'static [usize] {
-    match name {
-        "EnumDisplayDevicesA"
-        | "EnumDisplayDevicesW"
-        | "EnumDisplaySettingsExA"
-        | "EnumDisplaySettingsExW" => &[1, 3],
-        "EnumDisplaySettingsA"
-        | "EnumDisplaySettingsW"
-        | "MonitorFromPoint"
-        | "MonitorFromRect"
-        | "MonitorFromWindow" => &[1],
-        "GetDisplayConfigBufferSizes" | "QueryDisplayConfig" => &[0],
-        _ => &[],
-    }
-}
-fn text(bytes: &mut [u8], at: usize, value: &str, wide: bool) {
-    let data = if wide {
-        value
-            .encode_utf16()
-            .flat_map(u16::to_le_bytes)
-            .collect::<Vec<_>>()
-    } else {
-        value.as_bytes().to_vec()
-    };
-    bytes[at..at + data.len()].copy_from_slice(&data);
-}
-fn rect(mem: &Memory, pointer: u64) -> Result<[i32; 4], String> {
-    let mut bytes = [0; 16];
-    mem.read(pointer, &mut bytes)?;
-    Ok(std::array::from_fn(|i| {
-        i32::from_le_bytes(bytes[4 * i..4 * i + 4].try_into().unwrap())
-    }))
-}
 pub(super) struct Enumeration {
     pub result: u64,
     pub calls: Vec<(u64, [u64; 4])>,
@@ -64,17 +13,17 @@ impl Runtime64 {
     pub(super) fn display_call(
         &self,
         mem: &mut Memory,
-        name: &str,
+        id: DisplayApi,
         args: &[u64],
     ) -> Result<u64, String> {
-        let wide = name.ends_with('W');
-        if name.starts_with("EnumDisplay") {
+        let wide = id.wide();
+        if id.devices() || id.settings() {
             let device = if args[0] == 0 {
                 String::new()
             } else {
                 Self::path_name(mem, args[0], wide)?
             };
-            if name.starts_with("EnumDisplayDevices") {
+            if id.devices() {
                 let size = if wide { 840 } else { 424 };
                 if mem.read_int(args[2], 4)? != size || args[3] & !1 != 0 {
                     self.set_error(mem, 87)?;
@@ -84,32 +33,15 @@ impl Runtime64 {
                     return Ok(0);
                 }
                 let adapter = device.is_empty();
-                let mut bytes = vec![0; size as usize];
-                bytes[..4].copy_from_slice(&(size as u32).to_le_bytes());
-                text(
-                    &mut bytes,
-                    4,
-                    &if adapter {
-                        DEVICE.to_owned()
-                    } else {
-                        format!("{DEVICE}\\Monitor0")
-                    },
+                let bytes = profile::device(
                     wide,
-                );
-                text(
-                    &mut bytes,
-                    if wide { 68 } else { 36 },
+                    adapter,
                     if adapter {
                         "Wire virtual display"
                     } else {
                         "Wire virtual monitor"
                     },
-                    wide,
                 );
-                let flags = if wide { 324 } else { 164 };
-                bytes[flags..flags + 4]
-                    .copy_from_slice(&(if adapter { 5u32 } else { 3 }).to_le_bytes());
-                // No Windows registry/PnP key or physical device ID is claimed.
                 mem.write(args[2], &bytes)?;
                 return Ok(1);
             }
@@ -118,7 +50,7 @@ impl Runtime64 {
             {
                 return Ok(0);
             }
-            if name.contains("Ex") && args[3] & !3 != 0 {
+            if id.extended() && args[3] & !3 != 0 {
                 self.set_error(mem, 87)?;
                 return Ok(0);
             }
@@ -131,55 +63,33 @@ impl Runtime64 {
                 self.set_error(mem, 87)?;
                 return Ok(0);
             }
-            let mut bytes = vec![0; size];
-            text(&mut bytes, 0, DEVICE, wide);
-            let offset = size_offset as usize;
-            bytes[offset - 4..offset - 2].copy_from_slice(&0x401u16.to_le_bytes());
-            bytes[offset..offset + 2].copy_from_slice(&(size as u16).to_le_bytes());
-            bytes[offset + 4..offset + 8].copy_from_slice(&0x005c0020u32.to_le_bytes());
-            let bits = if wide { 168 } else { 104 };
-            for (i, value) in [32u32, WIDTH, HEIGHT, 0, REFRESH_HZ]
-                .into_iter()
-                .enumerate()
-            {
-                bytes[bits + 4 * i..bits + 4 * i + 4].copy_from_slice(&value.to_le_bytes());
-            }
-            mem.write(args[2], &bytes)?;
+            mem.write(args[2], &profile::mode(wide, size))?;
             return Ok(1);
         }
-        match name {
-            "GetMonitorInfoA" | "GetMonitorInfoW" => {
+        match id {
+            DisplayApi::Metrics => Ok(profile::metric(args[0] as u32) as u64),
+            DisplayApi::InfoA | DisplayApi::InfoW => {
                 let size = mem.read_int(args[1], 4)? as usize;
                 if args[0] != MONITOR || (size != 40 && size != if wide { 104 } else { 72 }) {
                     self.set_error(mem, 87)?;
                     return Ok(0);
                 }
-                let mut bytes = vec![0; size];
-                for (i, value) in [size as u32, 0, 0, WIDTH, HEIGHT, 0, 0, WIDTH, HEIGHT, 1]
-                    .into_iter()
-                    .enumerate()
-                {
-                    bytes[4 * i..4 * i + 4].copy_from_slice(&value.to_le_bytes());
-                }
-                if size != 40 {
-                    text(&mut bytes, 40, DEVICE, wide);
-                }
-                mem.write(args[1], &bytes)?;
+                mem.write(args[1], &profile::monitor(wide, size))?;
                 Ok(1)
             }
-            "MonitorFromPoint" | "MonitorFromRect" | "MonitorFromWindow" => {
+            DisplayApi::FromPoint | DisplayApi::FromRect | DisplayApi::FromWindow => {
                 if args[1] > 2 {
                     self.set_error(mem, 87)?;
                     return Ok(0);
                 }
-                let intersects = match name {
-                    "MonitorFromPoint" => {
+                let intersects = match id {
+                    DisplayApi::FromPoint => {
                         // POINT is an eight-byte by-value struct in one Win64 register.
                         let x = args[0] as u32 as i32;
                         let y = (args[0] >> 32) as u32 as i32;
                         (0..WIDTH as i32).contains(&x) && (0..HEIGHT as i32).contains(&y)
                     }
-                    "MonitorFromRect" => {
+                    DisplayApi::FromRect => {
                         let r = rect(mem, args[0])?;
                         r[0] < r[2]
                             && r[1] < r[3]
@@ -206,7 +116,7 @@ impl Runtime64 {
             }
             // CCD paths/modes are not provided. These APIs return Win32 status
             // directly; never zero the outputs to pretend there is a valid path.
-            "GetDisplayConfigBufferSizes" | "QueryDisplayConfig" | "DisplayConfigGetDeviceInfo" => {
+            DisplayApi::ConfigSizes | DisplayApi::ConfigQuery | DisplayApi::ConfigDeviceInfo => {
                 Ok(50)
             }
             _ => unreachable!(),

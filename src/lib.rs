@@ -3,7 +3,6 @@ pub mod codepage;
 pub mod cpu;
 mod crt_sort;
 mod d3d9;
-mod display;
 mod dsound;
 pub mod file_api;
 pub mod fs;

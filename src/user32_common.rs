@@ -243,15 +243,9 @@ pub(crate) fn dispatch(
             | "MapWindowPoints"
             | "IsIconic"
             | "IsZoomed"
-            | "GetSystemMetrics"
             | "GetDoubleClickTime"
             | "GetDialogBaseUnits"
             | "EnumChildWindows"
-            | "MonitorFromWindow"
-            | "MonitorFromPoint"
-            | "MonitorFromRect"
-            | "GetMonitorInfoW"
-            | "GetMonitorInfoA"
             | "DialogBoxIndirectParamW"
             | "CreateDialogIndirectParamW"
             | "MapDialogRect"
@@ -627,56 +621,6 @@ pub(crate) fn dispatch(
             }
             "GetDoubleClickTime" => value(500, "input timing profile"),
             "GetDialogBaseUnits" => value(8 | (16 << 16), "initial fixed dialog font units"),
-            "GetSystemMetrics" => {
-                let n = match a[0] {
-                    0 | 16 | 61 | 78 => 1024,
-                    1 | 17 | 62 | 79 => 768,
-                    2 | 3 | 9 | 10 | 20 | 21 => 17,
-                    4 => 23,
-                    5..=8 => 1,
-                    11..=14 => 32,
-                    15 => 19,
-                    28..=31 => 112,
-                    32 | 33 => 4,
-                    36 | 37 | 48 | 49 => 16,
-                    43 => 3,
-                    45 | 46 | 68 | 80 => 1,
-                    83 => 2,
-                    _ => 0,
-                };
-                value(n, "logical 1024x768 desktop / 96 DPI profile")
-            }
-            "MonitorFromWindow" | "MonitorFromPoint" | "MonitorFromRect" => {
-                value(0x40000001, "single logical monitor")
-            }
-            "GetMonitorInfoA" | "GetMonitorInfoW" => {
-                let size = mem.read_u32(a[1]).map_err(|e| e.to_string())?;
-                let wide = name.ends_with('W');
-                if a[0] != 0x40000001 || (size != 40 && size != if wide { 104 } else { 72 }) {
-                    return failure(state, 87);
-                }
-                let mut bytes = [size, 0, 0, 1024, 768, 0, 0, 1024, 768, 1]
-                    .into_iter()
-                    .flat_map(u32::to_le_bytes)
-                    .collect::<Vec<_>>();
-                if size != 40 {
-                    if wide {
-                        bytes.extend(
-                            "\\\\.\\DISPLAY1"
-                                .encode_utf16()
-                                .chain(std::iter::repeat(0))
-                                .take(32)
-                                .flat_map(u16::to_le_bytes),
-                        );
-                    } else {
-                        let mut text = [0; 32];
-                        text[..12].copy_from_slice(b"\\\\.\\DISPLAY1");
-                        bytes.extend(text);
-                    }
-                }
-                mem.write_bytes(a[1], &bytes).map_err(|e| e.to_string())?;
-                value(1, "logical monitor bounds")
-            }
             "EnumChildWindows" => {
                 let mut seen = BTreeSet::new();
                 let mut pending = vec![a[0]];
