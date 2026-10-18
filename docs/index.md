@@ -56,8 +56,10 @@
 - [GDI DC 与设备能力](architecture/gdi-dc.md)及[完整验收](reports/refactoring-gdi-dc-2026-10-18.md)：七项契约、真实 backing 和私有逻辑 DC owner；40 个性能协议及游戏前缀通过。
 - [桌面设置与 DWM](architecture/desktop.md)及[完整验收](reports/refactoring-desktop-2026-10-18.md)：六项契约、进程设置 owner；43 个性能协议、bit-test 补证及游戏前缀通过。
 - [窗口类与元数据](architecture/classes.md)及[完整验收](reports/refactoring-classes-2026-10-18.md)：十七项契约、私有 Win64 类 owner 与 PE32 兼容 facade；46 个性能协议、两组 control 补证及游戏前缀通过。
-- [USER 名称与属性候选](reports/refactoring-user-objects-2026-10-18.md)：十四项首版正确性通过，性能对照触发拒绝门槛；布局候选撤回，trace 构造修订筛选中，未计入累计数。
-- [窗口查询边界](architecture/window-queries.md)及[候选记录](reports/refactoring-window-queries-2026-10-18.md)：二十五项范围、六项旧行为回归；已接入，集成验收中。
+- [USER 名称与属性](reports/refactoring-user-objects-2026-10-18.md)：十四项首版/布局候选拒绝，trace 与窗口查询最终修订一起验收，历史轮次保留。
+- [窗口查询边界](architecture/window-queries.md)及[验收记录](reports/refactoring-window-queries-2026-10-18.md)：二十五项范围、六项旧行为回归；与名称/属性共 39 项计入累计。
+- [访存调用边界调查与最终验收](reports/refactoring-memory-call-boundary-2026-10-18.md)：修正实际 CLI caller 审计，消除 checked_access 内联增加的栈操作；55 条性能协议及游戏前缀通过，累计 540 项。
+- [窗口文本与输入所有权](architecture/window-state.md)及[候选记录](reports/refactoring-window-state-2026-10-18.md)：十六项已接入，完整正确性通过，性能与游戏验收中。
 - [固定执行路径的测量协议](reports/refactoring-fixed-executable-slot-2026-10-18.md)：调查同哈希副本的数倍耗时差异，新增显式固定 executable/cwd 模式、逐轮 SHA 检查与临时链接回收。
 - [release 编译单元候选](reports/refactoring-release-codegen-2026-10-15.md)：独立构建配置、同二进制对照及长样本调查。
 - [网关边界候选](reports/refactoring-gateway-boundary-2026-10-15.md)、[页缓存内联候选](reports/refactoring-page-cache-inline-2026-10-15.md)、[helper 布局候选](reports/refactoring-memory-helper-layout-2026-10-15.md)：已撤回实现和保留的测量证据。

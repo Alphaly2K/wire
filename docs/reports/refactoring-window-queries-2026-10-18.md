@@ -1,6 +1,6 @@
 # R2 窗口查询、字段与坐标基线（2026-10-18）
 
-状态：查询路由已接入，六项独立旧行为回归及完整正确性检查通过；与前批名称/属性、trace 修订一起进行集成性能验收，尚未计入已验收累计数。
+状态：2026-10-18 与前批名称/属性、trace 和访存调用边界修订一起验收。最终冻结为 `r2-user-queries-memory-boundary-wire/wire`；完整检查、55 条性能协议及三对游戏前缀全部通过，累计 540 exports，详见[最终证据](refactoring-memory-call-boundary-2026-10-18.md)。下文保留先前集成过程与失败调查。
 
 拟覆盖二十五项：IsWindow/IsWindowVisible/IsWindowUnicode、GetParent、GetWindowThreadProcessId、GetClientRect/GetWindowRect、Get/SetWindowLongA/W、Get/SetWindowLongPtrA/W、FindWindowA/W、GetDesktopWindow、GetWindowPlacement、IsIconic/IsZoomed/IsWindowEnabled、ClientToScreen/ScreenToClient/MapWindowPoints。PE32 四项 Ptr 保留未知 ABI 与零清栈，placement 保留明确 error120 与旧 trace；Win64 六项原缺失查询继续 absent，不添加功能。
 

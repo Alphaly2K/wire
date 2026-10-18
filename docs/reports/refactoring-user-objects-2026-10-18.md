@@ -34,4 +34,6 @@ before 为 `r2-classes-wire/wire`，SHA256 `a5625b33fe03942673e5e7838914d6bda5d6
 
 正式 48 条路径矩阵全部结果校验，属性 IR/raw −17.143%/−13.694%；thread-id、GDI profile、rectangle 和 keyboard 出现 +193.579%/+140.224%/+123.683%/+103.720%，该独立冻结仍未验收。两个同哈希副本和重复采样未复现数倍成本；固定 executable 路径与 cwd 的三对诊断差异回到约 2%，见[测量调查](refactoring-fixed-executable-slot-2026-10-18.md)。保留全部旧协议轮次，未执行该冻结的 Alice 验收。
 
+2026-10-18 名称/属性与窗口查询、trace 及 checked operand 调用边界修订一起完成最终验收：55 条 protocol、342 次执行和三对 Alice 前缀全部校验，属性 PE32 IR/raw CPU −14.334%/−12.002%。独立旧候选保持拒绝状态；最终冻结、局部成本与完整证据见[集成验收](refactoring-memory-call-boundary-2026-10-18.md)。本家族十四项计入累计，合计 540 exports。
+
 该冻结包含窗口查询独立测试与未接入的三个草稿文件；核对完成后 live 源码才接入查询路由。后续将以 Classes 为共同 before，对名称/属性、trace 修订和二十五项查询的集成状态执行完整检查、固定路径矩阵与游戏前缀。各家族独立旧行为回归保留；集成候选通过之前累计仍为 501。

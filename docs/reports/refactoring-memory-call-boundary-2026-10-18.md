@@ -10,4 +10,19 @@
 
 修订只给 `owned_noncode_access` 显式 `inline(never)`，保持页界限、generation 和非投机权限/guard 处理。`checked_access` 恢复 65 条指令和 16B frame。完整 release 检查通过，包含六项尚未迁移的窗口文本/焦点基线。新冻结 `r2-user-queries-memory-boundary-wire/wire`：SHA256 `04b46d3234302dfdb5d28b3a277a76f228ef6edbe1de1671269cfccf7c83cbe4`，5,970,696 bytes，较上一集成 +32 bytes。
 
-700M 三方三对早期对照全部校验，修订 after/before CPU +1.168%；原集成作为 old 标签保留。结果见 `r2-user-queries-memory-boundary-early-summary.json`。后续完整检查、固定路径矩阵、长 memory control 和 Alice 前缀尚待完成，当前不计入新增验收数量。
+700M 三方三对早期对照全部校验，修订 after/before CPU +1.168%；原集成作为 old 标签保留。结果见 `r2-user-queries-memory-boundary-early-summary.json`。实现提交 `5983f95`；完整 release 600 / 7 ignored、debug 446、显式 native 7、工具 23 与 fmt/strict Clippy/build 全部通过。377 个 Rust 文件及 target/frozen executable 核对一致，见 `r2-user-queries-memory-boundary-source-verification.json`；后续文本/焦点迁移发生在该核对之后。
+
+最终 51 条初筛全部校验：memory +1.039%，window Win64 −36.818%、PE32 IR/raw −9.898%/−8.069%，properties PE32 IR/raw −14.334%/−12.002%。PE32 integer/raw、SSE/IR、SSE/raw 初筛 CPU 中位数 +5.892%/+4.945%/+6.287%，逐对存在明显离散（SSE/IR +4.945%/+18.714%/+2.441%），未忽略这些轮次。三倍 work、相同 before control 的独立三对补证如下：
+
+| 路径 | work | after/before CPU | control/before CPU | after/control CPU |
+| --- | ---: | ---: | ---: | ---: |
+| AMD64 memory | 2.1B | +0.842% | −0.481% | +1.329% |
+| PE32 integer/raw | 900M | −0.697% | −0.462% | −0.236% |
+| PE32 SSE/IR | 900M | −0.525% | +0.007% | −0.532% |
+| PE32 SSE/raw | 900M | +1.735% | +0.046% | +1.688% |
+
+补证没有三对均超过 5% 的拒绝路径，SSE/raw 局部成本保留；没有跨不同 work 或测量工具版本混算。完整汇总 `r2-user-queries-memory-boundary-final-summary.json` 含 **55 条 protocol、342 次校验执行**，RSS 中位数最多 +336KiB。原矩阵、component、采样、早期筛选与被拒候选全部保留。
+
+Alice 200M 前缀三对全部保持预算出口、隐藏 client 314×211、Draw/Present 0/0。after CPU 2.534515 秒、wall 2.714905 秒、RSS 417,284,096 bytes；相对 before CPU −0.263%、wall −11.735%、RSS −112KiB。wall 包含启动离散，不推断绘制 FPS。证据 `r2-user-queries-memory-boundary-fixed-alice/compare.json`；复用原 runtime，没有复制或链接游戏素材。
+
+2026-10-18 接受此最终冻结，二进制相对 Classes +5,424 bytes，满足两家族预设预算。名称/属性十四项与窗口查询二十五项共 **39 exports** 纳入验收，累计 **540 exports**。随后文本/焦点候选继续独立验收。
