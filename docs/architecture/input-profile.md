@@ -1,6 +1,6 @@
 # Raw input 与 IME 边界
 
-状态：24 项契约已接入候选，验收记录见[本批报告](../reports/refactoring-input-profile-2026-10-18.md)。
+状态：24 项契约已接入并验收，实现提交 `f6f6fbc`，正确性、性能成本与游戏前缀见[本批报告](../reports/refactoring-input-profile-2026-10-18.md)。
 
 | 家族 | export 数 | PE32 | Win64 静态 / 动态 provider |
 | --- | ---: | --- | --- |

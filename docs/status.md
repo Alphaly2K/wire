@@ -1,17 +1,17 @@
 # 当前状态
 
-更新日期：2026-10-18。重构前基线为 `2e78377`；最新已验收运行时为 [键盘](reports/refactoring-keyboard-2026-10-18.md)，实现提交 `386f38a`，该报告记录冻结源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
+更新日期：2026-10-18。重构前基线为 `2e78377`；最新已验收运行时为 [raw input / IME](reports/refactoring-input-profile-2026-10-18.md)，实现提交 `f6f6fbc`，该报告记录冻结源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
 
-本轮完成键盘状态和布局 16 项契约接入，删除重复 ABI/arity/DWORD/provider 与名称分发，纯布局核独立。异步、消息队列和文字状态继续由同一 Keyboard owner 管理；PE32 保留十三项 layout ABI-only，Win64 保留 static-import-only kernel provider 差异。
+本轮完成 raw input / IME 24 项契约接入，删除重复 ABI/arity/DWORD/provider 与名称分发。raw handler 只借 Memory，IME 无 context 策略独立于 Runtime64；PE32 保留 ABI-only，Win64 保留静态与动态 provider 差异、完整 HWND 及错误/输出顺序。
 
-本批完整正确性、28 条性能初筛、四条扩样及游戏前缀已验收，累计 400 项。保留 PE32 integer/IR 扩样 +3.102% 的局部成本，具体机制未确证，详见[键盘验收](reports/refactoring-keyboard-2026-10-18.md)。后续 USER、COM、图形等继续迁移；[raw-input/IME 24 项候选](reports/refactoring-input-profile-2026-10-18.md)已接入，完整 release 542、debug 389、native 7、工具 20 项通过，性能验收进行中，尚不计入累计数。Mono 原生化已撤回，本轮继续排除。
+本批完整正确性、30 条性能初筛、四条扩样及游戏前缀已验收，累计 424 项。保留 FP/IR +2.172%、FP/raw +2.986% 和 Alice CPU +2.813% 的局部成本，SSE 离散与追加双端同哈希复核详见[完整报告](reports/refactoring-input-profile-2026-10-18.md)。后续 USER、COM、图形等继续迁移；矩形/边框的独立基线、fixture 和未接入实现草稿准备中，尚不计入累计数。Mono 原生化已撤回，本轮继续排除。
 
 ## 重构范围
 
 | 阶段 | 已交付 | 剩余范围 |
 | --- | --- | --- |
 | R0/R1 | 冻结输入、原创正式 fixture、领域测试 harness、GUID 唯一契约和双架构适配 | 随后续家族维护独立基线 |
-| R2 | 已验收 400 个 export 的契约；明细见下表 | USER、COM、图形等 legacy 家族 |
+| R2 | 已验收 424 个 export 的契约；明细见下表 | USER、COM、图形等 legacy 家族 |
 | R3 | guest environment、双架构模块状态、Win64 文件、period 请求、SRW、地址等待及 APC 队列、线程标量操作与描述、双架构 apartment/BSTR、Win64 task/HSTRING 成员、PE32 TLS/FLS 私有 owner | PE32 其余资源、线程资源创建/退出及 COM 其余对象；PE32 kernel 大范围抽取曾因性能撤回 |
 | R4/R5 | Process32 编排边界、owned host UI 请求、GDI 与像素状态分离 | 领域分发与资源 owner 随 R2/R3 继续收敛 |
 | R6 | 按用户要求忽略 | 不重建原生 Mono 路径 |
@@ -52,6 +52,7 @@
 | Variant | 4 | [调用与资源边界](architecture/variants.md)及[验收](reports/refactoring-variant-2026-10-18.md) |
 | 基础字符串 / 指针与 MulDiv / 进程查询 | 14 / 5 / 10 | [基础 helper 边界](architecture/basic-helpers.md)及[验收](reports/refactoring-basic-2026-10-18.md) |
 | 键盘状态 / 布局 | 3 / 13 | [键盘边界](architecture/keyboard.md)及[验收](reports/refactoring-keyboard-2026-10-18.md) |
+| raw input / IME | 7 / 17 | [输入能力边界](architecture/input-profile.md)及[验收](reports/refactoring-input-profile-2026-10-18.md) |
 
 ## 当前执行路径与能力
 
@@ -68,9 +69,9 @@
 
 ## 验证与性能
 
-最近已验收的键盘批次冻结：release **537 passed / 7 ignored**，debug Win32/AMD64/FPU **384 passed**，显式 native **7 passed**，工具 **20 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。随后新增的 raw-input/IME 基线和 fixture 草稿不属于上述冻结。
+最近已验收的 raw-input/IME 批次冻结：release **542 passed / 7 ignored**，debug Win32/AMD64/FPU **389 passed**，显式 native **7 passed**，工具 **20 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。随后新增的矩形基线和未接入实现草稿不属于上述冻结。
 
-键盘的 28 条初筛与四条同哈希三顺序扩样，共 32 个 workload protocol 全部结果校验。Win64 新状态/布局网关 CPU +0.954%/−2.034%，PE32 状态 IR 扩样 −7.217%、raw 初筛 −5.475%。保留 integer/IR 扩样 +3.102%（after/control +3.280%），逐对 −8.689%/+4.856%/−4.154%，计数/最终寄存器与 x86 源码保持，具体机制未确证。其它初筛最大回退 +2.652%，RSS 最多 +96KiB，二进制增加 2,928 bytes；Alice 前缀 CPU −3.102%、wall −3.402%，启动终点保持。各批次使用自己的基线，基础 helper AMD64 memory/SSE、GUID 资源 multimedia/IR/VirtualQuery/IR，线程控制 SSE、日历 Local/Global、线程属性 HeapSize、BSTR SSE/raw 等历史成本与离散轮次继续保留在对应报告，未推断游戏 FPS。AMD64 event fixture 的重复导入已独立修正；旧验收保持冻结输入，后续按新哈希配对，详见[工具边界](architecture/validation-tools.md)。
+本批 34 个 workload protocol 全部结果校验。新 raw-input/IME 网关 Win64 CPU +2.440%/−3.012%；PE32 raw input IR/raw −12.408%/−5.732%、IME IR/raw −7.775%/−4.826%，不推导通用加速。保留 FP/IR +2.172%、FP/raw +2.986%，SSE 长样本原 +19.803% 与漂移轮次原样保存，追加双端同哈希复核后六对合并 −0.822%。核心源码、执行计数与主要代码生成调查在案，具体成本机制未确证。初筛 RSS 最多 +336KiB，二进制 +8,336 bytes；Alice CPU/wall +2.813%/+2.631%，启动终点保持。历史各批次成本与离散证据保留在对应报告；AMD64 event 重复导入修正与稳定启动协议见[工具边界](architecture/validation-tools.md)，未推断游戏 FPS。
 
 后续正式比较使用显式 [稳定启动协议](reports/refactoring-launch-protocol-2026-10-16.md)，固定 argv0、参数和 child cwd，并记录 shell SHA。默认工具行为保持；旧协议数据独立保留，汇总不跨协议或不同 work 合并。编译、正式计时、采样与 runtime diagnostics 串行执行。每个结构候选先完成正确性，再按至少三对轮换检查结果、CPU/wall/RSS 与输入哈希；超过门槛先调查，不把失败候选扩大到其它领域。
 
