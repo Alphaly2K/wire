@@ -3,10 +3,53 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from perf.measurement import digest, launch_protocol, paired_order, run_command, stable_command
+from perf.measurement import digest, execution, launch_protocol, paired_order, run_command, stable_command
 
 
 class MeasurementTests(unittest.TestCase):
+    @unittest.skipUnless(Path('/bin/zsh').is_file(), 'stable launch requires zsh')
+    def test_executable_slot_keeps_actual_path_cwd_and_frozen_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            commands, workspaces = [], []
+            for label in ['before', 'different-length-after']:
+                source = root / label / 'frozen'
+                source.parent.mkdir()
+                source.write_text('#!/bin/sh\nprintf "%s" "$0" > marker\npwd > cwd\nexit 7\n')
+                source.chmod(0o755)
+                expected = digest(source)
+                out = root / 'case' / f'pair-{label}'; out.mkdir(parents=True)
+                with execution(source, out, True, True, expected) as (program, cwd):
+                    commands.append((str(program), str(cwd)))
+                    self.assertEqual(digest(program), expected)
+                    result = run_command(stable_command([str(program)]), out / 'report.txt', cwd=cwd)
+                    self.assertEqual(result['exit_code'], 7)
+                    workspaces.append(cwd)
+                self.assertEqual((out / 'workspace/marker').read_text(), str(program))
+                self.assertEqual((out / 'workspace/cwd').read_text().strip(), str(cwd))
+                self.assertFalse((out / 'workspace/wire').exists())
+                self.assertFalse(cwd.exists())
+                self.assertEqual(digest(source), expected)
+                self.assertEqual(source.stat().st_nlink, 1)
+            self.assertEqual(commands[0], commands[1])
+            self.assertEqual(workspaces[0], workspaces[1])
+            self.assertNotEqual(launch_protocol(True, True), launch_protocol(True))
+
+    def test_executable_slot_rejects_hash_mismatch_and_missing_stable_launch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / 'frozen'
+            source.write_bytes(b'original')
+            out = root / 'run'; out.mkdir()
+            with self.assertRaisesRegex(ValueError, 'stable launch'):
+                with execution(source, out, False, True, digest(source)):
+                    self.fail('must reject before entering')
+            with self.assertRaisesRegex(ValueError, 'frozen manifest'):
+                with execution(source, out, True, True, 'bad hash'):
+                    self.fail('must reject before entering')
+            self.assertEqual(source.read_bytes(), b'original')
+            self.assertEqual(source.stat().st_nlink, 1)
+            self.assertFalse((root / 'execution').exists())
+
     @unittest.skipUnless(Path('/bin/zsh').is_file(), 'stable launch requires zsh')
     def test_stable_launch_fixes_real_argv0_and_forwards_literal_arguments(self):
         with tempfile.TemporaryDirectory() as directory:

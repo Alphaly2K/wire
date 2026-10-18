@@ -26,12 +26,14 @@ def main():
     p.add_argument('--pairs',type=int,default=3)
     p.add_argument('--mode',choices=['timing','stats','diagnostics'],default='timing')
     p.add_argument('--stable-launch',action='store_true',help='fix guest argv0 and use each run directory as host cwd')
+    p.add_argument('--fixed-executable-slot',action='store_true',help='also fix executable path/cwd across labels; requires --stable-launch')
     args=p.parse_args();binaries={n:Path(v).resolve(strict=True) for n,v in (a.split('=',1) for a in args.binary)}
+    if args.fixed_executable_slot and not args.stable_launch:p.error('--fixed-executable-slot requires --stable-launch')
     spec=importlib.util.spec_from_file_location('audit_probes',args.audit_probes.resolve(strict=True));audit=importlib.util.module_from_spec(spec);spec.loader.exec_module(audit)
     args.out.mkdir(parents=True,exist_ok=False)
     manifest=dict(binaries={n:dict(path=str(v),sha256=digest(v)) for n,v in binaries.items()},fixtures_sha256=digest(args.audit_probes),script_sha256=digest(Path(__file__)),replay_sha256=digest(Path(__file__).parent/'interpreter_perf.py'),measurement_sha256=digest(Path(__file__).parent/'perf'/'measurement.py'),mode=args.mode,pairs=args.pairs,inputs={})
     results={}
-    manifest['launch']=launch_protocol(args.stable_launch)
+    manifest['launch']=launch_protocol(args.stable_launch,args.fixed_executable_slot)
     for name in args.cases:
         data,expected=bit_fixture(args.work) if name=='bit-test' else audit.fixture(name,args.work)
         exe=args.out/f'{name}.exe';exe.write_bytes(data)
@@ -40,7 +42,7 @@ def main():
         runs=[]
         for pair in range(args.pairs):
             for version in paired_order(binaries, pair):
-                r=replay(binaries[version],exe,expected,args.out/name/f'pair-{pair}-{version}',args.mode,180,stable_launch=args.stable_launch)
+                r=replay(binaries[version],exe,expected,args.out/name/f'pair-{pair}-{version}',args.mode,180,stable_launch=args.stable_launch,fixed_executable=args.fixed_executable_slot,binary_sha256=manifest['binaries'][version]['sha256'])
                 r.update(pair=pair,version=version);runs.append(r)
                 print(f'{name} pair={pair} {version}: wall={r["wall_s"]:.4f} cpu={r["cpu_s"]:.4f} RSS={r["peak_rss_bytes"]}',flush=True)
         results[name]=dict(runs=runs,medians={v:{k:statistics.median(r[k] for r in runs if r['version']==v) for k in ['wall_s','cpu_s','peak_rss_bytes']} for v in binaries})

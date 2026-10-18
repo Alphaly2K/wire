@@ -3,7 +3,7 @@
 import argparse,json,os,re,shutil,statistics,struct,subprocess,sys
 from pathlib import Path
 sys.dont_write_bytecode=True
-from perf.measurement import digest, launch_protocol, paired_order, run_command, stable_command
+from perf.measurement import digest, execution, launch_protocol, paired_order, run_command, stable_command
 
 def pe32(code):
     raw=(len(code)+511)//512*512;b=bytearray(512+raw)
@@ -110,6 +110,9 @@ def nls_conversion_fixture(work):
     return image, dict(eax=(65 + 2 * n) & 0xffffffff, retired=11 * n + 10)
 
 def fixture(name,work):
+    if name=='gateway-window':
+        from perf.fixtures.window_queries_gateway import x86
+        return x86(work,pe32)
     if name=='gateway-properties':
         from perf.fixtures.user_objects_gateway import x86
         return x86(work,pe32)
@@ -257,13 +260,15 @@ def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--binary',action='append',required=True);p.add_argument('--out',type=Path,required=True);p.add_argument('--pairs',type=int,default=3);p.add_argument('--work',type=int,default=30000000);p.add_argument('--cases',nargs='+',default=['sse-register','fp-scalar','bit-test','integer']);p.add_argument('--paths',nargs='+',default=['ir','raw']);p.add_argument('--discard-api-log',action='store_true',help='send API trace writes to the null device, retaining formatting and counters')
     p.add_argument('--qos-clamp',choices=['utility','background','maintenance'],help='optional macOS taskpolicy clamp applied equally to every binary')
     p.add_argument('--stable-launch',action='store_true',help='fix guest argv0/log argument and use each run directory as host cwd')
+    p.add_argument('--fixed-executable-slot',action='store_true',help='also fix executable path/cwd across labels; requires --stable-launch')
     a=p.parse_args()
+    if a.fixed_executable_slot and not a.stable_launch:p.error('--fixed-executable-slot requires --stable-launch')
     if a.qos_clamp and sys.platform != 'darwin':
         p.error('--qos-clamp requires macOS taskpolicy')
     if a.qos_clamp and shutil.which('taskpolicy') is None:
         p.error('taskpolicy is unavailable')
     bins={n:Path(v).resolve(strict=True) for n,v in (s.split('=',1) for s in a.binary)};a.out.mkdir(parents=True,exist_ok=False)
-    launch=launch_protocol(a.stable_launch)
+    launch=launch_protocol(a.stable_launch,a.fixed_executable_slot)
     if a.stable_launch:a.out=a.out.resolve()
     manifest=dict(binaries={n:dict(path=str(v),sha256=digest(v)) for n,v in bins.items()},script_sha256=digest(Path(__file__)),measurement_sha256=digest(Path(__file__).parent/'perf'/'measurement.py'),pairs=a.pairs,api_log='discard' if a.discard_api_log else 'file',qos_clamp=a.qos_clamp,taskpolicy_sha256=digest(Path(shutil.which('taskpolicy'))) if a.qos_clamp else None,inputs={});results={}
     manifest['launch']=launch
@@ -276,14 +281,16 @@ def main():
             for pair in range(a.pairs):
                 for name in paired_order(bins, pair):
                     out=a.out/case/path/f'pair-{pair}-{name}';out.mkdir(parents=True)
-                    if a.discard_api_log:
-                        (out/'logs').mkdir()
-                        (out/'logs/api.log').symlink_to(os.devnull)
-                    cmd=[str(bins[name]),'run',str(exe),'--headless','--max-instr',str(expected['retired']+10),'--log-dir','logs' if a.stable_launch else str(out/'logs')]
-                    if path=='ir':cmd+=['--ir',str(ir)]
-                    if a.stable_launch:cmd=stable_command(cmd)
-                    if a.qos_clamp:cmd=[shutil.which('taskpolicy'),'-c',a.qos_clamp]+cmd
-                    result = run_command(cmd, out/'report.txt', cwd=out if a.stable_launch else None)
+                    with execution(bins[name],out,a.stable_launch,a.fixed_executable_slot,manifest['binaries'][name]['sha256']) as (program,cwd):
+                        if a.discard_api_log:
+                            logs=(cwd or out)/'logs';logs.mkdir()
+                            (logs/'api.log').symlink_to(os.devnull)
+                        cmd=[str(program),'run',str(exe),'--headless','--max-instr',str(expected['retired']+10),'--log-dir','logs' if a.stable_launch else str(out/'logs')]
+                        if path=='ir':cmd+=['--ir',str(ir)]
+                        if a.stable_launch:cmd=stable_command(cmd)
+                        if a.qos_clamp:cmd=[shutil.which('taskpolicy'),'-c',a.qos_clamp]+cmd
+                        result = run_command(cmd,out/'report.txt',cwd=cwd)
+                        if a.fixed_executable_slot:result['executable_slot_sha256']=manifest['binaries'][name]['sha256']
                     text=(out/'report.txt').read_text();regs=re.search(r'final regs: eax=(0x[0-9a-f]+)',text);count=re.search(r'instructions: (\d+)',text)
                     result.update(pair=pair,binary=name,path=path,eax=None if regs is None else int(regs[1],16),retired=None if count is None else int(count[1]))
                     result['validated']=bool('breakpoint' in text and result['eax']==expected['eax'] and result['retired']==expected['retired'])

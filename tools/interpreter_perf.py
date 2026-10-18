@@ -15,7 +15,7 @@ import sys
 
 sys.dont_write_bytecode = True
 from amd64_perf import fixtures, pe64
-from perf.measurement import digest, launch_protocol, paired_order, run_command, stable_command
+from perf.measurement import digest, execution as execution_context, launch_protocol, paired_order, run_command, stable_command
 
 MASK = (1 << 64) - 1
 CONST = 0x1122334455667788
@@ -119,23 +119,25 @@ def nls_conversion_fixture(work):
 
 
 def replay(binary, exe, expected, folder, mode, timeout, cache=None, qos_clamp=None,
-           stable_launch=False):
+           stable_launch=False, fixed_executable=False, binary_sha256=None):
     folder.mkdir(parents=True, exist_ok=True)
     if stable_launch:
         folder, exe = folder.resolve(), exe.resolve()
-    command = [str(binary), 'probe64', str(exe), '--max-instr', str(expected['work'] + 100)]
-    if mode != 'timing':
-        command.append('--cpu-stats' if mode == 'stats' else '--cpu-diagnostics')
-    if expected.get('startup'):
-        command.append('--startup')
-    if cache:
-        command += ['--translation-cache', cache]
-    if stable_launch:
-        command = stable_command(command)
-    if qos_clamp:
-        command = [shutil.which('taskpolicy'), '-c', qos_clamp] + command
-    result = run_command(command, folder / 'report.txt', timeout,
-                         cwd=folder if stable_launch else None)
+    with execution_context(binary, folder, stable_launch, fixed_executable, binary_sha256) as (program, cwd):
+        command = [str(program), 'probe64', str(exe), '--max-instr', str(expected['work'] + 100)]
+        if mode != 'timing':
+            command.append('--cpu-stats' if mode == 'stats' else '--cpu-diagnostics')
+        if expected.get('startup'):
+            command.append('--startup')
+        if cache:
+            command += ['--translation-cache', cache]
+        if stable_launch:
+            command = stable_command(command)
+        if qos_clamp:
+            command = [shutil.which('taskpolicy'), '-c', qos_clamp] + command
+        result = run_command(command, folder / 'report.txt', timeout, cwd=cwd)
+        if fixed_executable:
+            result['executable_slot_sha256'] = binary_sha256
     report = (folder / 'report.txt').read_text()
     returned = re.search(r'entry returned RAX=(0x[0-9a-f]+); retired=(\d+)', report)
     execution = re.search(r'AMD64 execution: retired=(\d+) work=(\d+)', report)
@@ -170,7 +172,11 @@ def main():
                    help='optional macOS taskpolicy clamp applied equally to every binary')
     p.add_argument('--stable-launch', action='store_true',
                    help='fix guest argv0 and use each run directory as host cwd')
+    p.add_argument('--fixed-executable-slot', action='store_true',
+                   help='also fix the executable path and cwd across labels; requires --stable-launch')
     args = p.parse_args()
+    if args.fixed_executable_slot and not args.stable_launch:
+        p.error('--fixed-executable-slot requires --stable-launch')
     if args.work < 1 or args.pairs < 1 or args.timeout <= 0:
         p.error('work, pairs and timeout must be positive')
     if args.qos_clamp and sys.platform != 'darwin':
@@ -331,6 +337,10 @@ def main():
         from perf.fixtures.gdi_profile_gateway import x64
         data, meta = x64(args.work)
         entries.append(('gateway-gdi-profile', data, meta))
+    if args.cases and 'gateway-window' in args.cases:
+        from perf.fixtures.window_queries_gateway import x64
+        data, meta = x64(args.work)
+        entries.append(('gateway-window', data, meta))
     if args.cases and 'gateway-classes' in args.cases:
         from perf.fixtures.classes_gateway import x64
         data, meta = x64(args.work)
@@ -389,7 +399,7 @@ def main():
                     taskpolicy_sha256=digest(Path(shutil.which('taskpolicy'))) if args.qos_clamp else None,
                     inputs={})
     results = {}
-    manifest['launch'] = launch_protocol(args.stable_launch)
+    manifest['launch'] = launch_protocol(args.stable_launch, args.fixed_executable_slot)
     for name, data, expected in entries:
         exe = args.out / f'{name}.exe'; exe.write_bytes(data)
         manifest['inputs'][name] = dict(sha256=digest(exe), **expected)
@@ -400,7 +410,8 @@ def main():
             for version in order:
                 r = replay(binaries[version], exe, expected,
                            args.out / name / f'pair-{pair}-{version}', args.mode, args.timeout,
-                           caches.get(version), args.qos_clamp, args.stable_launch)
+                           caches.get(version), args.qos_clamp, args.stable_launch,
+                           args.fixed_executable_slot, manifest['binaries'][version]['sha256'])
                 if runs and (r['rax'], r['retired'], r['work']) != (
                         runs[0]['rax'], runs[0]['retired'], runs[0]['work']):
                     raise RuntimeError(f'guest state differs: {name} {version}')

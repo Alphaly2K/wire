@@ -55,6 +55,10 @@ def summarize(directories, before='before', after='after'):
                         or ('binary' in run and 'version' in run
                             and run['binary'] != run['version'])):
                     raise ValueError(f'invalid/unvalidated run: {source}/{case}')
+                if (isinstance(manifest.get('launch'), dict)
+                        and manifest['launch'].get('mode') == 'fixed-executable-slot-v1'
+                        and run.get('executable_slot_sha256') != manifest['binaries'][label]['sha256']):
+                    raise ValueError(f'executable slot hash mismatch: {source}/{case}')
                 if any(not isinstance(run.get(metric), (int, float))
                        or not math.isfinite(run[metric]) or run[metric] <= 0
                        for metric in METRICS):

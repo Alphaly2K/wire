@@ -33,6 +33,8 @@ PE32 headless 整数 fixture 的同二进制 700M 对照曾出现 2.31–7.28s �
 
 新增模式源于同一机器码哈希副本在旧协议中出现约 2.3s/7.1s 的重复差异；固定 argv/log 参数后，在同一 utility QoS 中两副本接近。启动参数与其引发的分配布局是调查线索，尚未证明具体 allocator/cache 因果关系。使用该模式需重新测量，不能将旧协议的离散样本静默移除或混入新协议。manifest 保存 launch 模式、argv0、cwd/log 策略与 shell hash；离线汇总按完整 launch 字段分组。调查、工具测试与跨架构预检见 [记录](../reports/refactoring-launch-protocol-2026-10-16.md)。
 
+2026-10-18：增加可选 `--fixed-executable-slot`，要求显式 stable launch。每个 case/path 的不同标签轮次使用同一 `execution/wire` 和 cwd，启动前核对冻结程序 SHA；只临时硬链接小型解释器，退出后移除链接并把该轮生成文件归档到 `workspace/`。不复制或链接游戏资产，下一轮重建相同路径的空工作目录。manifest 独立记录 `fixed-executable-slot-v1`，run 的 slot SHA 也须通过汇总校验。默认和旧 stable 协议保持；两种协议的结果不合并。动机、失败日志与真实输入预检见[固定路径调查](../reports/refactoring-fixed-executable-slot-2026-10-18.md)。
+
 ```sh
 python3 -B tools/perf/summarize.py wire-out/batch-a wire-out/batch-b --out wire-out/summary.json
 ```

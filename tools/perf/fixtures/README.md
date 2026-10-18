@@ -84,3 +84,5 @@ API count=`2*n`，raw/IR 均用旧 handler 独立预检。默认 case 集合保�
 `input_profile_gateway.py` 提供双架构可选 `gateway-raw-input` 与 `gateway-ime`，分别循环 GetRawInputDeviceList 和 ImmIsIME。前者每轮重写 stack count sentinel 并消费返回值与 count：Win64 无设备写零，PE32 ABI-only 保留 sentinel；后者查询固定 HKL，均不创建资源或依赖宿主输入。核对 checksum、退休数/API 次数及 Win64 work；每个镜像只有一个 import，默认 case 集合保持。
 
 `geometry_gateway.py` 提供双架构可选 `gateway-rectangle`：stack 上的零矩形每轮 OffsetRect(+1, −1)，消费 BOOL 返回值并在末尾读取累计 x 坐标，checksum 为 2n；核对退休数/API 次数及 Win64 work，无逐轮资源增长，不改变默认 case 集合。
+
+`window_queries_gateway.py` 提供双架构可选 `gateway-window`。Win64 注册类并实际执行原创 WNDPROC，创建一个逻辑窗口后反复读取 style，末尾销毁窗口并消费成功返回；六次创建/销毁 callback 均执行四条 guest 指令。n=`max(1, work//7)`，retired=`6*n+63`、work=`7*n+66`、API=`n+3`、RAX=`n*0x10000000+1`。PE32 使用同一桌面窗口，预设 userdata=42 后循环读取，n=`max(1, work//6)`、retired=`6*n+15`、API=`n+2`、EAX=`42*n`（DWORD）。两端均无逐轮资源增长，已用旧窗口实现独立核对 12K 输入；不要求宿主窗口或显示设备。

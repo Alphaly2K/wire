@@ -81,6 +81,21 @@ class SummaryEvidence(unittest.TestCase):
         rows = summarize([legacy, explicit, stable, other_shell])['comparisons']
         self.assertEqual(sorted(r['measurements']['after']['samples'] for r in rows), [1, 1, 2])
 
+    def test_fixed_slot_requires_each_runs_frozen_executable_hash(self):
+        folder = self.evidence('slot', launch=dict(mode='fixed-executable-slot-v1'))
+        with self.assertRaisesRegex(ValueError, 'slot hash mismatch'):
+            summarize([folder])
+        path = folder / 'compare.json'
+        data = json.loads(path.read_text())
+        for run in data['integer']['runs']:
+            run['executable_slot_sha256'] = 'new' if run['version'] == 'after' else 'old'
+        path.write_text(json.dumps(data))
+        self.assertEqual(len(summarize([folder])['comparisons']), 1)
+        data['integer']['runs'][1]['executable_slot_sha256'] = 'old'
+        path.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError, 'slot hash mismatch'):
+            summarize([folder])
+
     def test_pe32_raw_ir_and_amd64_keep_distinct_workloads(self):
         amd64 = self.evidence('amd64')
         pe32 = self.evidence('pe32', version_key='binary')
