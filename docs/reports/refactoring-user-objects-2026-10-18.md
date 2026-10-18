@@ -21,3 +21,15 @@ before 为 `r2-classes-wire/wire`，SHA256 `a5625b33fe03942673e5e7838914d6bda5d6
 首版 48 条路径结果全部校验，属性读取 PE32 IR/raw CPU 中位数 −15.504%/−12.361%。多个未改动 Win64 网关中位数回退超过 3%，八项追加相同 before executable 的 control 三标签、三对对照；线程 ID 查询补证 +5.809%，三对均超过 5%，因此拒绝首版，不用属性改善抵消。GDI profile 补证 +5.982%，其余对照与全部初筛保留于 `r2-user-objects-stable-final-summary.json`、`r2-user-objects-stable-amd64-controls-summary.json`。
 
 静态调查单独在正式计时结束后执行：catalog_call 8208→8215 条指令，dispatch_bound 10749→10745；入口及内联 hot 路径的前部主要指令/栈帧相同，但函数地址改变。证据 `r2-user-objects-gateway-codegen/`；这些检查尚未确定回退的具体机制。后续尝试隔离原有完整分发函数的布局，保留算法和验证顺序；窗口查询草稿仍未接入。
+
+完整 dispatcher 独立 4KiB 对齐节候选 `r2-user-objects-gateway-layout-wire/wire` 体积保持 5,968,232 bytes，三项网关回归通过；700M work、相同 before control 的五项早期筛选中，thread-id +6.133%、GDI profile +5.563%、desktop +5.410%，memory +5.509%、SSE +1.239%。线程查询仍三对均超过 5%，该修订也拒绝，linker 与运行时属性已全部撤回；不继续其完整检查或游戏计时。证据 `r2-user-objects-gateway-layout-early-summary.json`。
+
+正式计时之后串行抓取旧版/首版各 3 秒 sample，实际运行均校验相同线程查询输入，证据 `r2-user-objects-profile/`。进一步反汇编发现 Trace::call_bound 从 142→152 条指令、frame 从 192→224B，首版在旧记录 drop 前构建完整 64B 新记录，随后出现额外 aggregate 复制。新修订提前拥有借用参数，在旧记录淘汰后组装完整记录，保持名称/参数所有权、4096 条容量与输出顺序；独立候选验证中，不预先宣称消除回退。
+
+先调整构造顺序的 `trace-fields` 候选五条 700M control 对照结果：thread-id +2.855%、GDI profile +2.731%、desktop +4.859%、memory +4.611%、SSE +2.940%，全部轮次保留，尚未扩展完整验收。继续将原 0–4 个 trace 参数的动态 copy_from_slice 改为有界值复制，移除小参数路径的通用 memcpy，长参数继续拥有原 Box 存储。现有 0–16 参数、源参数后续修改、格式和容量/顺序测试继续通过。
+
+`trace-scalar` 早期三对含同哈希 control：三条 Win64 网关按 100M work、memory/SSE 按 700M；thread-id/GDI profile/desktop CPU +0.925%/+2.287%/+1.896%，memory/SSE +3.278%/+1.639%。逐对和 control 成本保留于 `r2-user-objects-trace-scalar-early-summary.json`，memory 仍需调查补证，不将其它路径的改善抵消该成本。
+
+最终修订冻结 `r2-user-objects-trace-final-wire/wire`，SHA256 `d1bbdf56abbdd2a83ddc487dd0c0ed3a461d6ef402dc5356cefe56ed7892c0e3`，5,969,080 bytes，较 before +3,808 bytes；与早期 scalar executable 哈希相同。完整 release 594 passed / 7 ignored，debug 440，显式 native 7，工具 20；fmt、strict Clippy 和 build 通过。375 个 Rust 文件（src/tests 367 个）与 target/frozen executable 核对一致，证据 `r2-user-objects-trace-final-source-verification.json`。首次 fmt 检查仅发现 trace 构造排版，原日志保留，最终检查为 `r2-user-objects-trace-final-fmt-v2.txt`。
+
+正式 48 条路径矩阵正在使用最终冻结重新执行。该冻结包含窗口查询独立测试与未接入的三个草稿文件；核对完成后 live 源码才接入查询路由，尚未编译，不属于本批运行时验收或累计数。两批编译与性能仍串行。

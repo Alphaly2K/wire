@@ -13,15 +13,19 @@ enum Arguments {
 }
 impl Arguments {
     fn new(args: &[u64]) -> Self {
-        if args.len() <= 4 {
-            let mut values = [0; 4];
-            values[..args.len()].copy_from_slice(args);
-            Self::Inline {
-                values,
-                len: args.len() as u8,
-            }
-        } else {
-            Self::Extra(args.into())
+        // Scalar gateways have at most four values. Express their bounded
+        // copies directly instead of calling memcpy for 0–32 bytes per API.
+        let values = match args {
+            [] => [0; 4],
+            [a] => [*a, 0, 0, 0],
+            [a, b] => [*a, *b, 0, 0],
+            [a, b, c] => [*a, *b, *c, 0],
+            [a, b, c, d] => [*a, *b, *c, *d],
+            _ => return Self::Extra(args.into()),
+        };
+        Self::Inline {
+            values,
+            len: args.len() as u8,
         }
     }
     fn slice(&self) -> &[u64] {
@@ -86,10 +90,13 @@ impl Trace {
         self.records.pop_front()
     }
     pub fn push_back(&mut self, value: impl Into<TraceRecord>) {
+        self.evict_if_full();
+        self.records.push_back(value.into());
+    }
+    fn evict_if_full(&mut self) {
         if self.records.len() == 4096 {
             self.records.pop_front();
         }
-        self.records.push_back(value.into());
     }
     pub(super) fn call(&mut self, dll: &str, name: &str, args: &[u64], ret: u64) {
         let export = if let Some(export) = self.names.get(dll).and_then(|m| m.get(name)) {
@@ -105,11 +112,12 @@ impl Trace {
         self.call_bound(export, args, ret);
     }
     pub(super) fn call_bound(&mut self, export: Arc<str>, args: &[u64], ret: u64) {
-        self.push_back(TraceRecord(Record::Call {
-            export,
-            args: Arguments::new(args),
-            ret,
-        }));
+        // Own borrowed arguments before eviction, but assemble the complete
+        // record afterwards so it need not survive the old record's drop.
+        let args = Arguments::new(args);
+        self.evict_if_full();
+        self.records
+            .push_back(TraceRecord(Record::Call { export, args, ret }));
     }
 }
 impl<'a> IntoIterator for &'a Trace {
