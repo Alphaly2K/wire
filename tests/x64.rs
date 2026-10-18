@@ -60,6 +60,8 @@ mod message_contract;
 mod modules;
 #[path = "x64/network.rs"]
 mod network;
+#[path = "x64/painting_contract.rs"]
+mod painting_contract;
 #[path = "x64/process.rs"]
 mod process;
 #[path = "x64/sections.rs"]

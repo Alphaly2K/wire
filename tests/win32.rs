@@ -69,6 +69,8 @@ mod memory;
 mod message_contract;
 #[path = "win32/modules.rs"]
 mod modules;
+#[path = "win32/painting_contract.rs"]
+mod painting_contract;
 #[path = "win32/paths.rs"]
 mod paths;
 #[path = "win32/sections.rs"]
