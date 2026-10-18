@@ -32,6 +32,8 @@ mod geometry_contract;
 mod guid_allocation;
 #[path = "x64/handles.rs"]
 mod handles;
+#[path = "x64/images_contract.rs"]
+mod images_contract;
 #[path = "x64/input_profile_contract.rs"]
 mod input_profile_contract;
 #[path = "x64/interlocked.rs"]

@@ -319,6 +319,10 @@ def main():
         from perf.fixtures.cursor_gateway import x64
         data, meta = x64(args.work)
         entries.append(('gateway-cursor', data, meta))
+    if args.cases and 'gateway-images' in args.cases:
+        from perf.fixtures.images_gateway import x64
+        data, meta = x64(args.work)
+        entries.append(('gateway-images', data, meta))
     for name, ime in [('gateway-raw-input', False), ('gateway-ime', True)]:
         if args.cases and name in args.cases:
             from perf.fixtures.input_profile_gateway import x64

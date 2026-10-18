@@ -43,6 +43,8 @@ mod geometry_contract;
 mod guid_allocation;
 #[path = "win32/handles.rs"]
 mod handles;
+#[path = "win32/images_contract.rs"]
+mod images_contract;
 #[path = "win32/input_profile_contract.rs"]
 mod input_profile_contract;
 #[path = "win32/interlocked.rs"]
