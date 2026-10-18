@@ -163,3 +163,46 @@ fn gdi_contract_win64_bad_return_frame_does_not_acquire_a_dc() {
         0x7ffd00650000
     );
 }
+#[test]
+fn gdi_object_and_raster_exports_keep_their_win64_absence() {
+    for dll in ["gdi32.dll", "user32.dll", "kernel32.dll", "kernelbase.dll"] {
+        for name in [
+            "CreateCompatibleBitmap",
+            "CreateDIBSection",
+            "DeleteObject",
+            "SelectObject",
+            "GetObjectA",
+            "GetObjectW",
+            "GetObjectType",
+            "GetCurrentObject",
+            "GetStockObject",
+            "SetPixel",
+            "SetPixelV",
+            "GetPixel",
+            "BitBlt",
+            "SetWindowOrgEx",
+            "SetViewportOrgEx",
+            "GetWindowOrgEx",
+            "GetViewportOrgEx",
+            "SetTextColor",
+            "GetTextColor",
+            "SetBkColor",
+            "GetBkColor",
+            "GdiFlush",
+            "StretchDIBits",
+            "GetDIBits",
+            "CreateFontA",
+            "CreateFontW",
+            "CreateFontIndirectA",
+            "CreateFontIndirectW",
+            "GetTextMetricsW",
+            "SetMapMode",
+            "GetMapMode",
+        ] {
+            assert!(
+                !wire::x64::runtime::import_supported(dll, name),
+                "{dll}!{name}"
+            );
+        }
+    }
+}
