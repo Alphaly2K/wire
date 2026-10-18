@@ -1,17 +1,17 @@
 # 当前状态
 
-更新日期：2026-10-19。重构前基线为 `2e78377`；最新已验收运行时为[窗口生命周期与过程控制](reports/refactoring-window-control-2026-10-18.md)，实现 `b3ccab4`，该报告记录冻结源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
+更新日期：2026-10-19。重构前基线为 `2e78377`；最新已验收运行时为[消息队列与计时器](reports/refactoring-messages-2026-10-18.md)，实现 `c07b983`，该报告记录冻结源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
 
-本轮追加验收窗口创建、销毁、过程转发、显示/更新、位置和同步消息十七项，统一契约与 typed 控制。保留 PE32 的阻塞/非局部转移、状态提交及通知顺序，以及 Win64 callback/resume、UpdateWindow scalar 与四项 absent 的差异。
+本轮追加验收消息队列、计时器、DispatchMessage 与消息元数据等 22 项，统一契约与 typed 控制。保留 PE32 的阻塞/非局部转移、队列变更的部分提交，以及 Win64 callback/resume、DWORD 与指针宽度和 absent 的差异。
 
-完整正确性、69 条性能协议、450 次执行及三对游戏前缀通过，累计 **573 项**。真实 SendMessage/WNDPROC 网关 Win64/PE32 IR/raw CPU −0.828%/−1.387%/−7.536%；SSE/raw 相对 control +3.139% 局部成本和 GDI/IR 时间漂移保留，详见本批报告。失败候选与[固定 executable/cwd 协议调查](reports/refactoring-fixed-executable-slot-2026-10-18.md)继续可查。消息队列、计时器和 DispatchMessage 等 22 项迁移草稿已接入，独立旧行为基线与原创 post/get 基准通过，正在编译验证，见[候选报告](reports/refactoring-messages-2026-10-18.md)。其余 USER、COM、图形继续迁移。Mono 原生化已撤回，本轮继续排除。
+完整正确性、38 条性能协议、237 次执行及三对游戏前缀通过，累计 **595 项**。真实 post/get 网关 Win64/PE32 IR/raw CPU −1.417%/−10.391%/−1.827%；SSE/IR 初筛回退和同哈希 control 漂移全部保留，长样本未出现持续回退，详见本批报告。失败候选与[固定 executable/cwd 协议调查](reports/refactoring-fixed-executable-slot-2026-10-18.md)继续可查。绘制区域与 paint DC 六项已接入，独立旧行为基线及原创 paint 循环通过，完整检查中，见[候选报告](reports/refactoring-painting-2026-10-19.md)。其余 USER、COM、图形继续迁移。Mono 原生化已撤回，本轮继续排除。
 
 ## 重构范围
 
 | 阶段 | 已交付 | 剩余范围 |
 | --- | --- | --- |
 | R0/R1 | 冻结输入、原创正式 fixture、领域测试 harness、GUID 唯一契约和双架构适配 | 随后续家族维护独立基线 |
-| R2 | 已验收 573 个 export 的契约；明细见下表 | USER、COM、图形等 legacy 家族 |
+| R2 | 已验收 595 个 export 的契约；明细见下表 | USER、COM、图形等 legacy 家族 |
 | R3 | guest environment、双架构模块状态、Win64 文件、period 请求、SRW、地址等待及 APC 队列、线程标量操作与描述、双架构 apartment/BSTR、Win64 task/HSTRING/image/desktop 成员、PE32 TLS/FLS 与双架构 cursor、Win64 DC/class 私有 owner | PE32 其余资源、线程资源创建/退出及 COM 其余对象；PE32 kernel 大范围抽取曾因性能撤回 |
 | R4/R5 | Process32 编排边界、owned host UI 请求、GDI 与像素状态分离 | 领域分发与资源 owner 随 R2/R3 继续收敛 |
 | R6 | 按用户要求忽略 | 不重建原生 Mono 路径 |
@@ -64,6 +64,7 @@
 | 窗口查询 / 字段与坐标 | 25 | [查询边界](architecture/window-queries.md)及[集成验收](reports/refactoring-window-queries-2026-10-18.md) |
 | 窗口文本 / 焦点与 capture | 16 | [状态边界](architecture/window-state.md)及[完整验收](reports/refactoring-window-state-2026-10-18.md) |
 | 窗口生命周期 / 过程控制与同步消息 | 17 | [控制边界](architecture/window-control.md)及[完整验收](reports/refactoring-window-control-2026-10-18.md) |
+| 消息队列 / 过程分发 / 计时器与消息元数据 | 22 | [消息边界](architecture/messages.md)及[完整验收](reports/refactoring-messages-2026-10-18.md) |
 
 ## 当前执行路径与能力
 
@@ -80,9 +81,9 @@
 
 ## 验证与性能
 
-最近已验收的冻结：release **603 passed / 7 ignored**，debug Win32/AMD64/FPU **449 passed**，显式 native **7 passed**，工具 **23 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。384 个 Rust 文件和 executable 核对一致；随后消息队列测试及迁移不属于该冻结。失败候选和 codegen 调查保留在[集成报告](reports/refactoring-memory-call-boundary-2026-10-18.md)。
+最近已验收的冻结：release **607 passed / 7 ignored**，debug Win32/AMD64/FPU **453 passed**，显式 native **7 passed**，工具 **23 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。388 个 Rust 文件和 executable 核对一致；随后绘制基线与迁移不属于该冻结。失败候选和 codegen 调查保留在[集成报告](reports/refactoring-memory-call-boundary-2026-10-18.md)。
 
-本批 69 个 workload protocol 全部结果校验，不跨不同 work/工具版本混算。SSE/raw 扩样相对 before +1.544%、相对 control +3.139% 局部成本保留；GDI/IR 的 before 差异同时出现于旧程序 control，原始轮次可查。RSS 中位数最多 +176KiB，二进制减少 12,720 bytes。Alice CPU/wall −0.009%/−0.636%，保持同一预算、隐藏窗口与零 Draw/Present；未推断游戏 FPS。历史各批次成本、预算修订与漂移证据保留在对应报告；稳定启动协议见[工具边界](architecture/validation-tools.md)。
+本批 38 个 workload protocol 全部结果校验，不跨不同 work/工具版本混算。SSE/IR 扩样相对 before −0.246%、同哈希 control/before +4.965%，逐对离散和短样本回退保留。RSS 中位数最多 +272KiB，二进制增加 5,728 bytes，在 +24KiB 预算内。Alice CPU/wall −0.907%/−7.945%，保持同一预算、隐藏窗口与零 Draw/Present；未推断游戏 FPS。历史各批次成本、预算修订与漂移证据保留在对应报告；稳定启动协议见[工具边界](architecture/validation-tools.md)。
 
 后续正式比较使用显式 [稳定启动协议](reports/refactoring-launch-protocol-2026-10-16.md)，固定 argv0、参数和 child cwd，并记录 shell SHA。默认工具行为保持；旧协议数据独立保留，汇总不跨协议或不同 work 合并。编译、正式计时、采样与 runtime diagnostics 串行执行。每个结构候选先完成正确性，再按至少三对轮换检查结果、CPU/wall/RSS 与输入哈希；超过门槛先调查，不把失败候选扩大到其它领域。
 
