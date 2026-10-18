@@ -34,7 +34,7 @@ AMD64 data-alias 初筛 **+3.213%**，PE32 SSE/IR、FP/IR、FP/raw **+3.043%/+5.
 | PE32 FP/IR | +2.172% | +1.055% | +1.105% |
 | PE32 FP/raw | +2.986% | +7.305% | −4.025% |
 
-SSE/IR 首组三种顺序的逐对差异为 **−1.499%/+20.934%/−5.511%**，跨轮中位数 **+19.803%**。第二轮同哈希 before/control CPU **6.284881/7.201823 秒**，第三轮 **9.100170/6.663868 秒**，存在明显漂移。追加三种顺序的复核，两端分别加入同哈希 control/clone，三对 **−0.458%/−0.002%/−1.422%**；这次 after/before 中位数 **−0.352%**，control/before **+0.054%**、clone/after **+1.970%**。原先三对与追加三对一起汇总后为 **−0.822%**，不删除原 +19.803% 或慢轮。证据 `r2-input-profile-stable-expanded-*`、`r2-input-profile-stable-sse-recheck-*`。
+SSE/IR 首组三种顺序的逐对差异为 **−1.499%/+20.934%/−5.511%**，跨轮中位数 **+19.803%**。第二轮同哈希 before/control CPU **6.2849/7.2018 秒**，第三轮 **9.1002/6.6639 秒**，存在明显漂移。追加三种顺序的复核，两端分别加入同哈希 control/clone，三对 **−0.458%/−0.002%/−1.422%**；这次 after/before 中位数 **−0.352%**，control/before **+0.054%**、clone/after **+1.970%**。原先三对与追加三对一起汇总后为 **−0.822%**，不删除原 +19.803% 或慢轮。证据 `r2-input-profile-stable-expanded-*`、`r2-input-profile-stable-sse-recheck-*`。
 
 离线调查核对 SSE/IR、FP/IR、FP/raw 各九次既有报告，执行计数与最终 GPR/EIP/EFLAGS 分组一致。**27 个 CPU/IR/memory 源文件**在两个冻结之间哈希保持。按 Mach-O 地址/大小限定范围反汇编，七节中六节助记符序列保持，`__wire_0f32` 为 **6212→6213** 条，六个被调查的 AMD64 执行/访存 helper 助记符保持；未比较全部操作数。独立 data-alias 3M diagnostics 两端均 IR **3,000,007**、fallback **0**、translation/cold **13**、失效 **0**，最终 RAX/退休数一致。具体漂移与局部成本机制未确证。证据 `r2-input-profile-cost-investigation/summary.json`、`r2-input-profile-data64-diagnostics/counters.json`。
 
