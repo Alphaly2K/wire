@@ -72,6 +72,8 @@ mod thread_control;
 mod thread_properties;
 #[path = "x64/user.rs"]
 mod user;
+#[path = "x64/user_objects_contract.rs"]
+mod user_objects_contract;
 #[path = "x64/variant_contract.rs"]
 mod variant_contract;
 #[path = "x64/winrt_contract.rs"]
