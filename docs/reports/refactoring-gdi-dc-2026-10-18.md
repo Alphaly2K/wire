@@ -1,6 +1,6 @@
 # R2/R3 GDI DC 与设备能力（2026-10-18）
 
-状态：六项独立旧行为基线与有效 DC 查询 fixture 已通过，七项候选已接入，完整验收待执行。不得计入已验收累计数。
+状态：2026-10-18 验收通过。独立基线 `41f561c`，实现 `594a38f`，七项契约与 DC owner 已接入，累计 **478 exports**。
 
 七项范围：GetDC、ReleaseDC、GetWindowDC、CreateCompatibleDC、DeleteDC、GetDeviceCaps、GetPixelFormat。PE32 GetWindowDC/GetPixelFormat 保持 ABI-only/error120，其他五项已有处理；Win64 GetWindowDC absent，其他六项已有处理。
 
@@ -18,4 +18,12 @@ before 为 `r2-display-wire/wire`，SHA256 `f1e4bcb455d1c1eab8fd776c84a9269e79f0
 
 校正后的真实窗口创建/DC/拒绝回滚一项通过（`r2-gdi-dc-window-tests-corrected.txt`）。完整 release **572 passed / 7 ignored**，debug Win32/AMD64/FPU **418 passed**，显式 native **7 passed**，工具 **20 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过，日志 `r2-gdi-dc-{release-tests,debug-tests,native-tests,clippy,final-build,tools,fmt}.txt`。
 
-冻结 `r2-gdi-dc-wire/wire`，SHA256 `b94fa7683a3625b801a703ce34a0abef6b724c3fc010604df35e692c620ebaf9`，**5,960,776 bytes**，较 before **+3,104 bytes**，通过 +24KiB 文件预算。冻结时 **353 个 Rust 文件**（src/tests **345**）与活动源码和快照逐项一致，target/frozen SHA 相同；证据 `r2-gdi-dc-source-verification.json`。40 条三对性能路径正在执行。
+冻结 `r2-gdi-dc-wire/wire`，SHA256 `b94fa7683a3625b801a703ce34a0abef6b724c3fc010604df35e692c620ebaf9`，**5,960,776 bytes**，较 before **+3,104 bytes**，通过 +24KiB 文件预算。冻结时 **353 个 Rust 文件**（src/tests **345**）与活动源码和快照逐项一致，target/frozen SHA 相同；证据 `r2-gdi-dc-source-verification.json`。后续 desktop 草稿不属于此冻结。
+
+## 性能与启动验收
+
+40 个 workload protocol 使用稳定启动与三对轮换，全部结果、退休数、API 次数通过校验。最大 CPU 中位数回退 GUID/IR **+2.985%**，RSS 中位数最多 **+96KiB**，未触发追加回退调查门槛。Win64 原网关中位数成本最高 **+2.455%**，保留局部成本与离散，不宣称所有路径加速。PE32 integer/IR 中位数 −10.349%，逐对 −0.789%/−10.349%/+6.629% 明显漂移；GUID/IR 逐对 +4.813%/+0.709%/+1.185% 与中位数比较亦有差异，全部保留。
+
+新有效 DC 查询循环 CPU Win64 **+0.026%**，PE32 IR/raw **−4.065%/−3.336%**。三对分别为 Win64 +0.394%/+0.036%/−2.659%，PE32 IR −4.308%/−3.450%/−4.712%，raw −2.838%/−11.851%/−3.151%。完整矩阵 `r2-gdi-dc-stable-{amd64-cpu,v2,amd64-gateways,pe32-cpu,pe32-gateways}`，汇总 `r2-gdi-dc-stable-final-summary.json`。
+
+Alice 200M 三对全部校验，CPU/wall 中位数 **−0.169%/−0.123%**，保持预算出口、隐藏 client 314×211、Draw/Present 0。复用原 runtime，未复制或硬链接；证据 `r2-gdi-dc-stable-alice/compare.json`、manifest 与逐轮日志。编译、正式计时、原生游戏验证严格串行，未推断完整游戏 FPS。
