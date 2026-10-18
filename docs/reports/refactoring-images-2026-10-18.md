@@ -1,6 +1,6 @@
 # R2/R3 图标与光标资源（2026-10-18）
 
-状态：五项独立旧行为及完整正确性通过，8 项契约及资源 owner 已接入候选，性能验收进行中，不计入已验收 447 exports。
+状态：2026-10-18 验收通过。实现提交 `9fb4b93`，8 项契约与资源 owner 已接入，累计 **455 exports**。
 
 8 项候选：LoadIconA/W、LoadCursorA/W、LoadImageA/W、DestroyIcon、DestroyCursor。PE32 仅 stock arrow 加载成功，其余六项错误 120；DestroyIcon 的既有 `USER32 error 120` 和 UNIMPLEMENTED trace 单独保持。Win64 八项保留 typed 子集，静态 kernel32/kernelbase/user32、动态仅 user32。
 
@@ -19,3 +19,11 @@ ImageApi 冷绑定统一元数据，原 ABI/arity/DWORD 和执行时名称分发
 五项独立基线在候选上通过，完整 release **560 passed / 7 ignored**，debug Win32/AMD64/FPU **406 passed**，显式 native **7 passed**，工具 **20 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。证据 `r2-images-{release-tests,debug-tests,native-tests,clippy,final-build,tools,fmt}.txt`。
 
 冻结 `r2-images-wire/wire`，SHA256 `eafa6755485153773615025776c0bc5ab67361969f79418a86cf1ebcda1ee225`，**5,949,256 bytes**，较 before **+3,856 bytes**，通过 +24KiB 文件预算。**343 个 Rust 文件**（src/tests **335**）逐项与活动源码和快照一致，target/frozen SHA 相同；证据 `r2-images-source-verification.json`。
+
+## 性能与启动验收
+
+34 个 workload protocol 均使用稳定启动与三对轮换，结果、退休数、API 次数全部校验。AMD64 CPU 七条范围 −1.669%～+1.551%，PE32 CPU 八条 −3.422%～+1.536%。矩阵最大 CPU 中位数回退 **+1.551%**，RSS 中位数最多 **+96KiB**，未触发追加回退调查门槛。原始离散与局部成本保留。
+
+新 shared stock-arrow 网关 CPU Win64 **−1.912%**，PE32 IR/raw **−4.620%/−2.813%**。三对分别为 Win64 −8.505%/−1.172%/−3.139%、PE32 IR −4.151%/−3.950%/−6.226%、raw −2.700%/−3.918%/−3.188%；中位数比较与逐对比较因时间漂移可有差异，均原样保留。仅描述这一查找循环。完整矩阵 `r2-images-stable-{amd64-cpu,v2,amd64-gateways,pe32-cpu,pe32-gateways}`，汇总 `r2-images-stable-final-summary.json`。
+
+Alice 200M 三对全部校验，CPU/wall 中位数 **−0.435%/−0.568%**，维持预算出口、隐藏 client 314×211、Draw/Present 0。游戏资源复用原 runtime，未复制或硬链接。见 `r2-images-stable-alice/compare.json`、manifest 和逐轮日志；未推断游戏 FPS。编译、正式计时、原生游戏验证串行。

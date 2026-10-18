@@ -346,3 +346,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 10 项 export 汇入 CursorApi，删除重复 ABI/arity/DWORD/provider 与名称分发。私有 owner 管理完整句柄、signed 坐标、per-thread saturating count，保持两端 handle/thread key 宽度；Win64 clip、host 鼠标输入与消息元数据共用同一状态。tracking 只借 Memory 和窗口存在性查询，原能力及错误/输出顺序保持。实现 `24d918d`，独立基线 `421938e`；完整 release 555、debug 401、native 7、工具 20 项及 fmt/strict Clippy/build 通过。
 
 31 条性能路径全部校验，最大 CPU 中位数回退 GDI/raw +2.559%，GUID/IR +2.558%；新 ShowCursor 网关 Win64 −3.306%、PE32 IR/raw −0.929%/−1.637%，RSS 最多 +128KiB。Alice CPU/wall −0.082%/−0.181%，保持启动终点。337 个 Rust 文件核对一致，二进制减少 3,680 bytes。2026-10-18 接受，累计 447 个 export，详见[完整验收](refactoring-cursor-2026-10-18.md)。
+
+## R2/R3 图标与光标资源
+
+8 项 export 汇入 ImageApi，删除重复 ABI/arity/DWORD 与名称分发。Images 私有拥有图像、单调句柄与实际 payload，cursor 共用原身份校验；Key 与 icon group/DIB 纯核独立。PE32 DestroyIcon 的明确 unsupported trace 及两端原能力/错误顺序保持。实现 `9fb4b93`，独立基线 `af5d003`；完整 release 560、debug 406、native 7、工具 20 项及 fmt/strict Clippy/build 通过。
+
+34 条性能路径全部校验，最大 CPU 中位数回退 +1.551%；共享加载网关 Win64 −1.912%、PE32 IR/raw −4.620%/−2.813%，RSS 最多 +96KiB。Alice CPU/wall −0.435%/−0.568%，保持启动终点。343 个 Rust 文件核对一致，二进制增加 3,856 bytes。2026-10-18 接受，累计 455 个 export，详见[完整验收](refactoring-images-2026-10-18.md)。

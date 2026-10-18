@@ -1,6 +1,6 @@
 # 图标与光标资源边界
 
-状态：8 项契约和资源 owner 已接入候选，验证见[本批报告](../reports/refactoring-images-2026-10-18.md)。
+状态：8 项契约及资源 owner 已验收，五项独立基线、完整正确性、34 个性能协议及游戏前缀见[本批报告](../reports/refactoring-images-2026-10-18.md)。
 
 `catalog/images.rs` 集中参数宽度、返回约定和 provider。PE32 两项 LoadCursor 保留 stock arrow 子集；DestroyIcon 用明确的 typed 拒绝适配保留错误 120、UNIMPLEMENTED 和 `USER32 error 120` trace；另五项 ABI-only。Win64 八项 typed 保留静态 kernel32/kernelbase/user32 与动态仅 user32 的差异。LoadImage 的 type/尺寸/flags 在 Win64 按 DWORD 截断，instance/name/image handle 保留完整指针宽度。
 
