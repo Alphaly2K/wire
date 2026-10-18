@@ -732,35 +732,9 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("CreateDialogParamA", 20),
                 ("CreateDialogParamW", 20),
                 ("EndDialog", 8),
-                ("GetMenu", 4),
-                ("SetMenu", 8),
-                ("CreateMenu", 0),
-                ("CreatePopupMenu", 0),
-                ("DestroyMenu", 4),
-                ("IsMenu", 4),
-                ("InsertMenuItemA", 16),
-                ("InsertMenuItemW", 16),
-                ("SetMenuItemInfoA", 16),
-                ("SetMenuItemInfoW", 16),
-                ("GetMenuItemInfoA", 16),
-                ("GetMenuItemInfoW", 16),
-                ("RemoveMenu", 12),
-                ("DeleteMenu", 12),
-                ("GetSubMenu", 8),
-                ("GetMenuItemID", 8),
-                ("GetMenuState", 12),
-                ("EnableMenuItem", 12),
-                ("CheckMenuItem", 12),
-                ("DrawMenuBar", 4),
-                ("TrackPopupMenuEx", 24),
-                ("LoadMenuA", 8),
-                ("LoadMenuW", 8),
-                ("TrackPopupMenu", 28),
-                ("GetSystemMenu", 8),
                 ("GetSysColor", 4),
                 ("GetSysColorBrush", 4),
                 ("AttachThreadInput", 12),
-                ("RedrawWindow", 16),
                 ("GetUpdateRect", 12),
                 ("ChangeDisplaySettingsA", 8),
                 ("ChangeDisplaySettingsW", 8),
@@ -1028,7 +1002,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("SetCaretPos", 8),
                 ("GetClipboardData", 4),
                 ("IsClipboardFormatAvailable", 4),
-                ("GetMenuItemCount", 4),
                 ("SetRectEmpty", 4),
                 ("EqualRect", 8),
                 ("SetClipboardData", 8),
@@ -1855,6 +1828,18 @@ pub fn dispatch(
                 }
                 _ => return Ok(()),
             }
+        }
+        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Menu(_))) => {
+            let Some(crate::win32::catalog::ApiId::Menu(id)) = binding.typed else {
+                unreachable!();
+            };
+            (ret, note, implemented) = state.menus.call(
+                id,
+                &args,
+                mem,
+                &mut state.user32.windows,
+                &mut state.last_error,
+            );
         }
         _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Class(_))) => {
             let Some(crate::win32::catalog::ApiId::Class(id)) = binding.typed else {
@@ -2830,12 +2815,6 @@ pub fn dispatch(
         _ => {
             if let Some((v, msg, supported)) =
                 crate::win32::gdi::x86::dispatch(dll, name, &args, mem, state)
-            {
-                ret = v;
-                note = msg;
-                implemented = supported;
-            } else if let Some((v, msg, supported)) =
-                crate::menu::dispatch(dll, name, &args, mem, state)
             {
                 ret = v;
                 note = msg;

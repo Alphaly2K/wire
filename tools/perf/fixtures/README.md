@@ -1,5 +1,10 @@
 # 原创解释器验收输入
 
+`menu_gateway.py` 的 PE32 可选 `gateway-menu` 创建菜单并插入 ID 77，
+每轮 CheckMenuItem 先置位再清零，分别消费原 checked 位 0 和 8；
+插入与末尾销毁均核对 BOOL 返回值，checksum 为 0。n=`max(1, work//13)`，
+retired=`13*n+22`、API=`2*n+3`；无逐轮资源增长，默认 case 集合不变。
+
 `amd64_audit.py` 是 2026-10-09 正式 V2 测量使用的原创输入生成器，
 从 ignored audit 输出目录提取，未改变 guest PE 字节、预期 work、retired 或 checksum。
 相邻 golden JSON 由迁移前生成器固定了 12K 与 100M work 的六组输入哈希。

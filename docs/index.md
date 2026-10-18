@@ -65,7 +65,7 @@
 - [绘制区域与 paint DC](architecture/painting.md)及[拒绝记录](reports/refactoring-painting-2026-10-19.md)：六项迁移因持续浮点性能回退撤回，保留旧行为基线和真实 paint 循环。
 - [对话框控件与枚举](architecture/dialog.md)及[候选记录](reports/refactoring-dialog-2026-10-19.md)：22 项已接入，正确性通过、性能待复核。
 - [精确标量 SSE 边界](architecture/scalar-simd.md)及[编译隔离记录](reports/refactoring-scalar-codegen-2026-10-19.md)：隔离纯运算的生成代码，保留原事务与舍入语义，性能候选待验收。
-- [菜单基线](reports/refactoring-menus-2026-10-19.md)：双输出故障、共享资源与 child ID 生命周期，以及真实 RedrawWindow 网关优先级。
+- [菜单契约与 owner](architecture/menus.md)及[候选记录](reports/refactoring-menus-2026-10-19.md)：27 项已接入；保留双输出故障、共享资源与 child ID 生命周期，以及真实 RedrawWindow 网关优先级。
 - [固定执行路径的测量协议](reports/refactoring-fixed-executable-slot-2026-10-18.md)：调查同哈希副本的数倍耗时差异，新增显式固定 executable/cwd 模式、逐轮 SHA 检查与临时链接回收。
 - [release 编译单元候选](reports/refactoring-release-codegen-2026-10-15.md)：独立构建配置、同二进制对照及长样本调查。
 - [网关边界候选](reports/refactoring-gateway-boundary-2026-10-15.md)、[页缓存内联候选](reports/refactoring-page-cache-inline-2026-10-15.md)、[helper 布局候选](reports/refactoring-memory-helper-layout-2026-10-15.md)：已撤回实现和保留的测量证据。

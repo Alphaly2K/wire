@@ -28,6 +28,7 @@ mod interlocked;
 mod keyboard;
 mod local_memory;
 mod locals;
+mod menu;
 mod messages;
 mod modules;
 mod multimedia;
@@ -79,6 +80,7 @@ pub use interlocked::{InterlockedApi, INTERLOCKED_CONTRACTS};
 pub use keyboard::{KeyboardApi, KEYBOARD_CONTRACTS};
 pub use local_memory::{LocalMemoryApi, LOCAL_MEMORY_CONTRACTS};
 pub use locals::{LocalApi, LOCAL_CONTRACTS};
+pub use menu::{MenuApi, MENU_CONTRACTS};
 pub use messages::{MessageApi, MESSAGE_CONTRACTS};
 pub use modules::{ModuleApi, ModuleQueryApi, MODULE_CONTRACTS, MODULE_QUERY_CONTRACTS};
 pub use multimedia::{MultimediaApi, MULTIMEDIA_CONTRACTS};
@@ -188,6 +190,7 @@ pub enum ApiId {
     WindowState(WindowStateApi),
     Message(MessageApi),
     Dialog(DialogApi),
+    Menu(MenuApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -377,6 +380,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(WINDOW_STATE_CONTRACTS.iter())
         .chain(MESSAGE_CONTRACTS.iter())
         .chain(DIALOG_CONTRACTS.iter())
+        .chain(MENU_CONTRACTS.iter())
 }
 
 #[cfg(test)]
