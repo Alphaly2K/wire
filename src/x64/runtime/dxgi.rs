@@ -1157,8 +1157,12 @@ mod tests {
         m.write_int(DATA + 664, 8, 0x140000000).unwrap();
         m.write_int(DATA + 704, 8, DATA + 512).unwrap();
         assert_ne!(
-            r.user_call(&mut m, "RegisterClassExW", &[DATA + 640])
-                .unwrap(),
+            r.class_call(
+                &mut m,
+                crate::win32::catalog::ClassApi::RegisterExW,
+                &[DATA + 640],
+            )
+            .unwrap(),
             0
         );
         let returned = Cpu64::new(0x140001234, STACK + 128);

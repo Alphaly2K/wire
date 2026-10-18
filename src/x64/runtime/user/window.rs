@@ -242,20 +242,17 @@ impl Runtime64 {
         }
         let (target, parameters, operation, release) = if name.starts_with("Create") {
             let key = Self::resource_key(mem, args[1], wide)?;
+            let key = match &key {
+                super::super::resources::Key::Id(id) => crate::win32::user::classes64::Key::Id(*id),
+                super::super::resources::Key::Name(name) => {
+                    crate::win32::user::classes64::Key::Name(name)
+                }
+            };
             let class = self
                 .user
                 .classes
-                .iter()
-                .find(|(atom, class)| {
-                    (class.instance == args[10] || class.style & 0x4000 != 0)
-                        && match &key {
-                            super::super::resources::Key::Id(id) => **atom as u32 == *id,
-                            super::super::resources::Key::Name(name) => {
-                                class.name.eq_ignore_ascii_case(name)
-                            }
-                        }
-                })
-                .map(|(&atom, class)| (atom, class.clone()));
+                .find(args[10], key, true)
+                .map(|(atom, class)| (atom, class.clone()));
             let Some((atom, class)) = class else {
                 self.set_error(mem, 1407)?;
                 return Ok(WindowResult::Value(0));

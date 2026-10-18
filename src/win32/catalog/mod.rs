@@ -4,6 +4,7 @@ mod address_waits;
 mod basic_strings;
 mod bstr;
 mod calendar;
+mod classes;
 mod clocks;
 mod com;
 mod context;
@@ -48,6 +49,7 @@ pub use basic_strings::{BasicStringApi, BASIC_STRING_CONTRACTS};
 pub(crate) use bstr::symbol as bstr_symbol;
 pub use bstr::{BstrApi, BSTR_CONTRACTS};
 pub use calendar::{CalendarApi, CALENDAR_CONTRACTS};
+pub use classes::{ClassApi, CLASS_CONTRACTS};
 pub use clocks::{ClockApi, CLOCK_CONTRACTS};
 pub use com::{ComApi, COM_CONTRACTS};
 pub use context::{ContextApi, CONTEXT_CONTRACTS};
@@ -167,6 +169,7 @@ pub enum ApiId {
     Display(DisplayApi),
     GdiDc(GdiDcApi),
     Desktop(DesktopApi),
+    Class(ClassApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -349,6 +352,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(DISPLAY_CONTRACTS.iter())
         .chain(GDI_DC_CONTRACTS.iter())
         .chain(DESKTOP_CONTRACTS.iter())
+        .chain(CLASS_CONTRACTS.iter())
 }
 
 #[cfg(test)]

@@ -6,14 +6,9 @@ use crate::thread::{Sched, ThreadState, WaitTarget, Wake};
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
-#[derive(Clone)]
-pub struct WindowClass {
-    pub name: String,
-    pub fields: [u32; 11], // style through hIconSm, excluding cbSize
-    wide: bool,
-    name_ptrs: [u32; 2],
-    menu_ptrs: [u32; 2],
-}
+mod classes;
+pub(crate) use classes::{call as class_call, register_system_class};
+pub use classes::{find_class, WindowClass};
 
 pub struct User32 {
     pub classes: BTreeMap<u16, WindowClass>,
@@ -218,103 +213,6 @@ pub fn host_message(
     );
 }
 
-fn persistent_strings(
-    mem: &mut GuestMem,
-    state: &mut ApiState,
-    text: &str,
-) -> Result<[u32; 2], String> {
-    let ansi = crate::codepage::encode(text, 932)
-        .map_err(|e| format!("class name encoding: {e}"))?
-        .0;
-    let wide: Vec<u16> = text.encode_utf16().collect();
-    let a = state.scratch_alloc(mem, ansi.len() as u32 + 1, 1);
-    let w = state.scratch_alloc(mem, (wide.len() as u32 + 1) * 2, 2);
-    mem.write_bytes(a, &ansi).map_err(|e| e.to_string())?;
-    mem.write_u8(a + ansi.len() as u32, 0)
-        .map_err(|e| e.to_string())?;
-    for (i, value) in wide.into_iter().chain([0]).enumerate() {
-        mem.write_u16(w + i as u32 * 2, value)
-            .map_err(|e| e.to_string())?;
-    }
-    Ok([a, w])
-}
-
-pub fn find_class(
-    mem: &GuestMem,
-    state: &ApiState,
-    id: u32,
-    instance: u32,
-    wide: bool,
-) -> Result<Option<u16>, String> {
-    let name = if id > 0xffff {
-        Some(
-            crate::file_api::read_name(mem, id, wide)
-                .map_err(|e| format!("class name: {e}"))?
-                .to_lowercase(),
-        )
-    } else {
-        None
-    };
-    Ok(state.user32.classes.iter().find_map(|(&atom, class)| {
-        let matches_name = name
-            .as_ref()
-            .map_or(atom as u32 == id, |n| class.name.to_lowercase() == *n);
-        (matches_name && (class.fields[4] == instance || class.fields[0] & 0x4000 != 0))
-            .then_some(atom)
-    }))
-}
-
-/// Minimal system controls with real window/text ownership. Specialized
-/// control messages and rich formatting remain separate backend work.
-pub(crate) fn register_system_class(
-    mem: &mut GuestMem,
-    api: &mut ApiTable,
-    state: &mut ApiState,
-    module: u32,
-    name: &str,
-    wide: bool,
-) -> Result<(), String> {
-    if state
-        .user32
-        .classes
-        .values()
-        .any(|c| c.name.eq_ignore_ascii_case(name))
-    {
-        return Ok(());
-    }
-    if state.user32.next_atom > 0xffff {
-        return Err("system class atom table exhausted".into());
-    }
-    let name_ptrs = persistent_strings(mem, state, name)?;
-    let mut fields = [0; 11];
-    fields[0] = 0x4000; // CS_GLOBALCLASS
-    fields[1] = api.register(
-        "user32.dll",
-        Some(if wide {
-            "DefWindowProcW"
-        } else {
-            "DefWindowProcA"
-        }),
-        None,
-    );
-    fields[3] = 16;
-    fields[4] = module;
-    fields[9] = name_ptrs[usize::from(wide)];
-    let atom = state.user32.next_atom as u16;
-    state.user32.next_atom += 1;
-    state.user32.classes.insert(
-        atom,
-        WindowClass {
-            name: name.into(),
-            fields,
-            wide,
-            name_ptrs,
-            menu_ptrs: [0; 2],
-        },
-    );
-    Ok(())
-}
-
 impl User32 {
     pub(crate) fn keyboard_call(
         &mut self,
@@ -449,91 +347,9 @@ pub fn dispatch(
             ))
         })());
     }
-    if matches!(
-        name,
-        "GetClassLongA" | "GetClassLongW" | "SetClassLongA" | "SetClassLongW" | "GetClassWord"
-    ) {
-        return Some((|| {
-            let Some(w) = state.user32.windows.get(&a[0]) else {
-                state.last_error = 1400;
-                return Ok((GuestCallOutcome::Returned(0), "invalid class HWND".into()));
-            };
-            if a[1] as i32 == -32 && name.starts_with("Get") {
-                return Ok((
-                    GuestCallOutcome::Returned(w.class as u32),
-                    "class atom".into(),
-                ));
-            }
-            let index = match a[1] as i32 {
-                -26 => 0,
-                -24 => 1,
-                -20 => 2,
-                -18 => 3,
-                -16 => 4,
-                -14 => 5,
-                -12 => 6,
-                -10 => 7,
-                -8 => 8,
-                -34 => 10,
-                _ => {
-                    state.last_error = 1413;
-                    return Ok((
-                        GuestCallOutcome::Returned(0),
-                        "unsupported class index".into(),
-                    ));
-                }
-            };
-            let class = state.user32.classes.get_mut(&w.class).unwrap();
-            let old = class.fields[index];
-            if name.starts_with("Set") {
-                if matches!(index, 2 | 3) && a[2] > 4096 {
-                    state.last_error = 87;
-                    return Ok((
-                        GuestCallOutcome::Returned(0),
-                        "class extra storage too large".into(),
-                    ));
-                }
-                if index == 8 {
-                    state.last_error = 120;
-                    return Ok((
-                        GuestCallOutcome::Returned(0),
-                        "class menu-name change unavailable".into(),
-                    ));
-                }
-                class.fields[index] = a[2];
-            }
-            Ok((GuestCallOutcome::Returned(old), "class field state".into()))
-        })());
-    }
-    if matches!(
-        name,
-        "CreateWindowExA"
-            | "CreateWindowExW"
-            | "GetClassInfoA"
-            | "GetClassInfoW"
-            | "GetClassInfoExA"
-            | "GetClassInfoExW"
-    ) {
-        let class_pointer = a[1];
-        if class_pointer > 0xffff {
-            if let Ok(class) = crate::file_api::read_name(mem, class_pointer, name.ends_with('W')) {
-                if let Some(builtin) = [
-                    "Button",
-                    "Edit",
-                    "Static",
-                    "ListBox",
-                    "ComboBox",
-                    "ScrollBar",
-                ]
-                .into_iter()
-                .find(|n| n.eq_ignore_ascii_case(&class))
-                {
-                    let module = state.module_handle_for("user32.dll");
-                    if let Err(e) = register_system_class(mem, api, state, module, builtin, true) {
-                        return Some(Err(e));
-                    }
-                }
-            }
+    if matches!(name, "CreateWindowExA" | "CreateWindowExW") {
+        if let Err(error) = classes::ensure_builtin(mem, api, state, a[1], name.ends_with('W')) {
+            return Some(Err(error));
         }
     }
     if matches!(
@@ -683,24 +499,6 @@ pub fn dispatch(
     }
     if matches!(
         name,
-        "RegisterClassA"
-            | "RegisterClassW"
-            | "RegisterClassExA"
-            | "RegisterClassExW"
-            | "GetClassInfoA"
-            | "GetClassInfoW"
-            | "GetClassInfoExA"
-            | "GetClassInfoExW"
-            | "UnregisterClassA"
-            | "UnregisterClassW"
-    ) {
-        return Some(
-            class_dispatch(name, a, mem, state)
-                .map(|(value, note)| (GuestCallOutcome::Returned(value), note)),
-        );
-    }
-    if matches!(
-        name,
         "CreateWindowExA"
             | "CreateWindowExW"
             | "DestroyWindow"
@@ -752,99 +550,6 @@ pub fn dispatch(
         ));
     }
     None
-}
-
-fn class_dispatch(
-    name: &str,
-    a: &crate::api::Args,
-    mem: &mut GuestMem,
-    state: &mut ApiState,
-) -> Result<(u32, String), String> {
-    let wide = name.ends_with('W');
-    let extended = name.contains("Ex");
-    let fail = |state: &mut ApiState, code| {
-        state.last_error = code;
-        Ok((0, format!("window class error {code}")))
-    };
-    if name.starts_with("Register") {
-        if extended && mem.read_u32(a[0]).map_err(|e| e.to_string())? != 48 {
-            return fail(state, 87);
-        }
-        let mut fields = [0; 11];
-        for (i, value) in fields
-            .iter_mut()
-            .take(if extended { 11 } else { 10 })
-            .enumerate()
-        {
-            *value = mem
-                .read_u32(a[0] + (i as u32 + extended as u32) * 4)
-                .map_err(|e| e.to_string())?;
-        }
-        if fields[1] == 0 || fields[9] <= 0xffff || fields[2] > 4096 || fields[3] > 4096 {
-            return fail(state, 87);
-        }
-        let text = crate::file_api::read_name(mem, fields[9], wide)
-            .map_err(|e| format!("class name: {e}"))?;
-        if text.is_empty() || text.encode_utf16().count() > 255 {
-            return fail(state, 87);
-        }
-        if find_class(mem, state, fields[9], fields[4], wide)?.is_some() {
-            return fail(state, 1410);
-        }
-        if state.user32.next_atom > 0xffff {
-            return fail(state, 8);
-        }
-        let name_ptrs = persistent_strings(mem, state, &text)?;
-        let menu_ptrs = if fields[8] <= 0xffff {
-            [fields[8]; 2]
-        } else {
-            let menu = crate::file_api::read_name(mem, fields[8], wide)
-                .map_err(|e| format!("class menu: {e}"))?;
-            persistent_strings(mem, state, &menu)?
-        };
-        let atom = state.user32.next_atom as u16;
-        state.user32.next_atom += 1;
-        state.user32.classes.insert(
-            atom,
-            WindowClass {
-                name: text.clone(),
-                fields,
-                wide,
-                name_ptrs,
-                menu_ptrs,
-            },
-        );
-        return Ok((atom as u32, format!("registered {text}")));
-    }
-    let unregister = name.starts_with("Unregister");
-    let (instance, id) = if unregister {
-        (a[1], a[0])
-    } else {
-        (a[0], a[1])
-    };
-    let Some(atom) = find_class(mem, state, id, instance, wide)? else {
-        return fail(state, 1411);
-    };
-    if unregister {
-        if state.user32.windows.values().any(|w| w.class == atom) {
-            return fail(state, 1412);
-        }
-        state.user32.classes.remove(&atom);
-        return Ok((1, "class unregistered".into()));
-    }
-    let class = state.user32.classes.get(&atom).unwrap();
-    let mut fields = class.fields;
-    fields[8] = class.menu_ptrs[wide as usize];
-    fields[9] = class.name_ptrs[wide as usize];
-    let mut bytes = Vec::new();
-    if extended {
-        bytes.extend(48u32.to_le_bytes());
-    }
-    for value in fields.into_iter().take(if extended { 11 } else { 10 }) {
-        bytes.extend(value.to_le_bytes());
-    }
-    mem.write_bytes(a[2], &bytes).map_err(|e| e.to_string())?;
-    Ok((1, format!("class {} atom={atom:#x}", class.name)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1024,7 +729,7 @@ fn window_dispatch(
             if a[2] != 0 {
                 let title = crate::file_api::read_name(mem, a[2], wide)
                     .map_err(|e| format!("window title: {e}"))?;
-                fields[9] = persistent_strings(mem, state, &title)?[class.wide as usize];
+                fields[9] = classes::persistent_strings(mem, state, &title)?[class.wide as usize];
             }
         }
         for (i, field) in fields.into_iter().enumerate() {

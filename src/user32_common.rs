@@ -24,7 +24,7 @@ fn failure(state: &mut ApiState, error: u32) -> ResultValue {
     state.last_error = error;
     value(0, &format!("USER32 error {error}"))
 }
-fn copy_text(
+pub(crate) fn copy_text(
     mem: &GuestMem,
     p: u32,
     capacity: u32,
@@ -223,8 +223,6 @@ pub(crate) fn dispatch(
             | "GetDlgCtrlID"
             | "GetDlgItemInt"
             | "SetDlgItemInt"
-            | "GetClassNameW"
-            | "GetClassNameA"
             | "IsWindowEnabled"
             | "EnableWindow"
             | "SetParent"
@@ -373,16 +371,6 @@ pub(crate) fn dispatch(
                 state.user32.windows.get(&a[0]).map_or(0, |w| w.menu),
                 "control ID",
             ),
-            "GetClassNameA" | "GetClassNameW" => {
-                let Some(w) = state.user32.windows.get(&a[0]) else {
-                    return failure(state, 1400);
-                };
-                let text: Vec<u16> = state.user32.classes[&w.class].name.encode_utf16().collect();
-                value(
-                    copy_text(mem, a[1], a[2], &text, name.ends_with('W'))?,
-                    "class name",
-                )
-            }
             "IsWindowEnabled" | "IsIconic" | "IsZoomed" => {
                 let mask = match name {
                     "IsWindowEnabled" => 0x08000000,

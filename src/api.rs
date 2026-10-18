@@ -682,18 +682,8 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
         add(
             "user32.dll",
             &[
-                ("RegisterClassA", 4),
-                ("RegisterClassW", 4),
-                ("RegisterClassExA", 4),
                 ("LoadStringA", 16),
                 ("LoadStringW", 16),
-                ("GetClassInfoA", 12),
-                ("GetClassInfoW", 12),
-                ("GetClassInfoExA", 12),
-                ("GetClassInfoExW", 12),
-                ("RegisterClassExW", 4),
-                ("UnregisterClassA", 8),
-                ("UnregisterClassW", 8),
                 ("CreateWindowExA", 48),
                 ("CreateWindowExW", 48),
                 ("DestroyWindow", 4),
@@ -790,8 +780,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetWindowLongW", 8),
                 ("SetWindowLongA", 12),
                 ("SetWindowLongW", 12),
-                ("GetClassLongA", 8),
-                ("GetClassLongW", 8),
                 ("DefDlgProcA", 16),
                 ("DefDlgProcW", 16),
                 ("DialogBoxParamA", 20),
@@ -1122,8 +1110,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("DialogBoxIndirectParamW", 20),
                 ("CreateIconIndirect", 4),
                 ("EnumChildWindows", 12),
-                ("GetClassNameW", 12),
-                ("GetClassNameA", 12),
                 ("GetDlgCtrlID", 4),
                 ("GetDlgItemInt", 16),
                 ("GetScrollInfo", 12),
@@ -1881,6 +1867,12 @@ pub fn dispatch(
                 },
                 &mut state.last_error,
             );
+        }
+        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Class(_))) => {
+            let Some(crate::win32::catalog::ApiId::Class(id)) = binding.typed else {
+                unreachable!();
+            };
+            (ret, note) = crate::user32::class_call(id, &args, mem, api, state)?;
         }
         _ if matches!(
             binding.typed,
