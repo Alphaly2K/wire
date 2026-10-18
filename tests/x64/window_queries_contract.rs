@@ -13,8 +13,14 @@ fn call(p: &mut Process64, name: &str, args: &[u64]) -> u64 {
     )
 }
 
-fn window() -> (Process64, u64) {
-    let path = std::env::temp_dir().join(format!("wire-query64-{}.exe", std::process::id()));
+pub(super) fn window() -> (Process64, u64) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "wire-query64-{}-{}.exe",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
     std::fs::write(&path, fixture()).unwrap();
     let mut p = Process64::load(&path, false).unwrap();
     std::fs::remove_file(path).unwrap();

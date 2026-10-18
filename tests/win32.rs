@@ -85,5 +85,7 @@ mod user_objects_contract;
 mod variant_contract;
 #[path = "win32/window_queries_contract.rs"]
 mod window_queries_contract;
+#[path = "win32/window_state_contract.rs"]
+mod window_state_contract;
 #[path = "win32/winrt_contract.rs"]
 mod winrt_contract;
