@@ -28,6 +28,8 @@ mod critical_sections;
 mod cursor_contract;
 #[path = "x64/desktop_contract.rs"]
 mod desktop_contract;
+#[path = "x64/dialog_contract.rs"]
+mod dialog_contract;
 #[path = "x64/display_contract.rs"]
 mod display_contract;
 #[path = "x64/files.rs"]

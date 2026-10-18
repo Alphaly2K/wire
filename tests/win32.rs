@@ -33,6 +33,8 @@ mod cursor_contract;
 mod d3d9;
 #[path = "win32/desktop_contract.rs"]
 mod desktop_contract;
+#[path = "win32/dialog_contract.rs"]
+mod dialog_contract;
 #[path = "win32/display_contract.rs"]
 mod display_contract;
 #[path = "win32/exceptions.rs"]
