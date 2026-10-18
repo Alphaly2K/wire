@@ -291,8 +291,8 @@ fn window_dispatch(
             let mut pa = [0; 16];
             pa[0] = a[0];
             pa[1] = state.scratch_alloc(mem, 64, 4);
-            let (result, _) = crate::user32_paint::dispatch(
-                "BeginPaint",
+            let (result, _) = super::paint_call(
+                crate::win32::catalog::PaintApi::Begin,
                 &pa,
                 cpu,
                 mem,
@@ -301,15 +301,21 @@ fn window_dispatch(
                 log,
                 sched,
                 max_instr,
-            )
-            .unwrap()?;
+            )?;
             if !matches!(result, GuestCallOutcome::Returned(_)) {
                 return Ok((result, "default paint transferred".into()));
             }
-            crate::user32_paint::dispatch(
-                "EndPaint", &pa, cpu, mem, api, state, log, sched, max_instr,
-            )
-            .unwrap()?;
+            super::paint_call(
+                crate::win32::catalog::PaintApi::End,
+                &pa,
+                cpu,
+                mem,
+                api,
+                state,
+                log,
+                sched,
+                max_instr,
+            )?;
             return value(0, "default paint validated".into());
         }
         if a[1] == 0x14 {
