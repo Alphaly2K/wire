@@ -43,8 +43,8 @@
 | --- | --- |
 | R0 入口/fixture | 已完成；12 组 golden 输入一致，默认与旧路径各 7 个运行 smoke 通过 |
 | R1 GUID 契约试点 | 已完成唯一契约、双架构冷绑定、纯语义/适配器、行为及性能验收 |
-| R2 分发收敛 | GUID + 6 个 identity + 8 个 version + 42 个 NLS + 31 个 module + 45 个 file export 已迁移；其余 file/同步/USER/COM/图形等仍 legacy |
-| R3 状态归属 | identity/profile、环境变量、双架构 module 和 Win64 file 已有 owner；PE32 file/thread/COM 等仍待迁移 |
+| R2 分发收敛 | 累计 471 个 export 已验收；明细见当前状态与下方各家族报告；其余 USER/COM/GDI/D3D 等仍 legacy |
+| R3 状态归属 | environment/module/Win64 file、local slots、已迁移同步/线程/COM/image 子领域与双架构 cursor 已形成 owner；其余资源继续分批收敛 |
 | R4 PE32 Process | 已完成装载/执行编排提取；旧 Cpu 方法只保留委托 facade |
 | R5 host/graphics | 已完成 owned UI 请求/事件与 GDI adapter 分离，真实 native 验证通过 |
 | R6 原生 Mono | 按用户指示跳过 |
@@ -352,3 +352,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 8 项 export 汇入 ImageApi，删除重复 ABI/arity/DWORD 与名称分发。Images 私有拥有图像、单调句柄与实际 payload，cursor 共用原身份校验；Key 与 icon group/DIB 纯核独立。PE32 DestroyIcon 的明确 unsupported trace 及两端原能力/错误顺序保持。实现 `9fb4b93`，独立基线 `af5d003`；完整 release 560、debug 406、native 7、工具 20 项及 fmt/strict Clippy/build 通过。
 
 34 条性能路径全部校验，最大 CPU 中位数回退 +1.551%；共享加载网关 Win64 −1.912%、PE32 IR/raw −4.620%/−2.813%，RSS 最多 +96KiB。Alice CPU/wall −0.435%/−0.568%，保持启动终点。343 个 Rust 文件核对一致，二进制增加 3,856 bytes。2026-10-18 接受，累计 455 个 export，详见[完整验收](refactoring-images-2026-10-18.md)。
+
+## R2 虚拟桌面与显示查询
+
+16 项 export 汇入 DisplayApi，删除重复 ABI/arity/DWORD/provider 与名称分发；共享 desktop profile 与 device/mode/monitor 编码，callback 使用具名进程控制路由。保留 packed POINT、两端 monitor 验证/CCD 错误/输出差异及 Win64 metrics 动态查询缺口。独立基线纠正原审计遗漏，运行时未迎合错误预期；实现 `0acb937`、基线 `c415d78`。完整 release 566、debug 412、native 7、工具 20 项与 fmt/strict Clippy/build 通过。
+
+37 条性能路径全部校验，最大 CPU 中位数回退 +1.567%；monitor 查询网关 Win64 −0.896%、PE32 IR/raw −20.398%/−18.693%，RSS 最多 +160KiB。保留 integer/IR 中位数与逐对结果不一致的漂移，未宣称通用整数收益。Alice CPU/wall −1.384%/−1.359%，保持隐藏窗口与零 Draw/Present。347 个 Rust 文件核对一致，二进制增加 8,416 bytes。2026-10-18 接受，累计 471 个 export，详见[完整验收](refactoring-display-2026-10-18.md)。

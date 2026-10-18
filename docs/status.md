@@ -1,17 +1,17 @@
 # 当前状态
 
-更新日期：2026-10-18。重构前基线为 `2e78377`；最新已验收运行时为 [图标与光标资源](reports/refactoring-images-2026-10-18.md)，实现提交 `9fb4b93`，该报告记录冻结源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
+更新日期：2026-10-18。重构前基线为 `2e78377`；最新已验收运行时为 [虚拟桌面与显示查询](reports/refactoring-display-2026-10-18.md)，实现提交 `0acb937`，该报告记录冻结源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
 
-本轮完成 image 8 项契约接入，删除重复 ABI/arity/DWORD 与名称分发。Win64 图像资源、句柄游标和 payload 由私有 owner 管理，SetCursor 从同一 owner 校验；共享纯 icon 校验，保留架构能力、错误/trace 与输出/返回帧顺序。
+本轮完成 display 16 项契约接入，删除重复 ABI/arity/DWORD/provider 与名称分发。共享固定 desktop profile 和 device/mode/monitor 编码，保留 packed POINT、动态查询缺口、两端原能力和错误/输出顺序；monitor callback 使用明确进程控制路由。
 
-本批完整正确性、34 条性能路径及游戏前缀已验收，累计 455 项。共享光标加载循环 Win64/PE32 IR/raw CPU −1.912%/−4.620%/−2.813%，矩阵最大中位数回退 +1.551%，详见[完整报告](reports/refactoring-images-2026-10-18.md)。显示查询/枚举的下一批基线与未接入草稿准备中；其余 USER、COM、图形继续迁移。Mono 原生化已撤回，本轮继续排除。
+本批完整正确性、37 条性能路径及游戏前缀已验收，累计 471 项。monitor 查询循环 Win64/PE32 IR/raw CPU −0.896%/−20.398%/−18.693%，矩阵最大中位数回退 +1.567%，详见[完整报告](reports/refactoring-display-2026-10-18.md)。下一批 GDI DC 独立基线和未接入草稿准备中；其余 USER、COM、图形继续迁移。Mono 原生化已撤回，本轮继续排除。
 
 ## 重构范围
 
 | 阶段 | 已交付 | 剩余范围 |
 | --- | --- | --- |
 | R0/R1 | 冻结输入、原创正式 fixture、领域测试 harness、GUID 唯一契约和双架构适配 | 随后续家族维护独立基线 |
-| R2 | 已验收 455 个 export 的契约；明细见下表 | USER、COM、图形等 legacy 家族 |
+| R2 | 已验收 471 个 export 的契约；明细见下表 | USER、COM、图形等 legacy 家族 |
 | R3 | guest environment、双架构模块状态、Win64 文件、period 请求、SRW、地址等待及 APC 队列、线程标量操作与描述、双架构 apartment/BSTR、Win64 task/HSTRING/image 成员、PE32 TLS/FLS 与双架构 cursor 私有 owner | PE32 其余资源、线程资源创建/退出及 COM 其余对象；PE32 kernel 大范围抽取曾因性能撤回 |
 | R4/R5 | Process32 编排边界、owned host UI 请求、GDI 与像素状态分离 | 领域分发与资源 owner 随 R2/R3 继续收敛 |
 | R6 | 按用户要求忽略 | 不重建原生 Mono 路径 |
@@ -56,6 +56,7 @@
 | 矩形 / 窗口边框 | 10 / 3 | [几何边界](architecture/geometry.md)及[验收](reports/refactoring-geometry-2026-10-18.md) |
 | 游标 / 指针能力 | 10 | [调用与状态边界](architecture/cursor.md)及[验收](reports/refactoring-cursor-2026-10-18.md) |
 | 图标 / 光标资源 | 8 | [资源边界](architecture/images.md)及[验收](reports/refactoring-images-2026-10-18.md) |
+| 显示 / monitor / metrics | 16 | [显示边界](architecture/display.md)及[验收](reports/refactoring-display-2026-10-18.md) |
 
 ## 当前执行路径与能力
 
@@ -72,9 +73,9 @@
 
 ## 验证与性能
 
-最近已验收的 image 批次冻结：release **560 passed / 7 ignored**，debug Win32/AMD64/FPU **406 passed**，显式 native **7 passed**，工具 **20 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。随后新增的 display 草稿不属于上述冻结。
+最近已验收的 display 批次冻结：release **566 passed / 7 ignored**，debug Win32/AMD64/FPU **412 passed**，显式 native **7 passed**，工具 **20 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。随后新增的 GDI 草稿不属于上述冻结。
 
-本批 34 个 workload protocol 全部结果校验。共享光标加载网关 Win64 CPU −1.912%，PE32 IR/raw −4.620%/−2.813%；CPU 中位数最大回退 +1.551%。RSS 中位数最多 +96KiB，二进制 +3,856 bytes。Alice CPU/wall −0.435%/−0.568%，启动终点保持。历史各批次成本、体积预算修订与离散证据保留在对应报告；AMD64 event 重复导入修正与稳定启动协议见[工具边界](architecture/validation-tools.md)，未推断游戏 FPS。
+本批 37 个 workload protocol 全部结果校验。monitor 查询网关 Win64 CPU −0.896%，PE32 IR/raw −20.398%/−18.693%；CPU 中位数最大回退 +1.567%。RSS 中位数最多 +160KiB，二进制 +8,416 bytes。Alice CPU/wall −1.384%/−1.359%，启动终点保持。历史各批次成本、体积预算修订与离散证据保留在对应报告；AMD64 event 重复导入修正与稳定启动协议见[工具边界](architecture/validation-tools.md)，未推断游戏 FPS。
 
 后续正式比较使用显式 [稳定启动协议](reports/refactoring-launch-protocol-2026-10-16.md)，固定 argv0、参数和 child cwd，并记录 shell SHA。默认工具行为保持；旧协议数据独立保留，汇总不跨协议或不同 work 合并。编译、正式计时、采样与 runtime diagnostics 串行执行。每个结构候选先完成正确性，再按至少三对轮换检查结果、CPU/wall/RSS 与输入哈希；超过门槛先调查，不把失败候选扩大到其它领域。
 
