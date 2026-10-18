@@ -13,3 +13,7 @@
 原创可选 `gateway-window-control` 实际创建/销毁窗口，每轮 SendMessageW 进入应用 guest WNDPROC，返回 3 并消费累加值。两端结果均为 3n+1；Win64 retired=10n+51/work=11n+54，PE32 retired=10n+36，API 均 n+3。旧运行时双架构及 PE32 IR/raw 均独立通过。Win64 首两次 fixture 入口与固定导入区重叠，缩短零常量载入并加入边界断言后通过；失败日志与最终 `r2-window-control-fixture-baseline64-layout`、`r2-window-control-fixture-baseline32` 均保留。工具 23 项通过。该修正只涉及原创测试 PE，不涉及运行时。
 
 完整 release 603 / 7 ignored、debug 449、显式 native 7，以及 fmt、strict all-target/all-feature Clippy、build 全部通过。384 个 Rust 文件（src/tests 376）live/frozen/manifest 与文件集合一致，target/frozen executable SHA 相同。冻结 `r2-window-control-wire/wire`：SHA256 `aab40883614c0b70188c75408527084098ff2cfe0d69b0da3bd34dcc7f0737ad`，5,964,712 bytes，相对前批减少 12,720 bytes，满足预设 +24KiB 预算。证据 `r2-window-control-validation-corrected-source-verification.json`。下一步用该冻结执行 57 条路径和 Alice 200M 前缀，编译与计时串行。
+
+实现 `b3ccab4`。57 条路径、342 次执行全部校验；SendMessage/WNDPROC 网关 Win64、PE32 IR/raw CPU −0.828%/−1.387%/−7.536%，RSS 中位数最多 +176KiB。初筛部分 CPU 与既有网关存在离散或超过 +3% 的中位数成本，继续独立三倍 work、before/after/control 扩样；原始数据 `r2-window-control-fixed-summary.{json,txt}` 全部保留。Win64 GUID/images 的大幅表观加速尚不归因为本批实现。
+
+Alice 200M 六次运行全部校验，同预算出口、隐藏 client 314×211、Draw/Present 0/0；CPU −0.009%、wall −0.636%、RSS −736KiB。证据 `r2-window-control-fixed-alice/compare.json`。复用原 runtime，未复制或硬链接游戏素材。本批暂不计入累计，等待补证。

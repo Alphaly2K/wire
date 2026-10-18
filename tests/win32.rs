@@ -65,6 +65,8 @@ mod keyboard_contract;
 mod locals;
 #[path = "win32/memory.rs"]
 mod memory;
+#[path = "win32/message_contract.rs"]
+mod message_contract;
 #[path = "win32/modules.rs"]
 mod modules;
 #[path = "win32/paths.rs"]

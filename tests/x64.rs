@@ -54,6 +54,8 @@ mod keyboard_contract;
 mod locals;
 #[path = "x64/memory.rs"]
 mod memory;
+#[path = "x64/message_contract.rs"]
+mod message_contract;
 #[path = "x64/modules.rs"]
 mod modules;
 #[path = "x64/network.rs"]
