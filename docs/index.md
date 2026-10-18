@@ -50,7 +50,7 @@
 - [键盘边界](architecture/keyboard.md)及[完整验收](reports/refactoring-keyboard-2026-10-18.md)：16 项状态/布局契约，保留静态与动态 provider 差异；32 个性能协议与游戏前缀验证，保留整数 IR 局部成本和离散轮次。
 - [Raw input / IME 边界](architecture/input-profile.md)及[完整验收](reports/refactoring-input-profile-2026-10-18.md)：24 项契约、34 个性能协议，保留 FP 和启动前缀局部成本及 SSE 离散复核。
 - [矩形与窗口边框](architecture/geometry.md)及[完整验收](reports/refactoring-geometry-2026-10-18.md)：13 项契约、纯算法与架构 codec；30 个性能协议及游戏前缀通过，保留 packed POINT、DPI 错误和返回帧顺序。
-- [游标与指针边界](architecture/cursor.md)及[候选记录](reports/refactoring-cursor-2026-10-18.md)：10 项契约、私有游标状态、虚拟裁剪与 tracking 适配；完整正确性通过，性能验收进行中。
+- [游标与指针边界](architecture/cursor.md)及[完整验收](reports/refactoring-cursor-2026-10-18.md)：10 项契约、私有游标状态、虚拟裁剪与 tracking 适配；31 个性能协议和游戏前缀通过。
 - [release 编译单元候选](reports/refactoring-release-codegen-2026-10-15.md)：独立构建配置、同二进制对照及长样本调查。
 - [网关边界候选](reports/refactoring-gateway-boundary-2026-10-15.md)、[页缓存内联候选](reports/refactoring-page-cache-inline-2026-10-15.md)、[helper 布局候选](reports/refactoring-memory-helper-layout-2026-10-15.md)：已撤回实现和保留的测量证据。
 - [本次渐进重构记录](reports/refactoring-2026-10-14.md)：阶段交付、行为差异与验收结果。

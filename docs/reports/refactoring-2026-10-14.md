@@ -340,3 +340,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 13 项 export 汇入 GeometryApi，删除重复 ABI/arity/DWORD/provider 与名称分发；RECT/frame 纯核只处理值，两端适配器只借明确资源。packed POINT、静态/动态 provider、Win64 七项 absent 与错误/输出顺序保持。实现 `fd3da58`，独立基线 `3e96c84`；完整 release 548、debug 395、native 7、工具 20 项及 fmt/strict Clippy/build 通过。
 
 28 条初筛与两条 900M 同哈希扩样全部校验，bit-test/data-alias 初筛 +3.196%/+3.422%，扩样 +1.039%/−1.246%；新矩形网关 Win64 −2.439%、PE32 IR/raw −19.121%/−17.978%。RSS 最多 +64KiB，Alice CPU/wall −5.910%/−8.017%，保持同一启动终点。330 个 Rust 文件核对一致；二进制 +20,624 bytes 超原 +16KiB 文件预算，经 Mach-O 调查明确修订为 +24KiB，section 使用量合计 +42 bytes，主要成本来自 segment 页对齐与链接元数据。2026-10-18 接受，累计 437 个 export，详见[完整验收](refactoring-geometry-2026-10-18.md)。
+
+## R2/R3 游标与指针能力
+
+10 项 export 汇入 CursorApi，删除重复 ABI/arity/DWORD/provider 与名称分发。私有 owner 管理完整句柄、signed 坐标、per-thread saturating count，保持两端 handle/thread key 宽度；Win64 clip、host 鼠标输入与消息元数据共用同一状态。tracking 只借 Memory 和窗口存在性查询，原能力及错误/输出顺序保持。实现 `24d918d`，独立基线 `421938e`；完整 release 555、debug 401、native 7、工具 20 项及 fmt/strict Clippy/build 通过。
+
+31 条性能路径全部校验，最大 CPU 中位数回退 GDI/raw +2.559%，GUID/IR +2.558%；新 ShowCursor 网关 Win64 −3.306%、PE32 IR/raw −0.929%/−1.637%，RSS 最多 +128KiB。Alice CPU/wall −0.082%/−0.181%，保持启动终点。337 个 Rust 文件核对一致，二进制减少 3,680 bytes。2026-10-18 接受，累计 447 个 export，详见[完整验收](refactoring-cursor-2026-10-18.md)。

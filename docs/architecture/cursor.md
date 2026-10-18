@@ -1,6 +1,6 @@
 # 游标状态与架构边界
 
-状态：10 项契约及状态 owner 已接入候选，验证进度见[本批报告](../reports/refactoring-cursor-2026-10-18.md)。
+状态：10 项契约及状态 owner 已验收，六项独立基线、完整正确性、31 个性能协议及游戏前缀见[本批报告](../reports/refactoring-cursor-2026-10-18.md)。
 
 `catalog/cursor.rs` 集中声明参数、返回载体和架构策略。PE32 Show/Get/Set/GetPosition/SetPosition typed，其余五项 ABI-only；Win64 九项 typed、SetPosition absent。Win64 TrackMouseEvent 静态仅 user32，其他八项保留静态 kernel32/kernelbase/user32；动态均仅 user32。BOOL 参数按 DWORD 计划截断，句柄保留 guest 指针宽度。
 

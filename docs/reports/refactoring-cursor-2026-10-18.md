@@ -1,6 +1,6 @@
 # R2/R3 游标与指针能力（2026-10-18）
 
-状态：六项旧行为独立基线及完整正确性通过，10 项契约和 owner 已接入候选，性能验收进行中。本批不计入已验收 437 exports。
+状态：2026-10-18 验收通过。实现提交 `24d918d`，10 项契约及状态 owner 已接入，累计 **447 exports**。
 
 10 项候选：ShowCursor、GetCursor、SetCursor、GetCursorPos、SetCursorPos、ClipCursor、GetClipCursor、EnableMouseInPointer、IsMouseInPointerEnabled、TrackMouseEvent。PE32 前五项 typed，其余五项保持 ABI-only/error 120；Win64 除 SetCursorPos absent 外九项 typed。TrackMouseEvent 静态仅 user32，其余 Win64 typed 静态 kernel32/kernelbase/user32；动态均仅 user32。
 
@@ -17,3 +17,11 @@ CursorApi 统一冷绑定元数据，原 ABI/arity/DWORD/provider 特例和名�
 六项独立基线和既有 tracking 单测在候选上通过，另加极限饱和、完整线程 ID 隔离、退休及资源状态保留测试。完整 release **555 passed / 7 ignored**，debug Win32/AMD64/FPU **401 passed**，显式 native **7 passed**，工具 **20 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。证据 `r2-cursor-{release-tests,debug-tests,native-tests,clippy,final-build,tools,fmt}.txt`。
 
 冻结 `r2-cursor-wire/wire`，SHA256 `bffc882421f25ea6be0ee82b23c4ebe2383bda4c8736fb10e6312bb89f4bd59c`，**5,945,400 bytes**，较 before **−3,680 bytes**，通过 +24KiB 文件预算。**337 个 Rust 文件**（src/tests **329**）逐项与活动源码和快照一致，target/frozen SHA 相同；证据 `r2-cursor-source-verification.json`。
+
+## 性能与启动验收
+
+31 个 workload protocol 均使用稳定启动和三对轮换，结果、退休数、API 次数全部校验。AMD64 CPU 七条范围 −1.428%～+0.546%；PE32 CPU 八条范围 −1.728%～+2.075%。最大 CPU 中位数回退为 GDI/raw **+2.559%**，GUID/IR **+2.558%**，均低于调查门槛；RSS 中位数最多 **+128KiB**。保留这些局部成本与原始轮次，不将全部路径描述为加速。
+
+新 ShowCursor 网关 CPU Win64 **−3.306%**，PE32 IR/raw **−0.929%/−1.637%**。Win64 三对分别 −4.002%/−3.028%/−2.884%；PE32 IR −1.675%/−2.328%/−0.331%，raw −3.305%/−0.558%/−1.637%。只对应计数调用循环，未据此推断游戏帧率。完整矩阵 `r2-cursor-stable-{amd64-cpu,v2,amd64-gateways,pe32-cpu,pe32-gateways}`，汇总 `r2-cursor-stable-final-summary.json`。
+
+Alice 200M 三对均校验，维持预算出口、隐藏 client 314×211、Draw/Present 0；CPU/wall 中位数 **−0.082%/−0.181%**。复用原 runtime，未复制或硬链接游戏资源。证据 `r2-cursor-stable-alice/compare.json`、manifest 与逐轮日志。编译、正式计时、原生游戏验证串行。
