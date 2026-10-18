@@ -30,9 +30,7 @@ pub struct User32 {
     pub(crate) active: u32,
     pub(crate) foreground: u32,
     pub(crate) capture: u32,
-    pub(crate) cursor_pos: [i32; 2],
-    cursor_counts: BTreeMap<u32, i32>,
-    cursor: u32,
+    pub(crate) cursor: crate::win32::user::cursor::Cursor<u32, u32>,
     keyboard: crate::keyboard::Keyboard,
     formats: BTreeMap<String, u32>,
     next_format: u32,
@@ -115,9 +113,7 @@ impl Default for User32 {
             active: 0,
             foreground: 0,
             capture: 0,
-            cursor_pos: [0; 2],
-            cursor_counts: BTreeMap::new(),
-            cursor: 0,
+            cursor: Default::default(),
             keyboard: Default::default(),
             formats: BTreeMap::new(),
             next_format: 0xc000,
@@ -347,37 +343,12 @@ pub fn dispatch(
     if dll != "user32.dll" {
         return None;
     }
-    if matches!(
-        name,
-        "ShowCursor" | "GetCursor" | "SetCursor" | "LoadCursorA" | "LoadCursorW"
-    ) {
-        let result = match name {
-            "ShowCursor" => {
-                let count = state
-                    .user32
-                    .cursor_counts
-                    .entry(sched.current_tid())
-                    .or_default();
-                *count = count.saturating_add(if a[0] != 0 { 1 } else { -1 });
-                *count as u32
-            }
-            "GetCursor" => state.user32.cursor,
-            "SetCursor" => {
-                if a[0] != 0 && a[0] != 0x42007f00 {
-                    state.last_error = 6;
-                    0
-                } else {
-                    std::mem::replace(&mut state.user32.cursor, a[0])
-                }
-            }
-            _ => {
-                if a[0] == 0 && a[1] == 32512 {
-                    0x42007f00
-                } else {
-                    state.last_error = 1812;
-                    0
-                }
-            }
+    if matches!(name, "LoadCursorA" | "LoadCursorW") {
+        let result = if a[0] == 0 && a[1] == 32512 {
+            0x42007f00
+        } else {
+            state.last_error = 1812;
+            0
         };
         return Some(Ok((
             GuestCallOutcome::Returned(result),
@@ -1446,7 +1417,7 @@ pub(crate) fn thread_exit(state: &mut ApiState, sched: &mut Sched, tid: u32) {
         .retain(|_, m| m.sender != tid || m.processing);
     state.user32.queues.remove(&tid);
     state.user32.queue_changed.remove(&tid);
-    state.user32.cursor_counts.remove(&tid);
+    state.user32.cursor.exit(tid);
     state.user32.keyboard.exit(tid);
     state.user32.timers.retain(|&(owner, _, _), _| owner != tid);
 }

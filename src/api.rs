@@ -731,8 +731,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("LoadCursorW", 8),
                 ("LoadImageA", 24),
                 ("LoadImageW", 24),
-                ("SetCursor", 4),
-                ("GetCursor", 0),
                 ("GetDC", 4),
                 ("GetWindowDC", 4),
                 ("ReleaseDC", 8),
@@ -767,10 +765,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("ClientToScreen", 8),
                 ("ScreenToClient", 8),
                 ("WindowFromPoint", 8),
-                ("GetCursorPos", 4),
-                ("SetCursorPos", 8),
-                ("ClipCursor", 4),
-                ("ShowCursor", 4),
                 ("LoadAcceleratorsA", 8),
                 ("LoadAcceleratorsW", 8),
                 ("TranslateAcceleratorA", 12),
@@ -1144,7 +1138,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("IsClipboardFormatAvailable", 4),
                 ("MsgWaitForMultipleObjects", 20),
                 ("EnumDisplaySettingsExW", 16),
-                ("TrackMouseEvent", 4),
                 ("IsWindowEnabled", 4),
                 ("SetPropW", 12),
                 ("GetMenuItemCount", 4),
@@ -1854,6 +1847,21 @@ pub fn dispatch(
                 unreachable!()
             };
             let result = crate::win32::x86::geometry::call(id, &args, mem, &mut state.last_error)?;
+            ret = result.value;
+            note = result.note.into();
+        }
+        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Cursor(_))) => {
+            let Some(crate::win32::catalog::ApiId::Cursor(id)) = binding.typed else {
+                unreachable!()
+            };
+            let result = crate::win32::x86::cursor::call(
+                id,
+                &args,
+                mem,
+                &mut state.user32.cursor,
+                sched.current_tid(),
+                &mut state.last_error,
+            )?;
             ret = result.value;
             note = result.note.into();
         }

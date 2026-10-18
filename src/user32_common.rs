@@ -241,8 +241,6 @@ pub(crate) fn dispatch(
             | "SetCapture"
             | "ReleaseCapture"
             | "GetCapture"
-            | "GetCursorPos"
-            | "SetCursorPos"
             | "MapWindowPoints"
             | "IsIconic"
             | "IsZoomed"
@@ -609,14 +607,6 @@ pub(crate) fn dispatch(
                     },
                     "logical input ownership",
                 )
-            }
-            "GetCursorPos" => {
-                write_words(mem, a[0], &state.user32.cursor_pos)?;
-                value(1, "cursor position")
-            }
-            "SetCursorPos" => {
-                state.user32.cursor_pos = [a[0] as i32, a[1] as i32];
-                value(1, "logical cursor position")
             }
             "MapWindowPoints" => {
                 if a[3] > 4096 {

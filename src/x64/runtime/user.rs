@@ -1,6 +1,7 @@
 //! Checked Win64 USER32 objects. Guest class pointers never become host pointers.
 use super::{Memory, Runtime64, READ};
 use crate::win32::x64::geometry::{read_rect as rectangle, write_rect};
+mod cursor;
 mod gdi;
 mod message;
 mod window;
@@ -45,8 +46,7 @@ pub(super) struct User {
     next_image: u64,
     classes: BTreeMap<u16, Class>,
     next_atom: u16,
-    cursor: u64,
-    cursor_counts: BTreeMap<u64, i32>,
+    cursor: crate::win32::x64::cursor::Cursor64,
     pub(super) windows: BTreeMap<u64, Window>,
     next_window: u64,
     focus: u64,
@@ -56,8 +56,6 @@ pub(super) struct User {
     next_dc: u64,
     pub(super) events: std::collections::VecDeque<message::Message>,
     pub(super) keyboard: crate::keyboard::Keyboard,
-    cursor_pos: [i32; 2],
-    cursor_clip: [i32; 4],
     message_state: BTreeMap<u64, [u64; 3]>,
 }
 impl Default for User {
@@ -67,8 +65,12 @@ impl Default for User {
             next_image: super::TEB + 0x610000,
             classes: BTreeMap::new(),
             next_atom: 0xc000,
-            cursor: 0,
-            cursor_counts: BTreeMap::new(),
+            cursor: crate::win32::x64::cursor::Cursor64::new([
+                0,
+                0,
+                super::display::WIDTH as i32,
+                super::display::HEIGHT as i32,
+            ]),
             windows: BTreeMap::new(),
             next_window: super::TEB + 0x630000,
             focus: 0,
@@ -78,13 +80,6 @@ impl Default for User {
             next_dc: super::TEB + 0x650000,
             events: std::collections::VecDeque::new(),
             keyboard: Default::default(),
-            cursor_pos: [0; 2],
-            cursor_clip: [
-                0,
-                0,
-                super::display::WIDTH as i32,
-                super::display::HEIGHT as i32,
-            ],
             message_state: BTreeMap::new(),
         }
     }
@@ -103,17 +98,8 @@ pub(super) fn arity(name: &str) -> Option<usize> {
         "LoadIconA" | "LoadIconW" | "LoadCursorA" | "LoadCursorW" | "UnregisterClassA"
         | "UnregisterClassW" => 2,
         "LoadImageA" | "LoadImageW" => 6,
-        "DestroyIcon"
-        | "DestroyCursor"
-        | "SetCursor"
-        | "ShowCursor"
-        | "RegisterClassA"
-        | "RegisterClassW"
-        | "RegisterClassExA"
-        | "RegisterClassExW"
-        | "EnableMouseInPointer" => 1,
-        "GetCursor" | "IsMouseInPointerEnabled" => 0,
-        "ClipCursor" | "GetClipCursor" | "GetCursorPos" | "TrackMouseEvent" => 1,
+        "DestroyIcon" | "DestroyCursor" | "RegisterClassA" | "RegisterClassW"
+        | "RegisterClassExA" | "RegisterClassExW" => 1,
         "DwmGetWindowAttribute" => 4,
         "DwmIsCompositionEnabled" => 1,
         _ => return None,
@@ -129,7 +115,6 @@ pub(super) fn dwords(name: &str) -> &'static [usize] {
     match name {
         "GetDeviceCaps" => &[1],
         "DwmGetWindowAttribute" => &[1, 3],
-        "ShowCursor" | "EnableMouseInPointer" => &[0],
         "LoadImageA" | "LoadImageW" => &[2, 3, 4, 5],
         _ => &[],
     }
@@ -149,84 +134,6 @@ impl Runtime64 {
             return self.window_query(mem, name, args);
         }
         match name {
-            "TrackMouseEvent" => {
-                // TRACKMOUSEEVENT is 24 bytes on Win64 (including tail padding).
-                // The current AppKit bridge has no hover/leave tracking source.
-                // Query/cancel the actual empty registration state; registration
-                // must fail rather than promise notifications we cannot deliver.
-                let mut data = [0; 24];
-                mem.read(args[0], &mut data)?;
-                let size = u32::from_le_bytes(data[..4].try_into().unwrap());
-                let flags = u32::from_le_bytes(data[4..8].try_into().unwrap());
-                if size != 24 {
-                    self.set_error(mem, 87)?;
-                    return Ok(0);
-                }
-                if flags & 0x40000000 != 0 {
-                    let mut output = [0; 24];
-                    output[..4].copy_from_slice(&24u32.to_le_bytes());
-                    mem.write(args[0], &output)?;
-                    return Ok(1);
-                }
-                let window = u64::from_le_bytes(data[8..16].try_into().unwrap());
-                if !self.user.windows.contains_key(&window) {
-                    self.set_error(mem, 1400)?;
-                    return Ok(0);
-                }
-                if flags & !(0x80000000 | 0x10 | 3) != 0 {
-                    self.set_error(mem, 87)?;
-                    return Ok(0);
-                }
-                if flags & 0x80000000 != 0 || flags & 3 == 0 {
-                    return Ok(1); // Nothing was armed; cancellation needs no backend.
-                }
-                self.set_error(mem, 50)?;
-                Ok(0)
-            }
-            "GetClipCursor" => {
-                write_rect(mem, args[0], self.user.cursor_clip)?;
-                Ok(1)
-            }
-            "GetCursorPos" => {
-                mem.write(
-                    args[0],
-                    &self
-                        .user
-                        .cursor_pos
-                        .into_iter()
-                        .flat_map(i32::to_le_bytes)
-                        .collect::<Vec<_>>(),
-                )?;
-                Ok(1)
-            }
-            "ClipCursor" => {
-                let screen = [
-                    0,
-                    0,
-                    super::display::WIDTH as i32,
-                    super::display::HEIGHT as i32,
-                ];
-                let mut clip = if args[0] == 0 {
-                    screen
-                } else {
-                    rectangle(mem, args[0])?
-                };
-                clip[0] = clip[0].max(screen[0]);
-                clip[1] = clip[1].max(screen[1]);
-                clip[2] = clip[2].min(screen[2]);
-                clip[3] = clip[3].min(screen[3]);
-                if clip[0] >= clip[2] || clip[1] >= clip[3] {
-                    self.set_error(mem, 87)?;
-                    return Ok(0);
-                }
-                self.user.cursor_clip = clip;
-                for n in 0..2 {
-                    self.user.cursor_pos[n] =
-                        self.user.cursor_pos[n].clamp(clip[n], clip[n + 2] - 1);
-                }
-                // Constrain the virtual desktop pointer, never the host desktop.
-                Ok(1)
-            }
             "DwmIsCompositionEnabled" => {
                 if args[0] == 0 {
                     return Ok(0x80070057);
@@ -411,46 +318,6 @@ impl Runtime64 {
                     self.user.images.remove(&args[0]);
                 }
                 Ok(1)
-            }
-            "SetCursor" => {
-                if args[0] != 0
-                    && !self
-                        .user
-                        .images
-                        .get(&args[0])
-                        .is_some_and(|image| image.kind == 2)
-                {
-                    self.set_error(mem, 6)?;
-                    return Ok(0);
-                }
-                let previous = self.user.cursor;
-                self.user.cursor = args[0];
-                Ok(previous)
-            }
-            "GetCursor" => Ok(self.user.cursor),
-            // The native input bridge delivers legacy mouse messages. Mouse
-            // promotion to WM_POINTER is not installed in this guest profile.
-            "IsMouseInPointerEnabled" => Ok(0),
-            "EnableMouseInPointer" => {
-                if args[0] != 0 {
-                    self.set_error(mem, 50)?; // WM_POINTER promotion has no backend.
-                    Ok(0)
-                } else {
-                    Ok(1)
-                }
-            }
-            "ShowCursor" => {
-                let count = self
-                    .user
-                    .cursor_counts
-                    .entry(self.threads.active)
-                    .or_default();
-                *count = if args[0] != 0 {
-                    count.saturating_add(1)
-                } else {
-                    count.saturating_sub(1)
-                };
-                Ok(*count as u32 as u64)
             }
             "RegisterClassA" | "RegisterClassW" | "RegisterClassExA" | "RegisterClassExW" => {
                 let ex = name.contains("Ex");

@@ -4,6 +4,7 @@ pub(crate) mod calendar;
 pub(crate) mod clocks;
 pub(crate) mod com;
 pub(crate) mod critical_sections;
+pub(crate) mod cursor;
 pub(crate) mod geometry;
 pub(crate) mod guid;
 pub(crate) mod heaps;

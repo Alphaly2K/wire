@@ -126,7 +126,7 @@ impl Runtime64 {
                     },
                     tid: owner,
                     time: self.start.elapsed().as_millis() as u32,
-                    point: self.user.cursor_pos,
+                    point: self.user.cursor.position(),
                     hardware: false,
                 });
                 (!quit) as u64
@@ -232,7 +232,7 @@ impl Runtime64 {
                             },
                             tid,
                             time: self.start.elapsed().as_millis() as u32,
-                            point: self.user.cursor_pos,
+                            point: self.user.cursor.position(),
                             hardware: false,
                         });
                     }
@@ -285,34 +285,35 @@ mod tests {
     }
     #[test]
     fn mouse_tracking_reports_empty_state_and_real_absent_delivery() {
+        use crate::win32::catalog::CursorApi::Track;
         let (mut r, mut m) = fixture();
         let data = STACK + 128;
         m.write_int(data, 4, 24).unwrap();
         m.write_int(data + 8, 8, HWND).unwrap();
         for flags in [1, 2, 3, 0x11, 0x12] {
             m.write_int(data + 4, 4, flags).unwrap();
-            assert_eq!(r.user_call(&mut m, "TrackMouseEvent", &[data]).unwrap(), 0);
+            assert_eq!(r.cursor_call(&mut m, Track, &[data]).unwrap(), 0);
             assert_eq!(m.read_int(crate::x64::runtime::TEB + 0x68, 4).unwrap(), 50);
             assert!(r.user.events.is_empty());
         }
         m.write_int(data + 4, 4, 0x80000003).unwrap();
-        assert_eq!(r.user_call(&mut m, "TrackMouseEvent", &[data]).unwrap(), 1);
+        assert_eq!(r.cursor_call(&mut m, Track, &[data]).unwrap(), 1);
         m.write_int(data + 4, 4, 0x40000000).unwrap();
         m.write_int(data + 8, 8, u64::MAX).unwrap();
-        assert_eq!(r.user_call(&mut m, "TrackMouseEvent", &[data]).unwrap(), 1);
+        assert_eq!(r.cursor_call(&mut m, Track, &[data]).unwrap(), 1);
         assert_eq!(m.read_int(data, 4).unwrap(), 24);
         assert_eq!(m.read_int(data + 4, 4).unwrap(), 0);
         assert_eq!(m.read_int(data + 8, 8).unwrap(), 0);
         assert_eq!(m.read_int(data + 16, 8).unwrap(), 0);
         m.write_int(data + 4, 4, 2).unwrap();
         m.write_int(data + 8, 8, HWND ^ (1 << 40)).unwrap();
-        assert_eq!(r.user_call(&mut m, "TrackMouseEvent", &[data]).unwrap(), 0);
+        assert_eq!(r.cursor_call(&mut m, Track, &[data]).unwrap(), 0);
         assert_eq!(
             m.read_int(crate::x64::runtime::TEB + 0x68, 4).unwrap(),
             1400
         );
         m.write_int(data, 4, 16).unwrap();
-        assert_eq!(r.user_call(&mut m, "TrackMouseEvent", &[data]).unwrap(), 0);
+        assert_eq!(r.cursor_call(&mut m, Track, &[data]).unwrap(), 0);
         assert_eq!(m.read_int(crate::x64::runtime::TEB + 0x68, 4).unwrap(), 87);
         // QUERY writes the complete Win64 structure atomically.
         let crossing = STACK + 4090;
@@ -322,7 +323,7 @@ mod tests {
         let mut before = [0; 24];
         m.read(crossing, &mut before).unwrap();
         m.protect(STACK + 4096, 4096, READ).unwrap();
-        assert!(r.user_call(&mut m, "TrackMouseEvent", &[crossing]).is_err());
+        assert!(r.cursor_call(&mut m, Track, &[crossing]).is_err());
         let mut after = [0; 24];
         m.read(crossing, &mut after).unwrap();
         assert_eq!(after, before);
@@ -354,7 +355,7 @@ mod tests {
             Some(0)
         );
         r.threads.active = 1;
-        r.user.cursor_pos = [-10, 240];
+        r.user.cursor.state.set_position([-10, 240]);
         r.message_call(&mut m, "PostMessageW", &[HWND, 0x8001, 0, 0])
             .unwrap();
         let time = r.user.events[0].time;

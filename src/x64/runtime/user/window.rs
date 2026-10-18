@@ -150,14 +150,13 @@ impl Runtime64 {
                 (event.lparam >> 16) as u16 as i16 as i32,
             ];
             let point = std::array::from_fn(|n| {
-                let p = if screen {
+                if screen {
                     input[n]
                 } else {
                     w.client[n].wrapping_add(input[n])
-                };
-                p.clamp(self.user.cursor_clip[n], self.user.cursor_clip[n + 2] - 1)
+                }
             });
-            self.user.cursor_pos = point;
+            let point = self.user.cursor.host_position(point);
             let local: [i32; 2] = std::array::from_fn(|n| {
                 if screen {
                     point[n]
@@ -180,7 +179,7 @@ impl Runtime64 {
             event,
             time,
             tid: self.user.windows[&event.window].tid,
-            point: self.user.cursor_pos,
+            point: self.user.cursor.position(),
             hardware: true,
         });
         Ok(())

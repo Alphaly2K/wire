@@ -208,9 +208,6 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
     if sockets::is_call(name) && !dll.eq_ignore_ascii_case("ws2_32.dll") {
         return false;
     }
-    if name == "TrackMouseEvent" && !dll.eq_ignore_ascii_case("user32.dll") {
-        return false;
-    }
     if devices::arity(name).is_some() && !devices::export(dll, name) {
         return false;
     }
@@ -848,6 +845,7 @@ impl Runtime64 {
             ApiId::Variant(_) => unreachable!("Variant helpers have no Win64 binding"),
             ApiId::ProcessQuery(id) => self.process_query_call(mem, id, args),
             ApiId::Keyboard(id) => self.keyboard_call(mem, id, args),
+            ApiId::Cursor(id) => self.cursor_call(mem, id, args),
             ApiId::RawInput(_) | ApiId::Ime(_) => self.input_profile_call(mem, id, args),
             ApiId::Geometry(id) => {
                 let result = crate::win32::x64::geometry::call(mem, id, args)?;

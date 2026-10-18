@@ -8,6 +8,7 @@ mod clocks;
 mod com;
 mod context;
 mod critical_sections;
+mod cursor;
 mod delays;
 mod files;
 mod geometry;
@@ -47,6 +48,7 @@ pub use clocks::{ClockApi, CLOCK_CONTRACTS};
 pub use com::{ComApi, COM_CONTRACTS};
 pub use context::{ContextApi, CONTEXT_CONTRACTS};
 pub use critical_sections::{CriticalSectionApi, CRITICAL_SECTION_CONTRACTS};
+pub use cursor::{CursorApi, CURSOR_CONTRACTS};
 pub use delays::{DelayApi, DELAY_CONTRACTS};
 pub use files::{FileApi, FILE_CONTRACTS};
 pub use geometry::{GeometryApi, GEOMETRY_CONTRACTS};
@@ -152,6 +154,7 @@ pub enum ApiId {
     RawInput(RawInputApi),
     Ime(ImeApi),
     Geometry(GeometryApi),
+    Cursor(CursorApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -329,6 +332,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(RAW_INPUT_CONTRACTS.iter())
         .chain(IME_CONTRACTS.iter())
         .chain(GEOMETRY_CONTRACTS.iter())
+        .chain(CURSOR_CONTRACTS.iter())
 }
 
 #[cfg(test)]
