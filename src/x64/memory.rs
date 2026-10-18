@@ -668,6 +668,10 @@ impl Memory {
     }
     // Former code pages remain excluded even while NX, so a successful store
     // cannot invalidate this sequence.
+    // Keep the per-instruction proof as a tail call from checked_access.
+    // Inlining this page lookup there adds spills to every checked operand;
+    // unrelated API changes can otherwise change the compiler's decision.
+    #[inline(never)]
     pub(crate) fn owned_noncode_access(&self, address: u64, size: usize) -> bool {
         size as u64 <= PAGE - (address & (PAGE - 1))
             && self

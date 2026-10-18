@@ -16,4 +16,4 @@
 
 集成冻结 `r2-user-queries-integrated-wire/wire`：SHA256 `1b32033648a5f513318697248e41fffd22776307b7008af473e9c51f9e78734c`，5,970,664 bytes，相对 Classes +5,392 bytes，相对属性/trace 最终草稿 +1,584 bytes，满足预先固定的各项体积预算。两个家族保留各自独立行为基线；共同 before 为已验收 Classes，集成状态将在新的固定路径协议下比较，不把已拒绝候选作为性能准入基线。
 
-新增 `gateway-window` 已在旧 Classes 冻结程序上独立验证 Win64 与 PE32 IR/raw 三条路径。Win64 真正执行 WNDPROC 并创建/销毁窗口，PE32 预设桌面字段后循环读取；返回值、退休数、API 次数及 Win64 work 均通过。集成候选的 51 条路径、三对轮换矩阵正在执行，之后再做游戏前缀验收。
+新增 `gateway-window` 已在旧 Classes 冻结程序上独立验证 Win64 与 PE32 IR/raw 三条路径。Win64 真正执行 WNDPROC 并创建/销毁窗口，PE32 预设桌面字段后循环读取；返回值、退休数、API 次数及 Win64 work 均通过。首轮集成 51 条路径、306 次执行全部校验：window Win64 −36.511%、PE32 IR/raw −11.397%/−7.523%，properties PE32 IR/raw −16.376%/−10.341%，RSS 中位数最多 +96KiB。memory +4.212% 触发长样本调查，暂缓验收；具体补证、采样与 helper 内联修订见[调用边界调查](refactoring-memory-call-boundary-2026-10-18.md)。原集成没有执行游戏验收。
