@@ -385,6 +385,8 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 
 最终 release 600 / debug 446 / native 7 / 工具 23 和 fmt/strict Clippy/build 通过，377 个 Rust 文件核对一致，二进制相对 Classes +5,424 bytes。55 条性能协议、342 次执行及三对 Alice 前缀全部校验；PE32 三条离散路径追加 control 后为 −0.697%/−0.525%/+1.735%，原始慢轮保留。2026-10-18 接受名称/属性十四项与查询二十五项，累计 **540 exports**；详见[完整集成验收](refactoring-memory-call-boundary-2026-10-18.md)。
 
-## 窗口文本与输入所有权候选
+## 窗口文本与输入所有权
 
-十六项唯一契约、PE32 状态提交/guest 通知协调与 Win64 scalar adapter 已接入，移除重复 ABI 和名称路由；原两架构 NULL、编码、callback 与 absent 差异保持。基线 `71b53a4`、实现 `fe6b552`，完整 release 600 / debug 446 / native 7 / 工具 23 及 fmt/strict Clippy/build 通过。380 个 Rust 文件核对一致，二进制较上一已验收冻结 +6,736 bytes，在预设 +16KiB 内。原创长度查询 fixture 已在旧运行时双架构验证，54 条性能路径及游戏前缀验收中，尚未计入累计；见[候选报告](refactoring-window-state-2026-10-18.md)。
+十六项唯一契约、PE32 状态提交/guest 通知协调与 Win64 scalar adapter 已接入，移除重复 ABI 和名称路由；原两架构 NULL、编码、callback 与 absent 差异保持。基线 `71b53a4`、实现 `fe6b552`，完整 release 600 / debug 446 / native 7 / 工具 23 及 fmt/strict Clippy/build 通过。380 个 Rust 文件核对一致，二进制较上一已验收冻结 +6,736 bytes，在预设 +16KiB 内。
+
+59 个性能协议、369 次执行和三对 Alice 前缀全部校验，长度查询 Win64/PE32 IR/raw CPU +1.614%/−25.612%/−22.253%；PE32 四条扩样成本均在 ±1% 内。Win64 rectangle 的数倍差异同时出现在同一旧二进制 control，不归因为实现收益。Alice CPU +0.083%、wall +10.116%，保持同预算隐藏窗口、零 Draw/Present；启动离散保留。2026-10-18 接受，累计 **556 exports**；见[完整验收](refactoring-window-state-2026-10-18.md)。
