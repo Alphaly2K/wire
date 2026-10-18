@@ -55,6 +55,7 @@
 - [虚拟桌面与显示查询](architecture/display.md)及[完整验收](reports/refactoring-display-2026-10-18.md)：16 项契约、共享 profile/编码与明确 monitor callback 控制；37 个性能协议及游戏前缀通过。
 - [GDI DC 与设备能力](architecture/gdi-dc.md)及[完整验收](reports/refactoring-gdi-dc-2026-10-18.md)：七项契约、真实 backing 和私有逻辑 DC owner；40 个性能协议及游戏前缀通过。
 - [桌面设置与 DWM](architecture/desktop.md)及[完整验收](reports/refactoring-desktop-2026-10-18.md)：六项契约、进程设置 owner；43 个性能协议、bit-test 补证及游戏前缀通过。
+- [窗口类与元数据](architecture/classes.md)及[完整验收](reports/refactoring-classes-2026-10-18.md)：十七项契约、私有 Win64 类 owner 与 PE32 兼容 facade；46 个性能协议、两组 control 补证及游戏前缀通过。
 - [release 编译单元候选](reports/refactoring-release-codegen-2026-10-15.md)：独立构建配置、同二进制对照及长样本调查。
 - [网关边界候选](reports/refactoring-gateway-boundary-2026-10-15.md)、[页缓存内联候选](reports/refactoring-page-cache-inline-2026-10-15.md)、[helper 布局候选](reports/refactoring-memory-helper-layout-2026-10-15.md)：已撤回实现和保留的测量证据。
 - [本次渐进重构记录](reports/refactoring-2026-10-14.md)：阶段交付、行为差异与验收结果。

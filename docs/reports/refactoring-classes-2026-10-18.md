@@ -1,6 +1,6 @@
 # R2/R3 窗口类注册与查询（2026-10-18）
 
-状态：六项独立旧行为基线与可选性能 fixture 已通过，十七项候选已接入且完整正确性通过，性能与游戏前缀验收进行中，不计入已验收累计数。
+状态：十七项契约与 Win64 类 owner 已验收。独立基线 `a899cd5`，实现 `a7f313f`，累计已验收 501 个 export。
 
 范围为 RegisterClassA/W、RegisterClassExA/W、UnregisterClassA/W、GetClassInfoA/W、GetClassInfoExA/W、GetClassLongA/W、SetClassLongA/W、GetClassWord、GetClassNameA/W，共十七项。PE32 全部已有处理；Win64 六项注册/注销已有处理，其余十一项 absent。Win64 静态接受 kernel32/kernelbase/user32，默认动态只有 user32，保留已有 gateway fallback。
 
@@ -21,3 +21,11 @@ before 为 `r2-desktop-wire/wire`，SHA256 `97689a99eb05cbf37372cbce693d3af16e9c
 候选六项独立测试、已有类元数据一项和真实窗口创建/回滚一项回归通过，日志 `r2-classes-candidate32-tests-v2.txt`、`r2-classes-candidate64-tests.txt`、`r2-classes-metadata-tests.txt`、`r2-classes-window-tests.txt`。修订后完整 release 583 passed / 7 ignored，debug Win32/AMD64/FPU 429 passed，显式 native 7 passed，工具 20 passed；fmt、strict all-target/all-feature Clippy、release build 通过。
 
 冻结 `r2-classes-wire/wire`：SHA256 `a5625b33fe03942673e5e7838914d6bda5d66669470d5dcdce55cd599805871c`，5,965,272 bytes，相对 before +9,040 bytes，满足 +24KiB 预算。365 个 Rust 文件（src/tests 357 个）的 live/frozen/manifest SHA 和文件集合一致，target 与 frozen executable SHA 一致，见 `r2-classes-source-verification.json`。正式计时与编译/native 检查严格串行。
+
+正式三对矩阵共 46 条 workload protocol，结果、retired/work、API 计数和输入全部校验，见 `r2-classes-stable-final-summary.json`。类接口样本 Win64 CPU −15.632%，逐对 −16.152%/−14.814%/−17.288%；PE32 IR/raw −6.676%/−4.082%，逐对分别 −6.713%/−3.207%/−6.676% 与 −4.049%/−2.861%/−4.082%。RSS 中位数最多 +144KiB。
+
+两条初筛超过 3%：desktop/IR +3.080%，逐对 +9.082%/+2.091%/+2.870%；images/raw +3.774%，逐对 +3.905%/+0.800%/+5.483%。原轮次保留，分别按相同 work/launch/QoS 追加三对并加入相同 before executable 的 control。desktop 补证 +0.844%，逐对 +0.211%/+1.915%/+0.844%，control 相对 before +0.599%，after 相对 control +0.244%；images 补证 −0.214%，逐对 −0.763%/−1.123%/−0.122%，control 相对 before −0.269%，after 相对 control +0.055%。未出现持续超门槛回退，见 `r2-classes-stable-{desktop,images}-control-summary.json`。其余初筛最大中位数回退为 processor-count/IR +2.367%。
+
+integer/IR 中位数 −9.309%，逐对 +2.601%/−9.332%/+10.691%，仍有明显时间漂移，不将该中位数列为通用整数优化收益。未改动 CPU、IR、内存或浮点语义。
+
+矩阵、补证之后串行三对 Alice 200M work 前缀，复用原 runtime/游戏资产。六次均保持隐藏窗口、client 314×211、Draw/Present 0 的预算出口；CPU/wall 中位数 −1.888%/−2.156%，见 `r2-classes-stable-alice/compare.json`。本批验收为类接口与启动前缀，未测完整游戏渲染或 FPS。
