@@ -21,3 +21,5 @@ RedrawWindow 存在原始入口差异：API fallback 先由 menu handler 返回 
 完整 release 619 passed / 7 ignored、debug 465、显式 native 7、工具 23，以及 root/library fmt、strict Clippy、release build 全部通过。冻结 `r2-menu-wire`，SHA256 `ad5f87ad780763733aba2500814628149c4d0812e4b9e373fb380b99d0b2427d`，6,013,928 bytes，相对 scalar 冻结 +21,520 bytes，在本批 +24KiB 上限内；399 个 Rust 输入和 target/frozen executable 核对一致。原创 gateway-menu 13K work 旧/新 raw/IR 四次 smoke 全部校验，retired 13,022、API 2,003、checksum 0。该低 work smoke 仅验证行为，不作性能准入。
 
 随后串行运行旧/新 Alice 各一次 200M 功能 smoke，均在相同预算退出，hidden HWND 0x7ffd00630000、client 314×211、Draw/Present 0/0；证据 `r2-menu-functional-alice`。复用已有游戏 runtime，只临时软链接二进制并在退出后删除。该 smoke 不用于性能准入；完整验证汇总 `r2-menu-complete-verification.json`。
+
+菜单自身 50M work 的 raw/IR 三对初筛随后串行完成，12 次执行全部校验。CPU 中位数 IR −8.735%、raw −0.144%，RSS −32KiB/−112KiB；IR 逐对 −8.326%/−8.735%/+4.439%，raw +5.913%/+0.194%/−6.364%，离散完整保留。这是固定菜单状态循环的观测，宽矩阵与菜单正式游戏计时仍待完成，尚未增加已验收数。证据 `r2-menu-gateway-screen` 及独立 metrics。上一批对话框的三项成本另见其 scalar-codegen 报告，不混作菜单的性能结果。

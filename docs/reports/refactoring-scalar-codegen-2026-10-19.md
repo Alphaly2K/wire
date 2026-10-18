@@ -23,3 +23,9 @@
 计时退出后，菜单四项独立基线通过，确认 RedrawWindow 的真实 gateway 遮盖；root/src/crates、Cargo 输入及 executable SHA 与本冻结仍相同，证据 `r2-menu-baseline-runtime-identity.json`。这四项新测试不包含在原 395 文件来源核对中。随后串行执行 Alice 新旧各一次 200M 功能 smoke，均到相同预算、hidden 314×211、Draw/Present 0/0；临时二进制软链接退出后删除，复用现有 runtime，未复制或硬链接游戏资源。该 smoke 明确仅作功能检查，不用于宿主漂移期间的性能准入。
 
 再次仅复核 900M bit/IR，三标签三对全部结束且结果校验通过，`r2-dialog-recheck-bit-ir` 和独立 metrics 保留。候选 CPU 中位数 −0.420%，但 before/control 同哈希仍从 5.1517 秒漂移到 8.4842 秒，首对 control/before 约 +34%；本轮仍不作为性能准入。计时退出后才编辑菜单新增测试。为继续职责迁移，后续菜单候选将独立冻结，并单独对照本报告冻结；本候选与消息基线之间未解决的性能验收继续保留，累计已验收仍为 595。
+
+菜单候选完成完整正确性并冻结后，再次独立使用原消息/本报告冻结，串行完成此前未结束的 900M SSE/raw、150M 三项 IR gateway 和 GUID/raw 三标签三对。原完整 code-alias、最新 bit 及本次四项 gateway/SSE 与最初矩阵一同保留为 `r2-dialog-all-completed-metrics.json`：35 条完整协议、234 次校验通过的执行，不汇入此前中断的 SSE 或漂移严重的旧 bit 扩样。不同 work、脚本与协议均保留独立分组。
+
+扩样 CPU 中位数：code-alias −6.360%、bit/IR −0.420%、SSE/raw +5.353%、dialog/IR −11.545%、messages/IR +3.925%、GDI/IR +4.105%、GUID/raw +0.337%。SSE/raw 相对同哈希 control +2.413%，逐对相对 before +15.540%/+5.353%/−5.733%；messages/IR 相对 control +4.505%，逐对相对 before +6.193%/+3.925%/−3.320%；GDI/IR 相对 control +2.064%，逐对相对 before +4.219%/+1.169%/+5.862%。同哈希噪声与候选的局部成本均保留，SSE/raw、messages/IR、GDI/IR 继续调查，未作性能准入。
+
+前后 api::dispatch 的独立反汇编保存为 `r2-dialog-api-dispatch-{before,after}-assembly.txt`；总函数指令与局部栈布局发生变化，后续按实际消息/图形路径定位，尚未据此确定热点原因。随后串行完成 Alice 200M 三对，六次均到同一预算出口、hidden 314×211、Draw/Present 0/0；CPU/wall 中位数 −3.906%/−3.967%，RSS +160KiB。证据 `r2-dialog-final-alice`，复用已有 runtime，二进制软链接在每次退出后删除。此启动前缀未进入实际绘制，不推断游戏 FPS。
