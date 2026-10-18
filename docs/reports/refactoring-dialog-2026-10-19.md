@@ -7,3 +7,7 @@
 独立基线固定 child/thread 检查先于输出访存、GetDlgItemInt 在 WM_GETTEXT 故障前清零 translated 输出、枚举 callback=NULL 的不同检查规则，以及 callback FALSE 在顶层/子窗口枚举中不同的返回 carrier。明确不可用的服务继续在任何 guest 输入访问前失败；既有文本/有符号十进制边界、枚举快照与回调控制测试继续保留。
 
 这些后续草稿不属于绘制已核对的 391 个 Rust 文件冻结。先结束绘制计时和游戏，再编译旧行为基线，基线通过后才注册迁移。
+
+原创可选 `gateway-dialog` 创建父/子窗口，每轮 GetDlgItem 后将实际返回值与子窗口 handle 做 XOR 并累积 OR，最终分别销毁两个窗口。n=work//7，API=n+5，retired=7n+65，checksum=0。首次旧程序运行因把终止 int3 计入退休数导致期望多 1，失败日志 `r2-dialog-fixture-baseline` 保留，修正该独立计数后再验证 IR/raw。
+
+修正后在旧消息冻结上 n=100 的 IR/raw 首次全部校验通过：retired=765、API=105、checksum=0；工具 23 项通过。证据 `r2-dialog-fixture-baseline-corrected`、`r2-dialog-tool-tests.txt`。领域边界见[对话框说明](../architecture/dialog.md)，typed 草稿仍未注册。
