@@ -110,6 +110,9 @@ def nls_conversion_fixture(work):
     return image, dict(eax=(65 + 2 * n) & 0xffffffff, retired=11 * n + 10)
 
 def fixture(name,work):
+    if name=='gateway-rectangle':
+        from perf.fixtures.geometry_gateway import x86
+        return x86(work,pe32)
     if name in ('gateway-raw-input', 'gateway-ime'):
         from perf.fixtures.input_profile_gateway import x86
         return x86(work,pe32,ime=name=='gateway-ime')

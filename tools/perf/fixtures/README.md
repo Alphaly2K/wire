@@ -82,3 +82,5 @@ API count=`2*n`，raw/IR 均用旧 handler 独立预检。默认 case 集合保�
 `keyboard_gateway.py` 提供双架构可选 `gateway-keyboard`：每轮把 GetKeyboardState 快照写入 stack buffer，再读取 A 的同步/异步状态，累计返回值 1；无注入按键或逐轮资源增长。Win64 可选 `gateway-keyboard-map` 每轮累计 MapVirtualKeyExW(A, 0, US HKL) 的 scan 30 和 GetKeyboardType(0) 的 4。两项核对 checksum、退休数/API 次数与 Win64 work，不测量 host 输入事件延迟，默认 case 集合保持。
 
 `input_profile_gateway.py` 提供双架构可选 `gateway-raw-input` 与 `gateway-ime`，分别循环 GetRawInputDeviceList 和 ImmIsIME。前者每轮重写 stack count sentinel 并消费返回值与 count：Win64 无设备写零，PE32 ABI-only 保留 sentinel；后者查询固定 HKL，均不创建资源或依赖宿主输入。核对 checksum、退休数/API 次数及 Win64 work；每个镜像只有一个 import，默认 case 集合保持。
+
+`geometry_gateway.py` 提供双架构可选 `gateway-rectangle`：stack 上的零矩形每轮 OffsetRect(+1, −1)，消费 BOOL 返回值并在末尾读取累计 x 坐标，checksum 为 2n；核对退休数/API 次数及 Win64 work，无逐轮资源增长，不改变默认 case 集合。

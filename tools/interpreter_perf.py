@@ -311,6 +311,10 @@ def main():
         from perf.fixtures.basic_gateway import x64
         data, meta = x64(args.work)
         entries.append(('gateway-processor-count', data, meta))
+    if args.cases and 'gateway-rectangle' in args.cases:
+        from perf.fixtures.geometry_gateway import x64
+        data, meta = x64(args.work)
+        entries.append(('gateway-rectangle', data, meta))
     for name, ime in [('gateway-raw-input', False), ('gateway-ime', True)]:
         if args.cases and name in args.cases:
             from perf.fixtures.input_profile_gateway import x64
