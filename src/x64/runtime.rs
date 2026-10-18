@@ -846,6 +846,7 @@ impl Runtime64 {
             ApiId::ProcessQuery(id) => self.process_query_call(mem, id, args),
             ApiId::Keyboard(id) => self.keyboard_call(mem, id, args),
             ApiId::Cursor(id) => self.cursor_call(mem, id, args),
+            ApiId::Image(id) => self.image_call(mem, id, args),
             ApiId::RawInput(_) | ApiId::Ime(_) => self.input_profile_call(mem, id, args),
             ApiId::Geometry(id) => {
                 let result = crate::win32::x64::geometry::call(mem, id, args)?;

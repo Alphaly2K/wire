@@ -16,6 +16,7 @@ mod guid;
 mod handles;
 mod heaps;
 mod identity;
+mod images;
 mod inline_sync;
 mod input_profile;
 mod interlocked;
@@ -56,6 +57,7 @@ pub use guid::{GuidApi, GUID_CONTRACTS};
 pub use handles::{HandleApi, HANDLE_CONTRACTS};
 pub use heaps::{HeapApi, HEAP_CONTRACTS};
 pub use identity::{IdentityApi, IDENTITY_CONTRACTS};
+pub use images::{ImageApi, IMAGE_CONTRACTS};
 pub use inline_sync::{InlineSyncApi, INLINE_SYNC_CONTRACTS};
 pub use input_profile::{ImeApi, RawInputApi, IME_CONTRACTS, RAW_INPUT_CONTRACTS};
 pub use interlocked::{InterlockedApi, INTERLOCKED_CONTRACTS};
@@ -155,6 +157,7 @@ pub enum ApiId {
     Ime(ImeApi),
     Geometry(GeometryApi),
     Cursor(CursorApi),
+    Image(ImageApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -333,6 +336,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(IME_CONTRACTS.iter())
         .chain(GEOMETRY_CONTRACTS.iter())
         .chain(CURSOR_CONTRACTS.iter())
+        .chain(IMAGE_CONTRACTS.iter())
 }
 
 #[cfg(test)]

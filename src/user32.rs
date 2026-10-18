@@ -343,18 +343,6 @@ pub fn dispatch(
     if dll != "user32.dll" {
         return None;
     }
-    if matches!(name, "LoadCursorA" | "LoadCursorW") {
-        let result = if a[0] == 0 && a[1] == 32512 {
-            0x42007f00
-        } else {
-            state.last_error = 1812;
-            0
-        };
-        return Some(Ok((
-            GuestCallOutcome::Returned(result),
-            "logical system arrow and per-thread cursor display count".into(),
-        )));
-    }
     if name == "EnumDisplayMonitors" {
         return Some((|| {
             if a[0] != 0 || a[2] == 0 {

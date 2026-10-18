@@ -9,6 +9,7 @@ pub(crate) mod geometry;
 pub(crate) mod guid;
 pub(crate) mod heaps;
 pub(crate) mod host;
+pub(crate) mod images;
 pub(crate) mod interlocked;
 pub(crate) mod keyboard;
 pub(crate) mod local_memory;

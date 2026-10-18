@@ -1,10 +1,6 @@
 //! Bounded PE32+ resource tree traversal. RVAs are u32; all guest pointers are u64.
 use super::{Memory, Runtime64};
-#[derive(PartialEq, Eq)]
-pub(super) enum Key {
-    Id(u32),
-    Name(String),
-}
+pub(super) use crate::win32::user::images::Key;
 impl Runtime64 {
     pub(super) fn resource_key(mem: &Memory, pointer: u64, wide: bool) -> Result<Key, String> {
         if pointer <= 65535 {

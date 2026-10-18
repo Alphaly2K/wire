@@ -12,13 +12,7 @@ impl Runtime64 {
         let result = if id == CursorApi::Track {
             cursor::track(mem, a[0], |window| self.user.windows.contains_key(&window))?
         } else {
-            let valid_image = id != CursorApi::Set
-                || a[0] == 0
-                || self
-                    .user
-                    .images
-                    .get(&a[0])
-                    .is_some_and(|image| image.kind == 2);
+            let valid_image = id != CursorApi::Set || a[0] == 0 || self.user.images.is_cursor(a[0]);
             self.user
                 .cursor
                 .call(mem, id, a, self.threads.active, valid_image)?

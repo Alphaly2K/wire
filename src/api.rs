@@ -725,12 +725,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("PostMessageA", 16),
                 ("PostMessageW", 16),
                 ("PostThreadMessageA", 16),
-                ("LoadIconA", 8),
-                ("LoadIconW", 8),
-                ("LoadCursorA", 8),
-                ("LoadCursorW", 8),
-                ("LoadImageA", 24),
-                ("LoadImageW", 24),
                 ("GetDC", 4),
                 ("GetWindowDC", 4),
                 ("ReleaseDC", 8),
@@ -1144,7 +1138,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("CreateDialogIndirectParamW", 20),
                 ("DialogBoxIndirectParamW", 20),
                 ("CreateIconIndirect", 4),
-                ("DestroyIcon", 4),
                 ("EnumChildWindows", 12),
                 ("EnumDisplayMonitors", 16),
                 ("GetClassNameW", 12),
@@ -1864,6 +1857,15 @@ pub fn dispatch(
             )?;
             ret = result.value;
             note = result.note.into();
+        }
+        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Image(_))) => {
+            let Some(crate::win32::catalog::ApiId::Image(id)) = binding.typed else {
+                unreachable!()
+            };
+            let result = crate::win32::x86::images::call(id, &args, &mut state.last_error);
+            ret = result.value;
+            note = result.note.into();
+            implemented = result.implemented;
         }
         ("wire.wmi", _) => {
             (ret, note, implemented) =

@@ -3,19 +3,13 @@ use super::{Memory, Runtime64, READ};
 use crate::win32::x64::geometry::{read_rect as rectangle, write_rect};
 mod cursor;
 mod gdi;
+mod images;
 mod message;
 mod window;
 pub(super) use message::arity as message_arity;
 use std::collections::BTreeMap;
 pub use window::WindowCall;
 pub(super) use window::WindowResult;
-struct Image {
-    instance: u64,
-    key: super::resources::Key,
-    kind: u32,
-    shared: bool,
-    _payload: Vec<u8>,
-}
 #[derive(Clone)]
 struct Class {
     instance: u64,
@@ -42,8 +36,7 @@ pub(super) struct Window {
     ready: bool,
 }
 pub(super) struct User {
-    images: BTreeMap<u64, Image>,
-    next_image: u64,
+    images: crate::win32::user::images::Images,
     classes: BTreeMap<u16, Class>,
     next_atom: u16,
     cursor: crate::win32::x64::cursor::Cursor64,
@@ -61,8 +54,10 @@ pub(super) struct User {
 impl Default for User {
     fn default() -> Self {
         Self {
-            images: BTreeMap::new(),
-            next_image: super::TEB + 0x610000,
+            images: crate::win32::user::images::Images::new(
+                super::TEB + 0x610000,
+                super::TEB + 0x620000,
+            ),
             classes: BTreeMap::new(),
             next_atom: 0xc000,
             cursor: crate::win32::x64::cursor::Cursor64::new([
@@ -95,11 +90,8 @@ pub(super) fn arity(name: &str) -> Option<usize> {
         return Some(arity);
     }
     Some(match name {
-        "LoadIconA" | "LoadIconW" | "LoadCursorA" | "LoadCursorW" | "UnregisterClassA"
-        | "UnregisterClassW" => 2,
-        "LoadImageA" | "LoadImageW" => 6,
-        "DestroyIcon" | "DestroyCursor" | "RegisterClassA" | "RegisterClassW"
-        | "RegisterClassExA" | "RegisterClassExW" => 1,
+        "UnregisterClassA" | "UnregisterClassW" => 2,
+        "RegisterClassA" | "RegisterClassW" | "RegisterClassExA" | "RegisterClassExW" => 1,
         "DwmGetWindowAttribute" => 4,
         "DwmIsCompositionEnabled" => 1,
         _ => return None,
@@ -115,7 +107,6 @@ pub(super) fn dwords(name: &str) -> &'static [usize] {
     match name {
         "GetDeviceCaps" => &[1],
         "DwmGetWindowAttribute" => &[1, 3],
-        "LoadImageA" | "LoadImageW" => &[2, 3, 4, 5],
         _ => &[],
     }
 }
@@ -159,165 +150,6 @@ impl Runtime64 {
                     } // No cloaking service.
                     _ => Ok(0x80070057),
                 }
-            }
-            "LoadIconA" | "LoadIconW" | "LoadCursorA" | "LoadCursorW" | "LoadImageA"
-            | "LoadImageW" => {
-                let load_image = name.starts_with("LoadImage");
-                let kind = if load_image {
-                    args[2] as u32
-                } else {
-                    if name.starts_with("LoadCursor") {
-                        2
-                    } else {
-                        1
-                    }
-                };
-                let shared = !load_image || args[5] & 0x8000 != 0;
-                if load_image && (args[5] & !0x8040 != 0 || args[3] != 0 || args[4] != 0) {
-                    self.set_error(mem, 50)?;
-                    return Ok(0);
-                }
-                if !matches!(kind, 1 | 2) {
-                    self.set_error(mem, 50)?;
-                    return Ok(0);
-                }
-                let key = Self::resource_key(mem, args[1], wide)?;
-                if shared {
-                    if let Some((&handle, _)) = self.user.images.iter().find(|(_, image)| {
-                        image.shared
-                            && image.instance == args[0]
-                            && image.key == key
-                            && image.kind == kind
-                    }) {
-                        return Ok(handle);
-                    }
-                }
-                let payload = if args[0] == 0 {
-                    let super::resources::Key::Id(id) = key else {
-                        self.set_error(mem, 1814)?;
-                        return Ok(0);
-                    };
-                    if !(if kind == 1 {
-                        matches!(id, 32512..=32518)
-                    } else {
-                        matches!(id, 32512..=32516 | 32640..=32646 | 32648..=32651 | 32671..=32672)
-                    }) {
-                        self.set_error(mem, 1814)?;
-                        return Ok(0);
-                    }
-                    // Logical stock icon/cursor identity. Native drawing of these
-                    // stock objects is separate from the window/frame presenter.
-                    Vec::new()
-                } else {
-                    if self.modules.image(args[0]).is_none() {
-                        self.set_error(mem, 6)?;
-                        return Ok(0);
-                    }
-                    let group =
-                        self.resource(mem, args[0], if kind == 1 { 14 } else { 12 }, &key)?;
-                    let Some(group) = group else {
-                        self.set_error(mem, 1814)?;
-                        return Ok(0);
-                    };
-                    if kind != 1 {
-                        self.set_error(mem, 50)?;
-                        return Ok(0);
-                    }
-                    if group.len() < 6 || group[..4] != [0, 0, 1, 0] {
-                        return Err("invalid icon group header".into());
-                    }
-                    let count = u16::from_le_bytes(group[4..6].try_into().unwrap()) as usize;
-                    if count == 0 || count > 256 || 6 + count * 14 > group.len() {
-                        return Err("truncated icon group".into());
-                    }
-                    let index = (0..count)
-                        .min_by_key(|&i| {
-                            let width = if group[6 + i * 14] == 0 {
-                                256u16
-                            } else {
-                                group[6 + i * 14] as u16
-                            };
-                            width.abs_diff(32)
-                        })
-                        .unwrap();
-                    let offset = 6 + index * 14;
-                    let id =
-                        u16::from_le_bytes(group[offset + 12..offset + 14].try_into().unwrap());
-                    let length =
-                        u32::from_le_bytes(group[offset + 8..offset + 12].try_into().unwrap());
-                    let Some(payload) =
-                        self.resource(mem, args[0], 3, &super::resources::Key::Id(id as u32))?
-                    else {
-                        self.set_error(mem, 1814)?;
-                        return Ok(0);
-                    };
-                    if payload.len() != length as usize {
-                        return Err("icon group payload size mismatch".into());
-                    }
-                    if payload.len() < 40 {
-                        return Err("truncated icon DIB".into());
-                    }
-                    let word = |at| u32::from_le_bytes(payload[at..at + 4].try_into().unwrap());
-                    if word(0) != 40
-                        || word(16) != 0
-                        || u16::from_le_bytes(payload[14..16].try_into().unwrap()) != 32
-                    {
-                        self.set_error(mem, 50)?;
-                        return Ok(0);
-                    }
-                    let width = word(4);
-                    let doubled_height = word(8);
-                    if width == 0
-                        || width > 256
-                        || doubled_height == 0
-                        || doubled_height > 512
-                        || !doubled_height.is_multiple_of(2)
-                        || u16::from_le_bytes(payload[12..14].try_into().unwrap()) != 1
-                    {
-                        return Err("invalid icon DIB dimensions/planes".into());
-                    }
-                    let height = doubled_height / 2;
-                    let required = 40 + width * height * 4 + width.div_ceil(32) * 4 * height;
-                    if payload.len() < required as usize {
-                        return Err("truncated icon bitmap/mask".into());
-                    }
-                    // Retain the actual resource; no substitute icon makes a
-                    // missing guest resource look successfully loaded.
-                    payload
-                };
-                if self.user.images.len() >= 4096 || self.user.next_image >= super::TEB + 0x620000 {
-                    self.set_error(mem, 8)?;
-                    return Ok(0);
-                }
-                let handle = self.user.next_image;
-                self.user.next_image += 16;
-                self.user.images.insert(
-                    handle,
-                    Image {
-                        instance: args[0],
-                        key,
-                        kind,
-                        shared,
-                        _payload: payload,
-                    },
-                );
-                Ok(handle)
-            }
-            "DestroyIcon" | "DestroyCursor" => {
-                let kind = if name == "DestroyIcon" { 1 } else { 2 };
-                let Some(image) = self
-                    .user
-                    .images
-                    .get(&args[0])
-                    .filter(|image| image.kind == kind)
-                else {
-                    self.set_error(mem, 6)?;
-                    return Ok(0);
-                };
-                if !image.shared {
-                    self.user.images.remove(&args[0]);
-                }
-                Ok(1)
             }
             "RegisterClassA" | "RegisterClassW" | "RegisterClassExA" | "RegisterClassExW" => {
                 let ex = name.contains("Ex");
