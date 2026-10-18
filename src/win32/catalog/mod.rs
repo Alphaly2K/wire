@@ -12,6 +12,7 @@ mod cursor;
 mod delays;
 mod display;
 mod files;
+mod gdi_dc;
 mod geometry;
 mod guid;
 mod handles;
@@ -54,6 +55,7 @@ pub use cursor::{CursorApi, CURSOR_CONTRACTS};
 pub use delays::{DelayApi, DELAY_CONTRACTS};
 pub use display::{DisplayApi, DISPLAY_CONTRACTS};
 pub use files::{FileApi, FILE_CONTRACTS};
+pub use gdi_dc::{GdiDcApi, GDI_DC_CONTRACTS};
 pub use geometry::{GeometryApi, GEOMETRY_CONTRACTS};
 pub use guid::{GuidApi, GUID_CONTRACTS};
 pub use handles::{HandleApi, HANDLE_CONTRACTS};
@@ -161,6 +163,7 @@ pub enum ApiId {
     Cursor(CursorApi),
     Image(ImageApi),
     Display(DisplayApi),
+    GdiDc(GdiDcApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -341,6 +344,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(CURSOR_CONTRACTS.iter())
         .chain(IMAGE_CONTRACTS.iter())
         .chain(DISPLAY_CONTRACTS.iter())
+        .chain(GDI_DC_CONTRACTS.iter())
 }
 
 #[cfg(test)]

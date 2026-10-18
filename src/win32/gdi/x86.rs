@@ -10,13 +10,10 @@ pub(crate) fn dispatch(
     mem: &mut GuestMem,
     state: &mut ApiState,
 ) -> Option<(u32, String, bool)> {
-    let user = dll == "user32.dll" && matches!(name, "GetDC" | "ReleaseDC");
     let gdi = dll == "gdi32.dll"
         && matches!(
             name,
-            "CreateCompatibleDC"
-                | "DeleteDC"
-                | "CreateCompatibleBitmap"
+            "CreateCompatibleBitmap"
                 | "CreateDIBSection"
                 | "DeleteObject"
                 | "SelectObject"
@@ -40,7 +37,6 @@ pub(crate) fn dispatch(
                 | "GdiFlush"
                 | "StretchDIBits"
                 | "GetDIBits"
-                | "GetDeviceCaps"
                 | "CreateFontA"
                 | "CreateFontW"
                 | "CreateFontIndirectA"
@@ -49,23 +45,10 @@ pub(crate) fn dispatch(
                 | "SetMapMode"
                 | "GetMapMode"
         );
-    if !user && !gdi {
+    if !gdi {
         return None;
     }
-    let result = if name == "GetDC" {
-        (|| {
-            let (width, height) = if a[0] == 0 {
-                (1024, 768)
-            } else {
-                let w = state.user32.windows.get(&a[0]).ok_or(1400u32)?;
-                let [width, height] = w.client_size();
-                (width.max(1) as u32, height.max(1) as u32)
-            };
-            state.graphics.window_dc(a[0], width, height)
-        })()
-    } else {
-        crate::graphics::execute_gdi(name, a, mem, &mut state.graphics)
-    };
+    let result = crate::graphics::execute_gdi(name, a, mem, &mut state.graphics);
     let info = if name == "CreateDIBSection" {
         let mut bytes = [0; 40];
         if mem.read_bytes(a[1], &mut bytes).is_ok() {

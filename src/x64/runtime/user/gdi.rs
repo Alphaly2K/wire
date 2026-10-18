@@ -1,82 +1,44 @@
-//! Logical display DC ownership and device-capability queries. No GDI drawing backend yet.
+//! Typed Win64 DC adapter, borrowing the private logical DC owner.
 use super::{Memory, Runtime64};
-pub(in crate::x64::runtime) fn arity(name: &str) -> Option<usize> {
-    Some(match name {
-        "GetDC" | "CreateCompatibleDC" | "DeleteDC" | "GetPixelFormat" => 1,
-        "ReleaseDC" | "GetDeviceCaps" => 2,
-        _ => return None,
-    })
-}
+use crate::win32::{catalog::GdiDcApi, gdi::dc::capabilities64};
+
 impl Runtime64 {
-    pub(in crate::x64::runtime) fn gdi_call(
+    pub(in crate::x64::runtime) fn gdi_dc_call(
         &mut self,
         mem: &mut Memory,
-        name: &str,
+        id: GdiDcApi,
         args: &[u64],
     ) -> Result<u64, String> {
-        if matches!(name, "GetDC" | "CreateCompatibleDC") {
-            let compatible = name == "CreateCompatibleDC";
-            let valid = if compatible {
-                args[0] == 0 || self.user.dcs.contains_key(&args[0])
-            } else {
-                args[0] == 0 || self.user.windows.contains_key(&args[0])
-            };
-            if !valid {
-                self.set_error(mem, if compatible { 6 } else { 1400 })?;
-                return Ok(0);
+        use GdiDcApi::*;
+        let result = match id {
+            Window | Compatible => {
+                self.user
+                    .dcs
+                    .acquire(args[0], self.threads.active, id == Compatible, |hwnd| {
+                        self.user.windows.contains_key(&hwnd)
+                    })
             }
-            if self.user.dcs.len() >= 4096 || self.user.next_dc >= super::super::TEB + 0x660000 {
-                self.set_error(mem, 8)?;
-                return Ok(0);
-            }
-            let handle = self.user.next_dc;
-            self.user.next_dc += 16;
-            self.user.dcs.insert(
-                handle,
-                (
-                    if compatible { 0 } else { args[0] },
-                    self.threads.active,
-                    compatible,
-                ),
-            );
-            return Ok(handle);
-        }
-        let handle = args[if name == "ReleaseDC" { 1 } else { 0 }];
-        let Some(&(window, tid, compatible)) = self.user.dcs.get(&handle) else {
-            self.set_error(mem, 6)?;
-            return Ok(0);
-        };
-        match name {
-            "ReleaseDC" | "DeleteDC" => {
-                if compatible != (name == "DeleteDC")
-                    || tid != self.threads.active
-                    || (name == "ReleaseDC" && window != args[0])
-                {
-                    self.set_error(mem, 6)?;
-                    return Ok(0);
+            Release | Delete => self.user.dcs.release(
+                args[if id == Release { 1 } else { 0 }],
+                if id == Release { args[0] } else { 0 },
+                self.threads.active,
+                id == Delete,
+            ),
+            Capabilities | PixelFormat => self.user.dcs.validate(args[0]).map(|()| {
+                if id == Capabilities {
+                    capabilities64(args[1] as u32)
+                } else {
+                    0
                 }
-                self.user.dcs.remove(&handle);
-                Ok(1)
-            }
-            "GetPixelFormat" => Ok(0), // No format has been selected on this DC.
-            "GetDeviceCaps" => Ok(match args[1] {
-                0 => 0x400,
-                2 => 1, // DT_RASDISPLAY of the virtual desktop.
-                4 => 271,
-                6 => 203,
-                8 | 118 => 1024,
-                10 | 117 => 768,
-                12 => 32,
-                14 => 1,
-                24 => u32::MAX as u64,
-                40 | 42 => 36,
-                44 => 51,
-                88 | 90 => 96,
-                108 => 24,
-                116 => 60,
-                _ => 0, // No unimplemented raster/shading feature is advertised.
             }),
-            _ => unreachable!(),
+            WindowFrame => unreachable!("GetWindowDC has no Win64 binding"),
+        };
+        match result {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                self.set_error(mem, error)?;
+                Ok(0)
+            }
         }
     }
 }

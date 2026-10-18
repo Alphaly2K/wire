@@ -162,7 +162,6 @@ impl Runtime64 {
                         )
                         || devices::export(&provider, &function)
                         || (provider == "user32.dll" && user::arity(&function).is_some())
-                        || (provider == "gdi32.dll" && user::gdi_arity(&function).is_some())
                         || (provider == "dwmapi.dll"
                             && matches!(
                                 function.as_str(),

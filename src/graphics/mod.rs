@@ -1,5 +1,6 @@
 //! Initial GDI object/pixel backend. Public snapshots are real CPU pixels for
 //! independent fixtures; platform presentation and drawing APIs are separate.
+mod dc;
 mod dib;
 mod font;
 mod operations;

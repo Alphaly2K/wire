@@ -2,7 +2,7 @@
 use super::{
     dib, font,
     surface::{Bitmap, Storage},
-    Arguments, Dc, Graphics, STOCK_BITMAP,
+    Arguments, Graphics, STOCK_BITMAP,
 };
 use crate::mem::GuestMem;
 
@@ -136,25 +136,6 @@ pub(crate) fn execute(
                 return Err(120);
             }
             Ok(1) // only MM_TEXT is currently supported
-        }
-        "ReleaseDC" => {
-            gfx.release_window_dc(a[0], a[1])?;
-            Ok(1)
-        }
-        "CreateCompatibleDC" => {
-            if a[0] != 0 {
-                gfx.dc(a[0])?;
-            }
-            let h = gfx.handle()?;
-            gfx.dcs.insert(h, Dc::new(None, STOCK_BITMAP));
-            Ok(h)
-        }
-        "DeleteDC" => {
-            if gfx.dc(a[0])?.window.is_some() {
-                return Err(6);
-            }
-            gfx.dcs.remove(&a[0]);
-            Ok(1)
         }
         "CreateCompatibleBitmap" => {
             let bpp = gfx.bitmaps.get(&gfx.dc(a[0])?.bitmap).ok_or(6u32)?.bpp;

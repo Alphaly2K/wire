@@ -45,8 +45,7 @@ pub(super) struct User {
     focus: u64,
     active: u64,
     foreground: u64,
-    dcs: BTreeMap<u64, (u64, u64, bool)>,
-    next_dc: u64,
+    dcs: crate::win32::gdi::dc::DeviceContexts,
     pub(super) events: std::collections::VecDeque<message::Message>,
     pub(super) keyboard: crate::keyboard::Keyboard,
     message_state: BTreeMap<u64, [u64; 3]>,
@@ -71,8 +70,10 @@ impl Default for User {
             focus: 0,
             active: 0,
             foreground: 0,
-            dcs: BTreeMap::new(),
-            next_dc: super::TEB + 0x650000,
+            dcs: crate::win32::gdi::dc::DeviceContexts::new(
+                super::TEB + 0x650000,
+                super::TEB + 0x660000,
+            ),
             events: std::collections::VecDeque::new(),
             keyboard: Default::default(),
             message_state: BTreeMap::new(),
@@ -81,9 +82,6 @@ impl Default for User {
 }
 pub(super) fn arity(name: &str) -> Option<usize> {
     if let Some(arity) = message::arity(name) {
-        return Some(arity);
-    }
-    if let Some(arity) = gdi::arity(name) {
         return Some(arity);
     }
     if let Some(arity) = window::arity(name) {
@@ -105,7 +103,6 @@ pub(super) fn dwords(name: &str) -> &'static [usize] {
         return window::dwords(name);
     }
     match name {
-        "GetDeviceCaps" => &[1],
         "DwmGetWindowAttribute" => &[1, 3],
         _ => &[],
     }
@@ -118,9 +115,6 @@ impl Runtime64 {
         args: &[u64],
     ) -> Result<u64, String> {
         let wide = name.ends_with('W');
-        if gdi::arity(name).is_some() {
-            return self.gdi_call(mem, name, args);
-        }
         if window::arity(name).is_some() {
             return self.window_query(mem, name, args);
         }
@@ -239,11 +233,4 @@ impl Runtime64 {
 }
 pub(super) fn is_callback(name: &str) -> bool {
     window::is_callback(name)
-}
-pub(super) fn gdi_arity(name: &str) -> Option<usize> {
-    if matches!(name, "GetDC" | "ReleaseDC") {
-        None
-    } else {
-        gdi::arity(name)
-    }
 }

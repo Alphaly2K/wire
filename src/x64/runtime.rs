@@ -236,7 +236,6 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
                 || matches!(name, "SystemParametersInfoA" | "SystemParametersInfoW")))
         && !(dll.eq_ignore_ascii_case("dwmapi.dll")
             && matches!(name, "DwmGetWindowAttribute" | "DwmIsCompositionEnabled"))
-        && !(dll.eq_ignore_ascii_case("gdi32.dll") && user::gdi_arity(name).is_some())
         && !(dll.eq_ignore_ascii_case("advapi32.dll") && tracing::is_call(name))
         && !(dll.eq_ignore_ascii_case("advapi32.dll") && registry::arity(name).is_some())
         && !(dll.eq_ignore_ascii_case("ntdll.dll") && unwind::is_call(name))
@@ -838,6 +837,7 @@ impl Runtime64 {
             ApiId::Cursor(id) => self.cursor_call(mem, id, args),
             ApiId::Image(id) => self.image_call(mem, id, args),
             ApiId::Display(id) => self.display_call(mem, id, args),
+            ApiId::GdiDc(id) => self.gdi_dc_call(mem, id, args),
             ApiId::RawInput(_) | ApiId::Ime(_) => self.input_profile_call(mem, id, args),
             ApiId::Geometry(id) => {
                 let result = crate::win32::x64::geometry::call(mem, id, args)?;

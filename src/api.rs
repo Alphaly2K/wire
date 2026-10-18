@@ -725,9 +725,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("PostMessageA", 16),
                 ("PostMessageW", 16),
                 ("PostThreadMessageA", 16),
-                ("GetDC", 4),
-                ("GetWindowDC", 4),
-                ("ReleaseDC", 8),
                 ("BeginPaint", 8),
                 ("EndPaint", 8),
                 ("InvalidateRect", 12),
@@ -864,8 +861,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
         add(
             "gdi32.dll",
             &[
-                ("CreateCompatibleDC", 4),
-                ("DeleteDC", 4),
                 ("CreateDCA", 16),
                 ("CreateDCW", 16),
                 ("CreateDIBSection", 24),
@@ -956,7 +951,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("SetWindowExtEx", 16),
                 ("DPtoLP", 12),
                 ("LPtoDP", 12),
-                ("GetDeviceCaps", 8),
                 ("GetDCOrgEx", 8),
                 ("SelectPalette", 12),
                 ("RealizePalette", 4),
@@ -995,7 +989,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("StartPage", 4),
                 ("EndPage", 4),
                 ("GdiFlush", 0),
-                ("GetPixelFormat", 4),
                 ("SetPixelFormat", 12),
                 ("SwapBuffers", 4),
                 ("ChoosePixelFormat", 8),
@@ -1874,6 +1867,24 @@ pub fn dispatch(
                 ret = result.value;
                 note = result.note;
             }
+        }
+        _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::GdiDc(_))) => {
+            let Some(crate::win32::catalog::ApiId::GdiDc(id)) = binding.typed else {
+                unreachable!();
+            };
+            (ret, note) = crate::win32::gdi::dc_x86::call(
+                id,
+                &args,
+                &mut state.graphics,
+                |hwnd| {
+                    state
+                        .user32
+                        .windows
+                        .get(&hwnd)
+                        .map(|window| window.client_size())
+                },
+                &mut state.last_error,
+            );
         }
         _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Image(_))) => {
             let Some(crate::win32::catalog::ApiId::Image(id)) = binding.typed else {

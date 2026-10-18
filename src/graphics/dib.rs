@@ -14,28 +14,10 @@ pub(super) fn dispatch(
     mem: &GuestMem,
     gfx: &mut Graphics,
 ) -> Option<Result<u32, u32>> {
-    if !matches!(name, "StretchDIBits" | "GetDIBits" | "GetDeviceCaps") {
+    if !matches!(name, "StretchDIBits" | "GetDIBits") {
         return None;
     }
     Some((|| match name {
-        "GetDeviceCaps" => {
-            gfx.dc(a[0])?;
-            Ok(match a[1] {
-                0 => 0x300,
-                2 => 1,
-                4 => 271,
-                6 => 203,
-                8 | 118 => 1024,
-                10 | 117 => 768,
-                12 => 32,
-                14 => 1,
-                24 => u32::MAX,
-                38 => 0x2081,
-                88 | 90 => 96,
-                108 => 24,
-                _ => 0,
-            })
-        }
         "GetDIBits" => {
             gfx.dc(a[0])?;
             let bitmap = gfx.bitmaps.get(&a[1]).ok_or(6u32)?;
