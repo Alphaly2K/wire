@@ -825,8 +825,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("FindWindowW", 8),
                 ("GetWindowThreadProcessId", 8),
                 ("AttachThreadInput", 12),
-                ("RegisterWindowMessageA", 4),
-                ("RegisterWindowMessageW", 4),
                 ("RedrawWindow", 16),
                 ("GetUpdateRect", 12),
                 ("MapWindowPoints", 16),
@@ -1104,7 +1102,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("IsClipboardFormatAvailable", 4),
                 ("MsgWaitForMultipleObjects", 20),
                 ("IsWindowEnabled", 4),
-                ("SetPropW", 12),
                 ("GetMenuItemCount", 4),
                 ("CreateDialogIndirectParamW", 20),
                 ("DialogBoxIndirectParamW", 20),
@@ -1867,6 +1864,20 @@ pub fn dispatch(
                 },
                 &mut state.last_error,
             );
+        }
+        _ if matches!(
+            binding.typed,
+            Some(crate::win32::catalog::ApiId::UserObject(_))
+        ) =>
+        {
+            let Some(crate::win32::catalog::ApiId::UserObject(id)) = binding.typed else {
+                unreachable!();
+            };
+            let result = state
+                .user32
+                .object_call(id, &args, mem, &mut state.last_error)?;
+            ret = result.0;
+            note = result.1.into();
         }
         _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Class(_))) => {
             let Some(crate::win32::catalog::ApiId::Class(id)) = binding.typed else {

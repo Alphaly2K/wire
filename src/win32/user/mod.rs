@@ -7,3 +7,4 @@ pub(crate) mod geometry;
 pub(crate) mod images;
 pub(crate) mod input_profile;
 pub(crate) mod keyboard_layout;
+pub(crate) mod objects;

@@ -39,6 +39,7 @@ mod system_profile;
 mod thread_control;
 mod thread_properties;
 mod timers;
+mod user_objects;
 mod variant;
 mod version;
 mod virtual_memory;
@@ -84,6 +85,7 @@ pub use system_profile::{SystemProfileApi, SYSTEM_PROFILE_CONTRACTS};
 pub use thread_control::{ThreadControlApi, THREAD_CONTROL_CONTRACTS};
 pub use thread_properties::{ThreadPropertyApi, THREAD_PROPERTY_CONTRACTS};
 pub use timers::{TimerApi, TIMER_CONTRACTS};
+pub use user_objects::{UserObjectApi, USER_OBJECT_CONTRACTS};
 pub use variant::{VariantApi, VARIANT_CONTRACTS};
 pub use version::{VersionApi, VERSION_CONTRACTS};
 pub use virtual_memory::{VirtualMemoryApi, VIRTUAL_MEMORY_CONTRACTS};
@@ -170,6 +172,7 @@ pub enum ApiId {
     GdiDc(GdiDcApi),
     Desktop(DesktopApi),
     Class(ClassApi),
+    UserObject(UserObjectApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -353,6 +356,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(GDI_DC_CONTRACTS.iter())
         .chain(DESKTOP_CONTRACTS.iter())
         .chain(CLASS_CONTRACTS.iter())
+        .chain(USER_OBJECT_CONTRACTS.iter())
 }
 
 #[cfg(test)]

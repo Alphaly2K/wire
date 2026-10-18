@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
 mod classes;
+mod objects;
 pub(crate) use classes::{call as class_call, register_system_class};
 pub use classes::{find_class, WindowClass};
 
@@ -27,8 +28,7 @@ pub struct User32 {
     pub(crate) capture: u32,
     pub(crate) cursor: crate::win32::user::cursor::Cursor<u32, u32>,
     keyboard: crate::keyboard::Keyboard,
-    formats: BTreeMap<String, u32>,
-    next_format: u32,
+    registered: crate::win32::user::objects::RegisteredNames,
 }
 
 pub struct Timer {
@@ -64,7 +64,7 @@ pub struct Window {
     pub(crate) text: Vec<u16>,
     pub(crate) update: Option<[i32; 4]>,
     pub(crate) erase: bool,
-    props: BTreeMap<String, u32>,
+    props: crate::win32::user::objects::Properties,
     destroying: bool,
 }
 impl Window {
@@ -110,8 +110,7 @@ impl Default for User32 {
             capture: 0,
             cursor: Default::default(),
             keyboard: Default::default(),
-            formats: BTreeMap::new(),
-            next_format: 0xc000,
+            registered: Default::default(),
         }
     }
 }
@@ -307,89 +306,10 @@ pub fn dispatch(
     if dll != "user32.dll" {
         return None;
     }
-    if matches!(
-        name,
-        "SetPropA" | "SetPropW" | "GetPropA" | "GetPropW" | "RemovePropA" | "RemovePropW"
-    ) {
-        return Some((|| {
-            let key = if a[1] <= 0xffff {
-                format!("atom:{}", a[1])
-            } else {
-                format!(
-                    "name:{}",
-                    crate::file_api::read_name(mem, a[1], name.ends_with('W'))
-                        .map_err(|e| format!("window property: {e}"))?
-                        .to_lowercase()
-                )
-            };
-            let Some(w) = state.user32.windows.get_mut(&a[0]) else {
-                state.last_error = 1400;
-                return Ok((
-                    GuestCallOutcome::Returned(0),
-                    "invalid property HWND".into(),
-                ));
-            };
-            if a[1] == 0 {
-                state.last_error = 87;
-                return Ok((GuestCallOutcome::Returned(0), "invalid property key".into()));
-            }
-            let result = if name.starts_with("Set") {
-                w.props.insert(key, a[2]);
-                1
-            } else if name.starts_with("Remove") {
-                w.props.remove(&key).unwrap_or(0)
-            } else {
-                w.props.get(&key).copied().unwrap_or(0)
-            };
-            Ok((
-                GuestCallOutcome::Returned(result),
-                "window-owned property".into(),
-            ))
-        })());
-    }
     if matches!(name, "CreateWindowExA" | "CreateWindowExW") {
         if let Err(error) = classes::ensure_builtin(mem, api, state, a[1], name.ends_with('W')) {
             return Some(Err(error));
         }
-    }
-    if matches!(
-        name,
-        "RegisterClipboardFormatA"
-            | "RegisterClipboardFormatW"
-            | "RegisterWindowMessageA"
-            | "RegisterWindowMessageW"
-    ) {
-        return Some((|| {
-            let text = crate::file_api::read_name(mem, a[0], name.ends_with('W'))
-                .map_err(|e| format!("registered format: {e}"))?;
-            if text.is_empty() || text.encode_utf16().count() > 255 {
-                state.last_error = 87;
-                return Ok((
-                    GuestCallOutcome::Returned(0),
-                    "invalid registered name".into(),
-                ));
-            }
-            let key = text.to_lowercase();
-            let atom = if let Some(&n) = state.user32.formats.get(&key) {
-                n
-            } else {
-                if state.user32.next_format > 0xffff {
-                    state.last_error = 8;
-                    return Ok((
-                        GuestCallOutcome::Returned(0),
-                        "format table exhausted".into(),
-                    ));
-                }
-                let n = state.user32.next_format;
-                state.user32.next_format += 1;
-                state.user32.formats.insert(key, n);
-                n
-            };
-            Ok((
-                GuestCallOutcome::Returned(atom),
-                "registered process format/message".into(),
-            ))
-        })());
     }
     if matches!(name, "FindWindowA" | "FindWindowW") {
         return Some((|| {
@@ -472,7 +392,7 @@ pub fn dispatch(
                         destroying: false,
                         update: None,
                         erase: false,
-                        props: BTreeMap::new(),
+                        props: Default::default(),
                     },
                 );
             }
@@ -714,7 +634,7 @@ fn window_dispatch(
             destroying: false,
             update: None,
             erase: false,
-            props: BTreeMap::new(),
+            props: Default::default(),
         };
         let create = state.scratch_alloc(mem, 48, 4);
         let mut fields = [

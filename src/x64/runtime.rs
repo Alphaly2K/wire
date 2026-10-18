@@ -830,6 +830,7 @@ impl Runtime64 {
             ApiId::GdiDc(id) => self.gdi_dc_call(mem, id, args),
             ApiId::Desktop(id) => self.desktop_call(mem, id, args),
             ApiId::Class(id) => self.class_call(mem, id, args),
+            ApiId::UserObject(_) => unreachable!("USER names/properties have no Win64 binding"),
             ApiId::RawInput(_) | ApiId::Ime(_) => self.input_profile_call(mem, id, args),
             ApiId::Geometry(id) => {
                 let result = crate::win32::x64::geometry::call(mem, id, args)?;
