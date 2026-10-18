@@ -206,13 +206,7 @@ pub(crate) fn dispatch(
 ) -> Option<ResultValue> {
     if !matches!(
         name,
-        "GetWindowTextW"
-            | "GetWindowTextA"
-            | "GetWindowTextLengthW"
-            | "GetWindowTextLengthA"
-            | "SetWindowTextW"
-            | "SetWindowTextA"
-            | "GetDlgItemTextW"
+        "GetDlgItemTextW"
             | "GetDlgItemTextA"
             | "SetDlgItemTextW"
             | "SetDlgItemTextA"
@@ -226,16 +220,6 @@ pub(crate) fn dispatch(
             | "SetParent"
             | "MoveWindow"
             | "SetWindowPos"
-            | "GetFocus"
-            | "SetFocus"
-            | "GetActiveWindow"
-            | "SetActiveWindow"
-            | "GetForegroundWindow"
-            | "SetForegroundWindow"
-            | "GetLastActivePopup"
-            | "SetCapture"
-            | "ReleaseCapture"
-            | "GetCapture"
             | "EnumChildWindows"
             | "DialogBoxIndirectParamW"
             | "CreateDialogIndirectParamW"
@@ -259,12 +243,7 @@ pub(crate) fn dispatch(
             || name.contains("DlgItemMessage")
             || matches!(name, "GetDlgItemInt" | "SetDlgItemInt")
         {
-            let is_dialog = name.contains("DlgItem");
-            let hwnd = if is_dialog {
-                child(state, a[0], a[1]).unwrap_or(0)
-            } else {
-                a[0]
-            };
+            let hwnd = child(state, a[0], a[1]).unwrap_or(0);
             if hwnd == 0 || !state.user32.windows.contains_key(&hwnd) {
                 return failure(state, 1400);
             }
@@ -306,16 +285,10 @@ pub(crate) fn dispatch(
                 )
                 .map_err(|e| e.to_string())?;
                 (0xc, 0, p)
-            } else if name.contains("Length") {
-                (0xe, 0, 0)
             } else if name.starts_with("Set") {
-                (0xc, 0, a[if is_dialog { 2 } else { 1 }])
+                (0xc, 0, a[2])
             } else {
-                (
-                    0xd,
-                    a[if is_dialog { 3 } else { 2 }],
-                    a[if is_dialog { 2 } else { 1 }],
-                )
+                (0xd, a[3], a[2])
             };
             let result = crate::user32::invoke(
                 cpu,
@@ -502,67 +475,6 @@ pub(crate) fn dispatch(
                     return Ok((result, "WM_WINDOWPOSCHANGED transferred".into()));
                 }
                 value(1, "logical window position")
-            }
-            "GetFocus" => value(state.user32.focus, "focus"),
-            "GetActiveWindow" => value(state.user32.active, "active window"),
-            "GetForegroundWindow" => value(state.user32.foreground, "foreground window"),
-            "GetCapture" => value(state.user32.capture, "capture"),
-            "GetLastActivePopup" => value(a[0], "logical owner popup subset"),
-            "SetFocus"
-            | "SetActiveWindow"
-            | "SetForegroundWindow"
-            | "SetCapture"
-            | "ReleaseCapture" => {
-                let h = if name == "ReleaseCapture" { 0 } else { a[0] };
-                if h != 0 && !state.user32.windows.contains_key(&h) {
-                    return failure(state, 1400);
-                }
-                let old = match name {
-                    "SetFocus" => state.user32.focus,
-                    "SetCapture" | "ReleaseCapture" => state.user32.capture,
-                    _ => state.user32.active,
-                };
-                match name {
-                    "SetFocus" => state.user32.focus = h,
-                    "SetCapture" | "ReleaseCapture" => state.user32.capture = h,
-                    _ => {
-                        state.user32.active = h;
-                        state.user32.foreground = h;
-                    }
-                }
-                let messages: Vec<_> = match name {
-                    "SetFocus" => vec![(old, 8, h, 0), (h, 7, old, 0)],
-                    "SetCapture" | "ReleaseCapture" => vec![(old, 0x215, 0, h)],
-                    _ => vec![(old, 6, 0, h), (h, 6, 1, old)],
-                };
-                if old != h {
-                    for (hwnd, msg, wp, lp) in messages {
-                        if let Some(proc) = state.user32.windows.get(&hwnd).map(|w| w.wndproc) {
-                            let result = crate::user32::invoke(
-                                cpu,
-                                mem,
-                                api,
-                                state,
-                                log,
-                                sched,
-                                proc,
-                                &[hwnd, msg, wp, lp],
-                                max_instr,
-                            )?;
-                            if !matches!(result, GuestCallOutcome::Returned(_)) {
-                                return Ok((result, "window state callback transferred".into()));
-                            }
-                        }
-                    }
-                }
-                value(
-                    if matches!(name, "ReleaseCapture" | "SetForegroundWindow") {
-                        1
-                    } else {
-                        old
-                    },
-                    "logical input ownership",
-                )
             }
             "EnumChildWindows" => {
                 let mut seen = BTreeSet::new();

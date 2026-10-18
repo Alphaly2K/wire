@@ -1,0 +1,11 @@
+# 窗口文本与输入所有权
+
+`win32/catalog/window_state.rs` 是十六项 export 的 provider、ABI、参数宽度与执行策略来源。两架构保留各自已有能力：PE32 全部 typed，Win64 的 SetActiveWindow、GetLastActivePopup 和三项 capture 接口仍 absent。Win64 静态 kernel32/kernelbase 别名与动态 user32 范围分别声明。
+
+PE32 的 `user32/window_state.rs` 将标量所有权转换与 guest 回调协调分开。User32 先校验目标并提交 focus/capture/active/foreground，返回固定大小的通知计划；协调器逐条取得当前 WNDPROC 并调用 guest，保留重入期间销毁窗口、替换过程和非局部控制转移的顺序。callback 故障不回滚已提交所有权。NULL setter 仍可清除，重复 setter 不发送通知，ReleaseCapture 与 SetForegroundWindow 仍返回 BOOL 1。
+
+PE32 文本操作按 HWND、所属线程顺序验证，然后发送 WM_SETTEXT/WM_GETTEXT/WM_GETTEXTLENGTH。A/W 的文本解释继续由实际 WNDPROC 决定，不能直接读写 `Window.text` 来代替应用程序回调。默认文本处理与尚未迁移的 dialog wrappers 保留原入口和 Wine LGPL 来源说明；旧的普通文本/焦点名称路由与重复 ABI 声明删除。
+
+Win64 的 `x64/runtime/user/window/state.rs` 保留已有 scalar title 和 ownership 行为，使用固定 typed ID。getter 在查询 owner 时不查 HWND；setter 先验证 HWND，NULL 返回 1400 并保持原 owner。普通 A/W 文本分别使用 CP932/UTF-16，capacity 保持 DWORD 截断，输入故障前不更改 title，输出故障保留 Err 和既有返回帧提交策略。
+
+独立回归与候选验收状态见[批次记录](../reports/refactoring-window-state-2026-10-18.md)。

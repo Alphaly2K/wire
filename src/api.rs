@@ -697,7 +697,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetProcessWindowStation", 0),
                 ("GetUserObjectInformationW", 20),
                 ("GetUserObjectInformationA", 20),
-                ("GetLastActivePopup", 4),
                 ("GetMessageA", 16),
                 ("GetMessageW", 16),
                 ("PeekMessageA", 20),
@@ -715,22 +714,12 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("EndPaint", 8),
                 ("InvalidateRect", 12),
                 ("ValidateRect", 8),
-                ("SetWindowTextA", 8),
-                ("SetWindowTextW", 8),
-                ("GetWindowTextA", 12),
-                ("GetWindowTextW", 12),
                 ("MessageBoxA", 16),
                 ("MessageBoxW", 16),
                 ("MessageBoxExA", 20),
                 ("MessageBoxExW", 20),
                 ("SetTimer", 16),
                 ("KillTimer", 8),
-                ("GetForegroundWindow", 0),
-                ("SetForegroundWindow", 4),
-                ("SetFocus", 4),
-                ("GetFocus", 0),
-                ("GetActiveWindow", 0),
-                ("SetActiveWindow", 4),
                 ("MoveWindow", 24),
                 ("SetWindowPos", 28),
                 ("BringWindowToTop", 4),
@@ -810,9 +799,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("AttachThreadInput", 12),
                 ("RedrawWindow", 16),
                 ("GetUpdateRect", 12),
-                ("ReleaseCapture", 0),
-                ("SetCapture", 4),
-                ("GetCapture", 0),
                 ("ChangeDisplaySettingsA", 8),
                 ("ChangeDisplaySettingsW", 8),
                 ("SetWindowsHookExA", 16),
@@ -1078,7 +1064,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("DestroyCaret", 0),
                 ("OpenClipboard", 4),
                 ("SetCaretPos", 8),
-                ("GetWindowTextLengthW", 4),
                 ("GetMessageExtraInfo", 0),
                 ("GetClipboardData", 4),
                 ("IsClipboardFormatAvailable", 4),
@@ -1876,6 +1861,25 @@ pub fn dispatch(
                     .query_call(id, &args, mem, &mut state.last_error)?
             };
             implemented = id != WindowQueryApi::Placement;
+        }
+        _ if matches!(
+            binding.typed,
+            Some(crate::win32::catalog::ApiId::WindowState(_))
+        ) =>
+        {
+            let Some(crate::win32::catalog::ApiId::WindowState(id)) = binding.typed else {
+                unreachable!();
+            };
+            let (outcome, message) = crate::user32::window_state_call(
+                id, &args, cpu, mem, api, state, log, sched, max_instr,
+            )?;
+            match outcome {
+                GuestCallOutcome::Returned(value) => {
+                    ret = value;
+                    note = message;
+                }
+                _ => return Ok(()),
+            }
         }
         _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Class(_))) => {
             let Some(crate::win32::catalog::ApiId::Class(id)) = binding.typed else {

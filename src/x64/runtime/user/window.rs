@@ -7,6 +7,7 @@ use crate::x64::{
 };
 mod position;
 mod queries;
+mod state;
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Operation {
     Create {
@@ -53,16 +54,8 @@ pub(in crate::x64::runtime) fn arity(name: &str) -> Option<usize> {
         "CallWindowProcA" | "CallWindowProcW" => 5,
         "SetWindowPos" => 7,
         "MoveWindow" => 6,
-        "ShowWindow" | "SetWindowTextA" | "SetWindowTextW" => 2,
-        "DestroyWindow"
-        | "DispatchMessageA"
-        | "DispatchMessageW"
-        | "SetFocus"
-        | "SetForegroundWindow"
-        | "UpdateWindow" => 1,
-        "GetFocus" | "GetActiveWindow" | "GetForegroundWindow" => 0,
-        "GetWindowTextLengthA" | "GetWindowTextLengthW" => 1,
-        "GetWindowTextA" | "GetWindowTextW" => 3,
+        "ShowWindow" => 2,
+        "DestroyWindow" | "DispatchMessageA" | "DispatchMessageW" | "UpdateWindow" => 1,
         _ => return None,
     })
 }
@@ -74,7 +67,7 @@ pub(in crate::x64::runtime) fn dwords(name: &str) -> &'static [usize] {
         }
         "SetWindowPos" => &[2, 3, 4, 5, 6],
         "MoveWindow" => &[1, 2, 3, 4, 5],
-        "CallWindowProcA" | "CallWindowProcW" | "GetWindowTextA" | "GetWindowTextW" => &[2],
+        "CallWindowProcA" | "CallWindowProcW" => &[2],
         _ => &[],
     }
 }
@@ -553,12 +546,6 @@ impl Runtime64 {
         name: &str,
         args: &[u64],
     ) -> Result<u64, String> {
-        match name {
-            "GetFocus" => return Ok(self.user.focus),
-            "GetActiveWindow" => return Ok(self.user.active),
-            "GetForegroundWindow" => return Ok(self.user.foreground),
-            _ => {}
-        }
         let Some(w) = self.user.windows.get_mut(&args[0]) else {
             self.set_error(mem, 1400)?;
             return Ok(0);
@@ -585,55 +572,6 @@ impl Runtime64 {
                 }
                 _ => Ok(0),
             },
-            "SetWindowTextA" | "SetWindowTextW" => {
-                let title = if args[1] == 0 {
-                    String::new()
-                } else {
-                    Self::path_name(mem, args[1], name.ends_with('W'))?
-                };
-                w.title = title;
-                Ok(1)
-            }
-            "GetWindowTextLengthA" | "GetWindowTextLengthW" => Ok(if name.ends_with('W') {
-                w.title.encode_utf16().count()
-            } else {
-                crate::codepage::encode(&w.title, 932)
-                    .map_err(|e| format!("window title: {e}"))?
-                    .0
-                    .len()
-            } as u64),
-            "GetWindowTextA" | "GetWindowTextW" => {
-                if args[2] == 0 {
-                    return Ok(0);
-                }
-                let wide = name.ends_with('W');
-                let mut bytes = if wide {
-                    w.title
-                        .encode_utf16()
-                        .flat_map(u16::to_le_bytes)
-                        .collect::<Vec<_>>()
-                } else {
-                    crate::codepage::encode(&w.title, 932)
-                        .map_err(|e| format!("window title: {e}"))?
-                        .0
-                };
-                let width = if wide { 2 } else { 1 };
-                bytes.truncate(bytes.len().min((args[2] as usize - 1) * width));
-                let length = bytes.len() / width;
-                bytes.extend(vec![0; width]);
-                mem.write(args[1], &bytes)?;
-                Ok(length as u64)
-            }
-            "SetFocus" => {
-                let previous = self.user.focus;
-                self.user.focus = args[0];
-                Ok(previous)
-            }
-            "SetForegroundWindow" => {
-                self.user.foreground = args[0];
-                self.user.active = args[0];
-                Ok(1)
-            }
             "UpdateWindow" => Ok(1), // No Win64 GDI update region has been invalidated yet.
             _ => unreachable!(),
         }

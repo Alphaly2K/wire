@@ -9,9 +9,11 @@ use std::time::{Duration, Instant};
 mod classes;
 mod objects;
 mod queries;
+mod window_state;
 pub(crate) use classes::{call as class_call, register_system_class};
 pub use classes::{find_class, WindowClass};
 pub(crate) use queries::desktop as desktop_query;
+pub(crate) use window_state::call as window_state_call;
 
 pub struct User32 {
     pub classes: BTreeMap<u16, WindowClass>,
