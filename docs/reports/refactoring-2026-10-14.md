@@ -322,3 +322,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 29 项 export 汇入三个契约家族，删除混合 common_api、重复 ABI/arity 与名称分发。WMI 内部 BSTR 直接借共享 owner，PE32 资源请求仍由原入口提交；Win64 仅保留原四项 processor/group-count typed。六项独立旧行为基线及完整 release 533、debug 380、native 7、工具 20 项和 fmt/strict Clippy/build 通过。实现提交 `2999453`。
 
 首版 spec 数据重复和两个持续 code-alias 回退候选拒绝；最终共用 spec 数据、按字段恢复缓存，二进制只增加 48 bytes。68 条初筛与七条同哈希三顺序扩样，共 75 个 workload protocol 全部校验；code-alias −5.378%，新 processor 网关 Win64 −6.369%。保留 memory/SSE +3.612%/+3.853% 局部成本及原始离散轮次，独立 diagnostics 与执行器助记符调查未确证具体机制；首次错误节统计已纠正，受静态分析重叠影响的 bit 全组三顺序重跑。Alice 200M 前缀 CPU −0.876%、wall −2.273%，保持隐藏窗口和零 Draw/Present。314 个 Rust 文件核对一致，契约累计 384 个 export。2026-10-18 接受，完整记录见[基础 helper 验收](refactoring-basic-2026-10-18.md)。
+
+## R2 键盘状态与布局
+
+16 项 export 汇入 KeyboardApi，移除重复 ABI/arity/DWORD/provider、旧名称调用与 menu 中重复未实现分支。纯布局算法逐段保持，Keyboard owner 继续管理异步/队列/文字；PE32 三项 typed、十三项 ABI-only，Win64 保留 kernel 静态导入与 user32 动态查询的差异。四项独立旧行为基线及完整 release 537、debug 384、native 7、工具 20 项和 fmt/strict Clippy/build 通过。实现提交 `386f38a`。
+
+28 条初筛与四条同哈希三顺序扩样，共 32 个 workload protocol 全部校验；初筛最大 CPU 回退 +2.652%，RSS 最多 +96KiB。新 keyboard/IR 扩样 −7.217%、raw 初筛 −5.475%，Win64 state/layout +0.954%/−2.034%。保留 integer/IR 扩样 +3.102% 的中位数成本与明显漂移，九次计数/最终寄存器及 x86 源码保持，具体机制未确证。Alice 200M 前缀 CPU −3.102%、wall −3.402%，保持隐藏窗口和零 Draw/Present。320 个 Rust 文件核对一致，二进制增加 2,928 bytes，契约累计 400 个 export。2026-10-18 接受，完整记录见[键盘验收](refactoring-keyboard-2026-10-18.md)。

@@ -1,6 +1,6 @@
 # R2 键盘状态与布局（2026-10-18）
 
-状态：独立旧行为基线通过，新契约与适配器已接入候选，完整验收进行中。
+状态：2026-10-18 接受，实现提交 `386f38a`，独立基线提交 `453d2a8`。
 
 ## 独立基线
 
@@ -24,4 +24,25 @@ before 为基础 helper 已验收冻结 `r2-basic-fields-wire/wire`，SHA256 `b6
 
 正式性能范围为基础 PE32 raw/static IR 与 AMD64 integer/memory/SSE/FP/bit/cache-alias，加新键盘网关、既有热 gateway 和 GDI/processor/GUID 代表路径；各至少三对，超门槛独立调查。真实游戏前缀复用已有 runtime。编译、正式计时、native 游戏及 runtime diagnostics 严格串行，性能与游戏结果另行记录。
 
-当前不计入已验收 384 exports。
+## 性能与接受决定
+
+**28 条初筛路径**全部三对结果校验，CPU 中位数最大回退 **+2.652%**（PE32 bit/raw），RSS 中位数最多 **+96KiB**。AMD64 integer/memory/SSE 为 **−0.222%/−1.844%/−4.699%**，FP/bit/code-alias/data-alias 为 **+0.475%/−0.504%/+1.720%/−2.214%**。Win64 新状态/布局网关 **+0.954%/−2.034%**；PE32 状态 IR/raw 初筛 **−15.165%/−5.475%**，其中 IR 的有利离散另作扩样，不将初筛 −15% 表述为稳定收益。
+
+PE32 integer/IR、SSE/IR 因单轮 **+10.268%/+9.652%** 扩为 900M；GUID/raw 因单轮 **+5.262%** 扩为 150M；新 keyboard/IR 因上述改善幅度离散扩为 150M。每项均加入同哈希 control，三种顺序各一对：
+
+| 路径 | work | after/before CPU | control/before CPU | after/control CPU |
+| --- | ---: | ---: | ---: | ---: |
+| PE32 integer/IR | 900M | +3.102% | −0.173% | +3.280% |
+| PE32 SSE/IR | 900M | −0.906% | −0.088% | −0.819% |
+| PE32 keyboard/IR | 150M | −7.217% | −1.732% | −5.582% |
+| PE32 GUID/raw | 150M | −0.026% | −0.441% | +0.417% |
+
+integer 三对分别 **−8.689%/+4.856%/−4.154%**，CPU 的跨轮中位数为 after **3.910674 秒**、before **3.793023 秒**、control **3.786468 秒**；首轮同哈希 before/control 为 3.2254/3.7405 秒，保留该明显漂移。记录 +3.102% 的中位数成本及全部逐对结果，没有三对均超过 5% 的拒绝路径。
+
+独立离线调查核对九次长样本 report：IR **900,000,003**、fallback **1**、CALL_NATIVE **0**、scalar runs **149,999,714**、段内指令 **899,997,142** 及全部最终 GPR/EIP/EFLAGS 一致。冻结之间 **16 个 src/x86 Rust 文件**哈希未变。按 Mach-O addr/size 限定反汇编范围，ir32/mix32/raw32/0f32 四节的指令数与助记符序列保持；simd32 为 **1664→1736**，助记符序列变化。这里只比较助记符，未核对全部操作数，整数成本的具体机制尚未确证。证据 `r2-keyboard-integer-investigation/summary.json`，没有另起 diagnostics 与正式计时重叠。
+
+新 keyboard/IR 的三对长样本 **−5.531%/−8.711%/−6.581%**，改善范围较初筛收敛。GUID/raw 最后一组 before/after 约为 9.3974/9.3061 秒，control 7.8543 秒；全部保留，不丢弃慢轮。不同 work 独立汇总，最终 **32 个 workload protocol = 28 初筛 + 4 扩样**，全部结果校验。汇总 `r2-keyboard-stable-initial-summary.json` 与 `r2-keyboard-stable-summary.json`。
+
+Alice 200M 前缀三对保持预算出口、隐藏 client **314×211** 与 Draw/Present **0/0**。CPU 中位数 **−3.102%**、wall **−3.402%**，after CPU **2.583591 秒**、wall **2.621487459 秒**、RSS **417,366,016 bytes**。直接复用原 runtime，未复制素材；该前缀未绘制，未推断游戏 FPS。证据 `r2-keyboard-stable-alice/compare.json`。
+
+在保留整数局部成本和离散轮次的前提下接受此冻结，本批 **16 exports** 纳入已验收范围，累计 **400 exports**。随后准备的 raw-input/IME 基线与 fixture 草稿不属于该冻结、通过计数或本批验收。
