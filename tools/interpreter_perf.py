@@ -315,6 +315,10 @@ def main():
         from perf.fixtures.geometry_gateway import x64
         data, meta = x64(args.work)
         entries.append(('gateway-rectangle', data, meta))
+    if args.cases and 'gateway-cursor' in args.cases:
+        from perf.fixtures.cursor_gateway import x64
+        data, meta = x64(args.work)
+        entries.append(('gateway-cursor', data, meta))
     for name, ime in [('gateway-raw-input', False), ('gateway-ime', True)]:
         if args.cases and name in args.cases:
             from perf.fixtures.input_profile_gateway import x64

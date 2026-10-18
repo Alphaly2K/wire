@@ -22,6 +22,8 @@ mod context;
 mod cpu;
 #[path = "x64/critical_sections.rs"]
 mod critical_sections;
+#[path = "x64/cursor_contract.rs"]
+mod cursor_contract;
 #[path = "x64/files.rs"]
 mod files;
 #[path = "x64/geometry_contract.rs"]

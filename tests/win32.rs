@@ -25,6 +25,8 @@ mod context;
 mod critical_sections;
 #[path = "win32/crt.rs"]
 mod crt;
+#[path = "win32/cursor_contract.rs"]
+mod cursor_contract;
 #[path = "win32/d3d9.rs"]
 mod d3d9;
 #[path = "win32/exceptions.rs"]
