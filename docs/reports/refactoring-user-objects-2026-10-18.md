@@ -1,6 +1,6 @@
 # R2/R3 USER 注册名称与窗口属性（2026-10-18）
 
-状态：五项独立旧行为测试与原创性能 fixture 已通过，十四项候选已接入且完整正确性通过，性能与游戏前缀验收进行中，不计入已验收累计数。窗口类矩阵、补证与游戏已结束，本批在其后串行验证。
+状态：十四项首版正确性通过，但 Win64 性能复测触发拒绝门槛，首版冻结不验收，游戏前缀尚未执行；保留日志并调查修订，不计入已验收累计数。
 
 十四项范围：RegisterClipboardFormatA/W、RegisterWindowMessageA/W、SetPropA/W、GetPropA/W、RemovePropA/W、EnumPropsA/W、EnumPropsExA/W。PE32 前十项已有处理，四项枚举保留 ABI-only/error120/原清栈且不调用 callback；Win64 全部 absent。
 
@@ -17,3 +17,7 @@ before 为 `r2-classes-wire/wire`，SHA256 `a5625b33fe03942673e5e7838914d6bda5d6
 候选五项独立测试与已有真实窗口/属性/注册名生命周期一项回归通过，证据 `r2-user-objects-candidate{32,64}-tests.txt`、`r2-user-objects-lifetime-tests.txt`。完整 release 588 passed / 7 ignored，debug Win32/AMD64/FPU 434 passed，显式 native 7 passed，工具 20 passed；fmt、strict all-target/all-feature Clippy 与 release build 通过。
 
 冻结 `r2-user-objects-wire/wire`：SHA256 `4ca4c9efe2fd806c4a435ed6af7fceea23b3bab120108fca4f5f86f8600ea73a`，5,968,232 bytes，相对 before +2,960 bytes，满足 +24KiB 预算。370 个 Rust 文件（src/tests 362 个）的 live/frozen/manifest SHA 和文件集合一致，target/frozen executable SHA 一致，见 `r2-user-objects-source-verification.json`。正式 48 条路径三对矩阵使用该冻结程序，编译/native 检查均已结束。
+
+首版 48 条路径结果全部校验，属性读取 PE32 IR/raw CPU 中位数 −15.504%/−12.361%。多个未改动 Win64 网关中位数回退超过 3%，八项追加相同 before executable 的 control 三标签、三对对照；线程 ID 查询补证 +5.809%，三对均超过 5%，因此拒绝首版，不用属性改善抵消。GDI profile 补证 +5.982%，其余对照与全部初筛保留于 `r2-user-objects-stable-final-summary.json`、`r2-user-objects-stable-amd64-controls-summary.json`。
+
+静态调查单独在正式计时结束后执行：catalog_call 8208→8215 条指令，dispatch_bound 10749→10745；入口及内联 hot 路径的前部主要指令/栈帧相同，但函数地址改变。证据 `r2-user-objects-gateway-codegen/`；这些检查尚未确定回退的具体机制。后续尝试隔离原有完整分发函数的布局，保留算法和验证顺序；窗口查询草稿仍未接入。
