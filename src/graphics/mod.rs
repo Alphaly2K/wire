@@ -3,9 +3,11 @@
 mod dc;
 mod dib;
 mod font;
+mod operation;
 mod operations;
 mod surface;
 use crate::mem::GuestMem;
+pub use operation::GdiOperation;
 pub(crate) use operations::execute as execute_gdi;
 use std::collections::BTreeMap;
 use surface::{dimensions, Bitmap, Storage};

@@ -832,6 +832,9 @@ impl Runtime64 {
             ApiId::Message(_) => unreachable!("message calls use explicit process control"),
             ApiId::Dialog(_) => unreachable!("dialog exports remain absent on Win64"),
             ApiId::Menu(_) => unreachable!("menu exports remain absent on Win64"),
+            ApiId::GdiOperation(_) => {
+                unreachable!("GDI object/raster exports remain absent on Win64")
+            }
             ApiId::UserObject(_) => unreachable!("USER names/properties have no Win64 binding"),
             ApiId::RawInput(_) | ApiId::Ime(_) => self.input_profile_call(mem, id, args),
             ApiId::Geometry(id) => {

@@ -16,6 +16,7 @@ mod dialog;
 mod display;
 mod files;
 mod gdi_dc;
+mod gdi_operations;
 mod geometry;
 mod guid;
 mod handles;
@@ -68,6 +69,7 @@ pub use dialog::{DialogApi, DIALOG_CONTRACTS};
 pub use display::{DisplayApi, DISPLAY_CONTRACTS};
 pub use files::{FileApi, FILE_CONTRACTS};
 pub use gdi_dc::{GdiDcApi, GDI_DC_CONTRACTS};
+pub use gdi_operations::{GdiApi, GDI_OPERATION_CONTRACTS};
 pub use geometry::{GeometryApi, GEOMETRY_CONTRACTS};
 pub use guid::{GuidApi, GUID_CONTRACTS};
 pub use handles::{HandleApi, HANDLE_CONTRACTS};
@@ -191,6 +193,7 @@ pub enum ApiId {
     Message(MessageApi),
     Dialog(DialogApi),
     Menu(MenuApi),
+    GdiOperation(GdiApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -381,6 +384,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(MESSAGE_CONTRACTS.iter())
         .chain(DIALOG_CONTRACTS.iter())
         .chain(MENU_CONTRACTS.iter())
+        .chain(GDI_OPERATION_CONTRACTS.iter())
 }
 
 #[cfg(test)]

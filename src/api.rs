@@ -751,30 +751,16 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
             &[
                 ("CreateDCA", 16),
                 ("CreateDCW", 16),
-                ("CreateDIBSection", 24),
                 ("CreateBitmap", 20),
-                ("CreateCompatibleBitmap", 12),
                 ("CreateBitmapIndirect", 4),
-                ("DeleteObject", 4),
-                ("SelectObject", 8),
-                ("GetObjectA", 12),
-                ("GetObjectW", 12),
-                ("GetCurrentObject", 8),
-                ("BitBlt", 36),
                 ("StretchBlt", 44),
                 ("PatBlt", 24),
                 ("MaskBlt", 48),
                 ("TransparentBlt", 44),
                 ("AlphaBlend", 44),
                 ("GradientFill", 24),
-                ("GetDIBits", 28),
                 ("SetDIBits", 28),
                 ("SetDIBitsToDevice", 48),
-                ("StretchDIBits", 52),
-                ("CreateFontIndirectA", 4),
-                ("CreateFontIndirectW", 4),
-                ("CreateFontA", 56),
-                ("CreateFontW", 56),
                 ("CreatePen", 12),
                 ("CreatePenIndirect", 4),
                 ("CreateSolidBrush", 4),
@@ -787,10 +773,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("CreateRoundRectRgn", 24),
                 ("CombineRgn", 16),
                 ("SelectClipRgn", 8),
-                ("SetTextColor", 8),
-                ("GetTextColor", 4),
-                ("SetBkColor", 8),
-                ("GetBkColor", 4),
                 ("SetBkMode", 8),
                 ("GetBkMode", 4),
                 ("TextOutA", 20),
@@ -806,17 +788,12 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetCharWidth32A", 16),
                 ("GetCharWidth32W", 16),
                 ("GetTextMetricsA", 8),
-                ("GetTextMetricsW", 8),
                 ("GetOutlineTextMetricsA", 12),
                 ("GetGlyphOutlineA", 28),
                 ("GetGlyphOutlineW", 28),
                 ("SetTextAlign", 8),
                 ("GetTextAlign", 4),
                 ("SetTextCharacterExtra", 8),
-                ("GetStockObject", 4),
-                ("SetPixel", 16),
-                ("GetPixel", 12),
-                ("SetPixelV", 16),
                 ("Rectangle", 20),
                 ("Ellipse", 20),
                 ("RoundRect", 28),
@@ -829,12 +806,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("SetROP2", 8),
                 ("GetROP2", 4),
                 ("SetPolyFillMode", 8),
-                ("SetMapMode", 8),
-                ("GetMapMode", 4),
-                ("SetViewportOrgEx", 16),
-                ("GetViewportOrgEx", 8),
-                ("SetWindowOrgEx", 16),
-                ("GetWindowOrgEx", 8),
                 ("SetViewportExtEx", 16),
                 ("SetWindowExtEx", 16),
                 ("DPtoLP", 12),
@@ -876,7 +847,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("EndDoc", 4),
                 ("StartPage", 4),
                 ("EndPage", 4),
-                ("GdiFlush", 0),
                 ("SetPixelFormat", 12),
                 ("SwapBuffers", 4),
                 ("ChoosePixelFormat", 8),
@@ -1693,6 +1663,15 @@ pub fn dispatch(
                         .get(&hwnd)
                         .map(|window| window.client_size())
                 },
+                &mut state.last_error,
+            );
+        }
+        (Some(crate::win32::catalog::ApiId::GdiOperation(id)), _, _) => {
+            (ret, note, implemented) = crate::win32::gdi::x86::call(
+                id,
+                &args,
+                mem,
+                &mut state.graphics,
                 &mut state.last_error,
             );
         }
@@ -2751,13 +2730,7 @@ pub fn dispatch(
             note = "font resource backend not ported".into();
         }
         _ => {
-            if let Some((v, msg, supported)) =
-                crate::win32::gdi::x86::dispatch(dll, name, &args, mem, state)
-            {
-                ret = v;
-                note = msg;
-                implemented = supported;
-            } else if let Some((v, msg)) = crate::file_api::dispatch(dll, name, &args, mem, state) {
+            if let Some((v, msg)) = crate::file_api::dispatch(dll, name, &args, mem, state) {
                 ret = v;
                 note = msg;
             } else if let Some((v, msg)) = crate::system::dispatch(dll, name, &args, mem, state) {

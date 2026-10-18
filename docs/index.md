@@ -67,6 +67,7 @@
 - [精确标量 SSE 边界](architecture/scalar-simd.md)及[编译隔离记录](reports/refactoring-scalar-codegen-2026-10-19.md)：隔离纯运算的生成代码，保留原事务与舍入语义，性能候选待验收。
 - [菜单契约与 owner](architecture/menus.md)及[候选记录](reports/refactoring-menus-2026-10-19.md)：27 项已接入；保留双输出故障、共享资源与 child ID 生命周期，以及真实 RedrawWindow 网关优先级。
 - [PE32 typed 分发模式](reports/refactoring-direct-dispatch-2026-10-19.md)：六次真实采样后改为直接枚举模式，保持原分支覆盖与处理体；性能验证进行中。
+- [GDI 对象、像素与字体](architecture/gdi-operations.md)及[候选记录](reports/refactoring-gdi-operations-2026-10-19.md)：31 项唯一契约，图形核心拥有操作枚举，adapter 只借 Graphics/错误槽；完整正确性通过，性能待验收。
 - [固定执行路径的测量协议](reports/refactoring-fixed-executable-slot-2026-10-18.md)：调查同哈希副本的数倍耗时差异，新增显式固定 executable/cwd 模式、逐轮 SHA 检查与临时链接回收。
 - [release 编译单元候选](reports/refactoring-release-codegen-2026-10-15.md)：独立构建配置、同二进制对照及长样本调查。
 - [网关边界候选](reports/refactoring-gateway-boundary-2026-10-15.md)、[页缓存内联候选](reports/refactoring-page-cache-inline-2026-10-15.md)、[helper 布局候选](reports/refactoring-memory-helper-layout-2026-10-15.md)：已撤回实现和保留的测量证据。

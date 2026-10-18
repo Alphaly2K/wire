@@ -1,4 +1,5 @@
 //! Checked 32bpp BI_RGB transfer contracts for the initial raster backend.
+use super::GdiOperation as Op;
 use super::{surface::dimensions, Arguments, Graphics};
 use crate::mem::GuestMem;
 fn words(mem: &GuestMem, p: u32) -> Result<[u32; 10], u32> {
@@ -9,16 +10,16 @@ fn words(mem: &GuestMem, p: u32) -> Result<[u32; 10], u32> {
     }))
 }
 pub(super) fn dispatch(
-    name: &str,
+    op: Op,
     a: &Arguments,
     mem: &GuestMem,
     gfx: &mut Graphics,
 ) -> Option<Result<u32, u32>> {
-    if !matches!(name, "StretchDIBits" | "GetDIBits") {
+    if !matches!(op, Op::StretchDib | Op::GetDib) {
         return None;
     }
-    Some((|| match name {
-        "GetDIBits" => {
+    Some((|| match op {
+        Op::GetDib => {
             gfx.dc(a[0])?;
             let bitmap = gfx.bitmaps.get(&a[1]).ok_or(6u32)?;
             if a[6] != 0 {
@@ -79,7 +80,7 @@ pub(super) fn dispatch(
             mem.write_bytes(a[4], &bytes).map_err(|_| 87u32)?;
             Ok(count)
         }
-        "StretchDIBits" => {
+        Op::StretchDib => {
             if a[11] != 0 || a[12] != 0xcc0020 {
                 return Err(120);
             }

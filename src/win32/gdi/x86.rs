@@ -1,55 +1,19 @@
-//! GDI/USER ABI routing, window dimensions, LastError and diagnostics.
+//! PE32 GDI errors/diagnostics; only Graphics and the error slot are borrowed.
 use crate::{
-    api::{ApiState, Args},
+    api::Args,
+    graphics::{GdiOperation as Op, Graphics},
     mem::GuestMem,
 };
-pub(crate) fn dispatch(
-    dll: &str,
-    name: &str,
+
+pub(crate) fn call(
+    op: Op,
     a: &Args,
     mem: &mut GuestMem,
-    state: &mut ApiState,
-) -> Option<(u32, String, bool)> {
-    let gdi = dll == "gdi32.dll"
-        && matches!(
-            name,
-            "CreateCompatibleBitmap"
-                | "CreateDIBSection"
-                | "DeleteObject"
-                | "SelectObject"
-                | "GetObjectA"
-                | "GetObjectW"
-                | "GetObjectType"
-                | "GetCurrentObject"
-                | "GetStockObject"
-                | "SetPixel"
-                | "SetPixelV"
-                | "GetPixel"
-                | "BitBlt"
-                | "SetWindowOrgEx"
-                | "SetViewportOrgEx"
-                | "GetWindowOrgEx"
-                | "GetViewportOrgEx"
-                | "SetTextColor"
-                | "GetTextColor"
-                | "SetBkColor"
-                | "GetBkColor"
-                | "GdiFlush"
-                | "StretchDIBits"
-                | "GetDIBits"
-                | "CreateFontA"
-                | "CreateFontW"
-                | "CreateFontIndirectA"
-                | "CreateFontIndirectW"
-                | "GetTextMetricsW"
-                | "SetMapMode"
-                | "GetMapMode"
-        );
-    if !gdi {
-        return None;
-    }
-    let result = crate::graphics::execute_gdi(name, a, mem, &mut state.graphics);
-    let info = if name == "CreateDIBSection" {
+    graphics: &mut Graphics,
+    last_error: &mut u32,
+) -> (u32, String, bool) {
+    let result = crate::graphics::execute_gdi(op, a, mem, graphics);
+    let info = if op == Op::DibSection {
         let mut bytes = [0; 40];
         if mem.read_bytes(a[1], &mut bytes).is_ok() {
             format!(
@@ -67,18 +31,18 @@ pub(crate) fn dispatch(
     } else {
         String::new()
     };
-    Some(match result {
+    match result {
         Ok(v) => (v, "checked GDI object / CPU pixels".into(), true),
         Err(e) => {
-            state.last_error = e;
+            *last_error = e;
             let v = if matches!(
-                name,
-                "GetPixel"
-                    | "SetPixel"
-                    | "SetTextColor"
-                    | "GetTextColor"
-                    | "SetBkColor"
-                    | "GetBkColor"
+                op,
+                Op::GetPixel
+                    | Op::SetPixel
+                    | Op::SetTextColor
+                    | Op::GetTextColor
+                    | Op::SetBackgroundColor
+                    | Op::GetBackgroundColor
             ) {
                 u32::MAX
             } else {
@@ -86,5 +50,5 @@ pub(crate) fn dispatch(
             };
             (v, format!("GDI error {e}{info}"), e != 120)
         }
-    })
+    }
 }

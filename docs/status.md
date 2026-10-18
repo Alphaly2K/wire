@@ -12,6 +12,8 @@
 
 ## 重构范围
 
+最新另接入 [GDI 对象、像素与字体 31 项](reports/refactoring-gdi-operations-2026-10-19.md)：唯一 catalog 和图形操作枚举，adapter 只借 Graphics/LastError；独立旧行为基线、完整 release 623、debug 469、native 7 和严格检查通过。GDI 150M raw/IR 三标签三对全部校验，raw 相对直接父版本 −1.107%，IR +3.853% 继续调查；累计宽矩阵进行中。对话框、菜单、分发和本批冻结独立保留，正式计数仍为 595。
+
 | 阶段 | 已交付 | 剩余范围 |
 | --- | --- | --- |
 | R0/R1 | 冻结输入、原创正式 fixture、领域测试 harness、GUID 唯一契约和双架构适配 | 随后续家族维护独立基线 |

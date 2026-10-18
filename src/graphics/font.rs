@@ -1,5 +1,6 @@
 //! Logical font handles and x86 LOGFONT A/W marshaling. Font realization and
 //! glyph rendering use a platform backend; a handle alone is no glyph result.
+use super::GdiOperation as Op;
 use super::{Arguments, Graphics};
 use crate::mem::GuestMem;
 use std::collections::BTreeMap;
@@ -54,15 +55,15 @@ fn read_font(mem: &GuestMem, p: u32, wide: bool) -> Result<[u8; 92], u32> {
     Ok(lf)
 }
 pub(super) fn dispatch(
-    name: &str,
+    op: Op,
     a: &Arguments,
     mem: &GuestMem,
     gfx: &mut Graphics,
 ) -> Option<Result<u32, u32>> {
-    Some((|| match name {
-        "CreateFontA" | "CreateFontW" | "CreateFontIndirectA" | "CreateFontIndirectW" => {
-            let wide = name.ends_with('W');
-            let lf = if name.starts_with("CreateFontIndirect") {
+    Some((|| match op {
+        Op::FontA | Op::FontW | Op::FontIndirectA | Op::FontIndirectW => {
+            let wide = matches!(op, Op::FontW | Op::FontIndirectW);
+            let lf = if matches!(op, Op::FontIndirectA | Op::FontIndirectW) {
                 read_font(mem, a[0], wide)?
             } else {
                 let mut lf = [0; 92];
@@ -91,8 +92,8 @@ pub(super) fn dispatch(
             );
             Ok(h)
         }
-        "GetStockObject" if matches!(a[0], 10..=14 | 16 | 17) => Ok(0x42000080 + a[0] * 4),
-        "GetTextMetricsW" => {
+        Op::StockObject if matches!(a[0], 10..=14 | 16 | 17) => Ok(0x42000080 + a[0] * 4),
+        Op::TextMetricsW => {
             let h = gfx.dc(a[0])?.font;
             let font = gfx.fonts.get_mut(&h).ok_or(6u32)?;
             if font.metrics.is_none() {
@@ -102,13 +103,13 @@ pub(super) fn dispatch(
                 .map_err(|_| 87u32)?;
             Ok(1)
         }
-        "SelectObject" if gfx.fonts.contains_key(&a[1]) => {
+        Op::Select if gfx.fonts.contains_key(&a[1]) => {
             let dc = gfx.dcs.get_mut(&a[0]).ok_or(6u32)?;
             let old = dc.font;
             dc.font = a[1];
             Ok(old)
         }
-        "DeleteObject" if gfx.fonts.contains_key(&a[0]) => {
+        Op::Delete if gfx.fonts.contains_key(&a[0]) => {
             if !gfx.fonts[&a[0]].stock {
                 if gfx.dcs.values().any(|d| d.font == a[0]) {
                     return Err(170);
@@ -117,10 +118,10 @@ pub(super) fn dispatch(
             }
             Ok(1)
         }
-        "GetObjectType" if gfx.fonts.contains_key(&a[0]) => Ok(6),
-        "GetCurrentObject" if a[1] == 6 => Ok(gfx.dc(a[0])?.font),
-        "GetObjectA" | "GetObjectW" if gfx.fonts.contains_key(&a[0]) => {
-            let wide = name.ends_with('W');
+        Op::ObjectType if gfx.fonts.contains_key(&a[0]) => Ok(6),
+        Op::CurrentObject if a[1] == 6 => Ok(gfx.dc(a[0])?.font),
+        Op::ObjectA | Op::ObjectW if gfx.fonts.contains_key(&a[0]) => {
+            let wide = op == Op::ObjectW;
             let size = if wide { 92 } else { 60 };
             if a[2] == 0 {
                 return Ok(size);

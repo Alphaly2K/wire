@@ -1,4 +1,5 @@
 //! Checked PE32 object/raster operations, independent of process and API state.
+use super::GdiOperation as Op;
 use super::{
     dib, font,
     surface::{Bitmap, Storage},
@@ -118,26 +119,26 @@ fn blit(a: &Arguments, mem: &GuestMem, gfx: &mut Graphics) -> Result<u32, u32> {
 }
 
 pub(crate) fn execute(
-    name: &str,
+    op: Op,
     a: &Arguments,
     mem: &mut GuestMem,
     gfx: &mut Graphics,
 ) -> Result<u32, u32> {
-    if let Some(result) = font::dispatch(name, a, mem, gfx) {
+    if let Some(result) = font::dispatch(op, a, mem, gfx) {
         return result;
     }
-    if let Some(result) = dib::dispatch(name, a, mem, gfx) {
+    if let Some(result) = dib::dispatch(op, a, mem, gfx) {
         return result;
     }
-    match name {
-        "SetMapMode" | "GetMapMode" => {
+    match op {
+        Op::SetMapMode | Op::GetMapMode => {
             gfx.dc(a[0])?;
-            if name == "SetMapMode" && a[1] != 1 {
+            if op == Op::SetMapMode && a[1] != 1 {
                 return Err(120);
             }
             Ok(1) // only MM_TEXT is currently supported
         }
-        "CreateCompatibleBitmap" => {
+        Op::CompatibleBitmap => {
             let bpp = gfx.bitmaps.get(&gfx.dc(a[0])?.bitmap).ok_or(6u32)?.bpp;
             let (width, height, bpp) = if a[1] == 0 || a[2] == 0 {
                 (1, 1, 1)
@@ -153,7 +154,7 @@ pub(crate) fn execute(
                 .insert(h, Bitmap::owned(width, height, bpp, false)?);
             Ok(h)
         }
-        "CreateDIBSection" => {
+        Op::DibSection => {
             if a[0] != 0 {
                 gfx.dc(a[0])?;
             }
@@ -217,7 +218,7 @@ pub(crate) fn execute(
             );
             Ok(h)
         }
-        "SelectObject" => {
+        Op::Select => {
             if gfx.dc(a[0])?.window.is_some() {
                 return Err(87);
             }
@@ -238,7 +239,7 @@ pub(crate) fn execute(
             dc.bitmap = a[1];
             Ok(old)
         }
-        "DeleteObject" => {
+        Op::Delete => {
             let b = gfx.bitmaps.get(&a[0]).ok_or(6u32)?;
             if b.internal || gfx.dcs.values().any(|dc| dc.bitmap == a[0]) {
                 return Err(170);
@@ -249,8 +250,8 @@ pub(crate) fn execute(
             gfx.bitmaps.remove(&a[0]);
             Ok(1)
         }
-        "GetObjectA" | "GetObjectW" => bitmap_object(mem, gfx.bitmaps.get(&a[0]).ok_or(6u32)?, a),
-        "GetObjectType" => Ok(if gfx.bitmaps.contains_key(&a[0]) {
+        Op::ObjectA | Op::ObjectW => bitmap_object(mem, gfx.bitmaps.get(&a[0]).ok_or(6u32)?, a),
+        Op::ObjectType => Ok(if gfx.bitmaps.contains_key(&a[0]) {
             7
         } else if let Some(dc) = gfx.dcs.get(&a[0]) {
             if dc.window.is_none() {
@@ -261,19 +262,19 @@ pub(crate) fn execute(
         } else {
             0
         }),
-        "GetCurrentObject" => {
+        Op::CurrentObject => {
             if a[1] != 7 {
                 return Err(120);
             }
             Ok(gfx.dc(a[0])?.bitmap)
         }
-        "GetStockObject" => {
+        Op::StockObject => {
             if a[0] != 21 {
                 return Err(120);
             }
             Ok(STOCK_BITMAP)
         }
-        "GetPixel" | "SetPixel" | "SetPixelV" => {
+        Op::GetPixel | Op::SetPixel | Op::SetPixelV => {
             let dc = gfx.dc(a[0])?;
             let bitmap = dc.bitmap;
             let [x, y] = dc.point(a[1], a[2]);
@@ -285,7 +286,7 @@ pub(crate) fn execute(
             if x < 0 || y < 0 || x > u32::MAX as i64 || y > u32::MAX as i64 {
                 return Err(87);
             }
-            if name == "GetPixel" {
+            if op == Op::GetPixel {
                 gfx.bitmaps
                     .get(&bitmap)
                     .ok_or(6u32)?
@@ -298,19 +299,22 @@ pub(crate) fn execute(
                     .get_mut(&bitmap)
                     .ok_or(6u32)?
                     .write(mem, x as u32, y as u32, a[3])?;
-                Ok(if name == "SetPixelV" { 1 } else { color })
+                Ok(if op == Op::SetPixelV { 1 } else { color })
             }
         }
-        "BitBlt" => blit(a, mem, gfx),
-        "SetWindowOrgEx" | "SetViewportOrgEx" | "GetWindowOrgEx" | "GetViewportOrgEx" => {
+        Op::Blit => blit(a, mem, gfx),
+        Op::SetWindowOrigin
+        | Op::SetViewportOrigin
+        | Op::GetWindowOrigin
+        | Op::GetViewportOrigin => {
             gfx.dc(a[0])?;
             let dc = gfx.dcs.get_mut(&a[0]).unwrap();
-            let slot = if name.contains("Window") {
+            let slot = if matches!(op, Op::SetWindowOrigin | Op::GetWindowOrigin) {
                 &mut dc.origin
             } else {
                 &mut dc.viewport
             };
-            if name.starts_with("Set") {
+            if matches!(op, Op::SetWindowOrigin | Op::SetViewportOrigin) {
                 point_output(mem, a[3], *slot)?;
                 *slot = [a[1] as i32, a[2] as i32];
             } else {
@@ -321,16 +325,16 @@ pub(crate) fn execute(
             }
             Ok(1)
         }
-        "SetTextColor" | "GetTextColor" | "SetBkColor" | "GetBkColor" => {
+        Op::SetTextColor | Op::GetTextColor | Op::SetBackgroundColor | Op::GetBackgroundColor => {
             gfx.dc(a[0])?;
             let dc = gfx.dcs.get_mut(&a[0]).unwrap();
-            let slot = if name.contains("Text") {
+            let slot = if matches!(op, Op::SetTextColor | Op::GetTextColor) {
                 &mut dc.text_color
             } else {
                 &mut dc.bk_color
             };
             let old = *slot;
-            if name.starts_with("Set") {
+            if matches!(op, Op::SetTextColor | Op::SetBackgroundColor) {
                 if a[1] & 0xff000000 != 0 {
                     return Err(120);
                 }
@@ -338,7 +342,7 @@ pub(crate) fn execute(
             }
             Ok(old)
         }
-        "GdiFlush" => Ok(1), // all implemented operations are synchronous
+        Op::Flush => Ok(1), // all implemented operations are synchronous
         _ => unreachable!(),
     }
 }
