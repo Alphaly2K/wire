@@ -23,6 +23,7 @@ mod find;
 mod gateways;
 mod guid;
 mod heap;
+mod input_profile;
 mod keyboard;
 mod local_memory;
 mod locals;
@@ -240,7 +241,6 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
                     name,
                     "SystemParametersInfoA" | "SystemParametersInfoW" | "GetSystemMetrics"
                 )))
-        && !(dll.eq_ignore_ascii_case("imm32.dll") && user::ime_arity(name).is_some())
         && !(dll.eq_ignore_ascii_case("dwmapi.dll")
             && matches!(name, "DwmGetWindowAttribute" | "DwmIsCompositionEnabled"))
         && !(dll.eq_ignore_ascii_case("gdi32.dll") && user::gdi_arity(name).is_some())
@@ -848,6 +848,7 @@ impl Runtime64 {
             ApiId::Variant(_) => unreachable!("Variant helpers have no Win64 binding"),
             ApiId::ProcessQuery(id) => self.process_query_call(mem, id, args),
             ApiId::Keyboard(id) => self.keyboard_call(mem, id, args),
+            ApiId::RawInput(_) | ApiId::Ime(_) => self.input_profile_call(mem, id, args),
             ApiId::BasicString(_) | ApiId::PointerHelper(_) => {
                 unreachable!("PE32 basic helpers have no Win64 binding")
             }

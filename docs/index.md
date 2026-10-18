@@ -48,6 +48,7 @@
 - [GUID 资源辅助验收](reports/refactoring-guid-allocation-2026-10-18.md)：三个追加 export、allocator/TaskMemory、entropy 与返回槽别名、63 条初筛路径和保留的 multimedia/VirtualQuery IR 局部成本。
 - [基础 helper 边界](architecture/basic-helpers.md)及[完整验收](reports/refactoring-basic-2026-10-18.md)：29 项接口、common_api 移除、ABI spec 数据共享与缓存恢复生成代码；75 个性能协议与游戏前缀验证，保留 memory/SSE 局部成本及历史拒绝候选。
 - [键盘边界](architecture/keyboard.md)及[完整验收](reports/refactoring-keyboard-2026-10-18.md)：16 项状态/布局契约，保留静态与动态 provider 差异；32 个性能协议与游戏前缀验证，保留整数 IR 局部成本和离散轮次。
+- [Raw input / IME 边界](architecture/input-profile.md)及[候选记录](reports/refactoring-input-profile-2026-10-18.md)：24 项无设备/无输入上下文契约，正确性通过，性能验收进行中。
 - [release 编译单元候选](reports/refactoring-release-codegen-2026-10-15.md)：独立构建配置、同二进制对照及长样本调查。
 - [网关边界候选](reports/refactoring-gateway-boundary-2026-10-15.md)、[页缓存内联候选](reports/refactoring-page-cache-inline-2026-10-15.md)、[helper 布局候选](reports/refactoring-memory-helper-layout-2026-10-15.md)：已撤回实现和保留的测量证据。
 - [本次渐进重构记录](reports/refactoring-2026-10-14.md)：阶段交付、行为差异与验收结果。

@@ -1088,24 +1088,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
             ],
         );
         add(
-            "imm32.dll",
-            &[
-                ("ImmGetContext", 4),
-                ("ImmReleaseContext", 8),
-                ("ImmGetCompositionStringA", 16),
-                ("ImmGetCompositionStringW", 16),
-                ("ImmSetCompositionStringA", 24),
-                ("ImmSetCompositionStringW", 24),
-                ("ImmNotifyIME", 16),
-                ("ImmGetDefaultIMEWnd", 4),
-                ("ImmIsIME", 4),
-                ("ImmGetOpenStatus", 4),
-                ("ImmSetOpenStatus", 8),
-                ("ImmAssociateContext", 8),
-                ("ImmAssociateContextEx", 12),
-            ],
-        );
-        add(
             "ole32.dll",
             &[("CreateStreamOnHGlobal", 12), ("GetHGlobalFromStream", 8)],
         );
@@ -1243,15 +1225,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
             ],
         );
         add("oleaut32.dll", &[("#9", 4)]); // VariantClear
-        add(
-            "imm32.dll",
-            &[
-                ("ImmSetCompositionFontW", 8),
-                ("ImmSetConversionStatus", 12),
-                ("ImmGetConversionStatus", 12),
-                ("ImmSetCompositionWindow", 8),
-            ],
-        );
         add("dbghelp.dll", &[("MiniDumpWriteDump", 28)]);
         add("quartz.dll", &[("AMGetErrorTextW", 12)]);
         add("propsys.dll", &[("PropVariantToDouble", 8)]);

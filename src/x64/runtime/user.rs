@@ -2,7 +2,6 @@
 use super::{Memory, Runtime64, READ};
 mod gdi;
 mod message;
-mod raw;
 mod window;
 pub(super) use message::arity as message_arity;
 use std::collections::BTreeMap;
@@ -93,13 +92,7 @@ pub(super) fn arity(name: &str) -> Option<usize> {
     if let Some(arity) = message::arity(name) {
         return Some(arity);
     }
-    if let Some(arity) = raw::arity(name) {
-        return Some(arity);
-    }
     if let Some(arity) = gdi::arity(name) {
-        return Some(arity);
-    }
-    if let Some(arity) = ime_arity(name) {
         return Some(arity);
     }
     if let Some(arity) = window::arity(name) {
@@ -139,21 +132,12 @@ pub(super) fn dwords(name: &str) -> &'static [usize] {
     if message::arity(name).is_some() {
         return message::dwords(name);
     }
-    if raw::arity(name).is_some() {
-        return raw::dwords(name);
-    }
     if window::arity(name).is_some() {
         return window::dwords(name);
     }
     match name {
         "GetDeviceCaps" => &[1],
         "DwmGetWindowAttribute" => &[1, 3],
-        "ImmAssociateContextEx" => &[2],
-        "ImmGetCompositionStringA" | "ImmGetCompositionStringW" => &[1, 3],
-        "ImmSetCompositionStringA" | "ImmSetCompositionStringW" => &[1, 3, 5],
-        "ImmNotifyIME" => &[1, 2, 3],
-        "ImmSetOpenStatus" => &[1],
-        "ImmSetConversionStatus" => &[1, 2],
         "ShowCursor" | "EnableMouseInPointer" => &[0],
         "LoadImageA" | "LoadImageW" => &[2, 3, 4, 5],
         "AdjustWindowRect" => &[1, 2],
@@ -187,49 +171,8 @@ impl Runtime64 {
         args: &[u64],
     ) -> Result<u64, String> {
         let wide = name.ends_with('W');
-        if raw::arity(name).is_some() {
-            return self.raw_input_call(mem, name, args);
-        }
         if gdi::arity(name).is_some() {
             return self.gdi_call(mem, name, args);
-        }
-        if ime_arity(name).is_some() {
-            // The guest desktop currently has no installed IME or HIMC. A valid
-            // window has no input context; never claim composition was enabled.
-            if name == "ImmIsIME" {
-                return Ok(0);
-            }
-            if name == "ImmGetDefaultIMEWnd" {
-                if args[0] != 0 && !self.user.windows.contains_key(&args[0]) {
-                    self.set_error(mem, 1400)?;
-                }
-                return Ok(0);
-            }
-            let window = matches!(
-                name,
-                "ImmGetContext"
-                    | "ImmReleaseContext"
-                    | "ImmAssociateContext"
-                    | "ImmAssociateContextEx"
-            );
-            if window && !self.user.windows.contains_key(&args[0]) {
-                self.set_error(mem, 1400)?;
-                return Ok(0);
-            }
-            if name == "ImmGetContext" {
-                return Ok(0);
-            }
-            if name == "ImmAssociateContext" && args[1] == 0 {
-                return Ok(0);
-            }
-            if name == "ImmAssociateContextEx" && args[1] == 0 && matches!(args[2], 0 | 1) {
-                return Ok(1);
-            }
-            // No HIMC has been issued. Wine's composition/status routines fail
-            // before dereferencing payload/output pointers for an invalid IMC.
-            // Preserve those buffers; this does not implement an IME frontend.
-            self.set_error(mem, 6)?;
-            return Ok(0);
         }
         if window::arity(name).is_some() {
             return self.window_query(mem, name, args);
@@ -667,20 +610,6 @@ impl Runtime64 {
 }
 pub(super) fn is_callback(name: &str) -> bool {
     window::is_callback(name)
-}
-pub(super) fn ime_arity(name: &str) -> Option<usize> {
-    Some(match name {
-        "ImmGetContext" | "ImmIsIME" | "ImmGetOpenStatus" | "ImmGetDefaultIMEWnd" => 1,
-        "ImmReleaseContext"
-        | "ImmAssociateContext"
-        | "ImmSetOpenStatus"
-        | "ImmSetCompositionFontW"
-        | "ImmSetCompositionWindow" => 2,
-        "ImmAssociateContextEx" | "ImmGetConversionStatus" | "ImmSetConversionStatus" => 3,
-        "ImmGetCompositionStringA" | "ImmGetCompositionStringW" | "ImmNotifyIME" => 4,
-        "ImmSetCompositionStringA" | "ImmSetCompositionStringW" => 6,
-        _ => return None,
-    })
 }
 pub(super) fn gdi_arity(name: &str) -> Option<usize> {
     if matches!(name, "GetDC" | "ReleaseDC") {

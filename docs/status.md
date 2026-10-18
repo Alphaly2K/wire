@@ -4,7 +4,7 @@
 
 本轮完成键盘状态和布局 16 项契约接入，删除重复 ABI/arity/DWORD/provider 与名称分发，纯布局核独立。异步、消息队列和文字状态继续由同一 Keyboard owner 管理；PE32 保留十三项 layout ABI-only，Win64 保留 static-import-only kernel provider 差异。
 
-本批完整正确性、28 条性能初筛、四条扩样及游戏前缀已验收，累计 400 项。保留 PE32 integer/IR 扩样 +3.102% 的局部成本，具体机制未确证，详见[键盘验收](reports/refactoring-keyboard-2026-10-18.md)。后续 USER、COM、图形等继续迁移；raw-input/IME 独立基线与 fixture 草稿准备中，尚未接入。Mono 原生化已撤回，本轮继续排除。
+本批完整正确性、28 条性能初筛、四条扩样及游戏前缀已验收，累计 400 项。保留 PE32 integer/IR 扩样 +3.102% 的局部成本，具体机制未确证，详见[键盘验收](reports/refactoring-keyboard-2026-10-18.md)。后续 USER、COM、图形等继续迁移；[raw-input/IME 24 项候选](reports/refactoring-input-profile-2026-10-18.md)已接入，完整 release 542、debug 389、native 7、工具 20 项通过，性能验收进行中，尚不计入累计数。Mono 原生化已撤回，本轮继续排除。
 
 ## 重构范围
 
