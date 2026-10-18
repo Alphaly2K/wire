@@ -28,6 +28,8 @@ mod files;
 mod guid_allocation;
 #[path = "x64/handles.rs"]
 mod handles;
+#[path = "x64/input_profile_contract.rs"]
+mod input_profile_contract;
 #[path = "x64/interlocked.rs"]
 mod interlocked;
 #[path = "x64/kernel.rs"]
