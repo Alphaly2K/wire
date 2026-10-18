@@ -43,7 +43,7 @@
 | --- | --- |
 | R0 入口/fixture | 已完成；12 组 golden 输入一致，默认与旧路径各 7 个运行 smoke 通过 |
 | R1 GUID 契约试点 | 已完成唯一契约、双架构冷绑定、纯语义/适配器、行为及性能验收 |
-| R2 分发收敛 | 累计 478 个 export 已验收；明细见当前状态与下方各家族报告；其余 USER/COM/GDI/D3D 等仍 legacy |
+| R2 分发收敛 | 累计 484 个 export 已验收；明细见当前状态与下方各家族报告；其余 USER/COM/GDI/D3D 等仍 legacy |
 | R3 状态归属 | environment/module/Win64 file、local slots、已迁移同步/线程/COM/image 子领域与双架构 cursor 已形成 owner；其余资源继续分批收敛 |
 | R4 PE32 Process | 已完成装载/执行编排提取；旧 Cpu 方法只保留委托 facade |
 | R5 host/graphics | 已完成 owned UI 请求/事件与 GDI adapter 分离，真实 native 验证通过 |
@@ -364,3 +364,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 七项 export 汇入 GdiDcApi，删除重复 ABI/arity/DWORD/provider 和名称分发。PE32 DC 操作直接借用原 Graphics bitmap/font/DC backing；Win64 私有 owner 拥有完整窗口/线程/compatible 身份及单调 handle 范围。原能力差异、ABI-only/absent 策略与错误/返回帧顺序保持。实现 `594a38f`、独立基线 `41f561c`；完整 release 572、debug 418、native 7、工具 20 项与 fmt/strict Clippy/build 通过。
 
 40 条性能路径全部校验，最大 CPU 中位数回退 GUID/IR +2.985%，RSS 最多 +96KiB；新有效 DC 查询 Win64 +0.026%、PE32 IR/raw −4.065%/−3.336%。保留 Win64 网关局部成本、integer/IR 和 GUID/IR 的时间漂移。Alice CPU/wall −0.169%/−0.123%，保持隐藏窗口和零 Draw/Present。353 个 Rust 文件核对一致，二进制增加 3,104 bytes。2026-10-18 接受，累计 478 个 export，详见[完整验收](refactoring-gdi-dc-2026-10-18.md)。
+
+## R2/R3 桌面设置与 DWM
+
+六项契约统一 provider/ABI/typed route，固定 profile 与进程 screen-reader 状态具有明确归属，保留 PE32 ABI-only/unknown 与 Win64 动态表差异。实现 `fb73a4c`，独立基线 `ac29b45`。release 577、debug 423、native 7、工具 20 项及 fmt/strict Clippy/build 通过。
+
+43 条性能路径全部校验；桌面查询 Win64/PE32 IR/raw CPU −1.088%/−20.724%/−21.863%，RSS 最多 +176KiB。bit-test/IR 初筛 +4.269%，含同一 before control 的追加三对 +0.240%，原始漂移数据保留。Alice CPU/wall +0.241%/+0.303%，同隐藏窗口、零 Draw/Present 预算出口。359 个 Rust 文件核对一致，二进制减少 4,544 bytes。2026-10-18 接受，累计 484 个 export，详见[完整验收](refactoring-desktop-2026-10-18.md)。

@@ -1,17 +1,17 @@
 # 当前状态
 
-更新日期：2026-10-18。重构前基线为 `2e78377`；最新已验收运行时为 [GDI DC 与设备能力](reports/refactoring-gdi-dc-2026-10-18.md)，实现提交 `594a38f`，该报告记录冻结源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
+更新日期：2026-10-18。重构前基线为 `2e78377`；最新已验收运行时为 [桌面设置与 DWM](reports/refactoring-desktop-2026-10-18.md)，实现提交 `fb73a4c`，该报告记录冻结源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
 
-本轮完成 GDI DC 七项契约，删除重复 ABI/arity/DWORD/provider 与名称分发。PE32 复用实际 Graphics backing，Win64 DC 由私有 owner 管理完整窗口/线程/compatible 身份和单调 handle 范围；两端原能力与错误/返回帧顺序保持。
+本轮完成桌面设置与 DWM 六项契约，删除重复 ABI/arity/DWORD/provider 与名称分发。Win64 screen-reader 状态交给私有进程设置 owner，PE32 固定查询走 typed profile；原能力、provider 差异及错误/返回帧顺序保持。
 
-本批完整正确性、40 条性能路径及游戏前缀已验收，累计 478 项。有效 DC 查询循环 Win64/PE32 IR/raw CPU +0.026%/−4.065%/−3.336%，矩阵最大中位数回退 +2.985%，详见[完整报告](reports/refactoring-gdi-dc-2026-10-18.md)。下一批 desktop/DWM 独立基线和未接入草稿准备中；其余 USER、COM、图形继续迁移。Mono 原生化已撤回，本轮继续排除。
+本批完整正确性、43 条性能路径、bit-test 补证及游戏前缀已验收，累计 484 项。桌面查询 Win64/PE32 IR/raw CPU −1.088%/−20.724%/−21.863%，初筛 bit-test/IR +4.269%，加入同二进制 control 的补证 +0.240%，详见[完整报告](reports/refactoring-desktop-2026-10-18.md)。下一批窗口类十七项已有独立旧行为基线和未接入草稿；其余 USER、COM、图形继续迁移。Mono 原生化已撤回，本轮继续排除。
 
 ## 重构范围
 
 | 阶段 | 已交付 | 剩余范围 |
 | --- | --- | --- |
 | R0/R1 | 冻结输入、原创正式 fixture、领域测试 harness、GUID 唯一契约和双架构适配 | 随后续家族维护独立基线 |
-| R2 | 已验收 478 个 export 的契约；明细见下表 | USER、COM、图形等 legacy 家族 |
+| R2 | 已验收 484 个 export 的契约；明细见下表 | USER、COM、图形等 legacy 家族 |
 | R3 | guest environment、双架构模块状态、Win64 文件、period 请求、SRW、地址等待及 APC 队列、线程标量操作与描述、双架构 apartment/BSTR、Win64 task/HSTRING/image 成员、PE32 TLS/FLS 与双架构 cursor、Win64 DC 私有 owner | PE32 其余资源、线程资源创建/退出及 COM 其余对象；PE32 kernel 大范围抽取曾因性能撤回 |
 | R4/R5 | Process32 编排边界、owned host UI 请求、GDI 与像素状态分离 | 领域分发与资源 owner 随 R2/R3 继续收敛 |
 | R6 | 按用户要求忽略 | 不重建原生 Mono 路径 |
@@ -58,6 +58,7 @@
 | 图标 / 光标资源 | 8 | [资源边界](architecture/images.md)及[验收](reports/refactoring-images-2026-10-18.md) |
 | 显示 / monitor / metrics | 16 | [显示边界](architecture/display.md)及[验收](reports/refactoring-display-2026-10-18.md) |
 | GDI DC / 设备能力 | 7 | [DC 边界](architecture/gdi-dc.md)及[验收](reports/refactoring-gdi-dc-2026-10-18.md) |
+| 桌面设置 / DWM | 6 | [桌面边界](architecture/desktop.md)及[验收](reports/refactoring-desktop-2026-10-18.md) |
 
 ## 当前执行路径与能力
 
@@ -74,9 +75,9 @@
 
 ## 验证与性能
 
-最近已验收的 GDI DC 批次冻结：release **572 passed / 7 ignored**，debug Win32/AMD64/FPU **418 passed**，显式 native **7 passed**，工具 **20 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。随后新增的 desktop 草稿不属于上述冻结。
+最近已验收的 desktop 批次冻结：release **577 passed / 7 ignored**，debug Win32/AMD64/FPU **423 passed**，显式 native **7 passed**，工具 **20 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。随后新增的窗口类基线与草稿不属于上述冻结。
 
-本批 40 个 workload protocol 全部结果校验。有效 DC 查询 Win64 CPU +0.026%，PE32 IR/raw −4.065%/−3.336%；CPU 中位数最大回退 +2.985%，Win64 既有网关局部成本最高 +2.455%。RSS 中位数最多 +96KiB，二进制 +3,104 bytes。Alice CPU/wall −0.169%/−0.123%，启动终点保持。历史各批次成本、体积预算修订与离散证据保留在对应报告；AMD64 event 重复导入修正与稳定启动协议见[工具边界](architecture/validation-tools.md)，未推断游戏 FPS。
+本批 43 个 workload protocol 全部结果校验。桌面查询 Win64 CPU −1.088%，PE32 IR/raw −20.724%/−21.863%；bit-test/IR 原始中位数 +4.269%，追加含同一 before control 的三对补证 +0.240%，原始数据和漂移保留。其余初筛最大中位数回退 AMD64 memory +2.540%。RSS 中位数最多 +176KiB，二进制 −4,544 bytes。Alice CPU/wall +0.241%/+0.303%，启动终点保持。历史各批次成本、体积预算修订与离散证据保留在对应报告；AMD64 event 重复导入修正与稳定启动协议见[工具边界](architecture/validation-tools.md)，未推断游戏 FPS。
 
 后续正式比较使用显式 [稳定启动协议](reports/refactoring-launch-protocol-2026-10-16.md)，固定 argv0、参数和 child cwd，并记录 shell SHA。默认工具行为保持；旧协议数据独立保留，汇总不跨协议或不同 work 合并。编译、正式计时、采样与 runtime diagnostics 串行执行。每个结构候选先完成正确性，再按至少三对轮换检查结果、CPU/wall/RSS 与输入哈希；超过门槛先调查，不把失败候选扩大到其它领域。
 

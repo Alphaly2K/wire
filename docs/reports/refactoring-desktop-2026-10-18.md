@@ -1,6 +1,6 @@
 # R2/R3 进程桌面设置与 DWM 查询（2026-10-18）
 
-状态：五项独立旧行为基线与原创查询 fixture 已通过，六项候选已接入并通过完整正确性检查，性能与游戏前缀验收进行中，不计入已验收累计数。
+状态：六项契约及状态迁移已验收。实现提交 `fb73a4c`，独立基线提交 `ac29b45`，累计已验收 484 个 export。
 
 六项范围：SystemParametersInfoA/W、GetDoubleClickTime、GetDialogBaseUnits、DwmGetWindowAttribute、DwmIsCompositionEnabled。PE32 前两项 ABI-only、两个固定值 typed、DWM 保留 unknown ABI/零清栈；Win64 两项设置与两项 DWM 已有处理，两个固定值 absent。
 
@@ -17,3 +17,9 @@ before 为 `r2-gdi-dc-wire/wire`，SHA256 `b94fa7683a3625b801a703ce34a0abef6b724
 候选完整检查：release 577 passed / 7 ignored，debug Win32/AMD64/FPU 423 passed，显式 native 7 passed，工具 20 passed；fmt、strict all-target/all-feature Clippy、release build 均通过。默认 ignored 的七项已在提供原生依赖后显式执行。
 
 冻结 `r2-desktop-wire/wire`：SHA256 `97689a99eb05cbf37372cbce693d3af16e9caa64fdb5ae317753cb3f035d7383`，5,956,232 bytes，相对 before −4,544 bytes，满足 +24KiB 预算。359 个 Rust 文件（src/tests 351 个）的 live/frozen/manifest SHA 及文件集合一致，target 与 frozen executable SHA 一致，见 `r2-desktop-source-verification.json`。正式计时使用这份冻结程序，后续文档更新不改变运行时。
+
+正式三对矩阵共 43 条 workload protocol，结果、retired/work、API 计数及输入全部校验，见 `r2-desktop-stable-final-summary.json` 与五个 `r2-desktop-stable-*` 目录。桌面查询 Win64 CPU −1.088%，PE32 IR/raw −20.724%/−21.863%；PE32 原名称分发已被固定 profile 的 typed 路由替换。RSS 中位数最多 +176KiB。
+
+初筛唯一超过 3% 门槛的是 PE32 bit-test/IR：CPU 中位数 +4.269%，逐对 +1.499%/+4.592%/+0.167%，存在跨轮漂移。保留原轮次，另外进行同 work/launch/QoS 的三对复测，加入同一 before 二进制的 control。补证 CPU 中位数 +0.240%，逐对 +0.240%/+1.920%/−0.692%；control 相对 before −1.081%，after 相对 control +1.336%。未出现稳定的超门槛回退，原报告不改写为补证结果，见 `r2-desktop-stable-bit-test-control-summary.json`。其余原始矩阵最大中位数回退为 AMD64 memory +2.540%。integer/IR 中位数 −9.938%，逐对 +0.261%/−9.938%/+7.374% 漂移明显，不据此宣称通用整数性能收益。
+
+Alice 使用既有 runtime/原游戏资产，严格在矩阵与补证之后串行三对运行。均到 200M work 预算出口，窗口隐藏、client 314×211、Draw/Present 0；CPU/wall 中位数 +0.241%/+0.303%，见 `r2-desktop-stable-alice/compare.json`。此处验收启动前缀与同终点，不涉及实际游戏绘制或 FPS。
