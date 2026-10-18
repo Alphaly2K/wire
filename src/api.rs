@@ -693,10 +693,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("CallWindowProcW", 20),
                 ("ShowWindow", 8),
                 ("UpdateWindow", 4),
-                ("IsWindow", 4),
-                ("IsWindowVisible", 4),
-                ("IsIconic", 4),
-                ("IsZoomed", 4),
                 ("EnableWindow", 8),
                 ("GetProcessWindowStation", 0),
                 ("GetUserObjectInformationW", 20),
@@ -719,8 +715,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("EndPaint", 8),
                 ("InvalidateRect", 12),
                 ("ValidateRect", 8),
-                ("GetClientRect", 8),
-                ("GetWindowRect", 8),
                 ("SetWindowTextA", 8),
                 ("SetWindowTextW", 8),
                 ("GetWindowTextA", 12),
@@ -740,16 +734,12 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("MoveWindow", 24),
                 ("SetWindowPos", 28),
                 ("BringWindowToTop", 4),
-                ("ClientToScreen", 8),
-                ("ScreenToClient", 8),
                 ("WindowFromPoint", 8),
                 ("LoadAcceleratorsA", 8),
                 ("LoadAcceleratorsW", 8),
                 ("TranslateAcceleratorA", 12),
                 ("TranslateAcceleratorW", 12),
-                ("GetDesktopWindow", 0),
                 ("GetShellWindow", 0),
-                ("GetParent", 4),
                 ("SetParent", 8),
                 ("DrawIcon", 16),
                 ("FillRect", 12),
@@ -776,10 +766,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("DrawTextW", 20),
                 ("DrawTextExA", 24),
                 ("DrawTextExW", 24),
-                ("GetWindowLongA", 8),
-                ("GetWindowLongW", 8),
-                ("SetWindowLongA", 12),
-                ("SetWindowLongW", 12),
                 ("DefDlgProcA", 16),
                 ("DefDlgProcW", 16),
                 ("DialogBoxParamA", 20),
@@ -821,13 +807,9 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetSysColorBrush", 4),
                 ("EnumWindows", 8),
                 ("EnumThreadWindows", 12),
-                ("FindWindowA", 8),
-                ("FindWindowW", 8),
-                ("GetWindowThreadProcessId", 8),
                 ("AttachThreadInput", 12),
                 ("RedrawWindow", 16),
                 ("GetUpdateRect", 12),
-                ("MapWindowPoints", 16),
                 ("ReleaseCapture", 0),
                 ("SetCapture", 4),
                 ("GetCapture", 0),
@@ -1101,7 +1083,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetClipboardData", 4),
                 ("IsClipboardFormatAvailable", 4),
                 ("MsgWaitForMultipleObjects", 20),
-                ("IsWindowEnabled", 4),
                 ("GetMenuItemCount", 4),
                 ("CreateDialogIndirectParamW", 20),
                 ("DialogBoxIndirectParamW", 20),
@@ -1110,7 +1091,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetDlgCtrlID", 4),
                 ("GetDlgItemInt", 16),
                 ("GetScrollInfo", 12),
-                ("GetWindowPlacement", 8),
                 ("IsDialogMessageW", 8),
                 ("LockWindowUpdate", 4),
                 ("MapDialogRect", 8),
@@ -1878,6 +1858,24 @@ pub fn dispatch(
                 .object_call(id, &args, mem, &mut state.last_error)?;
             ret = result.0;
             note = result.1.into();
+        }
+        _ if matches!(
+            binding.typed,
+            Some(crate::win32::catalog::ApiId::WindowQuery(_))
+        ) =>
+        {
+            use crate::win32::catalog::{ApiId, WindowQueryApi};
+            let Some(ApiId::WindowQuery(id)) = binding.typed else {
+                unreachable!();
+            };
+            (ret, note) = if id == WindowQueryApi::Desktop {
+                crate::user32::desktop_query(mem, api, state)?
+            } else {
+                state
+                    .user32
+                    .query_call(id, &args, mem, &mut state.last_error)?
+            };
+            implemented = id != WindowQueryApi::Placement;
         }
         _ if matches!(binding.typed, Some(crate::win32::catalog::ApiId::Class(_))) => {
             let Some(crate::win32::catalog::ApiId::Class(id)) = binding.typed else {

@@ -4,7 +4,7 @@
 
 本轮完成窗口类十七项契约，删除重复 ABI/arity/provider 与名称分发。Win64 类表与 atom 交给私有 owner，PE32 记录/持久名称与类信息、字段、名称 handler 集中于同一模块，公开兼容表保留；原隐式控件、架构差异与错误/返回帧顺序保持。
 
-本批完整正确性、46 条性能路径、两组同二进制 control 补证及游戏前缀已验收，累计 501 项。类接口 Win64/PE32 IR/raw CPU −15.632%/−6.676%/−4.082%；desktop/IR 和 images/raw 初筛 +3.080%/+3.774%，补证 +0.844%/−0.214%，详见[完整报告](reports/refactoring-classes-2026-10-18.md)。USER 注册名称与属性十四项首版正确性通过，48 条路径结果校验，但追加对照确认 Win64 查询持续回退，首版冻结已拒绝、未执行游戏验收；布局候选也已撤回，trace 构造修订筛选中，见[候选报告](reports/refactoring-user-objects-2026-10-18.md)。后续二十五项窗口查询的六项独立基线已通过，草稿未接入，见[基线记录](reports/refactoring-window-queries-2026-10-18.md)。其余 USER、COM、图形继续迁移。Mono 原生化已撤回，本轮继续排除。
+本批完整正确性、46 条性能路径、两组同二进制 control 补证及游戏前缀已验收，累计 501 项。类接口 Win64/PE32 IR/raw CPU −15.632%/−6.676%/−4.082%；desktop/IR 和 images/raw 初筛 +3.080%/+3.774%，补证 +0.844%/−0.214%，详见[完整报告](reports/refactoring-classes-2026-10-18.md)。USER 注册名称与属性十四项首版性能被拒绝，trace 修订旧协议又出现同哈希副本的数倍耗时差异，已增加[固定 executable/cwd 对照协议](reports/refactoring-fixed-executable-slot-2026-10-18.md)，保留失败候选。二十五项窗口查询已接入，六项独立回归及完整 release 594 / debug 440 / native 7 / 工具 23 通过；名称/属性、trace 与查询的集成候选正在执行新的 51 条性能路径，见[候选报告](reports/refactoring-window-queries-2026-10-18.md)。验收前不计入累计数。其余 USER、COM、图形继续迁移。Mono 原生化已撤回，本轮继续排除。
 
 ## 重构范围
 

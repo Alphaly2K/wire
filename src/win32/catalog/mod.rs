@@ -44,6 +44,7 @@ mod variant;
 mod version;
 mod virtual_memory;
 mod waits;
+mod window_queries;
 mod winrt;
 pub use address_waits::{AddressWaitApi, ADDRESS_WAIT_CONTRACTS};
 pub use basic_strings::{BasicStringApi, BASIC_STRING_CONTRACTS};
@@ -90,6 +91,7 @@ pub use variant::{VariantApi, VARIANT_CONTRACTS};
 pub use version::{VersionApi, VERSION_CONTRACTS};
 pub use virtual_memory::{VirtualMemoryApi, VIRTUAL_MEMORY_CONTRACTS};
 pub use waits::{WaitApi, WAIT_CONTRACTS};
+pub use window_queries::{WindowQueryApi, WINDOW_QUERY_CONTRACTS};
 pub use winrt::{WinrtApi, WINRT_CONTRACTS};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -173,6 +175,7 @@ pub enum ApiId {
     Desktop(DesktopApi),
     Class(ClassApi),
     UserObject(UserObjectApi),
+    WindowQuery(WindowQueryApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -357,6 +360,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(DESKTOP_CONTRACTS.iter())
         .chain(CLASS_CONTRACTS.iter())
         .chain(USER_OBJECT_CONTRACTS.iter())
+        .chain(WINDOW_QUERY_CONTRACTS.iter())
 }
 
 #[cfg(test)]

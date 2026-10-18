@@ -8,8 +8,10 @@ use std::time::{Duration, Instant};
 
 mod classes;
 mod objects;
+mod queries;
 pub(crate) use classes::{call as class_call, register_system_class};
 pub use classes::{find_class, WindowClass};
+pub(crate) use queries::desktop as desktop_query;
 
 pub struct User32 {
     pub classes: BTreeMap<u16, WindowClass>,
@@ -311,97 +313,6 @@ pub fn dispatch(
             return Some(Err(error));
         }
     }
-    if matches!(name, "FindWindowA" | "FindWindowW") {
-        return Some((|| {
-            let wide = name.ends_with('W');
-            let class = if a[0] > 0xffff {
-                Some(
-                    crate::file_api::read_name(mem, a[0], wide)
-                        .map_err(|e| format!("FindWindow class: {e}"))?
-                        .to_lowercase(),
-                )
-            } else {
-                None
-            };
-            let title = if a[1] != 0 {
-                Some(
-                    crate::file_api::read_name(mem, a[1], wide)
-                        .map_err(|e| format!("FindWindow title: {e}"))?
-                        .to_lowercase(),
-                )
-            } else {
-                None
-            };
-            let found = state
-                .user32
-                .windows
-                .iter()
-                .find_map(|(&h, w)| {
-                    if w.style & 0x40000000 != 0 || w.parent == 0xfffffffd {
-                        return None;
-                    }
-                    let c = state.user32.classes.get(&w.class)?;
-                    let matches_class = if a[0] == 0 {
-                        true
-                    } else if let Some(key) = &class {
-                        c.name.to_lowercase() == *key
-                    } else {
-                        w.class as u32 == a[0]
-                    };
-                    (matches_class
-                        && title
-                            .as_ref()
-                            .is_none_or(|t| String::from_utf16_lossy(&w.text).to_lowercase() == *t))
-                    .then_some(h)
-                })
-                .unwrap_or(0);
-            Ok((
-                GuestCallOutcome::Returned(found),
-                "process top-level window lookup".into(),
-            ))
-        })());
-    }
-    if name == "GetDesktopWindow" {
-        return Some((|| {
-            const DESKTOP: u32 = 0x4000fffc;
-            if !state.user32.windows.contains_key(&DESKTOP) {
-                let module = state.module_handle_for("user32.dll");
-                register_system_class(mem, api, state, module, "Desktop", true)?;
-                let (&atom, class) = state
-                    .user32
-                    .classes
-                    .iter()
-                    .find(|(_, c)| c.name == "Desktop")
-                    .unwrap();
-                state.user32.windows.insert(
-                    DESKTOP,
-                    Window {
-                        class: atom,
-                        wndproc: class.fields[1],
-                        instance: module,
-                        parent: 0,
-                        menu: 0,
-                        style: 0x10000000,
-                        ex_style: 0,
-                        rect: [0, 0, 1024, 768],
-                        user_data: 0,
-                        extra: Vec::new(),
-                        wide: true,
-                        tid: 0,
-                        text: Vec::new(),
-                        destroying: false,
-                        update: None,
-                        erase: false,
-                        props: Default::default(),
-                    },
-                );
-            }
-            Ok((
-                GuestCallOutcome::Returned(DESKTOP),
-                "virtual desktop".into(),
-            ))
-        })());
-    }
     if let Some(result) =
         crate::user32_paint::dispatch(name, a, cpu, mem, api, state, log, sched, max_instr)
     {
@@ -428,17 +339,6 @@ pub fn dispatch(
             | "DefDlgProcW"
             | "SendMessageA"
             | "SendMessageW"
-            | "GetWindowLongA"
-            | "GetWindowLongW"
-            | "SetWindowLongA"
-            | "SetWindowLongW"
-            | "IsWindow"
-            | "IsWindowVisible"
-            | "IsWindowUnicode"
-            | "GetClientRect"
-            | "GetWindowRect"
-            | "GetParent"
-            | "GetWindowThreadProcessId"
             | "ShowWindow"
     ) {
         return Some(window_dispatch(
@@ -728,28 +628,6 @@ fn window_dispatch(
             format!("created {} HWND={hwnd:#x}", class.name),
         );
     }
-    if matches!(name, "IsWindow" | "IsWindowVisible" | "IsWindowUnicode") {
-        let result = state.user32.windows.get(&a[0]).is_some_and(|w| match name {
-            "IsWindowVisible" => w.style & 0x1000_0000 != 0,
-            "IsWindowUnicode" => w.wide,
-            _ => true,
-        });
-        return value(result as u32, String::new());
-    }
-    let parent_origin = if name == "GetWindowRect" {
-        if let Some(w) = state
-            .user32
-            .windows
-            .get(&a[0])
-            .filter(|w| w.style & 0x40000000 != 0)
-        {
-            crate::user32_geometry::client_origin(state, w.parent)?
-        } else {
-            [0; 2]
-        }
-    } else {
-        [0; 2]
-    };
     if matches!(name, "SendMessageA" | "SendMessageW") {
         let sender = sched.current_tid();
         if let Some((&id, msg)) = state
@@ -772,68 +650,6 @@ fn window_dispatch(
         return value(0, "invalid HWND".into());
     };
     match name {
-        "GetWindowLongA" | "GetWindowLongW" | "SetWindowLongA" | "SetWindowLongW" => {
-            let setting = name.starts_with("Set");
-            if setting && a[1] == (-4i32) as u32 && a[2] == 0 {
-                state.last_error = 87;
-                return value(0, "null WndProc".into());
-            }
-            let slot = match a[1] as i32 {
-                -4 => Some(&mut window.wndproc),
-                -6 => Some(&mut window.instance),
-                -8 => Some(&mut window.parent),
-                -12 => Some(&mut window.menu),
-                -16 => Some(&mut window.style),
-                -20 => Some(&mut window.ex_style),
-                -21 => Some(&mut window.user_data),
-                _ => None,
-            };
-            let old = if let Some(slot) = slot {
-                let old = *slot;
-                if setting {
-                    *slot = a[2];
-                }
-                old
-            } else if (a[1] as i32) >= 0
-                && (a[1] as usize)
-                    .checked_add(4)
-                    .is_some_and(|end| end <= window.extra.len())
-            {
-                let bytes = &mut window.extra[a[1] as usize..a[1] as usize + 4];
-                let old = u32::from_le_bytes(bytes.try_into().unwrap());
-                if setting {
-                    bytes.copy_from_slice(&a[2].to_le_bytes());
-                }
-                old
-            } else {
-                state.last_error = 1413;
-                return value(0, "invalid window long index".into());
-            };
-            value(old, String::new())
-        }
-        "GetParent" => value(window.parent, String::new()),
-        "GetWindowThreadProcessId" => {
-            if a[1] != 0 {
-                mem.write_u32(a[1], 4242).map_err(|e| e.to_string())?;
-            }
-            value(window.tid, String::new())
-        }
-        "GetClientRect" | "GetWindowRect" => {
-            let [x, y, w, h] = window.rect;
-            let rect = if name == "GetClientRect" {
-                let size = window.client_size();
-                [0, 0, size[0], size[1]]
-            } else {
-                let x = x.wrapping_add(parent_origin[0]);
-                let y = y.wrapping_add(parent_origin[1]);
-                [x, y, x.saturating_add(w), y.saturating_add(h)]
-            };
-            for (i, n) in rect.into_iter().enumerate() {
-                mem.write_u32(a[1] + i as u32 * 4, n as u32)
-                    .map_err(|e| e.to_string())?;
-            }
-            value(1, "logical window geometry".into())
-        }
         "SendMessageA" | "SendMessageW" => {
             if window.tid != sched.current_tid() {
                 let owner = window.tid;

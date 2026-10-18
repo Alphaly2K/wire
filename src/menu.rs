@@ -417,8 +417,6 @@ pub(crate) fn dispatch(
                 | "GetMenuState"
                 | "EnableMenuItem"
                 | "CheckMenuItem"
-                | "ClientToScreen"
-                | "ScreenToClient"
                 | "DrawMenuBar"
                 | "TrackPopupMenu"
                 | "TrackPopupMenuEx"
@@ -496,23 +494,6 @@ pub(crate) fn dispatch(
                         Ok(old & mask)
                     }
                 }
-            }
-            "ClientToScreen" | "ScreenToClient" => {
-                let origin =
-                    crate::user32_geometry::client_origin(state, a[0]).map_err(|_| 1400u32)?;
-                let mut bytes = [0; 8];
-                mem.read_bytes(a[1], &mut bytes).map_err(|_| INVALID)?;
-                for (i, offset) in origin.into_iter().enumerate() {
-                    let n = i32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap());
-                    let n = if name == "ClientToScreen" {
-                        n.wrapping_add(offset)
-                    } else {
-                        n.wrapping_sub(offset)
-                    };
-                    bytes[i * 4..i * 4 + 4].copy_from_slice(&n.to_le_bytes());
-                }
-                mem.write_bytes(a[1], &bytes).map_err(|_| INVALID)?;
-                Ok(1)
             }
             _ => Err(120),
         }

@@ -6,6 +6,7 @@ use crate::x64::{
     runtime::WindowStep,
 };
 mod position;
+mod queries;
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Operation {
     Create {
@@ -52,31 +53,13 @@ pub(in crate::x64::runtime) fn arity(name: &str) -> Option<usize> {
         "CallWindowProcA" | "CallWindowProcW" => 5,
         "SetWindowPos" => 7,
         "MoveWindow" => 6,
-        "ShowWindow"
-        | "GetWindowLongA"
-        | "GetWindowLongW"
-        | "GetWindowLongPtrA"
-        | "GetWindowLongPtrW"
-        | "GetWindowRect"
-        | "GetWindowPlacement"
-        | "GetClientRect"
-        | "SetWindowTextA"
-        | "SetWindowTextW"
-        | "ClientToScreen"
-        | "ScreenToClient"
-        | "GetWindowThreadProcessId" => 2,
-        "SetWindowLongA" | "SetWindowLongW" | "SetWindowLongPtrA" | "SetWindowLongPtrW" => 3,
+        "ShowWindow" | "SetWindowTextA" | "SetWindowTextW" => 2,
         "DestroyWindow"
         | "DispatchMessageA"
         | "DispatchMessageW"
-        | "IsWindow"
-        | "IsWindowVisible"
-        | "IsWindowUnicode"
-        | "GetParent"
         | "SetFocus"
         | "SetForegroundWindow"
-        | "UpdateWindow"
-        | "IsIconic" => 1,
+        | "UpdateWindow" => 1,
         "GetFocus" | "GetActiveWindow" | "GetForegroundWindow" => 0,
         "GetWindowTextLengthA" | "GetWindowTextLengthW" => 1,
         "GetWindowTextA" | "GetWindowTextW" => 3,
@@ -86,10 +69,9 @@ pub(in crate::x64::runtime) fn arity(name: &str) -> Option<usize> {
 pub(in crate::x64::runtime) fn dwords(name: &str) -> &'static [usize] {
     match name {
         "CreateWindowExA" | "CreateWindowExW" => &[0, 3, 4, 5, 6, 7],
-        "DefWindowProcA" | "DefWindowProcW" | "SendMessageA" | "SendMessageW" | "ShowWindow"
-        | "GetWindowLongA" | "GetWindowLongW" | "GetWindowLongPtrA" | "GetWindowLongPtrW"
-        | "SetWindowLongPtrA" | "SetWindowLongPtrW" => &[1],
-        "SetWindowLongA" | "SetWindowLongW" => &[1, 2],
+        "DefWindowProcA" | "DefWindowProcW" | "SendMessageA" | "SendMessageW" | "ShowWindow" => {
+            &[1]
+        }
         "SetWindowPos" => &[2, 3, 4, 5, 6],
         "MoveWindow" => &[1, 2, 3, 4, 5],
         "CallWindowProcA" | "CallWindowProcW" | "GetWindowTextA" | "GetWindowTextW" => &[2],
@@ -571,18 +553,10 @@ impl Runtime64 {
         name: &str,
         args: &[u64],
     ) -> Result<u64, String> {
-        if name.starts_with("SetWindowLongPtr") && args[1] as u32 as i32 == -4 {
-            if args[2] == 0 {
-                self.set_error(mem, 87)?;
-                return Ok(0);
-            }
-            self.valid_procedure(mem, args[2])?;
-        }
         match name {
             "GetFocus" => return Ok(self.user.focus),
             "GetActiveWindow" => return Ok(self.user.active),
             "GetForegroundWindow" => return Ok(self.user.foreground),
-            "IsWindow" => return Ok(self.user.windows.contains_key(&args[0]) as u64),
             _ => {}
         }
         let Some(w) = self.user.windows.get_mut(&args[0]) else {
@@ -611,66 +585,6 @@ impl Runtime64 {
                 }
                 _ => Ok(0),
             },
-            "GetParent" => Ok(w.parent),
-            "IsWindowVisible" => Ok((w.style & 0x10000000 != 0) as u64),
-            "IsWindowUnicode" => Ok(w.wide as u64),
-            "IsIconic" => Ok((w.style & 0x20000000 != 0) as u64),
-            "GetClientRect" => {
-                write_rect(
-                    mem,
-                    args[1],
-                    [0, 0, w.client[2] - w.client[0], w.client[3] - w.client[1]],
-                )?;
-                Ok(1)
-            }
-            "GetWindowRect" => {
-                write_rect(mem, args[1], w.rect)?;
-                Ok(1)
-            }
-            "GetWindowPlacement" => {
-                // WINDOWPLACEMENT contains only DWORD/POINT/RECT fields: 44
-                // bytes on both ABIs. Our desktop work-area origin is (0,0).
-                if args[1] == 0 || mem.read_int(args[1], 4)? != 44 {
-                    self.set_error(mem, 87)?;
-                    return Ok(0);
-                }
-                mem.check(args[1], 44, WRITE)?;
-                // Minimized/maximized restore geometry is not modeled yet.
-                if w.style & 0x21000000 != 0 {
-                    self.set_error(mem, 50)?;
-                    return Ok(0);
-                }
-                let mut bytes = [0; 44];
-                bytes[..4].copy_from_slice(&44u32.to_le_bytes());
-                bytes[8..12].copy_from_slice(&1u32.to_le_bytes()); // SW_SHOWNORMAL.
-                bytes[12..28].fill(0xff); // No min/max position has been assigned.
-                for (i, value) in w.rect.iter().enumerate() {
-                    bytes[28 + i * 4..32 + i * 4].copy_from_slice(&value.to_le_bytes());
-                }
-                mem.write(args[1], &bytes)?;
-                Ok(1)
-            }
-            "ClientToScreen" | "ScreenToClient" => {
-                let mut bytes = [0; 8];
-                mem.read(args[1], &mut bytes)?;
-                for i in 0..2 {
-                    let value = i32::from_le_bytes(bytes[4 * i..4 * i + 4].try_into().unwrap());
-                    let value = if name == "ClientToScreen" {
-                        value.wrapping_add(w.client[i])
-                    } else {
-                        value.wrapping_sub(w.client[i])
-                    };
-                    bytes[4 * i..4 * i + 4].copy_from_slice(&value.to_le_bytes());
-                }
-                mem.write(args[1], &bytes)?;
-                Ok(1)
-            }
-            "GetWindowThreadProcessId" => {
-                if args[1] != 0 {
-                    mem.write_int(args[1], 4, 1)?;
-                }
-                Ok(w.tid)
-            }
             "SetWindowTextA" | "SetWindowTextW" => {
                 let title = if args[1] == 0 {
                     String::new()
@@ -709,52 +623,6 @@ impl Runtime64 {
                 bytes.extend(vec![0; width]);
                 mem.write(args[1], &bytes)?;
                 Ok(length as u64)
-            }
-            name if name.contains("WindowLong") => {
-                let ptr = name.contains("Ptr");
-                let width = if ptr { 8 } else { 4 };
-                let index = args[1] as u32 as i32;
-                let set = name.starts_with("Set");
-                let field = match index {
-                    -16 => Some(w.style as u64),
-                    -20 => Some(w.ex_style as u64),
-                    -4 if ptr => Some(w.procedure),
-                    -6 if ptr => Some(w.instance),
-                    -8 if ptr => Some(w.parent),
-                    -12 if ptr => Some(w.menu),
-                    -21 if ptr => Some(w.data),
-                    _ => None,
-                };
-                let old = if let Some(field) = field {
-                    field
-                } else if index >= 0
-                    && (index as usize)
-                        .checked_add(width)
-                        .is_some_and(|end| end <= w.extra.len())
-                {
-                    let mut bytes = [0; 8];
-                    bytes[..width]
-                        .copy_from_slice(&w.extra[index as usize..index as usize + width]);
-                    u64::from_le_bytes(bytes)
-                } else {
-                    self.set_error(mem, 1413)?;
-                    return Ok(0);
-                };
-                if set {
-                    let value = args[2];
-                    match index {
-                        -16 => w.style = value as u32,
-                        -20 => w.ex_style = value as u32,
-                        -4 => w.procedure = value,
-                        -6 => w.instance = value,
-                        -8 => return Err("Win64 reparenting is not implemented".into()),
-                        -12 => w.menu = value,
-                        -21 => w.data = value,
-                        _ => w.extra[index as usize..index as usize + width]
-                            .copy_from_slice(&value.to_le_bytes()[..width]),
-                    }
-                }
-                Ok(old)
             }
             "SetFocus" => {
                 let previous = self.user.focus;

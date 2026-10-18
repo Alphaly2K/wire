@@ -186,7 +186,6 @@ pub(crate) fn unimplemented(name: &str) -> bool {
             | "MapDialogRect"
             | "IsDialogMessageW"
             | "CreateIconIndirect"
-            | "GetWindowPlacement"
             | "SetWindowPlacement"
             | "GetScrollInfo"
             | "SetScrollInfo"
@@ -223,7 +222,6 @@ pub(crate) fn dispatch(
             | "GetDlgCtrlID"
             | "GetDlgItemInt"
             | "SetDlgItemInt"
-            | "IsWindowEnabled"
             | "EnableWindow"
             | "SetParent"
             | "MoveWindow"
@@ -238,16 +236,12 @@ pub(crate) fn dispatch(
             | "SetCapture"
             | "ReleaseCapture"
             | "GetCapture"
-            | "MapWindowPoints"
-            | "IsIconic"
-            | "IsZoomed"
             | "EnumChildWindows"
             | "DialogBoxIndirectParamW"
             | "CreateDialogIndirectParamW"
             | "MapDialogRect"
             | "IsDialogMessageW"
             | "CreateIconIndirect"
-            | "GetWindowPlacement"
             | "SetWindowPlacement"
             | "GetScrollInfo"
             | "SetScrollInfo"
@@ -371,22 +365,6 @@ pub(crate) fn dispatch(
                 state.user32.windows.get(&a[0]).map_or(0, |w| w.menu),
                 "control ID",
             ),
-            "IsWindowEnabled" | "IsIconic" | "IsZoomed" => {
-                let mask = match name {
-                    "IsWindowEnabled" => 0x08000000,
-                    "IsIconic" => 0x20000000,
-                    _ => 0x01000000,
-                };
-                value(
-                    state
-                        .user32
-                        .windows
-                        .get(&a[0])
-                        .is_some_and(|w| (w.style & mask != 0) != (name == "IsWindowEnabled"))
-                        as u32,
-                    "logical window state",
-                )
-            }
             "EnableWindow" => {
                 let Some(w) = state.user32.windows.get_mut(&a[0]) else {
                     return failure(state, 1400);
@@ -584,25 +562,6 @@ pub(crate) fn dispatch(
                         old
                     },
                     "logical input ownership",
-                )
-            }
-            "MapWindowPoints" => {
-                if a[3] > 4096 {
-                    return failure(state, 87);
-                }
-                let from = origin(state, a[0])?;
-                let to = origin(state, a[1])?;
-                let delta = [from[0].wrapping_sub(to[0]), from[1].wrapping_sub(to[1])];
-                let mut points = words(mem, a[2], a[3] as usize * 2)?;
-                for xy in points.as_chunks_mut::<2>().0 {
-                    for i in 0..2 {
-                        xy[i] = xy[i].wrapping_add(delta[i]);
-                    }
-                }
-                write_words(mem, a[2], &points)?;
-                value(
-                    (delta[0] as u32 & 0xffff) | ((delta[1] as u32) << 16),
-                    "logical coordinate mapping",
                 )
             }
             "EnumChildWindows" => {

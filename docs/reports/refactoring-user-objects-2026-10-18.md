@@ -32,4 +32,6 @@ before 为 `r2-classes-wire/wire`，SHA256 `a5625b33fe03942673e5e7838914d6bda5d6
 
 最终修订冻结 `r2-user-objects-trace-final-wire/wire`，SHA256 `d1bbdf56abbdd2a83ddc487dd0c0ed3a461d6ef402dc5356cefe56ed7892c0e3`，5,969,080 bytes，较 before +3,808 bytes；与早期 scalar executable 哈希相同。完整 release 594 passed / 7 ignored，debug 440，显式 native 7，工具 20；fmt、strict Clippy 和 build 通过。375 个 Rust 文件（src/tests 367 个）与 target/frozen executable 核对一致，证据 `r2-user-objects-trace-final-source-verification.json`。首次 fmt 检查仅发现 trace 构造排版，原日志保留，最终检查为 `r2-user-objects-trace-final-fmt-v2.txt`。
 
-正式 48 条路径矩阵正在使用最终冻结重新执行。该冻结包含窗口查询独立测试与未接入的三个草稿文件；核对完成后 live 源码才接入查询路由，尚未编译，不属于本批运行时验收或累计数。两批编译与性能仍串行。
+正式 48 条路径矩阵全部结果校验，属性 IR/raw −17.143%/−13.694%；thread-id、GDI profile、rectangle 和 keyboard 出现 +193.579%/+140.224%/+123.683%/+103.720%，该独立冻结仍未验收。两个同哈希副本和重复采样未复现数倍成本；固定 executable 路径与 cwd 的三对诊断差异回到约 2%，见[测量调查](refactoring-fixed-executable-slot-2026-10-18.md)。保留全部旧协议轮次，未执行该冻结的 Alice 验收。
+
+该冻结包含窗口查询独立测试与未接入的三个草稿文件；核对完成后 live 源码才接入查询路由。后续将以 Classes 为共同 before，对名称/属性、trace 修订和二十五项查询的集成状态执行完整检查、固定路径矩阵与游戏前缀。各家族独立旧行为回归保留；集成候选通过之前累计仍为 501。

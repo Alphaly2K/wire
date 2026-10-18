@@ -376,3 +376,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 十七项契约统一注册、注销、类信息/字段/名称的 provider 与 ABI，Win64 类表和 atom 具有私有 owner，PE32 记录与持久名称 handler 收敛并保留公开 facade 和隐式控件。独立基线 `a899cd5`、实现 `a7f313f`；首次内部可见性和 native fixture 私有入口问题已修正并保留原日志。最终 release 583、debug 429、native 7、工具 20 项及 fmt/strict Clippy/build 通过。
 
 46 条性能路径全部校验；类接口 Win64/PE32 IR/raw CPU −15.632%/−6.676%/−4.082%，RSS 最多 +144KiB。desktop/IR 和 images/raw 初筛 +3.080%/+3.774%，含同一 before control 的三对补证 +0.844%/−0.214%，原始轮次与 integer/IR 漂移保留。Alice CPU/wall −1.888%/−2.156%，保持同预算隐藏窗口与零 Draw/Present 出口。365 个 Rust 文件核对一致，二进制增加 9,040 bytes。2026-10-18 接受，累计 501 个 export，详见[完整验收](refactoring-classes-2026-10-18.md)。
+
+## USER 名称/属性与窗口查询集成候选
+
+十四项名称/属性首版因 Win64 对照成本拒绝，布局候选撤回；trace 修订保留参数所有权、容量与顺序，避免小参数通用 memcpy 和完整记录的早期临时复制。旧协议最终矩阵出现同哈希副本的数倍差异，固定 executable/cwd 的独立调查与显式工具修订见[测量报告](refactoring-fixed-executable-slot-2026-10-18.md)，旧轮次全部保留。
+
+二十五项窗口查询已接入唯一契约与受限 scalar adapter，旧 ABI、arity、dwords/provider 和名称分支已删除，保留两架构 LastError、字段/extra 宽度、WNDPROC 检查和输出故障差异。六项独立旧行为回归与完整 release 594 / debug 440 / native 7 / 工具 23 通过，集成 binary 较 Classes +5,392 bytes，375 个 Rust 文件核对一致。新的 51 条固定路径矩阵执行中，累计暂仍为 501；详见[窗口查询记录](refactoring-window-queries-2026-10-18.md)。
