@@ -14,4 +14,6 @@ Win64 TaskMemory 私有登记 task allocation 的成员，free 显式借用受�
 
 Win64 CoCreateInstance 保留受限 missing-factory 行为：空必需参数先返回 E_INVALIDARG；随后预检 output、读 CLSID/IID、记录 trace、写空输出，最后按 apartment 未初始化、context 为零或 class 未注册映射 HRESULT。输出 fault 与返回槽别名顺序保持。PE32 仍委托原 WMI locator factory，其支持范围和输出先后不因契约迁移改变。两架构的工厂能力分别表达。
 
+PE32 [WMI factory 与对象调用](wmi.md)直接借私有 registry、heap、BSTR 和 gateway table；普通方法不再借整个 ApiState，原引用计数、枚举游标与故障提交保持。
+
 独立基线包括真实线程在小/大时间片下的 mode/引用隔离、静态/动态 provider、完整 carrier、输出 fault/alias、task allocator 与 GUID/Local/Heap 的归属。原创 balanced init/uninit fixture 消费第二次初始化的 S_FALSE，并核对每轮四次 API 调用。详见[本批验收](../reports/refactoring-com-core-2026-10-17.md)。

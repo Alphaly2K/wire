@@ -562,3 +562,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 PE32 GDI+ 资源借用
 
 基线 `2760af1`。GdiPlus 的矩阵、allocation 与 startup token 调用只借自身集合、内存和 process heap；公开 facade 保留。原处理体、数学/codec、allocation 回滚及 spec ABI parser 归一核对保持。release GDI+ 4、完整 Win32 255、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵，累计契约仍 **915**。见[GDI+ 边界](../architecture/gdiplus.md)，证据 `wire-out/refactoring-2026-10-14/r3-gdiplus32-{source-checks,verification}.json`。
+
+## R3 PE32 WMI 对象调用
+
+基线 `8aa4165`。对象、refs、cursor 和 vtable 继续由 Wmi 私有拥有，调用只借内存、gateway table、heap 和 BSTR；移除整份 registry 的临时 take。原处理体、创建/输出提交、方法表及 IID 归一核对保持。release com 过滤 30、完整 Win32 255、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵，累计契约仍 **915**。见[WMI 边界](../architecture/wmi.md)，证据 `wire-out/refactoring-2026-10-14/r3-wmi32-{source-checks,verification}.json`。
