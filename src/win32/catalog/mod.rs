@@ -42,6 +42,7 @@ mod pointer_helpers;
 mod process_queries;
 mod process_startup;
 mod resources;
+mod snapshots;
 mod sync_objects;
 mod system_profile;
 mod thread_control;
@@ -99,6 +100,7 @@ pub use pointer_helpers::{PointerHelperApi, POINTER_HELPER_CONTRACTS};
 pub use process_queries::{ProcessQueryApi, PROCESS_QUERY_CONTRACTS};
 pub use process_startup::{StartupApi, STARTUP_CONTRACTS};
 pub use resources::{ResourceApi, RESOURCE_CONTRACTS};
+pub use snapshots::{SnapshotApi, SNAPSHOT_CONTRACTS};
 pub use sync_objects::{SyncObjectApi, SYNC_OBJECT_CONTRACTS};
 pub use system_profile::{SystemProfileApi, SYSTEM_PROFILE_CONTRACTS};
 pub use thread_control::{ThreadControlApi, THREAD_CONTROL_CONTRACTS};
@@ -206,6 +208,7 @@ pub enum ApiId {
     Resource(ResourceApi),
     Startup(StartupApi),
     Environment(EnvironmentApi),
+    Snapshot(SnapshotApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -401,6 +404,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(RESOURCE_CONTRACTS.iter())
         .chain(STARTUP_CONTRACTS.iter())
         .chain(ENVIRONMENT_CONTRACTS.iter())
+        .chain(SNAPSHOT_CONTRACTS.iter())
 }
 
 #[cfg(test)]

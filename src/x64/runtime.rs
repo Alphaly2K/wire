@@ -328,13 +328,6 @@ fn import_arity(name: &str) -> Option<usize> {
         "OpenThreadToken" => 4,
         "GetTokenInformation" => 5,
         "SHGetKnownFolderPath" => 4,
-        "CreateToolhelp32Snapshot"
-        | "Process32First"
-        | "Process32Next"
-        | "Process32FirstW"
-        | "Process32NextW"
-        | "Thread32First"
-        | "Thread32Next" => 2,
         "GetLogicalProcessorInformationEx" => 3,
         "BCryptGenRandom" | "BCryptOpenAlgorithmProvider" => 4,
         "BCryptCloseAlgorithmProvider" => 2,
@@ -391,7 +384,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "OpenThreadToken" => &[1, 2],
         "GetTokenInformation" => &[1, 3],
         "SHGetKnownFolderPath" => &[1],
-        "CreateToolhelp32Snapshot" => &[0, 1],
         "GetLogicalProcessorInformationEx" => &[0],
         "BCryptGenRandom" => &[2, 3],
         "BCryptOpenAlgorithmProvider" => &[3],
@@ -804,6 +796,26 @@ impl Runtime64 {
             ApiId::Environment(id) => self.environment_call(mem, id, args),
             ApiId::Startup(id) => {
                 crate::win32::x64::process_startup::call(id, args, mem, [COMMAND_A, COMMAND_W])
+            }
+            ApiId::Snapshot(id) => {
+                if id == crate::win32::catalog::SnapshotApi::Create {
+                    let threads = self
+                        .threads
+                        .entries
+                        .iter()
+                        .filter(|(_, t)| t.exit.is_none())
+                        .map(|(&id, t)| (id as u32, t.priority));
+                    match self.snapshots.create(args[0], &self.exe_path, threads) {
+                        Ok(handle) => Ok(handle),
+                        Err(error) => {
+                            self.set_error(mem, error)?;
+                            Ok(u64::MAX)
+                        }
+                    }
+                } else {
+                    let last_error = self.teb() + 0x68;
+                    self.snapshots.enumerate(mem, id, args, last_error)
+                }
             }
             ApiId::Keyboard(id) => self.keyboard_call(mem, id, args),
             ApiId::Cursor(id) => self.cursor_call(mem, id, args),
@@ -1601,26 +1613,6 @@ impl Runtime64 {
                         });
                     }
                 }
-            }
-            "CreateToolhelp32Snapshot" => {
-                let threads = self
-                    .threads
-                    .entries
-                    .iter()
-                    .filter(|(_, t)| t.exit.is_none())
-                    .map(|(&id, t)| (id as u32, t.priority));
-                match self.snapshots.create(args[0], &self.exe_path, threads) {
-                    Ok(handle) => handle,
-                    Err(error) => {
-                        self.set_error(mem, error)?;
-                        u64::MAX
-                    }
-                }
-            }
-            "Process32First" | "Process32Next" | "Process32FirstW" | "Process32NextW"
-            | "Thread32First" | "Thread32Next" => {
-                let last_error = self.teb() + 0x68;
-                self.snapshots.enumerate(mem, name, args, last_error)?
             }
             _ if matches!(binding.control, gateways::ControlImport::Thread(_)) => {
                 let gateways::ControlImport::Thread(id) = binding.control else {

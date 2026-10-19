@@ -6,8 +6,14 @@ CreateToolhelp32Snapshot 保留 DWORD flags、忽略 PID 的原有限语义，�
 
 线程列表与优先级在创建时复制，之后新增线程或修改优先级不会改变旧快照。process ANSI/wide 共用一个 process_done；线程 First 从零、Next 从当前 thread_at 读取，初始 Next 也从零开始。每次先检查完整 64-bit 句柄，再读取调用者的 dwSize（ANSI 304、wide 568、thread 28）；size 不符为 24，列表耗尽或该类型未请求为 18。读 size 的 guest fault 优先于列表不可用。
 
-编码仍由原私有 process_entry/thread_entry 完成，保持 CP932/UTF-16 名称、guest PID 1、线程数量及优先级映射。输出成功后才更新游标；失败 First 不重置、失败 Next 不推进。owner 只借 Memory、参数、原名称与当前线程 LastError guest 地址。返回帧由 gateway 预先保存，因此输出覆盖返回槽仍返回原 PC；成功保留 LastError，guest fault 不提交 CPU/API count。
+编码仍由原私有 process_entry/thread_entry 完成，保持 CP932/UTF-16 名称、guest PID 1、线程数量及优先级映射。输出成功后才更新游标；失败 First 不重置、失败 Next 不推进。owner 只借 Memory、参数、绑定得到的 SnapshotApi 与当前线程 LastError guest 地址；执行时不解析 API 名称。返回帧由 gateway 预先保存，因此输出覆盖返回槽仍返回原 PC；成功保留 LastError，guest fault 不提交 CPU/API count。
 
-三个独立旧行为测试先在原实现通过，覆盖限额/退休/flags、ANSI/wide 游标共享、guard/边界故障、saved frame 与线程快照隔离。原创 `gateway-snapshot` 只创建一个 process 快照，循环真实 Process32FirstW copyout，消费 BOOL、PID 和 dwSize，最后关闭并消费 BOOL。n=max(1,work/12)，RAX=570n+1、retired=11n+19、work=12n+21、API=n+2；单次及 12K 输入已在旧冻结实际校验，inventory 固定三个独立 kernel32 OFT/IAT 导入。此批保留七项 legacy provider/ABI 入口，不增加功能或 catalog export。
+三个独立旧行为测试先在原实现通过，覆盖限额/退休/flags、ANSI/wide 游标共享、guard/边界故障、saved frame 与线程快照隔离。原创 Win64 `gateway-snapshot` 只创建一个 process 快照，循环真实 Process32FirstW copyout，消费 BOOL、PID 和 dwSize，最后关闭并消费 BOOL。n=max(1,work/12)，RAX=570n+1、retired=11n+19、work=12n+21、API=n+2；单次及 12K 输入已在旧冻结实际校验，inventory 固定三个独立 kernel32 OFT/IAT 导入。
 
 完整检查、19 条性能协议、raw 漂移复核及三对启动前缀已验收，具体成本与原始证据见[验收记录](../reports/refactoring-snapshot-owner-2026-10-19.md)。
+
+七项声明位于 `win32::catalog::SNAPSHOT_CONTRACTS`，统一 provider、arity、DWORD 和 typed ID。Win64 的 kernel32/kernelbase 静态导入与动态查询都保留；PE32 仅 kernel32 有已知 stdcall ABI，继续返回零、error 120 和 untouched outputs，kernelbase/user32 保持未知 ABI 的零清栈策略。Process32First/Next 是原 ANSI 名字，不新增 FirstA/NextA alias。Thread32First/Next 的句柄仍以完整 pointer carrier 传入 Win64，避免按 Wine i386 spec 的 long 意外截断。
+
+双架构 provider/ABI 测试先在旧实现通过。追加 PE32 `gateway-snapshot` 仅循环 ABI-only CreateToolhelp32Snapshot，核对返回零、retired=6n+7、API=n，其中 n=max(1,work/6)；它不创建快照资源。小输入 raw/IR 在旧冻结通过，迁移后十次调用的完整日志逐字节一致，包含 UNIMPLEMENTED 诊断。
+
+契约迁移的完整检查、17 个计时协议及三对启动前缀已验收，Win64 copyout 循环 CPU −12.007%，代码别名负载保留 +4.286% 的局部成本。完整原始轮次、采样和代码生成调查见[契约验收](../reports/refactoring-snapshot-contract-2026-10-19.md)。

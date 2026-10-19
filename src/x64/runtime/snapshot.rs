@@ -1,5 +1,6 @@
 //! Toolhelp snapshots expose the isolated guest process, never host applications.
 use super::Memory;
+use crate::win32::catalog::SnapshotApi;
 use std::collections::BTreeMap;
 
 pub(super) struct Snapshots {
@@ -52,15 +53,22 @@ impl Snapshots {
     pub(super) fn enumerate(
         &mut self,
         mem: &mut Memory,
-        name: &str,
+        id: SnapshotApi,
         args: &[u64],
         last_error: u64,
     ) -> Result<u64, String> {
-        let first = name.contains("First");
-        let thread = name.starts_with("Thread");
+        let (first, thread, wide) = match id {
+            SnapshotApi::ProcessFirstA => (true, false, false),
+            SnapshotApi::ProcessNextA => (false, false, false),
+            SnapshotApi::ProcessFirstW => (true, false, true),
+            SnapshotApi::ProcessNextW => (false, false, true),
+            SnapshotApi::ThreadFirst => (true, true, false),
+            SnapshotApi::ThreadNext => (false, true, false),
+            SnapshotApi::Create => unreachable!("creation does not enumerate a snapshot"),
+        };
         let size = if thread {
             28
-        } else if name.ends_with('W') {
+        } else if wide {
             568
         } else {
             304
@@ -75,7 +83,7 @@ impl Snapshots {
             } else if !snapshot.process || !first && snapshot.process_done {
                 Err(18)
             } else {
-                snapshot.process_entry(name.ends_with('W'))
+                snapshot.process_entry(wide)
             };
             let data = match data {
                 Ok(data) => data,
