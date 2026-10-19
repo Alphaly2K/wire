@@ -78,6 +78,8 @@ mod resources_contract;
 mod sections;
 #[path = "x64/simd.rs"]
 mod simd;
+#[path = "x64/snapshot_owner.rs"]
+mod snapshot_owner;
 #[path = "x64/sync.rs"]
 mod sync;
 #[path = "x64/thread_control.rs"]
