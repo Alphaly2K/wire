@@ -73,5 +73,24 @@ fn user_endpoints_keep_diagnostic_text_station_outputs_and_provider_abi() {
         assert_eq!(v.call("mpr.dll", name, &[0x30000000; 4]), 2250);
         assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 236);
         assert_eq!(v.state.last_error, 77);
+        assert!(
+            wire::file_api::dispatch("mpr.dll", name, &[0; 16], &v.mem, &mut v.state).is_none()
+        );
+    }
+    // These older public facades did not own the root gateway's MessageBox cases.
+    for name in ["MessageBoxA", "MessageBoxW"] {
+        assert!(wire::user32::dispatch(
+            "user32.dll",
+            name,
+            &[0; 16],
+            &mut v.cpu,
+            &mut v.mem,
+            &mut v.api,
+            &mut v.state,
+            &mut v.log,
+            &mut v.sched,
+            1_000_000
+        )
+        .is_none());
     }
 }

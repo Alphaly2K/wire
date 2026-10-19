@@ -25,8 +25,13 @@ pub enum DialogApi {
     LockUpdate,
     Windows,
     ThreadWindows,
+    MessageBoxA,
+    MessageBoxW,
 }
 impl DialogApi {
+    pub(crate) const fn message_box(self) -> bool {
+        matches!(self, Self::MessageBoxA | Self::MessageBoxW)
+    }
     pub(crate) const fn unavailable(self) -> bool {
         matches!(
             self,
@@ -68,13 +73,15 @@ const fn declaration(
     returns: ReturnConvention,
 ) -> Contract {
     Contract::new(ApiId::Dialog(id), name, parameters, returns,
-        "retain PE32 child lookup/thread checks, pre-callback integer output, decimal parsing, snapshot enumeration and callback transfer; explicit unavailable services retain error 120 and unimplemented trace; Win64 exports absent",
+        "retain PE32 child lookup/thread checks, pre-callback integer output, decimal parsing, snapshot enumeration and callback transfer; MessageBox retains diagnostic text and IDOK without host UI, ignored flags and input fault markers; explicit unavailable services retain error 120 and unimplemented trace; Win64 exports absent",
         [ArchitecturePlan { dlls: &["user32.dll"], execution: ExecutionPolicy::Typed },
          ArchitecturePlan { dlls: &[], execution: ExecutionPolicy::Absent }])
 }
 use Parameter::{Int32 as I, Pointer as P, Uint32 as U};
 use ReturnConvention::{BoolLastError as B, Pointer as H, Uint32 as D};
-pub static DIALOG_CONTRACTS: [Contract; 22] = [
+pub static DIALOG_CONTRACTS: [Contract; 24] = [
+    declaration(DialogApi::MessageBoxA, "MessageBoxA", &[P, P, P, U], D),
+    declaration(DialogApi::MessageBoxW, "MessageBoxW", &[P, P, P, U], D),
     declaration(DialogApi::GetTextW, "GetDlgItemTextW", &[P, I, P, I], D),
     declaration(DialogApi::GetTextA, "GetDlgItemTextA", &[P, I, P, I], D),
     declaration(DialogApi::SetTextW, "SetDlgItemTextW", &[P, I, P], B),

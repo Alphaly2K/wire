@@ -1,6 +1,8 @@
 # 对话框控件与窗口枚举
 
-已接入的迁移及当前验收状态见[批次报告](../reports/refactoring-dialog-2026-10-19.md)。`win32/catalog/dialog.rs` 为 22 项 PE32 export 提供唯一的 DLL、参数、清栈和 typed ID 声明，Win64 全部 absent。完整正确性通过，性能仍待复核，尚未增加累计验收数量。
+`win32/catalog/dialog.rs` 为 24 项 PE32 export 提供唯一的 DLL、参数、清栈和 typed ID 声明，Win64 全部 absent。原 22 项控件/枚举已随日志批次及累计复核接入，见[批次报告](../reports/refactoring-dialog-2026-10-19.md)与[当前状态](../status.md)。随后两个 MessageBox 入口仅做普通契约迁移，不重复性能矩阵。
+
+MessageBoxA/W 由 `win32/x86/dialog.rs` 仅借 GuestMem 读取原文本和 caption，返回 IDOK 并记录 `SHOWN` 诊断；忽略 flags、NULL 和读故障的原文本策略保持，没有新增 host 对话框。原公开 user32::dispatch facade 继续排除这两个入口，普通 gateway 使用冷绑定 ID。
 
 `user32/dialog.rs` 协调控件查找、窗口线程约束、十进制文本消息和快照枚举。消息包装器沿用应用 WNDPROC 回调，保留 Returned、阻塞及非局部控制转移；API 入口处理返回 frame 与 trace。GetDlgItemInt 在调用 WM_GETTEXT 前清零 translated 输出，回调正常返回后才解析数字并写入最终 translated 标志。child 或线程错误先于输出访存。
 

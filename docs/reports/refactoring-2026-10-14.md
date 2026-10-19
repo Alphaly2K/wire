@@ -546,3 +546,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R2 PE32 kernel endpoint 补齐
 
 独立基线 `12ed607` 固定 TerminateProcess、SetHandleCount 和 GetCurrentPackageId 的 provider、ABI、输出不变与退出故障提交。三项接入既有家族，终止/容量主体归一保持，Win64 均维持 absent。release Win32 251、Win64 modules 12、catalog 一致性及 fmt/release lib/bin strict Clippy/build 通过，不跑性能。累计 **891 exports**，见[进程 endpoint](../architecture/process-control.md)，证据 `wire-out/refactoring-2026-10-14/r2-kernel-endpoints32-{source-checks,verification}.json`。
+
+## R2 PE32 USER/MPR endpoint 补齐
+
+基线 `6cc04bf` 固定两个 station、两个诊断 MessageBox 与两个 MPR 查询。六项进入既有领域契约，MessageBox 仅借 GuestMem，原 synthetic handle、未支持 query、local-drive status、LastError、fault marker 和 facade 范围保持；Win64 均 absent。基线测试首次误认为 MPR ABI unknown，实际已加载 spec，修正为原 16 字节清栈后通过，失败日志保留。release 完整 Win32 252、Win64 modules 13、catalog 一致性及 fmt/release lib/bin strict Clippy/build 通过，不跑性能。累计 **897 exports**，证据 `wire-out/refactoring-2026-10-14/r2-user-endpoints32-{source-checks,verification}.json`。

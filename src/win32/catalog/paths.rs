@@ -15,6 +15,8 @@ pub enum PathApi {
     UnquoteSpacesA,
     UnquoteSpacesW,
     MakeSureDirectoryPathExists,
+    UniversalNameA,
+    UniversalNameW,
 }
 
 impl PathApi {
@@ -27,6 +29,7 @@ impl PathApi {
                 | Self::RenameExtensionW
                 | Self::AddExtensionW
                 | Self::UnquoteSpacesW
+                | Self::UniversalNameW
         )
     }
 }
@@ -39,10 +42,10 @@ const fn declaration(
 ) -> Contract {
     Contract::new(
         ApiId::Path(id), name, parameters, returns,
-        "PE32 checked CP932/UTF-16 path helpers; pinned root rules, MAX_PATH extension limit, NULL short-circuits and output/LastError order; unquote retains zero EAX carrier; confined imagehlp directory creation; absent on Win64",
+        "PE32 checked CP932/UTF-16 path helpers; pinned root rules, MAX_PATH extension limit, NULL short-circuits and output/LastError order; unquote retains zero EAX carrier; confined imagehlp directory creation; MPR universal names retain local-drive ERROR_NOT_CONNECTED with ignored pointers and unchanged LastError; absent on Win64",
         [
             ArchitecturePlan {
-                dlls: if matches!(id, PathApi::MakeSureDirectoryPathExists) { &["imagehlp.dll"] } else { &["shlwapi.dll"] },
+                dlls: if matches!(id, PathApi::MakeSureDirectoryPathExists) { &["imagehlp.dll"] } else if matches!(id, PathApi::UniversalNameA | PathApi::UniversalNameW) { &["mpr.dll"] } else { &["shlwapi.dll"] },
                 execution: ExecutionPolicy::Typed,
             },
             ArchitecturePlan { dlls: &[], execution: ExecutionPolicy::Absent },
@@ -50,10 +53,22 @@ const fn declaration(
     )
 }
 
-use Parameter::Pointer as P;
+use Parameter::{Pointer as P, Uint32 as D};
 use ReturnConvention::{BoolLastError as B, Void};
 
-pub static PATH_CONTRACTS: [Contract; 13] = [
+pub static PATH_CONTRACTS: [Contract; 15] = [
+    declaration(
+        PathApi::UniversalNameA,
+        "WNetGetUniversalNameA",
+        &[P, D, P, P],
+        ReturnConvention::Uint32,
+    ),
+    declaration(
+        PathApi::UniversalNameW,
+        "WNetGetUniversalNameW",
+        &[P, D, P, P],
+        ReturnConvention::Uint32,
+    ),
     declaration(PathApi::FileExistsA, "PathFileExistsA", &[P], B),
     declaration(PathApi::FileExistsW, "PathFileExistsW", &[P], B),
     declaration(PathApi::IsDirectoryA, "PathIsDirectoryA", &[P], B),

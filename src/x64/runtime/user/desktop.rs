@@ -51,7 +51,7 @@ impl Runtime64 {
                     _ => Ok(0x80070057),
                 }
             }
-            DoubleClickTime | DialogBaseUnits => {
+            DoubleClickTime | DialogBaseUnits | ProcessStation | ObjectInformationW => {
                 unreachable!("fixed desktop queries have no Win64 binding")
             }
         }

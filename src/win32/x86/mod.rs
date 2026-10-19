@@ -8,6 +8,7 @@ pub(crate) mod crt_memory;
 pub(crate) mod crt_state;
 pub(crate) mod cursor;
 pub(crate) mod desktop;
+pub(crate) mod dialog;
 pub(crate) mod display;
 pub(crate) mod environment;
 pub(crate) mod files;

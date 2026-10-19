@@ -3,6 +3,32 @@
 use super::*;
 
 #[test]
+fn win64_keeps_pe32_user_and_mpr_endpoints_unavailable() {
+    for (dll, names) in [
+        (
+            "user32.dll",
+            &[
+                "GetProcessWindowStation",
+                "GetUserObjectInformationW",
+                "MessageBoxA",
+                "MessageBoxW",
+            ][..],
+        ),
+        (
+            "mpr.dll",
+            &["WNetGetUniversalNameA", "WNetGetUniversalNameW"][..],
+        ),
+    ] {
+        for name in names {
+            assert!(
+                !wire::x64::runtime::import_supported(dll, name),
+                "{dll}!{name}"
+            );
+        }
+    }
+}
+
+#[test]
 fn win64_psapi_imports_and_dynamic_kernel_aliases_keep_distinct_visibility() {
     let (mut mem, mut cpu, mut runtime) = startup();
     runtime.register_provider("kernel32.dll");

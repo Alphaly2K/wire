@@ -63,6 +63,7 @@
 - [PE32 scratch 与 CRT](architecture/crt32.md)：私有指针 owner、普通内存/字符串、堆和启动适配器，保留 CPU/callback 边界及故障提交顺序。
 - [PE32 同步与等待适配](architecture/waits.md)：event/semaphore/mutex 与对象 readiness/acquire/wake 仅借明确资源，音频通知复用同一对象操作。
 - [PE32 kernel endpoint 补齐](architecture/process-control.md)：终止进程、句柄容量提示和 package 查询接入唯一契约，保留退出故障顺序与 Win64 absent。
+- PE32 USER/MPR 补齐：[诊断式 MessageBox](architecture/dialog.md)、[window-station 查询](architecture/desktop.md)及[MPR 本地盘错误](architecture/paths-handles.md)，保留公开 facade 范围。
 - [Win64 Toolhelp 快照](architecture/snapshots.md)及[完整验收](reports/refactoring-snapshot-owner-2026-10-19.md)：冻结线程值、游标/输出故障、保护关闭；19 条协议、180 次执行及独立累计 IR 复核。
 - [Toolhelp 七项统一契约](reports/refactoring-snapshot-contract-2026-10-19.md)：双架构 provider/ABI 和 typed ID；累计 713 exports，17 个计时协议、162 次执行及三对启动前缀，保留代码别名局部成本。
 - [日历、时区与 CPU 计时调用边界](architecture/calendar.md)及[契约验收](reports/refactoring-calendar-2026-10-16.md)：11 项接口、时区独立模块、宿主 CPU 计时、32 条性能路径及局部成本调查。

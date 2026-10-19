@@ -135,6 +135,9 @@ fn execute(
     };
     let result = (|| -> Result<(u32, String), u32> {
         match operation {
+            Helper(PathApi::UniversalNameA | PathApi::UniversalNameW) => {
+                Ok((2250, String::new())) // ERROR_NOT_CONNECTED: sandbox C: is local.
+            }
             Helper(PathApi::RemoveFileSpecA | PathApi::RemoveFileSpecW) => {
                 if a[0] == 0 {
                     return Ok((0, String::new()));

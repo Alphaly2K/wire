@@ -938,6 +938,9 @@ pub fn dispatch(
                 _ => return Ok(()),
             }
         }
+        (Some(crate::win32::catalog::ApiId::Dialog(id)), _, _) if id.message_box() => {
+            (ret, note) = crate::win32::x86::dialog::message_box(id, &args, mem);
+        }
         (Some(crate::win32::catalog::ApiId::Dialog(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::Dialog(id)) = binding.typed else {
                 unreachable!();
@@ -1573,24 +1576,6 @@ pub fn dispatch(
         ) => {
             log.log_call(idx, dll, name, &args[..4], args[3], true, "SEH unwind");
             return crate::seh::unwind(cpu, mem, api, state, log, sched, &args, max_instr);
-        }
-        (_, "user32.dll", "GetProcessWindowStation") => {
-            ret = 0x7007_0000;
-            note = "fake winsta handle".into();
-        }
-        (_, "user32.dll", "GetUserObjectInformationW") => {
-            ret = 0;
-            note = "fake: unsupported winsta query".into();
-        }
-        (_, "user32.dll", "MessageBoxA") | (_, "user32.dll", "MessageBoxW") => {
-            let wide = name.ends_with('W');
-            let text = read_str(mem, args[1], wide);
-            let caption = read_str(mem, args[2], wide);
-            note = format!("SHOWN: [{caption}] {text}");
-            ret = 1; // IDOK
-        }
-        (_, "mpr.dll", "WNetGetUniversalNameA") | (_, "mpr.dll", "WNetGetUniversalNameW") => {
-            ret = 2250; // ERROR_NOT_CONNECTED: sandbox C: is a local drive
         }
         (Some(crate::win32::catalog::ApiId::MessageFormat(id)), _, _) => {
             (ret, note) = crate::win32::x86::message_format::call(

@@ -328,7 +328,7 @@ pub fn dispatch(
     use crate::win32::catalog::{resolve, ApiId, Architecture, Resolution};
     if let Resolution::Bound(contract) = resolve(Architecture::X86, dll, name) {
         return match contract.id {
-            ApiId::Dialog(id) => Some(dialog_call(
+            ApiId::Dialog(id) if !id.message_box() => Some(dialog_call(
                 id, a, cpu, mem, api, state, log, sched, max_instr,
             )),
             ApiId::Painting(id) => Some(paint_call(
