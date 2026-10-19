@@ -3,6 +3,35 @@
 use super::*;
 
 #[test]
+fn endpoint_contract_keeps_pe32_abi_only_outputs_unknown_native_query_and_facade_scope() {
+    let mut vm = Vm::new();
+    for (name, slots, kernel_abi) in [
+        ("CreatePipe", 4, true),
+        ("GetConsoleMode", 2, true),
+        ("WriteConsoleW", 5, true),
+        ("CreateProcessW", 10, true),
+        ("NtQueryDirectoryFile", 11, false),
+    ] {
+        for dll in ["kernel32.dll", "kernelbase.dll", "ntdll.dll"] {
+            let known = kernel_abi && dll == "kernel32.dll";
+            assert_eq!(api::native_export(dll, name), known, "{dll}!{name}");
+            vm.mem.write_u32(DATA, 0xa5a5a5a5).unwrap();
+            vm.k("SetLastError", &[77]);
+            assert_eq!(vm.call(dll, name, &vec![DATA; slots]), 0);
+            assert_eq!(vm.state.last_error, 120);
+            assert_eq!(vm.mem.read_u32(DATA).unwrap(), 0xa5a5a5a5);
+            assert_eq!(
+                vm.cpu.esp(),
+                STACK_BASE + STACK_SIZE - 252 + if known { slots as u32 * 4 } else { 0 }
+            );
+            assert!(
+                wire::file_api::dispatch(dll, name, &[DATA; 16], &vm.mem, &mut vm.state).is_none()
+            );
+        }
+    }
+}
+
+#[test]
 fn search_contract_baseline_keeps_pe32_cleanup_flags_and_handle_type() {
     let mut v = Vm::new();
     std::fs::write(v.dir.join("a.bound"), b"a").unwrap();
