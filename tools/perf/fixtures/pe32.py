@@ -272,7 +272,9 @@ def fixture(name,work):
         c+=bytes.fromhex('b801000000 b903000000 bf')+struct.pack('<I',n);loop=len(c);c+=bytes.fromhex('0fbbc8 0fb3c8 0fabc8 0fa3c8');epilogue=b'';expected=9;count=6*n+3
     elif name=='fp-scalar':
         c+=bytes.fromhex('b80000c03f 660f6ec0 b80000803f 660f6ec8 bf')+struct.pack('<I',n);loop=len(c);c+=bytes.fromhex('f30f59c1 f30f5ad0 f20f5ada f30f2cc3');epilogue=b'';expected=1;count=6*n+5
-    else:
+    elif name=='integer':
         c+=bytes.fromhex('b801000000 b903000000 bf')+struct.pack('<I',n);loop=len(c);c+=bytes.fromhex('01c8 31cb 89c2 83c001');epilogue=b'';expected=1+4*n;count=6*n+3
+    else:
+        raise ValueError(f'unknown PE32 fixture: {name}')
     c+=bytes.fromhex('4f 0f85');c+=struct.pack('<i',loop-len(c)-4);c+=epilogue+bytes.fromhex('cc')
     return pe32(c),dict(eax=expected&0xffffffff,retired=count)

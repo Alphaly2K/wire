@@ -2,15 +2,43 @@
 import hashlib
 import json
 from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
 
 from perf.fixtures.amd64_audit import fixture
 from perf.fixtures import kernel_gateway
+from perf.fixtures.pe32 import fixture as pe32_fixture
 from interpreter32_perf import pe32
 from api_inventory import PE
 
 
 class AuditFixtureMigration(unittest.TestCase):
+    def test_pe32_rejects_unknown_cases_instead_of_substituting_integer(self):
+        for name in ['gdi-gateway', 'Integer', '', 'not-a-fixture']:
+            with self.subTest(case=name), self.assertRaisesRegex(ValueError, 'unknown PE32 fixture'):
+                pe32_fixture(name, 12000)
+        image, expected = pe32_fixture('integer', 12000)
+        self.assertEqual(hashlib.sha256(image).hexdigest(),
+                         'b30ac7d6438224c178e4277057bdc0bb666bd9c2e50644264756118710d33f79')
+        self.assertEqual(expected, dict(eax=8001, retired=12003))
+
+    def test_pe32_cli_rejects_mixed_invalid_cases_before_io_or_binary_lookup(self):
+        script = Path(__file__).parent / 'interpreter32_perf.py'
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            out = root / 'must-not-be-created'
+            result = subprocess.run([
+                sys.executable, '-B', str(script), '--binary', f'before={root / "missing"}',
+                '--cases', 'integer', 'gdi-gateway', '--out', str(out)],
+                capture_output=True, text=True, cwd=root, timeout=10)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn('unknown PE32 fixture: gdi-gateway', result.stderr)
+            self.assertNotIn('Traceback', result.stderr)
+            self.assertEqual(result.stdout, '')
+            self.assertFalse(out.exists())
+
     def test_pe_bytes_and_expected_retirement_match_original_audit(self):
         golden = json.loads((Path(__file__).parent /
                              'perf/fixtures/amd64_audit_golden.json').read_text())

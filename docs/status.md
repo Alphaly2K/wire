@@ -8,7 +8,7 @@
 
 中间 GDI 冻结出现 messages/IR 三对持续回退，未准入。实际采样后将 API 日志提取为独立 runtime 服务，并用专用整数格式化保留完整 trace、频率和最近 64 条记录。最终消息 150M IR/raw CPU 中位数相对原消息冻结 −13.210%/−12.110%，GDI 150M IR/raw −16.987%/−13.229%；33 条性能协议、207 次 fixture 执行及三对真实启动前缀通过。旧冻结、失败轮次和同哈希 control 独立保留，没有用其它负载的改善抵消持续回退。
 
-早期绘制六项候选因持续浮点回退撤回，见[历史拒绝报告](reports/refactoring-painting-2026-10-19.md)。当前五项重试保持原 RedrawWindow 网关归属，不追认旧候选。其余 USER、COM、图形和资源 owner 继续迁移。R7 [CLI 拆分已重试接入](reports/refactoring-cli-followup-2026-10-19.md)，完整正确性及命令对照通过，性能待复核；旧候选和回滚证据保留。[离线 API inventory](reports/refactoring-inventory-2026-10-19.md)、profile、native 探针和架构性能入口已按职责整理，最新工具检查 26 项通过。Mono 原生化已撤回，本轮排除。
+早期绘制六项候选因持续浮点回退撤回，见[历史拒绝报告](reports/refactoring-painting-2026-10-19.md)。当前五项重试保持原 RedrawWindow 网关归属，不追认旧候选。其余 USER、COM、图形和资源 owner 继续迁移。R7 [CLI 拆分已重试接入](reports/refactoring-cli-followup-2026-10-19.md)，完整正确性及命令对照通过，性能待复核；旧候选和回滚证据保留。[离线 API inventory](reports/refactoring-inventory-2026-10-19.md)、profile、native 探针和架构性能入口已按职责整理；PE32 工具另修正未知 case 静默替换为整数的问题，最新工具检查 28 项通过，详见[工具边界](architecture/validation-tools.md)。Mono 原生化已撤回，本轮排除。
 
 ## 重构范围
 

@@ -14,6 +14,10 @@ def main():
     p.add_argument('--stable-launch',action='store_true',help='fix guest argv0/log argument and use each run directory as host cwd')
     p.add_argument('--fixed-executable-slot',action='store_true',help='also fix executable path/cwd across labels; requires --stable-launch')
     a=p.parse_args()
+    try:
+        inputs=[(case,*fixture(case,a.work)) for case in a.cases]
+    except ValueError as error:
+        p.error(str(error))
     if a.fixed_executable_slot and not a.stable_launch:p.error('--fixed-executable-slot requires --stable-launch')
     if a.qos_clamp and sys.platform != 'darwin':
         p.error('--qos-clamp requires macOS taskpolicy')
@@ -24,8 +28,8 @@ def main():
     if a.stable_launch:a.out=a.out.resolve()
     manifest=dict(binaries={n:dict(path=str(v),sha256=digest(v)) for n,v in bins.items()},script_sha256=digest(Path(__file__)),measurement_sha256=digest(Path(__file__).with_name('measurement.py')),pairs=a.pairs,api_log='discard' if a.discard_api_log else 'file',qos_clamp=a.qos_clamp,taskpolicy_sha256=digest(Path(shutil.which('taskpolicy'))) if a.qos_clamp else None,inputs={});results={}
     manifest['launch']=launch
-    for case in a.cases:
-        data,expected=fixture(case,a.work);exe=a.out/f'{case}.exe';exe.write_bytes(data);ir=a.out/f'{case}.wir'
+    for case,data,expected in inputs:
+        exe=a.out/f'{case}.exe';exe.write_bytes(data);ir=a.out/f'{case}.wir'
         subprocess.run([str(next(iter(bins.values()))),'prepare',str(exe),'--out',str(ir)],check=True,stdout=subprocess.DEVNULL)
         manifest['inputs'][case]=dict(exe_sha256=digest(exe),ir_sha256=digest(ir),**expected);(a.out/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
         for path in a.paths:

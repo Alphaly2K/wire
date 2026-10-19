@@ -62,4 +62,6 @@ python3 -B tools/cpu_profile.py summarize wire-out/new-profile/run-0/sample.txt 
 python3 -B tools/probe_cli.py --before frozen-before/wire --after frozen-after/wire --out wire-out/new-cli-comparison
 ```
 
+PE32 测量入口现于参数解析后先生成并验证全部 case，再解析 binary 或创建输出目录。未知名称明确报错，`fixture()` 直接调用也拒绝未知名称；原先任意未知名称会静默生成 integer，资源迁移中误写 `gdi-gateway` 已暴露此问题。合法名字和默认四项保持，59 个 case 在 1/12K/100M 三种规模下的 177 份 PE 字节和预期值与修正前完全一致。独立 CLI 检查要求错误退出码 2、无 traceback、无输出目录；工具 **28** 项及四次实际 raw/IR 执行通过，证据 `r7-pe32-case-validation-*`。未修改运行时或重跑长性能计时。
+
 100M 的 AMD64 event 输入 SHA 从 `e95a32dce6313767263432f4df1ab8106745bf24526597ad643d7ceb0b961441` 变为 `f538f2f83f97fbc7152cf9f3bb8628f8663efea3306aaa937374ae194ffaf1b2`。旧正式数据与校验保留，后续使用修正输入独立配对，不跨哈希合并。本次仅修工具，没有修改运行时。
