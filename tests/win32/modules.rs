@@ -207,6 +207,88 @@ fn version_resources_query_fixed_translation_and_ansi_unicode_nested_strings() {
 }
 
 #[test]
+fn version_resources_keep_output_preflight_partial_failure_and_return_alias() {
+    let mut v = Vm::new();
+    let sp = STACK_BASE + STACK_SIZE - 256;
+    v.wide(DATA, "C:\\missing-version.dll");
+    v.mem.write_u32(DATA + 0x100, 0xa5a5a5a5).unwrap();
+    assert_eq!(
+        v.call(
+            "version.dll",
+            "GetFileVersionInfoSizeW",
+            &[DATA, DATA + 0x100]
+        ),
+        0
+    );
+    assert_eq!(v.state.last_error, 2);
+    assert_eq!(v.mem.read_u32(DATA + 0x100).unwrap(), 0xa5a5a5a5);
+    assert_eq!(v.cpu.esp(), sp + 12);
+    let ptr = DATA + 0x100;
+    let len = ptr + 4;
+    v.mem.write_u32(len, 0x12345678).unwrap();
+    assert_eq!(
+        v.call(
+            "version.dll",
+            "VerQueryValueW",
+            &[0x30000000, DATA, 0x30000000, len]
+        ),
+        0
+    );
+    assert_eq!(v.mem.read_u32(len).unwrap(), 0x12345678);
+    assert_eq!(
+        v.call(
+            "version.dll",
+            "VerQueryValueW",
+            &[0x30000000, DATA, ptr, len]
+        ),
+        0
+    );
+    assert_eq!(v.state.last_error, 87);
+    assert_eq!(v.mem.read_u32(ptr).unwrap(), 0xa5a5a5a5);
+    assert_eq!(v.mem.read_u32(len).unwrap(), 0);
+    let mut block = vec![0; 6];
+    block[2..4].copy_from_slice(&52u16.to_le_bytes());
+    block.extend(
+        "VS_VERSION_INFO"
+            .encode_utf16()
+            .chain([0])
+            .flat_map(u16::to_le_bytes),
+    );
+    block.resize((block.len() + 3) & !3, 0);
+    let value = block.len() as u32;
+    block.extend([0; 52]);
+    let size = block.len() as u16;
+    block[..2].copy_from_slice(&size.to_le_bytes());
+    v.mem.write_bytes(DATA + 0x500, &block).unwrap();
+    v.wide(DATA + 0x200, "\\");
+    v.k("SetLastError", &[77]);
+    assert_eq!(
+        v.call(
+            "version.dll",
+            "VerQueryValueW",
+            &[DATA + 0x500, DATA + 0x200, sp, len]
+        ),
+        1
+    );
+    assert_eq!(v.cpu.eip, DATA + 0x500 + value);
+    assert_eq!(v.cpu.esp(), sp + 20);
+    assert_eq!(v.mem.read_u32(len).unwrap(), 52);
+    assert_eq!(v.state.last_error, 77);
+    for name in [
+        "GetFileVersionInfoA",
+        "GetFileVersionInfoW",
+        "GetFileVersionInfoSizeA",
+        "GetFileVersionInfoSizeW",
+        "VerQueryValueA",
+        "VerQueryValueW",
+    ] {
+        assert_eq!(v.call("kernel32.dll", name, &[0; 4]), 0);
+        assert_eq!(v.cpu.esp(), sp + 4);
+        assert_eq!(v.state.last_error, 120);
+    }
+}
+
+#[test]
 fn large_dll_and_resource_only_dll_preserve_heap_and_reuse_loaded_basenames() {
     let mut v = Vm::new();
     let heap = v.state.process_heap;
