@@ -1,6 +1,6 @@
 # PE32 资源契约迁移（2026-10-19）
 
-状态：结构已接入，完整正确性与启动功能通过，性能待宿主负载稳定后复核。直接运行时基线为 CLI `c145084`，先于迁移提交的独立行为检查为 `6d42ed2`，fixture 栈输出修正为 `770274d`。累计性能验收仍为 675 项；本轮十项与此前 paint/控件七项分别记作正确性通过、性能待复核。
+状态：结构、完整正确性与启动功能通过；随后在 [Unity 渲染结束后的累计复核](refactoring-post-unity-performance-2026-10-19.md)中通过性能验收，当前累计 706 项。直接运行时基线为 CLI `c145084`，先于迁移提交的独立行为检查为 `6d42ed2`，fixture 栈输出修正为 `770274d`。以下保留当时暂停长计时的过程。
 
 十项 export 由 `win32::catalog::resources` 声明 provider、参数和执行策略：user32 的 LoadStringA/W，kernel32 的 FindResourceA/W、FindResourceExA/W、LoadResource、SizeofResource、LockResource、FreeResource。删除总分发器的十项重复 ABI 和名称处理体，改用绑定的 ResourceApi ID。`win32::x86::resources` 只借 GuestMem、EXE 基址和错误槽；公开 `resource` 读取 helper 及其调用者保持。Win64 保持 absent，详见[资源边界](../architecture/resources.md)。
 

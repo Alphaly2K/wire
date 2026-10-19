@@ -1,6 +1,6 @@
 # 环境变量契约与 Win64 状态归属（2026-10-19）
 
-状态：结构、完整正确性与启动功能通过，性能待复核。直接基线为启动信息 `a9b9d36`，独立旧行为检查先提交于 `2ee3a02`。九项环境 export 汇入 EnvironmentApi；累计性能验收仍为 675 项，当前另 31 项正确性通过、性能待宿主稳定后复核。
+状态：结构、完整正确性与启动功能通过；随后在 [Unity 渲染结束后的累计复核](refactoring-post-unity-performance-2026-10-19.md)中通过性能验收，当前累计 706 项。直接基线为启动信息 `a9b9d36`，独立旧行为检查先提交于 `2ee3a02`。九项环境 export 汇入 EnvironmentApi；以下保留当时暂停长计时的过程。
 
 删除 PE32 八项重复 ABI、Win64 arity/DWORD 行及两端名称处理体。PE32 六项 typed、三项 ABI-only；Win64 六项 typed、三项 absent。PE32 gateway 继续调用原 scratch allocator，领域 adapter 只接收内存和分配地址。Win64 变量与环境块集合归入私有 Environment owner，原 page allocator 和 mapping 服务保持，见[环境边界](../architecture/environment.md)。
 

@@ -416,3 +416,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 22 项契约统一消息投递/提取、DispatchMessage callback/resume、计时器与等待；保留五项 PE32 ABI-only、六项 Win64 absent，以及双架构消息输出故障的不同提交顺序。基线 `f818b33`、实现 `c07b983`，完整 release 607 / debug 453 / native 7 / 工具 23 与 fmt/strict Clippy/build 通过，388 个 Rust 文件核对一致，二进制增加 5,728 bytes，在 +24KiB 预算内。
 
 38 个协议、237 次执行全部校验。post/get 网关 Win64/PE32 IR/raw CPU −1.417%/−10.391%/−1.827%。PE32 SSE/IR 初筛 +10.556%，900M 三标签补证为 −0.246%，同哈希 control/before +4.965%；首轮与后续离散全部保留，未形成持续回退。FP 两架构复核的明显差异继续记录为纯重构性能观测，ISA 源码未改。Alice CPU/wall −0.907%/−7.945%，保持隐藏窗口和零 Draw/Present 预算出口。2026-10-19 接受，累计 **595 exports**；详见[完整验收](refactoring-messages-2026-10-18.md)。
+
+## 对话框、菜单、GDI 与后续累计复核
+
+日志修订 `b433c63` 完成对话框 22、菜单 27、GDI 31 项的累计验收，达到 675 项，独立旧候选及采样证据见[日志报告](refactoring-api-log-2026-10-19.md)。随后五项 paint、两项 comctl32 初始化、十项资源、五项启动信息、九项环境接口与 CLI 拆分完整正确性通过；Unity 后台渲染及同哈希显著漂移期间暂停长计时。
+
+用户确认渲染结束后，以原 675 项冻结与 `d65c389` 环境冻结作三标签轮换，32 条协议、288 次执行及三对 Alice 200M 前缀全部校验。最大 CPU 中位数回退 +2.574%，保留 SSE/control 局部成本与 GDI 同哈希漂移；fixture RSS 中位数最多 +112KiB，累计 executable +44,272 bytes。Alice CPU/wall −1.543%/−0.328%，仍为隐藏窗口、零 Draw/Present 的启动前缀。release 644、debug 490、native 7、工具 28 及静态检查/build 沿用同源码冻结，302 个 src Rust 文件重新核对。2026-10-19 累计接受 **706 exports** 及 CLI，见[完整复核](refactoring-post-unity-performance-2026-10-19.md)。

@@ -1,6 +1,6 @@
 # CLI 职责拆分重试（2026-10-19）
 
-状态：结构已接入，完整 release、命令兼容与启动功能通过，性能待复核。直接基线为控件初始化 `f776057`；本批仅改变 executable 的五个源文件，其余 289 个 src Rust 文件保持逐字相同。此前 [CLI 候选与撤回](refactoring-cli-2026-10-19.md)仍按历史结果保留。
+状态：结构、完整 release、命令兼容与启动功能通过；随后在 [Unity 渲染结束后的累计复核](refactoring-post-unity-performance-2026-10-19.md)中通过性能验收。直接基线为控件初始化 `f776057`；本批仅改变 executable 的五个源文件，其余 289 个 src Rust 文件保持逐字相同。此前 [CLI 候选与撤回](refactoring-cli-2026-10-19.md)仍按历史结果保留。
 
 main 保留六行参数收集与分发。四个 CLI 模块分别负责命令选择、静态 PE/IR 文件操作、PE32 启动和 AMD64 probe/startup；guest 资源仍由 library 中的 Process32/Process64 及领域服务拥有。
 

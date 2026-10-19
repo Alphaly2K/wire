@@ -1,6 +1,6 @@
 # 五项 paint 契约迁移与后台负载复核
 
-状态：五项 paint 已接入唯一契约与 typed 分发，完整正确性通过；后台负载明显波动，性能待复核。此前完成性能验收的运行时为 `b433c63`，累计 675 项，新增五项单列为已接入、待性能验收。
+状态：五项 paint 已接入唯一契约与 typed 分发，完整正确性通过；随后在 [Unity 渲染结束后的累计复核](refactoring-post-unity-performance-2026-10-19.md)中通过性能验收，当前累计 706 项。以下保留最初后台负载波动、暂停计时和功能验证的原始过程，不追认已撤回候选。
 
 下一候选只包含 InvalidateRect、ValidateRect、GetUpdateRect、BeginPaint、EndPaint 五项。RedrawWindow 的真实 API 网关已经由 MenuApi::Redraw 负责，保留 error 120 与菜单未实现诊断；公开 `user32::dispatch` facade 则进入矩形绘制实现。独立菜单用例已固定这一区别，不能把 facade 行为接到真实网关。先前六项候选的缺陷和拒绝仍按原报告保留。
 

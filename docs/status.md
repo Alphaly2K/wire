@@ -1,27 +1,27 @@
 # 当前状态
 
-更新日期：2026-10-19。重构前基线为 `2e78377`；最新已验收运行时为 [API 日志与累计契约](reports/refactoring-api-log-2026-10-19.md)，实现 `b433c63`，报告记录冻结源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
+更新日期：2026-10-19。重构前基线为 `2e78377`；最新已验收运行时为 `d65c389` 环境接口冻结，见 [Unity 渲染结束后的累计性能复核](reports/refactoring-post-unity-performance-2026-10-19.md)，报告记录源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
 
 本轮累计接入对话框/窗口枚举 22、菜单 27、GDI 对象/像素/字体 31 项，共 **80 项**，累计 **675 项**。统一声明、typed 分发与领域 owner 保持双架构范围、故障提交和既有不可用策略；保留真实 RedrawWindow 网关与公开 facade 的历史差异。精确标量 SSE 已移入独立编译单元，没有近似浮点或新增 ISA 语义。
 
-当前代码另已接入 **31 项契约**：5 项 paint、2 项 comctl32 初始化、10 项 PE32 资源、5 项双架构启动信息、9 项环境接口，完整正确性通过，性能因后台 Unity/WindowServer 负载及明显同哈希漂移待复核；与上述 675 项分别记录。新实现、冻结及全部结果见[五项 paint](reports/refactoring-painting-followup-2026-10-19.md)、[控件初始化](reports/refactoring-common-controls-2026-10-19.md)、[资源](reports/refactoring-resources-2026-10-19.md)、[启动信息](reports/refactoring-process-startup-2026-10-19.md)与[环境接口](reports/refactoring-environment-2026-10-19.md)。
+随后 **31 项契约**：5 项 paint、2 项 comctl32 初始化、10 项 PE32 资源、5 项双架构启动信息、9 项环境接口，完整正确性及累计性能复核通过，当前共 **706 项**。Unity 渲染结束后重新完成 32 条性能协议、288 次执行及三对游戏启动；原后台干扰轮次保留。实现与冻结见[五项 paint](reports/refactoring-painting-followup-2026-10-19.md)、[控件初始化](reports/refactoring-common-controls-2026-10-19.md)、[资源](reports/refactoring-resources-2026-10-19.md)、[启动信息](reports/refactoring-process-startup-2026-10-19.md)与[环境接口](reports/refactoring-environment-2026-10-19.md)。
 
 中间 GDI 冻结出现 messages/IR 三对持续回退，未准入。实际采样后将 API 日志提取为独立 runtime 服务，并用专用整数格式化保留完整 trace、频率和最近 64 条记录。最终消息 150M IR/raw CPU 中位数相对原消息冻结 −13.210%/−12.110%，GDI 150M IR/raw −16.987%/−13.229%；33 条性能协议、207 次 fixture 执行及三对真实启动前缀通过。旧冻结、失败轮次和同哈希 control 独立保留，没有用其它负载的改善抵消持续回退。
 
-早期绘制六项候选因持续浮点回退撤回，见[历史拒绝报告](reports/refactoring-painting-2026-10-19.md)。当前五项重试保持原 RedrawWindow 网关归属，不追认旧候选。其余 USER、COM、图形和资源 owner 继续迁移。R7 [CLI 拆分已重试接入](reports/refactoring-cli-followup-2026-10-19.md)，完整正确性及命令对照通过，性能待复核；旧候选和回滚证据保留。[离线 API inventory](reports/refactoring-inventory-2026-10-19.md)、profile、native 探针和架构性能入口已按职责整理；PE32 工具另修正未知 case 静默替换为整数的问题，最新工具检查 28 项通过，详见[工具边界](architecture/validation-tools.md)。Mono 原生化已撤回，本轮排除。
+早期绘制六项候选因持续浮点回退撤回，见[历史拒绝报告](reports/refactoring-painting-2026-10-19.md)。当前五项重试保持原 RedrawWindow 网关归属，不追认旧候选。其余 USER、COM、图形和资源 owner 继续迁移。R7 [CLI 拆分已重试接入](reports/refactoring-cli-followup-2026-10-19.md)，完整正确性、命令对照及累计性能通过；旧候选和回滚证据保留。[离线 API inventory](reports/refactoring-inventory-2026-10-19.md)、profile、native 探针和架构性能入口已按职责整理；PE32 工具另修正未知 case 静默替换为整数的问题，最新工具检查 28 项通过，详见[工具边界](architecture/validation-tools.md)。Mono 原生化已撤回，本轮排除。
 
 ## 重构范围
 
-当前累计性能冻结已验收[对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)与日志修订；独立历史证据继续可查。五项 paint 单独冻结并通过正确性，性能待复核；CLI 与剩余领域不属于累计冻结。
+当前累计冻结包含[对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)、日志、五项 paint、控件初始化、资源、启动信息、环境接口与 CLI 拆分；独立历史证据继续可查。
 
 | 阶段 | 已交付 | 剩余范围 |
 | --- | --- | --- |
 | R0/R1 | 冻结输入、原创正式 fixture、领域测试 harness、GUID 唯一契约和双架构适配 | 随后续家族维护独立基线 |
-| R2 | 已验收 675 个 export 的契约，另 31 项 paint/控件初始化/资源/启动信息/环境正确性通过、性能待复核；明细见下表 | USER、COM、图形等 legacy 家族 |
+| R2 | 已验收 706 个 export 的契约；明细见下表 | USER、COM、图形等 legacy 家族 |
 | R3 | guest environment 与 Win64 变量/环境块 owner、双架构模块状态、Win64 文件、period 请求、SRW、地址等待及 APC 队列、线程标量操作与描述、双架构 apartment/BSTR、Win64 task/HSTRING/image/desktop 成员、PE32 TLS/FLS 与双架构 cursor、Win64 DC/class 私有 owner | PE32 其余资源、线程资源创建/退出及 COM 其余对象；PE32 kernel 大范围抽取曾因性能撤回 |
 | R4/R5 | Process32 编排边界、owned host UI 请求、GDI 与像素状态分离 | 领域分发与资源 owner 随 R2/R3 继续收敛 |
 | R6 | 按用户要求忽略 | 不重建原生 Mono 路径 |
-| R7 | CLI 命令职责拆分、PE32 内核目录、领域测试、公共性能工具及 profile、离线 inventory、当前/历史文档入口 | CLI 性能待复核；其余工具和目录随领域迁移继续整理 |
+| R7 | CLI 命令职责拆分及性能复核、PE32 内核目录、领域测试、公共性能工具及 profile、离线 inventory、当前/历史文档入口 | 其余工具和目录随领域迁移继续整理 |
 
 已迁移的 export 是契约覆盖范围；typed、ABI-only 与 absent 的架构策略分别记录，不能按数量推导完整 Windows 兼容性。
 
@@ -74,6 +74,11 @@
 | 对话框控件 / 窗口枚举 | 22 | [对话框边界](architecture/dialog.md)及[累计验收](reports/refactoring-api-log-2026-10-19.md) |
 | 菜单资源与操作 | 27 | [菜单边界](architecture/menus.md)及[累计验收](reports/refactoring-api-log-2026-10-19.md) |
 | GDI 对象 / 像素 / 字体 | 31 | [图形操作边界](architecture/gdi-operations.md)及[累计验收](reports/refactoring-api-log-2026-10-19.md) |
+| paint | 5 | [绘制边界](architecture/painting.md)及[累计复核](reports/refactoring-post-unity-performance-2026-10-19.md) |
+| comctl32 初始化 | 2 | [窗口类边界](architecture/classes.md)及[累计复核](reports/refactoring-post-unity-performance-2026-10-19.md) |
+| PE32 资源 | 10 | [资源边界](architecture/resources.md)及[累计复核](reports/refactoring-post-unity-performance-2026-10-19.md) |
+| 启动信息 | 5 | [进程信息边界](architecture/process-startup.md)及[累计复核](reports/refactoring-post-unity-performance-2026-10-19.md) |
+| 环境接口 | 9 | [环境边界](architecture/environment.md)及[累计复核](reports/refactoring-post-unity-performance-2026-10-19.md) |
 
 ## 当前执行路径与能力
 
@@ -90,23 +95,11 @@
 
 ## 验证与性能
 
-最近已验收的冻结：release **625 passed / 7 ignored**，debug Win32/AMD64/FPU 与日志单元 **471 passed**，显式 native **7 passed**，工具 **23 passed**；fmt、strict all-target/all-feature Clippy、SIMD crate 静态检查与 release build 通过。402 个 Rust 文件和 executable 核对一致。
+最近已验收的冻结：release **644 passed / 7 ignored**、debug **490 passed**（Win32 237、AMD64 242、FPU 9、日志单元 2）、显式 native **7 passed**、工具 **28 passed**；fmt、strict all-target/all-feature Clippy、SIMD crate 静态检查与 release build 通过。302 个 src Rust 文件和 executable 核对一致。CLI 的 21 组命令、原始 IR 与 API trace 对照，以及各领域的独立旧行为/故障检查，分别保留在对应报告。
 
-当前五项 paint 冻结：release **628 passed / 7 ignored**、debug **474 passed**、native **7 passed**、工具 **26 passed**，上述静态检查和 build 通过。290 个 src Rust 文件与冻结一致，executable 仅增加 48 bytes。20 条 12K 功能协议共 120 次执行通过；37 个长样本结果校验后因同哈希明显漂移停止长计时，另保留 1 个主动中断样本。小规模功能耗时不作性能准入。
+最新累计复核共 **32 条协议、288 次执行**全部校验；三标签轮换中穿插同一旧 binary 的 control。五个新接口家族的 CPU 中位数 −51.455% 至 +1.099%；PE32 四项计算的 raw/IR 与 AMD64 计算/别名/线程 ID 为 −4.098% 至 +2.574%。保留 AMD64 SSE after/control +3.440% 的局部成本、GDI/IR 同哈希漂移及全部离散轮次，没有持续超过 5% 的回退。fixture RSS 中位数最大增加 112KiB。相对 675 项日志冻结，累计 executable +44,272 bytes，各批独立增量仍在 +24KiB 预算内，没有扩大缓存或资源限额。
 
-该候选三对 Alice 200M 功能前缀也到相同预算/隐藏窗口/零 Draw/Present 出口；RSS before 307–378MiB、after 379–397MiB，保留差异待复核，不与前述已验收启动计时混算。
-
-随后两项控件初始化冻结：release **631 passed / 7 ignored**、debug **477 passed**、native **7 passed**、工具 **26 passed**，静态检查和 build 通过；290 个 src Rust 文件核对一致，executable 较 paint 冻结增加 1,344 bytes。9 条 12K 功能协议共 54 次执行，以及一对 Alice 200M 功能前缀通过，长性能对照待复核。
-
-最新 CLI 拆分冻结：其余 289 个 src Rust 文件与控件冻结相同，只改变 main 和四个命令模块；完整 release **631 passed / 7 ignored**、fmt、严格 Clippy 与 build 复测通过。**21 组命令/42 次执行**、IR 文件及 API 调用/频率内容、一对 Alice 功能前缀通过；新增仓库内检查工具自行生成输入后，21 组对照再次全部通过，工具 **26** 项复测通过。debug/native 沿用上述同源 library 证据。294 个 src Rust 文件与冻结一致，executable 增加 5,472 bytes，性能待复核。
-
-随后资源冻结：完整 release **636 passed / 7 ignored**、debug **482 passed**、native **7 passed**、工具 **26 passed**，静态检查与 build 通过；296 个 src Rust 文件核对一致，executable 较 CLI 减少 3,616 bytes。八种实际输入、16 条 raw/IR 功能协议共 96 次执行、六对完整资源 trace 和一对 Alice 200M 功能前缀通过；性能待复核。
-
-最新启动信息冻结：完整 release **640 passed / 7 ignored**、debug **486 passed**、native **7 passed**、工具 **28 passed**，静态检查与 build 通过；299 个 src Rust 文件核对一致，executable 较资源增加 19,024 bytes。PE32 16 条协议/96 次执行、AMD64 4 条协议/24 次执行、六对启动 API trace 和一对 Alice 功能前缀通过；性能待复核。
-
-随后环境接口冻结：完整 release **644 passed / 7 ignored**、debug **490 passed**、native **7 passed**、工具 **28 passed**，静态检查与 build 通过；302 个 src Rust 文件核对一致，executable 较启动信息增加 22,000 bytes。PE32 16 条协议/96 次执行、AMD64 4 条协议/24 次执行、六对环境 API trace 及一对 Alice 功能前缀通过；性能待复核。
-
-33 条 workload protocol 全部结果校验，不跨不同 work/工具版本混算；GUID/raw 首轮离散后，150M 加同哈希 control 三对均改善，CPU 中位数 −14.007%。15 项计算路径的 CPU 中位数变化为 −4.408% 至 +2.111%，fixture RSS 中位数最多 +48KiB。二进制较直接 GDI 候选增加 32 bytes，满足 +24KiB 预算。Alice CPU/wall +1.272%/+1.650%，RSS 中位数约 +5.91MiB，原生启动 before 的 RSS 范围约 319–398MiB；保持同一预算、隐藏窗口与零 Draw/Present。所有离散轮次保留，没有推断游戏 FPS。
+三对 Alice 200M 启动前缀 CPU/wall 中位数 **−1.543%/−0.328%**，RSS 中位数 **−256KiB**；保持同一预算、隐藏窗口与零 Draw/Present。首次沙箱无法访问 Metal 的失败独立保留，正式六次使用可访问设备的宿主环境；复用原游戏资源。完整证据见[累计复核](reports/refactoring-post-unity-performance-2026-10-19.md)。旧 Unity/WindowServer 干扰、37 个已校验样本及 1 个主动中断维持历史记录，不与新协议样本混算。
 
 后续正式比较使用显式 [稳定启动协议](reports/refactoring-launch-protocol-2026-10-16.md)，固定 argv0、参数和 child cwd，并记录 shell SHA。默认工具行为保持；旧协议数据独立保留，汇总不跨协议或不同 work 合并。编译、正式计时、采样与 runtime diagnostics 串行执行。每个结构候选先完成正确性，再按至少三对轮换检查结果、CPU/wall/RSS 与输入哈希；超过门槛先调查，不把失败候选扩大到其它领域。
 

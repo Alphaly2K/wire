@@ -1,6 +1,6 @@
 # comctl32 初始化与窗口类边界（2026-10-19）
 
-状态：两项初始化已接入既有 class 契约与 typed 路由，完整正确性通过；性能待宿主负载稳定后复核。此前五项 paint 已提交 `79f1df4`，两批共七项新增接入，正式性能验收总数仍为 675。
+状态：两项初始化已接入既有 class 契约与 typed 路由，完整正确性通过；随后在 [Unity 渲染结束后的累计复核](refactoring-post-unity-performance-2026-10-19.md)中通过性能验收，当前累计 706 项。此前五项 paint 已提交 `79f1df4`；以下记录当时的独立正确性及暂停长计时过程。
 
 范围为 InitCommonControls 与 InitCommonControlsEx。DLL、签名和执行策略合入 `win32/catalog/classes.rs`，class 声明从原十七项增加到十九项；原十七项的 provider、参数和架构范围保持。初始化只接受 PE32 comctl32.dll，Win64 继续 absent。总分发器移除两项重复 ABI 和控件注册循环，直接使用已有 ClassApi 路由；领域实现归入 `user32/classes.rs`，仍复用原 register_system_class。
 

@@ -1,6 +1,6 @@
 # 命令入口边界
 
-状态：模块划分已接入。完整 release、21 组命令兼容与启动功能通过，性能因宿主后台负载待复核；当前证据见[CLI 重试](../reports/refactoring-cli-followup-2026-10-19.md)。旧候选与撤回数据继续保留。
+状态：模块划分已接入。完整 release、21 组命令兼容与启动功能通过，[累计性能复核](../reports/refactoring-post-unity-performance-2026-10-19.md)通过；当前实现证据见[CLI 重试](../reports/refactoring-cli-followup-2026-10-19.md)。旧候选与撤回数据继续保留。
 
 `main` 只读取进程参数并交给 `cli::dispatch`。CLI 模块属于 executable，不成为解释器 library 的依赖；Process32/Process64 继续拥有 guest 装载、执行与运行时状态。
 

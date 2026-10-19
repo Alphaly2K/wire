@@ -11,7 +11,7 @@
 - [测试与性能工具](architecture/validation-tools.md)：领域测试名映射、公共测量库、freeze 输入和兼容入口。
 - [稳定启动测量协议](reports/refactoring-launch-protocol-2026-10-16.md)：相同哈希副本的偏差调查、可选 argv/cwd 协议和跨模式证据隔离。
 - [模块身份与生命周期](architecture/modules.md)：31 个 export 的冷绑定契约、动态查询差异、私有 owner 与引用/pin 提交。
-- [PE32 资源查询与字符串](architecture/resources.md)及[迁移记录](reports/refactoring-resources-2026-10-19.md)：十项 ResourceApi、只读 image 视图、编码/故障/返回槽边界；完整正确性通过，性能待复核。
+- [PE32 资源查询与字符串](architecture/resources.md)及[迁移记录](reports/refactoring-resources-2026-10-19.md)：十项 ResourceApi、只读 image 视图、编码/故障/返回槽边界；正确性及累计性能通过。
 - [模块 API 契约验收](reports/refactoring-module-catalog-2026-10-14.md)：模块 catalog、控制请求与独立性能调查。
 - [文件状态与标准句柄](architecture/files.md)：Win64 filesystem、属性元数据、endpoint/alias 寿命和输出提交顺序。
 - [核心文件 API 契约与验收](reports/refactoring-file-catalog-2026-10-15.md)：行为基线、失败候选、布局/调度调查与最终接入。
@@ -35,8 +35,8 @@
 - [Heap 资源与调用边界](architecture/heaps.md)及[契约验收](reports/refactoring-heaps-2026-10-16.md)：13 项接口、私有堆/slab 所有权、ABI-only/absent 策略及 29 条性能路径。
 - [Local/Global 共享资源与调用边界](architecture/local-memory.md)及[契约验收](reports/refactoring-local-memory-2026-10-16.md)：14 项接口、成对资源共享、错误及返回顺序、28 条性能路径。
 - [系统信息与内存状态调用边界](architecture/system-profile.md)及[契约验收](reports/refactoring-system-profile-2026-10-16.md)：四项接口、双架构布局、public facade、31 条性能路径与路由顺序调查。
-- [进程启动信息](architecture/process-startup.md)及[迁移记录](reports/refactoring-process-startup-2026-10-19.md)：五项命令行/STARTUPINFO/feature 契约，保留双架构布局与返回帧差异；完整正确性通过，性能待复核。
-- [环境变量与环境块](architecture/environment.md)及[迁移记录](reports/refactoring-environment-2026-10-19.md)：九项契约、Win64 私有 owner 与两种分配寿命，完整正确性通过，性能待复核。
+- [进程启动信息](architecture/process-startup.md)及[迁移记录](reports/refactoring-process-startup-2026-10-19.md)：五项命令行/STARTUPINFO/feature 契约，保留双架构布局与返回帧差异；正确性及累计性能通过。
+- [环境变量与环境块](architecture/environment.md)及[迁移记录](reports/refactoring-environment-2026-10-19.md)：九项契约、Win64 私有 owner 与两种分配寿命，正确性及累计性能通过。
 - [日历、时区与 CPU 计时调用边界](architecture/calendar.md)及[契约验收](reports/refactoring-calendar-2026-10-16.md)：11 项接口、时区独立模块、宿主 CPU 计时、32 条性能路径及局部成本调查。
 - [多媒体计时器调用与资源边界](architecture/multimedia.md)及[契约验收](reports/refactoring-multimedia-2026-10-16.md)：三项接口、私有 period owner、静态/动态 provider 差异、35 条性能路径与同哈希扩样。
 - [SRW、条件变量与 InitOnce 边界](architecture/inline-sync.md)及[契约验收](reports/refactoring-inline-sync-2026-10-16.md)：十二项接口、私有 SRW owner、真实线程阻塞重试、36 条性能路径。
@@ -72,19 +72,20 @@
 - [PE32 typed 分发模式](reports/refactoring-direct-dispatch-2026-10-19.md)：直接枚举模式保持原分支覆盖与处理体，随日志修订累计验收。
 - [GDI 对象、像素与字体](architecture/gdi-operations.md)及[独立记录](reports/refactoring-gdi-operations-2026-10-19.md)：31 项唯一契约，图形核心拥有操作枚举，adapter 只借 Graphics/错误槽；随日志修订累计验收，失败冻结不追认。
 - [API 日志职责与累计验收](reports/refactoring-api-log-2026-10-19.md)：完整 trace 逐字节保持，33 条性能协议、207 次 fixture 和三对游戏前缀通过，累计 675 项。
+- [Unity 渲染结束后的累计复核](reports/refactoring-post-unity-performance-2026-10-19.md)：675 项日志冻结与当前版本的 32 条协议、288 次循环及三对游戏启动通过，新增 31 项及 CLI 完成性能验收，累计 706 项。
 - [固定执行路径的测量协议](reports/refactoring-fixed-executable-slot-2026-10-18.md)：调查同哈希副本的数倍耗时差异，新增显式固定 executable/cwd 模式、逐轮 SHA 检查与临时链接回收。
 - [release 编译单元候选](reports/refactoring-release-codegen-2026-10-15.md)：独立构建配置、同二进制对照及长样本调查。
 - [网关边界候选](reports/refactoring-gateway-boundary-2026-10-15.md)、[页缓存内联候选](reports/refactoring-page-cache-inline-2026-10-15.md)、[helper 布局候选](reports/refactoring-memory-helper-layout-2026-10-15.md)：已撤回实现和保留的测量证据。
 - [本次渐进重构记录](reports/refactoring-2026-10-14.md)：阶段交付、行为差异与验收结果。
 - [R7 稳定边界整理](reports/refactoring-r7-2026-10-14.md)：PE32 目录、领域测试、freeze/replay 工具及完整对照。
 - [R7 CLI 候选](reports/refactoring-cli-2026-10-19.md)：六个函数逐体迁移和 19 组命令兼容通过；性能对照大幅漂移，源码已精确撤回，候选冻结保留。
-- [R7 CLI 重试](reports/refactoring-cli-followup-2026-10-19.md)：四个命令模块已接入，七份函数文本等价、21 组命令及启动功能通过；library 保持，性能待复核。
+- [R7 CLI 重试](reports/refactoring-cli-followup-2026-10-19.md)：四个命令模块已接入，七份函数文本等价、21 组命令及启动功能通过；library 保持，累计性能复核通过。
 - [R7 离线 inventory](reports/refactoring-inventory-2026-10-19.md)：PE/CLR 解析、运行轨迹和扫描报表各归其职，旧入口保留，24 项工具检查及机器报告对照通过。
 - [R7 CPU profile 工具](reports/refactoring-profile-tools-2026-10-19.md)：实现归入 perf 包，旧入口与 mock 保持，真实采样的 JSON/折叠栈/火焰图逐字节对照通过。
 - [R7 native 图形探针](reports/refactoring-native-probes-2026-10-19.md)：七个旧入口保留，13 个 C ABI 布局集中；三项真实 native 执行与 11 个输出对照通过。
 - [R7 架构测量入口](reports/refactoring-perf-drivers-2026-10-19.md)：三个正式入口与早期 AMD64 工具归入 perf；226 份生成输入及 58 次兼容执行保持。
-- [五项 paint 迁移与后台负载](reports/refactoring-painting-followup-2026-10-19.md)：typed 契约接入，完整正确性与 120 次功能对照通过；保留宿主控制和主动中断，性能待复核。
-- [comctl32 初始化](reports/refactoring-common-controls-2026-10-19.md)：两项签名与注册循环归回 class 领域，完整正确性、54 次功能对照及启动前缀通过，性能待复核。
+- [五项 paint 迁移与后台负载](reports/refactoring-painting-followup-2026-10-19.md)：typed 契约接入，完整正确性与 120 次功能对照通过；累计性能复核通过，保留旧宿主控制和主动中断。
+- [comctl32 初始化](reports/refactoring-common-controls-2026-10-19.md)：两项签名与注册循环归回 class 领域，完整正确性、54 次功能对照、启动前缀及累计性能通过。
 - [PE32 kernel 候选拒绝记录](reports/refactoring-pe32-kernel-rejected-2026-10-14.md)：独立资源故障基线、性能回退调查及运行时代码撤回。
 - [IR 执行器布局隔离](reports/refactoring-ir-layout-2026-10-14.md)：macOS 固定对齐、机器码证据与独立性能验收。
 - [原生 Mono 撤回](mono-native-rollback-2026-10-14.md)：保留通用优化，继续执行原始 guest Mono。

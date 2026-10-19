@@ -1,6 +1,6 @@
 # 双架构进程启动信息契约（2026-10-19）
 
-状态：结构、完整正确性和启动功能通过，性能待宿主负载稳定后复核。直接运行时基线为资源迁移 `ab96bfc`，独立旧行为基线先提交于 `99d280d`。本批五项与此前十七项分别记作正确性通过、性能待复核；最近正式性能验收仍为 675 项。
+状态：结构、完整正确性和启动功能通过；随后在 [Unity 渲染结束后的累计复核](refactoring-post-unity-performance-2026-10-19.md)中通过性能验收，当前累计 706 项。直接运行时基线为资源迁移 `ab96bfc`，独立旧行为基线先提交于 `99d280d`。以下保留当时暂停长计时的过程。
 
 五项 GetCommandLineA/W、GetStartupInfoA/W、IsProcessorFeaturePresent 由 StartupApi 唯一声明 provider、参数和执行策略，删除 PE32 重复 ABI、Win64 arity/DWORD 行和旧名称处理体。`win32::{x86,x64}::process_startup` 只借内存和既有命令行指针。PE32 kernel32 与 Win64 kernel32/kernelbase 的范围、命令存储、结构布局、feature 集合及返回帧差异保持，详见[调用边界](../architecture/process-startup.md)。
 
