@@ -32,6 +32,7 @@ mod locals;
 mod mapping;
 mod modules;
 mod pipes;
+mod process_options;
 mod process_queries;
 mod registry;
 mod resources;
@@ -112,7 +113,7 @@ pub struct Runtime64 {
     delay_hooks: BTreeMap<u64, (String, u64, u64)>,
     srw: crate::win32::kernel::srw::SrwLocks,
     exception_filter: u64,
-    error_mode: u32,
+    process_options: process_options::ProcessOptions,
     snapshots: snapshot::Snapshots,
     pub api_calls: u64,
     /// Most recent calls, bounded independently of the full api_calls counter.
@@ -127,7 +128,6 @@ pub struct Runtime64 {
     registry: registry::Registry,
     user: user::User,
     searches: find::Searches,
-    process_attributes: BTreeMap<u64, (u32, BTreeMap<u64, Vec<u8>>)>,
 }
 #[derive(Debug, PartialEq, Eq)]
 pub enum Control {
@@ -253,13 +253,8 @@ fn import_arity(name: &str) -> Option<usize> {
         "NtQueryDirectoryFile" => 11,
         "CommandLineToArgvW" => 2,
         "AreFileApisANSI" => 0,
-        "GetErrorMode" => 0,
-        "SetErrorMode" => 1,
         "SetThreadStackGuarantee" => 1,
         "CreatePipe" => 4,
-        "InitializeProcThreadAttributeList" => 4,
-        "UpdateProcThreadAttribute" => 7,
-        "DeleteProcThreadAttributeList" => 1,
         "CreateProcessW" => 10,
         "GetConsoleMode" | "GetTempPathW" | "GetTempPath2W" => 2,
         "EncodePointer" | "DecodePointer" | "SetUnhandledExceptionFilter" | "ExitProcess" => 1,
@@ -294,9 +289,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "SHGetKnownFolderPath" => &[1],
         "GetLogicalProcessorInformationEx" => &[0],
         "NtQueryDirectoryFile" => &[6, 7],
-        "SetErrorMode" => &[0],
-        "InitializeProcThreadAttributeList" => &[1, 2],
-        "UpdateProcThreadAttribute" => &[1],
         "CreateProcessW" => &[4, 5],
         "CreatePipe" => &[3],
         "GetTempPathW" | "GetTempPath2W" | "ExitProcess" => &[0],
@@ -403,7 +395,7 @@ impl Runtime64 {
             delay_hooks: BTreeMap::new(),
             srw: Default::default(),
             exception_filter: 0,
-            error_mode: 0,
+            process_options: process_options::ProcessOptions::default(),
             snapshots: snapshot::Snapshots::default(),
             api_calls: 0,
             trace: Trace::default(),
@@ -417,7 +409,6 @@ impl Runtime64 {
             registry: registry::Registry::default(),
             user: user::User::default(),
             searches: find::Searches::default(),
-            process_attributes: BTreeMap::new(),
         })
     }
     fn set_error(&self, mem: &mut Memory, error: u32) -> Result<(), String> {
@@ -763,6 +754,11 @@ impl Runtime64 {
                 let last_error = self.teb() + 0x68;
                 self.winsock
                     .call(mem, id, args, last_error, &mut self.events)
+            }
+            ApiId::ProcessOption(id) => {
+                let last_error = self.teb() + 0x68;
+                self.process_options
+                    .call(mem, id, args, last_error, &self.pipes, &self.events)
             }
             ApiId::Keyboard(id) => self.keyboard_call(mem, id, args),
             ApiId::Cursor(id) => self.cursor_call(mem, id, args),
@@ -2022,86 +2018,6 @@ impl Runtime64 {
                     self.local_blocks.insert(block);
                     block
                 }
-            }
-            "GetErrorMode" => self.error_mode as u64,
-            "SetErrorMode" => {
-                if args[0] & !0x8007 != 0 {
-                    return Err("unsupported Win64 process error-mode bits".into());
-                }
-                let previous = self.error_mode;
-                self.error_mode = args[0] as u32;
-                previous as u64
-            }
-            "InitializeProcThreadAttributeList" => {
-                if args[1] == 0 || args[1] > 16 || args[2] != 0 {
-                    self.set_error(mem, 87)?;
-                    0
-                } else {
-                    let needed = 32 + args[1] * 32;
-                    mem.check(args[3], 8, WRITE)?;
-                    let capacity = mem.read_int(args[3], 8)?;
-                    if args[0] == 0 || capacity < needed {
-                        mem.write_int(args[3], 8, needed)?;
-                        self.set_error(mem, 122)?;
-                        0
-                    } else {
-                        mem.check(args[0], needed as usize, WRITE)?;
-                        mem.write(args[0], &vec![0; needed as usize])?;
-                        self.process_attributes
-                            .insert(args[0], (args[1] as u32, BTreeMap::new()));
-                        1
-                    }
-                }
-            }
-            "UpdateProcThreadAttribute" => {
-                if args[1] & !1 != 0 || args[5] != 0 || args[6] != 0 {
-                    self.set_error(mem, 87)?;
-                    0
-                } else if args[2] != 0x20002 {
-                    return Err(format!(
-                        "unsupported Win64 process attribute {:#x}",
-                        args[2]
-                    ));
-                } else if args[4] == 0 || args[4] > 64 * 8 || args[4] % 8 != 0 {
-                    self.set_error(mem, 87)?;
-                    0
-                } else {
-                    let mut bytes = vec![0; args[4] as usize];
-                    mem.read(args[3], &mut bytes)?;
-                    let valid_handles = bytes.as_chunks::<8>().0.iter().all(|b| {
-                        let handle = u64::from_le_bytes(*b);
-                        self.pipes
-                            .flags(handle)
-                            .or_else(|| self.events.flags(handle))
-                            .is_some_and(|flags| flags & 1 != 0)
-                    });
-                    if !valid_handles {
-                        self.set_error(mem, 6)?;
-                        0
-                    } else if let Some((capacity, attributes)) =
-                        self.process_attributes.get_mut(&args[0])
-                    {
-                        if attributes.contains_key(&args[2]) && args[1] == 0
-                            || !attributes.contains_key(&args[2])
-                                && attributes.len() >= *capacity as usize
-                        {
-                            self.set_error(mem, 87)?;
-                            0
-                        } else {
-                            attributes.insert(args[2], bytes);
-                            1
-                        }
-                    } else {
-                        self.set_error(mem, 87)?;
-                        0
-                    }
-                }
-            }
-            "DeleteProcThreadAttributeList" => {
-                if self.process_attributes.remove(&args[0]).is_none() {
-                    return Err("invalid Win64 process attribute list".into());
-                }
-                0
             }
             "CreateProcessW" => {
                 // Only a missing unambiguous executable can currently be resolved. A

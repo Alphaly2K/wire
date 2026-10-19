@@ -486,3 +486,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R2/R3 Winsock 契约与启动状态
 
 20 项声明及九项 Win64 序数归一移入 catalog，启动引用计数及标量 handler 迁入私有 Winsock owner。共用事件和等待/APC/CPU 提交仍由原所有者负责，删除重复 ABI、provider 和字符串分组。元数据、序数、标量 handler 及等待主体对照基线 `4b5e327` 保持一致。相关 release network 7、PE32 ABI-only/未知序数回归 1、catalog 一致性及 fmt/release lib/bin strict Clippy/build 通过，不做性能计时。累计 **836 exports**，见[边界与验收](../architecture/winsock.md)。
+
+## R2/R3 进程选项与启动属性
+
+五项 ProcessOptionApi 统一 ABI/provider，进程错误模式和启动属性列表迁入私有 owner；线程创建通过查询继承进程模式。处理函数经 ID、owner、窄借用和整除写法等价整理对照 `b6ac06a` 保持一致，线程创建除此项查询外逐字不变。相关 release 属性列表及真实线程/APC 共 2、catalog 一致性及 fmt/release lib/bin strict Clippy/build 通过，不新增重复测试或性能计时。累计 **841 exports**，见[边界与验收](../architecture/process-options.md)。

@@ -41,6 +41,7 @@ mod nls;
 mod painting;
 mod paths;
 mod pointer_helpers;
+mod process_options;
 mod process_queries;
 mod process_startup;
 mod registry;
@@ -108,6 +109,7 @@ pub use nls::{NlsApi, NLS_CONTRACTS};
 pub use painting::{PaintingApi, PAINTING_CONTRACTS};
 pub use paths::{PathApi, PATH_CONTRACTS};
 pub use pointer_helpers::{PointerHelperApi, POINTER_HELPER_CONTRACTS};
+pub use process_options::{ProcessOptionApi, PROCESS_OPTION_CONTRACTS};
 pub use process_queries::{ProcessQueryApi, PROCESS_QUERY_CONTRACTS};
 pub use process_startup::{StartupApi, STARTUP_CONTRACTS};
 pub use registry::{RegistryApi, REGISTRY_CONTRACTS};
@@ -237,6 +239,7 @@ pub enum ApiId {
     WinHttp(WinHttpApi),
     Device(DeviceApi),
     Winsock(WinsockApi),
+    ProcessOption(ProcessOptionApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -443,6 +446,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         &WINHTTP_CONTRACTS,
         &DEVICE_CONTRACTS,
         &WINSOCK_CONTRACTS,
+        &PROCESS_OPTION_CONTRACTS,
     ];
     FAMILIES.iter().flat_map(|family| family.iter())
 }

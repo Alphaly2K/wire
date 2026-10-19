@@ -474,7 +474,7 @@ impl Runtime64 {
                 resources: Some((stack, size, tls_blocks)),
                 description: String::new(),
                 apcs: Default::default(),
-                error_mode: self.error_mode,
+                error_mode: self.process_options.error_mode(),
             },
         );
         self.threads.handles.insert(handle, id);
