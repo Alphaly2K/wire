@@ -234,12 +234,6 @@ fn import_arity(name: &str) -> Option<usize> {
     }
     Some(match name {
         name if dxgi::arity(name).is_some() => dxgi::arity(name).unwrap(),
-        "GetSystemDirectoryA"
-        | "GetSystemDirectoryW"
-        | "GetWindowsDirectoryA"
-        | "GetWindowsDirectoryW"
-        | "GetSystemWindowsDirectoryA"
-        | "GetSystemWindowsDirectoryW" => 2,
         "AddVectoredExceptionHandler" => 2,
         "RemoveVectoredExceptionHandler" => 1,
         "RaiseException" => 4,
@@ -256,7 +250,7 @@ fn import_arity(name: &str) -> Option<usize> {
         "SetThreadStackGuarantee" => 1,
         "CreatePipe" => 4,
         "CreateProcessW" => 10,
-        "GetConsoleMode" | "GetTempPathW" | "GetTempPath2W" => 2,
+        "GetConsoleMode" => 2,
         "EncodePointer" | "DecodePointer" | "SetUnhandledExceptionFilter" | "ExitProcess" => 1,
         "WriteConsoleW" => 5,
         _ => return None,
@@ -275,12 +269,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
     }
     match name {
         name if dxgi::arity(name).is_some() => dxgi::dwords(name),
-        "GetSystemDirectoryA"
-        | "GetSystemDirectoryW"
-        | "GetWindowsDirectoryA"
-        | "GetWindowsDirectoryW"
-        | "GetSystemWindowsDirectoryA"
-        | "GetSystemWindowsDirectoryW" => &[1],
         "AddVectoredExceptionHandler" => &[0],
         "RaiseException" => &[0, 1, 2],
         "RtlAddFunctionTable" => &[1],
@@ -291,7 +279,7 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "NtQueryDirectoryFile" => &[6, 7],
         "CreateProcessW" => &[4, 5],
         "CreatePipe" => &[3],
-        "GetTempPathW" | "GetTempPath2W" | "ExitProcess" => &[0],
+        "ExitProcess" => &[0],
         "WriteConsoleW" => &[2],
         _ => &[],
     }
@@ -760,6 +748,9 @@ impl Runtime64 {
                 self.process_options
                     .call(mem, id, args, last_error, &self.pipes, &self.events)
             }
+            ApiId::SystemPath(id) => {
+                crate::win32::x64::system_paths::call(mem, id, args, &self.profile)
+            }
             ApiId::Keyboard(id) => self.keyboard_call(mem, id, args),
             ApiId::Cursor(id) => self.cursor_call(mem, id, args),
             ApiId::Image(id) => self.image_call(mem, id, args),
@@ -1055,33 +1046,6 @@ impl Runtime64 {
                         return_boolean: true,
                         window_call: None,
                     });
-                }
-            }
-            "GetSystemDirectoryA"
-            | "GetSystemDirectoryW"
-            | "GetWindowsDirectoryA"
-            | "GetWindowsDirectoryW"
-            | "GetSystemWindowsDirectoryA"
-            | "GetSystemWindowsDirectoryW" => {
-                let path = if name.starts_with("GetSystemDirectory") {
-                    "C:\\Windows\\System32\0"
-                } else {
-                    "C:\\Windows\0"
-                };
-                let wide = name.ends_with('W');
-                let bytes = if wide {
-                    path.encode_utf16()
-                        .flat_map(u16::to_le_bytes)
-                        .collect::<Vec<_>>()
-                } else {
-                    path.as_bytes().to_vec()
-                };
-                let required = bytes.len() / if wide { 2 } else { 1 };
-                if args[1] < required as u64 {
-                    required as u64
-                } else {
-                    mem.write(args[0], &bytes)?;
-                    required as u64 - 1
                 }
             }
             _ if matches!(binding.control, gateways::ControlImport::AddressWait(_)) => {
@@ -2372,22 +2336,6 @@ impl Runtime64 {
                 }
             }
             "AreFileApisANSI" => 1, // This provider uses its declared ANSI code page for file paths.
-            "GetTempPathW" | "GetTempPath2W" => {
-                // Like Windows, this query does not test or create the directory.
-                let path: Vec<u16> = "C:\\Temp\\".encode_utf16().collect();
-                if args[0] as usize <= path.len() {
-                    (path.len() + 1) as u64
-                } else {
-                    let bytes: Vec<u8> = path
-                        .iter()
-                        .copied()
-                        .chain(Some(0))
-                        .flat_map(u16::to_le_bytes)
-                        .collect();
-                    mem.write(args[1], &bytes)?;
-                    path.len() as u64
-                }
-            }
             _ if matches!(
                 handle,
                 Some(HandleApi::GetStdHandle | HandleApi::SetStdHandle)

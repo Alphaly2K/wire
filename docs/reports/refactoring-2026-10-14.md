@@ -490,3 +490,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R2/R3 进程选项与启动属性
 
 五项 ProcessOptionApi 统一 ABI/provider，进程错误模式和启动属性列表迁入私有 owner；线程创建通过查询继承进程模式。处理函数经 ID、owner、窄借用和整除写法等价整理对照 `b6ac06a` 保持一致，线程创建除此项查询外逐字不变。相关 release 属性列表及真实线程/APC 共 2、catalog 一致性及 fmt/release lib/bin strict Clippy/build 通过，不新增重复测试或性能计时。累计 **841 exports**，见[边界与验收](../architecture/process-options.md)。
+
+## R2 系统与临时目录
+
+独立旧行为基线 `dba0edf` 固定目录查询的 A/W 单位、两种参数顺序、容量不足/NULL 查询、返回槽别名、跨页写出故障和 PE32 ABI-only 清栈。十项声明接入，Win64 copyout 迁入无状态适配器，三个默认目录集中于 GuestEnvironment；保留 Win64 ANSI temp absent。双架构定向 release 各 1、catalog 一致性及 fmt/release lib/bin strict Clippy/build 通过，不跑性能。累计 **851 exports**，见[边界与验收](../architecture/system-paths.md)。

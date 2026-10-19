@@ -82,6 +82,15 @@ impl GuestEnvironment {
     pub fn documents(&self) -> &'static str {
         "C:\\Users\\wire\\Documents"
     }
+    pub fn windows_directory(&self) -> &'static str {
+        "C:\\Windows"
+    }
+    pub fn system_directory(&self) -> &'static str {
+        "C:\\Windows\\System32"
+    }
+    pub fn temporary_directory(&self) -> &'static str {
+        "C:\\Temp\\"
+    }
     pub fn user_directories(&self) -> [&'static str; 4] {
         [
             self.local(),

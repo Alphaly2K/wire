@@ -163,8 +163,7 @@ impl Runtime64 {
                         || (matches!(provider.as_str(), "kernel32.dll" | "kernelbase.dll")
                             && matches!(
                                 function.as_str(),
-                                "GetTempPath2W"
-                                    | "WaitOnAddress"
+                                "WaitOnAddress"
                                     | "WakeByAddressSingle"
                                     | "WakeByAddressAll"
                                     | "AreFileApisANSI"

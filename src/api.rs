@@ -482,8 +482,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
             "kernel32.dll",
             &[
                 ("SetHandleCount", 4),
-                ("GetTempPathA", 8),
-                ("GetTempPathW", 8),
                 ("ExitProcess", 4),
                 ("TerminateProcess", 8),
                 ("SetUnhandledExceptionFilter", 4),
@@ -536,8 +534,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("AreFileApisANSI", 0),
                 ("GetVolumeInformationW", 32),
                 ("SearchPathW", 24),
-                ("GetSystemDirectoryW", 8),
-                ("GetWindowsDirectoryW", 8),
                 ("CreateProcessW", 40),
                 ("CreatePipe", 16),
                 ("GetTimeFormatW", 24),

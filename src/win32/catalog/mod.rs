@@ -50,6 +50,7 @@ mod sids;
 mod snapshots;
 mod sspi;
 mod sync_objects;
+mod system_paths;
 mod system_profile;
 mod thread_control;
 mod thread_properties;
@@ -118,6 +119,7 @@ pub use sids::{SidApi, SID_CONTRACTS};
 pub use snapshots::{SnapshotApi, SNAPSHOT_CONTRACTS};
 pub use sspi::{SspiApi, SSPI_CONTRACTS};
 pub use sync_objects::{SyncObjectApi, SYNC_OBJECT_CONTRACTS};
+pub use system_paths::{SystemPathApi, SYSTEM_PATH_CONTRACTS};
 pub use system_profile::{SystemProfileApi, SYSTEM_PROFILE_CONTRACTS};
 pub use thread_control::{ThreadControlApi, THREAD_CONTROL_CONTRACTS};
 pub use thread_properties::{ThreadPropertyApi, THREAD_PROPERTY_CONTRACTS};
@@ -240,6 +242,7 @@ pub enum ApiId {
     Device(DeviceApi),
     Winsock(WinsockApi),
     ProcessOption(ProcessOptionApi),
+    SystemPath(SystemPathApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -447,6 +450,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         &DEVICE_CONTRACTS,
         &WINSOCK_CONTRACTS,
         &PROCESS_OPTION_CONTRACTS,
+        &SYSTEM_PATH_CONTRACTS,
     ];
     FAMILIES.iter().flat_map(|family| family.iter())
 }
