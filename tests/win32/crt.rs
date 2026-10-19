@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn crt_pointer_state_keeps_lazy_argv_errno_and_exhaustion_order() {
     let mut v = Vm::new();
-    let start = v.state.scratch_top;
+    let start = v.state.scratch_position();
     v.k("SetLastError", &[77]);
     let errno = v.call("msvcrt.dll", "_errno", &[]);
     assert_eq!(errno, start);
@@ -26,22 +26,22 @@ fn crt_pointer_state_keeps_lazy_argv_errno_and_exhaustion_order() {
     assert_eq!(v.mem.read_u32(argv).unwrap(), v.state.cmdline_a);
     assert_eq!(v.mem.read_u32(argv + 4).unwrap(), 0);
     assert_eq!(v.mem.read_u32(envp).unwrap(), 0);
-    let top = v.state.scratch_top;
+    let top = v.state.scratch_position();
     assert_eq!(v.call("msvcrt.dll", "_errno", &[]), errno);
     assert_eq!(v.mem.read_u32(errno).unwrap(), 34);
     assert_eq!(v.state.build_argv(&mut v.mem), (1, argv, envp));
-    assert_eq!(v.state.scratch_top, top);
+    assert_eq!(v.state.scratch_position(), top);
     assert_eq!(v.state.last_error, 77);
     assert_eq!(v.state.scratch_alloc(&mut v.mem, 1, 3), 0);
-    assert_eq!(v.state.scratch_top, top);
+    assert_eq!(v.state.scratch_position(), top);
     assert_eq!(v.state.last_error, 8);
     assert_eq!(v.state.scratch_alloc(&mut v.mem, 0x01000000 - top, 1), top);
-    assert_eq!(v.state.scratch_top, 0x01000000);
+    assert_eq!(v.state.scratch_position(), 0x01000000);
     // Cached pointers survive arena exhaustion; new allocations fail in place.
     assert_eq!(v.call("msvcrt.dll", "_errno", &[]), errno);
     assert_eq!(v.state.build_argv(&mut v.mem), (1, argv, envp));
     assert_eq!(v.state.scratch_alloc(&mut v.mem, 0, 1), 0);
-    assert_eq!(v.state.scratch_top, 0x01000000);
+    assert_eq!(v.state.scratch_position(), 0x01000000);
 }
 
 #[test]

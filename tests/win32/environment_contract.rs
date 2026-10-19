@@ -16,7 +16,7 @@ fn environment_pe32_keeps_ignored_pointers_empty_blocks_and_abi_only_exports() {
             .unwrap()
             .ends_with(" ; empty environment"));
     }
-    let top = v.state.scratch_top;
+    let top = v.state.scratch_position();
     for (i, name) in ["GetEnvironmentStrings", "GetEnvironmentStringsW"]
         .into_iter()
         .enumerate()
@@ -34,7 +34,7 @@ fn environment_pe32_keeps_ignored_pointers_empty_blocks_and_abi_only_exports() {
     }
     for name in ["FreeEnvironmentStringsA", "FreeEnvironmentStringsW"] {
         assert_eq!(v.k(name, &[0xdeadbeef]), 1);
-        assert_eq!(v.state.scratch_top, top + 32);
+        assert_eq!(v.state.scratch_position(), top + 32);
         assert_eq!(v.state.last_error, 77);
     }
     for name in [
@@ -58,7 +58,8 @@ fn environment_pe32_keeps_ignored_pointers_empty_blocks_and_abi_only_exports() {
 fn environment_pe32_keeps_scratch_exhaustion_fault_before_error_export() {
     let mut v = Vm::new();
     v.k("SetLastError", &[77]);
-    v.state.scratch_top = 0x01000000;
+    let remaining = 0x01000000 - v.state.scratch_position();
+    assert_ne!(v.state.scratch_alloc(&mut v.mem, remaining, 1), 0);
     let calls = v.log.call_count;
     assert!(v
         .try_call("kernel32.dll", "GetEnvironmentStringsW", &[])

@@ -19,6 +19,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 pub use crate::runtime::api_log::ApiLogger;
 pub use crate::win32::kernel::objects32::{HandleObj, KernelObjects32};
+pub use crate::win32::x86::scratch::SCRATCH_BASE;
 pub use crate::x86::address_space::{STUB_BASE, STUB_CAPACITY, STUB_STRIDE};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,9 +208,6 @@ impl ApiTable {
     }
 }
 
-/// Guest scratch space for fake CRT pointers (starts here, bump-allocated).
-pub const SCRATCH_BASE: u32 = 0x00f0_0000;
-
 /// Mutable host-side state for the emulated process.
 pub struct ApiState {
     pub(crate) environment: crate::runtime::environment::GuestEnvironment,
@@ -220,11 +218,8 @@ pub struct ApiState {
     pub exe_path: String,
     pub cmdline_a: u32,
     pub cmdline_w: u32,
-    pub scratch_top: u32,
-    pub argv_ptr: u32,
-    pub envp_ptr: u32,
-    pub crt_app_type: u32,
-    crt_errno: HashMap<u32, u32>,
+    scratch: crate::win32::x86::scratch::Scratch32,
+    crt: crate::win32::x86::crt_state::CrtState32,
     pub process_heap: u32,
     pub heap: crate::heap::GuestHeap,
     pub fs: Option<crate::fs::GuestFs>,
@@ -255,11 +250,8 @@ impl ApiState {
             exe_path,
             cmdline_a,
             cmdline_w,
-            scratch_top: SCRATCH_BASE,
-            argv_ptr: 0,
-            envp_ptr: 0,
-            crt_app_type: 1,
-            crt_errno: HashMap::new(),
+            scratch: crate::win32::x86::scratch::Scratch32::default(),
+            crt: crate::win32::x86::crt_state::CrtState32::default(),
             process_heap: 0x7005_0000,
             heap: crate::heap::GuestHeap::new(0x7005_0000),
             fs: None,
@@ -312,47 +304,23 @@ impl ApiState {
 
     /// Bump-allocate guest scratch memory (for fake CRT structures).
     pub fn scratch_alloc(&mut self, mem: &mut GuestMem, size: u32, align: u32) -> u32 {
-        let allocation = (|| {
-            if !align.is_power_of_two() {
-                return None;
-            }
-            let a = self.scratch_top.checked_add(align - 1)? & !(align - 1);
-            let end = a.checked_add(size.max(1))?;
-            if end > 0x01000000 || mem.commit(a, size.max(1)).is_err() {
-                return None;
-            }
-            Some((a, end))
-        })();
-        let Some((a, end)) = allocation else {
-            self.last_error = 8;
-            return 0;
-        };
-        self.scratch_top = end;
-        a
+        self.scratch.alloc(mem, size, align, &mut self.last_error)
+    }
+    pub fn scratch_position(&self) -> u32 {
+        self.scratch.position()
+    }
+    pub fn crt_app_type(&self) -> u32 {
+        self.crt.app_type()
     }
     fn errno_address(&mut self, mem: &mut GuestMem, tid: u32) -> Result<u32, String> {
-        if let Some(&p) = self.crt_errno.get(&tid) {
-            return Ok(p);
-        }
-        let p = self.scratch_alloc(mem, 4, 4);
-        if p == 0 {
-            return Err("CRT errno allocation failed".into());
-        }
-        mem.write_u32(p, 0).map_err(|e| e.to_string())?;
-        self.crt_errno.insert(tid, p);
-        Ok(p)
+        self.crt
+            .errno_address(mem, tid, &mut self.scratch, &mut self.last_error)
     }
 
     /// Lazy argc/argv/envp: argc=1, argv=[cmdline, NULL], envp=[NULL].
     pub fn build_argv(&mut self, mem: &mut GuestMem) -> (u32, u32, u32) {
-        if self.argv_ptr == 0 {
-            let argv = self.scratch_alloc(mem, 16, 16);
-            mem.write_u32(argv, self.cmdline_a).ok();
-            mem.write_u32(argv + 4, 0).ok();
-            self.argv_ptr = argv;
-            self.envp_ptr = self.scratch_alloc(mem, 16, 16); // zero = empty
-        }
-        (1, self.argv_ptr, self.envp_ptr)
+        self.crt
+            .build_argv(mem, self.cmdline_a, &mut self.scratch, &mut self.last_error)
     }
 }
 
@@ -2099,7 +2067,7 @@ fn crt_dispatch(
             .scratch_alloc(mem, 0x100, 16)
             .wrapping_add(args[0].wrapping_mul(0x40)),
         "__set_app_type" => {
-            state.crt_app_type = args[0];
+            state.crt.set_app_type(args[0]);
             0
         }
         "__p__fmode" | "__p__commode" | "__p___argc" | "__p__timezone" | "__p__daylight"

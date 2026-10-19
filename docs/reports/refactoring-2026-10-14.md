@@ -530,3 +530,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R2/R7 PE32 ABI 来源收敛
 
 基线 `0459298` 审计根手工表 301 项，270 项与已加载 spec 完全一致，零数值冲突；删除重复项，31 项例外及原因集中到 win32::abi。原 spec 解析、ordinal 准入、领域方法优先级、CRT 零清栈与未知策略保持；native_export 的被覆盖 CRT 白名单归并。release Win32 248、fmt/release lib/bin strict Clippy/build 通过，不跑性能。累计 export 仍 **888**，见[ABI 来源](../architecture/abi.md)。
+
+## R3 PE32 scratch 与 CRT 指针
+
+独立基线 `53f620d` 固定懒 argv、errno 和 scratch 对齐/耗尽顺序。Scratch32 与 CrtState32 分别私有拥有游标及 CRT 指针身份，ApiState 入口委托；原数学、callback、data export 和 cdecl 路径保持。分配/初始化/部分提交主体核对一致，release Win32 249、fmt/release lib/bin strict Clippy/build 通过，不跑性能。累计 export 仍 **888**，见[CRT 边界](../architecture/crt32.md)。
