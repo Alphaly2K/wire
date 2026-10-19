@@ -109,6 +109,8 @@ mod token_contract;
 mod tracing_contract;
 #[path = "win32/user.rs"]
 mod user;
+#[path = "win32/user_endpoints.rs"]
+mod user_endpoints;
 #[path = "win32/user_objects_contract.rs"]
 mod user_objects_contract;
 #[path = "win32/variant_contract.rs"]
