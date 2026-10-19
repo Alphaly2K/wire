@@ -368,6 +368,37 @@ fn format_message_allocation_and_local_free_share_real_heap() {
 }
 
 #[test]
+fn shell_contract_keeps_pe32_argv_abi_only_folder_allocation_and_provider_specific_cleanup() {
+    let mut vm = Vm::new();
+    for (name, slots) in [("CommandLineToArgvW", 2), ("SHGetKnownFolderPath", 4)] {
+        for dll in ["shell32.dll", "kernel32.dll", "kernelbase.dll"] {
+            assert_eq!(api::native_export(dll, name), dll == "shell32.dll");
+            vm.k("SetLastError", &[77]);
+            vm.mem.write_u32(DATA, 0xa5a5a5a5).unwrap();
+            assert_eq!(vm.call(dll, name, &vec![DATA; slots]), 0);
+            if name == "SHGetKnownFolderPath" && dll == "shell32.dll" {
+                assert_eq!(vm.state.last_error, 77);
+                let pointer = vm.mem.read_u32(DATA).unwrap();
+                assert_eq!(vm.mem.read_wstr(pointer, 4).unwrap(), "C:\\");
+                assert_ne!(pointer, 0);
+            } else {
+                assert_eq!(vm.state.last_error, 120);
+                assert_eq!(vm.mem.read_u32(DATA).unwrap(), 0xa5a5a5a5);
+            }
+            assert_eq!(
+                vm.cpu.esp(),
+                STACK_BASE + STACK_SIZE - 252
+                    + if dll == "shell32.dll" {
+                        slots as u32 * 4
+                    } else {
+                        0
+                    }
+            );
+        }
+    }
+}
+
+#[test]
 fn system_profile_memory_structures_and_monotonic_clocks() {
     let mut v = Vm::new();
     v.k("GetNativeSystemInfo", &[DATA]);

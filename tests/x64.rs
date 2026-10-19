@@ -84,6 +84,8 @@ mod registry_owner;
 mod resources_contract;
 #[path = "x64/sections.rs"]
 mod sections;
+#[path = "x64/shell_contract.rs"]
+mod shell_contract;
 #[path = "x64/sid_contract.rs"]
 mod sid_contract;
 #[path = "x64/simd.rs"]
