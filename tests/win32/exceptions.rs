@@ -3,6 +3,46 @@
 use super::*;
 
 #[test]
+fn exception_contract_keeps_pe32_provider_specific_abi_and_unimplemented_vectored_calls() {
+    for (name, slots) in [
+        ("AddVectoredExceptionHandler", 2),
+        ("RemoveVectoredExceptionHandler", 1),
+        ("RaiseException", 4),
+        ("SetUnhandledExceptionFilter", 1),
+        ("UnhandledExceptionFilter", 1),
+        ("RtlUnwind", 4),
+        ("RtlUnwindEx", 6),
+        ("RtlAddFunctionTable", 3),
+        ("RtlDeleteFunctionTable", 1),
+        ("RtlInstallFunctionTableCallback", 6),
+        ("RtlLookupFunctionEntry", 3),
+    ] {
+        for dll in ["kernel32.dll", "kernelbase.dll", "ntdll.dll"] {
+            let known = (dll == "kernel32.dll" && !name.starts_with("Rtl"))
+                || (name == "RtlUnwind" && (dll == "kernel32.dll" || dll == "ntdll.dll"));
+            assert_eq!(api::native_export(dll, name), known, "{dll}!{name}");
+            if matches!(
+                name,
+                "RaiseException"
+                    | "SetUnhandledExceptionFilter"
+                    | "UnhandledExceptionFilter"
+                    | "RtlUnwind"
+            ) {
+                continue;
+            }
+            let mut vm = Vm::new();
+            vm.k("SetLastError", &[77]);
+            assert_eq!(vm.call(dll, name, &vec![DATA; slots]), 0);
+            assert_eq!(vm.state.last_error, 120);
+            assert_eq!(
+                vm.cpu.esp(),
+                STACK_BASE + STACK_SIZE - 252 + if known { slots as u32 * 4 } else { 0 }
+            );
+        }
+    }
+}
+
+#[test]
 fn software_seh_continues_with_modified_context_and_rejects_noncontinuable() {
     let mut v = Vm::new();
     // mov eax,[esp+12]; mov [eax+176],0x12345678; xor eax,eax; ret

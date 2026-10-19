@@ -36,6 +36,8 @@ mod dialog_contract;
 mod display_contract;
 #[path = "x64/environment_contract.rs"]
 mod environment_contract;
+#[path = "x64/exception_contract.rs"]
+mod exception_contract;
 #[path = "x64/files.rs"]
 mod files;
 #[path = "x64/gdi_contract.rs"]
