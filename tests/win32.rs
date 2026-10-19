@@ -85,6 +85,8 @@ mod process_startup_contract;
 mod resources_contract;
 #[path = "win32/sections.rs"]
 mod sections;
+#[path = "win32/snapshot_contract.rs"]
+mod snapshot_contract;
 #[path = "win32/sync.rs"]
 mod sync;
 #[path = "win32/thread_control.rs"]

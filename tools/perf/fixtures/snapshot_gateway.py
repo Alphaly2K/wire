@@ -29,3 +29,19 @@ def x64(work):
     result[0x3c0:0x3cd] = b'kernel32.dll\0'
     return result, dict(rax=hex(570 * n + 1), retired=11 * n + 19, work=12 * n + 21,
                         api_calls=n + 2, startup=True)
+
+
+def x86(work, pe32):
+    # PE32 is ABI-only: Create returns zero and error 120, with no resource growth.
+    n = max(1, work // 6)
+    code = bytearray.fromhex('57 56 bf') + struct.pack('<I', n)
+    code += bytes.fromhex('31f6')
+    loop = len(code)
+    code += bytes.fromhex('6a00 6a02 ff15') + struct.pack('<I', 0x401180)
+    code += bytes.fromhex('01c6 4f')
+    at = len(code)
+    code += bytes.fromhex('0f85') + struct.pack('<i', loop - at - 6)
+    code += bytes.fromhex('89f0 5e 5f cc')
+    result = image(code, pe32, 4, [b'CreateToolhelp32Snapshot\0'])
+    result[0x3c0:0x3cd] = b'kernel32.dll\0'
+    return result, dict(eax=0, retired=6 * n + 7, api_calls=n)

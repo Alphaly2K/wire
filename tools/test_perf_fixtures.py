@@ -16,7 +16,7 @@ from api_inventory import PE
 
 class AuditFixtureMigration(unittest.TestCase):
     def test_snapshot_copyout_keeps_three_independent_kernel_imports(self):
-        from perf.fixtures.snapshot_gateway import x64
+        from perf.fixtures.snapshot_gateway import x64, x86
         for work in [1, 12000, 100000000]:
             with self.subTest(work=work):
                 data, _ = x64(work)
@@ -25,6 +25,10 @@ class AuditFixtureMigration(unittest.TestCase):
                                  [('kernel32.dll', 'CreateToolhelp32Snapshot', 0x1180),
                                   ('kernel32.dll', 'Process32FirstW', 0x1188),
                                   ('kernel32.dll', 'CloseHandle', 0x1190)])
+                data, _ = x86(work, pe32)
+                self.assertEqual([(row['dll'], row['name'], row['iat_rva'])
+                                  for row in PE(data).imports()],
+                                 [('kernel32.dll', 'CreateToolhelp32Snapshot', 0x1180)])
 
     def test_token_queries_keep_exact_provider_and_independent_import_tables(self):
         from perf.fixtures.token_gateway import x64
