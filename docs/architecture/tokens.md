@@ -17,3 +17,5 @@ GetHandleInformation 保留原资源查找顺序和 token flags。SetHandleInfor
 PE32 原创 ABI-only query 循环使用五个参数及独立 advapi32 OFT/IAT，n=max(1,work/9)，EAX=0、retired=9n+7、API=n；单次和 12K 输入的 raw/IR 已在旧冻结通过。Win64 原 token 查询 fixture 字节和预算不变。
 
 契约迁移完成 release 全量、debug 定向、静态检查与小型功能/完整日志对照。按用户调整后的验收要求，本批评估为低风险，不重复性能或游戏/native 矩阵；详见[契约验收](../reports/refactoring-token-contract-2026-10-19.md)。
+
+随后 SID 的无状态 codec 与九项接口移入专用 [SID adapter](sids.md)，token owner 继续只管理 token 资源及信息查询。

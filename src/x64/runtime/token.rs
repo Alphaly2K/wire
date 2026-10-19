@@ -111,16 +111,6 @@ impl Tokens {
     }
 }
 
-pub(super) fn sid(mem: &Memory, address: u64) -> Result<Vec<u8>, u32> {
-    let mut header = [0; 8];
-    mem.read(address, &mut header).map_err(|_| 1337u32)?;
-    if header[0] != 1 || header[1] > 15 {
-        return Err(1337);
-    }
-    let mut data = vec![0; 8 + header[1] as usize * 4];
-    mem.read(address, &mut data).map_err(|_| 1337u32)?;
-    Ok(data)
-}
 fn information(class: u32, output: u64) -> Result<Vec<u8>, u32> {
     let data = match class {
         18 => 1u32.to_le_bytes().to_vec(), // TokenElevationTypeDefault: no linked elevated token.

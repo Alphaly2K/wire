@@ -40,6 +40,7 @@
 - [Win64 ETW provider 所有权](architecture/tracing.md)及[完整验收](reports/refactoring-etw-owner-2026-10-19.md)：注册、退休、disabled header 边界与私有 owner；三项独立旧行为、12 条性能协议、108 次执行及三对游戏前缀通过。
 - [Win64 token 所有权](architecture/tokens.md)及[完整验收](reports/refactoring-token-owner-2026-10-19.md)：query access、故障顺序、保护关闭与单调句柄；17 条协议、162 次执行、PE32 局部成本调查及三对启动前缀。
 - [token 三项统一契约](reports/refactoring-token-contract-2026-10-19.md)：静态/动态 provider 差异、PE32 ABI-only；累计 716 exports，按影响执行正确性和构建，不重复性能矩阵。
+- [SID 九项契约与适配器](architecture/sids.md)及[验收](reports/refactoring-sid-contract-2026-10-20.md)：显式内存/错误槽、BYTE/DWORD、guard 与提交顺序；累计 725 exports。
 - [Win64 Toolhelp 快照](architecture/snapshots.md)及[完整验收](reports/refactoring-snapshot-owner-2026-10-19.md)：冻结线程值、游标/输出故障、保护关闭；19 条协议、180 次执行及独立累计 IR 复核。
 - [Toolhelp 七项统一契约](reports/refactoring-snapshot-contract-2026-10-19.md)：双架构 provider/ABI 和 typed ID；累计 713 exports，17 个计时协议、162 次执行及三对启动前缀，保留代码别名局部成本。
 - [日历、时区与 CPU 计时调用边界](architecture/calendar.md)及[契约验收](reports/refactoring-calendar-2026-10-16.md)：11 项接口、时区独立模块、宿主 CPU 计时、32 条性能路径及局部成本调查。

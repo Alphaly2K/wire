@@ -211,19 +211,6 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
         && !dll.eq_ignore_ascii_case("kernelbase.dll")
         && !(dll.eq_ignore_ascii_case("shell32.dll")
             && matches!(name, "CommandLineToArgvW" | "SHGetKnownFolderPath"))
-        && !(dll.eq_ignore_ascii_case("advapi32.dll")
-            && matches!(
-                name,
-                "GetSidSubAuthority"
-                    | "GetSidSubAuthorityCount"
-                    | "GetSidIdentifierAuthority"
-                    | "IsValidSid"
-                    | "GetLengthSid"
-                    | "CopySid"
-                    | "EqualSid"
-                    | "GetSidLengthRequired"
-                    | "InitializeSid"
-            ))
         && !(dll.eq_ignore_ascii_case("advapi32.dll") && tracing::is_call(name))
         && !(dll.eq_ignore_ascii_case("advapi32.dll") && registry::arity(name).is_some())
         && !(dll.eq_ignore_ascii_case("ntdll.dll") && unwind::is_call(name))
@@ -262,20 +249,7 @@ fn kernel_export(name: &str) -> bool {
         || name.starts_with("BCrypt")
         || name.starts_with("time")
         || name == "NtQueryDirectoryFile"
-        || matches!(
-            name,
-            "CommandLineToArgvW"
-                | "SHGetKnownFolderPath"
-                | "GetSidSubAuthority"
-                | "GetSidSubAuthorityCount"
-                | "GetSidIdentifierAuthority"
-                | "IsValidSid"
-                | "GetLengthSid"
-                | "CopySid"
-                | "EqualSid"
-                | "GetSidLengthRequired"
-                | "InitializeSid"
-        )
+        || matches!(name, "CommandLineToArgvW" | "SHGetKnownFolderPath")
     {
         return false;
     }
@@ -311,13 +285,6 @@ fn import_arity(name: &str) -> Option<usize> {
         "EventProviderEnabled" => 3,
         "EventWriteTransfer" => 6,
         "FormatMessageA" | "FormatMessageW" => 7,
-        "GetSidSubAuthority" | "EqualSid" => 2,
-        "CopySid" | "InitializeSid" => 3,
-        "GetSidSubAuthorityCount"
-        | "GetSidIdentifierAuthority"
-        | "IsValidSid"
-        | "GetLengthSid"
-        | "GetSidLengthRequired" => 1,
         "SHGetKnownFolderPath" => 4,
         "GetLogicalProcessorInformationEx" => 3,
         "BCryptGenRandom" | "BCryptOpenAlgorithmProvider" => 4,
@@ -369,8 +336,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "EventWriteTransfer" => &[4],
         "EventSetInformation" => &[1, 3],
         "FormatMessageA" | "FormatMessageW" => &[0, 2, 3, 5],
-        "GetSidSubAuthority" => &[1],
-        "CopySid" => &[0],
         "SHGetKnownFolderPath" => &[1],
         "GetLogicalProcessorInformationEx" => &[0],
         "BCryptGenRandom" => &[2, 3],
@@ -824,6 +789,10 @@ impl Runtime64 {
                     }
                 }
             }
+            ApiId::Sid(id) => {
+                let last_error = self.teb() + 0x68;
+                crate::win32::x64::sid::call(mem, id, args, last_error)
+            }
             ApiId::Keyboard(id) => self.keyboard_call(mem, id, args),
             ApiId::Cursor(id) => self.cursor_call(mem, id, args),
             ApiId::Image(id) => self.image_call(mem, id, args),
@@ -1251,74 +1220,6 @@ impl Runtime64 {
             },
             name if tracing::is_call(name) => self.etw.call(mem, name, args)?,
             "FormatMessageA" | "FormatMessageW" => self.format_message(mem, name, args)?,
-            "GetSidSubAuthority"
-            | "GetSidSubAuthorityCount"
-            | "GetSidIdentifierAuthority"
-            | "IsValidSid"
-            | "GetLengthSid"
-            | "GetSidLengthRequired"
-            | "InitializeSid"
-            | "CopySid"
-            | "EqualSid" => {
-                if name == "InitializeSid" && args[2] as u8 <= 15 {
-                    mem.check(args[0], 8 + args[2] as u8 as usize * 4, WRITE)?;
-                    mem.check(args[1], 6, READ)?;
-                }
-                if name == "CopySid" {
-                    if let Ok(sid) = token::sid(mem, args[2]) {
-                        if args[0] >= sid.len() as u64 {
-                            mem.check(args[1], sid.len(), WRITE)?;
-                        }
-                    }
-                }
-                let result = (|| -> Result<u64, u32> {
-                    if name == "GetSidLengthRequired" {
-                        return Ok(8 + (args[0] as u8 as u64) * 4);
-                    }
-                    if name == "InitializeSid" {
-                        let count = args[2] as u8;
-                        if count > 15 {
-                            return Err(87);
-                        }
-                        let mut header = [1, count, 0, 0, 0, 0, 0, 0];
-                        mem.read(args[1], &mut header[2..]).map_err(|_| 1337u32)?;
-                        mem.check(args[0], 8 + count as usize * 4, WRITE)
-                            .map_err(|_| 1337u32)?;
-                        mem.write(args[0], &header).map_err(|_| 1337u32)?;
-                        return Ok(1);
-                    }
-                    let source = if name == "CopySid" { args[2] } else { args[0] };
-                    let sid = token::sid(mem, source)?;
-                    Ok(match name {
-                        "IsValidSid" => 1,
-                        "GetLengthSid" => sid.len() as u64,
-                        "GetSidIdentifierAuthority" => source + 2,
-                        "GetSidSubAuthorityCount" => source + 1,
-                        "GetSidSubAuthority" => {
-                            if args[1] >= sid[1] as u64 {
-                                return Err(87);
-                            }
-                            source + 8 + args[1] * 4
-                        }
-                        "EqualSid" => (sid == token::sid(mem, args[1])?) as u64,
-                        "CopySid" => {
-                            if args[0] < sid.len() as u64 {
-                                return Err(122);
-                            }
-                            mem.write(args[1], &sid).map_err(|_| 1337u32)?;
-                            1
-                        }
-                        _ => unreachable!(),
-                    })
-                })();
-                match result {
-                    Ok(value) => value,
-                    Err(error) => {
-                        self.set_error(mem, error)?;
-                        0
-                    }
-                }
-            }
             _ if matches!(
                 file,
                 Some(
