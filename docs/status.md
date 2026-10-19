@@ -6,6 +6,8 @@
 
 [WMI COM](architecture/wmi.md)随后完成同类收敛：对象 registry 不再临时 take，创建和普通方法只借 gateway table、内存、heap 和 BSTR。release com 过滤 30、完整 Win32 255 及必要构建通过，catalog 数量保持 915。
 
+[DirectSound](architecture/directsound.md)的对象调用随后收窄到 heap 与只读 event/window/Presenter；去掉设备临时 take，保留原 PCM/native pump 和 signal 顺序。release audio 4、mixer 1、完整 Win32 255 及 fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵。
+
 本轮累计接入对话框/窗口枚举 22、菜单 27、GDI 对象/像素/字体 31 项，共 **80 项**，累计 **675 项**。统一声明、typed 分发与领域 owner 保持双架构范围、故障提交和既有不可用策略；保留真实 RedrawWindow 网关与公开 facade 的历史差异。精确标量 SSE 已移入独立编译单元，没有近似浮点或新增 ISA 语义。
 
 随后 **31 项契约**：5 项 paint、2 项 comctl32 初始化、10 项 PE32 资源、5 项双架构启动信息、9 项环境接口，完整正确性及累计性能复核通过，当前共 **706 项**。Unity 渲染结束后重新完成 32 条性能协议、288 次执行及三对游戏启动；原后台干扰轮次保留。实现与冻结见[五项 paint](reports/refactoring-painting-followup-2026-10-19.md)、[控件初始化](reports/refactoring-common-controls-2026-10-19.md)、[资源](reports/refactoring-resources-2026-10-19.md)、[启动信息](reports/refactoring-process-startup-2026-10-19.md)与[环境接口](reports/refactoring-environment-2026-10-19.md)。

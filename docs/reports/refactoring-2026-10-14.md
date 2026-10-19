@@ -566,3 +566,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 PE32 WMI 对象调用
 
 基线 `8aa4165`。对象、refs、cursor 和 vtable 继续由 Wmi 私有拥有，调用只借内存、gateway table、heap 和 BSTR；移除整份 registry 的临时 take。原处理体、创建/输出提交、方法表及 IID 归一核对保持。release com 过滤 30、完整 Win32 255、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵，累计契约仍 **915**。见[WMI 边界](../architecture/wmi.md)，证据 `wire-out/refactoring-2026-10-14/r3-wmi32-{source-checks,verification}.json`。
+
+## R3 PE32 DirectSound 设备借用
+
+基线 `c0d296b`。对象/分配方法显式借 heap、event/window/Presenter 只读前置资源，调用直接借设备，通知 drain 只借 pending/KernelObjects32/Sched。原方法/回滚、buffer codec、混音/native pump 和 ABI parser 核对保持。release audio 4、mixer 1、完整 Win32 255、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵，累计契约仍 **915**。见[DirectSound 边界](../architecture/directsound.md)，证据 `wire-out/refactoring-2026-10-14/r3-dsound32-{source-checks,verification}.json`。

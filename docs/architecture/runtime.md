@@ -23,6 +23,7 @@
 | `graphics`、`d3d9`、`gpu` | 像素/对象核心不依赖 ApiState；DIB/font 仍有 PE32 codec，D3D9/DXGI 的其它 guest COM 适配器后续按领域迁移 |
 | `gdiplus`、`gdiplus::calls` | GdiPlus 私有拥有 matrix/allocation/token；普通调用只借内存和 process heap，公开 dispatch 保留兼容签名 |
 | `wmi`、`wmi::calls` | Wmi 私有拥有 COM 对象、引用计数、游标和 vtable；调用只借内存、gateway table、heap 与 BSTR，provider 和 HRESULT 保持 |
+| `dsound`、`dsound::calls` | DSound 私有拥有对象/buffer、通知和 sink；方法只借内存、gateway、heap 及只读事件/窗口/Presenter，pump 与 signal 次序保持 |
 | `main`、`cli` | main 只收集参数并分发；四个命令模块负责参数、静态 image/IR 操作和架构报表，guest 构造与执行委托 Process32/Process64。结构与命令兼容通过，性能待复核，见 [CLI 边界](cli.md) |
 
 目标依赖方向：CLI → Process → Loader/CPU/ABI adapter；ABI adapter → Win32 领域状态 → 纯算法/host 服务。共享 ISA 语义不依赖 Win32 或 host；host 产出事件，由 Process/USER 消费，host callback 不运行 guest CPU。
