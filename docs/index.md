@@ -77,6 +77,8 @@
 - [R7 CLI 候选](reports/refactoring-cli-2026-10-19.md)：六个函数逐体迁移和 19 组命令兼容通过；性能对照大幅漂移，源码已精确撤回，候选冻结保留。
 - [R7 离线 inventory](reports/refactoring-inventory-2026-10-19.md)：PE/CLR 解析、运行轨迹和扫描报表各归其职，旧入口保留，24 项工具检查及机器报告对照通过。
 - [R7 CPU profile 工具](reports/refactoring-profile-tools-2026-10-19.md)：实现归入 perf 包，旧入口与 mock 保持，真实采样的 JSON/折叠栈/火焰图逐字节对照通过。
+- [R7 native 图形探针](reports/refactoring-native-probes-2026-10-19.md)：七个旧入口保留，13 个 C ABI 布局集中；三项真实 native 执行与 11 个输出对照通过。
+- [五项 paint 后续基线](reports/refactoring-painting-followup-2026-10-19.md)：独立 provider/清栈/返回 frame 测试通过；同二进制控制仍离散，暂缓运行时迁移。
 - [PE32 kernel 候选拒绝记录](reports/refactoring-pe32-kernel-rejected-2026-10-14.md)：独立资源故障基线、性能回退调查及运行时代码撤回。
 - [IR 执行器布局隔离](reports/refactoring-ir-layout-2026-10-14.md)：macOS 固定对齐、机器码证据与独立性能验收。
 - [原生 Mono 撤回](mono-native-rollback-2026-10-14.md)：保留通用优化，继续执行原始 guest Mono。

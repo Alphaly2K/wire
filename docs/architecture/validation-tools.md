@@ -19,7 +19,7 @@ python3 -B tools/freeze_interpreter.py --binary target/release/wire --out wire-o
 python3 -B -m unittest discover -s tools -p 'test_*.py'
 ```
 
-PE32、AMD64 和 V2 的公开脚本入口保持不变，正式 fixture 位于 `tools/perf/fixtures/`。native/probe 和 inventory 的现有入口仍保留；native source、FFI 和 third_party 构建路径没有搬动。本页描述当前工具边界，后续领域迁移仍需独立验收。
+PE32、AMD64 和 V2 的公开脚本入口保持不变，正式 fixture 位于 `tools/perf/fixtures/`。native/probe 和 inventory 的兼容入口仍保留；native source、FFI 和 third_party 构建路径没有搬动。本页描述当前工具边界，后续领域迁移仍需独立验收。
 
 2026-10-15：PE32 和 AMD64 测量入口均接受可选 `--qos-clamp utility|background|maintenance`，通过 macOS taskpolicy 对每个被测 child 施加同样的调度上限；默认不改变 QoS。manifest 明确记录模式与 taskpolicy hash，逐轮 command 保留 wrapper，不把受控调度结果混成默认前台吞吐量。
 
@@ -51,5 +51,7 @@ capture/compare 可显式传 `--headless --discard-api-log`，匹配 headless/nu
 python3 -B tools/cpu_profile.py capture fixture.exe --binary frozen/wire --ir fixture.wir --out wire-out/new-profile --headless --discard-api-log
 python3 -B tools/cpu_profile.py summarize wire-out/new-profile/run-0/sample.txt --out wire-out/new-profile-summary
 ```
+
+七个独立 native 图形探针实现归入 `tools/probes/`，共享 C ABI 布局在 `abi.py`，各探针保留自己的输入、失败断言及清理顺序。旧 `tools/probe_*.py` 脚本及导入继续委托同一实际模块；新入口可用 `python3 -B -m tools.probes.present --help` 等命令。Present 的 AppKit 源码按仓库根定位，MoltenVK 的 C 探针仍在 tools 根，不受调用工作目录影响。13 个 ABI 布局、三项真实 native 报告与 11 个 shader/像素输出对照通过；缺失外部 SDK/validator 的未重跑项目见 [native 探针验收](../reports/refactoring-native-probes-2026-10-19.md)。当前工具测试 26 项。
 
 100M 的 AMD64 event 输入 SHA 从 `e95a32dce6313767263432f4df1ab8106745bf24526597ad643d7ceb0b961441` 变为 `f538f2f83f97fbc7152cf9f3bb8628f8663efea3306aaa937374ae194ffaf1b2`。旧正式数据与校验保留，后续使用修正输入独立配对，不跨哈希合并。本次仅修工具，没有修改运行时。
