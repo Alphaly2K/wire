@@ -785,6 +785,67 @@ mod tests {
         m.read_int(DATA + 32, 8).unwrap()
     }
     #[test]
+    fn graphics_export_baseline_preserves_provider_visibility_and_scalar_abi() {
+        use super::super::gateways::BoundImport;
+        for (name, provider, arity, dwords) in [
+            ("CreateDXGIFactory", "dxgi.dll", 2, &[][..]),
+            ("CreateDXGIFactory1", "dxgi.dll", 2, &[][..]),
+            ("CreateDXGIFactory2", "dxgi.dll", 3, &[0][..]),
+            ("D3D12CreateDevice", "d3d12.dll", 4, &[1][..]),
+            ("D3D12GetDebugInterface", "d3d12.dll", 2, &[][..]),
+            ("D3D11CreateDevice", "d3d11.dll", 10, &[1, 3, 5, 6][..]),
+            (
+                "D3D11CreateDeviceAndSwapChain",
+                "d3d11.dll",
+                12,
+                &[1, 3, 5, 6][..],
+            ),
+        ] {
+            for dll in [
+                "kernel32.dll",
+                "KERNELBASE.DLL",
+                "wire.dxgi",
+                "WIRE.DXGI",
+                "dxgi.dll",
+                "d3d11.dll",
+                "d3d12.dll",
+                "ntdll.dll",
+            ] {
+                let binding = BoundImport::from_parts(dll, name);
+                assert_eq!(binding.arity, Some(arity));
+                assert_eq!(binding.dwords, dwords);
+                assert_eq!(
+                    binding.supported,
+                    matches!(dll, "kernel32.dll" | "KERNELBASE.DLL" | "wire.dxgi")
+                        || dll == provider,
+                    "{dll}!{name}",
+                );
+            }
+            for dll in [
+                "kernel32.dll",
+                "kernelbase.dll",
+                "dxgi.dll",
+                "d3d11.dll",
+                "d3d12.dll",
+            ] {
+                let (mut r, mut m) = setup();
+                let module = r.native_module(dll, true).unwrap();
+                m.write(DATA + 128, format!("{name}\0").as_bytes()).unwrap();
+                let address =
+                    call(&mut r, &mut m, "GetProcAddress", &[module, DATA + 128]).unwrap();
+                assert_eq!(address != 0, dll == provider, "{dll}!{name}");
+                if dll == "kernel32.dll" {
+                    // A previously installed gateway remains discoverable.
+                    let registered = r.register(dll, name);
+                    assert_eq!(
+                        call(&mut r, &mut m, "GetProcAddress", &[module, DATA + 128]).unwrap(),
+                        registered
+                    );
+                }
+            }
+        }
+    }
+    #[test]
     fn blend_state_validates_only_active_target_and_enabled_factors() {
         let (mut r, mut m) = setup();
         let device = r.dxgi_object(&mut m, Kind::Device, 0).unwrap();

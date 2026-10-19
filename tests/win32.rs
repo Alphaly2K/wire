@@ -51,6 +51,8 @@ mod gdi_contract;
 mod gdiplus;
 #[path = "win32/geometry_contract.rs"]
 mod geometry_contract;
+#[path = "win32/graphics_contract.rs"]
+mod graphics_contract;
 #[path = "win32/guid_allocation.rs"]
 mod guid_allocation;
 #[path = "win32/handles.rs"]
