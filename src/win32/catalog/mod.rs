@@ -46,6 +46,7 @@ mod registry;
 mod resources;
 mod sids;
 mod snapshots;
+mod sspi;
 mod sync_objects;
 mod system_profile;
 mod thread_control;
@@ -109,6 +110,7 @@ pub use registry::{RegistryApi, REGISTRY_CONTRACTS};
 pub use resources::{ResourceApi, RESOURCE_CONTRACTS};
 pub use sids::{SidApi, SID_CONTRACTS};
 pub use snapshots::{SnapshotApi, SNAPSHOT_CONTRACTS};
+pub use sspi::{SspiApi, SSPI_CONTRACTS};
 pub use sync_objects::{SyncObjectApi, SYNC_OBJECT_CONTRACTS};
 pub use system_profile::{SystemProfileApi, SYSTEM_PROFILE_CONTRACTS};
 pub use thread_control::{ThreadControlApi, THREAD_CONTROL_CONTRACTS};
@@ -224,6 +226,7 @@ pub enum ApiId {
     Etw(EtwApi),
     Registry(RegistryApi),
     Bcrypt(BcryptApi),
+    Sspi(SspiApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -426,6 +429,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         &ETW_CONTRACTS,
         &REGISTRY_CONTRACTS,
         &BCRYPT_CONTRACTS,
+        &SSPI_CONTRACTS,
     ];
     FAMILIES.iter().flat_map(|family| family.iter())
 }

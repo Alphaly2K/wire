@@ -123,7 +123,7 @@ pub struct Runtime64 {
     files: files::Files,
     mappings: mapping::Mappings,
     winsock_refs: u32,
-    security_tables: [u64; 2],
+    security: sspi::Security,
     graphics: dxgi::Graphics,
     registry: registry::Registry,
     user: user::User,
@@ -215,7 +215,6 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
         && !(dll.eq_ignore_ascii_case("ntdll.dll") && unwind::is_call(name))
         && !(dll.eq_ignore_ascii_case("ntdll.dll") && name == "NtQueryDirectoryFile")
         && !(dll.eq_ignore_ascii_case("ws2_32.dll") && sockets::is_call(name))
-        && !(dll.eq_ignore_ascii_case("secur32.dll") && sspi::arity(name).is_some())
         && !(dll.eq_ignore_ascii_case("dxgi.dll") && dxgi::export(name))
         && !(dll.eq_ignore_ascii_case("d3d12.dll") && dxgi::d3d12_export(name))
         && !(dll.eq_ignore_ascii_case("d3d11.dll") && dxgi::d3d11_export(name))
@@ -236,7 +235,6 @@ fn kernel_export(name: &str) -> bool {
     if devices::arity(name).is_some()
         || winhttp::arity(name).is_some()
         || sockets::is_call(name)
-        || sspi::arity(name).is_some()
         || dxgi::arity(name).is_some()
         || name.starts_with("time")
         || name == "NtQueryDirectoryFile"
@@ -255,7 +253,6 @@ fn import_arity(name: &str) -> Option<usize> {
         name if sockets::arity(name).is_some() => sockets::arity(name).unwrap(),
         name if devices::arity(name).is_some() => devices::arity(name).unwrap(),
         name if dxgi::arity(name).is_some() => dxgi::arity(name).unwrap(),
-        name if sspi::arity(name).is_some() => sspi::arity(name).unwrap(),
         "GetSystemDirectoryA"
         | "GetSystemDirectoryW"
         | "GetWindowsDirectoryA"
@@ -302,7 +299,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         name if sockets::arity(name).is_some() => sockets::dwords(name),
         name if devices::arity(name).is_some() => devices::dwords(name),
         name if dxgi::arity(name).is_some() => dxgi::dwords(name),
-        name if sspi::arity(name).is_some() => sspi::dwords(name),
         "GetSystemDirectoryA"
         | "GetSystemDirectoryW"
         | "GetWindowsDirectoryA"
@@ -343,7 +339,7 @@ fn import_groups(name: &str) -> u32 {
         false, // scalar window controls moved to catalog; preserve bit positions
         false, // registry moved to catalog typed IDs; preserve legacy bit positions
         false, // display moved to catalog typed/control IDs; preserve bit positions
-        sspi::arity(name).is_some(),
+        false, // SSPI moved to catalog typed IDs; preserve legacy bit positions
         sockets::is_call(name),
         false, // timers moved to catalog typed IDs; preserve legacy bit positions
     ];
@@ -436,7 +432,7 @@ impl Runtime64 {
             files: files::Files::default(),
             mappings: mapping::Mappings::default(),
             winsock_refs: 0,
-            security_tables: [0; 2],
+            security: sspi::Security::default(),
             graphics: dxgi::Graphics::default(),
             registry: registry::Registry::default(),
             user: user::User::default(),
@@ -641,14 +637,7 @@ impl Runtime64 {
         self.modules.register_provider(name);
     }
     pub fn register(&mut self, dll: &str, name: &str) -> u64 {
-        let name = bstr_symbol(dll, dxgi::symbol(dll, sockets::symbol(dll, name)));
-        let export = format!("{dll}!{name}");
-        if let Some((&address, _)) = self.gateways.iter().find(|(_, value)| **value == export) {
-            return address;
-        }
-        let address = 0x7ffe00000000 + self.gateways.len() as u64 * 16;
-        self.gateways.insert(address, export);
-        address
+        self.gateways.register(dll, name)
     }
     fn heap_alloc(&mut self, mem: &mut Memory, size: u64) -> Result<u64, String> {
         if size > 16 * 1024 * 1024 {
@@ -766,6 +755,10 @@ impl Runtime64 {
             ApiId::Etw(id) => self.etw.call(mem, id, args),
             ApiId::Registry(id) => self.registry.call(mem, id, args),
             ApiId::Bcrypt(id) => self.rng.call(mem, id, args),
+            ApiId::Sspi(id) => {
+                self.security
+                    .call(mem, id, args, &mut self.next_alloc, &mut self.gateways)
+            }
             ApiId::Keyboard(id) => self.keyboard_call(mem, id, args),
             ApiId::Cursor(id) => self.cursor_call(mem, id, args),
             ApiId::Image(id) => self.image_call(mem, id, args),
@@ -1065,7 +1058,6 @@ impl Runtime64 {
                     });
                 }
             }
-            _ if binding.groups & (1 << 13) != 0 => self.security_call(mem, name, args)?,
             "GetSystemDirectoryA"
             | "GetSystemDirectoryW"
             | "GetWindowsDirectoryA"

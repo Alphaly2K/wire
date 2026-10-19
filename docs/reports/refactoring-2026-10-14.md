@@ -470,3 +470,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R2/R3 BCrypt RNG
 
 独立基线 `19517df` 固定 provider、DWORD trace、全宽复用句柄和容量/输出故障顺序。三项契约与私有 RNG owner 接入，原 OS entropy/handler 经归一核对保持；catalog 的第 64 族触发类型递归上限后改为静态分组迭代，原家族顺序保持。相关 release 3、catalog 一致性、fmt/strict Clippy/build 通过，公共 catalog 另做一次整合正确性回归；不跑性能矩阵。累计 **753 exports**，见[验收](refactoring-bcrypt-2026-10-20.md)。
+
+## R2/R3 SSPI
+
+独立基线 `613383c` 固定 34 项静态/动态 provider 与 gateway fallback。统一 SspiApi、私有 A/W 函数表 owner 和 Gateways 冷注册接入，34 项 arity/DWORD 与原表逐项一致，原函数表主体归一核对保持。release Win64 264、网关单元/catalog 一致性及 fmt/strict Clippy/build 通过，不跑性能或无关游戏/native 矩阵。累计 **787 exports**，见[验收](refactoring-sspi-2026-10-20.md)。

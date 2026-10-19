@@ -172,6 +172,16 @@ impl From<BTreeMap<u64, String>> for Gateways {
 }
 
 impl Gateways {
+    pub(crate) fn register(&mut self, dll: &str, name: &str) -> u64 {
+        let name = super::normalize_symbol(dll, name);
+        let export = format!("{dll}!{name}");
+        if let Some((&address, _)) = self.iter().find(|(_, value)| **value == export) {
+            return address;
+        }
+        let address = 0x7ffe00000000 + self.len() as u64 * 16;
+        self.insert(address, export);
+        address
+    }
     pub(crate) fn has_entry(&self, start: u64, end: u64) -> bool {
         if end <= start || end <= self.first || start > self.last {
             return false;

@@ -1,5 +1,5 @@
 //! Queries describe loaded guest images and the logical built-in service providers.
-use super::{devices, dxgi, kernel_export, sockets, sspi, unwind, winhttp};
+use super::{devices, dxgi, kernel_export, sockets, unwind, winhttp};
 use super::{Memory, Runtime64, WRITE};
 
 /// Module adapters request control; the gateway owns CPU, trace and count commits.
@@ -146,7 +146,6 @@ impl Runtime64 {
                         ) && unwind::is_call(&function))
                         || (provider == "ntdll.dll" && function == "NtQueryDirectoryFile")
                         || (provider == "ws2_32.dll" && sockets::is_call(&function))
-                        || (provider == "secur32.dll" && sspi::arity(&function).is_some())
                         || (provider == "dxgi.dll" && dxgi::export(&function))
                         || (provider == "d3d12.dll" && dxgi::d3d12_export(&function))
                         || (provider == "d3d11.dll" && dxgi::d3d11_export(&function))
