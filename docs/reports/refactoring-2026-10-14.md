@@ -474,3 +474,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R2/R3 SSPI
 
 独立基线 `613383c` 固定 34 项静态/动态 provider 与 gateway fallback。统一 SspiApi、私有 A/W 函数表 owner 和 Gateways 冷注册接入，34 项 arity/DWORD 与原表逐项一致，原函数表主体归一核对保持。release Win64 264、网关单元/catalog 一致性及 fmt/strict Clippy/build 通过，不跑性能或无关游戏/native 矩阵。累计 **787 exports**，见[验收](refactoring-sspi-2026-10-20.md)。
+
+## R2 WinHTTP 五项契约
+
+基线 `1bd3adf` 的既有 proxy/transport 回归已通过，五项声明汇入 WinHttpApi，handler 迁入无状态受检适配器并删除原 runtime 模块。相关 release 1、catalog 一致性和 fmt/strict Clippy/build 通过；按低风险评估不新增重复测试或性能矩阵。累计 **792 exports**，见[边界与验收](../architecture/winhttp.md)。

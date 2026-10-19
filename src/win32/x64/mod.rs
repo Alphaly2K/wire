@@ -16,3 +16,4 @@ pub(crate) mod system_profile;
 pub(crate) mod text;
 pub(crate) mod version;
 pub(crate) mod virtual_memory;
+pub(crate) mod winhttp;

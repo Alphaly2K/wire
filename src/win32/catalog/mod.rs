@@ -62,6 +62,7 @@ mod waits;
 mod window_control;
 mod window_queries;
 mod window_state;
+mod winhttp;
 mod winrt;
 pub use address_waits::{AddressWaitApi, ADDRESS_WAIT_CONTRACTS};
 pub use basic_strings::{BasicStringApi, BASIC_STRING_CONTRACTS};
@@ -126,6 +127,7 @@ pub use waits::{WaitApi, WAIT_CONTRACTS};
 pub use window_control::{WindowControlApi, WINDOW_CONTROL_CONTRACTS};
 pub use window_queries::{WindowQueryApi, WINDOW_QUERY_CONTRACTS};
 pub use window_state::{WindowStateApi, WINDOW_STATE_CONTRACTS};
+pub use winhttp::{WinHttpApi, WINHTTP_CONTRACTS};
 pub use winrt::{WinrtApi, WINRT_CONTRACTS};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -227,6 +229,7 @@ pub enum ApiId {
     Registry(RegistryApi),
     Bcrypt(BcryptApi),
     Sspi(SspiApi),
+    WinHttp(WinHttpApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -430,6 +433,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         &REGISTRY_CONTRACTS,
         &BCRYPT_CONTRACTS,
         &SSPI_CONTRACTS,
+        &WINHTTP_CONTRACTS,
     ];
     FAMILIES.iter().flat_map(|family| family.iter())
 }

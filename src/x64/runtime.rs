@@ -53,7 +53,6 @@ pub(crate) enum WindowStep {
     Next(u64, [u64; 4]),
     Returned(u64),
 }
-mod winhttp;
 mod winrt;
 
 pub const TEB: u64 = 0x7ffd00000000;
@@ -199,9 +198,6 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
     if name == "NtQueryDirectoryFile" && !dll.eq_ignore_ascii_case("ntdll.dll") {
         return false;
     }
-    if winhttp::arity(name).is_some() && !winhttp::export(dll, name) {
-        return false;
-    }
     if sockets::is_call(name) && !dll.eq_ignore_ascii_case("ws2_32.dll") {
         return false;
     }
@@ -220,7 +216,6 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
         && !(dll.eq_ignore_ascii_case("d3d11.dll") && dxgi::d3d11_export(name))
         && !(dll == dxgi::DLL && dxgi::arity(name).is_some())
         && !devices::export(dll, name)
-        && !winhttp::export(dll, name)
     {
         return false;
     }
@@ -233,7 +228,6 @@ fn kernel_export(name: &str) -> bool {
             .contains(&"kernel32.dll");
     }
     if devices::arity(name).is_some()
-        || winhttp::arity(name).is_some()
         || sockets::is_call(name)
         || dxgi::arity(name).is_some()
         || name.starts_with("time")
@@ -249,7 +243,6 @@ fn import_arity(name: &str) -> Option<usize> {
         return Some(contract.parameters.len());
     }
     Some(match name {
-        name if winhttp::arity(name).is_some() => winhttp::arity(name).unwrap(),
         name if sockets::arity(name).is_some() => sockets::arity(name).unwrap(),
         name if devices::arity(name).is_some() => devices::arity(name).unwrap(),
         name if dxgi::arity(name).is_some() => dxgi::arity(name).unwrap(),
@@ -295,7 +288,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         return contract.win64_dwords();
     }
     match name {
-        name if winhttp::arity(name).is_some() => winhttp::dwords(name),
         name if sockets::arity(name).is_some() => sockets::dwords(name),
         name if devices::arity(name).is_some() => devices::dwords(name),
         name if dxgi::arity(name).is_some() => dxgi::dwords(name),
@@ -327,7 +319,7 @@ fn import_dwords(name: &str) -> &'static [usize] {
 fn import_groups(name: &str) -> u32 {
     let predicates = [
         false, // BSTR moved to catalog typed IDs; preserve legacy bit positions
-        winhttp::arity(name).is_some(),
+        false, // WinHTTP moved to catalog typed IDs; preserve legacy bit positions
         devices::arity(name).is_some(),
         false, // message queues moved to catalog control IDs; preserve bit positions
         false, // identity moved to catalog typed IDs; preserve legacy bit positions
@@ -759,6 +751,10 @@ impl Runtime64 {
                 self.security
                     .call(mem, id, args, &mut self.next_alloc, &mut self.gateways)
             }
+            ApiId::WinHttp(id) => {
+                let last_error = self.teb() + 0x68;
+                crate::win32::x64::winhttp::call(mem, id, args, last_error)
+            }
             ApiId::Keyboard(id) => self.keyboard_call(mem, id, args),
             ApiId::Cursor(id) => self.cursor_call(mem, id, args),
             ApiId::Image(id) => self.image_call(mem, id, args),
@@ -993,7 +989,6 @@ impl Runtime64 {
                     }
                 }
             }
-            _ if binding.groups & (1 << 1) != 0 => self.winhttp_call(mem, name, args)?,
             _ if binding.groups & (1 << 2) != 0 => self.device_call(mem, name, args)?,
             _ if matches!(binding.control, gateways::ControlImport::Message(id) if !id.dispatch()) =>
             {

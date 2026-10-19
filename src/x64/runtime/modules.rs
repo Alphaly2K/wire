@@ -1,5 +1,5 @@
 //! Queries describe loaded guest images and the logical built-in service providers.
-use super::{devices, dxgi, kernel_export, sockets, unwind, winhttp};
+use super::{devices, dxgi, kernel_export, sockets, unwind};
 use super::{Memory, Runtime64, WRITE};
 
 /// Module adapters request control; the gateway owns CPU, trace and count commits.
@@ -160,7 +160,6 @@ impl Runtime64 {
                                     .contains(&provider.as_str())
                         )
                         || devices::export(&provider, &function)
-                        || winhttp::export(&provider, &function)
                         || (matches!(provider.as_str(), "kernel32.dll" | "kernelbase.dll")
                             && matches!(
                                 function.as_str(),
