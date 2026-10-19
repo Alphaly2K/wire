@@ -538,3 +538,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 PE32 同步与等待窄适配
 
 基线 `847dd25`。event/semaphore/mutex 适配器仅借对象、调度器、内存及错误槽，readiness/acquire/wake 与 DirectSound signal 仅借对象和调度器；命名对象的 LastError 策略由同一适配入口维护。原同步主体、四个对象 helper、命名复用与 wait 控制流程归一核对保持。release 完整 Win32 249、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵。累计 export 仍 **888**，证据为 `wire-out/refactoring-2026-10-14/r3-sync32-{source-checks,verification}.json`，见[等待边界](../architecture/waits.md)。
+
+## R3 PE32 CRT 普通语义窄适配
+
+基线 `b28ecc6`。memory/string/time 仅借内存，CRT heap 仅借 allocator 与 process heap，启动 accessor 与 strtoul 由 CrtState32 显式借 scratch/error/线程资源。原普通算法、分配、启动、errno 顺序、FPU/qsort/data export/initializer 和 gateway 主体归一核对保持。release CRT 8、完整 Win32 249、fmt/release lib/bin strict Clippy/build 通过，不跑性能。没有扩大 CRT 能力或新增 catalog 计数，累计 export 仍 **888**，证据为 `wire-out/refactoring-2026-10-14/r3-crt-scalar32-{source-checks,verification}.json`，见[CRT 边界](../architecture/crt32.md)。

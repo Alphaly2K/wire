@@ -60,7 +60,7 @@
 - [PE32 kernel 对象](architecture/kernel-objects32.md)：原 HANDLE 表、命名索引和分配位置归入私有 owner，保留同名与关闭寿命；完整 Win32 回归通过。
 - [PE32 文件 adapter](architecture/files.md)：文件/path 处理体只借 filesystem、对象和错误槽，旧公开入口保留；两种架构共享 kernel wildcard。
 - [PE32 ABI 来源](architecture/abi.md)：spec、31 条显式例外与原未知/CRT 策略集中到 win32::abi，删除 270 条根表重复声明。
-- [PE32 scratch 与 CRT](architecture/crt32.md)：私有游标、每线程 errno、懒 argv/envp 和 app type，独立固定耗尽及部分提交顺序。
+- [PE32 scratch 与 CRT](architecture/crt32.md)：私有指针 owner、普通内存/字符串、堆和启动适配器，保留 CPU/callback 边界及故障提交顺序。
 - [PE32 同步与等待适配](architecture/waits.md)：event/semaphore/mutex 与对象 readiness/acquire/wake 仅借明确资源，音频通知复用同一对象操作。
 - [Win64 Toolhelp 快照](architecture/snapshots.md)及[完整验收](reports/refactoring-snapshot-owner-2026-10-19.md)：冻结线程值、游标/输出故障、保护关闭；19 条协议、180 次执行及独立累计 IR 复核。
 - [Toolhelp 七项统一契约](reports/refactoring-snapshot-contract-2026-10-19.md)：双架构 provider/ABI 和 typed ID；累计 713 exports，17 个计时协议、162 次执行及三对启动前缀，保留代码别名局部成本。

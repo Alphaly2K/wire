@@ -14,7 +14,7 @@ use crate::win32::x86::object_waits::{obj_acquire, obj_ready};
 use std::collections::HashMap;
 pub type Args = [u32; 16];
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 pub use crate::runtime::api_log::ApiLogger;
 pub use crate::win32::kernel::objects32::{HandleObj, KernelObjects32};
@@ -1740,63 +1740,6 @@ fn crt_dispatch(
         return Ok(None);
     }
     let r = match name {
-        "time" | "_time32" => {
-            let n = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(|e| e.to_string())?
-                .as_secs();
-            let value = if n > i32::MAX as u64 {
-                u32::MAX
-            } else {
-                n as u32
-            };
-            if args[0] != 0 {
-                mem.write_u32(args[0], value).map_err(|e| e.to_string())?;
-            }
-            value
-        }
-        "_mbsinc" => {
-            let first = mem.read_u8(args[0]).map_err(|e| e.to_string())?;
-            let lead = matches!(first, 0x81..=0x9f | 0xe0..=0xfc);
-            let pair = lead
-                && mem
-                    .read_u8(args[0].checked_add(1).ok_or("_mbsinc address overflow")?)
-                    .map_err(|e| e.to_string())?
-                    != 0;
-            args[0]
-                .checked_add(if pair { 2 } else { 1 })
-                .ok_or("_mbsinc address overflow")?
-        }
-        "_mbsnbcpy" => {
-            // Hangover Wine mbcs.c, LGPL-2.1-or-later, Alexandre Julliard
-            // (1999), Jon Griffths (2000). Checked CP932 guest adaptation.
-            if args[2] == 0 {
-                return Ok(Some(crate::cpu::GuestCallOutcome::Returned(args[0])));
-            }
-            if args[2] > 1 << 26 {
-                return Err("_mbsnbcpy size too large".into());
-            }
-            let mut bytes = vec![0; args[2] as usize];
-            let mut lead = false;
-            let mut copied = 0;
-            for i in 0..args[2] {
-                let b = mem
-                    .read_u8(args[1].checked_add(i).ok_or("_mbsnbcpy address overflow")?)
-                    .map_err(|e| e.to_string())?;
-                if b == 0 {
-                    break;
-                }
-                lead = !lead && matches!(b, 0x81..=0x9f | 0xe0..=0xfc);
-                bytes[i as usize] = b;
-                copied += 1;
-            }
-            if lead {
-                bytes[copied - 1] = 0;
-            }
-            mem.write_bytes(args[0], &bytes)
-                .map_err(|e| e.to_string())?;
-            args[0]
-        }
         "_errno" => state.errno_address(mem, sched.current_tid())?,
         "_ftol" | "_ftol2" | "_ftol2_sse" => {
             let result = cpu.fpu.crt_ftol();
@@ -1834,42 +1777,10 @@ fn crt_dispatch(
             )
             .map(Some)
         }
-        "__acrt_iob_func" => state
-            .scratch_alloc(mem, 0x100, 16)
-            .wrapping_add(args[0].wrapping_mul(0x40)),
-        "__set_app_type" => {
-            state.crt.set_app_type(args[0]);
-            0
-        }
         "__p__fmode" | "__p__commode" | "__p___argc" | "__p__timezone" | "__p__daylight"
         | "__p__acmdln" | "__p__wcmdln" => api
             .data_export(mem, dll, &name[4..], state.cmdline_a, state.cmdline_w)?
             .ok_or("unknown CRT data accessor")?,
-        "__p___argv" | "__p___wargv" => {
-            let p = state.scratch_alloc(mem, 4, 4);
-            let (_, argv, _) = state.build_argv(mem);
-            mem.write_u32(p, argv).map_err(|e| e.to_string())?;
-            p
-        }
-        "__p__environ" | "__p__wenviron" | "__p___initenv" | "__p___winitenv" => {
-            let p = state.scratch_alloc(mem, 4, 4);
-            let (_, _, envp) = state.build_argv(mem);
-            mem.write_u32(p, envp).map_err(|e| e.to_string())?;
-            p
-        }
-        "__p__pgmptr" | "__p__wpgmptr" => {
-            let p = state.scratch_alloc(mem, 4, 4);
-            mem.write_u32(p, state.cmdline_a)
-                .map_err(|e| e.to_string())?;
-            p
-        }
-        "__getmainargs" => {
-            let (argc, argv, envp) = state.build_argv(mem);
-            mem.write_u32(args[0], argc).map_err(|e| e.to_string())?;
-            mem.write_u32(args[1], argv).map_err(|e| e.to_string())?;
-            mem.write_u32(args[2], envp).map_err(|e| e.to_string())?;
-            0
-        }
         "_initterm" | "_initterm_e" => {
             // Walk an array of guest function pointers and call each
             // non-null initializer (C++ static ctors / C initializers).
@@ -1891,237 +1802,42 @@ fn crt_dispatch(
             }
             first_err
         }
-        "_initialize_narrow_environment"
-        | "_initialize_wide_environment"
-        | "_configure_narrow_argv"
-        | "_configure_wide_argv"
-        | "_initialize_onexit_table"
-        | "_register_onexit_function"
-        | "_crt_atexit"
-        | "_crt_at_quick_exit"
-        | "_set_invalid_parameter_handler"
-        | "_set_app_type"
-        | "_set_fmode"
-        | "_set_new_mode"
-        | "setvbuf"
-        | "_crt_debugger_hook"
-        | "_controlfp_s"
-        | "_lock"
-        | "_unlock"
-        | "__setusermatherr"
-        | "_register_thread_local_exe_atexit_callback" => 0,
-        "malloc" => state.heap.alloc(mem, state.process_heap, args[0], false)?,
-        "calloc" => match args[0].checked_mul(args[1]) {
-            Some(n) => state.heap.alloc(mem, state.process_heap, n, true)?,
-            None => 0,
-        },
-        "realloc" => {
-            if args[0] == 0 {
-                state.heap.alloc(mem, state.process_heap, args[1], false)?
-            } else if args[1] == 0 {
-                state.heap.free(state.process_heap, args[0]);
-                0
-            } else {
-                state
-                    .heap
-                    .realloc(mem, state.process_heap, args[0], args[1], 0)?
-            }
-        }
-        "free" | "_free_dbg" => {
-            state.heap.free(state.process_heap, args[0]);
-            0
-        }
-        "memcpy" | "memmove" => {
-            let n = (args[2] as usize).min(1 << 26);
-            let mut tmp = vec![0u8; n];
-            mem.read_bytes(args[1], &mut tmp)
-                .map_err(|e| e.to_string())?;
-            mem.write_bytes(args[0], &tmp).map_err(|e| e.to_string())?;
-            args[0]
-        }
-        "memset" => {
-            let n = (args[2] as usize).min(1 << 26);
-            let tmp = vec![args[1] as u8; n];
-            mem.write_bytes(args[0], &tmp).map_err(|e| e.to_string())?;
-            args[0]
-        }
-        "memcmp" => {
-            if args[2] == 0 {
-                0
-            } else {
-                if args[2] > 1 << 26 {
-                    return Err("memcmp range too large".into());
-                }
-                let left = mem
-                    .ptr(args[0], args[2], false)
-                    .map_err(|e| e.to_string())?;
-                let right = mem
-                    .ptr(args[1], args[2], false)
-                    .map_err(|e| e.to_string())?;
-                // Both complete ranges are checked, and no guest callback or
-                // mutation can invalidate the backing during comparison.
-                let (left, right) = unsafe {
-                    (
-                        std::slice::from_raw_parts(left, args[2] as usize),
-                        std::slice::from_raw_parts(right, args[2] as usize),
-                    )
-                };
-                left.iter()
-                    .zip(right)
-                    .find_map(|(&a, &b)| (a != b).then_some((a as i32 - b as i32) as u32))
-                    .unwrap_or(0)
-            }
-        }
-        "toupper" | "tolower" => {
-            // The current CRT supports the default C locale. Values outside
-            // ASCII (including EOF) retain their exact integer value.
-            match (name, args[0]) {
-                ("toupper", 0x61..=0x7a) => args[0] - 32,
-                ("tolower", 0x41..=0x5a) => args[0] + 32,
-                _ => args[0],
-            }
-        }
-        "strcmp" | "strncmp" => {
-            let limit = if name == "strncmp" { args[2] } else { u32::MAX };
-            let mut result = 0;
-            for i in 0..limit {
-                let left = mem
-                    .read_u8(args[0].checked_add(i).ok_or("strcmp address overflow")?)
-                    .map_err(|e| e.to_string())?;
-                let right = mem
-                    .read_u8(args[1].checked_add(i).ok_or("strcmp address overflow")?)
-                    .map_err(|e| e.to_string())?;
-                if left != right {
-                    result = (left as i32 - right as i32) as u32;
-                    break;
-                }
-                if left == 0 {
-                    break;
-                }
-            }
-            result
-        }
-        "_strdup" | "strdup" => {
-            let mut bytes = Vec::new();
-            for i in 0..1 << 20 {
-                let b = mem
-                    .read_u8(args[0].checked_add(i).ok_or("strdup address overflow")?)
-                    .map_err(|e| e.to_string())?;
-                bytes.push(b);
-                if b == 0 {
-                    break;
-                }
-            }
-            if bytes.last() != Some(&0) {
-                return Err("unterminated strdup source".into());
-            }
-            let p = state
-                .heap
-                .alloc(mem, state.process_heap, bytes.len() as u32, false)?;
-            if p != 0 {
-                mem.write_bytes(p, &bytes).map_err(|e| e.to_string())?;
-            }
-            p
-        }
-        "strtoul" => {
-            let mut bytes = Vec::new();
-            let mut terminated = false;
-            for i in 0..1 << 20 {
-                let b = mem
-                    .read_u8(args[0].checked_add(i).ok_or("strtoul address overflow")?)
-                    .map_err(|e| e.to_string())?;
-                if b == 0 {
-                    terminated = true;
-                    break;
-                }
-                bytes.push(b);
-            }
-            if !terminated {
-                return Err("unterminated strtoul source".into());
-            }
-            let digit = |b: u8| match b {
-                b'0'..=b'9' => Some((b - b'0') as u32),
-                b'a'..=b'z' => Some((b - b'a' + 10) as u32),
-                b'A'..=b'Z' => Some((b - b'A' + 10) as u32),
-                _ => None,
-            };
-            let mut pos = 0;
-            while bytes.get(pos).is_some_and(u8::is_ascii_whitespace) {
-                pos += 1;
-            }
-            let negative = bytes.get(pos) == Some(&b'-');
-            if bytes.get(pos).is_some_and(|b| matches!(b, b'+' | b'-')) {
-                pos += 1;
-            }
-            let mut base = args[2];
-            let prefix = bytes.get(pos) == Some(&b'0')
-                && bytes.get(pos + 1).is_some_and(|b| matches!(b, b'x' | b'X'))
-                && bytes
-                    .get(pos + 2)
-                    .and_then(|&b| digit(b))
-                    .is_some_and(|n| n < 16);
-            if (base == 0 || base == 16) && prefix {
-                base = 16;
-                pos += 2;
-            }
-            if base == 0 {
-                base = if bytes.get(pos) == Some(&b'0') { 8 } else { 10 };
-            }
-            let start = pos;
-            let mut n = 0u32;
-            let mut overflow = false;
-            if (2..=36).contains(&base) {
-                while let Some(d) = bytes.get(pos).and_then(|&b| digit(b)).filter(|&d| d < base) {
-                    if let Some(value) = n.checked_mul(base).and_then(|v| v.checked_add(d)) {
-                        n = value;
-                    } else {
-                        overflow = true;
-                    }
-                    pos += 1;
-                }
-            }
-            if args[1] != 0 {
-                mem.write_u32(
-                    args[1],
-                    args[0]
-                        .checked_add(if pos == start { 0 } else { pos as u32 })
-                        .ok_or("strtoul end pointer overflow")?,
-                )
-                .map_err(|e| e.to_string())?;
-            }
-            if overflow || !(2..=36).contains(&base) {
-                let p = state.errno_address(mem, sched.current_tid())?;
-                mem.write_u32(p, if overflow { 34 } else { 22 })
-                    .map_err(|e| e.to_string())?;
-            }
-            if overflow {
-                u32::MAX
-            } else if negative {
-                n.wrapping_neg()
-            } else {
-                n
-            }
-        }
-        "strlen" => {
-            let mut len = None;
-            for i in 0..1 << 20 {
-                if mem
-                    .read_u8(args[0].checked_add(i).ok_or("strlen address overflow")?)
-                    .map_err(|e| e.to_string())?
-                    == 0
-                {
-                    len = Some(i);
-                    break;
-                }
-            }
-            len.ok_or("unterminated strlen source")?
-        }
+        "strtoul" => state.crt.strtoul(
+            args,
+            mem,
+            sched.current_tid(),
+            &mut state.scratch,
+            &mut state.last_error,
+        )?,
         "exit" | "_exit" | "_cexit" | "quick_exit" => {
             cpu.halted = true;
             cpu.exit_code = Some(args[0]);
             0
         }
-        _ => return Ok(None),
+        _ => {
+            if let Some(value) = crate::win32::x86::crt_memory::call(name, args, mem)? {
+                value
+            } else if let Some(value) = crate::win32::x86::heaps::crt_call(
+                name,
+                args,
+                mem,
+                &mut state.heap,
+                state.process_heap,
+            )? {
+                value
+            } else if let Some(value) = state.crt.startup_call(
+                name,
+                args,
+                mem,
+                state.cmdline_a,
+                &mut state.scratch,
+                &mut state.last_error,
+            )? {
+                value
+            } else {
+                return Ok(None);
+            }
+        }
     };
     Ok(Some(crate::cpu::GuestCallOutcome::Returned(r)))
 }

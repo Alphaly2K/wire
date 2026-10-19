@@ -4,6 +4,7 @@ pub(crate) mod calendar;
 pub(crate) mod clocks;
 pub(crate) mod com;
 pub(crate) mod critical_sections;
+pub(crate) mod crt_memory;
 pub(crate) mod crt_state;
 pub(crate) mod cursor;
 pub(crate) mod desktop;
