@@ -14,11 +14,11 @@ use crate::thread::{
 };
 use std::collections::HashMap;
 pub type Args = [u32; 16];
-use std::fs::File;
 use std::sync::{Arc, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 pub use crate::runtime::api_log::ApiLogger;
+pub use crate::win32::kernel::objects32::{HandleObj, KernelObjects32};
 pub use crate::x86::address_space::{STUB_BASE, STUB_CAPACITY, STUB_STRIDE};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,39 +210,6 @@ impl ApiTable {
 /// Guest scratch space for fake CRT pointers (starts here, bump-allocated).
 pub const SCRATCH_BASE: u32 = 0x00f0_0000;
 
-/// Kernel objects behind guest HANDLE values (M2). Files join this enum when
-/// real file I/O lands.
-#[derive(Debug)]
-pub enum HandleObj {
-    File {
-        file: File,
-        readable: bool,
-        writable: bool,
-    },
-    Search {
-        entries: Vec<std::path::PathBuf>,
-        next: usize,
-    },
-    Event {
-        manual: bool,
-        signaled: bool,
-    },
-    Mutex {
-        owner: Option<u32>, // owning tid; recursion via count
-        count: u32,
-    },
-    Semaphore {
-        count: i32,
-        max: i32,
-    },
-    Thread {
-        tid: u32,
-    },
-    Process {
-        access: u32,
-    },
-}
-
 /// Mutable host-side state for the emulated process.
 pub struct ApiState {
     pub(crate) environment: crate::runtime::environment::GuestEnvironment,
@@ -262,9 +229,7 @@ pub struct ApiState {
     pub heap: crate::heap::GuestHeap,
     pub fs: Option<crate::fs::GuestFs>,
     pub(crate) locals: crate::win32::kernel::locals32::LocalSlots32,
-    pub handles: HashMap<u32, HandleObj>,
-    pub named_objs: HashMap<String, u32>, // event/mutex/semaphore name -> handle
-    pub next_handle: u32,
+    pub handles: KernelObjects32,
     pub user32: crate::user32::User32,
     pub(crate) menus: crate::menu::Menus,
     pub modules: crate::modules::Modules,
@@ -299,9 +264,7 @@ impl ApiState {
             heap: crate::heap::GuestHeap::new(0x7005_0000),
             fs: None,
             locals: crate::win32::kernel::locals32::LocalSlots32::default(),
-            handles: HashMap::new(),
-            named_objs: HashMap::new(),
-            next_handle: 0x100,
+            handles: KernelObjects32::default(),
             user32: crate::user32::User32::default(),
             menus: crate::menu::Menus::default(),
             modules: crate::modules::Modules::default(),
@@ -329,27 +292,18 @@ impl ApiState {
     }
 
     pub fn alloc_handle(&mut self, obj: HandleObj) -> u32 {
-        let h = self.next_handle;
-        self.next_handle += 4;
-        self.handles.insert(h, obj);
-        h
+        self.handles.alloc(obj)
     }
 
     /// CreateEvent/CreateMutex/CreateSemaphore share name-based dedup:
     /// creating a named object that already exists returns the existing
     /// handle and sets ERROR_ALREADY_EXISTS.
     pub fn create_named(&mut self, name: &str, make: impl FnOnce() -> HandleObj) -> (u32, bool) {
-        if !name.is_empty() {
-            if let Some(&h) = self.named_objs.get(name) {
-                self.last_error = 183; // ERROR_ALREADY_EXISTS
-                return (h, true);
-            }
+        let (h, existed) = self.handles.create_named(name, make);
+        if existed {
+            self.last_error = 183; // ERROR_ALREADY_EXISTS
         }
-        let h = self.alloc_handle(make());
-        if !name.is_empty() {
-            self.named_objs.insert(name.to_string(), h);
-        }
-        (h, false)
+        (h, existed)
     }
 
     pub fn module_handle_for(&mut self, dll: &str) -> u32 {
@@ -1834,8 +1788,8 @@ pub fn dispatch(
                 }
                 OpenEventA | OpenEventW => {
                     let nm = read_str(mem, args[2], id.wide());
-                    match state.named_objs.get(&nm) {
-                        Some(&h) => {
+                    match state.handles.named(&nm) {
+                        Some(h) => {
                             note = format!("event \"{nm}\"");
                             h
                         }
@@ -2182,8 +2136,7 @@ pub fn dispatch(
             _,
             _,
         ) => {
-            if state.handles.remove(&args[0]).is_some() {
-                state.named_objs.retain(|_, handle| *handle != args[0]);
+            if state.handles.close(args[0]) {
                 ret = 1;
             } else {
                 state.last_error = 6;

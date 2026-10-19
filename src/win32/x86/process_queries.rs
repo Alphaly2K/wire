@@ -1,11 +1,10 @@
 //! Process query adapters inspect handles; the gateway owns handle creation.
 use crate::{
-    api::{Args, HandleObj},
+    api::{Args, HandleObj, KernelObjects32},
     mem::GuestMem,
     thread::Sched,
     win32::catalog::ProcessQueryApi,
 };
-use std::collections::HashMap;
 
 pub(crate) enum ProcessQueryResult {
     Value(u32),
@@ -16,7 +15,7 @@ pub(crate) fn call(
     id: ProcessQueryApi,
     a: &Args,
     mem: &mut GuestMem,
-    handles: &HashMap<u32, HandleObj>,
+    handles: &KernelObjects32,
     sched: &Sched,
 ) -> Result<ProcessQueryResult, u32> {
     use ProcessQueryApi::*;

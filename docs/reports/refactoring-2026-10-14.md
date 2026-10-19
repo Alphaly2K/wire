@@ -518,3 +518,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R2 图形 COM 方法冷绑定
 
 基线 `7435932`。70 条 DXGI 方法的 arity/DWORD 合为同一槽位声明，D3D11 原表保持并合并查找；BoundMethod 缓存静态声明和家族路由，调用时移除 D3D11 表扫描。groups 位图改为明确 graphics/file_search 字段。槽位、处理体和参数规则核对一致；release 图形 10、真实 GPU 1、文件 17、fmt/release lib/bin strict Clippy/build 通过。COM 内部方法不计作新增 DLL export，累计仍 **888**，见[边界与验收](../architecture/graphics-contracts.md)。
+
+## R3 PE32 kernel 对象
+
+基线 `b5182db`。KernelObjects32 私有拥有原混合 HANDLE 表、命名索引和递增分配位置，ApiState 兼容方法委托；CloseHandle 的对象/名字清理归 owner，FindClose 保留独立类型检查。原变体、分配、同名、gateway 与进程查询主体核对保持。release Win32 248、线程间 owner 迁移 1、fmt/release lib/bin strict Clippy/build 通过，不跑性能。累计 export 仍 **888**，见[边界与验收](../architecture/kernel-objects32.md)。

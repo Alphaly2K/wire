@@ -1,6 +1,6 @@
 # 当前状态
 
-更新日期：2026-10-20。重构前基线为 `2e78377`；最新完成[图形创建与 COM 冷绑定](architecture/graphics-contracts.md)，70 条 DXGI 方法 ABI 合表，执行时直接选择 DXGI/D3D11 家族；release 图形 10、Win64 文件 17、真实 GPU swapchain 1 项及 fmt/release lib/bin strict Clippy/build 通过。此前创建入口完成 PE32 未知 ABI、模块和 catalog 定向回归，[进程与文件 endpoint](architecture/process-control.md)完成 release 整合 Win64 268、PE32 247、library 60 passed / 7 ignored。按影响范围选择验证，本批不重复性能或游戏矩阵。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
+更新日期：2026-10-20。重构前基线为 `2e78377`；最新完成 [PE32 kernel 对象 owner](architecture/kernel-objects32.md)，完整 Win32 248、线程间 owner 迁移 1 项及 fmt/release lib/bin strict Clippy/build 通过。此前[图形创建与 COM 冷绑定](architecture/graphics-contracts.md)完成 70 条 DXGI 方法 ABI 合表及真实 GPU swapchain 回归，[进程与文件 endpoint](architecture/process-control.md)完成双架构整合。按影响范围选择验证，本批不重复性能或游戏矩阵。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
 
 本轮累计接入对话框/窗口枚举 22、菜单 27、GDI 对象/像素/字体 31 项，共 **80 项**，累计 **675 项**。统一声明、typed 分发与领域 owner 保持双架构范围、故障提交和既有不可用策略；保留真实 RedrawWindow 网关与公开 facade 的历史差异。精确标量 SSE 已移入独立编译单元，没有近似浮点或新增 ISA 语义。
 
@@ -20,7 +20,7 @@
 | --- | --- | --- |
 | R0/R1 | 冻结输入、原创正式 fixture、领域测试 harness、GUID 唯一契约和双架构适配 | 随后续家族维护独立基线 |
 | R2 | 已接入 888 个 export 的契约；明细见下表 | PE32 legacy 家族与图形 COM 方法 |
-| R3 | guest environment 与 Win64 变量/环境块 owner、双架构模块状态、Win64 文件、period 请求、SRW、地址等待及 APC 队列、线程标量操作与描述、双架构 apartment/BSTR、Win64 task/HSTRING/image/desktop/ETW/token/快照/注册表成员、PE32 TLS/FLS 与双架构 cursor、Win64 DC/class、BCrypt/SSPI/设备私有 owner | PE32 其余资源、线程资源创建/退出及 COM 其余对象；PE32 kernel 大范围抽取曾因性能撤回 |
+| R3 | guest environment 与 Win64 变量/环境块 owner、双架构模块状态、Win64 文件、period 请求、SRW、地址等待及 APC 队列、线程标量操作与描述、双架构 apartment/BSTR、Win64 task/HSTRING/image/desktop/ETW/token/快照/注册表成员、PE32 TLS/FLS/kernel 对象与双架构 cursor、Win64 DC/class、BCrypt/SSPI/设备私有 owner | PE32 文件适配/其余资源、线程资源创建/退出及 COM 其余对象；PE32 kernel 大范围抽取曾因性能撤回 |
 | R4/R5 | Process32 编排边界、owned host UI 请求、GDI 与像素状态分离 | 领域分发与资源 owner 随 R2/R3 继续收敛 |
 | R6 | 按用户要求忽略 | 不重建原生 Mono 路径 |
 | R7 | CLI 命令职责拆分及性能复核、PE32 内核目录、领域测试、公共性能工具及 profile、离线 inventory、当前/历史文档入口 | 其余工具和目录随领域迁移继续整理 |

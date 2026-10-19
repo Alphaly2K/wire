@@ -46,4 +46,4 @@ CreatePipe、GetConsoleMode、WriteConsoleW 与 NtQueryDirectoryFile 接入后�
 
 Mappings 独立拥有 section/view 与 retained file descriptor，view 持有 section 引用，文件或 section handle 关闭后已有 view 继续存活。guest WriteFile 更新同 inode 的活动 view；64 位 offset、64KiB 对齐、资源上限及原 backing 生命周期保持。adapter 按冷绑定 ID 调用原 Mappings 方法，不新增通用结果框架。独立行为与性能证据见 [section 验收](../reports/refactoring-file-section-catalog-2026-10-15.md)。
 
-SHLWAPI/imagehlp 的 13 项与六项通用句柄契约已在 section/Interlocked 新基线上通过验收，详见 [路径与句柄边界](paths-handles.md)。标准句柄及跨资源 CloseHandle 按冷绑定 HandleApi 选择原 owner 的分支，保留保护位、查询顺序和故障提交。PE32 目前仍使用 ApiState 的混合 HandleObj 表与 filesystem 字段，属于后续 R3 工作。
+SHLWAPI/imagehlp 的 13 项与六项通用句柄契约已在 section/Interlocked 新基线上通过验收，详见 [路径与句柄边界](paths-handles.md)。标准句柄及跨资源 CloseHandle 按冷绑定 HandleApi 选择原 owner 的分支，保留保护位、查询顺序和故障提交。PE32 的混合 HandleObj 表、命名索引与分配位置现由 [KernelObjects32](kernel-objects32.md) 私有拥有；filesystem 及文件适配仍继续收窄。
