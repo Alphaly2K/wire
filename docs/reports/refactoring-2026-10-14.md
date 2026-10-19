@@ -594,3 +594,11 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 Win64 local-slot owner
 
 基线 `1e3a534`。LocalSlots64 私有拥有 TLS/FLS 原固定数组、槽标记和 callback identity；Runtime64 继续按原 TEB/error/commit 顺序适配，destructor 按原 active index 先全部预检再清 callback 值。普通 local_call 与 hot TLS 源码归一核对保持。release 完整 Win64 269、fmt/release lib/bin strict Clippy/build 通过，不跑性能矩阵，未扩大槽容量或新增分配。见[TLS/FLS 边界](../architecture/locals.md)，证据 `wire-out/refactoring-2026-10-14/r3-locals64-owner-{source-checks,verification}.json`。
+
+## R2/R3/R4 连续 owner 迁移整合
+
+基线 `1155a3e`，覆盖 `2760af1` 至 `1155a3e` 的十个提交。release all-targets 共 690 passed / 7 ignored / 0 failed，21 个测试结果；all-targets/all-features strict Clippy、31 项工具测试及 fmt 通过。未改热循环或 ISA 算法，不重复性能和游戏矩阵；D3D9 两项真实 Metal 已在所属批次显式通过。证据 `wire-out/refactoring-2026-10-14/r3-owner-wave-20261020-verification.json` 记录日志和 executable hash，不复制二进制。状态入口压缩为当前结果，历史逐批记录保留。
+
+## R3 Win64 Heap 资源操作
+
+基线 `1155a3e`。slab/block allocator 从 Runtime64 方法改为 Heap 自身操作；仅借 Pages 显式页资源，通用分配 facade 共用原页算法，保留失败诊断、LastError、清零/回收及 ReAlloc 提交顺序。Heap 主体与页算法核对保持。初次机械提取漏改四个方法调用，修正后 release 完整 Win64 269、fmt/release lib/bin strict Clippy/build 通过，失败日志保留。不跑性能或游戏矩阵，累计契约仍 915。见[Heap 边界](../architecture/heaps.md)，证据 `wire-out/refactoring-2026-10-14/r3-heap64-owner-{source-checks,verification}.json`。

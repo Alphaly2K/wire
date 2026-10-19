@@ -9,6 +9,7 @@ use std::{
     collections::BTreeMap,
     time::{Instant, UNIX_EPOCH},
 };
+mod allocation;
 mod apc;
 mod automation;
 mod bcrypt;
@@ -527,22 +528,14 @@ impl Runtime64 {
         self.gateways.register(dll, name)
     }
     fn heap_alloc(&mut self, mem: &mut Memory, size: u64) -> Result<u64, String> {
-        if size > 16 * 1024 * 1024 {
-            self.set_error(mem, 8)?;
-            return Ok(0);
+        let last_error = self.teb() + 0x68;
+        allocation::Pages {
+            next: &mut self.next_alloc,
+            allocations: &mut self.allocations,
+            last_error,
+            trace: &mut self.trace,
         }
-        let span = size.max(1).div_ceil(PAGE) * PAGE;
-        let address = self.next_alloc;
-        if let Err(error) = mem.map(address, span, READ | WRITE) {
-            self.trace_note(format!(
-                "Win64 allocation failed: address={address:#x} size={size} span={span}: {error}"
-            ));
-            self.set_error(mem, 8)?;
-            return Ok(0);
-        }
-        self.next_alloc += span;
-        self.allocations.insert(address, (size as usize, span));
-        Ok(address)
+        .allocate(mem, size)
     }
     fn string_bytes(mem: &Memory, ptr: u64, count: u64, width: usize) -> Result<Vec<u8>, String> {
         crate::win32::x64::text::string_bytes(mem, ptr, count, width)
@@ -716,7 +709,16 @@ impl Runtime64 {
             ApiId::VirtualMemory(id) => {
                 crate::win32::x64::virtual_memory::call(mem, id, args, self.teb() + 0x68)
             }
-            ApiId::Heap(id) => self.guest_heap_call(mem, id, args),
+            ApiId::Heap(id) => {
+                let last_error = self.teb() + 0x68;
+                let mut pages = allocation::Pages {
+                    next: &mut self.next_alloc,
+                    allocations: &mut self.allocations,
+                    last_error,
+                    trace: &mut self.trace,
+                };
+                self.guest_heap.call(mem, id, args, &mut pages)
+            }
             ApiId::LocalMemory(id) => self.local_memory_call(mem, id, args),
             ApiId::SystemProfile(id) => {
                 crate::win32::x64::system_profile::call(mem, id, args, self.teb() + 0x68)

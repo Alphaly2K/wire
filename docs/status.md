@@ -1,34 +1,14 @@
 # 当前状态
 
-更新日期：2026-10-20。重构前基线为 `2e78377`；最新十二个 [不可用音频与字体入口](architecture/unavailable-endpoints.md) 接入唯一契约，保留原错误、输出、诊断和架构范围。完整 Win32 255、Win64 modules 13、catalog 一致性及 fmt/release lib/bin strict Clippy/build 通过。此前[文件版本资源](architecture/version-resources.md)、PE32 USER/MPR、[kernel endpoint](architecture/process-control.md)、[CRT](architecture/crt32.md)、[同步与等待](architecture/waits.md)等已接入。按影响范围选择验证，本批不重复性能或游戏矩阵。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
+更新日期：2026-10-20。按 [重构计划](refactoring-plan-2026-10-11.md) 持续推进，重构前基线为 `2e78377`，当前累计 **915 项 export 契约**。家族明细见下表，完整提交与历史验收见 [重构记录](reports/refactoring-2026-10-14.md)。Mono 原生化已撤回，R6 按用户要求排除。
 
-随后 [GDI+ 窄依赖](architecture/gdiplus.md)完成：矩阵、分配与启动令牌操作只借自身状态、内存和 process heap。原数学、指针与分配顺序保持，release GDI+ 4、完整 Win32 255 及 fmt/release lib/bin strict Clippy/build 通过，不跑性能矩阵；catalog 数量不变。
+近期完成 [GDI+](architecture/gdiplus.md)、[WMI](architecture/wmi.md)、[DirectSound](architecture/directsound.md) 与 [D3D9](architecture/d3d9.md) 的资源借用收敛，移除对象调用对整个 ApiState 的依赖及 registry/backend 临时 take；[PE32 线程创建和退出](architecture/thread-control.md)、[USER 资源退休](architecture/window-control.md)、[callback 执行](architecture/callbacks32.md) 与 [消息队列](architecture/messages.md) 也已归入各自 owner。Win64 [TLS/FLS](architecture/locals.md) 私有拥有固定槽和 callback identity，保留 TEB 与析构顺序。
 
-[WMI COM](architecture/wmi.md)随后完成同类收敛：对象 registry 不再临时 take，创建和普通方法只借 gateway table、内存、heap 和 BSTR。release com 过滤 30、完整 Win32 255 及必要构建通过，catalog 数量保持 915。
+最新阶段整合基线 `1155a3e`：release 全目标 **690 passed / 7 ignored**，all-targets/all-features strict Clippy、**31 项工具测试**及 fmt 通过。真实 Metal 两项已在 D3D9 批次显式通过。按改动影响选择验证，普通契约和资源边界提取不逐批重跑性能或游戏矩阵；执行循环、ISA 算法和 callback frame 保持。见 [验收策略](architecture/validation-tools.md)。
 
-[DirectSound](architecture/directsound.md)的对象调用随后收窄到 heap 与只读 event/window/Presenter；去掉设备临时 take，保留原 PCM/native pump 和 signal 顺序。release audio 4、mixer 1、完整 Win32 255 及 fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵。
+历史性能拒绝、回滚与后续复核证据继续保留，见 [API 日志累计验收](reports/refactoring-api-log-2026-10-19.md)、[后台 Unity 渲染结束后的复核](reports/refactoring-post-unity-performance-2026-10-19.md) 和 [CLI 重试](reports/refactoring-cli-followup-2026-10-19.md)。当前结构重构不宣称新的性能提升。
 
-最新 [D3D9 资源借用](architecture/d3d9.md)已完成：24 个分配/引用/绑定方法只借 heap，设备层再借只读 window 和 Graphics，移除后端 take。release 图形 11、library 4、显式 Metal 对照 2、完整 Win32 255 及必要构建通过，不跑性能矩阵，累计契约仍 915。
-
-[PE32 线程创建与退出](architecture/thread-control.md)继续收敛：普通创建显式借所属资源，有序线程/进程退出归 Process 并共享清理。完整 release Win32 255、IR 31 及 fmt/release lib/bin strict Clippy/build 通过，DLL/TLS/USER 次序、worker EAX 与非局部转移规则保持，不跑性能矩阵。
-
-最新 [USER 退休 owner](architecture/window-control.md)接入：窗口/线程清理只借 User32、Graphics、Menus 和 Sched，Process 及窗口控制直接调用。完整 release Win32 255、fmt/release lib/bin strict Clippy/build 通过，原跨线程 send 唤醒与菜单/图形释放顺序保持。
-
-[PE32 callback 执行](architecture/callbacks32.md)随后统一归 Process：USER/locale/CRT comparator 复用 context 策略，DLL/TLS/SEH/initializer 直接调用 Process 并保留各自策略。完整 release Win32 255、IR 31 及必要构建通过，原执行循环和 callback frame 未改。
-
-最新 [USER 队列 owner](architecture/messages.md)将 timer、post/host 入队与消息等待准备收敛为 User32 方法，Get/Peek/Wait 和对象等待共用 paint 准备。原队列、时间取样、change bits、唤醒和输出 fault 策略保持，完整 Win32 255 及必要构建通过，不跑性能矩阵。
-
-最新 [Win64 local-slot owner](architecture/locals.md)私有拥有原 TLS/FLS 固定数组与 callback identity；TEB 预检、值与错误提交仍由架构层完成，析构保留原两遍顺序。完整 release Win64 269、fmt/release lib/bin strict Clippy/build 通过，不跑性能矩阵。
-
-本轮累计接入对话框/窗口枚举 22、菜单 27、GDI 对象/像素/字体 31 项，共 **80 项**，累计 **675 项**。统一声明、typed 分发与领域 owner 保持双架构范围、故障提交和既有不可用策略；保留真实 RedrawWindow 网关与公开 facade 的历史差异。精确标量 SSE 已移入独立编译单元，没有近似浮点或新增 ISA 语义。
-
-随后 **31 项契约**：5 项 paint、2 项 comctl32 初始化、10 项 PE32 资源、5 项双架构启动信息、9 项环境接口，完整正确性及累计性能复核通过，当前共 **706 项**。Unity 渲染结束后重新完成 32 条性能协议、288 次执行及三对游戏启动；原后台干扰轮次保留。实现与冻结见[五项 paint](reports/refactoring-painting-followup-2026-10-19.md)、[控件初始化](reports/refactoring-common-controls-2026-10-19.md)、[资源](reports/refactoring-resources-2026-10-19.md)、[启动信息](reports/refactoring-process-startup-2026-10-19.md)与[环境接口](reports/refactoring-environment-2026-10-19.md)。
-
-后续各家族接入明细见下表，当前累计 **915 项**契约。普通结构迁移采用按影响范围选择验证的策略，性能不再逐批执行完整矩阵，见[工具与验收边界](architecture/validation-tools.md)。
-
-中间 GDI 冻结出现 messages/IR 三对持续回退，未准入。实际采样后将 API 日志提取为独立 runtime 服务，并用专用整数格式化保留完整 trace、频率和最近 64 条记录。最终消息 150M IR/raw CPU 中位数相对原消息冻结 −13.210%/−12.110%，GDI 150M IR/raw −16.987%/−13.229%；33 条性能协议、207 次 fixture 执行及三对真实启动前缀通过。旧冻结、失败轮次和同哈希 control 独立保留，没有用其它负载的改善抵消持续回退。
-
-早期绘制六项候选因持续浮点回退撤回，见[历史拒绝报告](reports/refactoring-painting-2026-10-19.md)。当前五项重试保持原 RedrawWindow 网关归属，不追认旧候选。其余 USER、COM、图形和资源 owner 继续迁移。R7 [CLI 拆分已重试接入](reports/refactoring-cli-followup-2026-10-19.md)，完整正确性、命令对照及累计性能通过；旧候选和回滚证据保留。[离线 API inventory](reports/refactoring-inventory-2026-10-19.md)、profile、native 探针和架构性能入口已按职责整理；PE32 工具另修正未知 case 静默替换为整数的问题，最新工具检查 28 项通过，详见[工具边界](architecture/validation-tools.md)。Mono 原生化已撤回，本轮排除。
+整合后 [Win64 Heap](architecture/heaps.md) 继续收敛：slab/block 算法归 Heap，仅借页分配、错误槽和诊断资源。原清零、回收、ReAlloc 及失败 trace 顺序保持，完整 Win64 269 和必要构建通过。
 
 ## 重构范围
 
@@ -38,8 +18,8 @@
 | --- | --- | --- |
 | R0/R1 | 冻结输入、原创正式 fixture、领域测试 harness、GUID 唯一契约和双架构适配 | 随后续家族维护独立基线 |
 | R2 | 已接入 915 个 export 的契约；明细见下表 | PE32 legacy 家族与图形 COM 方法 |
-| R3 | guest environment 与 Win64 变量/环境块 owner、双架构模块状态、Win64 文件、period 请求、SRW、地址等待及 APC 队列、线程标量操作与描述、双架构 apartment/BSTR、Win64 task/HSTRING/image/desktop/ETW/token/快照/注册表成员、PE32 TLS/FLS/kernel 对象/文件窄适配/scratch/CRT 与双架构 cursor、Win64 DC/class、BCrypt/SSPI/设备私有 owner | PE32 其余资源、线程资源创建/退出及 COM 其余对象；PE32 kernel 大范围抽取曾因性能撤回 |
-| R4/R5 | Process32 编排边界、owned host UI 请求、GDI 与像素状态分离 | 领域分发与资源 owner 随 R2/R3 继续收敛 |
+| R3 | environment、双架构 modules/apartment/BSTR/cursor、Win64 files/同步队列/TLS-FLS/task/HSTRING/USER/设备等 owner；PE32 kernel/scratch/CRT、线程创建/退出、USER 队列/退休及 GDI+/WMI/DirectSound/D3D9 窄资源调用 | 其余领域资源与 COM 对象；PE32 kernel 大范围抽取曾因性能撤回 |
+| R4/R5 | Process32 编排、线程退出与 callback 执行服务、owned host UI 请求、GDI 与像素状态分离 | 领域 callback 请求与其余分发/owner 继续收敛 |
 | R6 | 按用户要求忽略 | 不重建原生 Mono 路径 |
 | R7 | CLI 命令职责拆分及性能复核、PE32 内核目录、领域测试、公共性能工具及 profile、离线 inventory、当前/历史文档入口 | 其余工具和目录随领域迁移继续整理 |
 

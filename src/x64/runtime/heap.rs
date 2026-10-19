@@ -1,6 +1,6 @@
 //! Guest process heap packs small allocations in owned data slabs.
 //! Native callback/COM allocations retain their separate page ownership.
-use super::{Memory, Runtime64, PROCESS_HEAP};
+use super::{allocation::Pages, Memory, PROCESS_HEAP};
 use crate::win32::catalog::HeapApi;
 use std::collections::BTreeMap;
 const SLAB: u64 = 65536;
@@ -20,25 +20,26 @@ pub(super) struct Heap {
     blocks: BTreeMap<u64, Block>,
     slabs: BTreeMap<u64, Slab>,
 }
-impl Runtime64 {
-    fn guest_heap_allocate(
+impl Heap {
+    fn allocate(
         &mut self,
         mem: &mut Memory,
         size: usize,
         zero: bool,
+        pages: &mut Pages<'_>,
     ) -> Result<u64, String> {
         if size > 16 * 1024 * 1024 {
-            self.set_error(mem, 8)?;
+            pages.set_error(mem, 8)?;
             return Ok(0);
         }
         if size > 2048 {
-            let p = self.heap_alloc(mem, size as u64)?;
+            let p = pages.allocate(mem, size as u64)?;
             if p != 0 {
-                self.guest_heap.blocks.insert(
+                self.blocks.insert(
                     p,
                     Block {
                         size,
-                        capacity: self.allocations[&p].1 as usize,
+                        capacity: pages.allocations[&p].1 as usize,
                         slab: None,
                     },
                 );
@@ -47,14 +48,13 @@ impl Runtime64 {
         }
         let bucket = size.max(16).next_power_of_two();
         let existing = self
-            .guest_heap
             .slabs
             .iter()
             .find_map(|(&p, s)| (s.bucket == bucket && !s.free.is_empty()).then_some(p));
         let base = if let Some(p) = existing {
             p
         } else {
-            let p = self.heap_alloc(mem, SLAB)?;
+            let p = pages.allocate(mem, SLAB)?;
             if p == 0 {
                 return Ok(0);
             }
@@ -62,7 +62,7 @@ impl Runtime64 {
                 .rev()
                 .map(|n| p + n * bucket as u64)
                 .collect();
-            self.guest_heap.slabs.insert(
+            self.slabs.insert(
                 p,
                 Slab {
                     bucket,
@@ -72,15 +72,15 @@ impl Runtime64 {
             );
             p
         };
-        let p = *self.guest_heap.slabs[&base].free.last().unwrap();
+        let p = *self.slabs[&base].free.last().unwrap();
         // Validate a reused block before publishing allocator metadata.
         if zero && size != 0 {
             mem.write(p, &vec![0; size])?;
         }
-        let slab = self.guest_heap.slabs.get_mut(&base).unwrap();
+        let slab = self.slabs.get_mut(&base).unwrap();
         slab.free.pop();
         slab.live += 1;
-        self.guest_heap.blocks.insert(
+        self.blocks.insert(
             p,
             Block {
                 size,
@@ -90,43 +90,34 @@ impl Runtime64 {
         );
         Ok(p)
     }
-    fn guest_heap_free(&mut self, mem: &mut Memory, p: u64) -> Result<(), String> {
-        let block = *self
-            .guest_heap
-            .blocks
-            .get(&p)
-            .ok_or("invalid Win64 heap allocation")?;
+    fn free(&mut self, mem: &mut Memory, p: u64, pages: &mut Pages<'_>) -> Result<(), String> {
+        let block = *self.blocks.get(&p).ok_or("invalid Win64 heap allocation")?;
         if let Some(base) = block.slab {
-            let bucket = self.guest_heap.slabs[&base].bucket;
-            let reclaim = self.guest_heap.slabs[&base].live == 1
-                && self
-                    .guest_heap
-                    .slabs
-                    .values()
-                    .filter(|s| s.bucket == bucket)
-                    .count()
-                    > 1;
+            let bucket = self.slabs[&base].bucket;
+            let reclaim = self.slabs[&base].live == 1
+                && self.slabs.values().filter(|s| s.bucket == bucket).count() > 1;
             if reclaim {
                 mem.unmap(base, SLAB)?;
-                self.allocations.remove(&base);
-                self.guest_heap.slabs.remove(&base);
+                pages.allocations.remove(&base);
+                self.slabs.remove(&base);
             } else {
-                let slab = self.guest_heap.slabs.get_mut(&base).unwrap();
+                let slab = self.slabs.get_mut(&base).unwrap();
                 slab.live -= 1;
                 slab.free.push(p);
             }
         } else {
             mem.unmap(p, block.capacity as u64)?;
-            self.allocations.remove(&p);
+            pages.allocations.remove(&p);
         }
-        self.guest_heap.blocks.remove(&p);
+        self.blocks.remove(&p);
         Ok(())
     }
-    pub(super) fn guest_heap_call(
+    pub(super) fn call(
         &mut self,
         mem: &mut Memory,
         id: HeapApi,
         a: &[u64],
+        pages: &mut Pages<'_>,
     ) -> Result<u64, String> {
         if id == HeapApi::Process {
             return Ok(PROCESS_HEAP);
@@ -135,17 +126,17 @@ impl Runtime64 {
             return Err("unsupported Win64 heap/flags".into());
         }
         if id == HeapApi::Alloc {
-            return self.guest_heap_allocate(
+            return self.allocate(
                 mem,
                 a[2].min(usize::MAX as u64) as usize,
                 a[1] & 8 != 0,
+                pages,
             );
         }
         if id == HeapApi::Free && a[2] == 0 {
             return Ok(1);
         }
         let block = *self
-            .guest_heap
             .blocks
             .get(&a[2])
             .ok_or("invalid Win64 heap allocation")?;
@@ -153,7 +144,7 @@ impl Runtime64 {
             return Ok(block.size as u64);
         }
         if id == HeapApi::Free {
-            self.guest_heap_free(mem, a[2])?;
+            self.free(mem, a[2], pages)?;
             return Ok(1);
         }
         debug_assert_eq!(id, HeapApi::ReAlloc);
@@ -165,19 +156,19 @@ impl Runtime64 {
                     &vec![0; size as usize - block.size],
                 )?;
             }
-            self.guest_heap.blocks.get_mut(&a[2]).unwrap().size = size as usize;
+            self.blocks.get_mut(&a[2]).unwrap().size = size as usize;
             return Ok(a[2]);
         }
         if size > 16 * 1024 * 1024 {
-            self.set_error(mem, 8)?;
+            pages.set_error(mem, 8)?;
             return Ok(0);
         }
         let mut old = vec![0; block.size.min(size as usize)];
         mem.read(a[2], &mut old)?;
-        let p = self.guest_heap_allocate(mem, size as usize, a[1] & 8 != 0)?;
+        let p = self.allocate(mem, size as usize, a[1] & 8 != 0, pages)?;
         if p != 0 {
             mem.write(p, &old)?;
-            self.guest_heap_free(mem, a[2])?;
+            self.free(mem, a[2], pages)?;
         }
         Ok(p)
     }
