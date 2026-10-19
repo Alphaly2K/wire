@@ -3,6 +3,7 @@
 //! ABI checked against DXVK Native c8dc91fa directx/dxgi*.h; no implementation copied.
 use super::{Memory, Runtime64, PAGE, READ, WRITE};
 use crate::gpu::{AdapterInfo, NativeGraphics};
+use crate::win32::catalog::GraphicsExportApi;
 use std::collections::BTreeMap;
 mod abi;
 mod d3d11;
@@ -121,46 +122,18 @@ const ADAPTER: &[(&str, usize)] = &[
     ("Adapter.CheckInterfaceSupport", 3),
     ("Adapter.GetDesc1", 2),
 ];
-pub(super) fn export(name: &str) -> bool {
-    matches!(
-        name,
-        "CreateDXGIFactory" | "CreateDXGIFactory1" | "CreateDXGIFactory2"
-    )
-}
-pub(super) use d3d11::export as d3d11_export;
-pub(super) fn d3d12_export(name: &str) -> bool {
-    matches!(name, "D3D12CreateDevice" | "D3D12GetDebugInterface")
-}
-pub(super) fn symbol<'a>(dll: &str, name: &'a str) -> &'a str {
-    if dll.eq_ignore_ascii_case("d3d12.dll") {
-        // Wine 10.0 d3d12.spec, ordinal ABI data only.
-        match name {
-            "#101" => "D3D12CreateDevice",
-            "#102" => "D3D12GetDebugInterface",
-            _ => name,
-        }
-    } else {
-        name
-    }
-}
 pub(super) fn arity(name: &str) -> Option<usize> {
     if let Some(arity) = d3d11::arity(name) {
         return Some(arity);
     }
-    match name {
-        "CreateDXGIFactory" | "CreateDXGIFactory1" => Some(2),
-        "CreateDXGIFactory2" => Some(3),
-        "D3D12CreateDevice" => Some(4),
-        "D3D12GetDebugInterface" => Some(2),
-        _ => COMMON
-            .iter()
-            .chain(FACTORY)
-            .chain(ADAPTER)
-            .chain(output::METHODS)
-            .chain(swapchain::METHODS)
-            .find(|(n, _)| *n == name)
-            .map(|(_, a)| *a),
-    }
+    COMMON
+        .iter()
+        .chain(FACTORY)
+        .chain(ADAPTER)
+        .chain(output::METHODS)
+        .chain(swapchain::METHODS)
+        .find(|(n, _)| *n == name)
+        .map(|(_, a)| *a)
 }
 pub(super) fn dwords(name: &str) -> &'static [usize] {
     if name.starts_with("SwapChain.") {
@@ -173,8 +146,6 @@ pub(super) fn dwords(name: &str) -> &'static [usize] {
         return d3d11::dwords(name);
     }
     match name {
-        "CreateDXGIFactory2" => &[0],
-        "D3D12CreateDevice" => &[1],
         "Object.SetPrivateData" => &[2],
         "Factory.EnumAdapters" | "Factory.EnumAdapters1" | "Adapter.EnumOutputs" => &[1],
         "Factory.MakeWindowAssociation" => &[2],
@@ -439,20 +410,26 @@ impl Runtime64 {
         mem.write_int(out, 8, address)?;
         Ok(0)
     }
-    pub(super) fn dxgi_call(
+    pub(super) fn graphics_export_call(
         &mut self,
         mem: &mut Memory,
-        name: &str,
+        id: GraphicsExportApi,
         a: &[u64],
     ) -> Result<u64, String> {
-        if d3d11::arity(name).is_some() {
-            return self.d3d11_call(mem, name, a);
+        if matches!(
+            id,
+            GraphicsExportApi::D3d11Device | GraphicsExportApi::D3d11DeviceAndSwapChain
+        ) {
+            return self.d3d11_create(mem, id == GraphicsExportApi::D3d11DeviceAndSwapChain, a);
         }
-        if d3d12_export(name) {
+        if matches!(
+            id,
+            GraphicsExportApi::D3d12Device | GraphicsExportApi::D3d12Debug
+        ) {
             // Unity probes D3D12 before falling back to D3D11. There is no
             // D3D12 backend; report actual lack of support, including when
             // ppDevice is NULL (a capability query), rather than issue a device.
-            let (iid, out) = if name == "D3D12CreateDevice" {
+            let (iid, out) = if id == GraphicsExportApi::D3d12Device {
                 (a[2], a[3])
             } else {
                 (a[0], a[1])
@@ -467,44 +444,52 @@ impl Runtime64 {
             if out != 0 {
                 mem.write_int(out, 8, 0)?;
             }
-            return Ok(if name == "D3D12GetDebugInterface" {
+            return Ok(if id == GraphicsExportApi::D3d12Debug {
                 NO_INTERFACE
             } else {
                 UNSUPPORTED
             });
         }
-        if export(name) {
-            let (flags, iid, out) = if name == "CreateDXGIFactory2" {
-                (a[0], a[1], a[2])
-            } else {
-                (0, a[0], a[1])
-            };
-            if out == 0 || iid == 0 {
-                return Ok(INVALID_ARG);
-            }
-            mem.check(out, 8, WRITE)?;
-            let iid = read_guid(mem, iid)?;
-            let result = if flags & !1 != 0 {
-                INVALID
-            } else if flags != 0 {
-                0x887a002d
-            }
-            // debug layer not installed
-            else if !supports(Kind::Factory, &iid) {
-                NO_INTERFACE
-            } else if self.graphics.objects.len() >= OBJECT_LIMIT {
-                OUT_OF_MEMORY
-            } else {
-                0
-            };
-            if result != 0 {
-                mem.write_int(out, 8, 0)?;
-                return Ok(result);
-            }
-            self.graphics.info()?;
-            let object = self.dxgi_object(mem, Kind::Factory, 0)?;
-            mem.write_int(out, 8, object)?;
-            return Ok(0);
+        let (flags, iid, out) = if id == GraphicsExportApi::Factory2 {
+            (a[0], a[1], a[2])
+        } else {
+            (0, a[0], a[1])
+        };
+        if out == 0 || iid == 0 {
+            return Ok(INVALID_ARG);
+        }
+        mem.check(out, 8, WRITE)?;
+        let iid = read_guid(mem, iid)?;
+        let result = if flags & !1 != 0 {
+            INVALID
+        } else if flags != 0 {
+            0x887a002d
+        }
+        // debug layer not installed
+        else if !supports(Kind::Factory, &iid) {
+            NO_INTERFACE
+        } else if self.graphics.objects.len() >= OBJECT_LIMIT {
+            OUT_OF_MEMORY
+        } else {
+            0
+        };
+        if result != 0 {
+            mem.write_int(out, 8, 0)?;
+            return Ok(result);
+        }
+        self.graphics.info()?;
+        let object = self.dxgi_object(mem, Kind::Factory, 0)?;
+        mem.write_int(out, 8, object)?;
+        Ok(0)
+    }
+    pub(super) fn dxgi_call(
+        &mut self,
+        mem: &mut Memory,
+        name: &str,
+        a: &[u64],
+    ) -> Result<u64, String> {
+        if d3d11::arity(name).is_some() {
+            return self.d3d11_call(mem, name, a);
         }
         let o = self
             .graphics
@@ -721,6 +706,16 @@ mod tests {
     use crate::x64::{cpu::Cpu64, runtime::Control};
     const DATA: u64 = 0x600000000;
     const STACK: u64 = 0x7ff000000000;
+    // Keep fixture providers independent of production catalog declarations.
+    fn export(name: &str) -> bool {
+        matches!(
+            name,
+            "CreateDXGIFactory" | "CreateDXGIFactory1" | "CreateDXGIFactory2"
+        )
+    }
+    fn d3d12_export(name: &str) -> bool {
+        matches!(name, "D3D12CreateDevice" | "D3D12GetDebugInterface")
+    }
     fn setup() -> (Runtime64, Memory) {
         let mut m = Memory::default();
         m.map(DATA, 2 * PAGE, READ | WRITE).unwrap();

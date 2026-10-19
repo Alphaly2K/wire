@@ -196,9 +196,6 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
     }
     if !dll.eq_ignore_ascii_case("kernel32.dll")
         && !dll.eq_ignore_ascii_case("kernelbase.dll")
-        && !(dll.eq_ignore_ascii_case("dxgi.dll") && dxgi::export(name))
-        && !(dll.eq_ignore_ascii_case("d3d12.dll") && dxgi::d3d12_export(name))
-        && !(dll.eq_ignore_ascii_case("d3d11.dll") && dxgi::d3d11_export(name))
         && !(dll == dxgi::DLL && dxgi::arity(name).is_some())
     {
         return false;
@@ -222,7 +219,10 @@ fn import_arity(name: &str) -> Option<usize> {
 fn normalize_symbol<'a>(dll: &str, name: &'a str) -> &'a str {
     bstr_symbol(
         dll,
-        dxgi::symbol(dll, crate::win32::catalog::winsock_symbol(dll, name)),
+        crate::win32::catalog::graphics_symbol(
+            dll,
+            crate::win32::catalog::winsock_symbol(dll, name),
+        ),
     )
 }
 fn import_dwords(name: &str) -> &'static [usize] {
@@ -569,6 +569,7 @@ impl Runtime64 {
     ) -> Result<u64, String> {
         use crate::win32::catalog::ApiId;
         match id {
+            ApiId::GraphicsExport(id) => self.graphics_export_call(mem, id, args),
             ApiId::ProcessControl(_) => {
                 unreachable!("process controls use their bound gateway route")
             }

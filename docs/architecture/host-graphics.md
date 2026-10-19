@@ -12,6 +12,8 @@ GDI 的 DLL/export 接受范围、GetDC 的 USER client dimensions、LastError �
 
 回归入口：
 
+Win64 的七项 DXGI/D3D 创建入口已接入[图形契约](graphics-contracts.md)，创建 handler 与 COM 方法分开。现有静态/动态 provider 差异、未知 PE32 ABI 和 GPU 资源语义保持；COM 方法元数据继续迁移。
+
 ```sh
 cargo test --release --all-targets --locked
 cargo test --release --lib --locked -- --ignored --test-threads=1

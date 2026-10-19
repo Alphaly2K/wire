@@ -22,6 +22,7 @@ mod files;
 mod gdi_dc;
 mod gdi_operations;
 mod geometry;
+mod graphics;
 mod guid;
 mod handles;
 mod heaps;
@@ -95,6 +96,8 @@ pub use files::{FileApi, FILE_CONTRACTS};
 pub use gdi_dc::{GdiDcApi, GDI_DC_CONTRACTS};
 pub use gdi_operations::{GdiApi, GDI_OPERATION_CONTRACTS};
 pub use geometry::{GeometryApi, GEOMETRY_CONTRACTS};
+pub(crate) use graphics::symbol as graphics_symbol;
+pub use graphics::{GraphicsExportApi, GRAPHICS_EXPORT_CONTRACTS};
 pub use guid::{GuidApi, GUID_CONTRACTS};
 pub use handles::{HandleApi, HANDLE_CONTRACTS};
 pub use heaps::{HeapApi, HEAP_CONTRACTS};
@@ -181,6 +184,7 @@ pub enum ReturnConvention {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApiId {
+    GraphicsExport(GraphicsExportApi),
     Exception(ExceptionApi),
     MessageFormat(MessageFormatApi),
     Shell(ShellApi),
@@ -281,6 +285,7 @@ pub struct Contract {
     pub limits: &'static str,
     plans: [ArchitecturePlan; 2],
     lookup_dlls: Option<[&'static [&'static str]; 2]>,
+    exact_dlls: &'static [&'static str],
     dwords: [usize; 16],
     dword_count: usize,
 }
@@ -313,6 +318,7 @@ impl Contract {
             limits,
             plans,
             lookup_dlls: None,
+            exact_dlls: &[],
             dwords,
             dword_count,
         }
@@ -339,6 +345,11 @@ impl Contract {
             }
             None => self.dlls(architecture),
         }
+    }
+    /// Internal gateway providers can retain case-sensitive identity.
+    pub(super) const fn with_exact_dlls(mut self, dlls: &'static [&'static str]) -> Self {
+        self.exact_dlls = dlls;
+        self
     }
     pub fn execution(&self, architecture: Architecture) -> ExecutionPolicy {
         self.plans[match architecture {
@@ -375,11 +386,13 @@ pub fn resolve(architecture: Architecture, dll: &str, name: &str) -> Resolution 
     let Some(contract) = by_name(name) else {
         return Resolution::Legacy;
     };
-    if contract
-        .dlls(architecture)
-        .iter()
-        .any(|owner| dll.eq_ignore_ascii_case(owner))
-    {
+    if contract.dlls(architecture).iter().any(|owner| {
+        if contract.exact_dlls.contains(owner) {
+            dll == *owner
+        } else {
+            dll.eq_ignore_ascii_case(owner)
+        }
+    }) {
         Resolution::Bound(contract)
     } else {
         Resolution::WrongDll(contract)
@@ -467,6 +480,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         &MESSAGE_FORMAT_CONTRACTS,
         &SHELL_CONTRACTS,
         &PROCESS_CONTROL_CONTRACTS,
+        &GRAPHICS_EXPORT_CONTRACTS,
     ];
     FAMILIES.iter().flat_map(|family| family.iter())
 }
@@ -484,6 +498,11 @@ mod tests {
                 contract.name
             );
             assert!(!contract.limits.is_empty());
+            for dll in contract.exact_dlls {
+                assert!([Architecture::X86, Architecture::X64]
+                    .iter()
+                    .any(|&architecture| contract.dlls(architecture).contains(dll)));
+            }
             assert!(contract
                 .win64_dwords()
                 .iter()

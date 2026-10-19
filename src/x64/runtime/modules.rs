@@ -1,5 +1,5 @@
 //! Queries describe loaded guest images and the logical built-in service providers.
-use super::{dxgi, kernel_export};
+use super::kernel_export;
 use super::{Memory, Runtime64, WRITE};
 
 /// Module adapters request control; the gateway owns CPU, trace and count commits.
@@ -119,7 +119,7 @@ impl Runtime64 {
                                 .unwrap_or(&symbol)
                                 .to_owned()
                         } else if module.eq_ignore_ascii_case("d3d12.dll") {
-                            dxgi::symbol(module, &symbol).to_owned()
+                            crate::win32::catalog::graphics_symbol(module, &symbol).to_owned()
                         } else if module.eq_ignore_ascii_case("oleaut32.dll") {
                             crate::win32::catalog::bstr_symbol(module, &symbol).to_owned()
                         } else {
@@ -142,9 +142,6 @@ impl Runtime64 {
                     .to_owned();
                     let known = (matches!(provider.as_str(), "kernel32.dll" | "kernelbase.dll")
                         && kernel_export(&function))
-                        || (provider == "dxgi.dll" && dxgi::export(&function))
-                        || (provider == "d3d12.dll" && dxgi::d3d12_export(&function))
-                        || (provider == "d3d11.dll" && dxgi::d3d11_export(&function))
                         || matches!(
                             crate::win32::catalog::resolve(
                                 crate::win32::catalog::Architecture::X64,

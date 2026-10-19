@@ -4,9 +4,6 @@ use super::*;
 mod draw;
 mod layout;
 mod view;
-pub(in crate::x64::runtime) fn export(name: &str) -> bool {
-    matches!(name, "D3D11CreateDevice" | "D3D11CreateDeviceAndSwapChain")
-}
 const DEVICE: Guid = guid(
     0xdb6f6ddb,
     0xac77,
@@ -169,9 +166,6 @@ pub(super) struct Device {
     exception: u32,
 }
 pub(super) fn arity(name: &str) -> Option<usize> {
-    if export(name) {
-        return Some(if name.ends_with("SwapChain") { 12 } else { 10 });
-    }
     abi::DEVICE
         .iter()
         .chain(abi::DEVICE1)
@@ -187,9 +181,6 @@ pub(super) fn arity(name: &str) -> Option<usize> {
         .map(|(_, a, _)| *a)
 }
 pub(super) fn dwords(name: &str) -> &'static [usize] {
-    if export(name) {
-        return &[1, 3, 5, 6];
-    }
     abi::DEVICE
         .iter()
         .chain(abi::DEVICE1)
@@ -410,105 +401,109 @@ impl Runtime64 {
         }
         Ok(())
     }
+    pub(super) fn d3d11_create(
+        &mut self,
+        mem: &mut Memory,
+        combined: bool,
+        a: &[u64],
+    ) -> Result<u64, String> {
+        if combined {
+            return Err("D3D11 combined device/swapchain creation not yet implemented".into());
+        }
+        for (p, n) in [(a[7], 8), (a[8], 4), (a[9], 8)] {
+            if p != 0 {
+                mem.check(p, n, WRITE)?;
+            }
+        }
+        if a[6] != 7 || a[2] != 0 || a[3] & !0x23 != 0 || (a[4] == 0 && a[5] != 0) || a[5] > 16 {
+            return Ok(INVALID_ARG);
+        }
+        if a[3] & 2 != 0 {
+            return Ok(0x887a002d);
+        }
+        let mut levels = Vec::new();
+        if a[4] != 0 {
+            for i in 0..a[5] {
+                levels.push(mem.read_int(a[4] + 4 * i, 4)? as u32);
+            }
+        } else {
+            levels.extend([0xb000, 0xa100, 0xa000, 0x9300, 0x9200, 0x9100]);
+        }
+        let level = levels.into_iter().find(|&l| l == 0xa000);
+        let adapter = if a[0] != 0 {
+            if a[1] != 0
+                || self
+                    .graphics
+                    .objects
+                    .get(&a[0])
+                    .is_none_or(|o| o.kind != Kind::Adapter)
+            {
+                return Ok(INVALID_ARG);
+            }
+            a[0]
+        } else {
+            if a[1] != 1 {
+                return Ok(UNSUPPORTED);
+            }
+            // The default hardware adapter is the same attached Vulkan device.
+            self.graphics.info()?;
+            let factory = self.dxgi_object(mem, Kind::Factory, 0)?;
+            let adapter = self.dxgi_object(mem, Kind::Adapter, factory)?;
+            self.dxgi_release(mem, factory)?;
+            adapter
+        };
+        self.graphics.info()?;
+        let Some(level) = level else {
+            for p in [a[7], a[9]] {
+                if p != 0 {
+                    mem.write_int(p, 8, 0)?;
+                }
+            }
+            if a[0] == 0 {
+                self.dxgi_release(mem, adapter)?;
+            }
+            return Ok(UNSUPPORTED);
+        };
+        let device = self.dxgi_object(mem, Kind::Device, adapter)?;
+        self.graphics.devices.insert(
+            device,
+            Device {
+                flags: a[3] as u32,
+                level,
+                priority: 0,
+                latency: 3,
+                exception: 0,
+            },
+        );
+        if a[0] == 0 {
+            self.dxgi_release(mem, adapter)?;
+        }
+        let context = if a[9] != 0 {
+            self.d3d_context(mem, device)?
+        } else {
+            0
+        };
+        if a[7] != 0 {
+            mem.write_int(a[7], 8, device)?;
+        }
+        if a[8] != 0 {
+            mem.write_int(a[8], 4, level as u64)?;
+        }
+        if a[9] != 0 {
+            mem.write_int(a[9], 8, context)?;
+        }
+        if a[7] == 0 {
+            self.dxgi_release(mem, device)?;
+        }
+        self.trace_note(format!("experimental D3D11 native Vulkan compatibility subset: level={level:#x}; full FL10_0 conformance not claimed"));
+        Ok(0)
+    }
     pub(in crate::x64::runtime) fn d3d11_call(
         &mut self,
         mem: &mut Memory,
         name: &str,
         a: &[u64],
     ) -> Result<u64, String> {
-        if export(name) {
-            if name.ends_with("SwapChain") {
-                return Err("D3D11 combined device/swapchain creation not yet implemented".into());
-            }
-            for (p, n) in [(a[7], 8), (a[8], 4), (a[9], 8)] {
-                if p != 0 {
-                    mem.check(p, n, WRITE)?;
-                }
-            }
-            if a[6] != 7 || a[2] != 0 || a[3] & !0x23 != 0 || (a[4] == 0 && a[5] != 0) || a[5] > 16
-            {
-                return Ok(INVALID_ARG);
-            }
-            if a[3] & 2 != 0 {
-                return Ok(0x887a002d);
-            }
-            let mut levels = Vec::new();
-            if a[4] != 0 {
-                for i in 0..a[5] {
-                    levels.push(mem.read_int(a[4] + 4 * i, 4)? as u32);
-                }
-            } else {
-                levels.extend([0xb000, 0xa100, 0xa000, 0x9300, 0x9200, 0x9100]);
-            }
-            let level = levels.into_iter().find(|&l| l == 0xa000);
-            let adapter = if a[0] != 0 {
-                if a[1] != 0
-                    || self
-                        .graphics
-                        .objects
-                        .get(&a[0])
-                        .is_none_or(|o| o.kind != Kind::Adapter)
-                {
-                    return Ok(INVALID_ARG);
-                }
-                a[0]
-            } else {
-                if a[1] != 1 {
-                    return Ok(UNSUPPORTED);
-                }
-                // The default hardware adapter is the same attached Vulkan device.
-                self.graphics.info()?;
-                let factory = self.dxgi_object(mem, Kind::Factory, 0)?;
-                let adapter = self.dxgi_object(mem, Kind::Adapter, factory)?;
-                self.dxgi_release(mem, factory)?;
-                adapter
-            };
-            self.graphics.info()?;
-            let Some(level) = level else {
-                for p in [a[7], a[9]] {
-                    if p != 0 {
-                        mem.write_int(p, 8, 0)?;
-                    }
-                }
-                if a[0] == 0 {
-                    self.dxgi_release(mem, adapter)?;
-                }
-                return Ok(UNSUPPORTED);
-            };
-            let device = self.dxgi_object(mem, Kind::Device, adapter)?;
-            self.graphics.devices.insert(
-                device,
-                Device {
-                    flags: a[3] as u32,
-                    level,
-                    priority: 0,
-                    latency: 3,
-                    exception: 0,
-                },
-            );
-            if a[0] == 0 {
-                self.dxgi_release(mem, adapter)?;
-            }
-            let context = if a[9] != 0 {
-                self.d3d_context(mem, device)?
-            } else {
-                0
-            };
-            if a[7] != 0 {
-                mem.write_int(a[7], 8, device)?;
-            }
-            if a[8] != 0 {
-                mem.write_int(a[8], 4, level as u64)?;
-            }
-            if a[9] != 0 {
-                mem.write_int(a[9], 8, context)?;
-            }
-            if a[7] == 0 {
-                self.dxgi_release(mem, device)?;
-            }
-            self.trace_note(format!("experimental D3D11 native Vulkan compatibility subset: level={level:#x}; full FL10_0 conformance not claimed"));
-            return Ok(0);
-        }
         let o = self
             .graphics
             .objects
