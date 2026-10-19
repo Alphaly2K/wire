@@ -12,6 +12,8 @@
 
 资源检查中暴露的未知 PE32 case 静默生成 integer 问题已独立修正：所有 case 在 IO/启动前校验，合法 59 项三种规模的 177 份字节与预期保持。工具测试 28 项、实际 raw/IR 四次执行通过；运行时未改，证据 `r7-pe32-case-validation-*`，详见[工具边界](../architecture/validation-tools.md)。
 
+再接入[五项双架构启动信息](refactoring-process-startup-2026-10-19.md)，独立基线 `99d280d`，保持命令地址、68/104 字节结构、feature 集合及不同返回帧规则。最新完整 release 640 / 7 ignored、debug 486、native 7、工具 28 和静态检查/build 通过，299 个 src Rust 文件核对一致；PE32 16 条/96 次、AMD64 4 条/24 次功能执行、六对 trace 及一对 Alice 前缀通过。当前共 22 项新契约正确性通过、性能待复核，累计性能验收保持 675。
+
 ## 文件 section 批次（历史）
 
 八项映射 API 汇入唯一文件契约，文件 export 累计 53 个；删除重复 ABI/arity/DWORD 表，按冷绑定 FileApi ID 使用原 handler，保留 Mappings 的资源寿命、错误顺序和输出提交。PE32 八项仍为 ABI-only；Win64 六项 typed、两项 absent。

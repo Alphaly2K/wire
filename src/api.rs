@@ -481,10 +481,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
         add(
             "kernel32.dll",
             &[
-                ("GetStartupInfoA", 4),
-                ("GetStartupInfoW", 4),
-                ("GetCommandLineA", 0),
-                ("GetCommandLineW", 0),
                 ("SetHandleCount", 4),
                 ("GetTempPathA", 8),
                 ("GetTempPathW", 8),
@@ -512,7 +508,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetDriveTypeW", 4),
                 ("DeviceIoControl", 32),
                 ("GetOverlappedResult", 16),
-                ("IsProcessorFeaturePresent", 4),
                 ("SetConsoleCtrlHandler", 8),
                 ("GetProcessTimes", 20),
                 ("GetProcessWorkingSetSize", 12),
@@ -2270,11 +2265,15 @@ pub fn dispatch(
                 note = "unknown handle".into();
             }
         }
-        (_, "kernel32.dll", "GetCommandLineA") => ret = state.cmdline_a,
-        (_, "kernel32.dll", "GetCommandLineW") => ret = state.cmdline_w,
-        (_, "kernel32.dll", "IsProcessorFeaturePresent") => {
-            // SSE/SSE2 subset is enabled; SSE3 still lacks several opcodes.
-            ret = matches!(args[0], 6 | 10) as u32;
+        (Some(crate::win32::catalog::ApiId::Startup(id)), _, _) => {
+            let result = crate::win32::x86::process_startup::call(
+                id,
+                &args,
+                mem,
+                [state.cmdline_a, state.cmdline_w],
+            )?;
+            ret = result.0;
+            note = result.1.into();
         }
         (Some(crate::win32::catalog::ApiId::Resource(id)), _, _) => {
             (ret, note) = crate::win32::x86::resources::call(
@@ -2284,13 +2283,6 @@ pub fn dispatch(
                 state.exe_base,
                 &mut state.last_error,
             )?;
-        }
-        (_, "kernel32.dll", "GetStartupInfoA") | (_, "kernel32.dll", "GetStartupInfoW") => {
-            let mut si = [0u8; 68];
-            si[0..4].copy_from_slice(&68u32.to_le_bytes());
-            mem.write_bytes(args[0], &si).map_err(|e| e.to_string())?;
-            note = "zeroed STARTUPINFO".into();
-            ret = 0;
         }
         (Some(crate::win32::catalog::ApiId::Module(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::Module(id)) = binding.typed else {

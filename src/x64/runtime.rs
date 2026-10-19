@@ -345,7 +345,7 @@ fn import_arity(name: &str) -> Option<usize> {
         "SetEnvironmentVariableW" | "SetEnvironmentVariableA" => 2,
         "NtQueryDirectoryFile" => 11,
         "CommandLineToArgvW" => 2,
-        "GetCommandLineA" | "GetCommandLineW" | "AreFileApisANSI" => 0,
+        "AreFileApisANSI" => 0,
         "GetErrorMode" => 0,
         "SetErrorMode" => 1,
         "GetEnvironmentStringsW" => 0,
@@ -357,13 +357,7 @@ fn import_arity(name: &str) -> Option<usize> {
         "CreateProcessW" => 10,
         "FreeEnvironmentStringsW" => 1,
         "GetConsoleMode" | "GetTempPathW" | "GetTempPath2W" => 2,
-        "GetStartupInfoW"
-        | "GetStartupInfoA"
-        | "IsProcessorFeaturePresent"
-        | "EncodePointer"
-        | "DecodePointer"
-        | "SetUnhandledExceptionFilter"
-        | "ExitProcess" => 1,
+        "EncodePointer" | "DecodePointer" | "SetUnhandledExceptionFilter" | "ExitProcess" => 1,
         "WriteConsoleW" => 5,
         _ => return None,
     })
@@ -416,7 +410,7 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "UpdateProcThreadAttribute" => &[1],
         "CreateProcessW" => &[4, 5],
         "CreatePipe" => &[3],
-        "GetTempPathW" | "GetTempPath2W" | "IsProcessorFeaturePresent" | "ExitProcess" => &[0],
+        "GetTempPathW" | "GetTempPath2W" | "ExitProcess" => &[0],
         "WriteConsoleW" => &[2],
         _ => &[],
     }
@@ -819,6 +813,9 @@ impl Runtime64 {
             ApiId::Bstr(id) => self.bstr_call(mem, id, args),
             ApiId::Variant(_) => unreachable!("Variant helpers have no Win64 binding"),
             ApiId::ProcessQuery(id) => self.process_query_call(mem, id, args),
+            ApiId::Startup(id) => {
+                crate::win32::x64::process_startup::call(id, args, mem, [COMMAND_A, COMMAND_W])
+            }
             ApiId::Keyboard(id) => self.keyboard_call(mem, id, args),
             ApiId::Cursor(id) => self.cursor_call(mem, id, args),
             ApiId::Image(id) => self.image_call(mem, id, args),
@@ -2818,8 +2815,6 @@ impl Runtime64 {
                     0
                 }
             }
-            "GetCommandLineA" => COMMAND_A,
-            "GetCommandLineW" => COMMAND_W,
             "EncodePointer" | "DecodePointer" => args[0], // Optional pointer obfuscation; inverse identity.
             _ if matches!(binding.control, gateways::ControlImport::InlineSync(_)) => {
                 use crate::win32::x64::inline_sync::{call, Outcome};
@@ -3127,16 +3122,6 @@ impl Runtime64 {
                         }
                     }
                 }
-            }
-            "GetStartupInfoW" | "GetStartupInfoA" => {
-                let mut info = [0; 104];
-                info[..4].copy_from_slice(&104u32.to_le_bytes());
-                mem.write(args[0], &info)?;
-                0
-            }
-            "IsProcessorFeaturePresent" => {
-                // Advertise only facilities in this integer startup interpreter.
-                (args[0] as u32 == 12) as u64 // Checked NX; no SIMD/AVX/hardware virtualization.
             }
             "SetUnhandledExceptionFilter" => {
                 let previous = self.exception_filter;

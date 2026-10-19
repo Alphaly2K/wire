@@ -35,6 +35,7 @@
 - [Heap 资源与调用边界](architecture/heaps.md)及[契约验收](reports/refactoring-heaps-2026-10-16.md)：13 项接口、私有堆/slab 所有权、ABI-only/absent 策略及 29 条性能路径。
 - [Local/Global 共享资源与调用边界](architecture/local-memory.md)及[契约验收](reports/refactoring-local-memory-2026-10-16.md)：14 项接口、成对资源共享、错误及返回顺序、28 条性能路径。
 - [系统信息与内存状态调用边界](architecture/system-profile.md)及[契约验收](reports/refactoring-system-profile-2026-10-16.md)：四项接口、双架构布局、public facade、31 条性能路径与路由顺序调查。
+- [进程启动信息](architecture/process-startup.md)及[迁移记录](reports/refactoring-process-startup-2026-10-19.md)：五项命令行/STARTUPINFO/feature 契约，保留双架构布局与返回帧差异；完整正确性通过，性能待复核。
 - [日历、时区与 CPU 计时调用边界](architecture/calendar.md)及[契约验收](reports/refactoring-calendar-2026-10-16.md)：11 项接口、时区独立模块、宿主 CPU 计时、32 条性能路径及局部成本调查。
 - [多媒体计时器调用与资源边界](architecture/multimedia.md)及[契约验收](reports/refactoring-multimedia-2026-10-16.md)：三项接口、私有 period owner、静态/动态 provider 差异、35 条性能路径与同哈希扩样。
 - [SRW、条件变量与 InitOnce 边界](architecture/inline-sync.md)及[契约验收](reports/refactoring-inline-sync-2026-10-16.md)：十二项接口、私有 SRW owner、真实线程阻塞重试、36 条性能路径。
