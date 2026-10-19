@@ -487,8 +487,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("DebugBreak", 0),
                 ("OutputDebugStringA", 4),
                 ("OutputDebugStringW", 4),
-                ("FormatMessageA", 28),
-                ("FormatMessageW", 28),
                 ("TerminateThread", 8),
                 ("GetDiskFreeSpaceA", 20),
                 ("GetDiskFreeSpaceW", 20),
@@ -755,18 +753,12 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
             &[
                 ("ShellExecuteA", 24),
                 ("ShellExecuteW", 24),
-                ("SHGetFolderPathA", 20),
-                ("SHGetFolderPathW", 20),
-                ("SHGetSpecialFolderPathA", 16),
-                ("SHGetSpecialFolderPathW", 16),
-                ("SHGetKnownFolderPath", 16),
                 ("SHBrowseForFolderA", 4),
                 ("SHGetPathFromIDListA", 8),
                 ("DragAcceptFiles", 8),
                 ("DragQueryFileA", 16),
                 ("DragQueryFileW", 16),
                 ("DragFinish", 4),
-                ("CommandLineToArgvW", 8),
             ],
         );
         add(
@@ -2341,52 +2333,25 @@ pub fn dispatch(
         (_, "mpr.dll", "WNetGetUniversalNameA") | (_, "mpr.dll", "WNetGetUniversalNameW") => {
             ret = 2250; // ERROR_NOT_CONNECTED: sandbox C: is a local drive
         }
-        (_, "kernel32.dll", "FormatMessageA") | (_, "kernel32.dll", "FormatMessageW") => {
-            let wide = name.ends_with('W');
-            let text = if args[0] & 0x400 != 0 {
-                crate::file_api::read_name(mem, args[1], wide)
-                    .map_err(|e| format!("FormatMessage: {e}"))?
-            } else {
-                match args[2] {
-                    2 => "The system cannot find the file specified.\r\n".into(),
-                    5 => "Access is denied.\r\n".into(),
-                    87 => "The parameter is incorrect.\r\n".into(),
-                    n => format!("Win32 error {n}.\r\n"),
-                }
-            };
-            let count = if wide {
-                text.encode_utf16().count()
-            } else {
-                crate::codepage::encode(&text, 932)
-                    .map_err(|e| format!("FormatMessage: {e}"))?
-                    .0
-                    .len()
-            } as u32;
-            if args[0] & 0x100 != 0 {
-                let p = state.heap.alloc(
-                    mem,
-                    state.process_heap,
-                    (count + 1).max(args[5]) * if wide { 2 } else { 1 },
-                    false,
-                )?;
-                if p == 0 {
-                    state.last_error = 8;
-                    ret = 0;
-                } else {
-                    crate::file_api::write_string(mem, p, count + 1, &text, wide)
-                        .map_err(|e| format!("FormatMessage: {e}"))?;
-                    mem.write_u32(args[4], p).map_err(|e| e.to_string())?;
-                    ret = count;
-                }
-            } else if args[5] <= count {
-                state.last_error = 122;
-                ret = 0;
-            } else {
-                crate::file_api::write_string(mem, args[4], args[5], &text, wide)
-                    .map_err(|e| format!("FormatMessage: {e}"))?;
-                ret = count;
-            }
-            note = text.trim().into();
+        (Some(crate::win32::catalog::ApiId::MessageFormat(id)), _, _) => {
+            (ret, note) = crate::win32::x86::message_format::call(
+                id,
+                &args,
+                mem,
+                &mut state.heap,
+                state.process_heap,
+                &mut state.last_error,
+            )?;
+        }
+        (Some(crate::win32::catalog::ApiId::Shell(id)), _, _) => {
+            (ret, note) = crate::win32::x86::shell::call(
+                id,
+                &args,
+                mem,
+                &mut state.heap,
+                state.process_heap,
+                &mut state.last_error,
+            );
         }
         (_, "mscoree.dll", "CorExitProcess") => {
             cpu.halted = true;

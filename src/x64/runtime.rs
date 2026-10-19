@@ -36,6 +36,7 @@ mod process_options;
 mod process_queries;
 mod registry;
 mod resources;
+mod shell;
 mod snapshot;
 mod sockets;
 mod sspi;
@@ -198,8 +199,6 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
     }
     if !dll.eq_ignore_ascii_case("kernel32.dll")
         && !dll.eq_ignore_ascii_case("kernelbase.dll")
-        && !(dll.eq_ignore_ascii_case("shell32.dll")
-            && matches!(name, "CommandLineToArgvW" | "SHGetKnownFolderPath"))
         && !(dll.eq_ignore_ascii_case("ntdll.dll") && name == "NtQueryDirectoryFile")
         && !(dll.eq_ignore_ascii_case("dxgi.dll") && dxgi::export(name))
         && !(dll.eq_ignore_ascii_case("d3d12.dll") && dxgi::d3d12_export(name))
@@ -216,11 +215,7 @@ fn kernel_export(name: &str) -> bool {
             .lookup_dlls(crate::win32::catalog::Architecture::X64)
             .contains(&"kernel32.dll");
     }
-    if dxgi::arity(name).is_some()
-        || name.starts_with("time")
-        || name == "NtQueryDirectoryFile"
-        || matches!(name, "CommandLineToArgvW" | "SHGetKnownFolderPath")
-    {
+    if dxgi::arity(name).is_some() || name.starts_with("time") || name == "NtQueryDirectoryFile" {
         return false;
     }
     import_arity(name).is_some()
@@ -231,10 +226,7 @@ fn import_arity(name: &str) -> Option<usize> {
     }
     Some(match name {
         name if dxgi::arity(name).is_some() => dxgi::arity(name).unwrap(),
-        "FormatMessageA" | "FormatMessageW" => 7,
-        "SHGetKnownFolderPath" => 4,
         "NtQueryDirectoryFile" => 11,
-        "CommandLineToArgvW" => 2,
         "CreatePipe" => 4,
         "CreateProcessW" => 10,
         "GetConsoleMode" => 2,
@@ -256,8 +248,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
     }
     match name {
         name if dxgi::arity(name).is_some() => dxgi::dwords(name),
-        "FormatMessageA" | "FormatMessageW" => &[0, 2, 3, 5],
-        "SHGetKnownFolderPath" => &[1],
         "NtQueryDirectoryFile" => &[6, 7],
         "CreateProcessW" => &[4, 5],
         "CreatePipe" => &[3],
@@ -624,6 +614,8 @@ impl Runtime64 {
     ) -> Result<u64, String> {
         use crate::win32::catalog::ApiId;
         match id {
+            ApiId::MessageFormat(id) => self.format_message(mem, id, args),
+            ApiId::Shell(id) => self.shell_call(mem, id, args),
             ApiId::Exception(_) => unreachable!("exception controls use their bound gateway route"),
             ApiId::Com(id) => self.com_call(mem, id, args),
             ApiId::Winrt(id) => self.winrt_call(mem, id, args),
@@ -1090,7 +1082,6 @@ impl Runtime64 {
                     }
                 }
             }
-            "FormatMessageA" | "FormatMessageW" => self.format_message(mem, name, args)?,
             _ if matches!(
                 file,
                 Some(
@@ -1230,65 +1221,6 @@ impl Runtime64 {
                     Err(error) => {
                         self.set_error(mem, error)?;
                         0
-                    }
-                }
-            }
-            "SHGetKnownFolderPath" => {
-                mem.check(args[3], 8, WRITE)?;
-                let mut guid = [0; 16];
-                mem.read(args[0], &mut guid)?;
-                let path = match guid {
-                    [0xa4, 0xa1, 0x20, 0xa5, 0x80, 0x17, 0xf6, 0x4f, 0xbd, 0x18, 0x16, 0x73, 0x43, 0xc5, 0xaf, 0x16] => {
-                        Some(self.profile.local_low())
-                    }
-                    [0x85, 0x27, 0xb3, 0xf1, 0xba, 0x6f, 0xcf, 0x4f, 0x9d, 0x55, 0x7b, 0x8e, 0x7f, 0x15, 0x70, 0x91] => {
-                        Some(self.profile.local())
-                    }
-                    [0xdb, 0x85, 0xb6, 0x3e, 0xf9, 0x65, 0xf6, 0x4c, 0xa0, 0x3a, 0xe3, 0xef, 0x65, 0x72, 0x9f, 0x3d] => {
-                        Some(self.profile.roaming())
-                    }
-                    [0x8f, 0x85, 0x6c, 0x5e, 0x22, 0x0e, 0x60, 0x47, 0x9a, 0xfe, 0xea, 0x33, 0x17, 0xb6, 0x71, 0x73] => {
-                        Some(self.profile.home())
-                    }
-                    [0xd0, 0x9a, 0xd3, 0xfd, 0x8f, 0x23, 0xaf, 0x46, 0xad, 0xb4, 0x6c, 0x85, 0x48, 0x03, 0x69, 0xc7] => {
-                        Some(self.profile.documents())
-                    }
-                    _ => None,
-                };
-                let data = (|| -> Result<Vec<u8>, u32> {
-                    if args[2] != 0 || args[1] & !0xc000 != 0 {
-                        return Err(50);
-                    }
-                    let path = path.ok_or(50u32)?;
-                    let host = self.files.filesystem().ok_or(3u32)?.resolve(path)?;
-                    if args[1] & 0x8000 != 0 {
-                        std::fs::create_dir_all(&host).map_err(|e| crate::fs::win_error(&e))?;
-                    }
-                    if args[1] & 0x4000 == 0 && !host.is_dir() {
-                        return Err(3);
-                    }
-                    Ok(path
-                        .encode_utf16()
-                        .chain(Some(0))
-                        .flat_map(u16::to_le_bytes)
-                        .collect())
-                })();
-                match data {
-                    Err(error) => {
-                        mem.write_int(args[3], 8, 0)?;
-                        0x80070000 | error as u64
-                    }
-                    Ok(data) => {
-                        let p = self.heap_alloc(mem, data.len() as u64)?;
-                        if p == 0 {
-                            mem.write_int(args[3], 8, 0)?;
-                            0x8007000e
-                        } else {
-                            mem.write(p, &data)?;
-                            mem.write_int(args[3], 8, p)?;
-                            self.task_memory.track(p);
-                            0
-                        }
                     }
                 }
             }
@@ -1874,42 +1806,6 @@ impl Runtime64 {
                 } else {
                     mem.write(args[1], &bytes)?;
                     required as u64 - 1
-                }
-            }
-            "CommandLineToArgvW" => {
-                mem.check(args[1], 4, WRITE)?;
-                let line = Self::utf16(mem, args[0])?;
-                let words = if line.is_empty() {
-                    vec![self.exe_path.clone()]
-                } else {
-                    command::arguments(&line)
-                };
-                let strings: Vec<Vec<u8>> = words
-                    .iter()
-                    .map(|word| {
-                        word.encode_utf16()
-                            .chain(Some(0))
-                            .flat_map(u16::to_le_bytes)
-                            .collect()
-                    })
-                    .collect();
-                let table_size = strings.len() * 8;
-                let size = table_size + strings.iter().map(Vec::len).sum::<usize>();
-                let block = self.heap_alloc(mem, size as u64)?;
-                if block == 0 {
-                    0
-                } else {
-                    let mut data = vec![0; size];
-                    let mut at = table_size;
-                    for (n, string) in strings.iter().enumerate() {
-                        data[n * 8..n * 8 + 8].copy_from_slice(&(block + at as u64).to_le_bytes());
-                        data[at..at + string.len()].copy_from_slice(string);
-                        at += string.len();
-                    }
-                    mem.write(block, &data)?;
-                    mem.write_int(args[1], 4, words.len() as u64)?;
-                    self.local_blocks.insert(block);
-                    block
                 }
             }
             "CreateProcessW" => {

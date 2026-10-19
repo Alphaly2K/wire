@@ -3,6 +3,28 @@ use super::{Memory, Runtime64};
 use crate::win32::catalog::LocalMemoryApi;
 
 impl Runtime64 {
+    pub(super) fn format_message(
+        &mut self,
+        mem: &mut Memory,
+        id: crate::win32::catalog::MessageFormatApi,
+        args: &[u64],
+    ) -> Result<u64, String> {
+        use crate::win32::x64::message_format::{prepare, Prepared};
+        let error_slot = self.teb() + 0x68;
+        match prepare(mem, id, args, error_slot)? {
+            Prepared::Done(value) => Ok(value),
+            Prepared::Allocate { bytes, count, size } => {
+                let pointer = self.heap_alloc(mem, size)?;
+                if pointer == 0 {
+                    return Ok(0);
+                }
+                mem.write(pointer, &bytes)?;
+                mem.write_int(args[4], 8, pointer)?;
+                self.local_blocks.insert(pointer);
+                Ok(count)
+            }
+        }
+    }
     pub(super) fn local_memory_call(
         &mut self,
         mem: &mut Memory,

@@ -502,3 +502,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R2/R3 异常入口与注册元数据
 
 独立旧行为基线 `b014544` 固定 provider/ABI、完整 token/filter、返回帧预检和累计耗尽。十一项 ExceptionApi 汇入唯一契约，Win64 有序 handler/filter 与 function-table 集合成为私有 owner；Process64 继续负责 guest 回调、Raise/Unwind 和 CPU/计数提交。原查找、表项/结果校验、静态注册与 CONTEXT codec 经归一核对保持。release Win64 边界 2、Process64 8、PE32 异常 7、catalog 一致性及 fmt/release lib/bin strict Clippy/build 通过，不跑性能。累计 **867 exports**，见[边界与验收](../architecture/exceptions.md)。
+
+## R2 Shell 与错误消息
+
+基线 `d034c5b` 固定 shell 静态导入/动态发现差异、PE32 known-folder 分配和 provider 清栈。六项 ShellApi、两项 MessageFormatApi 接入；PE32 旧 NLS shell 主体移入窄借用 adapter，公开 facade 保留；Win64 受检准备与原 heap/local/task 分配协调分离，纯命令行 parser 移入 kernel 算法。原 parser、消息及 shell 主体归一核对保持。相关 release 及单元 31 项、fmt/release lib/bin strict Clippy/build 通过，不跑性能。累计 **875 exports**，见[边界与验收](../architecture/shell-and-messages.md)。

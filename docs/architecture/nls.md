@@ -18,6 +18,6 @@
 
 `EnumSystemLocalesEx` 的 Win64 binding 选择专用 ControlImport。进程层负责线程/executor 检查、回调栈验证、分配/释放、CPU/trace 提交、stop-on-false 与跨 budget 继续；NLS adapter 只填充回调输入，host 层不运行 guest CPU。四种 locale、过滤顺序和回调参数保持原样。PE32 仍是 ABI-only。
 
-公开 `wire::nls::dispatch` 保留旧函数范围并委托新 adapter；main gateway 直接使用冷绑定 ID，这个兼容入口不参与 typed 热路径。未迁移的 shell allocator 与 timezone API 仍留在旧 facade。Unicode 属性继续使用 Rust 表，排序、安装的语言数据库与自定义转换字符等限制按原路径处理。
+公开 `wire::nls::dispatch` 保留旧函数范围并委托新 adapter；main gateway 直接使用冷绑定 ID，这个兼容入口不参与 typed 热路径。timezone 已委托日历 adapter，[shell allocator](shell-and-messages.md)也已委托独立 shell adapter；facade 的历史范围保持。Unicode 属性继续使用 Rust 表，排序、安装的语言数据库与自定义转换字符等限制按原路径处理。
 
 `tests/nls_contract.rs` 固定两架构的 flags、部分输出、CP 别名、wrong provider、return-slot alias 和公开 facade。原有 locale callback、calendar、codepage、buffer fault 与 CRT character 测试继续运行。性能工具显式选择 `gateway-nls` / `nls-conversion`，后者同时校验转换的 UTF-16 字节与返回值累加，默认 case 集合保持原样。

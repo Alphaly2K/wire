@@ -53,6 +53,7 @@
 - [系统与临时目录查询](architecture/system-paths.md)：十项契约、统一环境默认值，保留双架构能力与计数/故障语义；累计 851 exports。
 - [标量入口补齐](reports/refactoring-scalar-followup-2026-10-20.md)：pointer encoding、stack guarantee、ANSI file profile 与 processor topology 汇入既有家族；双架构整合正确性通过，累计 856 exports。
 - [异常与展开边界](architecture/exceptions.md)：十一项架构契约、私有 vectored/filter 和 function-table owner，保留实际 guest 回调与控制提交；累计 867 exports。
+- [Shell 与错误消息](architecture/shell-and-messages.md)：八项契约、受检准备/分配协调、纯命令行 parser 和 PE32 NLS facade 兼容；累计 875 exports。
 - [Win64 Toolhelp 快照](architecture/snapshots.md)及[完整验收](reports/refactoring-snapshot-owner-2026-10-19.md)：冻结线程值、游标/输出故障、保护关闭；19 条协议、180 次执行及独立累计 IR 复核。
 - [Toolhelp 七项统一契约](reports/refactoring-snapshot-contract-2026-10-19.md)：双架构 provider/ABI 和 typed ID；累计 713 exports，17 个计时协议、162 次执行及三对启动前缀，保留代码别名局部成本。
 - [日历、时区与 CPU 计时调用边界](architecture/calendar.md)及[契约验收](reports/refactoring-calendar-2026-10-16.md)：11 项接口、时区独立模块、宿主 CPU 计时、32 条性能路径及局部成本调查。

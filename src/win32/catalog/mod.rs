@@ -34,6 +34,7 @@ mod keyboard;
 mod local_memory;
 mod locals;
 mod menu;
+mod message_format;
 mod messages;
 mod modules;
 mod multimedia;
@@ -47,6 +48,7 @@ mod process_queries;
 mod process_startup;
 mod registry;
 mod resources;
+mod shell;
 mod sids;
 mod snapshots;
 mod sspi;
@@ -104,6 +106,7 @@ pub use keyboard::{KeyboardApi, KEYBOARD_CONTRACTS};
 pub use local_memory::{LocalMemoryApi, LOCAL_MEMORY_CONTRACTS};
 pub use locals::{LocalApi, LOCAL_CONTRACTS};
 pub use menu::{MenuApi, MENU_CONTRACTS};
+pub use message_format::{MessageFormatApi, MESSAGE_FORMAT_CONTRACTS};
 pub use messages::{MessageApi, MESSAGE_CONTRACTS};
 pub use modules::{ModuleApi, ModuleQueryApi, MODULE_CONTRACTS, MODULE_QUERY_CONTRACTS};
 pub use multimedia::{MultimediaApi, MULTIMEDIA_CONTRACTS};
@@ -117,6 +120,7 @@ pub use process_queries::{ProcessQueryApi, PROCESS_QUERY_CONTRACTS};
 pub use process_startup::{StartupApi, STARTUP_CONTRACTS};
 pub use registry::{RegistryApi, REGISTRY_CONTRACTS};
 pub use resources::{ResourceApi, RESOURCE_CONTRACTS};
+pub use shell::{ShellApi, SHELL_CONTRACTS};
 pub use sids::{SidApi, SID_CONTRACTS};
 pub use snapshots::{SnapshotApi, SNAPSHOT_CONTRACTS};
 pub use sspi::{SspiApi, SSPI_CONTRACTS};
@@ -176,6 +180,8 @@ pub enum ReturnConvention {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApiId {
     Exception(ExceptionApi),
+    MessageFormat(MessageFormatApi),
+    Shell(ShellApi),
     Com(ComApi),
     Winrt(WinrtApi),
     Bstr(BstrApi),
@@ -455,6 +461,8 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         &PROCESS_OPTION_CONTRACTS,
         &SYSTEM_PATH_CONTRACTS,
         &EXCEPTION_CONTRACTS,
+        &MESSAGE_FORMAT_CONTRACTS,
+        &SHELL_CONTRACTS,
     ];
     FAMILIES.iter().flat_map(|family| family.iter())
 }
