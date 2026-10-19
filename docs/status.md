@@ -1,6 +1,6 @@
 # 当前状态
 
-更新日期：2026-10-20。重构前基线为 `2e78377`；最新完成 [PE32 scratch/CRT owner](architecture/crt32.md)，完整 Win32 249 及 fmt/release lib/bin strict Clippy/build 通过，保留懒分配、指针身份及失败提交顺序。此前 [ABI 来源收敛](architecture/abi.md)删除 270 条重复声明，[文件窄适配器](architecture/files.md)、[kernel 对象 owner](architecture/kernel-objects32.md)及[图形创建与 COM 冷绑定](architecture/graphics-contracts.md)已接入。按影响范围选择验证，本批不重复性能或游戏矩阵。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
+更新日期：2026-10-20。重构前基线为 `2e78377`；最新完成 [PE32 同步与等待窄适配](architecture/waits.md)，完整 Win32 249 及 fmt/release lib/bin strict Clippy/build 通过，保留对象获取、命名复用、音频 signal 与故障提交顺序。此前 [scratch/CRT owner](architecture/crt32.md)、[ABI 来源收敛](architecture/abi.md)、[文件窄适配器](architecture/files.md)、[kernel 对象 owner](architecture/kernel-objects32.md)及[图形创建与 COM 冷绑定](architecture/graphics-contracts.md)已接入。按影响范围选择验证，本批不重复性能或游戏矩阵。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
 
 本轮累计接入对话框/窗口枚举 22、菜单 27、GDI 对象/像素/字体 31 项，共 **80 项**，累计 **675 项**。统一声明、typed 分发与领域 owner 保持双架构范围、故障提交和既有不可用策略；保留真实 RedrawWindow 网关与公开 facade 的历史差异。精确标量 SSE 已移入独立编译单元，没有近似浮点或新增 ISA 语义。
 

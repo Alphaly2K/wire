@@ -534,3 +534,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 PE32 scratch 与 CRT 指针
 
 独立基线 `53f620d` 固定懒 argv、errno 和 scratch 对齐/耗尽顺序。Scratch32 与 CrtState32 分别私有拥有游标及 CRT 指针身份，ApiState 入口委托；原数学、callback、data export 和 cdecl 路径保持。分配/初始化/部分提交主体核对一致，release Win32 249、fmt/release lib/bin strict Clippy/build 通过，不跑性能。累计 export 仍 **888**，见[CRT 边界](../architecture/crt32.md)。
+
+## R3 PE32 同步与等待窄适配
+
+基线 `847dd25`。event/semaphore/mutex 适配器仅借对象、调度器、内存及错误槽，readiness/acquire/wake 与 DirectSound signal 仅借对象和调度器；命名对象的 LastError 策略由同一适配入口维护。原同步主体、四个对象 helper、命名复用与 wait 控制流程归一核对保持。release 完整 Win32 249、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵。累计 export 仍 **888**，证据为 `wire-out/refactoring-2026-10-14/r3-sync32-{source-checks,verification}.json`，见[等待边界](../architecture/waits.md)。

@@ -9,9 +9,8 @@
 
 use crate::cpu::{Cpu, GuestCallOutcome, EDX};
 use crate::mem::GuestMem;
-use crate::thread::{
-    target_mentions, Sched, ThreadState, WaitTarget, Wake, WAIT_OBJECT_0, WAIT_TIMEOUT,
-};
+use crate::thread::{Sched, ThreadState, WaitTarget, Wake, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use crate::win32::x86::object_waits::{obj_acquire, obj_ready};
 use std::collections::HashMap;
 pub type Args = [u32; 16];
 use std::sync::Arc;
@@ -291,11 +290,12 @@ impl ApiState {
     /// creating a named object that already exists returns the existing
     /// handle and sets ERROR_ALREADY_EXISTS.
     pub fn create_named(&mut self, name: &str, make: impl FnOnce() -> HandleObj) -> (u32, bool) {
-        let (h, existed) = self.handles.create_named(name, make);
-        if existed {
-            self.last_error = 183; // ERROR_ALREADY_EXISTS
-        }
-        (h, existed)
+        crate::win32::x86::sync_objects::create_named(
+            &mut self.handles,
+            &mut self.last_error,
+            name,
+            make,
+        )
     }
 
     pub fn module_handle_for(&mut self, dll: &str) -> u32 {
@@ -367,98 +367,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
         return crate::gdiplus::stack_bytes(name);
     }
     crate::win32::abi::stack_bytes(dll, name)
-}
-
-// --- kernel-object wait helpers (M2) ---
-
-/// Non-consuming readiness test (used by wait-all and by acquire itself).
-fn obj_ready(state: &ApiState, sched: &Sched, h: u32) -> bool {
-    match state.handles.get(&h) {
-        Some(HandleObj::Event { signaled, .. }) => *signaled,
-        Some(HandleObj::Mutex { owner, .. }) => {
-            owner.is_none() || *owner == Some(sched.current_tid())
-        }
-        Some(HandleObj::Semaphore { count, .. }) => *count > 0,
-        Some(HandleObj::Thread { tid }) => sched
-            .threads
-            .iter()
-            .any(|t| t.tid == *tid && matches!(t.state, ThreadState::Exited(_))),
-        _ => false,
-    }
-}
-
-/// Consuming acquire: events clear their signal (auto-reset), mutexes take
-/// ownership, semaphores decrement. Thread handles have nothing to consume.
-fn obj_acquire(state: &mut ApiState, sched: &Sched, h: u32) -> bool {
-    match state.handles.get_mut(&h) {
-        Some(HandleObj::Event { manual, signaled }) => {
-            if *signaled {
-                if !*manual {
-                    *signaled = false;
-                }
-                true
-            } else {
-                false
-            }
-        }
-        Some(HandleObj::Mutex { owner, count }) => {
-            let me = sched.current_tid();
-            match *owner {
-                None => {
-                    *owner = Some(me);
-                    *count = 1;
-                    true
-                }
-                Some(o) if o == me => {
-                    *count += 1;
-                    true
-                }
-                _ => false,
-            }
-        }
-        Some(HandleObj::Semaphore { count, .. }) => {
-            if *count > 0 {
-                *count -= 1;
-                true
-            } else {
-                false
-            }
-        }
-        Some(HandleObj::Thread { tid }) => {
-            let tid = *tid;
-            sched
-                .threads
-                .iter()
-                .any(|t| t.tid == tid && matches!(t.state, ThreadState::Exited(_)))
-        }
-        _ => false,
-    }
-}
-
-/// Wake up to `max` threads waiting on object `h` so they re-test it.
-fn wake_obj_waiters(sched: &mut Sched, h: u32, max: usize) -> usize {
-    let mut n = 0;
-    for i in 0..sched.threads.len() {
-        if n >= max {
-            break;
-        }
-        let hit = matches!(
-            &sched.threads[i].state,
-            ThreadState::Waiting { target, .. } if target_mentions(target, h)
-        );
-        if hit {
-            sched.wake_thread(i, Wake::Retest);
-            n += 1;
-        }
-    }
-    n
-}
-pub(crate) fn signal_audio_event(state: &mut ApiState, sched: &mut Sched, h: u32) {
-    if let Some(HandleObj::Event { manual, signaled }) = state.handles.get_mut(&h) {
-        *signaled = true;
-        let n = if *manual { usize::MAX } else { 1 };
-        wake_obj_waiters(sched, h, n);
-    }
 }
 
 /// Execute one API call on behalf of the guest. EIP currently points at the
@@ -1290,164 +1198,25 @@ pub fn dispatch(
             }
         }
         // --- events and semaphores: resolved once by the catalog ---
-        (Some(crate::win32::catalog::ApiId::SyncObject(_)), _, _) => {
-            let Some(crate::win32::catalog::ApiId::SyncObject(id)) = binding.typed else {
-                unreachable!();
-            };
-            use crate::win32::catalog::SyncObjectApi::*;
-            ret = match id {
-                CreateEventA | CreateEventW => {
-                    let nm = read_str(mem, args[3], id.wide());
-                    let (h, existed) = state.create_named(&nm, || HandleObj::Event {
-                        manual: args[1] != 0,
-                        signaled: args[2] != 0,
-                    });
-                    note = format!(
-                        "event \"{nm}\" manual={} signaled={}{}",
-                        args[1] != 0,
-                        args[2] != 0,
-                        if existed { " (already exists)" } else { "" }
-                    );
-                    h
-                }
-                OpenEventA | OpenEventW => {
-                    let nm = read_str(mem, args[2], id.wide());
-                    match state.handles.named(&nm) {
-                        Some(h) => {
-                            note = format!("event \"{nm}\"");
-                            h
-                        }
-                        None => {
-                            state.last_error = 2; // ERROR_FILE_NOT_FOUND
-                            note = format!("event \"{nm}\" not found");
-                            0
-                        }
-                    }
-                }
-                SetEvent => match state.handles.get_mut(&args[0]) {
-                    Some(HandleObj::Event { manual, signaled }) => {
-                        let manual = *manual;
-                        *signaled = true;
-                        let woken =
-                            wake_obj_waiters(sched, args[0], if manual { usize::MAX } else { 1 });
-                        note = format!("woke {woken} waiter(s)");
-                        1
-                    }
-                    _ => {
-                        state.last_error = 6;
-                        note = "bad event handle".into();
-                        0
-                    }
-                },
-                ResetEvent => match state.handles.get_mut(&args[0]) {
-                    Some(HandleObj::Event { signaled, .. }) => {
-                        *signaled = false;
-                        1
-                    }
-                    _ => {
-                        state.last_error = 6;
-                        0
-                    }
-                },
-                PulseEvent => match state.handles.get_mut(&args[0]) {
-                    Some(HandleObj::Event { manual, signaled }) => {
-                        let manual = *manual;
-                        *signaled = false;
-                        let woken =
-                            wake_obj_waiters(sched, args[0], if manual { usize::MAX } else { 1 });
-                        note = format!("woke {woken} waiter(s)");
-                        1
-                    }
-                    _ => {
-                        state.last_error = 6;
-                        0
-                    }
-                },
-                CreateSemaphoreW | CreateSemaphoreA => {
-                    let nm = read_str(mem, args[3], id.wide());
-                    let (initial, max) = (args[1] as i32, args[2] as i32);
-                    let (h, existed) = state.create_named(&nm, || HandleObj::Semaphore {
-                        count: initial,
-                        max,
-                    });
-                    note = format!(
-                        "semaphore \"{nm}\" {initial}/{max}{}",
-                        if existed { " (already exists)" } else { "" }
-                    );
-                    h
-                }
-                ReleaseSemaphore => match state.handles.get_mut(&args[0]) {
-                    Some(HandleObj::Semaphore { count, max }) => {
-                        let prev = *count;
-                        let n = args[1] as i32;
-                        *count = (*count + n).min(*max);
-                        if args[2] != 0 {
-                            mem.write_u32(args[2], prev as u32)
-                                .map_err(|e| e.to_string())?;
-                        }
-                        let woken = wake_obj_waiters(sched, args[0], n.max(0) as usize);
-                        note = format!("count {prev} -> {}, woke {woken}", *count);
-                        1
-                    }
-                    _ => {
-                        state.last_error = 6;
-                        note = "bad semaphore handle".into();
-                        0
-                    }
-                },
-                CreateEventExA | CreateEventExW | CreateSemaphoreExA | CreateSemaphoreExW
-                | OpenSemaphoreA | OpenSemaphoreW => {
-                    unreachable!("ABI-only exports use the legacy unimplemented policy")
-                }
-            };
+        (Some(crate::win32::catalog::ApiId::SyncObject(id)), _, _) => {
+            (ret, note) = crate::win32::x86::sync_objects::sync_call(
+                id,
+                &args,
+                mem,
+                &mut state.handles,
+                sched,
+                &mut state.last_error,
+            )?;
         }
-        (Some(crate::win32::catalog::ApiId::Mutex(_)), _, _) => {
-            let Some(crate::win32::catalog::ApiId::Mutex(id)) = binding.typed else {
-                unreachable!();
-            };
-            use crate::win32::catalog::MutexApi::*;
-            ret = match id {
-                CreateA | CreateW => {
-                    let nm = read_str(mem, args[2], id == CreateW);
-                    let me = sched.current_tid();
-                    let own = args[1] != 0;
-                    let (h, existed) = state.create_named(&nm, || HandleObj::Mutex {
-                        owner: if own { Some(me) } else { None },
-                        count: if own { 1 } else { 0 },
-                    });
-                    note = format!(
-                        "mutex \"{nm}\"{}",
-                        if existed { " (already exists)" } else { "" }
-                    );
-                    h
-                }
-                Release => {
-                    let me = sched.current_tid();
-                    match state.handles.get_mut(&args[0]) {
-                        Some(HandleObj::Mutex { owner, count }) if *owner == Some(me) => {
-                            *count -= 1;
-                            if *count == 0 {
-                                *owner = None;
-                                wake_obj_waiters(sched, args[0], 1);
-                            }
-                            1
-                        }
-                        Some(HandleObj::Mutex { .. }) => {
-                            state.last_error = 288; // ERROR_NOT_OWNER
-                            note = "not the owner".into();
-                            0
-                        }
-                        _ => {
-                            state.last_error = 6;
-                            note = "bad mutex handle".into();
-                            0
-                        }
-                    }
-                }
-                CreateExA | CreateExW | OpenA | OpenW => {
-                    unreachable!("ABI-only exports use the legacy unimplemented policy")
-                }
-            };
+        (Some(crate::win32::catalog::ApiId::Mutex(id)), _, _) => {
+            (ret, note) = crate::win32::x86::sync_objects::mutex_call(
+                id,
+                &args,
+                mem,
+                &mut state.handles,
+                sched,
+                &mut state.last_error,
+            )?;
         }
         // --- waits ---
         (
@@ -1464,7 +1233,7 @@ pub fn dispatch(
                     note = "wait completed".into();
                 }
                 wake => {
-                    if obj_acquire(state, sched, h) {
+                    if obj_acquire(&mut state.handles, sched, h) {
                         sched.clear_deadline();
                         ret = WAIT_OBJECT_0;
                     } else if !state.handles.contains_key(&h) {
@@ -1510,15 +1279,15 @@ pub fn dispatch(
                 wake => {
                     let mut got = None;
                     if wait_all {
-                        if hs.iter().all(|&h| obj_ready(state, sched, h)) {
+                        if hs.iter().all(|&h| obj_ready(&state.handles, sched, h)) {
                             for &h in &hs {
-                                obj_acquire(state, sched, h);
+                                obj_acquire(&mut state.handles, sched, h);
                             }
                             got = Some(0);
                         }
                     } else {
                         for (i, &h) in hs.iter().enumerate() {
-                            if obj_acquire(state, sched, h) {
+                            if obj_acquire(&mut state.handles, sched, h) {
                                 got = Some(i as u32);
                                 break;
                             }
@@ -1604,9 +1373,9 @@ pub fn dispatch(
                 let got = if invalid {
                     None
                 } else if flags & 1 != 0 {
-                    if input && hs.iter().all(|&h| obj_ready(state, sched, h)) {
+                    if input && hs.iter().all(|&h| obj_ready(&state.handles, sched, h)) {
                         for &h in &hs {
-                            obj_acquire(state, sched, h);
+                            obj_acquire(&mut state.handles, sched, h);
                         }
                         Some(0)
                     } else {
@@ -1615,7 +1384,9 @@ pub fn dispatch(
                 } else {
                     hs.iter()
                         .enumerate()
-                        .find_map(|(i, &h)| obj_acquire(state, sched, h).then_some(i as u32))
+                        .find_map(|(i, &h)| {
+                            obj_acquire(&mut state.handles, sched, h).then_some(i as u32)
+                        })
                         .or(input.then_some(n))
                 };
                 if invalid {

@@ -780,7 +780,7 @@ impl DSound {
 }
 fn signal(state: &mut ApiState, sched: &mut crate::thread::Sched) {
     for event in std::mem::take(&mut state.dsound.pending) {
-        crate::api::signal_audio_event(state, sched, event);
+        crate::win32::x86::object_waits::signal_audio_event(&mut state.handles, sched, event);
     }
 }
 pub(crate) fn poll(mem: &GuestMem, state: &mut ApiState, sched: &mut crate::thread::Sched) {
