@@ -90,8 +90,7 @@ pub struct Runtime64 {
     next_alloc: u64,
     allocations: BTreeMap<u64, (usize, u64)>,
     guest_heap: heap::Heap,
-    tls: [Option<u64>; 64],
-    fls: [Option<(u64, u64)>; 128],
+    locals: crate::win32::kernel::locals64::LocalSlots64,
     modules: crate::win32::x64::modules::Modules,
     tokens: token::Tokens,
     etw: tracing::Providers,
@@ -277,8 +276,7 @@ impl Runtime64 {
             allocations: BTreeMap::new(),
             guest_heap: Default::default(),
             bstrings: Default::default(),
-            tls: [None; 64],
-            fls: [None; 128],
+            locals: Default::default(),
             modules: crate::win32::x64::modules::Modules::new(TEB + 0x20000),
             tokens: token::Tokens::default(),
             etw: tracing::Providers::default(),
@@ -2363,7 +2361,7 @@ impl Runtime64 {
             }
             H::TlsGet | H::TlsSet | H::TlsFree => {
                 let index = args[0] as u32 as usize;
-                if index >= self.tls.len() || self.tls[index].is_none() {
+                if self.locals.tls(index).is_none() {
                     self.set_error(mem, 87)?;
                     0
                 } else if binding.hot == H::TlsGet {
@@ -2377,11 +2375,14 @@ impl Runtime64 {
                         args[1]
                     };
                     mem.write_int(self.teb() + 0x1480 + index as u64 * 8, 8, value)?;
-                    self.tls[index] = if binding.hot == H::TlsFree {
-                        None
-                    } else {
-                        Some(value)
-                    };
+                    self.locals.commit_tls(
+                        index,
+                        if binding.hot == H::TlsFree {
+                            None
+                        } else {
+                            Some(value)
+                        },
+                    );
                     1
                 }
             }

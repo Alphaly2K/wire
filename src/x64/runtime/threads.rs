@@ -224,21 +224,19 @@ impl Runtime64 {
     }
     pub(crate) fn fls_destructors(&self, mem: &mut Memory) -> Result<Vec<(u64, u64)>, String> {
         let mut calls = Vec::new();
-        for (n, slot) in self.fls.iter().enumerate() {
-            if let Some((_, callback)) = slot {
-                let ptr = self.teb() + super::PAGE + n as u64 * 8;
-                let value = mem.read_int(ptr, 8)?;
-                if *callback != 0 {
-                    mem.check(ptr, 8, WRITE)?;
-                    if value != 0 {
-                        calls.push((*callback, value));
-                    }
+        for (n, callback) in self.locals.active_fls() {
+            let ptr = self.teb() + super::PAGE + n as u64 * 8;
+            let value = mem.read_int(ptr, 8)?;
+            if callback != 0 {
+                mem.check(ptr, 8, WRITE)?;
+                if value != 0 {
+                    calls.push((callback, value));
                 }
             }
         }
         // Validate all slots before publishing any callback's cleared value.
-        for (n, slot) in self.fls.iter().enumerate() {
-            if slot.is_some_and(|(_, cb)| cb != 0) {
+        for (n, callback) in self.locals.active_fls() {
+            if callback != 0 {
                 mem.write_int(self.teb() + super::PAGE + n as u64 * 8, 8, 0)?;
             }
         }

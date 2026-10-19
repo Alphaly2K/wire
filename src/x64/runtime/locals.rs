@@ -1,4 +1,4 @@
-//! Typed local-slot execution; the existing Runtime64 and TEB owners stay intact.
+//! Typed local-slot execution; allocation markers belong to LocalSlots64, values to TEB memory.
 use super::*;
 use crate::win32::catalog::LocalApi;
 
@@ -12,14 +12,14 @@ impl Runtime64 {
         use LocalApi::*;
         Ok(match id {
             TlsAlloc => {
-                if let Some(index) = self.tls.iter().position(Option::is_none) {
+                if let Some(index) = self.locals.vacant_tls() {
                     for t in self.threads.entries.values().filter(|t| t.exit.is_none()) {
                         mem.check(t.teb + 0x1480 + index as u64 * 8, 8, WRITE)?;
                     }
                     for t in self.threads.entries.values().filter(|t| t.exit.is_none()) {
                         mem.write_int(t.teb + 0x1480 + index as u64 * 8, 8, 0)?;
                     }
-                    self.tls[index] = Some(0);
+                    self.locals.commit_tls(index, Some(0));
                     index as u64
                 } else {
                     self.set_error(mem, 8)?;
@@ -27,14 +27,14 @@ impl Runtime64 {
                 }
             }
             FlsAlloc => {
-                if let Some(index) = self.fls.iter().position(Option::is_none) {
+                if let Some(index) = self.locals.vacant_fls() {
                     for t in self.threads.entries.values().filter(|t| t.exit.is_none()) {
                         mem.check(t.teb + PAGE + index as u64 * 8, 8, WRITE)?;
                     }
                     for t in self.threads.entries.values().filter(|t| t.exit.is_none()) {
                         mem.write_int(t.teb + PAGE + index as u64 * 8, 8, 0)?;
                     }
-                    self.fls[index] = Some((0, args[0]));
+                    self.locals.commit_fls(index, Some((0, args[0])));
                     index as u64
                 } else {
                     self.set_error(mem, 8)?;
@@ -43,12 +43,12 @@ impl Runtime64 {
             }
             FlsGet | FlsSet | FlsFree => {
                 let index = args[0] as u32 as usize;
-                if index >= self.fls.len() || self.fls[index].is_none() {
+                if self.locals.fls(index).is_none() {
                     self.set_error(mem, 87)?;
                     0
                 } else {
                     let value = mem.read_int(self.teb() + PAGE + index as u64 * 8, 8)?;
-                    let (_, callback) = self.fls[index].unwrap();
+                    let (_, callback) = self.locals.fls(index).unwrap();
                     match id {
                         FlsGet => {
                             self.set_error(mem, 0)?;
@@ -69,7 +69,7 @@ impl Runtime64 {
                                     }
                                 }
                             }
-                            self.fls[index] = None;
+                            self.locals.commit_fls(index, None);
                             1
                         }
                     }
@@ -77,7 +77,7 @@ impl Runtime64 {
             }
             TlsGet | TlsSet | TlsFree => {
                 let index = args[0] as u32 as usize;
-                if index >= self.tls.len() || self.tls[index].is_none() {
+                if self.locals.tls(index).is_none() {
                     self.set_error(mem, 87)?;
                     0
                 } else if id == TlsGet {
@@ -87,7 +87,8 @@ impl Runtime64 {
                 } else {
                     let value = if id == TlsFree { 0 } else { args[1] };
                     mem.write_int(self.teb() + 0x1480 + index as u64 * 8, 8, value)?;
-                    self.tls[index] = if id == TlsFree { None } else { Some(value) };
+                    self.locals
+                        .commit_tls(index, if id == TlsFree { None } else { Some(value) });
                     1
                 }
             }

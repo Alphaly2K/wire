@@ -590,3 +590,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 PE32 USER 队列资源操作
 
 基线 `145a271`。timer、post/host 入队、change bits 与 wake 只借 User32/LastError/Sched/start；Get/Peek/Wait 和对象消息等待共用原 timer/paint prepare。两份准备主体和原 clock/timer/host/queue/mask 策略归一核对保持，队列与取样次序未改。release 完整 Win32 255、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵。见[消息边界](../architecture/messages.md)，证据 `wire-out/refactoring-2026-10-14/r3-user-queues32-{source-checks,verification}.json`。
+
+## R3 Win64 local-slot owner
+
+基线 `1e3a534`。LocalSlots64 私有拥有 TLS/FLS 原固定数组、槽标记和 callback identity；Runtime64 继续按原 TEB/error/commit 顺序适配，destructor 按原 active index 先全部预检再清 callback 值。普通 local_call 与 hot TLS 源码归一核对保持。release 完整 Win64 269、fmt/release lib/bin strict Clippy/build 通过，不跑性能矩阵，未扩大槽容量或新增分配。见[TLS/FLS 边界](../architecture/locals.md)，证据 `wire-out/refactoring-2026-10-14/r3-locals64-owner-{source-checks,verification}.json`。

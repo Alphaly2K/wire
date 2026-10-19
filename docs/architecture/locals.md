@@ -2,7 +2,7 @@
 
 八个 TLS/FLS export 的 provider、scalar ABI 与 typed ID 已汇入 `win32/catalog/locals.rs`。独立基线、切换和完整验收见 [迁移记录](../reports/refactoring-locals-2026-10-16.md)。
 
-PE32 的两张 map 与两个递增计数器由 `win32/kernel/locals32::LocalSlots32` 私有持有，ApiState 通过组件组合，旧四个公开内部字段不再暴露。allocate/get/set/free 只接收 LocalKind、TID、索引和值；不借用 CPU、guest 内存、ApiState、调度器或 LastError。适配器负责获取当前 TID、维护错误/trace/callback 说明及提交返回 frame。Win64 继续使用原 Runtime64/TEB owner；没有统一两端槽位策略。[状态拆分验收](../reports/refactoring-locals32-owner-2026-10-16.md)独立记录性能与故障语义。
+PE32 的两张 map 与两个递增计数器由 `win32/kernel/locals32::LocalSlots32` 私有持有，ApiState 通过组件组合，旧四个公开内部字段不再暴露。allocate/get/set/free 只接收 LocalKind、TID、索引和值；不借用 CPU、guest 内存、ApiState、调度器或 LastError。适配器负责获取当前 TID、维护错误/trace/callback 说明及提交返回 frame。Win64 的固定槽标记与 callback identity 随后归入 LocalSlots64，值继续位于原 TEB；没有统一两端槽位策略。[PE32 状态拆分验收](../reports/refactoring-locals32-owner-2026-10-16.md)独立记录性能与故障语义。
 
 | 行为 | PE32 | Win64 |
 | --- | --- | --- |
@@ -19,3 +19,7 @@ Win64 分配先检查所有存活线程的目标 TEB 槽可写，再逐一写零
 Win64 冷绑定由 LocalApi 选择原 TlsGet/TlsSet/TlsFree HotImport；执行 body 与 delay-general frame 检查保留。PE32 仍在公共返回阶段提交 EAX、frame 和 TEB error；返回槽 fault 可以发生在分配索引或资源变更之后。两端不同的故障顺序不统一为事务。
 
 动态查询通过同一 provider 契约；历史上剩余的 FLS 与 timeGetTime 手工 lookup 名单已删除，并以 fresh-provider 测试约束合法 DLL 范围。`GetProcAddress` 已有 gateway fallback 保留。
+
+`win32/kernel/locals64.rs` 私有拥有 TLS 64/FLS 128 两个原数组，提供 vacancy、受检查询、显式 commit 与按索引顺序遍历 active FLS。Runtime64 不再暴露这两张表。架构层仍先检查/写 TEB，再 commit 标记；FLS destructor 保留先读取并预检全部 active 槽，再清 callback 槽的两遍处理，包括 callback=0 时原先的值读取。静态 TLS 模板/块与 thread 创建仍由原进程路径管理。
+
+Win64 owner 基线 `1e3a534`。普通 local_call 与 hot TLS 的 TEB/error/commit 主体归一核对保持；完整 release Win64 269、fmt/release lib/bin strict Clippy/build 通过。无新增分配、槽容量或动态分发，按普通状态封装不跑性能矩阵。证据 `wire-out/refactoring-2026-10-14/r3-locals64-owner-{source-checks,verification}.json`。
