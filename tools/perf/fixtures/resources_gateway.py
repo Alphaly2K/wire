@@ -3,9 +3,9 @@ import struct
 
 
 def x86(work, pe32):
-    n = max(1, work // 55)
+    n = max(1, work // 57)
     code = bytearray.fromhex('57 56 53 bf') + struct.pack('<I', n)
-    code += bytes.fromhex('31f6')
+    code += bytes.fromhex('31f6 83ec08')
     loop = len(code)
 
     def push(value):
@@ -32,18 +32,21 @@ def x86(work, pe32):
     for iat in [0x401318, 0x40131c]:
         push(0x401800)
         call(iat)
-    for iat, limit, load in [(0x401330, 3, '0fb705'), (0x401334, 5, '0fb605')]:
-        for value in [limit, 0x402000, 0, 0]:
-            push(value)
+    for iat, limit, load in [(0x401330, 3, '0fb70424'), (0x401334, 5, '0fb60424')]:
+        code.extend(bytes.fromhex('8d0424'))
+        push(limit)
+        code.extend(b'\x50')
+        push(0)
+        push(0)
         call(iat)
-        code.extend(bytes.fromhex(load) + struct.pack('<I', 0x402000))
+        code.extend(bytes.fromhex(load))
         code.extend(bytes.fromhex('01c6'))
     code.extend(b'\x4f')
     at = len(code)
     code.extend(bytes.fromhex('0f85') + struct.pack('<i', loop - at - 6))
-    code.extend(bytes.fromhex('89f0 5b 5e 5f cc'))
+    code.extend(bytes.fromhex('83c408 89f0 5b 5e 5f cc'))
     assert len(code) <= 0x200
-    code.extend(bytes(0x1200 - len(code)))
+    code.extend(bytes(0xa00 - len(code)))
     for at, values in [(0x200, (0x1280, 0, 0, 0x1380, 0x1300)),
                        (0x214, (0x12b0, 0, 0, 0x1390, 0x1330))]:
         struct.pack_into('<5I', code, at, *values)
@@ -66,16 +69,8 @@ def x86(work, pe32):
         struct.pack_into('<I', code, 0x600 + at, value)
     struct.pack_into('<3H', code, 0x800, 2, 0x65e5, 0x672c)
     result = pe32(code)
-    # Put copy-out data on its own writable page, preserving static code IR.
-    struct.pack_into('<H', result, 0x86, 2)
-    struct.pack_into('<I', result, 0x98 + 56, 0x3000)
-    struct.pack_into('<I', result, 0x180, 0x1000)
-    struct.pack_into('<I', result, 0x188, 0x1000)
-    result[0x1a0:0x1a8] = b'.data\0\0\0'
-    struct.pack_into('<4I', result, 0x1a8, 0x200, 0x2000, 0x200, 0x1200)
-    struct.pack_into('<I', result, 0x1c4, 0xc0000040)
     struct.pack_into('<II', result, 0x98 + 104, 0x1200, 60)
     struct.pack_into('<II', result, 0x98 + 112, 0x1600, 112)
     per_loop = 3 * 0x401650 + 0x401660 + 2 * 0x401800 + 36 + 2 + 0x65e5 + 4 + 0x93
-    return result, dict(eax=(per_loop * n) & 0xffffffff, retired=55 * n + 9,
+    return result, dict(eax=(per_loop * n) & 0xffffffff, retired=57 * n + 11,
                         api_calls=10 * n)
