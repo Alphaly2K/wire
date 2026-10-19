@@ -1,6 +1,8 @@
 # 对话框控件与窗口枚举基线（2026-10-19）
 
-状态：四项独立旧行为基线及完整正确性通过，22 项契约及 typed 适配已接入，性能仍待复核。绘制首版因持续性能回退停止计时后才编译基线，日志 `r2-dialog-baseline-tests.txt`。
+状态：本批结构随 `b433c63` 日志修订累计验收，见 [33 条性能协议与游戏前缀](refactoring-api-log-2026-10-19.md)。以下保留各独立冻结的历史数据与准入结论；旧失败冻结未被追认。
+
+独立冻结时状态：四项独立旧行为基线及完整正确性通过，22 项契约及 typed 适配已接入，性能仍待复核。绘制首版因持续性能回退停止计时后才编译基线，日志 `r2-dialog-baseline-tests.txt`。
 
 范围为 Get/SetDlgItemTextA/W、SendDlgItemMessageA/W、GetDlgItem、GetDlgCtrlID、Get/SetDlgItemInt、EnumChildWindows、EnumWindows、EnumThreadWindows，以及原来明确返回错误 120 的九项 USER 服务。Win64 全部继续 absent。九项 unavailable 仍由 typed 领域处理，以保留原 `USER32 error 120` note 和 unimplemented trace；通用 ABI-only 返回路径的 note 不同，因此不直接套用。
 

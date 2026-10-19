@@ -1,23 +1,21 @@
 # 当前状态
 
-更新日期：2026-10-19。重构前基线为 `2e78377`；最新已验收运行时为[消息队列与计时器](reports/refactoring-messages-2026-10-18.md)，实现 `c07b983`，该报告记录冻结源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
+更新日期：2026-10-19。重构前基线为 `2e78377`；最新已验收运行时为 [API 日志与累计契约](reports/refactoring-api-log-2026-10-19.md)，实现 `b433c63`，报告记录冻结源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
 
-本轮追加验收消息队列、计时器、DispatchMessage 与消息元数据等 22 项，统一契约与 typed 控制。保留 PE32 的阻塞/非局部转移、队列变更的部分提交，以及 Win64 callback/resume、DWORD 与指针宽度和 absent 的差异。
+本轮累计接入对话框/窗口枚举 22、菜单 27、GDI 对象/像素/字体 31 项，共 **80 项**，累计 **675 项**。统一声明、typed 分发与领域 owner 保持双架构范围、故障提交和既有不可用策略；保留真实 RedrawWindow 网关与公开 facade 的历史差异。精确标量 SSE 已移入独立编译单元，没有近似浮点或新增 ISA 语义。
 
-后续 22 项对话框/枚举契约和[精确标量 SSE 编译隔离](reports/refactoring-scalar-codegen-2026-10-19.md)已接入并通过完整正确性，性能仍待复核；FP 初筛通过，宽矩阵若干短样本波动及扩样中的严重同哈希漂移全部保留，未增加已验收计数。[菜单 27 项契约与 owner](reports/refactoring-menus-2026-10-19.md)随后独立接入，release 619、debug 465、显式 native 7、工具 23 及完整静态检查通过，性能待验收；先固定真实 RedrawWindow 网关与公开 facade 的原始差异及不可用入口的不同 note/返回 frame，分别保存两批候选的冻结与验收。
+中间 GDI 冻结出现 messages/IR 三对持续回退，未准入。实际采样后将 API 日志提取为独立 runtime 服务，并用专用整数格式化保留完整 trace、频率和最近 64 条记录。最终消息 150M IR/raw CPU 中位数相对原消息冻结 −13.210%/−12.110%，GDI 150M IR/raw −16.987%/−13.229%；33 条性能协议、207 次 fixture 执行及三对真实启动前缀通过。旧冻结、失败轮次和同哈希 control 独立保留，没有用其它负载的改善抵消持续回退。
 
-对话框后续已补齐 35 条完整性能协议 / 234 次执行及三对 Alice 前缀；SSE/raw、messages/IR、GDI/IR 的中位数成本仍超过调查线，全部轮次和同哈希 control 独立保留。随后完成六次真实采样，消息/GDI 成本主要位于 API 路径，SSE/raw 前后热点分布接近；[PE32 分发模式候选](reports/refactoring-direct-dispatch-2026-10-19.md)把 50 个 typed guard 改为直接枚举模式，处理体与次序保持，完整 release 619、debug 465、native 7 和严格检查通过，性能验证进行中。菜单自身初筛的 raw/IR 三对全部校验，固定菜单循环 CPU −0.144%/−8.735%，宽矩阵仍待完成。累计验收维持 595。
-
-完整正确性、38 条性能协议、237 次执行及三对游戏前缀通过，累计 **595 项**。真实 post/get 网关 Win64/PE32 IR/raw CPU −1.417%/−10.391%/−1.827%；SSE/IR 初筛回退和同哈希 control 漂移全部保留，长样本未出现持续回退，详见本批报告。失败候选与[固定 executable/cwd 协议调查](reports/refactoring-fixed-executable-slot-2026-10-18.md)继续可查。绘制区域与 paint DC 六项迁移正确性通过，但持续浮点性能回退，已撤回运行时改动，保留独立旧行为基线与原创 paint 循环，见[拒绝报告](reports/refactoring-painting-2026-10-19.md)。其余 USER、COM、图形继续迁移。Mono 原生化已撤回，本轮继续排除。
+绘制区域与 paint DC 六项迁移因持续浮点回退撤回，保留独立基线与原创 paint 循环，见 [拒绝报告](reports/refactoring-painting-2026-10-19.md)。其余 USER、COM、图形和资源 owner 继续迁移；R7 CLI 边界整理继续推进。Mono 原生化已撤回，本轮排除。
 
 ## 重构范围
 
-最新另接入 [GDI 对象、像素与字体 31 项](reports/refactoring-gdi-operations-2026-10-19.md)：唯一 catalog 和图形操作枚举，adapter 只借 Graphics/LastError；独立旧行为基线、完整 release 623、debug 469、native 7 和严格检查通过。累计扩样中消息/IR 三对均回退超过 5%，该冻结未准入；旧轮次全部保留。重新采样后提取 [API 日志职责并优化固定整数格式化](reports/refactoring-api-log-2026-10-19.md)，完整 release 625、debug 471、native 7、工具 23 和严格检查通过，逐字节保留完整 trace/频率/64 条历史；150M 消息 IR/raw 相对正式消息冻结 CPU −13.210%/−12.110%，正在核验宽矩阵及游戏前缀。对话框、菜单、分发和 GDI 冻结独立保留，正式计数仍为 595。
+当前累计冻结已验收 [对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)与日志修订；独立历史证据继续可查。CLI 与剩余领域的迁移不属于该冻结。
 
 | 阶段 | 已交付 | 剩余范围 |
 | --- | --- | --- |
 | R0/R1 | 冻结输入、原创正式 fixture、领域测试 harness、GUID 唯一契约和双架构适配 | 随后续家族维护独立基线 |
-| R2 | 已验收 595 个 export 的契约；明细见下表 | USER、COM、图形等 legacy 家族 |
+| R2 | 已验收 675 个 export 的契约；明细见下表 | USER、COM、图形等 legacy 家族 |
 | R3 | guest environment、双架构模块状态、Win64 文件、period 请求、SRW、地址等待及 APC 队列、线程标量操作与描述、双架构 apartment/BSTR、Win64 task/HSTRING/image/desktop 成员、PE32 TLS/FLS 与双架构 cursor、Win64 DC/class 私有 owner | PE32 其余资源、线程资源创建/退出及 COM 其余对象；PE32 kernel 大范围抽取曾因性能撤回 |
 | R4/R5 | Process32 编排边界、owned host UI 请求、GDI 与像素状态分离 | 领域分发与资源 owner 随 R2/R3 继续收敛 |
 | R6 | 按用户要求忽略 | 不重建原生 Mono 路径 |
@@ -71,6 +69,9 @@
 | 窗口文本 / 焦点与 capture | 16 | [状态边界](architecture/window-state.md)及[完整验收](reports/refactoring-window-state-2026-10-18.md) |
 | 窗口生命周期 / 过程控制与同步消息 | 17 | [控制边界](architecture/window-control.md)及[完整验收](reports/refactoring-window-control-2026-10-18.md) |
 | 消息队列 / 过程分发 / 计时器与消息元数据 | 22 | [消息边界](architecture/messages.md)及[完整验收](reports/refactoring-messages-2026-10-18.md) |
+| 对话框控件 / 窗口枚举 | 22 | [对话框边界](architecture/dialog.md)及[累计验收](reports/refactoring-api-log-2026-10-19.md) |
+| 菜单资源与操作 | 27 | [菜单边界](architecture/menus.md)及[累计验收](reports/refactoring-api-log-2026-10-19.md) |
+| GDI 对象 / 像素 / 字体 | 31 | [图形操作边界](architecture/gdi-operations.md)及[累计验收](reports/refactoring-api-log-2026-10-19.md) |
 
 ## 当前执行路径与能力
 
@@ -87,9 +88,9 @@
 
 ## 验证与性能
 
-最近已验收的冻结：release **607 passed / 7 ignored**，debug Win32/AMD64/FPU **453 passed**，显式 native **7 passed**，工具 **23 passed**；fmt、strict all-target/all-feature Clippy 与 release build 通过。388 个 Rust 文件和 executable 核对一致；随后绘制基线与迁移不属于该冻结。失败候选和 codegen 调查保留在[集成报告](reports/refactoring-memory-call-boundary-2026-10-18.md)。
+最近已验收的冻结：release **625 passed / 7 ignored**，debug Win32/AMD64/FPU 与日志单元 **471 passed**，显式 native **7 passed**，工具 **23 passed**；fmt、strict all-target/all-feature Clippy、SIMD crate 静态检查与 release build 通过。402 个 Rust 文件和 executable 核对一致。
 
-本批 38 个 workload protocol 全部结果校验，不跨不同 work/工具版本混算。SSE/IR 扩样相对 before −0.246%、同哈希 control/before +4.965%，逐对离散和短样本回退保留。RSS 中位数最多 +272KiB，二进制增加 5,728 bytes，在 +24KiB 预算内。Alice CPU/wall −0.907%/−7.945%，保持同一预算、隐藏窗口与零 Draw/Present；未推断游戏 FPS。历史各批次成本、预算修订与漂移证据保留在对应报告；稳定启动协议见[工具边界](architecture/validation-tools.md)。
+33 条 workload protocol 全部结果校验，不跨不同 work/工具版本混算；GUID/raw 首轮离散后，150M 加同哈希 control 三对均改善，CPU 中位数 −14.007%。15 项计算路径的 CPU 中位数变化为 −4.408% 至 +2.111%，fixture RSS 中位数最多 +48KiB。二进制较直接 GDI 候选增加 32 bytes，满足 +24KiB 预算。Alice CPU/wall +1.272%/+1.650%，RSS 中位数约 +5.91MiB，原生启动 before 的 RSS 范围约 319–398MiB；保持同一预算、隐藏窗口与零 Draw/Present。所有离散轮次保留，没有推断游戏 FPS。
 
 后续正式比较使用显式 [稳定启动协议](reports/refactoring-launch-protocol-2026-10-16.md)，固定 argv0、参数和 child cwd，并记录 shell SHA。默认工具行为保持；旧协议数据独立保留，汇总不跨协议或不同 work 合并。编译、正式计时、采样与 runtime diagnostics 串行执行。每个结构候选先完成正确性，再按至少三对轮换检查结果、CPU/wall/RSS 与输入哈希；超过门槛先调查，不把失败候选扩大到其它领域。
 
