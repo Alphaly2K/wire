@@ -19,7 +19,7 @@
 | R3 | guest environment、双架构模块状态、Win64 文件、period 请求、SRW、地址等待及 APC 队列、线程标量操作与描述、双架构 apartment/BSTR、Win64 task/HSTRING/image/desktop 成员、PE32 TLS/FLS 与双架构 cursor、Win64 DC/class 私有 owner | PE32 其余资源、线程资源创建/退出及 COM 其余对象；PE32 kernel 大范围抽取曾因性能撤回 |
 | R4/R5 | Process32 编排边界、owned host UI 请求、GDI 与像素状态分离 | 领域分发与资源 owner 随 R2/R3 继续收敛 |
 | R6 | 按用户要求忽略 | 不重建原生 Mono 路径 |
-| R7 | PE32 内核目录、领域测试、公共性能工具、离线 inventory 及当前/历史文档入口 | CLI 候选暂缓；其余工具和目录随领域迁移继续整理 |
+| R7 | PE32 内核目录、领域测试、公共性能工具及 profile、离线 inventory、当前/历史文档入口 | CLI 候选暂缓；其余工具和目录随领域迁移继续整理 |
 
 已迁移的 export 是契约覆盖范围；typed、ABI-only 与 absent 的架构策略分别记录，不能按数量推导完整 Windows 兼容性。
 
