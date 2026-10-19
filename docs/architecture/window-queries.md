@@ -2,7 +2,7 @@
 
 `win32/catalog/window_queries.rs` 集中声明二十五项 export 的 provider、参数宽度和执行策略。PE32 四项 LongPtr 保留 absent、未知 ABI 与零清栈；GetWindowPlacement 使用明确 typed 错误处理以保留 error120、implemented=false 和原 trace。Win64 原缺失的 FindWindowA/W、GetDesktopWindow、IsZoomed、IsWindowEnabled、MapWindowPoints 继续 absent；其余十九项保留静态 kernel32/kernelbase/user32 与动态 user32 的区别。
 
-PE32 `user32/queries.rs` 的 scalar handler 只借用 User32、受检 guest memory 和 LastError。首次桌面创建需要 module/class 注册，由同模块的小型 coordinator 完成；重复查询直接使用现有窗口。父级坐标计算由 User32 提供，`user32_geometry::client_origin` 兼容 facade 委托该方法，保留环检测、wrapping 加法与原 Hangover LGPL 来源标注。
+PE32 `user32/queries.rs` 的 scalar handler 只借用 User32、受检 guest memory 和 LastError。首次桌面创建需要 module/class 注册，由同模块的小型 coordinator 完成；重复查询直接使用现有窗口。父级坐标计算由 User32 提供，保留环检测、wrapping 加法与原 Hangover LGPL 来源标注；调用方已直接借 owner，旧私有 `user32_geometry::client_origin` 转发入口删除。
 
 Win64 的适配位于 `x64/runtime/user/window/queries.rs`，由 User owner 处理，只借内存、当前 LastError 地址和只读 Gateways；创建、销毁与消息回调继续由窗口 coordinator 处理。查询与 coordinator 复用同一过程验证：已注册 gateway 可用，其余地址须可读且可执行。Long 的第三参数仍为 DWORD，Ptr 使用完整 u64；extra 存储允许原 4/8 字节重叠访问。SetWindowLongPtr 的 WNDPROC 校验先于 HWND 校验，PE32 保留先查 HWND 再拒绝空 WNDPROC 的顺序。
 

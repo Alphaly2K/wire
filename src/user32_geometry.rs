@@ -8,9 +8,4 @@
  * Original excerpt and license: third_party/hangover/.
  */
 //! Shared nonclient geometry for the initial 96-DPI desktop profile.
-use crate::api::ApiState;
-
 pub(crate) use crate::win32::user::geometry::frame;
-pub(crate) fn client_origin(state: &ApiState, h: u32) -> Result<[i32; 2], String> {
-    state.user32.client_origin(h)
-}

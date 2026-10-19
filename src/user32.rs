@@ -17,6 +17,7 @@ mod paint;
 mod queries;
 mod queues;
 mod sent;
+mod window_geometry;
 mod window_state;
 pub(crate) use classes::{call as class_call, register_system_class};
 pub use classes::{find_class, WindowClass};
@@ -26,6 +27,7 @@ pub(crate) use messages::MessageRequest;
 pub(crate) use paint::{Operation as PaintingOperation, PaintRequest};
 pub(crate) use queries::desktop as desktop_query;
 use queues::{clock_ms, message_bits};
+pub(crate) use window_geometry::WindowRequest;
 pub(crate) use window_state::WindowStateRequest;
 
 pub struct User32 {

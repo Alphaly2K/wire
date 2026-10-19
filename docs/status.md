@@ -12,6 +12,8 @@ Win64 [Heap](architecture/heaps.md)、[Local/Global](architecture/local-memory.m
 
 PE32 [窗口状态](architecture/window-state.md)、[对话框/枚举](architecture/dialog.md)、[消息](architecture/messages.md)、[monitor](architecture/display.md)和[绘制](architecture/painting.md)均由领域准备请求、Process 执行 callback 或阻塞；原重入重查、临时资源释放、输出 fault 与返回帧策略保持。新增的通知重入和 monitor fault 释放 fixture 已纳入完整 **257 项 Win32** 回归。
 
+随后[窗口几何/更新](architecture/window-control.md)也完成准备→回调→提交拆分，默认 WM_MOVE/WM_SIZE 之间保留重查。新增独立过程替换/最小化 fixture 后，完整 Win32 **258**、IR 31 和必要构建通过。
+
 ## 重构范围
 
 当前累计冻结包含[对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)、日志、五项 paint、控件初始化、资源、启动信息、环境接口与 CLI 拆分；独立历史证据继续可查。

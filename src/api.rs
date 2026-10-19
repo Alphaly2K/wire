@@ -322,6 +322,15 @@ impl ApiState {
     pub fn crt_app_type(&self) -> u32 {
         self.crt.app_type()
     }
+    pub(crate) fn window_geometry_request(
+        &mut self,
+        id: crate::win32::catalog::WindowControlApi,
+        args: &Args,
+        mem: &mut GuestMem,
+    ) -> Result<crate::user32::WindowRequest, String> {
+        self.user32
+            .prepare_geometry(id, args, mem, &mut self.scratch, &mut self.last_error)
+    }
     fn errno_address(&mut self, mem: &mut GuestMem, tid: u32) -> Result<u32, String> {
         self.crt
             .errno_address(mem, tid, &mut self.scratch, &mut self.last_error)

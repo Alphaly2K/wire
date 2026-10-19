@@ -10,15 +10,9 @@
 //! Wine 10.0 window-text and dialog-control message flow, with wire's logical
 //! window state, guest callbacks and checked pointers replacing NT/backend
 //! calls. Geometry/rectangle utilities follow the Win32 contracts directly.
-use crate::api::{ApiLogger, ApiState, ApiTable};
-use crate::cpu::{Cpu, GuestCallOutcome};
 use crate::mem::GuestMem;
-use crate::thread::Sched;
+use crate::user32::User32;
 
-type ResultValue = Result<(GuestCallOutcome, String), String>;
-fn value(n: u32, note: &str) -> ResultValue {
-    Ok((GuestCallOutcome::Returned(n), note.into()))
-}
 pub(crate) fn copy_text(
     mem: &GuestMem,
     p: u32,
@@ -49,12 +43,12 @@ pub(crate) fn default_text(
     wide: bool,
     a: &crate::api::Args,
     mem: &GuestMem,
-    state: &mut ApiState,
+    user: &mut User32,
 ) -> Result<Option<u32>, String> {
     if !matches!(a[1], 0xc..=0xe) {
         return Ok(None);
     }
-    let Some(w) = state.user32.windows.get_mut(&a[0]) else {
+    let Some(w) = user.windows.get_mut(&a[0]) else {
         return Ok(Some(0));
     };
     Ok(Some(match a[1] {
@@ -96,71 +90,4 @@ pub(crate) fn write_words(mem: &GuestMem, p: u32, words: &[i32]) -> Result<(), S
             .collect::<Vec<_>>(),
     )
     .map_err(|e| e.to_string())
-}
-// Adapted 2026-10-06 from Hangover Wine win32u/defwnd.c's
-// handle_window_pos_changed (LGPL-2.1-or-later): Copyright 1993, 1996
-// Alexandre Julliard; 1995 Alex Korobka; 2022 Jacek Caban for CodeWeavers.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn default_windowpos_changed(
-    a: &crate::api::Args,
-    cpu: &mut Cpu,
-    mem: &mut GuestMem,
-    api: &mut ApiTable,
-    state: &mut ApiState,
-    log: &mut ApiLogger,
-    sched: &mut Sched,
-    max_instr: u64,
-) -> ResultValue {
-    let flags = mem
-        .read_u32(a[3].checked_add(24).ok_or("WINDOWPOS overflow")?)
-        .map_err(|e| e.to_string())?;
-    let Some(w) = state.user32.windows.get(&a[0]) else {
-        return value(0, "window no longer exists");
-    };
-    let rect = w.rect;
-    let f = w.frame();
-    let pack = |x: i32, y: i32| (x as u32 & 0xffff) | ((y as u32) << 16);
-    if flags & 0x1000 == 0 {
-        let proc = w.wndproc;
-        let result = crate::x86::process::callbacks::invoke(
-            cpu,
-            mem,
-            api,
-            state,
-            log,
-            sched,
-            proc,
-            &[a[0], 3, 0, pack(rect[0] + f[0], rect[1] + f[1])],
-            max_instr,
-        )?;
-        if !matches!(result, GuestCallOutcome::Returned(_)) {
-            return Ok((result, "WM_MOVE transferred".into()));
-        }
-    }
-    if (flags & 0x800 == 0 || flags & 0x8000 != 0) && state.user32.windows.contains_key(&a[0]) {
-        let w = &state.user32.windows[&a[0]];
-        let (wp, lp) = if w.style & 0x20000000 != 0 {
-            (1, 0)
-        } else {
-            (
-                (w.style & 0x01000000 != 0) as u32 * 2,
-                pack(w.client_size()[0], w.client_size()[1]),
-            )
-        };
-        let result = crate::x86::process::callbacks::invoke(
-            cpu,
-            mem,
-            api,
-            state,
-            log,
-            sched,
-            w.wndproc,
-            &[a[0], 5, wp, lp],
-            max_instr,
-        )?;
-        if !matches!(result, GuestCallOutcome::Returned(_)) {
-            return Ok((result, "WM_SIZE transferred".into()));
-        }
-    }
-    value(0, "default WM_MOVE/WM_SIZE")
 }

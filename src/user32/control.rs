@@ -5,20 +5,8 @@
  */
 //! Typed process coordination for lifecycle and synchronous WNDPROC calls.
 use super::*;
-use crate::user32_common::{words, write_words};
 use crate::win32::catalog::WindowControlApi as W;
-use std::collections::BTreeSet;
 type ResultValue = Result<(GuestCallOutcome, String), String>;
-fn value(n: u32, note: &str) -> ResultValue {
-    Ok((GuestCallOutcome::Returned(n), note.into()))
-}
-fn failure(state: &mut ApiState, error: u32) -> ResultValue {
-    state.last_error = error;
-    value(0, &format!("USER32 error {error}"))
-}
-fn origin(state: &ApiState, hwnd: u32) -> Result<[i32; 2], String> {
-    crate::user32_geometry::client_origin(state, hwnd)
-}
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn call(
     id: W,
@@ -40,202 +28,16 @@ pub(crate) fn call(
             Ok((outcome, "guest WndProc forwarding".into()))
         }
         W::Enable | W::Parent | W::Move | W::Position => {
-            geometry_control(id, a, cpu, mem, api, state, log, sched, max_instr)
+            crate::x86::process::window_geometry::call(
+                id, a, cpu, mem, api, state, log, sched, max_instr,
+            )
         }
-        W::Update => update_window(a, cpu, mem, api, state, log, sched, max_instr),
+        W::Update => crate::x86::process::window_geometry::update(
+            a, cpu, mem, api, state, log, sched, max_instr,
+        ),
         _ => window_dispatch(id, a, cpu, mem, api, state, log, sched, max_instr),
     }
 }
-#[allow(clippy::too_many_arguments)]
-fn geometry_control(
-    id: W,
-    a: &crate::api::Args,
-    cpu: &mut Cpu,
-    mem: &mut GuestMem,
-    api: &mut ApiTable,
-    state: &mut ApiState,
-    log: &mut ApiLogger,
-    sched: &mut Sched,
-    max_instr: u64,
-) -> ResultValue {
-    match id {
-        W::Enable => {
-            let Some(w) = state.user32.windows.get_mut(&a[0]) else {
-                return failure(state, 1400);
-            };
-            let disabled = w.style & 0x08000000 != 0;
-            if a[1] != 0 {
-                w.style &= !0x08000000;
-            } else {
-                w.style |= 0x08000000;
-            }
-            let proc = w.wndproc;
-            if disabled == (a[1] != 0) {
-                let result = crate::x86::process::callbacks::invoke(
-                    cpu,
-                    mem,
-                    api,
-                    state,
-                    log,
-                    sched,
-                    proc,
-                    &[a[0], 0xa, (a[1] != 0) as u32, 0],
-                    max_instr,
-                )?;
-                if !matches!(result, GuestCallOutcome::Returned(_)) {
-                    return Ok((result, "WM_ENABLE transferred".into()));
-                }
-            }
-            value(disabled as u32, "window enabled state")
-        }
-        W::Parent => {
-            if a[1] != 0 && !state.user32.windows.contains_key(&a[1]) {
-                return failure(state, 1400);
-            }
-            let mut h = a[1];
-            let mut seen = BTreeSet::new();
-            while h != 0 {
-                if h == a[0] || !seen.insert(h) {
-                    return failure(state, 87);
-                }
-                h = state.user32.windows.get(&h).map_or(0, |w| w.parent);
-            }
-            let screen = origin(state, a[0])?;
-            let parent = origin(state, a[1])?;
-            let Some(w) = state.user32.windows.get_mut(&a[0]) else {
-                return failure(state, 1400);
-            };
-            let old = w.parent;
-            w.parent = a[1];
-            if w.style & 0x40000000 != 0 {
-                w.rect[0] = screen[0].wrapping_sub(parent[0]);
-                w.rect[1] = screen[1].wrapping_sub(parent[1]);
-            }
-            value(old, "parent changed; style retained")
-        }
-        W::Move | W::Position => {
-            let Some(w) = state.user32.windows.get(&a[0]) else {
-                return failure(state, 1400);
-            };
-            let proc = w.wndproc;
-            let old_rect = w.rect;
-            let flags = if id == W::Move { 0x14 } else { a[6] };
-            let offset = if id == W::Move { 1 } else { 2 };
-            let p = state.scratch_alloc(mem, 28, 4);
-            if p == 0 {
-                return failure(state, 8);
-            }
-            write_words(
-                mem,
-                p,
-                &[
-                    a[0] as i32,
-                    if id == W::Move { 0 } else { a[1] as i32 },
-                    a[offset] as i32,
-                    a[offset + 1] as i32,
-                    a[offset + 2] as i32,
-                    a[offset + 3] as i32,
-                    flags as i32,
-                ],
-            )?;
-            if flags & 0x400 == 0 {
-                let result = crate::x86::process::callbacks::invoke(
-                    cpu,
-                    mem,
-                    api,
-                    state,
-                    log,
-                    sched,
-                    proc,
-                    &[a[0], 0x46, 0, p],
-                    max_instr,
-                )?;
-                if !matches!(result, GuestCallOutcome::Returned(_)) {
-                    return Ok((result, "WM_WINDOWPOSCHANGING transferred".into()));
-                }
-            }
-            let pos = words(mem, p, 7)?;
-            let mut flags = pos[6] as u32;
-            let Some(w) = state.user32.windows.get_mut(&a[0]) else {
-                return failure(state, 1400);
-            };
-            if flags & 2 == 0 {
-                w.rect[..2].copy_from_slice(&pos[2..4]);
-            }
-            if flags & 1 == 0 {
-                w.rect[2] = pos[4].max(0);
-                w.rect[3] = pos[5].max(0);
-            }
-            if flags & 0x40 != 0 {
-                w.style |= 0x10000000;
-            }
-            if flags & 0x80 != 0 {
-                w.style &= !0x10000000;
-            }
-            // These internal flags describe actual client changes. Default
-            // WndProc consumes them to emit WM_MOVE/WM_SIZE independently.
-            if w.rect[..2] == old_rect[..2] {
-                flags |= 0x1000;
-            }
-            if w.rect[2..] == old_rect[2..] {
-                flags |= 0x800;
-            }
-            mem.write_u32(p + 24, flags).map_err(|e| e.to_string())?;
-            let result = crate::x86::process::callbacks::invoke(
-                cpu,
-                mem,
-                api,
-                state,
-                log,
-                sched,
-                proc,
-                &[a[0], 0x47, 0, p],
-                max_instr,
-            )?;
-            if !matches!(result, GuestCallOutcome::Returned(_)) {
-                return Ok((result, "WM_WINDOWPOSCHANGED transferred".into()));
-            }
-            value(1, "logical window position")
-        }
-        _ => unreachable!("window geometry control"),
-    }
-}
-#[allow(clippy::too_many_arguments)]
-fn update_window(
-    a: &crate::api::Args,
-    cpu: &mut Cpu,
-    mem: &mut GuestMem,
-    api: &mut ApiTable,
-    state: &mut ApiState,
-    log: &mut ApiLogger,
-    sched: &mut Sched,
-    max_instr: u64,
-) -> ResultValue {
-    if !state.user32.windows.contains_key(&a[0]) {
-        state.last_error = 1400;
-        return value(0, "window update/paint state");
-    }
-    let w = &state.user32.windows[&a[0]];
-    if w.update.is_none() {
-        return value(1, "window update/paint state");
-    }
-    let outcome = invoke(
-        cpu,
-        mem,
-        api,
-        state,
-        log,
-        sched,
-        w.wndproc,
-        &[a[0], 0xf, 0, 0],
-        max_instr,
-    )?;
-    if !matches!(outcome, GuestCallOutcome::Returned(_)) {
-        return Ok((outcome, "WM_PAINT transferred".into()));
-    }
-    value(1, "window update/paint state")
-}
-
 #[allow(clippy::too_many_arguments)]
 fn window_dispatch(
     id: W,
@@ -253,11 +55,12 @@ fn window_dispatch(
         if a[1] == 0x10 {
             return window_dispatch(W::Destroy, a, cpu, mem, api, state, log, sched, max_instr);
         }
-        if let Some(ret) = crate::user32_common::default_text(id.wide(), a, mem, state)? {
+        if let Some(ret) = crate::user32_common::default_text(id.wide(), a, mem, &mut state.user32)?
+        {
             return value(ret, "default window text".into());
         }
         if a[1] == 0x47 {
-            return crate::user32_common::default_windowpos_changed(
+            return crate::x86::process::window_geometry::default_windowpos_changed(
                 a, cpu, mem, api, state, log, sched, max_instr,
             );
         }

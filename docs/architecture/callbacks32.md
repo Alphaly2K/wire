@@ -14,4 +14,6 @@ SEH 使用异常入口保存的上下文，DLL 初始化和 CRT initializer 也�
 
 posted 消息、计时器和键盘转换由 USER 产生值、等待或 dispatch 请求；Process 的 messages 协调器执行阻塞、TIMERPROC 与 WNDPROC。参数读取、change bits、copy-out、移除和键盘消费顺序保持，等待仍在原 API stub 上重新分发。
 
+窗口几何和更新由 USER 准备；Process 在 WM_WINDOWPOSCHANGING 正常返回后让 USER 读取可变 WINDOWPOS 并提交，然后执行 WM_WINDOWPOSCHANGED。默认 WM_MOVE 与 WM_SIZE 之间重新查询过程/状态，见[窗口控制](window-control.md)。
+
 基线 `1a93e31`。原 caller-context helper、八个调用文件、Process 执行循环/frame 作格式化后源码对照，路径与策略保持。初次编译遗漏两处 locale 调用，补齐后验收；失败日志保留。release 完整 Win32 255、IR 31、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵。证据：`wire-out/refactoring-2026-10-14/r4-callback-owner32-{source-checks,verification}.json`。

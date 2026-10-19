@@ -638,3 +638,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R4 PE32 消息请求与连续迁移整合
 
 基线 `d541e63`。User32 准备 timer/post/filter/MSG 输出/键盘转换、等待期限与 dispatch 请求，不依赖 CPU/ApiState/执行器；Process 执行实际阻塞或 TIMERPROC/WNDPROC，原 sent loop 未改。原 timer/post/filter/output/keyboard、deadline、dispatch 输入和等待/redispatch 主体核对保持。对自 `1155a3e` 后的连续 owner/请求迁移进行阶段整合：release all-targets 692 passed / 7 ignored / 0 failed，21 suites；all-targets/all-features strict Clippy、build 与 fmt 通过。工具未改，前次 31 项结果继续保留；执行循环/frame 未改，不跑性能或游戏矩阵。累计契约仍 915，证据 `wire-out/refactoring-2026-10-14/r4-messages32-{source-checks,verification}.json`。
+
+## R4 PE32 窗口几何与默认位置通知
+
+基线 `c8c735e`。USER 准备 enable/parent/position/update 请求，Process 执行 callback，正常返回后 USER 读取 guest WINDOWPOS 并提交；位置通知保留原过程快照。默认 WM_MOVE/WM_SIZE 分两次准备，后者取得回调后的窗口/过程/style/client。user32_common 只借 User32/内存，删除闲置私有坐标 facade。原 parent、enable precommit、position prepare/commit、update、text/codec 与 callback frame 核对保持；新增过程替换/最小化 fixture 在迁移前通过。release 完整 Win32 258、IR 31、fmt/release lib/bin strict Clippy/build 通过，首次 dead-code 失败日志保留，删除闲置入口后重跑必要构建；不跑性能或游戏矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r4-window-geometry32-{source-checks,verification}.json`。
