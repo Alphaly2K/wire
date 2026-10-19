@@ -1,5 +1,7 @@
 # 测试与性能工具边界
 
+2026-10-19 用户调整验收要求：性能测试先按改动风险评估，不再把完整矩阵作为每批重构的前置条件。普通 API 声明迁移、低耦合 owner 封装、工具和文档整理，以所属领域的行为/ABI/故障回归及必要构建检查为主；不因编译后地址变化推测回退并反复扩样。改动 CPU 执行器、memory/cache、热网关、热点数据布局或实际绘制/启动路径时，按受影响负载选择少量有针对性的性能比较；较大阶段整合后再决定是否需要累计复核。保留历史严格验收及失败证据，但不将原 3%/5% 数值门槛继续作为普通结构改动的准入标准。已有定向检查通过且未产生新问题时直接继续；完整正确性矩阵和真实 native 检查也按实际影响范围执行。
+
 2026-10-14：保留 `x64`、`win32` integration target，把已有测试按 CPU/SIMD、memory、kernel、files、modules、sync、USER、COM 和图形等实际领域组织到子模块。共享小型 PE/VM/调用 harness 位于 `tests/support/`，跨领域的 PE32 DLL builder 与 guest COM 调用也在此处；领域私有 helper 和测试一起移动。
 
 完整函数名新增领域前缀，例如原 `amd64_integer_flags_and_rex_register_aliases_match_unicorn` 现在为 `cpu::amd64_integer_flags_and_rex_register_aliases_match_unicorn`。旧的函数名 substring 过滤继续可用，`--exact` 过滤需要新名称。完整映射保存在 `tests/test-name-map-2026-10-14.json`；R7 迁移时的 130 个 x64 测试与 109 个 Win32 测试逐名保持，后续新增用例不属于名称迁移项。5 个原始 guest Mono 观察测试留在 `x64.rs`，不涉及 native Mono。

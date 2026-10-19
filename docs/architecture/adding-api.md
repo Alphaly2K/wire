@@ -6,7 +6,7 @@
 2. 把不依赖 guest 内存和进程状态的算法放入领域纯核。GUID 的 Windows little-endian 布局、canonical parser/formatter 位于 `win32/com/guid.rs`；纯核不读 CPU，不写 LastError。
 3. 在 `win32/x86` / `win32/x64` 实现对应内存访问与错误映射。返回 frame 仍由原 `api` / `x64::runtime` facade 提交。varargs、FLOAT/XMM、callback、sret 等需要专用适配器，不能塞入当前 scalar 签名模型。
 4. 冷绑定选择 typed ID；动态 lookup 复用同一 resolver。删除已迁移 export 在旧支持、arity、DWORD、route 表中的手写项。保留 legacy 家族和现有 HotImport。
-5. 先固定旧行为的独立 fixture，再切换路由。验证错 DLL、参数高位/符号、输出故障、guard、返回槽别名和重绑定。期望值不从契约自动生成。影响 gateway 时冻结 executable，串行执行至少三对 AB/BA。
+5. 先固定旧行为的独立 fixture，再切换路由。验证错 DLL、参数高位/符号、输出故障、guard、返回槽别名和重绑定。期望值不从契约自动生成。按[验证选择](validation-tools.md)评估性能测试是否必要；普通声明/路由迁移不逐批重复完整性能矩阵，热点实现变化再按影响选择比较。
 
 ## GUID 的架构边界
 

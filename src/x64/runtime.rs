@@ -214,10 +214,7 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
         && !(dll.eq_ignore_ascii_case("advapi32.dll")
             && matches!(
                 name,
-                "OpenProcessToken"
-                    | "OpenThreadToken"
-                    | "GetTokenInformation"
-                    | "GetSidSubAuthority"
+                "GetSidSubAuthority"
                     | "GetSidSubAuthorityCount"
                     | "GetSidIdentifierAuthority"
                     | "IsValidSid"
@@ -269,9 +266,6 @@ fn kernel_export(name: &str) -> bool {
             name,
             "CommandLineToArgvW"
                 | "SHGetKnownFolderPath"
-                | "OpenProcessToken"
-                | "OpenThreadToken"
-                | "GetTokenInformation"
                 | "GetSidSubAuthority"
                 | "GetSidSubAuthorityCount"
                 | "GetSidIdentifierAuthority"
@@ -324,9 +318,6 @@ fn import_arity(name: &str) -> Option<usize> {
         | "IsValidSid"
         | "GetLengthSid"
         | "GetSidLengthRequired" => 1,
-        "OpenProcessToken" => 3,
-        "OpenThreadToken" => 4,
-        "GetTokenInformation" => 5,
         "SHGetKnownFolderPath" => 4,
         "GetLogicalProcessorInformationEx" => 3,
         "BCryptGenRandom" | "BCryptOpenAlgorithmProvider" => 4,
@@ -380,9 +371,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "FormatMessageA" | "FormatMessageW" => &[0, 2, 3, 5],
         "GetSidSubAuthority" => &[1],
         "CopySid" => &[0],
-        "OpenProcessToken" => &[1],
-        "OpenThreadToken" => &[1, 2],
-        "GetTokenInformation" => &[1, 3],
         "SHGetKnownFolderPath" => &[1],
         "GetLogicalProcessorInformationEx" => &[0],
         "BCryptGenRandom" => &[2, 3],
@@ -815,6 +803,25 @@ impl Runtime64 {
                 } else {
                     let last_error = self.teb() + 0x68;
                     self.snapshots.enumerate(mem, id, args, last_error)
+                }
+            }
+            ApiId::Token(id) => {
+                use crate::win32::catalog::TokenApi;
+                let last_error = self.teb() + 0x68;
+                match id {
+                    TokenApi::OpenProcess => self.tokens.open(mem, args, last_error),
+                    TokenApi::Information => self.tokens.query(mem, args, last_error),
+                    TokenApi::OpenThread => {
+                        self.set_error(
+                            mem,
+                            if self.threads.id(args[0]).is_ok() {
+                                1008
+                            } else {
+                                6
+                            },
+                        )?;
+                        Ok(0)
+                    }
                 }
             }
             ApiId::Keyboard(id) => self.keyboard_call(mem, id, args),
@@ -1311,25 +1318,6 @@ impl Runtime64 {
                         0
                     }
                 }
-            }
-            "OpenProcessToken" => {
-                let last_error = self.teb() + 0x68;
-                self.tokens.open(mem, args, last_error)?
-            }
-            "OpenThreadToken" => {
-                self.set_error(
-                    mem,
-                    if self.threads.id(args[0]).is_ok() {
-                        1008
-                    } else {
-                        6
-                    },
-                )?;
-                0
-            }
-            "GetTokenInformation" => {
-                let last_error = self.teb() + 0x68;
-                self.tokens.query(mem, args, last_error)?
             }
             _ if matches!(
                 file,

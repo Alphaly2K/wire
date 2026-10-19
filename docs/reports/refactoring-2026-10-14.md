@@ -444,3 +444,9 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 七项 provider/ABI/typed ID 收进唯一声明，Win64 owner 枚举不再解析 API 名称；PE32 保持 kernel32 ABI-only 及未知 DLL 的零清栈策略。独立旧行为基线 `5db0070`，完整 release 655、debug 501、native 7、工具 31 和静态检查/build 通过。303 个 src Rust 文件核对一致，binary −9,968 bytes，累计 **713 exports**。
 
 17 个计时协议、162 次执行和三对 Alice 前缀通过，Win64 copyout −12.007%，PE32 ABI-only 快捷路径 IR/raw −82.834%/−77.516%，四份完整日志逐字节一致。code-alias 900M 保留 +4.286% 局部成本，已扩样、采样并核对实际 CLI/cache 热区操作数；具体机制尚未确证。raw 六对 900M 汇总 −0.745%。Alice CPU/wall −1.008%/−0.404%，保持原预算/隐藏窗口/零 Draw/Present。详见[契约验收](refactoring-snapshot-contract-2026-10-19.md)。
+
+## R2 Token 三项契约与验证粒度调整
+
+用户要求先评估性能验收是否必要，减少普通结构迁移的重复矩阵，不因小幅波动停滞重构。当前[验证策略](../architecture/validation-tools.md)据此更新，原始计划文件和历史性能证据保留。
+
+三项 TokenApi 统一 provider、arity 与 DWORD，删除重复手写 ABI/支持列表和字符串分支。独立旧行为基线 `00966ee`，保留 Win64 fresh provider 动态不可见、已注册 gateway fallback 以及 PE32 的 provider-specific 清栈。原 token owner/SID codec 逐字不变，release 657、debug 定向 7、工具 31、fmt/strict Clippy/build 通过，304 个 src Rust 文件核对一致。六次小型功能重放核对结果/计数，四份 PE32 完整 trace 逐字节相同。本批评估为低风险，不跑性能或游戏/native 矩阵。binary −10,960 bytes，累计 **716 exports**；详见[契约验收](refactoring-token-contract-2026-10-19.md)。

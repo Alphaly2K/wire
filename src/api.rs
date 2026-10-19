@@ -728,8 +728,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("RegEnumKeyExA", 32),
                 ("RegEnumValueA", 32),
                 ("RegQueryInfoKeyA", 48),
-                ("OpenProcessToken", 12),
-                ("GetTokenInformation", 20),
                 ("LookupPrivilegeValueA", 12),
                 ("AdjustTokenPrivileges", 24),
             ],

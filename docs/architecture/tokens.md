@@ -1,6 +1,6 @@
 # Win64 token 资源与查询边界
 
-`x64::runtime::token::Tokens` 私有拥有 token 记录、query access、handle flags 与单调编号。Runtime64 的组合根通过 `open/query/flags/set_flags/close` 操作资源；open/query 只借 guest Memory、参数和当前线程 LastError 的 guest 地址，不再访问整个 Runtime64。SID 纯 codec 保持，OpenThreadToken 的线程身份判断仍由原调度边界负责；本批不迁移 legacy API 元数据或新增能力。
+`x64::runtime::token::Tokens` 私有拥有 token 记录、query access、handle flags 与单调编号。Runtime64 的组合根通过 `open/query/flags/set_flags/close` 操作资源；open/query 只借 guest Memory、参数和当前线程 LastError 的 guest 地址，不再访问整个 Runtime64。SID 纯 codec 保持，OpenThreadToken 的线程身份判断仍由原调度边界负责。
 
 当前 token 表达原有受限 guest 用户的 query-only 身份。OpenProcessToken 只接受当前进程伪句柄和 0/QUERY access，最多 128 个同时存活的 token。句柄从 `0x7fff4000` 单调分配到 `0x7fff4fff`，CloseHandle 释放存活容量但不复用编号。错误优先级为 process handle 6、unsupported access 50、容量/编号耗尽 8，最后才检查 8-byte output。输出故障不消耗编号；输出覆盖返回地址时使用 gateway 预先保存的 frame。
 
@@ -11,3 +11,9 @@ GetHandleInformation 保留原资源查找顺序和 token flags。SetHandleInfor
 三项独立测试位于 `tests/x64/token_owner.rs`，先在旧实现验证 process/access/容量/指针优先级、saved frame、flags、output alias、required-size guard、128 个存活及 4096 个累计编号的边界。原创 `gateway-token-info` 只在循环前打开一个 query token，每轮消费 BOOL、四字节 TokenElevation 与 required size。n=max(1,work/13)，RAX=5n+1、retired=12n+20、work=13n+21、API=n+1；两个小输入已在 ETW 冻结上实际校验，离线 inventory 固定两项 advapi32 导入及各自 IAT。
 
 完整正确性、17 条性能协议及三对启动前缀已验收；保留 PE32 integer/IR 六对长样本 +3.320% 的局部成本，具体调查和全部证据见[验收记录](../reports/refactoring-token-owner-2026-10-19.md)。
+
+三项入口的唯一声明为 `TOKEN_CONTRACTS`，绑定 TokenApi、arity 和 DWORD 索引。PE32 在 advapi32 三项均 ABI-only；kernel32 仅 OpenProcessToken/OpenThreadToken 的 Wine ABI 已知，GetTokenInformation 与 kernelbase/user32 保留未知 ABI 的零清栈。Win64 静态导入接受 advapi32/kernel32/kernelbase；三个 provider 的动态查询起初都返回 error 127，注册对应 gateway 后由原 fallback 发现，不新增默认动态导出。OpenThreadToken 保持完整线程句柄身份，合法 guest 线程返回 1008，否则为 6，不读取输出地址。双架构独立基线先在原实现通过，首轮错误地预期 advapi32 默认动态导出的记录保留于证据目录，未改动运行时来迎合该预期。
+
+PE32 原创 ABI-only query 循环使用五个参数及独立 advapi32 OFT/IAT，n=max(1,work/9)，EAX=0、retired=9n+7、API=n；单次和 12K 输入的 raw/IR 已在旧冻结通过。Win64 原 token 查询 fixture 字节和预算不变。
+
+契约迁移完成 release 全量、debug 定向、静态检查与小型功能/完整日志对照。按用户调整后的验收要求，本批评估为低风险，不重复性能或游戏/native 矩阵；详见[契约验收](../reports/refactoring-token-contract-2026-10-19.md)。
