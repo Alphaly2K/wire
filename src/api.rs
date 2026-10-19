@@ -3212,6 +3212,85 @@ fn crt_dispatch(
 
 #[cfg(test)]
 mod tests {
+    use super::ApiLogger;
+    use std::io::Write;
+
+    #[test]
+    fn api_log_preserves_numeric_format_and_complete_trace() {
+        let path =
+            std::env::temp_dir().join(format!("wire-api-log-numeric-{}", std::process::id()));
+        let mut log = ApiLogger::new(&path).unwrap();
+        let args = [0, 1, 15, 16, 255, 256, 65535, 65536, 0x80000000, u32::MAX];
+        let mut expected = String::new();
+        for count in [1, 9, 10, 9999999, 10000000, 99999999, u64::MAX] {
+            log.call_count = count - 1;
+            for (i, value) in args.iter().enumerate() {
+                // The maximum counter is tested separately without overflowing.
+                if log.call_count == u64::MAX {
+                    break;
+                }
+                let count = count + i as u64;
+                let values = &args[..i];
+                log.log_call(7, "gdi32.dll", "Value", values, *value, i % 2 == 0, "");
+                let values = values
+                    .iter()
+                    .map(|a| format!("{a:#x}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let marker = if i % 2 == 0 { "" } else { " [UNIMPLEMENTED]" };
+                expected.push_str(&format!(
+                    "#{count:<8} gdi32.dll!Value({values}) = {value:#x}{marker}\n"
+                ));
+            }
+        }
+        log.trace.flush().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+        assert_eq!(
+            log.recent.back().unwrap(),
+            "#18446744073709551615 gdi32.dll!Value() = 0x0"
+        );
+        drop(log);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn api_log_keeps_mutable_identity_counts_notes_and_recent_eviction() {
+        let path =
+            std::env::temp_dir().join(format!("wire-api-log-history-{}", std::process::id()));
+        let mut log = ApiLogger::new(&path).unwrap();
+        let mut expected = Vec::new();
+        for i in 1..=100 {
+            let (dll, name) = if i < 50 {
+                ("user32.dll", "A")
+            } else {
+                ("other!provider", "B!C")
+            };
+            log.log_call(3, dll, name, &[u32::MAX], 0x123, false, "diagnostic 日本語");
+            expected.push(format!(
+                "#{i:<8} {dll}!{name}(0xffffffff) = 0x123 [UNIMPLEMENTED] ; diagnostic 日本語"
+            ));
+            if i % 9 == 0 {
+                log.note("interleaved note");
+                expected.push("; interleaved note".into());
+            }
+        }
+        log.trace.flush().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            expected.join("\n") + "\n"
+        );
+        assert_eq!(
+            log.recent.iter().collect::<Vec<_>>(),
+            expected[expected.len() - 64..].iter().collect::<Vec<_>>()
+        );
+        assert_eq!(log.freq["user32.dll!A"], 49);
+        assert_eq!(log.freq["other!provider!B!C"], 51);
+        assert_eq!(log.freq, log.unimpl_freq);
+        assert_eq!(log.call_count, 100);
+        drop(log);
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn target_static_imports_have_known_stack_cleanup() {
         let mut dll = String::new();
