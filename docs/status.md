@@ -12,7 +12,7 @@
 
 ## 重构范围
 
-最新另接入 [GDI 对象、像素与字体 31 项](reports/refactoring-gdi-operations-2026-10-19.md)：唯一 catalog 和图形操作枚举，adapter 只借 Graphics/LastError；独立旧行为基线、完整 release 623、debug 469、native 7 和严格检查通过。GDI 150M raw/IR 三标签三对全部校验，raw 相对直接父版本 −1.107%，IR +3.853% 继续调查；累计宽矩阵进行中。对话框、菜单、分发和本批冻结独立保留，正式计数仍为 595。
+最新另接入 [GDI 对象、像素与字体 31 项](reports/refactoring-gdi-operations-2026-10-19.md)：唯一 catalog 和图形操作枚举，adapter 只借 Graphics/LastError；独立旧行为基线、完整 release 623、debug 469、native 7 和严格检查通过。累计扩样中消息/IR 三对均回退超过 5%，该冻结未准入；旧轮次全部保留。重新采样后提取 [API 日志职责并优化固定整数格式化](reports/refactoring-api-log-2026-10-19.md)，完整 release 625、debug 471、native 7、工具 23 和严格检查通过，逐字节保留完整 trace/频率/64 条历史；150M 消息 IR/raw 相对正式消息冻结 CPU −13.210%/−12.110%，正在核验宽矩阵及游戏前缀。对话框、菜单、分发和 GDI 冻结独立保留，正式计数仍为 595。
 
 | 阶段 | 已交付 | 剩余范围 |
 | --- | --- | --- |
