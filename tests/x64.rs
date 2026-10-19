@@ -8,6 +8,8 @@ use wire::x64::{
 };
 #[path = "x64/basic_contract.rs"]
 mod basic_contract;
+#[path = "x64/bcrypt_contract.rs"]
+mod bcrypt_contract;
 #[path = "x64/bstr_contract.rs"]
 mod bstr_contract;
 #[path = "x64/classes_contract.rs"]
