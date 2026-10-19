@@ -8,7 +8,7 @@
 
 历史性能拒绝、回滚与后续复核证据继续保留，见 [API 日志累计验收](reports/refactoring-api-log-2026-10-19.md)、[后台 Unity 渲染结束后的复核](reports/refactoring-post-unity-performance-2026-10-19.md) 和 [CLI 重试](reports/refactoring-cli-followup-2026-10-19.md)。当前结构重构不宣称新的性能提升。
 
-整合后 [Win64 Heap](architecture/heaps.md) 继续收敛：slab/block 算法归 Heap，仅借页分配、错误槽和诊断资源。原清零、回收、ReAlloc 及失败 trace 顺序保持，完整 Win64 269 和必要构建通过。
+整合后 [Win64 Heap](architecture/heaps.md) 与 [Local/Global](architecture/local-memory.md) 继续收敛：分配算法归各自 owner，仅借页分配、错误槽和诊断资源；LocalMemory 同时拥有 FormatMessage、shell argv 与线程描述的 local 归属。原清零、回收、ReAlloc、copy-out 及失败 trace 顺序保持，两批均通过完整 Win64 269 和必要构建。
 
 ## 重构范围
 

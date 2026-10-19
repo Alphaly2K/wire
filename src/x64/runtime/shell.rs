@@ -30,7 +30,7 @@ impl Runtime64 {
                     }
                     mem.write(block, &data)?;
                     mem.write_int(args[1], 4, count)?;
-                    self.local_blocks.insert(block);
+                    self.local_memory.track(block);
                     block
                 }
             }

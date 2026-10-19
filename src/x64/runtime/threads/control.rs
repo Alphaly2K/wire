@@ -157,7 +157,7 @@ impl Runtime64 {
                     } else {
                         mem.write(pointer, &data)?;
                         mem.write_int(args[1], 8, pointer)?;
-                        self.local_blocks.insert(pointer);
+                        self.local_memory.track(pointer);
                         0
                     }
                 }

@@ -99,7 +99,7 @@ pub struct Runtime64 {
     exception_registrations: exception::Registrations,
     profile: crate::runtime::environment::GuestEnvironment,
     environment: environment::Environment,
-    local_blocks: std::collections::BTreeSet<u64>,
+    local_memory: local_memory::LocalMemory,
     task_memory: com::TaskMemory,
     bstrings: automation::Bstrings,
     hstrings: winrt::Strings,
@@ -285,7 +285,7 @@ impl Runtime64 {
             exception_registrations: exception::Registrations::default(),
             profile: crate::runtime::environment::GuestEnvironment::amd64(),
             environment: Default::default(),
-            local_blocks: std::collections::BTreeSet::new(),
+            local_memory: local_memory::LocalMemory::default(),
             task_memory: Default::default(),
             hstrings: Default::default(),
             devices: Default::default(),
@@ -554,7 +554,16 @@ impl Runtime64 {
             ApiId::ProcessControl(_) => {
                 unreachable!("process controls use their bound gateway route")
             }
-            ApiId::MessageFormat(id) => self.format_message(mem, id, args),
+            ApiId::MessageFormat(id) => {
+                let last_error = self.teb() + 0x68;
+                let mut pages = allocation::Pages {
+                    next: &mut self.next_alloc,
+                    allocations: &mut self.allocations,
+                    last_error,
+                    trace: &mut self.trace,
+                };
+                self.local_memory.format_message(mem, id, args, &mut pages)
+            }
             ApiId::Shell(id) => self.shell_call(mem, id, args),
             ApiId::Exception(_) => unreachable!("exception controls use their bound gateway route"),
             ApiId::Com(id) => self.com_call(mem, id, args),
@@ -719,7 +728,16 @@ impl Runtime64 {
                 };
                 self.guest_heap.call(mem, id, args, &mut pages)
             }
-            ApiId::LocalMemory(id) => self.local_memory_call(mem, id, args),
+            ApiId::LocalMemory(id) => {
+                let last_error = self.teb() + 0x68;
+                let mut pages = allocation::Pages {
+                    next: &mut self.next_alloc,
+                    allocations: &mut self.allocations,
+                    last_error,
+                    trace: &mut self.trace,
+                };
+                self.local_memory.call(mem, id, args, &mut pages)
+            }
             ApiId::SystemProfile(id) => {
                 crate::win32::x64::system_profile::call(mem, id, args, self.teb() + 0x68)
             }

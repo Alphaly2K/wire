@@ -602,3 +602,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 Win64 Heap 资源操作
 
 基线 `1155a3e`。slab/block allocator 从 Runtime64 方法改为 Heap 自身操作；仅借 Pages 显式页资源，通用分配 facade 共用原页算法，保留失败诊断、LastError、清零/回收及 ReAlloc 提交顺序。Heap 主体与页算法核对保持。初次机械提取漏改四个方法调用，修正后 release 完整 Win64 269、fmt/release lib/bin strict Clippy/build 通过，失败日志保留。不跑性能或游戏矩阵，累计契约仍 915。见[Heap 边界](../architecture/heaps.md)，证据 `wire-out/refactoring-2026-10-14/r3-heap64-owner-{source-checks,verification}.json`。
+
+## R3 Win64 Local/Global 资源操作
+
+基线 `f65e0bf`。LocalMemory 私有拥有原 local-block 集合，执行 Local/Global 与 FormatMessage 分配提交，只借内存和 Pages；shell argv 与线程描述保持原 copy-out 后登记。两份算法和两个外部登记点核对保持，release 完整 Win64 269、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵，累计契约仍 915。见[Local/Global 边界](../architecture/local-memory.md)，证据 `wire-out/refactoring-2026-10-14/r3-local-memory64-owner-{source-checks,verification}.json`。
