@@ -491,14 +491,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("DebugBreak", 0),
                 ("OutputDebugStringA", 4),
                 ("OutputDebugStringW", 4),
-                ("GetEnvironmentStrings", 0),
-                ("GetEnvironmentStringsW", 0),
-                ("FreeEnvironmentStringsA", 4),
-                ("FreeEnvironmentStringsW", 4),
-                ("GetEnvironmentVariableA", 12),
-                ("GetEnvironmentVariableW", 12),
-                ("SetEnvironmentVariableA", 8),
-                ("SetEnvironmentVariableW", 8),
                 ("FormatMessageA", 28),
                 ("FormatMessageW", 28),
                 ("TerminateThread", 8),
@@ -2317,28 +2309,15 @@ pub fn dispatch(
             ret = args[0];
             note = "identity encoding".into();
         }
-        (_, "kernel32.dll", "GetEnvironmentStrings") => {
-            // empty block: "\0\0"
-            let p = state.scratch_alloc(mem, 16, 16);
-            mem.write_u16(p, 0).map_err(|e| e.to_string())?;
-            ret = p;
-            note = "empty environment block".into();
-        }
-        (_, "kernel32.dll", "GetEnvironmentStringsW") => {
-            // empty block: L"\0\0"
-            let p = state.scratch_alloc(mem, 16, 16);
-            mem.write_u32(p, 0).map_err(|e| e.to_string())?;
-            ret = p;
-            note = "empty environment block".into();
-        }
-        (_, "kernel32.dll", "FreeEnvironmentStringsA")
-        | (_, "kernel32.dll", "FreeEnvironmentStringsW") => {
-            ret = 1;
-        }
-        (_, "kernel32.dll", "GetEnvironmentVariableA")
-        | (_, "kernel32.dll", "GetEnvironmentVariableW") => {
-            ret = 0; // not found; GetLastError already 0
-            note = "empty environment".into();
+        (Some(crate::win32::catalog::ApiId::Environment(id)), _, _) => {
+            let storage = if id.scratch() {
+                state.scratch_alloc(mem, 16, 16)
+            } else {
+                0
+            };
+            let result = crate::win32::x86::environment::call(id, mem, storage)?;
+            ret = result.0;
+            note = result.1.into();
         }
         (_, "kernel32.dll", "SetUnhandledExceptionFilter") => {
             ret = state.unhandled_filter;

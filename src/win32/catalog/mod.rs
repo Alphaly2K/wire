@@ -14,6 +14,7 @@ mod delays;
 mod desktop;
 mod dialog;
 mod display;
+mod environment;
 mod files;
 mod gdi_dc;
 mod gdi_operations;
@@ -70,6 +71,7 @@ pub use delays::{DelayApi, DELAY_CONTRACTS};
 pub use desktop::{DesktopApi, DESKTOP_CONTRACTS};
 pub use dialog::{DialogApi, DIALOG_CONTRACTS};
 pub use display::{DisplayApi, DISPLAY_CONTRACTS};
+pub use environment::{EnvironmentApi, ENVIRONMENT_CONTRACTS};
 pub use files::{FileApi, FILE_CONTRACTS};
 pub use gdi_dc::{GdiDcApi, GDI_DC_CONTRACTS};
 pub use gdi_operations::{GdiApi, GDI_OPERATION_CONTRACTS};
@@ -203,6 +205,7 @@ pub enum ApiId {
     GdiOperation(GdiApi),
     Resource(ResourceApi),
     Startup(StartupApi),
+    Environment(EnvironmentApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -397,6 +400,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(GDI_OPERATION_CONTRACTS.iter())
         .chain(RESOURCE_CONTRACTS.iter())
         .chain(STARTUP_CONTRACTS.iter())
+        .chain(ENVIRONMENT_CONTRACTS.iter())
 }
 
 #[cfg(test)]

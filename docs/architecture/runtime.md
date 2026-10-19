@@ -12,6 +12,7 @@
 | `x64::runtime` | Win64 gateway 与服务组合根；已有 BoundImport 冷绑定和 HotImport 热路由，迁移中保留 |
 | `fs`、`codepage`、`simd` | 已共享的纯语义或公共服务，继续复用 |
 | `runtime::environment` | 不可变 guest 身份/版本/locale/路径；私有可变环境变量模型，架构 allocator 生命周期独立 |
+| `x64::runtime::environment::Environment` | 私有拥有 Win64 变量和环境块集合，typed adapter 保持页分配、专用释放及故障顺序；PE32 空环境继续使用原 scratch allocator |
 | `runtime::api_log` | PE32 完整 API trace、调用频率与最近 64 条诊断；不依赖 CPU、catalog 或 ApiState，`api::ApiLogger` 保留原公开入口 |
 | `win32::{catalog,kernel,x86,x64}` | GUID、identity、version、NLS 的唯一契约、纯算法及架构适配；locale 回调通过专用控制路由，由进程执行 |
 | `modules::Modules`、`win32::{x86,x64}::modules` | PE32 guest image/TLS 与 provider 身份；Win64 module/export/path/ref/pin/search 的私有 owner。Root 注册入口委托，ABI/control adapters 分别保留 |

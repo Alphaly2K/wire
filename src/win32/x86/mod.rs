@@ -7,6 +7,7 @@ pub(crate) mod critical_sections;
 pub(crate) mod cursor;
 pub(crate) mod desktop;
 pub(crate) mod display;
+pub(crate) mod environment;
 pub(crate) mod geometry;
 pub(crate) mod guid;
 pub(crate) mod heaps;

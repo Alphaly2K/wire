@@ -16,6 +16,7 @@ mod command;
 mod devices;
 mod display;
 mod dxgi;
+mod environment;
 mod events;
 pub(crate) mod exception;
 mod files;
@@ -97,9 +98,8 @@ pub struct Runtime64 {
     function_tables: BTreeMap<u64, unwind::Table>,
     exception_handlers: Vec<(u64, u64)>,
     next_exception_handler: u64,
-    environment_blocks: std::collections::BTreeSet<u64>,
     profile: crate::runtime::environment::GuestEnvironment,
-    environment: crate::runtime::environment::EnvironmentVariables,
+    environment: environment::Environment,
     local_blocks: std::collections::BTreeSet<u64>,
     task_memory: com::TaskMemory,
     bstrings: automation::Bstrings,
@@ -341,21 +341,17 @@ fn import_arity(name: &str) -> Option<usize> {
         "GetLogicalProcessorInformationEx" => 3,
         "BCryptGenRandom" | "BCryptOpenAlgorithmProvider" => 4,
         "BCryptCloseAlgorithmProvider" => 2,
-        "GetEnvironmentVariableW" | "GetEnvironmentVariableA" => 3,
-        "SetEnvironmentVariableW" | "SetEnvironmentVariableA" => 2,
         "NtQueryDirectoryFile" => 11,
         "CommandLineToArgvW" => 2,
         "AreFileApisANSI" => 0,
         "GetErrorMode" => 0,
         "SetErrorMode" => 1,
-        "GetEnvironmentStringsW" => 0,
         "SetThreadStackGuarantee" => 1,
         "CreatePipe" => 4,
         "InitializeProcThreadAttributeList" => 4,
         "UpdateProcThreadAttribute" => 7,
         "DeleteProcThreadAttributeList" => 1,
         "CreateProcessW" => 10,
-        "FreeEnvironmentStringsW" => 1,
         "GetConsoleMode" | "GetTempPathW" | "GetTempPath2W" => 2,
         "EncodePointer" | "DecodePointer" | "SetUnhandledExceptionFilter" | "ExitProcess" => 1,
         "WriteConsoleW" => 5,
@@ -403,7 +399,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "BCryptGenRandom" => &[2, 3],
         "BCryptOpenAlgorithmProvider" => &[3],
         "BCryptCloseAlgorithmProvider" => &[1],
-        "GetEnvironmentVariableW" | "GetEnvironmentVariableA" => &[2],
         "NtQueryDirectoryFile" => &[6, 7],
         "SetErrorMode" => &[0],
         "InitializeProcThreadAttributeList" => &[1, 2],
@@ -501,7 +496,6 @@ impl Runtime64 {
             function_tables: BTreeMap::new(),
             exception_handlers: Vec::new(),
             next_exception_handler: 0x7fff8000,
-            environment_blocks: std::collections::BTreeSet::new(),
             profile: crate::runtime::environment::GuestEnvironment::amd64(),
             environment: Default::default(),
             local_blocks: std::collections::BTreeSet::new(),
@@ -813,6 +807,7 @@ impl Runtime64 {
             ApiId::Bstr(id) => self.bstr_call(mem, id, args),
             ApiId::Variant(_) => unreachable!("Variant helpers have no Win64 binding"),
             ApiId::ProcessQuery(id) => self.process_query_call(mem, id, args),
+            ApiId::Environment(id) => self.environment_call(mem, id, args),
             ApiId::Startup(id) => {
                 crate::win32::x64::process_startup::call(id, args, mem, [COMMAND_A, COMMAND_W])
             }
@@ -1896,57 +1891,6 @@ impl Runtime64 {
                     0xc0000008
                 }
             }
-            "GetEnvironmentVariableW"
-            | "GetEnvironmentVariableA"
-            | "SetEnvironmentVariableW"
-            | "SetEnvironmentVariableA" => {
-                let wide = name.ends_with('W');
-                let variable = Self::path_name(mem, args[0], wide)?;
-                if variable.is_empty() || variable.contains('=') {
-                    self.set_error(mem, 87)?;
-                    0
-                } else {
-                    if name.starts_with("Set") {
-                        if args[1] == 0 {
-                            if self.environment.remove(&variable) {
-                                1
-                            } else {
-                                self.set_error(mem, 203)?;
-                                0
-                            }
-                        } else {
-                            let value = Self::path_name(mem, args[1], wide)?;
-                            self.environment.set(variable, value);
-                            1
-                        }
-                    } else if let Some(value) = self.environment.get(&variable) {
-                        let bytes: Vec<u8> = if wide {
-                            value
-                                .encode_utf16()
-                                .chain(Some(0))
-                                .flat_map(u16::to_le_bytes)
-                                .collect()
-                        } else {
-                            crate::codepage::encode(
-                                &(value.to_owned() + "\0"),
-                                self.profile.codepage(),
-                            )
-                            .map_err(|e| format!("environment codepage error {e}"))?
-                            .0
-                        };
-                        let required = bytes.len() / if wide { 2 } else { 1 };
-                        if args[2] < required as u64 {
-                            required as u64
-                        } else {
-                            mem.write(args[1], &bytes)?;
-                            required as u64 - 1
-                        }
-                    } else {
-                        self.set_error(mem, 203)?;
-                        0
-                    }
-                }
-            }
             _ if matches!(
                 file,
                 Some(FileApi::CreateFileMappingW | FileApi::CreateFileMappingA)
@@ -2863,30 +2807,6 @@ impl Runtime64 {
                         .collect();
                     mem.write(args[1], &bytes)?;
                     path.len() as u64
-                }
-            }
-            "GetEnvironmentStringsW" => {
-                // Initially empty; changes are guest-owned and never inherit host secrets.
-                let bytes = self.environment.wide_block();
-                let ptr = self.heap_alloc(mem, bytes.len() as u64)?;
-                if ptr != 0 {
-                    mem.write(ptr, &bytes)?;
-                    self.environment_blocks.insert(ptr);
-                }
-                ptr
-            }
-            "FreeEnvironmentStringsW" => {
-                if !self.environment_blocks.contains(&args[0])
-                    || !self.allocations.contains_key(&args[0])
-                {
-                    self.set_error(mem, 87)?;
-                    0
-                } else {
-                    let (_, span) = self.allocations[&args[0]];
-                    mem.unmap(args[0], span)?;
-                    self.environment_blocks.remove(&args[0]);
-                    self.allocations.remove(&args[0]);
-                    1
                 }
             }
             _ if matches!(
