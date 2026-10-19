@@ -626,3 +626,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 Win64 COM 窄调用
 
 基线 `82a6949`。TaskMemory 执行 CoTaskMemAlloc/Free，仅借 Pages/内存；COM adapter 仅借 Apartment/内存/Trace，不依赖 Runtime64，删除不再使用的只读 apartment facade。原 task allocate/free、init/factory 与私有释放主体核对保持，Apartment 纯状态未改。release 完整 Win64 269、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵，累计契约仍 915。证据 `wire-out/refactoring-2026-10-14/r3-com-calls64-{source-checks,verification}.json`。
+
+## R4 PE32 绘制 callback 请求
+
+基线 `94eadcb`。User32 仅借内存/Graphics/LastError，准备值、立即更新与 BeginPaint 请求；Process 执行擦除，在正常返回后写 PAINTSTRUCT。原 HWND/指针验证、DC/clip、消费区域、callback fault 与输出顺序核对保持，Graphics/frame 未改。release 完整 Win32 257、IR 31、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵，累计契约仍 915。RedrawWindow 的真实 gateway 继续为菜单未实现，公开 facade 差异保持。证据 `wire-out/refactoring-2026-10-14/r4-paint32-{source-checks,verification}.json`。

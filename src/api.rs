@@ -966,8 +966,9 @@ pub fn dispatch(
             }
         }
         (Some(crate::win32::catalog::ApiId::Painting(id)), _, _) => {
-            let (outcome, message) =
-                crate::user32::paint_call(id, &args, cpu, mem, api, state, log, sched, max_instr)?;
+            let (outcome, message) = crate::x86::process::painting::call(
+                id, &args, cpu, mem, api, state, log, sched, max_instr,
+            )?;
             match outcome {
                 GuestCallOutcome::Returned(value) => {
                     ret = value;

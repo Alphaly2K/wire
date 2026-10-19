@@ -291,7 +291,7 @@ fn window_dispatch(
             let mut pa = [0; 16];
             pa[0] = a[0];
             pa[1] = state.scratch_alloc(mem, 64, 4);
-            let (result, _) = super::paint_call(
+            let (result, _) = crate::x86::process::painting::call(
                 crate::win32::catalog::PaintingApi::Begin,
                 &pa,
                 cpu,
@@ -305,7 +305,7 @@ fn window_dispatch(
             if !matches!(result, GuestCallOutcome::Returned(_)) {
                 return Ok((result, "default paint transferred".into()));
             }
-            super::paint_call(
+            crate::x86::process::painting::call(
                 crate::win32::catalog::PaintingApi::End,
                 &pa,
                 cpu,

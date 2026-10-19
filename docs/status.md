@@ -18,6 +18,8 @@ PE32 [窗口状态](architecture/window-state.md) 与[对话框/枚举](architec
 
 Win64 [COM 普通调用](architecture/com-core.md) 随后收窄：task owner 只借 Pages/内存，其余调用只借 Apartment/内存/Trace；原线程状态和 missing-factory 顺序保持，完整 Win64 269 及必要构建通过。
 
+PE32 [绘制请求](architecture/painting.md) 已分离 USER/DC 准备与 Process 擦除执行；正常返回后写 PAINTSTRUCT，callback fault 后保留已提交区域/DC。完整 Win32 257、IR 31 及必要构建通过。
+
 ## 重构范围
 
 当前累计冻结包含[对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)、日志、五项 paint、控件初始化、资源、启动信息、环境接口与 CLI 拆分；独立历史证据继续可查。

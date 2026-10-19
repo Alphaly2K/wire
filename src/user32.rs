@@ -23,7 +23,7 @@ pub use classes::{find_class, WindowClass};
 pub(crate) use control::call as control_call;
 pub(crate) use dialog::{dialog_integer, DialogRequest};
 pub(crate) use messages::call as message_call;
-pub(crate) use paint::call as paint_call;
+pub(crate) use paint::{Operation as PaintingOperation, PaintRequest};
 pub(crate) use queries::desktop as desktop_query;
 use queues::{clock_ms, message_bits};
 pub(crate) use window_state::WindowStateRequest;
@@ -185,7 +185,7 @@ pub fn dispatch(
         return None;
     }
     if name == "RedrawWindow" {
-        return Some(paint::redraw(
+        return Some(crate::x86::process::painting::redraw(
             a, cpu, mem, api, state, log, sched, max_instr,
         ));
     }
@@ -197,7 +197,7 @@ pub fn dispatch(
             ApiId::Dialog(id) if !id.message_box() => Some(crate::x86::process::dialog::call(
                 id, a, cpu, mem, api, state, log, sched, max_instr,
             )),
-            ApiId::Painting(id) => Some(paint_call(
+            ApiId::Painting(id) => Some(crate::x86::process::painting::call(
                 id, a, cpu, mem, api, state, log, sched, max_instr,
             )),
             _ => None,
