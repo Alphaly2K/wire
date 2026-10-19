@@ -4,7 +4,7 @@
 
 本轮累计接入对话框/窗口枚举 22、菜单 27、GDI 对象/像素/字体 31 项，共 **80 项**，累计 **675 项**。统一声明、typed 分发与领域 owner 保持双架构范围、故障提交和既有不可用策略；保留真实 RedrawWindow 网关与公开 facade 的历史差异。精确标量 SSE 已移入独立编译单元，没有近似浮点或新增 ISA 语义。
 
-当前代码另已接入 **5 项 paint 契约**，完整正确性通过，性能因后台 Unity/WindowServer 负载及明显同哈希漂移待复核；与上述 675 项分别记录。新实现、冻结及全部结果见[五项 paint 后续报告](reports/refactoring-painting-followup-2026-10-19.md)。
+当前代码另已接入 **7 项契约**：5 项 paint、2 项 comctl32 初始化，完整正确性通过，性能因后台 Unity/WindowServer 负载及明显同哈希漂移待复核；与上述 675 项分别记录。新实现、冻结及全部结果见[五项 paint](reports/refactoring-painting-followup-2026-10-19.md)与[控件初始化](reports/refactoring-common-controls-2026-10-19.md)。
 
 中间 GDI 冻结出现 messages/IR 三对持续回退，未准入。实际采样后将 API 日志提取为独立 runtime 服务，并用专用整数格式化保留完整 trace、频率和最近 64 条记录。最终消息 150M IR/raw CPU 中位数相对原消息冻结 −13.210%/−12.110%，GDI 150M IR/raw −16.987%/−13.229%；33 条性能协议、207 次 fixture 执行及三对真实启动前缀通过。旧冻结、失败轮次和同哈希 control 独立保留，没有用其它负载的改善抵消持续回退。
 
@@ -17,7 +17,7 @@
 | 阶段 | 已交付 | 剩余范围 |
 | --- | --- | --- |
 | R0/R1 | 冻结输入、原创正式 fixture、领域测试 harness、GUID 唯一契约和双架构适配 | 随后续家族维护独立基线 |
-| R2 | 已验收 675 个 export 的契约，另 5 项 paint 正确性通过、性能待复核；明细见下表 | USER、COM、图形等 legacy 家族 |
+| R2 | 已验收 675 个 export 的契约，另 7 项 paint/控件初始化正确性通过、性能待复核；明细见下表 | USER、COM、图形等 legacy 家族 |
 | R3 | guest environment、双架构模块状态、Win64 文件、period 请求、SRW、地址等待及 APC 队列、线程标量操作与描述、双架构 apartment/BSTR、Win64 task/HSTRING/image/desktop 成员、PE32 TLS/FLS 与双架构 cursor、Win64 DC/class 私有 owner | PE32 其余资源、线程资源创建/退出及 COM 其余对象；PE32 kernel 大范围抽取曾因性能撤回 |
 | R4/R5 | Process32 编排边界、owned host UI 请求、GDI 与像素状态分离 | 领域分发与资源 owner 随 R2/R3 继续收敛 |
 | R6 | 按用户要求忽略 | 不重建原生 Mono 路径 |
@@ -95,6 +95,8 @@
 当前五项 paint 冻结：release **628 passed / 7 ignored**、debug **474 passed**、native **7 passed**、工具 **26 passed**，上述静态检查和 build 通过。290 个 src Rust 文件与冻结一致，executable 仅增加 48 bytes。20 条 12K 功能协议共 120 次执行通过；37 个长样本结果校验后因同哈希明显漂移停止长计时，另保留 1 个主动中断样本。小规模功能耗时不作性能准入。
 
 该候选三对 Alice 200M 功能前缀也到相同预算/隐藏窗口/零 Draw/Present 出口；RSS before 307–378MiB、after 379–397MiB，保留差异待复核，不与前述已验收启动计时混算。
+
+随后两项控件初始化冻结：release **631 passed / 7 ignored**、debug **477 passed**、native **7 passed**、工具 **26 passed**，静态检查和 build 通过；290 个 src Rust 文件核对一致，executable 较 paint 冻结增加 1,344 bytes。9 条 12K 功能协议共 54 次执行，以及一对 Alice 200M 功能前缀通过，长性能对照待复核。
 
 33 条 workload protocol 全部结果校验，不跨不同 work/工具版本混算；GUID/raw 首轮离散后，150M 加同哈希 control 三对均改善，CPU 中位数 −14.007%。15 项计算路径的 CPU 中位数变化为 −4.408% 至 +2.111%，fixture RSS 中位数最多 +48KiB。二进制较直接 GDI 候选增加 32 bytes，满足 +24KiB 预算。Alice CPU/wall +1.272%/+1.650%，RSS 中位数约 +5.91MiB，原生启动 before 的 RSS 范围约 319–398MiB；保持同一预算、隐藏窗口与零 Draw/Present。所有离散轮次保留，没有推断游戏 FPS。
 

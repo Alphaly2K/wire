@@ -134,6 +134,9 @@ def fixture(name,work):
     if name=='gateway-classes':
         from .classes_gateway import x86
         return x86(work,pe32)
+    if name=='gateway-common-controls':
+        from .common_controls_gateway import x86
+        return x86(work,pe32)
     if name=='gateway-desktop':
         from .desktop_gateway import x86
         return x86(work,pe32)

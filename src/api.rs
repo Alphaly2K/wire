@@ -816,10 +816,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
             ],
         );
         add(
-            "comctl32.dll",
-            &[("InitCommonControls", 0), ("InitCommonControlsEx", 4)],
-        );
-        add(
             "shlwapi.dll",
             &[
                 ("PathCombineA", 12),
@@ -2558,32 +2554,6 @@ pub fn dispatch(
             cpu.exit_code = Some(args[0]);
             note = "CLR-style exit".into();
             ret = 0;
-        }
-        (_, "comctl32.dll", "InitCommonControls" | "InitCommonControlsEx") => {
-            if name == "InitCommonControlsEx"
-                && mem.read_u32(args[0]).map_err(|e| e.to_string())? != 8
-            {
-                ret = 0;
-                state.last_error = 87;
-            } else {
-                let module = state.module_handle_for("comctl32.dll");
-                for class in [
-                    "Button",
-                    "Edit",
-                    "Static",
-                    "ListBox",
-                    "ComboBox",
-                    "ScrollBar",
-                    "SysListView32",
-                    "SysTreeView32",
-                    "SysTabControl32",
-                    "msctls_progress32",
-                ] {
-                    crate::user32::register_system_class(mem, api, state, module, class, true)?;
-                }
-                ret = 1;
-                note = "registered controls with basic window/text state".into();
-            }
         }
         (_, "gdiplus.dll", _) => {
             (ret, note, implemented) = crate::gdiplus::dispatch(name, &args, mem, state);

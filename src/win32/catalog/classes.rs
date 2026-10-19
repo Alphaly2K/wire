@@ -20,6 +20,8 @@ pub enum ClassApi {
     Word,
     NameA,
     NameW,
+    InitializeControls,
+    InitializeControlsEx,
 }
 
 impl ClassApi {
@@ -95,7 +97,20 @@ const fn declaration(
 
 use Parameter::{Int32 as I, Pointer as P};
 use ReturnConvention::{BoolLastError as B, Uint32 as U};
-pub static CLASS_CONTRACTS: [Contract; 17] = [
+const fn initialization(
+    id: ClassApi,
+    name: &'static str,
+    parameters: &'static [Parameter],
+    returns: ReturnConvention,
+) -> Contract {
+    Contract::new(
+        ApiId::Class(id), name, parameters, returns,
+        "PE32 basic global window/text classes only; Ex reads dwSize alone and ignores dwICC; invalid size retains error 87 and empty note; preserve ordered partial registration, existing classes, LastError, scalar return 1 and trace; Win64 initialization remains absent",
+        [ArchitecturePlan { dlls: &["comctl32.dll"], execution: ExecutionPolicy::Typed },
+         ArchitecturePlan { dlls: &[], execution: ExecutionPolicy::Absent }],
+    )
+}
+pub static CLASS_CONTRACTS: [Contract; 19] = [
     declaration(ClassApi::RegisterA, "RegisterClassA", &[P], U),
     declaration(ClassApi::RegisterW, "RegisterClassW", &[P], U),
     declaration(ClassApi::RegisterExA, "RegisterClassExA", &[P], U),
@@ -113,4 +128,11 @@ pub static CLASS_CONTRACTS: [Contract; 17] = [
     declaration(ClassApi::Word, "GetClassWord", &[P, I], U),
     declaration(ClassApi::NameA, "GetClassNameA", &[P, P, I], U),
     declaration(ClassApi::NameW, "GetClassNameW", &[P, P, I], U),
+    initialization(ClassApi::InitializeControls, "InitCommonControls", &[], U),
+    initialization(
+        ClassApi::InitializeControlsEx,
+        "InitCommonControlsEx",
+        &[P],
+        B,
+    ),
 ];

@@ -108,6 +108,35 @@ pub(crate) fn register_system_class(
     Ok(())
 }
 
+fn initialize_controls(
+    extended: bool,
+    record: u32,
+    mem: &mut GuestMem,
+    api: &mut ApiTable,
+    state: &mut ApiState,
+) -> Result<(u32, String), String> {
+    if extended && mem.read_u32(record).map_err(|e| e.to_string())? != 8 {
+        state.last_error = 87;
+        return Ok((0, String::new()));
+    }
+    let module = state.module_handle_for("comctl32.dll");
+    for class in [
+        "Button",
+        "Edit",
+        "Static",
+        "ListBox",
+        "ComboBox",
+        "ScrollBar",
+        "SysListView32",
+        "SysTreeView32",
+        "SysTabControl32",
+        "msctls_progress32",
+    ] {
+        register_system_class(mem, api, state, module, class, true)?;
+    }
+    Ok((1, "registered controls with basic window/text state".into()))
+}
+
 pub(crate) fn call(
     id: ClassApi,
     a: &crate::api::Args,
@@ -115,6 +144,12 @@ pub(crate) fn call(
     api: &mut ApiTable,
     state: &mut ApiState,
 ) -> Result<(u32, String), String> {
+    if matches!(
+        id,
+        ClassApi::InitializeControls | ClassApi::InitializeControlsEx
+    ) {
+        return initialize_controls(id == ClassApi::InitializeControlsEx, a[0], mem, api, state);
+    }
     if id.field() {
         return field_call(id, a, state);
     }
