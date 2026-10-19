@@ -8,4 +8,6 @@ SEH 使用异常入口保存的上下文，DLL 初始化和 CRT initializer 也�
 
 窗口文本与 focus/capture/active/foreground 已使用领域请求：User32 产生值、文本 callback 参数或所有权通知，Process 的 window_state 协调器执行 guest 并逐次重查目标。领域准备不再借 CPU 或总状态；提交先于通知、失败不回滚、Transferred/Exited 不恢复原 caller 的策略保持。见[窗口状态](window-state.md)。
 
+对话框控件、窗口/线程/子窗口枚举也使用请求：USER 准备文本缓冲或原顺序快照，Process 的 dialog 协调器执行回调；整数解析只在正常返回后提交，顶层与子窗口的 FALSE 返回差异保持。见[对话框与枚举](dialog.md)。
+
 基线 `1a93e31`。原 caller-context helper、八个调用文件、Process 执行循环/frame 作格式化后源码对照，路径与策略保持。初次编译遗漏两处 locale 调用，补齐后验收；失败日志保留。release 完整 Win32 255、IR 31、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵。证据：`wire-out/refactoring-2026-10-14/r4-callback-owner32-{source-checks,verification}.json`。

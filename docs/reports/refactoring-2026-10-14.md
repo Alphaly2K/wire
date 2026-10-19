@@ -614,3 +614,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R4 PE32 窗口状态 callback 请求
 
 基线 `d883866`。User32 仅借 tid/LastError，准备 scalar 值、文本 callback 或已提交的所有权通知；Process 执行 callback 并逐条重查 window/WNDPROC。领域不再借 Cpu/ApiState/执行器，原 change_owner、文本验证、getter、错误和通知循环核对保持，frame/run_loop 未改。新增独立 guest fixture 在迁移前通过，覆盖前一回调替换或销毁后续窗口；release 完整 Win32 256、IR 31、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵。累计契约仍 915，证据 `wire-out/refactoring-2026-10-14/r4-window-state32-{source-checks,verification}.json`。
+
+## R4 PE32 控件与枚举 callback 请求
+
+基线 `3217b11`。User32 仅借内存/scratch/tid/LastError，准备控件消息与顶层/子窗口原顺序快照，Process 执行回调循环。整数转换只在正常返回后执行，原 NULL、FALSE carrier、输出前缀、已销毁快照项与退出策略保持。child、消息、数字、两种快照/循环和未改 frame/run_loop 核对通过；release 完整 Win32 256、IR 31、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵。累计契约仍 915，证据 `wire-out/refactoring-2026-10-14/r4-dialog32-{source-checks,verification}.json`。

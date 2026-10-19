@@ -20,7 +20,7 @@ mod window_state;
 pub(crate) use classes::{call as class_call, register_system_class};
 pub use classes::{find_class, WindowClass};
 pub(crate) use control::call as control_call;
-pub(crate) use dialog::call as dialog_call;
+pub(crate) use dialog::{dialog_integer, DialogRequest};
 pub(crate) use messages::call as message_call;
 pub(crate) use paint::call as paint_call;
 pub(crate) use queries::desktop as desktop_query;
@@ -312,7 +312,7 @@ pub fn dispatch(
     use crate::win32::catalog::{resolve, ApiId, Architecture, Resolution};
     if let Resolution::Bound(contract) = resolve(Architecture::X86, dll, name) {
         return match contract.id {
-            ApiId::Dialog(id) if !id.message_box() => Some(dialog_call(
+            ApiId::Dialog(id) if !id.message_box() => Some(crate::x86::process::dialog::call(
                 id, a, cpu, mem, api, state, log, sched, max_instr,
             )),
             ApiId::Painting(id) => Some(paint_call(

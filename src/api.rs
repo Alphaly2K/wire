@@ -309,6 +309,16 @@ impl ApiState {
     pub fn scratch_position(&self) -> u32 {
         self.scratch.position()
     }
+    pub(crate) fn dialog_request(
+        &mut self,
+        id: crate::win32::catalog::DialogApi,
+        args: &Args,
+        mem: &mut GuestMem,
+        tid: u32,
+    ) -> Result<crate::user32::DialogRequest, String> {
+        self.user32
+            .prepare_dialog(id, args, mem, &mut self.scratch, tid, &mut self.last_error)
+    }
     pub fn crt_app_type(&self) -> u32 {
         self.crt.app_type()
     }
@@ -943,8 +953,9 @@ pub fn dispatch(
                 unreachable!();
             };
             implemented = !id.unavailable();
-            let (outcome, message) =
-                crate::user32::dialog_call(id, &args, cpu, mem, api, state, log, sched, max_instr)?;
+            let (outcome, message) = crate::x86::process::dialog::call(
+                id, &args, cpu, mem, api, state, log, sched, max_instr,
+            )?;
             match outcome {
                 GuestCallOutcome::Returned(value) => {
                     ret = value;

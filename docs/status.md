@@ -12,7 +12,7 @@
 
 [BSTR](architecture/bstr.md) 与 [HSTRING](architecture/winrt.md) 的分配/调用也已归字符串 owner，不再借 Runtime64；原 reference/member 模型、输出顺序和诊断保持，完整 Win64 269、trace 1 及必要构建通过。
 
-PE32 [窗口状态](architecture/window-state.md) 开始使用领域请求：User32 仅准备值、文本消息或通知，Process 执行 callback 并逐次重查目标。迁移前新增替换/销毁下一窗口的独立重入 fixture；完整 Win32 **256**、IR 31 和必要构建通过。
+PE32 [窗口状态](architecture/window-state.md) 与[对话框/枚举](architecture/dialog.md) 已使用领域请求：User32 仅准备值、文本消息、通知或窗口快照，Process 执行 callback 并逐次重查目标；整数输出保留先清零、正常返回后解析的顺序。迁移前新增替换/销毁下一窗口的独立重入 fixture；两批均通过完整 Win32 **256**、IR 31 和必要构建。
 
 ## 重构范围
 
