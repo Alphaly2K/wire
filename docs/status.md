@@ -12,6 +12,8 @@
 
 [BSTR](architecture/bstr.md) 与 [HSTRING](architecture/winrt.md) 的分配/调用也已归字符串 owner，不再借 Runtime64；原 reference/member 模型、输出顺序和诊断保持，完整 Win64 269、trace 1 及必要构建通过。
 
+PE32 [窗口状态](architecture/window-state.md) 开始使用领域请求：User32 仅准备值、文本消息或通知，Process 执行 callback 并逐次重查目标。迁移前新增替换/销毁下一窗口的独立重入 fixture；完整 Win32 **256**、IR 31 和必要构建通过。
+
 ## 重构范围
 
 当前累计冻结包含[对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)、日志、五项 paint、控件初始化、资源、启动信息、环境接口与 CLI 拆分；独立历史证据继续可查。

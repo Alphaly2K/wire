@@ -184,3 +184,61 @@ fn window_state_contract_pe32_keeps_state_committed_when_callback_faults() {
     assert!(v.try_call("user32.dll", "SetFocus", &[hwnd]).is_err());
     assert_eq!(v.call("user32.dll", "GetFocus", &[]), hwnd);
 }
+
+#[test]
+fn window_state_reloads_target_after_previous_notification_replaces_or_destroys_it() {
+    for destroy in [false, true] {
+        let mut v = Vm::new();
+        let first = window(&mut v, true);
+        let class = v.state.user32.windows[&first].class as u32;
+        let second = v.call(
+            "user32.dll",
+            "CreateWindowExW",
+            &[0, class, 0, 0, 3, 4, 640, 480, 0, 0, 0x400000, 0],
+        );
+        assert_ne!(second, 0);
+        let old_count = DATA + 0x2000;
+        let new_count = DATA + 0x2004;
+        for (address, counter) in [(CODE + 0x200, old_count), (CODE + 0x300, new_count)] {
+            // Count WM_SETFOCUS only; window destruction has its own callbacks.
+            let mut procedure = vec![0x83, 0x7c, 0x24, 8, 7, 0x75, 6, 0xff, 0x05];
+            procedure.extend(counter.to_le_bytes());
+            procedure.extend([0xb8, 1, 0, 0, 0, 0xc2, 16, 0]);
+            v.mem.write_bytes(address, &procedure).unwrap();
+        }
+        v.call(
+            "user32.dll",
+            "SetWindowLongW",
+            &[second, u32::MAX - 3, CODE + 0x200],
+        );
+        let mut action = Vec::new();
+        let gateway = if destroy {
+            v.api.register("user32.dll", Some("DestroyWindow"), None)
+        } else {
+            action.push(0x68);
+            action.extend((CODE + 0x300).to_le_bytes());
+            action.push(0x68);
+            action.extend((-4i32).to_le_bytes());
+            v.api.register("user32.dll", Some("SetWindowLongW"), None)
+        };
+        action.push(0x68);
+        action.extend(second.to_le_bytes());
+        action.push(0xb8);
+        action.extend(gateway.to_le_bytes());
+        action.extend([0xff, 0xd0]);
+        let mut procedure = vec![0x83, 0x7c, 0x24, 8, 8, 0x75, action.len() as u8];
+        procedure.extend(action);
+        procedure.extend([0xb8, 1, 0, 0, 0, 0xc2, 16, 0]);
+        v.mem.write_bytes(CODE, &procedure).unwrap();
+        v.call("user32.dll", "SetWindowLongW", &[first, u32::MAX - 3, CODE]);
+        assert_eq!(v.call("user32.dll", "SetFocus", &[first]), 0);
+        assert_eq!(v.call("user32.dll", "SetFocus", &[second]), first);
+        assert_eq!(v.mem.read_u32(old_count).unwrap(), 0);
+        assert_eq!(v.mem.read_u32(new_count).unwrap(), (!destroy) as u32);
+        assert_eq!(
+            v.call("user32.dll", "GetFocus", &[]),
+            if destroy { 0 } else { second }
+        );
+        assert_eq!(v.state.user32.windows.contains_key(&second), !destroy);
+    }
+}

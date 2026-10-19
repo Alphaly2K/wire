@@ -610,3 +610,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 Win64 BSTR/HSTRING 调用
 
 基线 `97acdf5`。原 allocation/call 直接归 Bstrings/Strings，只借内存和 Pages；原 membership/reference 实现未改。Trace 拥有原 note 服务，组合根、分配器和激活诊断共用。四个调用主体、BSTR source、note 和未改 membership 文件核对通过；release 完整 Win64 269、trace 1、fmt/release lib/bin strict Clippy/build 通过。Clippy 首次发现冗余 borrow，移除后通过，失败日志保留。不跑性能或游戏矩阵，累计契约仍 915。证据 `wire-out/refactoring-2026-10-14/r3-string-calls64-{source-checks,verification}.json`。
+
+## R4 PE32 窗口状态 callback 请求
+
+基线 `d883866`。User32 仅借 tid/LastError，准备 scalar 值、文本 callback 或已提交的所有权通知；Process 执行 callback 并逐条重查 window/WNDPROC。领域不再借 Cpu/ApiState/执行器，原 change_owner、文本验证、getter、错误和通知循环核对保持，frame/run_loop 未改。新增独立 guest fixture 在迁移前通过，覆盖前一回调替换或销毁后续窗口；release 完整 Win32 256、IR 31、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵。累计契约仍 915，证据 `wire-out/refactoring-2026-10-14/r4-window-state32-{source-checks,verification}.json`。

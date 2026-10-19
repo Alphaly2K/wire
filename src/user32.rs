@@ -25,7 +25,7 @@ pub(crate) use messages::call as message_call;
 pub(crate) use paint::call as paint_call;
 pub(crate) use queries::desktop as desktop_query;
 use queues::{clock_ms, message_bits};
-pub(crate) use window_state::call as window_state_call;
+pub(crate) use window_state::WindowStateRequest;
 
 pub struct User32 {
     pub classes: BTreeMap<u16, WindowClass>,

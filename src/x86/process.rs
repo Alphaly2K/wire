@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 pub(crate) mod callbacks;
 pub(crate) mod termination;
+pub(crate) mod window_state;
 
 pub struct Config {
     pub present: bool,

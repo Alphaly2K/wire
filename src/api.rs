@@ -924,7 +924,7 @@ pub fn dispatch(
             let Some(crate::win32::catalog::ApiId::WindowState(id)) = binding.typed else {
                 unreachable!();
             };
-            let (outcome, message) = crate::user32::window_state_call(
+            let (outcome, message) = crate::x86::process::window_state::call(
                 id, &args, cpu, mem, api, state, log, sched, max_instr,
             )?;
             match outcome {

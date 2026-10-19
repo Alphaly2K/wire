@@ -3,14 +3,21 @@
  * LGPL-2.1-or-later; see COPYING.LIB. Adapted from the Wine 10.0
  * window-text message flow previously in user32_common.rs.
  */
-//! USER owns state transitions; this coordinator executes guest notifications.
-use crate::{
-    api::{ApiLogger, ApiState, ApiTable, Args},
-    cpu::{Cpu, GuestCallOutcome},
-    mem::GuestMem,
-    thread::Sched,
-    win32::catalog::WindowStateApi as S,
-};
+//! USER prepares window state and notifications without running the guest CPU.
+use crate::{api::Args, win32::catalog::WindowStateApi as S};
+
+pub(crate) enum WindowStateRequest {
+    Value(u32, String),
+    Text {
+        procedure: u32,
+        message: [u32; 4],
+    },
+    Notifications {
+        value: u32,
+        messages: [[u32; 4]; 2],
+        count: usize,
+    },
+}
 
 struct Change {
     value: u32,
@@ -63,67 +70,53 @@ impl super::User32 {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn call(
-    id: S,
-    a: &Args,
-    cpu: &mut Cpu,
-    mem: &mut GuestMem,
-    api: &mut ApiTable,
-    state: &mut ApiState,
-    log: &mut ApiLogger,
-    sched: &mut Sched,
-    max_instr: u64,
-) -> Result<(GuestCallOutcome, String), String> {
-    let value = |n, note: &str| Ok((GuestCallOutcome::Returned(n), note.to_owned()));
-    let text_message = match id {
-        S::SetTextA | S::SetTextW => Some([a[0], 0xc, 0, a[1]]),
-        S::TextA | S::TextW => Some([a[0], 0xd, a[2], a[1]]),
-        S::TextLengthA | S::TextLengthW => Some([a[0], 0xe, 0, 0]),
-        _ => None,
-    };
-    if let Some(message) = text_message {
-        let error = match state.user32.windows.get(&a[0]).filter(|_| a[0] != 0) {
-            None => Some(1400),
-            Some(w) if w.tid != sched.current_tid() => Some(120),
+impl super::User32 {
+    pub(crate) fn prepare_window_state(
+        &mut self,
+        id: S,
+        a: &Args,
+        tid: u32,
+        last_error: &mut u32,
+    ) -> WindowStateRequest {
+        let value = |n, note: &str| WindowStateRequest::Value(n, note.to_owned());
+        let text_message = match id {
+            S::SetTextA | S::SetTextW => Some([a[0], 0xc, 0, a[1]]),
+            S::TextA | S::TextW => Some([a[0], 0xd, a[2], a[1]]),
+            S::TextLengthA | S::TextLengthW => Some([a[0], 0xe, 0, 0]),
             _ => None,
         };
-        if let Some(error) = error {
-            state.last_error = error;
-            return value(0, &format!("USER32 error {error}"));
-        }
-        let procedure = state.user32.windows[&a[0]].wndproc;
-        let outcome = crate::x86::process::callbacks::invoke(
-            cpu, mem, api, state, log, sched, procedure, &message, max_instr,
-        )?;
-        return Ok((outcome, "window/control message callback".into()));
-    }
-    match id {
-        S::Focus => return value(state.user32.focus, "focus"),
-        S::Active => return value(state.user32.active, "active window"),
-        S::Foreground => return value(state.user32.foreground, "foreground window"),
-        S::Capture => return value(state.user32.capture, "capture"),
-        S::LastPopup => return value(a[0], "logical owner popup subset"),
-        _ => {}
-    }
-    let change = match state.user32.change_owner(id, a[0]) {
-        Ok(change) => change,
-        Err(error) => {
-            state.last_error = error;
-            return value(0, &format!("USER32 error {error}"));
-        }
-    };
-    for message in change.messages.into_iter().take(change.count) {
-        // Resolve each procedure after the preceding callback, which can
-        // destroy a window or replace its WNDPROC. State is already committed.
-        if let Some(procedure) = state.user32.windows.get(&message[0]).map(|w| w.wndproc) {
-            let outcome = crate::x86::process::callbacks::invoke(
-                cpu, mem, api, state, log, sched, procedure, &message, max_instr,
-            )?;
-            if !matches!(outcome, GuestCallOutcome::Returned(_)) {
-                return Ok((outcome, "window state callback transferred".into()));
+        if let Some(message) = text_message {
+            let error = match self.windows.get(&a[0]).filter(|_| a[0] != 0) {
+                None => Some(1400),
+                Some(w) if w.tid != tid => Some(120),
+                _ => None,
+            };
+            if let Some(error) = error {
+                *last_error = error;
+                return value(0, &format!("USER32 error {error}"));
             }
+            let procedure = self.windows[&a[0]].wndproc;
+            return WindowStateRequest::Text { procedure, message };
+        }
+        match id {
+            S::Focus => return value(self.focus, "focus"),
+            S::Active => return value(self.active, "active window"),
+            S::Foreground => return value(self.foreground, "foreground window"),
+            S::Capture => return value(self.capture, "capture"),
+            S::LastPopup => return value(a[0], "logical owner popup subset"),
+            _ => {}
+        }
+        let change = match self.change_owner(id, a[0]) {
+            Ok(change) => change,
+            Err(error) => {
+                *last_error = error;
+                return value(0, &format!("USER32 error {error}"));
+            }
+        };
+        WindowStateRequest::Notifications {
+            value: change.value,
+            messages: change.messages,
+            count: change.count,
         }
     }
-    value(change.value, "logical input ownership")
 }
