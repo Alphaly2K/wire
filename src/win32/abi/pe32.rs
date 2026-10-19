@@ -163,12 +163,6 @@ fn override_stack_bytes(dll: &str, name: &str) -> Option<u32> {
         // Existing gdi32 aliases lack typed entries in the loaded spec.
         ("gdi32.dll", "TransparentBlt" | "AlphaBlend") => 44,
         ("gdi32.dll", "GradientFill") => 24,
-        // The version DLL spec is not among the current ABI sources.
-        (
-            "version.dll",
-            "GetFileVersionInfoA" | "GetFileVersionInfoW" | "VerQueryValueA" | "VerQueryValueW",
-        ) => 16,
-        ("version.dll", "GetFileVersionInfoSizeA" | "GetFileVersionInfoSizeW") => 8,
         // Preserve direct ordinal spelling as well as normal name resolution.
         ("oleaut32.dll", "#9") => 4,
         // These providers have legacy ABI entries but no loaded specs.

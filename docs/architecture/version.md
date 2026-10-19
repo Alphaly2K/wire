@@ -1,5 +1,7 @@
 # Windows version 边界
 
+本页记录 OS profile 查询；文件中的版本资源使用独立 [version.dll 边界](version-resources.md)。
+
 唯一声明位于 `win32/catalog/version.rs`，冷绑定派生 PE32 栈字节数、Win64 arity/DWORD 截断与 typed ID。适配器借用架构内存、不可变 GuestEnvironment 和 LastError 位置；Win64 层级比较算法位于 `win32/kernel/version.rs`，不依赖 Runtime64 或 guest 内存。原 Wine LGPL 来源与版权声明保留。
 
 | 行为 | PE32 | Win64 |

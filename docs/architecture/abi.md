@@ -9,3 +9,5 @@
 native_export 继续只描述 ABI 可知性；旧 msvcrt 名称白名单已被更早的 CRT 零清栈分支覆盖，因此归并为同一查询。没有新增实现、改变 DLL 大小写、补造未知签名或改变 dispatch 的 cdecl 参数读取策略。
 
 原 spec 输入、解析主体、ordinal 范围、COM 优先级及 31 项例外逐项核对保持。release 完整 Win32 248、fmt/release lib/bin strict Clippy/build 通过；不重复性能或游戏矩阵。证据见 `wire-out/refactoring-2026-10-14/r2-pe32-abi-{inventory,source-checks,verification}.json` 及 validation 日志。
+
+随后六项 version.dll 文件资源入口接入 [唯一领域契约](version-resources.md)，删除对应 override；当前 legacy 例外剩余 25 项，原 ABI 字节数和 ordinal 范围保持。前文 31 项是来源收敛时的历史基线。

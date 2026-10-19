@@ -1035,17 +1035,14 @@ pub fn dispatch(
         (Some(crate::win32::catalog::ApiId::Registry(id)), _, _) => {
             (ret, note) = crate::win32::x86::registry::call(id, &args, mem)?;
         }
-        (
-            _,
-            "version.dll",
-            "GetFileVersionInfoA"
-            | "GetFileVersionInfoW"
-            | "GetFileVersionInfoSizeA"
-            | "GetFileVersionInfoSizeW"
-            | "VerQueryValueA"
-            | "VerQueryValueW",
-        ) => {
-            (ret, note) = crate::version::dispatch(name, &args, mem, state).unwrap();
+        (Some(crate::win32::catalog::ApiId::VersionResource(id)), _, _) => {
+            (ret, note) = crate::win32::x86::version_resources::call(
+                id,
+                &args,
+                mem,
+                state.fs.as_ref(),
+                &mut state.last_error,
+            );
         }
         (_, "wire", "ExitEmulation") => {
             log.log_call(

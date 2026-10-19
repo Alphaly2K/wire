@@ -550,3 +550,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R2 PE32 USER/MPR endpoint 补齐
 
 基线 `6cc04bf` 固定两个 station、两个诊断 MessageBox 与两个 MPR 查询。六项进入既有领域契约，MessageBox 仅借 GuestMem，原 synthetic handle、未支持 query、local-drive status、LastError、fault marker 和 facade 范围保持；Win64 均 absent。基线测试首次误认为 MPR ABI unknown，实际已加载 spec，修正为原 16 字节清栈后通过，失败日志保留。release 完整 Win32 252、Win64 modules 13、catalog 一致性及 fmt/release lib/bin strict Clippy/build 通过，不跑性能。累计 **897 exports**，证据 `wire-out/refactoring-2026-10-14/r2-user-endpoints32-{source-checks,verification}.json`。
+
+## R2/R3 PE32 文件版本资源
+
+独立基线 `32fa8e3` 固定输出预检/部分清零/返回别名和 provider。六项契约接入，原 private version 模块拆为纯 PE 字节 parser 和仅借内存/filesystem/error 的适配器；原处理体归一保持，删除六条重复 ABI override，剩余 25 项例外。release 完整 Win32 253、Win64 modules 13、catalog 一致性及 fmt/release lib/bin strict Clippy/build 通过，不跑性能。累计 **903 exports**，见[版本资源边界](../architecture/version-resources.md)，证据 `wire-out/refactoring-2026-10-14/r2-version-resources32-{source-checks,verification}.json`。

@@ -570,6 +570,9 @@ impl Runtime64 {
             ApiId::Winrt(id) => self.winrt_call(mem, id, args),
             ApiId::Bstr(id) => self.bstr_call(mem, id, args),
             ApiId::Variant(_) => unreachable!("Variant helpers have no Win64 binding"),
+            ApiId::VersionResource(_) => {
+                unreachable!("file version resources have no Win64 binding")
+            }
             ApiId::ProcessQuery(id) => self.process_query_call(mem, id, args),
             ApiId::Environment(id) => self.environment_call(mem, id, args),
             ApiId::Startup(id) => {

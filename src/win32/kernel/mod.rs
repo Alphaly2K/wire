@@ -8,3 +8,4 @@ pub(crate) mod nls;
 pub(crate) mod objects32;
 pub(crate) mod srw;
 pub(crate) mod version;
+pub(crate) mod version_resources;

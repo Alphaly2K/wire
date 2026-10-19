@@ -37,4 +37,5 @@ pub(crate) mod system_profile;
 pub(crate) mod thread_properties;
 pub(crate) mod variant;
 pub(crate) mod version;
+pub(crate) mod version_resources;
 pub(crate) mod virtual_memory;

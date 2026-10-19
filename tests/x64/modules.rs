@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn win64_keeps_pe32_user_and_mpr_endpoints_unavailable() {
+fn win64_keeps_pe32_provider_endpoints_unavailable() {
     for (dll, names) in [
         (
             "user32.dll",
@@ -17,6 +17,17 @@ fn win64_keeps_pe32_user_and_mpr_endpoints_unavailable() {
         (
             "mpr.dll",
             &["WNetGetUniversalNameA", "WNetGetUniversalNameW"][..],
+        ),
+        (
+            "version.dll",
+            &[
+                "GetFileVersionInfoA",
+                "GetFileVersionInfoW",
+                "GetFileVersionInfoSizeA",
+                "GetFileVersionInfoSizeW",
+                "VerQueryValueA",
+                "VerQueryValueW",
+            ][..],
         ),
     ] {
         for name in names {

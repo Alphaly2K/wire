@@ -65,6 +65,7 @@ mod tracing;
 mod user_objects;
 mod variant;
 mod version;
+mod version_resources;
 mod virtual_memory;
 mod waits;
 mod window_control;
@@ -140,6 +141,7 @@ pub use tracing::{EtwApi, ETW_CONTRACTS};
 pub use user_objects::{UserObjectApi, USER_OBJECT_CONTRACTS};
 pub use variant::{VariantApi, VARIANT_CONTRACTS};
 pub use version::{VersionApi, VERSION_CONTRACTS};
+pub use version_resources::{VersionResourceApi, VERSION_RESOURCE_CONTRACTS};
 pub use virtual_memory::{VirtualMemoryApi, VIRTUAL_MEMORY_CONTRACTS};
 pub use waits::{WaitApi, WAIT_CONTRACTS};
 pub use window_control::{WindowControlApi, WINDOW_CONTROL_CONTRACTS};
@@ -196,6 +198,7 @@ pub enum ApiId {
     Guid(GuidApi),
     Identity(IdentityApi),
     Version(VersionApi),
+    VersionResource(VersionResourceApi),
     Nls(NlsApi),
     Module(ModuleApi),
     ModuleQuery(ModuleQueryApi),
@@ -409,6 +412,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         &GUID_CONTRACTS,
         &IDENTITY_CONTRACTS,
         &VERSION_CONTRACTS,
+        &VERSION_RESOURCE_CONTRACTS,
         &NLS_CONTRACTS,
         &MODULE_CONTRACTS,
         &MODULE_QUERY_CONTRACTS,
