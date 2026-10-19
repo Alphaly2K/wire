@@ -59,12 +59,13 @@
 - [图形 COM 冷绑定](architecture/graphics-contracts.md)：70 条 DXGI 方法的 ABI 合表、D3D11 共用查找及家族路由缓存；保留槽位和 handler，文件回归与真实 GPU 验证通过。
 - [PE32 kernel 对象](architecture/kernel-objects32.md)：原 HANDLE 表、命名索引和分配位置归入私有 owner，保留同名与关闭寿命；完整 Win32 回归通过。
 - [PE32 文件 adapter](architecture/files.md)：文件/path 处理体只借 filesystem、对象和错误槽，旧公开入口保留；两种架构共享 kernel wildcard。
-- [PE32 ABI 来源](architecture/abi.md)：spec、31 条显式例外与原未知/CRT 策略集中到 win32::abi，删除 270 条根表重复声明。
+- [PE32 ABI 来源](architecture/abi.md)：spec、当前 25 条显式例外与原未知/CRT 策略集中到 win32::abi，先后删除 270 条根表重复声明和六条版本资源 override。
 - [PE32 scratch 与 CRT](architecture/crt32.md)：私有指针 owner、普通内存/字符串、堆和启动适配器，保留 CPU/callback 边界及故障提交顺序。
 - [PE32 同步与等待适配](architecture/waits.md)：event/semaphore/mutex 与对象 readiness/acquire/wake 仅借明确资源，音频通知复用同一对象操作。
 - [PE32 kernel endpoint 补齐](architecture/process-control.md)：终止进程、句柄容量提示和 package 查询接入唯一契约，保留退出故障顺序与 Win64 absent。
 - PE32 USER/MPR 补齐：[诊断式 MessageBox](architecture/dialog.md)、[window-station 查询](architecture/desktop.md)及[MPR 本地盘错误](architecture/paths-handles.md)，保留公开 facade 范围。
 - [PE32 文件版本资源](architecture/version-resources.md)：六项唯一契约、独立 PE 字节 parser、窄 guest 适配器，删除六条 ABI override。
+- [不可用音频与字体入口](architecture/unavailable-endpoints.md)：十二项明确拒绝策略及 ABI 契约，保留原输出、错误与 trace。
 - [Win64 Toolhelp 快照](architecture/snapshots.md)及[完整验收](reports/refactoring-snapshot-owner-2026-10-19.md)：冻结线程值、游标/输出故障、保护关闭；19 条协议、180 次执行及独立累计 IR 复核。
 - [Toolhelp 七项统一契约](reports/refactoring-snapshot-contract-2026-10-19.md)：双架构 provider/ABI 和 typed ID；累计 713 exports，17 个计时协议、162 次执行及三对启动前缀，保留代码别名局部成本。
 - [日历、时区与 CPU 计时调用边界](architecture/calendar.md)及[契约验收](reports/refactoring-calendar-2026-10-16.md)：11 项接口、时区独立模块、宿主 CPU 计时、32 条性能路径及局部成本调查。

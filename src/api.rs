@@ -676,14 +676,11 @@ pub fn dispatch(
                 &mut state.last_error,
             )?;
         }
-        (
-            _,
-            "winmm.dll",
-            "mciSendCommandA" | "mciSendCommandW" | "mciSendStringA" | "mciSendStringW",
-        ) => {
-            ret = 274;
-            implemented = false;
-            note = "MCI device backend unavailable".into();
+        (Some(crate::win32::catalog::ApiId::Audio(id)), _, _) => {
+            let outcome = crate::win32::x86::audio::call(id, &args, mem)?;
+            ret = outcome.value;
+            note = outcome.note.into();
+            implemented = outcome.implemented;
         }
         (
             Some(crate::win32::catalog::ApiId::ProcessControl(
@@ -1610,28 +1607,7 @@ pub fn dispatch(
         (_, "dsound.dll", _) => {
             (ret, note, implemented) = crate::dsound::dispatch(name, &args, mem, api, state, sched);
         }
-        (_, "winmm.dll", "waveOutGetNumDevs") => {
-            ret = 0;
-            note = "no audio output backend".into();
-        }
-        (_, "winmm.dll", "waveOutOpen") => {
-            if args[0] != 0 {
-                mem.write_u32(args[0], 0).map_err(|e| e.to_string())?;
-            }
-            ret = 6; // MMSYSERR_NODRIVER
-            implemented = false;
-            note = "wave output backend unavailable".into();
-        }
-        (
-            _,
-            "gdi32.dll",
-            "AddFontMemResourceEx"
-            | "RemoveFontMemResourceEx"
-            | "AddFontResourceExA"
-            | "AddFontResourceExW"
-            | "RemoveFontResourceExA"
-            | "RemoveFontResourceExW",
-        ) => {
+        (Some(crate::win32::catalog::ApiId::FontResource(_)), _, _) => {
             state.last_error = 120;
             implemented = false;
             ret = 0;

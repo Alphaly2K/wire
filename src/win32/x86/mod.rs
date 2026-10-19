@@ -1,3 +1,4 @@
+pub(crate) mod audio;
 pub(crate) mod basic_strings;
 pub(crate) mod bstr;
 pub(crate) mod calendar;

@@ -1,6 +1,7 @@
 //! Export identity and ABI plans are resolved during binding, not execution.
 //! Unconverted families remain on explicit legacy routes.
 mod address_waits;
+mod audio;
 mod basic_strings;
 mod bcrypt;
 mod bstr;
@@ -19,6 +20,7 @@ mod display;
 mod environment;
 mod exceptions;
 mod files;
+mod font_resources;
 mod gdi_dc;
 mod gdi_operations;
 mod geometry;
@@ -75,6 +77,7 @@ mod winhttp;
 mod winrt;
 mod winsock;
 pub use address_waits::{AddressWaitApi, ADDRESS_WAIT_CONTRACTS};
+pub use audio::{AudioApi, AUDIO_CONTRACTS};
 pub use basic_strings::{BasicStringApi, BASIC_STRING_CONTRACTS};
 pub use bcrypt::{BcryptApi, BCRYPT_CONTRACTS};
 pub(crate) use bstr::symbol as bstr_symbol;
@@ -94,6 +97,7 @@ pub use display::{DisplayApi, DISPLAY_CONTRACTS};
 pub use environment::{EnvironmentApi, ENVIRONMENT_CONTRACTS};
 pub use exceptions::{ExceptionApi, EXCEPTION_CONTRACTS};
 pub use files::{FileApi, FILE_CONTRACTS};
+pub use font_resources::{FontResourceApi, FONT_RESOURCE_CONTRACTS};
 pub use gdi_dc::{GdiDcApi, GDI_DC_CONTRACTS};
 pub use gdi_operations::{GdiApi, GDI_OPERATION_CONTRACTS};
 pub use geometry::{GeometryApi, GEOMETRY_CONTRACTS};
@@ -186,6 +190,8 @@ pub enum ReturnConvention {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApiId {
+    Audio(AudioApi),
+    FontResource(FontResourceApi),
     GraphicsExport(GraphicsExportApi),
     Exception(ExceptionApi),
     MessageFormat(MessageFormatApi),
@@ -434,6 +440,8 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         &SYSTEM_PROFILE_CONTRACTS,
         &CALENDAR_CONTRACTS,
         &MULTIMEDIA_CONTRACTS,
+        &AUDIO_CONTRACTS,
+        &FONT_RESOURCE_CONTRACTS,
         &INLINE_SYNC_CONTRACTS,
         &CRITICAL_SECTION_CONTRACTS,
         &ADDRESS_WAIT_CONTRACTS,

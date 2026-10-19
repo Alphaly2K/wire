@@ -573,6 +573,9 @@ impl Runtime64 {
             ApiId::VersionResource(_) => {
                 unreachable!("file version resources have no Win64 binding")
             }
+            ApiId::Audio(_) | ApiId::FontResource(_) => {
+                unreachable!("legacy audio/font endpoints have no Win64 binding")
+            }
             ApiId::ProcessQuery(id) => self.process_query_call(mem, id, args),
             ApiId::Environment(id) => self.environment_call(mem, id, args),
             ApiId::Startup(id) => {

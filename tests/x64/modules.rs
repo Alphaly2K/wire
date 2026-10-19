@@ -6,6 +6,28 @@ use super::*;
 fn win64_keeps_pe32_provider_endpoints_unavailable() {
     for (dll, names) in [
         (
+            "winmm.dll",
+            &[
+                "mciSendCommandA",
+                "mciSendCommandW",
+                "mciSendStringA",
+                "mciSendStringW",
+                "waveOutGetNumDevs",
+                "waveOutOpen",
+            ][..],
+        ),
+        (
+            "gdi32.dll",
+            &[
+                "AddFontMemResourceEx",
+                "RemoveFontMemResourceEx",
+                "AddFontResourceExA",
+                "AddFontResourceExW",
+                "RemoveFontResourceExA",
+                "RemoveFontResourceExW",
+            ][..],
+        ),
+        (
             "user32.dll",
             &[
                 "GetProcessWindowStation",
