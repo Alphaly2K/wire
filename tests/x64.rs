@@ -94,6 +94,8 @@ mod thread_properties;
 mod token_contract;
 #[path = "x64/token_owner.rs"]
 mod token_owner;
+#[path = "x64/tracing_contract.rs"]
+mod tracing_contract;
 #[path = "x64/tracing_owner.rs"]
 mod tracing_owner;
 #[path = "x64/user.rs"]
