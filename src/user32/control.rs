@@ -71,7 +71,7 @@ fn geometry_control(
             }
             let proc = w.wndproc;
             if disabled == (a[1] != 0) {
-                let result = crate::user32::invoke(
+                let result = crate::x86::process::callbacks::invoke(
                     cpu,
                     mem,
                     api,
@@ -139,7 +139,7 @@ fn geometry_control(
                 ],
             )?;
             if flags & 0x400 == 0 {
-                let result = crate::user32::invoke(
+                let result = crate::x86::process::callbacks::invoke(
                     cpu,
                     mem,
                     api,
@@ -181,7 +181,7 @@ fn geometry_control(
                 flags |= 0x800;
             }
             mem.write_u32(p + 24, flags).map_err(|e| e.to_string())?;
-            let result = crate::user32::invoke(
+            let result = crate::x86::process::callbacks::invoke(
                 cpu,
                 mem,
                 api,

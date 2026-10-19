@@ -3,6 +3,7 @@ use crate::api::{ApiLogger, ApiState, ApiTable};
 use crate::cpu::{Cpu, GuestCallOutcome};
 use crate::mem::GuestMem;
 use crate::thread::{Sched, ThreadState, WaitTarget, Wake};
+use crate::x86::process::callbacks::invoke;
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -339,26 +340,6 @@ pub fn dispatch(
         };
     }
     None
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn invoke(
-    cpu: &mut Cpu,
-    mem: &mut GuestMem,
-    api: &mut ApiTable,
-    state: &mut ApiState,
-    log: &mut ApiLogger,
-    sched: &mut Sched,
-    proc: u32,
-    a: &[u32],
-    max_instr: u64,
-) -> Result<GuestCallOutcome, String> {
-    let saved = cpu.save_ctx();
-    let result = cpu.call_guest(mem, api, state, log, sched, proc, a, max_instr);
-    if matches!(result, Ok(GuestCallOutcome::Returned(_)) | Err(_)) {
-        cpu.load_ctx(&saved);
-    }
-    result
 }
 
 fn clock_ms(state: &ApiState) -> u32 {

@@ -93,7 +93,7 @@ pub(crate) fn call(
             return value(0, &format!("USER32 error {error}"));
         }
         let procedure = state.user32.windows[&a[0]].wndproc;
-        let outcome = super::invoke(
+        let outcome = crate::x86::process::callbacks::invoke(
             cpu, mem, api, state, log, sched, procedure, &message, max_instr,
         )?;
         return Ok((outcome, "window/control message callback".into()));
@@ -117,7 +117,7 @@ pub(crate) fn call(
         // Resolve each procedure after the preceding callback, which can
         // destroy a window or replace its WNDPROC. State is already committed.
         if let Some(procedure) = state.user32.windows.get(&message[0]).map(|w| w.wndproc) {
-            let outcome = super::invoke(
+            let outcome = crate::x86::process::callbacks::invoke(
                 cpu, mem, api, state, log, sched, procedure, &message, max_instr,
             )?;
             if !matches!(outcome, GuestCallOutcome::Returned(_)) {

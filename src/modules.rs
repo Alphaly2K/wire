@@ -914,18 +914,18 @@ fn invoke_tls(
         log.note(&format!(
             "TLS callback module={handle:#x} entry={function:#x} reason={reason}"
         ));
-        match cpu
-            .call_guest(
-                mem,
-                api,
-                state,
-                log,
-                sched,
-                function,
-                &[handle, reason, 0],
-                max_instr,
-            )
-            .map_err(Failure::Fatal)?
+        match crate::x86::process::call_guest(
+            cpu,
+            mem,
+            api,
+            state,
+            log,
+            sched,
+            function,
+            &[handle, reason, 0],
+            max_instr,
+        )
+        .map_err(Failure::Fatal)?
         {
             GuestCallOutcome::Returned(_) => {} // TLS callbacks return void.
             outcome => return Err(Failure::Control(outcome)),
@@ -949,18 +949,18 @@ fn notification(
     invoke_tls(handle, reason, cpu, mem, api, state, log, sched, max_instr)?;
     let entry = state.modules.images.get(&handle).map_or(0, |m| m.entry);
     if entry != 0 {
-        match cpu
-            .call_guest(
-                mem,
-                api,
-                state,
-                log,
-                sched,
-                entry,
-                &[handle, reason, reserved],
-                max_instr,
-            )
-            .map_err(Failure::Fatal)?
+        match crate::x86::process::call_guest(
+            cpu,
+            mem,
+            api,
+            state,
+            log,
+            sched,
+            entry,
+            &[handle, reason, reserved],
+            max_instr,
+        )
+        .map_err(Failure::Fatal)?
         {
             GuestCallOutcome::Returned(_) => {}
             outcome => return Err(Failure::Control(outcome)),
@@ -1116,18 +1116,18 @@ fn initialize(
         log.note(&format!(
             "DllMain attach module={handle:#x} entry={entry:#x}"
         ));
-        match cpu
-            .call_guest(
-                mem,
-                api,
-                state,
-                log,
-                sched,
-                entry,
-                &[handle, 1, 0],
-                max_instr,
-            )
-            .map_err(Failure::Fatal)?
+        match crate::x86::process::call_guest(
+            cpu,
+            mem,
+            api,
+            state,
+            log,
+            sched,
+            entry,
+            &[handle, 1, 0],
+            max_instr,
+        )
+        .map_err(Failure::Fatal)?
         {
             GuestCallOutcome::Returned(0) => {
                 // A failed PROCESS_ATTACH is followed by PROCESS_DETACH while
@@ -1216,8 +1216,9 @@ fn unload(
         log.note(&format!(
             "DllMain detach module={handle:#x} entry={entry:#x}"
         ));
-        if let outcome @ (GuestCallOutcome::Transferred | GuestCallOutcome::Exited(_)) = cpu
-            .call_guest(
+        if let outcome @ (GuestCallOutcome::Transferred | GuestCallOutcome::Exited(_)) =
+            crate::x86::process::call_guest(
+                cpu,
                 mem,
                 api,
                 state,
@@ -1491,7 +1492,8 @@ pub(crate) fn call(
                     };
                 }
                 if entry != 0 {
-                    match cpu.call_guest(
+                    match crate::x86::process::call_guest(
+                        cpu,
                         mem,
                         api,
                         state,

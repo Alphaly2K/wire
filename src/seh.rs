@@ -139,7 +139,8 @@ pub fn raise(
         log.note(&format!(
             "SEH {code:#010x}: frame={frame:#x} handler={handler:#x}"
         ));
-        let result = cpu.call_guest(
+        let result = crate::x86::process::call_guest(
+            cpu,
             mem,
             api,
             state,
@@ -180,7 +181,17 @@ pub fn raise(
     }
     if state.unhandled_filter != 0 {
         let filter = state.unhandled_filter;
-        let result = cpu.call_guest(mem, api, state, log, sched, filter, &[pointers], max_instr);
+        let result = crate::x86::process::call_guest(
+            cpu,
+            mem,
+            api,
+            state,
+            log,
+            sched,
+            filter,
+            &[pointers],
+            max_instr,
+        );
         let result = match result {
             Ok(GuestCallOutcome::Returned(value)) => {
                 cpu.load_ctx(&saved);
@@ -283,7 +294,8 @@ pub fn unwind(
         log.note(&format!(
             "SEH unwind: frame={frame:#x} handler={handler:#x} target={target:#x}"
         ));
-        let result = cpu.call_guest(
+        let result = crate::x86::process::call_guest(
+            cpu,
             mem,
             api,
             state,

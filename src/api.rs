@@ -1508,18 +1508,22 @@ pub fn dispatch(
             if state.unhandled_filter == 0 {
                 ret = 0;
             } else {
-                let saved = cpu.save_ctx();
                 let filter = state.unhandled_filter;
-                match cpu.call_guest(mem, api, state, log, sched, filter, &[args[0]], max_instr) {
-                    Ok(crate::cpu::GuestCallOutcome::Returned(value)) => {
-                        cpu.load_ctx(&saved);
+                match crate::x86::process::callbacks::invoke(
+                    cpu,
+                    mem,
+                    api,
+                    state,
+                    log,
+                    sched,
+                    filter,
+                    &[args[0]],
+                    max_instr,
+                )? {
+                    crate::cpu::GuestCallOutcome::Returned(value) => {
                         ret = value;
                     }
-                    Ok(_) => return Ok(()),
-                    Err(error) => {
-                        cpu.load_ctx(&saved);
-                        return Err(error);
-                    }
+                    _ => return Ok(()),
                 }
             }
         }
@@ -1720,7 +1724,17 @@ fn crt_dispatch(
             while a < end {
                 let f = mem.read_u32(a).unwrap_or(0);
                 if f != 0 {
-                    let v = match cpu.call_guest(mem, api, state, log, sched, f, &[], max_instr)? {
+                    let v = match crate::x86::process::call_guest(
+                        cpu,
+                        mem,
+                        api,
+                        state,
+                        log,
+                        sched,
+                        f,
+                        &[],
+                        max_instr,
+                    )? {
                         crate::cpu::GuestCallOutcome::Returned(value) => value,
                         transfer => return Ok(Some(transfer)),
                     };

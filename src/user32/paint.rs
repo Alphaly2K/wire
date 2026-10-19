@@ -204,7 +204,7 @@ fn execute(
             state.user32.windows.get_mut(&a[0]).unwrap().erase = false;
             let mut erased = !erase;
             if erase {
-                let result = crate::user32::invoke(
+                let result = crate::x86::process::callbacks::invoke(
                     cpu,
                     mem,
                     api,

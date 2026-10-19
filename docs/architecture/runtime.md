@@ -35,6 +35,6 @@ CPU 热循环、FLAGS/fault 提交、Memory/cache 所有权、stub 地址和 `.w
 
 本轮忽略已撤回的原生 Mono 实验；原始 guest Mono 的普通解释执行和诊断仍保留。
 
-PE32 callback 仍允许领域 handler 经旧 Cpu facade 重入 Process。这一兼容环在迁移控制请求时逐家族解除；facade 的删除条件是内部调用者和外部使用者都已迁到 Process。IR 链引用 `x86::address_space::STUB_BASE` 作为保留地址边界；不能将它误当作可继续链执行的普通指令地址。根目录重导出 facade 的删除条件是公开使用者迁入架构入口；当前不要求 tests/examples 一起换路径。
+PE32 领域 callback 已直接调用 Process；[回调服务](callbacks32.md)统一原 USER 的 context 恢复策略，DLL/SEH/CRT initializer 继续使用原独立策略。Cpu 的 run/call_guest 兼容 facade 保留给外部使用者，普通 CPU/IR 语义不经过它。领域控制请求仍按家族继续收敛。IR 链引用 `x86::address_space::STUB_BASE` 作为保留地址边界；不能将它误当作可继续链执行的普通指令地址。根目录重导出 facade 的删除条件是公开使用者迁入架构入口；当前不要求 tests/examples 一起换路径。
 
 host/graphics 的调用顺序、所有权与原生验证见 [宿主与图形边界](host-graphics.md)。native 源码和 build.rs 未迁移，保留的第三方构建输入不变。

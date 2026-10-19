@@ -96,7 +96,7 @@ pub(crate) fn call(
         } else {
             (0xd, a[3], a[2])
         };
-        let result = crate::user32::invoke(
+        let result = crate::x86::process::callbacks::invoke(
             cpu,
             mem,
             api,
@@ -163,7 +163,7 @@ pub(crate) fn call(
                 if !state.user32.windows.contains_key(&h) {
                     continue;
                 }
-                let result = crate::user32::invoke(
+                let result = crate::x86::process::callbacks::invoke(
                     cpu,
                     mem,
                     api,
@@ -230,7 +230,7 @@ fn enumerate(
             continue;
         }
         visited += 1;
-        match crate::user32::invoke(
+        match crate::x86::process::callbacks::invoke(
             cpu,
             mem,
             api,

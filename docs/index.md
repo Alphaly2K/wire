@@ -71,6 +71,7 @@
 - [DirectSound 资源与调用边界](architecture/directsound.md)：对象分配、通知和只读设备依赖收窄，混音/native pump 保持。
 - [D3D9 资源借用边界](architecture/d3d9.md)：24 个 heap 方法与设备资源分开，移除后端抽取，真实 Metal 对照通过。
 - [PE32 线程创建与退出编排](architecture/thread-control.md)：创建只借所属资源，有序退出归 Process，统一 worker 与显式退出清理。
+- [PE32 回调执行边界](architecture/callbacks32.md)：领域 callback 直接调用 Process，USER/locale/CRT comparator 的 context 策略统一，原 CPU facade 保留公开兼容。
 - [Win64 Toolhelp 快照](architecture/snapshots.md)及[完整验收](reports/refactoring-snapshot-owner-2026-10-19.md)：冻结线程值、游标/输出故障、保护关闭；19 条协议、180 次执行及独立累计 IR 复核。
 - [Toolhelp 七项统一契约](reports/refactoring-snapshot-contract-2026-10-19.md)：双架构 provider/ABI 和 typed ID；累计 713 exports，17 个计时协议、162 次执行及三对启动前缀，保留代码别名局部成本。
 - [日历、时区与 CPU 计时调用边界](architecture/calendar.md)及[契约验收](reports/refactoring-calendar-2026-10-16.md)：11 项接口、时区独立模块、宿主 CPU 计时、32 条性能路径及局部成本调查。

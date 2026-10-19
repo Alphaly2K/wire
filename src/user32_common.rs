@@ -122,7 +122,7 @@ pub(crate) fn default_windowpos_changed(
     let pack = |x: i32, y: i32| (x as u32 & 0xffff) | ((y as u32) << 16);
     if flags & 0x1000 == 0 {
         let proc = w.wndproc;
-        let result = crate::user32::invoke(
+        let result = crate::x86::process::callbacks::invoke(
             cpu,
             mem,
             api,
@@ -147,7 +147,7 @@ pub(crate) fn default_windowpos_changed(
                 pack(w.client_size()[0], w.client_size()[1]),
             )
         };
-        let result = crate::user32::invoke(
+        let result = crate::x86::process::callbacks::invoke(
             cpu,
             mem,
             api,

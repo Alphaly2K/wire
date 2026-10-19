@@ -14,6 +14,8 @@
 
 最新 [USER 退休 owner](architecture/window-control.md)接入：窗口/线程清理只借 User32、Graphics、Menus 和 Sched，Process 及窗口控制直接调用。完整 release Win32 255、fmt/release lib/bin strict Clippy/build 通过，原跨线程 send 唤醒与菜单/图形释放顺序保持。
 
+[PE32 callback 执行](architecture/callbacks32.md)随后统一归 Process：USER/locale/CRT comparator 复用 context 策略，DLL/TLS/SEH/initializer 直接调用 Process 并保留各自策略。完整 release Win32 255、IR 31 及必要构建通过，原执行循环和 callback frame 未改。
+
 本轮累计接入对话框/窗口枚举 22、菜单 27、GDI 对象/像素/字体 31 项，共 **80 项**，累计 **675 项**。统一声明、typed 分发与领域 owner 保持双架构范围、故障提交和既有不可用策略；保留真实 RedrawWindow 网关与公开 facade 的历史差异。精确标量 SSE 已移入独立编译单元，没有近似浮点或新增 ISA 语义。
 
 随后 **31 项契约**：5 项 paint、2 项 comctl32 初始化、10 项 PE32 资源、5 项双架构启动信息、9 项环境接口，完整正确性及累计性能复核通过，当前共 **706 项**。Unity 渲染结束后重新完成 32 条性能协议、288 次执行及三对游戏启动；原后台干扰轮次保留。实现与冻结见[五项 paint](reports/refactoring-painting-followup-2026-10-19.md)、[控件初始化](reports/refactoring-common-controls-2026-10-19.md)、[资源](reports/refactoring-resources-2026-10-19.md)、[启动信息](reports/refactoring-process-startup-2026-10-19.md)与[环境接口](reports/refactoring-environment-2026-10-19.md)。

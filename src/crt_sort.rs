@@ -43,7 +43,7 @@ impl Sort {
     ) -> Result<GuestCallOutcome, String> {
         macro_rules! compare {
             ($a:expr,$b:expr) => {
-                match crate::user32::invoke(
+                match crate::x86::process::callbacks::invoke(
                     cpu,
                     mem,
                     api,

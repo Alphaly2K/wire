@@ -582,3 +582,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 PE32 USER 窗口与线程退休
 
 基线 `5af8a4b`。remove_window/exit_thread 归入 User32，仅借 Graphics/Menus/Sched；原 pending send 完成/唤醒、窗口图形/菜单、focus、队列、timer 与 cursor/keyboard 清理顺序归一核对保持，旧 ApiState helper 删除。release 完整 Win32 255、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵。见[窗口控制边界](../architecture/window-control.md)，证据 `wire-out/refactoring-2026-10-14/r3-user-retirement32-{source-checks,verification}.json`。
+
+## R4 PE32 callback 执行 owner
+
+基线 `1a93e31`。原 USER invoke 归入 Process，qsort/locale/USER/UnhandledExceptionFilter 共享既有 context 恢复规则；DLL/TLS/SEH/initializer 直接调用 Process，保留各自恢复和控制策略。原 helper、八个调用文件、执行循环与 callback frame 对照保持。初次编译漏迁两个 locale 调用，补齐后 release 完整 Win32 255、IR 31、fmt/release lib/bin strict Clippy/build 通过，失败日志保留；不跑性能或游戏矩阵。见[callback 边界](../architecture/callbacks32.md)，证据 `wire-out/refactoring-2026-10-14/r4-callback-owner32-{source-checks,verification}.json`。
