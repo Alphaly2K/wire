@@ -17,6 +17,13 @@ import sys
 import time
 
 
+def prepare_folder(folder, discard_api_log):
+    folder.mkdir(exist_ok=True)
+    if discard_api_log:
+        # A fresh trace path is required; never replace an existing log.
+        (folder / 'api.log').symlink_to(os.devnull)
+
+
 def compare(args):
     """Alternate unchanged IR inputs across two frozen interpreter builds."""
     args.out.mkdir(parents=True, exist_ok=True)
@@ -25,10 +32,12 @@ def compare(args):
         order = ["before", "after"] if pair % 2 == 0 else ["after", "before"]
         for version in order:
             folder = args.out / f"pair-{pair}-{version}"
-            folder.mkdir(exist_ok=True)
+            prepare_folder(folder, args.discard_api_log)
             command = [str(getattr(args, version).resolve()), "run", str(args.exe.resolve()),
                        "--ir", str(args.ir.resolve()), "--max-instr", str(args.max_instr),
                        "--log-dir", str(folder.resolve())]
+            if args.headless:
+                command += ["--headless"]
             if args.stop_after_presents:
                 command += ["--stop-after-presents", str(args.stop_after_presents), "--present"]
             with (folder / "report.txt").open("w") as output:
@@ -71,7 +80,9 @@ def compare(args):
                for version in ['before', 'after']}
     summary = dict(commands=dict(before=str(args.before.resolve()), after=str(args.after.resolve()),
                                  exe=str(args.exe.resolve()), ir=str(args.ir.resolve()),
-                                 max_instr=args.max_instr, stop_after_presents=args.stop_after_presents),
+                                 max_instr=args.max_instr, stop_after_presents=args.stop_after_presents,
+                                 headless=args.headless,
+                                 api_log='discard' if args.discard_api_log else 'file'),
                    medians=medians, runs=runs)
     (args.out / "compare.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(medians, indent=2))
@@ -83,13 +94,18 @@ def capture(args):
     args.out.mkdir(parents=True, exist_ok=True)
     for run in range(args.runs):
         folder = args.out / f"run-{run}"
-        folder.mkdir(exist_ok=True)
+        prepare_folder(folder, args.discard_api_log)
         command = [str(args.binary.resolve()), "run", str(args.exe.resolve()),
                    "--max-instr", str(args.max_instr), "--log-dir", str(folder.resolve())]
+        if args.headless:
+            command += ["--headless"]
         if args.ir:
             command += ["--ir", str(args.ir.resolve())]
         if args.stop_after_presents:
             command += ["--stop-after-presents", str(args.stop_after_presents), "--present"]
+        (folder / 'command.json').write_text(json.dumps(dict(
+            command=command, headless=args.headless,
+            api_log='discard' if args.discard_api_log else 'file'), indent=2) + '\n')
         with (folder / "report.txt").open("w") as report:
             process = subprocess.Popen(command, stdout=report, stderr=subprocess.STDOUT)
             result = subprocess.run(
@@ -276,6 +292,9 @@ def main():
     collect.add_argument("--sample-seconds", type=int, default=5)
     collect.add_argument("--sample-interval-ms", type=int, default=1)
     collect.add_argument("--stop-after-presents", type=int, default=0)
+    collect.add_argument("--headless", action="store_true")
+    collect.add_argument("--discard-api-log", action="store_true",
+                         help="format and count API calls while sending the trace to the null device")
     report = commands.add_parser("summarize")
     report.add_argument("samples", type=pathlib.Path, nargs="+")
     report.add_argument("--out", type=pathlib.Path, required=True)
@@ -289,9 +308,14 @@ def main():
     bench.add_argument("--max-instr", type=int, default=50_000_000)
     bench.add_argument("--stop-after-presents", type=int, default=0,
                        help="measure startup through N successful Presents instead of an instruction budget")
+    bench.add_argument("--headless", action="store_true")
+    bench.add_argument("--discard-api-log", action="store_true",
+                       help="format and count API calls while sending the trace to the null device")
     args = parser.parse_args()
     if args.command != "summarize" and (args.max_instr < 1 or args.stop_after_presents < 0):
         parser.error("instruction budget must be positive and Present threshold must be nonnegative")
+    if args.command != "summarize" and args.headless and args.stop_after_presents:
+        parser.error("--headless cannot be combined with --stop-after-presents")
     if args.command == "capture":
         if args.runs < 1 or args.sample_seconds < 1 or args.sample_interval_ms < 1:
             parser.error("runs, sample duration and interval must be positive")
