@@ -2,10 +2,13 @@
 //! ABI data comes from Hangover's pinned Wine header. Guest code stays in the
 //! CPU interpreter; Metal executes only wire's static host graphics shader.
 use crate::{
-    api::{ApiState, ApiTable, Args},
+    api::{ApiTable, Args},
     mem::GuestMem,
 };
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+mod access;
+use access::{DeviceResources, HeapResources};
+
 mod device;
 mod gpu;
 mod raster;
@@ -195,14 +198,14 @@ impl D3D9 {
         }
         Ok(count)
     }
-    fn free_buffer(&mut self, data: Buffer, state: &mut ApiState) {
+    fn free_buffer(&mut self, data: Buffer, allocations: &mut HeapResources<'_>) {
         if Rc::strong_count(&data) == 1 {
             let p = data.borrow();
             self.allocated -= p.len() as u64;
-            state.heap.free(state.process_heap, p.bits);
+            allocations.heap.free(allocations.process_heap, p.bits);
         }
     }
-    fn collect(&mut self, mut work: Vec<u32>, state: &mut ApiState) {
+    fn collect(&mut self, mut work: Vec<u32>, allocations: &mut HeapResources<'_>) {
         while let Some(h) = work.pop() {
             if !self
                 .objects
@@ -226,23 +229,23 @@ impl D3D9 {
             }
             match o.payload {
                 Payload::Surface { data, .. } | Payload::Texture { data, .. } => {
-                    self.free_buffer(data, state)
+                    self.free_buffer(data, allocations)
                 }
                 Payload::Vertices { bits, len, .. } => {
                     self.allocated -= len as u64;
-                    state.heap.free(state.process_heap, bits);
+                    allocations.heap.free(allocations.process_heap, bits);
                 }
                 _ => {}
             }
-            state.heap.free(state.process_heap, h);
+            allocations.heap.free(allocations.process_heap, h);
         }
     }
-    fn unpin(&mut self, h: u32, state: &mut ApiState) {
+    fn unpin(&mut self, h: u32, allocations: &mut HeapResources<'_>) {
         let o = self.objects.get_mut(&h).expect("D3D pinned object");
         o.pins = o.pins.checked_sub(1).expect("D3D pin balance");
-        self.collect(vec![h], state);
+        self.collect(vec![h], allocations);
     }
-    fn release(&mut self, h: u32, state: &mut ApiState) -> Result<u32, u32> {
+    fn release(&mut self, h: u32, allocations: &mut HeapResources<'_>) -> Result<u32, u32> {
         let o = self.objects.get_mut(&h).ok_or(INVALID)?;
         if o.refs == 0 {
             return Err(INVALID);
@@ -260,7 +263,7 @@ impl D3D9 {
             o.pins = o.pins.checked_sub(1).expect("D3D lease balance");
             work.push(p);
         }
-        self.collect(work, state);
+        self.collect(work, allocations);
         Ok(count)
     }
     #[allow(clippy::too_many_arguments)]
@@ -273,7 +276,7 @@ impl D3D9 {
         leases: Vec<u32>,
         mem: &mut GuestMem,
         api: &mut ApiTable,
-        state: &mut ApiState,
+        allocations: &mut HeapResources<'_>,
     ) -> Result<u32, u32> {
         if self.objects.len() >= 4096 {
             return Err(NOMEM);
@@ -298,12 +301,12 @@ impl D3D9 {
                 .filter(|l| l.starts_with(kind) && l.as_bytes().get(kind.len()) == Some(&b'.'))
                 .map(|l| api.register("d3d9.dll", Some(l.split('\t').next().unwrap()), None))
                 .collect();
-            let p = alloc(mem, state, entries.len() as u32 * 4)?;
+            let p = alloc(mem, allocations, entries.len() as u32 * 4)?;
             put(mem, p, &entries)?;
             self.vtables.insert(kind, p);
             p
         };
-        let h = alloc(mem, state, 4)?;
+        let h = alloc(mem, allocations, 4)?;
         put(mem, h, &[table])?;
         for (p, n) in pins {
             self.objects.get_mut(&p).unwrap().pins += n;
@@ -332,7 +335,7 @@ impl D3D9 {
         pool: u32,
         usage: u32,
         mem: &mut GuestMem,
-        state: &mut ApiState,
+        allocations: &mut HeapResources<'_>,
     ) -> Result<Buffer, u32> {
         if !(matches!(format, 21 | 22) && usage & 2 == 0 || format == 75 && usage == 2) {
             return Err(UNAVAILABLE);
@@ -347,7 +350,7 @@ impl D3D9 {
         if size > 64 * 1024 * 1024 || self.allocated + size as u64 > 256 * 1024 * 1024 {
             return Err(NOMEM);
         }
-        let bits = alloc(mem, state, size)?;
+        let bits = alloc(mem, allocations, size)?;
         self.allocated += size as u64;
         Ok(Rc::new(RefCell::new(Pixels {
             width: w,
@@ -384,10 +387,10 @@ impl D3D9 {
         Ok(0)
     }
 }
-fn alloc(mem: &mut GuestMem, state: &mut ApiState, size: u32) -> Result<u32, u32> {
-    let h = state
+fn alloc(mem: &mut GuestMem, allocations: &mut HeapResources<'_>, size: u32) -> Result<u32, u32> {
+    let h = allocations
         .heap
-        .alloc(mem, state.process_heap, size, true)
+        .alloc(mem, allocations.process_heap, size, true)
         .map_err(|_| NOMEM)?;
     if h == 0 {
         Err(NOMEM)
@@ -451,13 +454,26 @@ pub(crate) fn dispatch(
     a: &Args,
     mem: &mut GuestMem,
     api: &mut ApiTable,
-    state: &mut ApiState,
+    state: &mut crate::api::ApiState,
 ) -> Option<(u32, String, bool)> {
     if dll != "d3d9.dll" {
         return None;
     }
-    let mut backend = std::mem::take(&mut state.d3d9);
-    let result = backend.call(name, a, mem, api, state);
+    let backend = &mut state.d3d9;
+    let result = backend.call(
+        name,
+        a,
+        mem,
+        api,
+        &mut DeviceResources {
+            allocations: HeapResources {
+                heap: &mut state.heap,
+                process_heap: state.process_heap,
+            },
+            windows: &state.user32.windows,
+            graphics: &mut state.graphics,
+        },
+    );
     let mut note = format!(
         "D3D9 {name}; frames={} draws={}",
         backend.frames, backend.draws
@@ -536,7 +552,6 @@ pub(crate) fn dispatch(
             }
         }
     }
-    state.d3d9 = backend;
     Some(match result {
         Ok(n) => (n, note, true),
         Err(e) => (
@@ -553,7 +568,7 @@ impl D3D9 {
         a: &Args,
         mem: &mut GuestMem,
         api: &mut ApiTable,
-        state: &mut ApiState,
+        resources: &mut DeviceResources<'_>,
     ) -> Result<u32, u32> {
         if name == "Direct3DCreate9" {
             // D3D9 SDK 31 predates the current SDK 32; both use this interface.
@@ -568,7 +583,7 @@ impl D3D9 {
                 vec![],
                 mem,
                 api,
-                state,
+                &mut resources.allocations,
             );
         }
         let (kind, method) = name.split_once('.').ok_or(UNAVAILABLE)?;
@@ -578,7 +593,7 @@ impl D3D9 {
         }
         match method {
             "AddRef" => return self.addref(a[0]),
-            "Release" => return self.release(a[0], state),
+            "Release" => return self.release(a[0], &mut resources.allocations),
             "QueryInterface" => {
                 mem.ptr(a[2], 4, true).map_err(|_| INVALID)?;
                 put(mem, a[2], &[0])?;
@@ -606,14 +621,16 @@ impl D3D9 {
             _ => {}
         }
         match kind {
-            "IDirect3D9" => self.factory(method, a, mem, api, state),
-            "IDirect3DDevice9" => self.recorded_device_call(method, a, mem, api, state),
+            "IDirect3D9" => self.factory(method, a, mem, api, resources),
+            "IDirect3DDevice9" => self.recorded_device_call(method, a, mem, api, resources),
             "IDirect3DTexture9" | "IDirect3DSurface9" => self.resource(method, a, mem),
-            "IDirect3DSwapChain9" => self.swap(method, a, mem, state),
+            "IDirect3DSwapChain9" => self.swap(method, a, mem, resources),
             "IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9" => self.vertex_call(method, a, mem),
             "IDirect3DVertexDeclaration9" => self.declaration_call(method, a, mem),
             "IDirect3DPixelShader9" | "IDirect3DVertexShader9" => self.shader_call(method, a, mem),
-            "IDirect3DStateBlock9" => self.stateblock_call(method, a, mem, state),
+            "IDirect3DStateBlock9" => {
+                self.stateblock_call(method, a, mem, &mut resources.allocations)
+            }
             _ => Err(UNAVAILABLE),
         }
     }
@@ -623,7 +640,7 @@ impl D3D9 {
         a: &Args,
         mem: &mut GuestMem,
         api: &mut ApiTable,
-        state: &mut ApiState,
+        resources: &mut DeviceResources<'_>,
     ) -> Result<u32, u32> {
         match m {
             "GetAdapterCount" => Ok(1),
@@ -732,7 +749,7 @@ impl D3D9 {
                     return Err(UNAVAILABLE);
                 }
                 let hwnd = if params[7] == 0 { a[3] } else { params[7] };
-                let w = state.user32.windows.get(&hwnd).ok_or(INVALID)?;
+                let w = resources.windows.get(&hwnd).ok_or(INVALID)?;
                 let size = w.client_size();
                 if params[0] == 0 {
                     params[0] = size[0].max(1) as u32;
@@ -745,7 +762,15 @@ impl D3D9 {
                 }
                 params[3] = 1;
                 params[7] = hwnd;
-                let data = self.pixels(params[0], params[1], params[2], 0, 1, mem, state)?;
+                let data = self.pixels(
+                    params[0],
+                    params[1],
+                    params[2],
+                    0,
+                    1,
+                    mem,
+                    &mut resources.allocations,
+                )?;
                 let device_result = self.object(
                     "IDirect3DDevice9",
                     Payload::Device(Box::new(Device {
@@ -780,21 +805,29 @@ impl D3D9 {
                     vec![],
                     mem,
                     api,
-                    state,
+                    &mut resources.allocations,
                 );
                 let device = match device_result {
                     Ok(d) => d,
                     Err(e) => {
-                        self.free_buffer(data, state);
+                        self.free_buffer(data, &mut resources.allocations);
                         return Err(e);
                     }
                 };
-                let result = self.surface(device, data.clone(), 0, 0, mem, api, state);
+                let result = self.surface(
+                    device,
+                    data.clone(),
+                    0,
+                    0,
+                    mem,
+                    api,
+                    &mut resources.allocations,
+                );
                 let surface = match result {
                     Ok(s) => s,
                     Err(e) => {
-                        self.release(device, state)?;
-                        self.free_buffer(data, state);
+                        self.release(device, &mut resources.allocations)?;
+                        self.free_buffer(data, &mut resources.allocations);
                         return Err(e);
                     }
                 };
@@ -810,14 +843,21 @@ impl D3D9 {
                 d.target = surface;
                 if params[9] == 1 {
                     let result = self
-                        .create_depth(device, params[0], params[1], mem, api, state)
+                        .create_depth(
+                            device,
+                            params[0],
+                            params[1],
+                            mem,
+                            api,
+                            &mut resources.allocations,
+                        )
                         .and_then(|depth| {
-                            let result = self.bind_depth(device, depth, state);
-                            self.release(depth, state)?;
+                            let result = self.bind_depth(device, depth, &mut resources.allocations);
+                            self.release(depth, &mut resources.allocations)?;
                             result
                         });
                     if let Err(e) = result {
-                        self.release(device, state)?;
+                        self.release(device, &mut resources.allocations)?;
                         return Err(e);
                     }
                 }

@@ -6,7 +6,7 @@ impl D3D9 {
         a: &Args,
         mem: &mut GuestMem,
         api: &mut ApiTable,
-        state: &mut ApiState,
+        resources: &mut DeviceResources<'_>,
     ) -> Result<u32, u32> {
         let h = a[0];
         mem.ptr(a[1], 56, true).map_err(|_| INVALID)?;
@@ -20,12 +20,7 @@ impl D3D9 {
             return Err(UNAVAILABLE);
         }
         let hwnd = if params[7] == 0 { d.hwnd } else { params[7] };
-        let size = state
-            .user32
-            .windows
-            .get(&hwnd)
-            .ok_or(INVALID)?
-            .client_size();
+        let size = resources.windows.get(&hwnd).ok_or(INVALID)?.client_size();
         if params[0] == 0 {
             params[0] = size[0].max(1) as u32;
         }
@@ -55,20 +50,35 @@ impl D3D9 {
                 return Err(INVALID);
             }
         }
-        let data = self.pixels(params[0], params[1], params[2], 0, 1, mem, state)?;
-        let back = match self.surface(h, data.clone(), 1, 0, mem, api, state) {
+        let data = self.pixels(
+            params[0],
+            params[1],
+            params[2],
+            0,
+            1,
+            mem,
+            &mut resources.allocations,
+        )?;
+        let back = match self.surface(h, data.clone(), 1, 0, mem, api, &mut resources.allocations) {
             Ok(back) => back,
             Err(e) => {
-                self.free_buffer(data, state);
+                self.free_buffer(data, &mut resources.allocations);
                 return Err(e);
             }
         };
         drop(data);
         let depth = if params[9] == 1 {
-            match self.create_depth(h, params[0], params[1], mem, api, state) {
+            match self.create_depth(
+                h,
+                params[0],
+                params[1],
+                mem,
+                api,
+                &mut resources.allocations,
+            ) {
                 Ok(depth) => depth,
                 Err(e) => {
-                    self.release(back, state)?;
+                    self.release(back, &mut resources.allocations)?;
                     return Err(e);
                 }
             }
@@ -83,7 +93,7 @@ impl D3D9 {
             if child == swap {
                 self.objects.get_mut(&h).unwrap().children.push(child);
             } else {
-                self.unpin(child, state);
+                self.unpin(child, &mut resources.allocations);
             }
         }
         self.pin(back)?;
@@ -119,11 +129,11 @@ impl D3D9 {
         d.transforms.clear();
         d.viewport = [0, 0, params[0], params[1], 0, 1f32.to_bits()];
         d.scissor = [0, 0, params[0] as i32, params[1] as i32];
-        self.release(back, state)?;
+        self.release(back, &mut resources.allocations)?;
         if depth != 0 {
-            self.release(depth, state)?;
+            self.release(depth, &mut resources.allocations)?;
         }
-        self.unpin(h, state);
+        self.unpin(h, &mut resources.allocations);
         // Match pinned Wine d3d9's successful Reset: report the resolved
         // swapchain dimensions/count/format, including windowed fallback.
         put(mem, a[1], &params)?;

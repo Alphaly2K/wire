@@ -10,7 +10,7 @@ Win64 的 `Presenter64` 继续拥有 guest HWND → native ID 映射，保留隐
 
 Presenter 的资源限制在主线程上，类型明确不可 Send/Sync；初始化继续要求 AppKit main thread。构造 Frame 时检查尺寸与 RGBA 长度，避免把不足的缓冲区送到 native FFI。frame upload failure 保留错误并继续可选 capture；displayed 只统计成功上传。抓帧仍使用 RGB PPM、完整 RGBA hash 去重、最多 16 个不同 frame，错误文本和 sequence 文件名保持。
 
-GDI 的 DLL/export 接受范围、GetDC 的 USER client dimensions、LastError 和 API diagnostics 位于 `win32/gdi/x86.rs`。`graphics` 拥有 bitmap/DC/font/pixel 资源，checked object/raster operations 只借用 Graphics、PE32 GuestMem 和固定参数数组，不依赖总 API 状态。当前 DIB/font codec 仍使用 PE32 布局；这一边界没有强制统一两种架构的地址空间。D3D9、DXGI/D3D11 的其它 guest COM 适配器按后续领域迁移继续保留原路径。
+GDI 的 DLL/export 接受范围、GetDC 的 USER client dimensions、LastError 和 API diagnostics 位于 `win32/gdi/x86.rs`。`graphics` 拥有 bitmap/DC/font/pixel 资源，checked object/raster operations 只借用 Graphics、PE32 GuestMem 和固定参数数组，不依赖总 API 状态。当前 DIB/font codec 仍使用 PE32 布局；这一边界没有强制统一两种架构的地址空间。[D3D9](d3d9.md)的分配/引用/绑定方法只借 heap，设备调用再借只读 window 与 Graphics，公开组合根保留；DXGI/D3D11 的其它 guest COM 适配器继续按领域迁移。
 
 [GDI+](gdiplus.md) 的 matrix、allocation 和 startup token 归 GdiPlus owner；PE32 调用显式借内存和 process heap，公开 facade 保留，原 Wine ABI parser 与数学算法不变。
 

@@ -148,10 +148,10 @@ impl D3D9 {
         a: &Args,
         mem: &mut GuestMem,
         api: &mut ApiTable,
-        state: &mut ApiState,
+        resources: &mut DeviceResources<'_>,
     ) -> Result<u32, u32> {
         if !setter(m) || !self.recording.contains_key(&a[0]) {
-            return self.device_call(m, a, mem, api, state);
+            return self.device_call(m, a, mem, api, resources);
         }
         let mut r = self.recording.remove(&a[0]).unwrap();
         // Existing checked setters and binding ownership are reused against
@@ -165,7 +165,7 @@ impl D3D9 {
             std::mem::swap(&mut o.children, &mut r.children);
         };
         swap(self, &mut r);
-        let result = self.device_call(m, a, mem, api, state);
+        let result = self.device_call(m, a, mem, api, resources);
         swap(self, &mut r);
         if result.is_ok() {
             r.keys.extend(keys(m, a));
@@ -178,7 +178,7 @@ impl D3D9 {
         a: &Args,
         mem: &mut GuestMem,
         api: &mut ApiTable,
-        state: &mut ApiState,
+        allocations: &mut HeapResources<'_>,
     ) -> Result<u32, u32> {
         mem.ptr(a[1], 4, true).map_err(|_| INVALID)?;
         put(mem, a[1], &[0])?;
@@ -197,10 +197,10 @@ impl D3D9 {
             vec![],
             mem,
             api,
-            state,
+            allocations,
         );
         for p in r.children {
-            self.unpin(p, state);
+            self.unpin(p, allocations);
         }
         put(mem, a[1], &[result?])?;
         Ok(0)
@@ -210,7 +210,7 @@ impl D3D9 {
         a: &Args,
         mem: &mut GuestMem,
         api: &mut ApiTable,
-        state: &mut ApiState,
+        allocations: &mut HeapResources<'_>,
     ) -> Result<u32, u32> {
         mem.ptr(a[2], 4, true).map_err(|_| INVALID)?;
         put(mem, a[2], &[0])?;
@@ -268,7 +268,7 @@ impl D3D9 {
             vec![],
             mem,
             api,
-            state,
+            allocations,
         )?;
         put(mem, a[2], &[h])?;
         Ok(0)
@@ -278,7 +278,7 @@ impl D3D9 {
         m: &str,
         a: &Args,
         mem: &GuestMem,
-        state: &mut ApiState,
+        allocations: &mut HeapResources<'_>,
     ) -> Result<u32, u32> {
         let Payload::StateBlock {
             device,
@@ -312,7 +312,7 @@ impl D3D9 {
                 keys,
             };
             for p in old {
-                self.unpin(p, state);
+                self.unpin(p, allocations);
             }
             return Ok(0);
         }
@@ -332,17 +332,17 @@ impl D3D9 {
                     },
                     true,
                     slot,
-                    state,
+                    allocations,
                 )?,
                 Key::VertexFormat => {
-                    self.set_declaration(h, snapshot.declaration, state)?;
+                    self.set_declaration(h, snapshot.declaration, allocations)?;
                     self.device_mut(h)?.fvf = snapshot.fvf;
                 }
                 Key::VertexShader => {
-                    self.set_vertex_shader(h, snapshot.vertex_shader, state)?;
+                    self.set_vertex_shader(h, snapshot.vertex_shader, allocations)?;
                 }
                 Key::PixelShader => {
-                    self.set_pixel_shader(h, snapshot.pixel_shader, state)?;
+                    self.set_pixel_shader(h, snapshot.pixel_shader, allocations)?;
                 }
                 Key::Stream => {
                     let mut args = [0; 16];
@@ -353,12 +353,12 @@ impl D3D9 {
                         snapshot.stream[1],
                         snapshot.stream[2],
                     ]);
-                    self.set_stream(&args, state)?;
+                    self.set_stream(&args, allocations)?;
                 }
                 Key::Indices => {
                     let mut args = [0; 16];
                     args[..2].copy_from_slice(&[h, snapshot.indices]);
-                    self.set_indices(&args, state)?;
+                    self.set_indices(&args, allocations)?;
                 }
                 _ => {
                     let d = self.device_mut(h)?;

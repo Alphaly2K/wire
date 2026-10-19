@@ -43,7 +43,7 @@ impl D3D9 {
         a: &Args,
         mem: &mut GuestMem,
         api: &mut ApiTable,
-        state: &mut ApiState,
+        allocations: &mut HeapResources<'_>,
     ) -> Result<u32, u32> {
         put(mem, a[2], &[0])?;
         let mut elements = Vec::new();
@@ -79,7 +79,7 @@ impl D3D9 {
                     vec![a[0]],
                     mem,
                     api,
-                    state,
+                    allocations,
                 )?;
                 put(mem, a[2], &[h])?;
                 return Ok(0);
@@ -128,7 +128,7 @@ impl D3D9 {
         &mut self,
         h: u32,
         decl: u32,
-        state: &mut ApiState,
+        allocations: &mut HeapResources<'_>,
     ) -> Result<(), u32> {
         if decl != 0 {
             if !matches!(&self.objects.get(&decl).ok_or(INVALID)?.payload,Payload::Declaration {device,..} if *device==h)
@@ -145,7 +145,7 @@ impl D3D9 {
         if old != 0 {
             let i = o.children.iter().position(|&p| p == old).unwrap();
             o.children.remove(i);
-            self.unpin(old, state);
+            self.unpin(old, allocations);
         }
         Ok(())
     }
@@ -191,7 +191,7 @@ impl D3D9 {
         a: &Args,
         mem: &mut GuestMem,
         api: &mut ApiTable,
-        state: &mut ApiState,
+        allocations: &mut HeapResources<'_>,
     ) -> Result<u32, u32> {
         put(mem, a[5], &[0])?;
         if a[1] == 0 {
@@ -206,7 +206,7 @@ impl D3D9 {
         if a[1] > 64 * 1024 * 1024 || self.allocated + a[1] as u64 > 256 * 1024 * 1024 {
             return Err(NOMEM);
         }
-        let bits = alloc(mem, state, a[1])?;
+        let bits = alloc(mem, allocations, a[1])?;
         let result = self.object(
             if index {
                 "IDirect3DIndexBuffer9"
@@ -227,12 +227,12 @@ impl D3D9 {
             vec![a[0]],
             mem,
             api,
-            state,
+            allocations,
         );
         let buffer = match result {
             Ok(h) => h,
             Err(e) => {
-                state.heap.free(state.process_heap, bits);
+                allocations.heap.free(allocations.process_heap, bits);
                 return Err(e);
             }
         };
@@ -304,7 +304,11 @@ impl D3D9 {
             _ => Err(UNAVAILABLE),
         }
     }
-    pub(super) fn set_stream(&mut self, a: &Args, state: &mut ApiState) -> Result<u32, u32> {
+    pub(super) fn set_stream(
+        &mut self,
+        a: &Args,
+        allocations: &mut HeapResources<'_>,
+    ) -> Result<u32, u32> {
         if a[1] != 0 {
             return Err(UNAVAILABLE);
         }
@@ -327,11 +331,15 @@ impl D3D9 {
         if old != 0 {
             let i = o.children.iter().position(|&p| p == old).unwrap();
             o.children.remove(i);
-            self.unpin(old, state);
+            self.unpin(old, allocations);
         }
         Ok(0)
     }
-    pub(super) fn set_indices(&mut self, a: &Args, state: &mut ApiState) -> Result<u32, u32> {
+    pub(super) fn set_indices(
+        &mut self,
+        a: &Args,
+        allocations: &mut HeapResources<'_>,
+    ) -> Result<u32, u32> {
         if a[1] != 0 {
             let o = self.objects.get(&a[1]).ok_or(INVALID)?;
             if o.kind != "IDirect3DIndexBuffer9"
@@ -349,7 +357,7 @@ impl D3D9 {
         if old != 0 {
             let i = o.children.iter().position(|&p| p == old).unwrap();
             o.children.remove(i);
-            self.unpin(old, state);
+            self.unpin(old, allocations);
         }
         Ok(0)
     }

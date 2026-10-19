@@ -570,3 +570,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 PE32 DirectSound 设备借用
 
 基线 `c0d296b`。对象/分配方法显式借 heap、event/window/Presenter 只读前置资源，调用直接借设备，通知 drain 只借 pending/KernelObjects32/Sched。原方法/回滚、buffer codec、混音/native pump 和 ABI parser 核对保持。release audio 4、mixer 1、完整 Win32 255、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵，累计契约仍 **915**。见[DirectSound 边界](../architecture/directsound.md)，证据 `wire-out/refactoring-2026-10-14/r3-dsound32-{source-checks,verification}.json`。
+
+## R3 PE32 D3D9 资源借用
+
+基线 `95b284d`。24 个生命周期/分配/绑定方法只借 heap，设备层再借只读 window/Graphics；普通方法不再接收 ApiState，根入口移除后端 take。原处理体/回滚/诊断归一或格式化后对照保持，raster/GPU 源码未改。初次编译检查误改 facade，修正后行为验收通过，失败日志保留。release 图形 11、library 4 passed / 2 ignored、显式真实 Metal 2、完整 Win32 255、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵。累计仍 **915**，见[D3D9 边界](../architecture/d3d9.md)，证据 `wire-out/refactoring-2026-10-14/r3-d3d9-owners32-{source-checks,verification}.json`。

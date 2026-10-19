@@ -7,18 +7,23 @@ impl D3D9 {
         height: u32,
         mem: &mut GuestMem,
         api: &mut ApiTable,
-        state: &mut ApiState,
+        allocations: &mut HeapResources<'_>,
     ) -> Result<u32, u32> {
-        let data = self.pixels(w, height, 75, 0, 2, mem, state)?;
-        match self.surface(h, data.clone(), 1, 0, mem, api, state) {
+        let data = self.pixels(w, height, 75, 0, 2, mem, allocations)?;
+        match self.surface(h, data.clone(), 1, 0, mem, api, allocations) {
             Ok(s) => Ok(s),
             Err(e) => {
-                self.free_buffer(data, state);
+                self.free_buffer(data, allocations);
                 Err(e)
             }
         }
     }
-    pub(super) fn bind_depth(&mut self, h: u32, s: u32, state: &mut ApiState) -> Result<(), u32> {
+    pub(super) fn bind_depth(
+        &mut self,
+        h: u32,
+        s: u32,
+        allocations: &mut HeapResources<'_>,
+    ) -> Result<(), u32> {
         if s != 0 {
             match &self.objects.get(&s).ok_or(INVALID)?.payload {
                 Payload::Surface { device, data, .. }
@@ -35,7 +40,7 @@ impl D3D9 {
         if old != 0 {
             let i = o.children.iter().position(|&v| v == old).unwrap();
             o.children.remove(i);
-            self.unpin(old, state);
+            self.unpin(old, allocations);
         }
         Ok(())
     }
@@ -44,9 +49,9 @@ impl D3D9 {
         h: u32,
         resource: u32,
         texture: bool,
-        state: &mut ApiState,
+        allocations: &mut HeapResources<'_>,
     ) -> Result<(), u32> {
-        self.bind_slot(h, resource, texture, 0, state)
+        self.bind_slot(h, resource, texture, 0, allocations)
     }
     pub(super) fn bind_slot(
         &mut self,
@@ -54,7 +59,7 @@ impl D3D9 {
         resource: u32,
         texture: bool,
         slot: u32,
-        state: &mut ApiState,
+        allocations: &mut HeapResources<'_>,
     ) -> Result<(), u32> {
         if slot > 1 {
             return Err(UNAVAILABLE);
@@ -107,7 +112,7 @@ impl D3D9 {
         if old != 0 {
             let i = o.children.iter().position(|&r| r == old).unwrap();
             o.children.remove(i);
-            self.unpin(old, state);
+            self.unpin(old, allocations);
         }
         Ok(())
     }
@@ -117,15 +122,15 @@ impl D3D9 {
         a: &Args,
         mem: &mut GuestMem,
         api: &mut ApiTable,
-        state: &mut ApiState,
+        resources: &mut DeviceResources<'_>,
     ) -> Result<u32, u32> {
         let h = a[0];
         match m {
             "BeginStateBlock" => self.begin_stateblock(h),
-            "EndStateBlock" => self.end_stateblock(a, mem, api, state),
-            "CreateStateBlock" => self.create_stateblock(a, mem, api, state),
+            "EndStateBlock" => self.end_stateblock(a, mem, api, &mut resources.allocations),
+            "CreateStateBlock" => self.create_stateblock(a, mem, api, &mut resources.allocations),
             "TestCooperativeLevel" => Ok(0),
-            "Reset" => self.reset(a, mem, api, state),
+            "Reset" => self.reset(a, mem, api, resources),
             "GetAvailableTextureMem" => Ok((256 * 1024 * 1024 - self.allocated) as u32),
             "EvictManagedResources" => Ok(0), // CPU storage is the only resource copy
             "GetDirect3D" => self.output_ref(self.device(h)?.factory, mem, a[1]),
@@ -161,7 +166,7 @@ impl D3D9 {
                         vec![h],
                         mem,
                         api,
-                        state,
+                        &mut resources.allocations,
                     )?;
                     self.pin(swap)?;
                     self.objects.get_mut(&h).unwrap().children.push(swap);
@@ -175,14 +180,22 @@ impl D3D9 {
                 }
                 self.output_ref(self.device(h)?.back, mem, a[4])
             }
-            "Present" => self.present(h, mem, state, a[1], a[2], a[3], a[4]),
+            "Present" => self.present(h, mem, resources, a[1], a[2], a[3], a[4]),
             "CreateTexture" => {
                 mem.ptr(a[7], 4, true).map_err(|_| INVALID)?;
                 put(mem, a[7], &[0])?;
                 if a[3] != 1 || a[4] & !0x201 != 0 || a[6] > 3 || a[8] != 0 {
                     return Err(UNAVAILABLE);
                 }
-                let data = self.pixels(a[1], a[2], a[5], a[6], a[4], mem, state)?;
+                let data = self.pixels(
+                    a[1],
+                    a[2],
+                    a[5],
+                    a[6],
+                    a[4],
+                    mem,
+                    &mut resources.allocations,
+                )?;
                 let texture = match self.object(
                     "IDirect3DTexture9",
                     Payload::Texture {
@@ -195,21 +208,22 @@ impl D3D9 {
                     vec![h],
                     mem,
                     api,
-                    state,
+                    &mut resources.allocations,
                 ) {
                     Ok(t) => t,
                     Err(e) => {
-                        self.free_buffer(data, state);
+                        self.free_buffer(data, &mut resources.allocations);
                         return Err(e);
                     }
                 };
-                let surface = match self.surface(h, data, 0, texture, mem, api, state) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        self.release(texture, state)?;
-                        return Err(e);
-                    }
-                };
+                let surface =
+                    match self.surface(h, data, 0, texture, mem, api, &mut resources.allocations) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            self.release(texture, &mut resources.allocations)?;
+                            return Err(e);
+                        }
+                    };
                 self.pin(surface)?;
                 self.objects
                     .get_mut(&texture)
@@ -238,14 +252,24 @@ impl D3D9 {
                 if shared != 0 || pool > 3 {
                     return Err(UNAVAILABLE);
                 }
-                let data = self.pixels(a[1], a[2], a[3], pool, usage, mem, state)?;
-                let s = match self.surface(h, data.clone(), 1, 0, mem, api, state) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        self.free_buffer(data, state);
-                        return Err(e);
-                    }
-                };
+                let data = self.pixels(
+                    a[1],
+                    a[2],
+                    a[3],
+                    pool,
+                    usage,
+                    mem,
+                    &mut resources.allocations,
+                )?;
+                let s =
+                    match self.surface(h, data.clone(), 1, 0, mem, api, &mut resources.allocations)
+                    {
+                        Ok(s) => s,
+                        Err(e) => {
+                            self.free_buffer(data, &mut resources.allocations);
+                            return Err(e);
+                        }
+                    };
                 put(mem, out, &[s])?;
                 Ok(0)
             }
@@ -272,7 +296,7 @@ impl D3D9 {
                 if a[1] != 0 || a[2] == 0 {
                     return Err(INVALID);
                 }
-                self.bind(h, a[2], false, state)?;
+                self.bind(h, a[2], false, &mut resources.allocations)?;
                 Ok(0)
             }
             "GetRenderTarget" => {
@@ -282,7 +306,7 @@ impl D3D9 {
                 self.output_ref(self.device(h)?.target, mem, a[2])
             }
             "SetDepthStencilSurface" => {
-                self.bind_depth(h, a[1], state)?;
+                self.bind_depth(h, a[1], &mut resources.allocations)?;
                 Ok(0)
             }
             "GetDepthStencilSurface" => {
@@ -299,7 +323,7 @@ impl D3D9 {
                 if a[3] != 75 || a[4] != 0 || a[5] != 0 || a[8] != 0 {
                     return Err(UNAVAILABLE);
                 }
-                let s = self.create_depth(h, a[1], a[2], mem, api, state)?;
+                let s = self.create_depth(h, a[1], a[2], mem, api, &mut resources.allocations)?;
                 put(mem, a[7], &[s])?;
                 Ok(0)
             }
@@ -431,7 +455,7 @@ impl D3D9 {
                 if a[1] > 1 {
                     return Err(UNAVAILABLE);
                 }
-                self.bind_slot(h, a[2], true, a[1], state)?;
+                self.bind_slot(h, a[2], true, a[1], &mut resources.allocations)?;
                 Ok(0)
             }
             "GetTexture" => {
@@ -451,13 +475,15 @@ impl D3D9 {
                 if !matches!(a[1], 0x102 | 0x142 | 0x104 | 0x144) {
                     return Err(UNAVAILABLE);
                 }
-                self.set_declaration(h, 0, state)?;
+                self.set_declaration(h, 0, &mut resources.allocations)?;
                 self.device_mut(h)?.fvf = a[1];
                 Ok(0)
             }
-            "CreateVertexDeclaration" => self.create_declaration(a, mem, api, state),
+            "CreateVertexDeclaration" => {
+                self.create_declaration(a, mem, api, &mut resources.allocations)
+            }
             "SetVertexDeclaration" => {
-                self.set_declaration(h, a[1], state)?;
+                self.set_declaration(h, a[1], &mut resources.allocations)?;
                 self.device_mut(h)?.fvf = 0;
                 Ok(0)
             }
@@ -505,9 +531,13 @@ impl D3D9 {
                 put(mem, a[1], &[self.device(h)?.fvf])?;
                 Ok(0)
             }
-            "CreatePixelShader" => self.create_pixel_shader(a, mem, api, state),
-            "CreateVertexShader" => self.create_vertex_shader(a, mem, api, state),
-            "SetPixelShader" => self.set_pixel_shader(h, a[1], state),
+            "CreatePixelShader" => {
+                self.create_pixel_shader(a, mem, api, &mut resources.allocations)
+            }
+            "CreateVertexShader" => {
+                self.create_vertex_shader(a, mem, api, &mut resources.allocations)
+            }
+            "SetPixelShader" => self.set_pixel_shader(h, a[1], &mut resources.allocations),
             "GetPixelShader" => {
                 let s = self.device(h)?.pixel_shader;
                 if s == 0 {
@@ -546,7 +576,7 @@ impl D3D9 {
                 }
                 Ok(0)
             }
-            "SetVertexShader" => self.set_vertex_shader(h, a[1], state),
+            "SetVertexShader" => self.set_vertex_shader(h, a[1], &mut resources.allocations),
             "GetVertexShader" => {
                 let s = self.device(h)?.vertex_shader;
                 if s == 0 {
@@ -631,10 +661,14 @@ impl D3D9 {
                 Ok(0)
             }
             "DrawPrimitiveUP" => self.draw(h, a, mem),
-            "CreateVertexBuffer" | "CreateIndexBuffer" => {
-                self.create_vertices(m == "CreateIndexBuffer", a, mem, api, state)
-            }
-            "SetIndices" => self.set_indices(a, state),
+            "CreateVertexBuffer" | "CreateIndexBuffer" => self.create_vertices(
+                m == "CreateIndexBuffer",
+                a,
+                mem,
+                api,
+                &mut resources.allocations,
+            ),
+            "SetIndices" => self.set_indices(a, &mut resources.allocations),
             "GetIndices" => {
                 put(mem, a[1], &[0])?;
                 let buffer = self.device(h)?.indices;
@@ -644,7 +678,7 @@ impl D3D9 {
                 Ok(0)
             }
             "DrawIndexedPrimitive" => self.draw_indexed(a, mem),
-            "SetStreamSource" => self.set_stream(a, state),
+            "SetStreamSource" => self.set_stream(a, &mut resources.allocations),
             "GetStreamSource" => {
                 if a[1] != 0 {
                     return Err(UNAVAILABLE);
@@ -670,7 +704,7 @@ impl D3D9 {
         m: &str,
         a: &Args,
         mem: &GuestMem,
-        state: &mut ApiState,
+        resources: &mut DeviceResources<'_>,
     ) -> Result<u32, u32> {
         let device = match self.objects[&a[0]].payload {
             Payload::Swap { device } => device,
@@ -696,7 +730,7 @@ impl D3D9 {
                 if a[5] != 0 {
                     return Err(UNAVAILABLE);
                 }
-                self.present(device, mem, state, a[1], a[2], a[3], a[4])
+                self.present(device, mem, resources, a[1], a[2], a[3], a[4])
             }
             _ => Err(UNAVAILABLE),
         }
@@ -706,7 +740,7 @@ impl D3D9 {
         &mut self,
         h: u32,
         mem: &GuestMem,
-        state: &mut ApiState,
+        resources: &mut DeviceResources<'_>,
         src: u32,
         dst: u32,
         hwnd: u32,
@@ -720,12 +754,7 @@ impl D3D9 {
             return Err(INVALID);
         }
         let hwnd = if hwnd == 0 { d.hwnd } else { hwnd };
-        let size = state
-            .user32
-            .windows
-            .get(&hwnd)
-            .ok_or(INVALID)?
-            .client_size();
+        let size = resources.windows.get(&hwnd).ok_or(INVALID)?.client_size();
         let w = size[0].max(1) as u32;
         let height = size[1].max(1) as u32;
         let data = self.buffer(d.back)?;
@@ -760,7 +789,7 @@ impl D3D9 {
             }
             pixels
         };
-        state
+        resources
             .graphics
             .upload(hwnd, w, height, &pixels)
             .map_err(|_| NOMEM)?;

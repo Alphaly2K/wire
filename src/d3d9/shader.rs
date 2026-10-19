@@ -313,7 +313,7 @@ impl D3D9 {
         a: &Args,
         mem: &mut GuestMem,
         api: &mut ApiTable,
-        state: &mut ApiState,
+        allocations: &mut HeapResources<'_>,
     ) -> Result<u32, u32> {
         put(mem, a[2], &[0])?;
         self.shader_error = None;
@@ -333,7 +333,7 @@ impl D3D9 {
             vec![a[0]],
             mem,
             api,
-            state,
+            allocations,
         )?;
         put(mem, a[2], &[h])?;
         Ok(0)
@@ -388,7 +388,7 @@ impl D3D9 {
         &mut self,
         h: u32,
         shader: u32,
-        state: &mut ApiState,
+        allocations: &mut HeapResources<'_>,
     ) -> Result<u32, u32> {
         if shader != 0 {
             if !matches!(&self.objects.get(&shader).ok_or(INVALID)?.payload, Payload::PixelShader { device,.. } if *device == h)
@@ -405,7 +405,7 @@ impl D3D9 {
         if old != 0 {
             let i = o.children.iter().position(|&n| n == old).unwrap();
             o.children.remove(i);
-            self.unpin(old, state);
+            self.unpin(old, allocations);
         }
         Ok(0)
     }

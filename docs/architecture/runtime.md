@@ -20,7 +20,7 @@
 | `x64::runtime::files::Files` | Win64 文件、标准 endpoint/alias、受限 filesystem 与属性元数据的私有 owner；路径 mutation 和资源寿命由 owner 执行，ABI/guest 输出由 adapter 提交 |
 | `host::calendar` | 提供原有宿主 localtime 值；Windows 日期格式和 guest 输出布局由领域/架构层负责 |
 | `host::ui`、`win32::{x86::host,gdi::x86}` | host 接收 owned 窗口/帧请求并产出事件；guest adapter 负责 USER 入队、GDI 语义映射及 LastError，公开 platform 路径只作 facade |
-| `graphics`、`d3d9`、`gpu` | 像素/对象核心不依赖 ApiState；DIB/font 仍有 PE32 codec，D3D9/DXGI 的其它 guest COM 适配器后续按领域迁移 |
+| `graphics`、`d3d9`、`gpu` | 像素/对象核心不依赖 ApiState；D3D9 生命周期只借 heap，设备调用再借 windows/Graphics，DIB/font 仍有 PE32 codec；DXGI 其余适配器继续迁移 |
 | `gdiplus`、`gdiplus::calls` | GdiPlus 私有拥有 matrix/allocation/token；普通调用只借内存和 process heap，公开 dispatch 保留兼容签名 |
 | `wmi`、`wmi::calls` | Wmi 私有拥有 COM 对象、引用计数、游标和 vtable；调用只借内存、gateway table、heap 与 BSTR，provider 和 HRESULT 保持 |
 | `dsound`、`dsound::calls` | DSound 私有拥有对象/buffer、通知和 sink；方法只借内存、gateway、heap 及只读事件/窗口/Presenter，pump 与 signal 次序保持 |

@@ -157,7 +157,7 @@ impl D3D9 {
         container: u32,
         mem: &mut GuestMem,
         api: &mut ApiTable,
-        state: &mut ApiState,
+        allocations: &mut HeapResources<'_>,
     ) -> Result<u32, u32> {
         let mut leases = vec![device];
         if container != 0 {
@@ -175,7 +175,7 @@ impl D3D9 {
             leases,
             mem,
             api,
-            state,
+            allocations,
         )
     }
     pub(super) fn fill(&self, mem: &GuestMem, h: u32, rp: u32, color: u32) -> Result<(), u32> {
