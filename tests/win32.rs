@@ -81,6 +81,8 @@ mod modules;
 mod painting_contract;
 #[path = "win32/paths.rs"]
 mod paths;
+#[path = "win32/process_endpoints.rs"]
+mod process_endpoints;
 #[path = "win32/process_startup_contract.rs"]
 mod process_startup_contract;
 #[path = "win32/registry_contract.rs"]
