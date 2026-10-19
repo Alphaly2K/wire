@@ -47,6 +47,7 @@
 - [BCrypt RNG 契约与所有权](architecture/bcrypt.md)及[验收](reports/refactoring-bcrypt-2026-10-20.md)：三项契约、私有 RNG 句柄集合与原 OS entropy；catalog 改为固定类型深度的分组迭代，累计 753 exports。
 - [SSPI 契约与函数表所有权](architecture/sspi.md)及[验收](reports/refactoring-sspi-2026-10-20.md)：34 项契约、独立 A/W 表与冷阶段网关注册；保留空安全包能力范围，累计 787 exports。
 - [WinHTTP 调用边界及验收](architecture/winhttp.md)：五项契约、无状态受检适配器，保持 proxy profile 和 transport 不可用语义；累计 792 exports。
+- [设备发现与通知边界及验收](architecture/devices.md)：24 项 HID/SetupAPI/user32 契约、独立设备集合与通知 owner；累计 816 exports。
 - [Win64 Toolhelp 快照](architecture/snapshots.md)及[完整验收](reports/refactoring-snapshot-owner-2026-10-19.md)：冻结线程值、游标/输出故障、保护关闭；19 条协议、180 次执行及独立累计 IR 复核。
 - [Toolhelp 七项统一契约](reports/refactoring-snapshot-contract-2026-10-19.md)：双架构 provider/ABI 和 typed ID；累计 713 exports，17 个计时协议、162 次执行及三对启动前缀，保留代码别名局部成本。
 - [日历、时区与 CPU 计时调用边界](architecture/calendar.md)及[契约验收](reports/refactoring-calendar-2026-10-16.md)：11 项接口、时区独立模块、宿主 CPU 计时、32 条性能路径及局部成本调查。

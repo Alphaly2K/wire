@@ -352,6 +352,7 @@ mod tests {
     }
     #[test]
     fn device_notifications_own_high_handles_validate_filters_and_cleanup_window() {
+        use crate::win32::catalog::DeviceApi;
         let (mut r, mut m) = fixture();
         let filter = STACK + 128;
         m.write_int(filter, 4, 32).unwrap();
@@ -359,21 +360,21 @@ mod tests {
         m.write(filter + 12, &crate::x64::runtime::devices::HID_GUID)
             .unwrap();
         let token = r
-            .device_call(&mut m, "RegisterDeviceNotificationW", &[HWND, filter, 0])
+            .device_call(&mut m, DeviceApi::RegisterW, &[HWND, filter, 0])
             .unwrap();
         assert!(token > u32::MAX as u64 && token != HWND);
         assert_eq!(
-            r.device_call(&mut m, "RegisterDeviceNotificationA", &[0, filter, 0])
+            r.device_call(&mut m, DeviceApi::RegisterA, &[0, filter, 0])
                 .unwrap(),
             0
         );
         assert_eq!(
-            r.device_call(&mut m, "RegisterDeviceNotificationW", &[HWND, filter, 2])
+            r.device_call(&mut m, DeviceApi::RegisterW, &[HWND, filter, 2])
                 .unwrap(),
             0
         );
         assert_eq!(
-            r.device_call(&mut m, "RegisterDeviceNotificationW", &[HWND, filter, 1])
+            r.device_call(&mut m, DeviceApi::RegisterW, &[HWND, filter, 1])
                 .unwrap(),
             0
         );
@@ -381,25 +382,25 @@ mod tests {
         m.write_int(fault, 4, 32).unwrap();
         m.write_int(fault + 4, 4, 5).unwrap();
         assert!(r
-            .device_call(&mut m, "RegisterDeviceNotificationW", &[HWND, fault, 0])
+            .device_call(&mut m, DeviceApi::RegisterW, &[HWND, fault, 0])
             .is_err());
         let other = r
-            .device_call(&mut m, "RegisterDeviceNotificationA", &[HWND, 0, 4])
+            .device_call(&mut m, DeviceApi::RegisterA, &[HWND, 0, 4])
             .unwrap();
         assert_eq!(other, token + 16); // Failed registrations did not acquire ownership.
         assert_eq!(
-            r.device_call(&mut m, "UnregisterDeviceNotification", &[token])
+            r.device_call(&mut m, DeviceApi::Unregister, &[token])
                 .unwrap(),
             1
         );
         assert_eq!(
-            r.device_call(&mut m, "UnregisterDeviceNotification", &[token])
+            r.device_call(&mut m, DeviceApi::Unregister, &[token])
                 .unwrap(),
             0
         );
         r.remove_device_notifications(HWND);
         assert_eq!(
-            r.device_call(&mut m, "UnregisterDeviceNotification", &[other])
+            r.device_call(&mut m, DeviceApi::Unregister, &[other])
                 .unwrap(),
             0
         );

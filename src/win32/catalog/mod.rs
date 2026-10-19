@@ -13,6 +13,7 @@ mod critical_sections;
 mod cursor;
 mod delays;
 mod desktop;
+mod devices;
 mod dialog;
 mod display;
 mod environment;
@@ -78,6 +79,7 @@ pub use critical_sections::{CriticalSectionApi, CRITICAL_SECTION_CONTRACTS};
 pub use cursor::{CursorApi, CURSOR_CONTRACTS};
 pub use delays::{DelayApi, DELAY_CONTRACTS};
 pub use desktop::{DesktopApi, DESKTOP_CONTRACTS};
+pub use devices::{DeviceApi, DEVICE_CONTRACTS};
 pub use dialog::{DialogApi, DIALOG_CONTRACTS};
 pub use display::{DisplayApi, DISPLAY_CONTRACTS};
 pub use environment::{EnvironmentApi, ENVIRONMENT_CONTRACTS};
@@ -230,6 +232,7 @@ pub enum ApiId {
     Bcrypt(BcryptApi),
     Sspi(SspiApi),
     WinHttp(WinHttpApi),
+    Device(DeviceApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -434,6 +437,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         &BCRYPT_CONTRACTS,
         &SSPI_CONTRACTS,
         &WINHTTP_CONTRACTS,
+        &DEVICE_CONTRACTS,
     ];
     FAMILIES.iter().flat_map(|family| family.iter())
 }

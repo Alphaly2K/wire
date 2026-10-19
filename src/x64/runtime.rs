@@ -201,9 +201,6 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
     if sockets::is_call(name) && !dll.eq_ignore_ascii_case("ws2_32.dll") {
         return false;
     }
-    if devices::arity(name).is_some() && !devices::export(dll, name) {
-        return false;
-    }
     if !dll.eq_ignore_ascii_case("kernel32.dll")
         && !dll.eq_ignore_ascii_case("kernelbase.dll")
         && !(dll.eq_ignore_ascii_case("shell32.dll")
@@ -215,7 +212,6 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
         && !(dll.eq_ignore_ascii_case("d3d12.dll") && dxgi::d3d12_export(name))
         && !(dll.eq_ignore_ascii_case("d3d11.dll") && dxgi::d3d11_export(name))
         && !(dll == dxgi::DLL && dxgi::arity(name).is_some())
-        && !devices::export(dll, name)
     {
         return false;
     }
@@ -227,8 +223,7 @@ fn kernel_export(name: &str) -> bool {
             .lookup_dlls(crate::win32::catalog::Architecture::X64)
             .contains(&"kernel32.dll");
     }
-    if devices::arity(name).is_some()
-        || sockets::is_call(name)
+    if sockets::is_call(name)
         || dxgi::arity(name).is_some()
         || name.starts_with("time")
         || name == "NtQueryDirectoryFile"
@@ -244,7 +239,6 @@ fn import_arity(name: &str) -> Option<usize> {
     }
     Some(match name {
         name if sockets::arity(name).is_some() => sockets::arity(name).unwrap(),
-        name if devices::arity(name).is_some() => devices::arity(name).unwrap(),
         name if dxgi::arity(name).is_some() => dxgi::arity(name).unwrap(),
         "GetSystemDirectoryA"
         | "GetSystemDirectoryW"
@@ -289,7 +283,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
     }
     match name {
         name if sockets::arity(name).is_some() => sockets::dwords(name),
-        name if devices::arity(name).is_some() => devices::dwords(name),
         name if dxgi::arity(name).is_some() => dxgi::dwords(name),
         "GetSystemDirectoryA"
         | "GetSystemDirectoryW"
@@ -320,7 +313,7 @@ fn import_groups(name: &str) -> u32 {
     let predicates = [
         false, // BSTR moved to catalog typed IDs; preserve legacy bit positions
         false, // WinHTTP moved to catalog typed IDs; preserve legacy bit positions
-        devices::arity(name).is_some(),
+        false, // device discovery moved to catalog typed IDs; preserve legacy bit positions
         false, // message queues moved to catalog control IDs; preserve bit positions
         false, // identity moved to catalog typed IDs; preserve legacy bit positions
         false, // WinRT moved to catalog typed IDs; preserve legacy bit positions
@@ -434,6 +427,21 @@ impl Runtime64 {
     }
     fn set_error(&self, mem: &mut Memory, error: u32) -> Result<(), String> {
         mem.write_int(self.teb() + 0x68, 4, error as u64)
+    }
+    fn remove_device_notifications(&mut self, window: u64) {
+        self.devices.remove_notifications(window);
+    }
+    fn device_call(
+        &mut self,
+        mem: &mut Memory,
+        id: crate::win32::catalog::DeviceApi,
+        args: &[u64],
+    ) -> Result<u64, String> {
+        use crate::win32::catalog::DeviceApi;
+        let window_exists = matches!(id, DeviceApi::RegisterA | DeviceApi::RegisterW)
+            && self.user.windows.contains_key(&args[0]);
+        let last_error = self.teb() + 0x68;
+        self.devices.call(mem, id, args, last_error, window_exists)
     }
     pub fn set_filesystem(&mut self, fs: crate::fs::GuestFs) {
         self.files.set_filesystem(fs);
@@ -755,6 +763,7 @@ impl Runtime64 {
                 let last_error = self.teb() + 0x68;
                 crate::win32::x64::winhttp::call(mem, id, args, last_error)
             }
+            ApiId::Device(id) => self.device_call(mem, id, args),
             ApiId::Keyboard(id) => self.keyboard_call(mem, id, args),
             ApiId::Cursor(id) => self.cursor_call(mem, id, args),
             ApiId::Image(id) => self.image_call(mem, id, args),
@@ -989,7 +998,6 @@ impl Runtime64 {
                     }
                 }
             }
-            _ if binding.groups & (1 << 2) != 0 => self.device_call(mem, name, args)?,
             _ if matches!(binding.control, gateways::ControlImport::Message(id) if !id.dispatch()) =>
             {
                 let gateways::ControlImport::Message(id) = binding.control else {

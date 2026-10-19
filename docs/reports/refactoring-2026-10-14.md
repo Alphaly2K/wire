@@ -478,3 +478,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R2 WinHTTP 五项契约
 
 基线 `1bd3adf` 的既有 proxy/transport 回归已通过，五项声明汇入 WinHttpApi，handler 迁入无状态受检适配器并删除原 runtime 模块。相关 release 1、catalog 一致性和 fmt/strict Clippy/build 通过；按低风险评估不新增重复测试或性能矩阵。累计 **792 exports**，见[边界与验收](../architecture/winhttp.md)。
+
+## R2/R3 Devices 契约与资源所有权
+
+24 项 DeviceApi 统一 HID/SetupAPI/user32 精确 provider、arity 与 DWORD，handler 迁入设备集合与通知订阅 owner。基线 `e32efe3` 的 24 项元数据逐项核对一致，原处理函数经 typed ID、owner、窄借用与格式归一后保持一致。相关 release Win64 2、通知单元 1、catalog 一致性及 fmt/release lib/bin strict Clippy/build 通过；既有检查覆盖空设备集合、HID status/输出、通知生命周期与窗口销毁清理。按低风险评估不新增重复测试或性能矩阵。累计 **816 exports**，见[边界与验收](../architecture/devices.md)。

@@ -1,5 +1,5 @@
 //! Queries describe loaded guest images and the logical built-in service providers.
-use super::{devices, dxgi, kernel_export, sockets, unwind};
+use super::{dxgi, kernel_export, sockets, unwind};
 use super::{Memory, Runtime64, WRITE};
 
 /// Module adapters request control; the gateway owns CPU, trace and count commits.
@@ -159,7 +159,6 @@ impl Runtime64 {
                                 if contract.lookup_dlls(crate::win32::catalog::Architecture::X64)
                                     .contains(&provider.as_str())
                         )
-                        || devices::export(&provider, &function)
                         || (matches!(provider.as_str(), "kernel32.dll" | "kernelbase.dll")
                             && matches!(
                                 function.as_str(),
