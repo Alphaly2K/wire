@@ -99,7 +99,10 @@ impl Files {
             let mut paths = Vec::new();
             for item in std::fs::read_dir(path).map_err(|e| crate::fs::win_error(&e))? {
                 let item = item.map_err(|e| crate::fs::win_error(&e))?;
-                if !crate::file_api::wildcard(&pattern, &item.file_name().to_string_lossy()) {
+                if !crate::win32::kernel::file_patterns::wildcard(
+                    &pattern,
+                    &item.file_name().to_string_lossy(),
+                ) {
                     continue;
                 }
                 // Follow only aliases whose target remains inside the guest drive.

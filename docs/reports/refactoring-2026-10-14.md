@@ -522,3 +522,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 PE32 kernel 对象
 
 基线 `b5182db`。KernelObjects32 私有拥有原混合 HANDLE 表、命名索引和递增分配位置，ApiState 兼容方法委托；CloseHandle 的对象/名字清理归 owner，FindClose 保留独立类型检查。原变体、分配、同名、gateway 与进程查询主体核对保持。release Win32 248、线程间 owner 迁移 1、fmt/release lib/bin strict Clippy/build 通过，不跑性能。累计 export 仍 **888**，见[边界与验收](../architecture/kernel-objects32.md)。
+
+## R3 PE32 文件窄借用
+
+基线 `9090b62`。file_api 保留公开 facade，原处理体进入 win32/x86/files，仅借 GuestMem、KernelObjects32、filesystem 与 LastError；wildcard 进入 kernel，由两种架构直接复用。原文本 codec、文件/path 主体、facade 和纯算法核对保持。release Win32 248、Win64 文件 17、fmt/release lib/bin strict Clippy/build 通过，不跑性能。累计 export 仍 **888**，见[文件边界](../architecture/files.md)。

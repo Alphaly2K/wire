@@ -106,7 +106,10 @@ impl Runtime64 {
                 let mut entries = Vec::new();
                 for entry in std::fs::read_dir(directory).map_err(|e| crate::fs::win_error(&e))? {
                     let entry = entry.map_err(|e| crate::fs::win_error(&e))?;
-                    if crate::file_api::wildcard(wildcard, &entry.file_name().to_string_lossy()) {
+                    if crate::win32::kernel::file_patterns::wildcard(
+                        wildcard,
+                        &entry.file_name().to_string_lossy(),
+                    ) {
                         if let Ok(path) = fs.resolve(&fs.guest_path(&entry.path())) {
                             entries.push(path);
                             if entries.len() > 65536 {

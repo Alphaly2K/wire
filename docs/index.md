@@ -58,6 +58,7 @@
 - [图形入口契约](architecture/graphics-contracts.md)：七项创建 export、静态/动态 provider 差异及 typed 创建分发；含真实 GPU swapchain 回归，累计 888 exports。
 - [图形 COM 冷绑定](architecture/graphics-contracts.md)：70 条 DXGI 方法的 ABI 合表、D3D11 共用查找及家族路由缓存；保留槽位和 handler，文件回归与真实 GPU 验证通过。
 - [PE32 kernel 对象](architecture/kernel-objects32.md)：原 HANDLE 表、命名索引和分配位置归入私有 owner，保留同名与关闭寿命；完整 Win32 回归通过。
+- [PE32 文件 adapter](architecture/files.md)：文件/path 处理体只借 filesystem、对象和错误槽，旧公开入口保留；两种架构共享 kernel wildcard。
 - [Win64 Toolhelp 快照](architecture/snapshots.md)及[完整验收](reports/refactoring-snapshot-owner-2026-10-19.md)：冻结线程值、游标/输出故障、保护关闭；19 条协议、180 次执行及独立累计 IR 复核。
 - [Toolhelp 七项统一契约](reports/refactoring-snapshot-contract-2026-10-19.md)：双架构 provider/ABI 和 typed ID；累计 713 exports，17 个计时协议、162 次执行及三对启动前缀，保留代码别名局部成本。
 - [日历、时区与 CPU 计时调用边界](architecture/calendar.md)及[契约验收](reports/refactoring-calendar-2026-10-16.md)：11 项接口、时区独立模块、宿主 CPU 计时、32 条性能路径及局部成本调查。

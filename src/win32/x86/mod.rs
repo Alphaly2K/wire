@@ -8,6 +8,7 @@ pub(crate) mod cursor;
 pub(crate) mod desktop;
 pub(crate) mod display;
 pub(crate) mod environment;
+pub(crate) mod files;
 pub(crate) mod geometry;
 pub(crate) mod guid;
 pub(crate) mod heaps;
