@@ -41,4 +41,6 @@ python3 -B tools/perf/summarize.py wire-out/batch-a wire-out/batch-b --out wire-
 
 AMD64 event fixture 的三项导入现在使用独立 OFT `0x1140`，IAT 仍为 `0x1190`。原 OFT `0x1180` 与 IAT 重叠，会多解析 ResetEvent/CreateEventW 两个重复导入。循环机器码与 RAX/work/retired/API 预期保持；两架构的独立 PE inventory 检查要求恰好三项导入及原 IAT 地址。20 项工具测试与两个已冻结运行时的 12K smoke 通过，日志前缀 `r7-event-fixture-`。
 
+离线 API inventory 的实际职责位于 `tools/inventory/`：`pe.py` 读取 PE/CLR 声明，`traces.py` 读取调用/查询/失败证据，`api.py` 编排目录扫描、可选 ABI coverage helper 和报表。原 `tools/api_inventory.py` CLI 与 fixture 使用的 PE/scan_game/trace_records 导入保留；源码候选仍从项目 src 读取，工作目录不改变这一根路径。候选字符串、导入声明、实际轨迹和 ABI 登记保持不同证据，目录整理不扩大能力结论。迁移与外部工作目录回归见 [工具验收](../reports/refactoring-inventory-2026-10-19.md)。
+
 100M 的 AMD64 event 输入 SHA 从 `e95a32dce6313767263432f4df1ab8106745bf24526597ad643d7ceb0b961441` 变为 `f538f2f83f97fbc7152cf9f3bb8628f8663efea3306aaa937374ae194ffaf1b2`。旧正式数据与校验保留，后续使用修正输入独立配对，不跨哈希合并。本次仅修工具，没有修改运行时。

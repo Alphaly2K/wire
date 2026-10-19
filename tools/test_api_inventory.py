@@ -1,5 +1,8 @@
 """Independent miniature PE/CLR fixtures for inventory evidence and bounds."""
+import json
 import struct
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -44,6 +47,23 @@ def fixture(bits=32, delay_va=False):
 
 
 class InventoryTests(unittest.TestCase):
+    def test_cli_keeps_project_symbol_candidates_from_an_external_working_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = fixture()[0]
+            strings = b'malloc\0_inventory_unlisted_symbol\0'
+            data[-128:-128 + len(strings)] = strings
+            exe = root / 'game.exe'
+            exe.write_bytes(data)
+            output = root / 'report'
+            script = Path(__file__).resolve().parent / 'api_inventory.py'
+            subprocess.run([sys.executable, '-B', str(script), '--game', f'test={exe}',
+                            '--output', str(output)], cwd=root, check=True, capture_output=True)
+            records = json.loads((output / 'inventory.json').read_text())['games'][0]['records']
+            candidates = {row['name'] for row in records if row['evidence'] == 'string_candidate'}
+            self.assertIn('malloc', candidates)
+            self.assertNotIn('_inventory_unlisted_symbol', candidates)
+
     def test_pe32_pe64_import_names_ordinals_and_delay_descriptors(self):
         for bits in [32, 64]:
             data, _, _ = fixture(bits)

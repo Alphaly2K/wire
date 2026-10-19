@@ -6,7 +6,7 @@
 
 中间 GDI 冻结出现 messages/IR 三对持续回退，未准入。实际采样后将 API 日志提取为独立 runtime 服务，并用专用整数格式化保留完整 trace、频率和最近 64 条记录。最终消息 150M IR/raw CPU 中位数相对原消息冻结 −13.210%/−12.110%，GDI 150M IR/raw −16.987%/−13.229%；33 条性能协议、207 次 fixture 执行及三对真实启动前缀通过。旧冻结、失败轮次和同哈希 control 独立保留，没有用其它负载的改善抵消持续回退。
 
-绘制区域与 paint DC 六项迁移因持续浮点回退撤回，保留独立基线与原创 paint 循环，见 [拒绝报告](reports/refactoring-painting-2026-10-19.md)。其余 USER、COM、图形和资源 owner 继续迁移；R7 CLI 边界整理继续推进。Mono 原生化已撤回，本轮排除。
+绘制区域与 paint DC 六项迁移因持续浮点回退撤回，保留独立基线与原创 paint 循环，见 [拒绝报告](reports/refactoring-painting-2026-10-19.md)。其余 USER、COM、图形和资源 owner 继续迁移。R7 [CLI 候选](reports/refactoring-cli-2026-10-19.md)正确性通过，但性能对照不稳定，已精确撤回；独立的 [离线 API inventory](reports/refactoring-inventory-2026-10-19.md)职责整理与 24 项工具检查通过。Mono 原生化已撤回，本轮排除。
 
 ## 重构范围
 
@@ -19,7 +19,7 @@
 | R3 | guest environment、双架构模块状态、Win64 文件、period 请求、SRW、地址等待及 APC 队列、线程标量操作与描述、双架构 apartment/BSTR、Win64 task/HSTRING/image/desktop 成员、PE32 TLS/FLS 与双架构 cursor、Win64 DC/class 私有 owner | PE32 其余资源、线程资源创建/退出及 COM 其余对象；PE32 kernel 大范围抽取曾因性能撤回 |
 | R4/R5 | Process32 编排边界、owned host UI 请求、GDI 与像素状态分离 | 领域分发与资源 owner 随 R2/R3 继续收敛 |
 | R6 | 按用户要求忽略 | 不重建原生 Mono 路径 |
-| R7 | PE32 内核目录、领域测试、公共性能工具、当前/历史文档入口 | 后续目录和工具随领域迁移继续整理 |
+| R7 | PE32 内核目录、领域测试、公共性能工具、离线 inventory 及当前/历史文档入口 | CLI 候选暂缓；其余工具和目录随领域迁移继续整理 |
 
 已迁移的 export 是契约覆盖范围；typed、ABI-only 与 absent 的架构策略分别记录，不能按数量推导完整 Windows 兼容性。
 
