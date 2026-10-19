@@ -40,7 +40,9 @@ Win64 普通文件读写和管道写入继续在原位置提前返回 Control::R
 
 文件 section 的八个 export 也由 FileApi 声明：CreateFileMappingA/W、OpenFileMappingA/W、MapViewOfFile/Ex、UnmapViewOfFile、FlushViewOfFile。文件契约在该批合计 53 个，PE32 32 Typed/21 ABI-only，Win64 45 Typed/8 Absent。PE32 八项均保留未实现策略；Win64 OpenFileMappingA/W 保持 absent，其余为原有 unnamed、read-only、file-backed 子集。HANDLE、view size 和可选 base 保留指针宽度，protection/access/offset high/low 使用 DWORD；SECURITY_ATTRIBUTES、access/alignment、handle 查询、错误码和故障提交顺序保持。
 
-AreFileApisANSI 随后汇入同一契约，当前合计 54 项：PE32 32 Typed/22 ABI-only，Win64 46 Typed/8 Absent。Win64 仍返回 1，PE32 保留零参数 ABI 与未实现策略，公开 file facade 继续排除 ABI-only 项，见[标量入口补齐](../reports/refactoring-scalar-followup-2026-10-20.md)。
+AreFileApisANSI 随后汇入同一契约，该批合计 54 项：PE32 32 Typed/22 ABI-only，Win64 46 Typed/8 Absent。Win64 仍返回 1，PE32 保留零参数 ABI 与未实现策略，公开 file facade 继续排除 ABI-only 项，见[标量入口补齐](../reports/refactoring-scalar-followup-2026-10-20.md)。
+
+CreatePipe、GetConsoleMode、WriteConsoleW 与 NtQueryDirectoryFile 接入后，当前合计 58 项：PE32 32 Typed/25 ABI-only/1 Absent，Win64 50 Typed/8 Absent。管道创建归 Pipes，原生目录查询及 cursor 提交归 Files；标准 console 拒绝、BOOLEAN carrier、输出检查及 LastError 顺序保持，见[进程与 endpoint 边界](process-control.md)。
 
 Mappings 独立拥有 section/view 与 retained file descriptor，view 持有 section 引用，文件或 section handle 关闭后已有 view 继续存活。guest WriteFile 更新同 inode 的活动 view；64 位 offset、64KiB 对齐、资源上限及原 backing 生命周期保持。adapter 按冷绑定 ID 调用原 Mappings 方法，不新增通用结果框架。独立行为与性能证据见 [section 验收](../reports/refactoring-file-section-catalog-2026-10-15.md)。
 

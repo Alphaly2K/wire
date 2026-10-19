@@ -1,4 +1,5 @@
 //! Anonymous byte streams with real endpoint lifetime and bounded buffering.
+use crate::x64::memory::{Memory, READ, WRITE};
 use std::collections::{BTreeMap, VecDeque};
 struct Pipe {
     data: VecDeque<u8>,
@@ -21,6 +22,37 @@ impl Default for Pipes {
     }
 }
 impl Pipes {
+    pub(super) fn create_call(
+        &mut self,
+        mem: &mut Memory,
+        args: &[u64],
+        error_slot: u64,
+    ) -> Result<u64, String> {
+        Ok({
+            mem.check(args[0], 8, WRITE)?;
+            mem.check(args[1], 8, WRITE)?;
+            let inherit = if args[2] == 0 {
+                false
+            } else {
+                mem.check(args[2], 24, READ)?;
+                if mem.read_int(args[2], 4)? != 24 || mem.read_int(args[2] + 8, 8)? != 0 {
+                    return Err("Win64 pipe security descriptor not implemented".into());
+                }
+                mem.read_int(args[2] + 16, 4)? != 0
+            };
+            match self.create(args[3] as u32, inherit) {
+                Ok((read, write)) => {
+                    mem.write_int(args[0], 8, read)?;
+                    mem.write_int(args[1], 8, write)?;
+                    1
+                }
+                Err(error) => {
+                    mem.write_int(error_slot, 4, error as u64)?;
+                    0
+                }
+            }
+        })
+    }
     pub fn create(&mut self, size: u32, inherit: bool) -> Result<(u64, u64), u32> {
         if size > 16 * 1024 * 1024 || self.objects.len() >= 1024 || self.next >= 0xffffe {
             return Err(8);

@@ -56,6 +56,10 @@ pub enum FileApi {
     UnmapViewOfFile,
     FlushViewOfFile,
     AreFileApisAnsi,
+    CreatePipe,
+    GetConsoleMode,
+    WriteConsoleW,
+    NtQueryDirectory,
 }
 
 impl FileApi {
@@ -139,6 +143,12 @@ const fn metadata(id: FileApi, name: &'static str, parameters: &'static [Paramet
     )
 }
 
+const fn endpoint(id: FileApi, name: &'static str, parameters: &'static [Parameter]) -> Contract {
+    let mut contract = metadata(id, name, parameters);
+    contract.limits = "PE32 kernel32 ABI-only; Win64 pipe output preflight, 24-byte security attributes, inherited endpoint flags and bounded allocation; redirected byte streams are not consoles, mode/write-console retain error 6 and unchanged outputs; original full-width handles and DWORD size/count";
+    contract
+}
+
 const fn mutation(
     id: FileApi,
     name: &'static str,
@@ -200,7 +210,7 @@ const fn section(
     )
 }
 
-pub static FILE_CONTRACTS: [Contract; 54] = [
+pub static FILE_CONTRACTS: [Contract; 58] = [
     declaration(
         FileApi::CreateFileA,
         "CreateFileA",
@@ -423,5 +433,15 @@ pub static FILE_CONTRACTS: [Contract; 54] = [
         "PE32 original kernel32 ABI-only return; Win64 reports the existing ANSI file codepage policy without reading memory or changing LastError",
         [ArchitecturePlan { dlls: &["kernel32.dll"], execution: ExecutionPolicy::LegacyUnimplemented },
          ArchitecturePlan { dlls: &["kernel32.dll", "kernelbase.dll"], execution: ExecutionPolicy::Typed }],
+    ),
+    endpoint(FileApi::CreatePipe, "CreatePipe", &[P, P, P, D]),
+    endpoint(FileApi::GetConsoleMode, "GetConsoleMode", &[P, P]),
+    endpoint(FileApi::WriteConsoleW, "WriteConsoleW", &[P, P, D, P, P]),
+    Contract::new(
+        ApiId::File(FileApi::NtQueryDirectory), "NtQueryDirectoryFile",
+        &[P, P, P, P, P, P, D, D, Parameter::Uint8, P, Parameter::Uint8], ReturnConvention::Ntstatus,
+        "existing synchronous ntdll directory batches; two BOOLEAN adapters consume low bytes while trace keeps full carriers, only length/class truncate to DWORD; checked IOSB/pattern/output and cursor commit order, no LastError writes; PE32 unknown ABI remains absent",
+        [ArchitecturePlan { dlls: &[], execution: ExecutionPolicy::Absent },
+         ArchitecturePlan { dlls: &["ntdll.dll"], execution: ExecutionPolicy::Typed }],
     ),
 ];

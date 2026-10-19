@@ -482,7 +482,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
             "kernel32.dll",
             &[
                 ("SetHandleCount", 4),
-                ("ExitProcess", 4),
                 ("TerminateProcess", 8),
                 ("DebugBreak", 0),
                 ("OutputDebugStringA", 4),
@@ -515,17 +514,13 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GlobalDeleteAtom", 4),
                 ("FreeConsole", 0),
                 ("AttachConsole", 4),
-                ("GetConsoleMode", 8),
                 ("WriteConsoleA", 20),
-                ("WriteConsoleW", 20),
                 ("SetConsoleTitleW", 4),
                 ("GetConsoleTitleW", 8),
                 ("GetConsoleProcessList", 8),
                 ("ReadConsoleW", 20),
                 ("GetVolumeInformationW", 32),
                 ("SearchPathW", 24),
-                ("CreateProcessW", 40),
-                ("CreatePipe", 16),
                 ("GetTimeFormatW", 24),
                 ("GetDateFormatW", 24),
                 ("GetLargePageMinimum", 0),
@@ -1699,7 +1694,13 @@ pub fn dispatch(
             sched.exit_current(cpu, code)?;
             return Ok(());
         }
-        (_, "kernel32.dll", "ExitProcess") => {
+        (
+            Some(crate::win32::catalog::ApiId::ProcessControl(
+                crate::win32::catalog::ProcessControlApi::Exit,
+            )),
+            _,
+            _,
+        ) => {
             log.log_call(idx, dll, name, &args[..1], 0, true, "process exit");
             match crate::modules::notify_process_exit(cpu, mem, api, state, log, sched, max_instr)?
             {

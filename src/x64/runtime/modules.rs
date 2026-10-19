@@ -142,7 +142,6 @@ impl Runtime64 {
                     .to_owned();
                     let known = (matches!(provider.as_str(), "kernel32.dll" | "kernelbase.dll")
                         && kernel_export(&function))
-                        || (provider == "ntdll.dll" && function == "NtQueryDirectoryFile")
                         || (provider == "dxgi.dll" && dxgi::export(&function))
                         || (provider == "d3d12.dll" && dxgi::d3d12_export(&function))
                         || (provider == "d3d11.dll" && dxgi::d3d11_export(&function))

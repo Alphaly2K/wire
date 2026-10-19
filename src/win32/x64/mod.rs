@@ -12,6 +12,7 @@ pub(crate) mod modules;
 pub(crate) mod multimedia;
 pub(crate) mod nls;
 pub(crate) mod pointer_helpers;
+pub(crate) mod process_control;
 pub(crate) mod process_startup;
 pub(crate) mod shell;
 pub(crate) mod sid;

@@ -176,7 +176,7 @@ impl Files {
         })
     }
 }
-impl Runtime64 {
+impl Files {
     pub(in crate::x64::runtime) fn nt_query_directory(
         &mut self,
         mem: &mut Memory,
@@ -214,9 +214,8 @@ impl Runtime64 {
             Err(8)
         } else {
             mem.check(a[5], capacity, WRITE)?;
-            self.files.directory_batch(
-                self.files
-                    .filesystem()
+            self.directory_batch(
+                self.filesystem()
                     .ok_or("directory query has no mounted filesystem")?,
                 a[0],
                 capacity,
@@ -243,6 +242,8 @@ impl Runtime64 {
         }
         Ok(status as u64)
     }
+}
+impl Runtime64 {
     pub(in crate::x64::runtime) fn full_directory_info(
         &mut self,
         mem: &mut Memory,

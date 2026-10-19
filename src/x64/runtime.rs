@@ -194,12 +194,8 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
     if import_arity(name).is_none() {
         return false;
     }
-    if name == "NtQueryDirectoryFile" && !dll.eq_ignore_ascii_case("ntdll.dll") {
-        return false;
-    }
     if !dll.eq_ignore_ascii_case("kernel32.dll")
         && !dll.eq_ignore_ascii_case("kernelbase.dll")
-        && !(dll.eq_ignore_ascii_case("ntdll.dll") && name == "NtQueryDirectoryFile")
         && !(dll.eq_ignore_ascii_case("dxgi.dll") && dxgi::export(name))
         && !(dll.eq_ignore_ascii_case("d3d12.dll") && dxgi::d3d12_export(name))
         && !(dll.eq_ignore_ascii_case("d3d11.dll") && dxgi::d3d11_export(name))
@@ -210,30 +206,17 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
     true
 }
 fn kernel_export(name: &str) -> bool {
-    if let Some(contract) = crate::win32::catalog::by_name(name) {
-        return contract
+    crate::win32::catalog::by_name(name).is_some_and(|contract| {
+        contract
             .lookup_dlls(crate::win32::catalog::Architecture::X64)
-            .contains(&"kernel32.dll");
-    }
-    if dxgi::arity(name).is_some() || name.starts_with("time") || name == "NtQueryDirectoryFile" {
-        return false;
-    }
-    import_arity(name).is_some()
+            .contains(&"kernel32.dll")
+    })
 }
 fn import_arity(name: &str) -> Option<usize> {
     if let Some(contract) = crate::win32::catalog::by_name(name) {
         return Some(contract.parameters.len());
     }
-    Some(match name {
-        name if dxgi::arity(name).is_some() => dxgi::arity(name).unwrap(),
-        "NtQueryDirectoryFile" => 11,
-        "CreatePipe" => 4,
-        "CreateProcessW" => 10,
-        "GetConsoleMode" => 2,
-        "ExitProcess" => 1,
-        "WriteConsoleW" => 5,
-        _ => return None,
-    })
+    dxgi::arity(name)
 }
 
 fn normalize_symbol<'a>(dll: &str, name: &'a str) -> &'a str {
@@ -246,39 +229,11 @@ fn import_dwords(name: &str) -> &'static [usize] {
     if let Some(contract) = crate::win32::catalog::by_name(name) {
         return contract.win64_dwords();
     }
-    match name {
-        name if dxgi::arity(name).is_some() => dxgi::dwords(name),
-        "NtQueryDirectoryFile" => &[6, 7],
-        "CreateProcessW" => &[4, 5],
-        "CreatePipe" => &[3],
-        "ExitProcess" => &[0],
-        "WriteConsoleW" => &[2],
-        _ => &[],
-    }
+    dxgi::dwords(name)
 }
 fn import_groups(name: &str) -> u32 {
-    let predicates = [
-        false, // BSTR moved to catalog typed IDs; preserve legacy bit positions
-        false, // WinHTTP moved to catalog typed IDs; preserve legacy bit positions
-        false, // device discovery moved to catalog typed IDs; preserve legacy bit positions
-        false, // message queues moved to catalog control IDs; preserve bit positions
-        false, // identity moved to catalog typed IDs; preserve legacy bit positions
-        false, // WinRT moved to catalog typed IDs; preserve legacy bit positions
-        false, // GUID helpers moved to catalog typed IDs; preserve legacy bit positions
-        dxgi::arity(name).is_some(),
-        false, // bound directory-search contracts supply bit 8; preserve bit positions
-        false, // WNDPROC controls moved to catalog; preserve bit positions
-        false, // scalar window controls moved to catalog; preserve bit positions
-        false, // registry moved to catalog typed IDs; preserve legacy bit positions
-        false, // display moved to catalog typed/control IDs; preserve bit positions
-        false, // SSPI moved to catalog typed IDs; preserve legacy bit positions
-        false, // Winsock moved to catalog typed/control IDs; preserve bit positions
-        false, // timers moved to catalog typed IDs; preserve legacy bit positions
-    ];
-    predicates
-        .into_iter()
-        .enumerate()
-        .fold(0, |mask, (n, yes)| mask | ((yes as u32) << n))
+    // Legacy graphics route; directory searches bind their separate flag from FileApi.
+    (dxgi::arity(name).is_some() as u32) << 7
 }
 
 impl Runtime64 {
@@ -614,6 +569,9 @@ impl Runtime64 {
     ) -> Result<u64, String> {
         use crate::win32::catalog::ApiId;
         match id {
+            ApiId::ProcessControl(_) => {
+                unreachable!("process controls use their bound gateway route")
+            }
             ApiId::MessageFormat(id) => self.format_message(mem, id, args),
             ApiId::Shell(id) => self.shell_call(mem, id, args),
             ApiId::Exception(_) => unreachable!("exception controls use their bound gateway route"),
@@ -1499,7 +1457,9 @@ impl Runtime64 {
                     }
                 }
             }
-            "NtQueryDirectoryFile" => self.nt_query_directory(mem, args)?,
+            _ if file == Some(FileApi::NtQueryDirectory) => {
+                self.files.nt_query_directory(mem, args)?
+            }
             _ if file == Some(FileApi::GetFileInformationByHandleEx)
                 && matches!(args[1], 14 | 15) =>
             {
@@ -1808,54 +1768,22 @@ impl Runtime64 {
                     required as u64 - 1
                 }
             }
-            "CreateProcessW" => {
-                // Only a missing unambiguous executable can currently be resolved. A
-                // present executable must be executed by a real child-process backend.
-                mem.check(args[8], 104, READ)?;
-                mem.check(args[9], 24, WRITE)?;
-                let cb = mem.read_int(args[8], 4)?;
-                if cb != 104 && cb != 112 {
-                    self.set_error(mem, 87)?;
-                    returned.regs[0] = 0;
-                    *cpu = returned;
-                    self.api_calls += 1;
-                    self.record(dll, name, args, 0);
-                    return Ok(Control::Returned);
-                }
-                let application = if args[0] != 0 {
-                    Self::utf16(mem, args[0])?
-                } else {
-                    let command = Self::utf16(mem, args[1])?;
-                    let command = command.trim_start();
-                    if let Some(quoted) = command.strip_prefix('"') {
-                        quoted
-                            .split_once('"')
-                            .ok_or("unterminated Win64 child executable quote")?
-                            .0
-                            .to_owned()
-                    } else {
-                        let first = command
-                            .split_whitespace()
-                            .next()
-                            .ok_or("empty Win64 child command line")?;
-                        if !first.to_ascii_lowercase().ends_with(".exe") {
-                            return Err(
-                                "Win64 ambiguous unquoted child executable search not implemented"
-                                    .into(),
-                            );
-                        }
-                        first.to_owned()
+            _ if binding.control
+                == gateways::ControlImport::Process(
+                    crate::win32::catalog::ProcessControlApi::Create,
+                ) =>
+            {
+                use crate::win32::x64::process_control::{probe_child, ChildProbe};
+                match probe_child(mem, args, self.files.filesystem())? {
+                    ChildProbe::InvalidStartup => {
+                        self.set_error(mem, 87)?;
+                        returned.regs[0] = 0;
+                        *cpu = returned;
+                        self.api_calls += 1;
+                        self.record(dll, name, args, 0);
+                        return Ok(Control::Returned);
                     }
-                };
-                let fs = self
-                    .files
-                    .filesystem()
-                    .ok_or("Win64 CreateProcess has no mounted guest filesystem")?;
-                let result = fs
-                    .resolve(&application)
-                    .and_then(|path| std::fs::metadata(path).map_err(|e| crate::fs::win_error(&e)));
-                match result {
-                    Err(error) => {
+                    ChildProbe::Missing { application, error } => {
                         self.set_error(mem, error)?;
                         self.trace.push_back(format!(
                             "CreateProcessW executable={application:?} failed error={error}"
@@ -1865,36 +1793,11 @@ impl Runtime64 {
                         }
                         0
                     }
-                    Ok(_) => {
-                        return Err(format!(
-                            "Win64 child-process execution not implemented: {application}"
-                        ))
-                    }
                 }
             }
-            "CreatePipe" => {
-                mem.check(args[0], 8, WRITE)?;
-                mem.check(args[1], 8, WRITE)?;
-                let inherit = if args[2] == 0 {
-                    false
-                } else {
-                    mem.check(args[2], 24, READ)?;
-                    if mem.read_int(args[2], 4)? != 24 || mem.read_int(args[2] + 8, 8)? != 0 {
-                        return Err("Win64 pipe security descriptor not implemented".into());
-                    }
-                    mem.read_int(args[2] + 16, 4)? != 0
-                };
-                match self.pipes.create(args[3] as u32, inherit) {
-                    Ok((read, write)) => {
-                        mem.write_int(args[0], 8, read)?;
-                        mem.write_int(args[1], 8, write)?;
-                        1
-                    }
-                    Err(error) => {
-                        self.set_error(mem, error)?;
-                        0
-                    }
-                }
+            _ if file == Some(FileApi::CreatePipe) => {
+                let error_slot = self.teb() + 0x68;
+                self.pipes.create_call(mem, args, error_slot)?
             }
             _ if handle == Some(HandleApi::GetHandleInformation) => {
                 if let Some(flags) = self
@@ -2177,13 +2080,13 @@ impl Runtime64 {
             }
             _ if file == Some(FileApi::GetFileType)
                 || handle == Some(HandleApi::CloseHandle)
-                || name == "GetConsoleMode" =>
+                || file == Some(FileApi::GetConsoleMode) =>
             {
                 let index = self.files.standard().index(args[0]);
                 if index.is_some() {
                     match name {
                         _ if file == Some(FileApi::GetFileType) => 3, // Redirected host pipe, not a console.
-                        "GetConsoleMode" => {
+                        _ if file == Some(FileApi::GetConsoleMode) => {
                             self.set_error(mem, 6)?;
                             0
                         }
@@ -2275,7 +2178,7 @@ impl Runtime64 {
                     0
                 }
             }
-            _ if file == Some(FileApi::WriteFile) || name == "WriteConsoleW" => {
+            _ if matches!(file, Some(FileApi::WriteFile | FileApi::WriteConsoleW)) => {
                 if file == Some(FileApi::WriteFile) && self.files.flags(args[0]).is_some() {
                     if args[4] != 0 || args[2] > 16 * 1024 * 1024 || args[3] == 0 {
                         return Err(
@@ -2345,7 +2248,7 @@ impl Runtime64 {
                     return Ok(Control::Returned);
                 }
                 let index = self.files.standard().index(args[0]).filter(|&i| i != 0);
-                if name == "WriteConsoleW" || index.is_none() {
+                if file == Some(FileApi::WriteConsoleW) || index.is_none() {
                     self.set_error(mem, 6)?;
                     0
                 } else if args[4] != 0 {
@@ -2401,7 +2304,11 @@ impl Runtime64 {
                     }
                 }
             }
-            "ExitProcess" => {
+            _ if binding.control
+                == gateways::ControlImport::Process(
+                    crate::win32::catalog::ProcessControlApi::Exit,
+                ) =>
+            {
                 self.api_calls += 1;
                 self.record(dll, name, args, args[0] as u32 as u64);
                 return Ok(Control::Exited(args[0] as u32));

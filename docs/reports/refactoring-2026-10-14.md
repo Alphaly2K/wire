@@ -506,3 +506,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R2 Shell 与错误消息
 
 基线 `d034c5b` 固定 shell 静态导入/动态发现差异、PE32 known-folder 分配和 provider 清栈。六项 ShellApi、两项 MessageFormatApi 接入；PE32 旧 NLS shell 主体移入窄借用 adapter，公开 facade 保留；Win64 受检准备与原 heap/local/task 分配协调分离，纯命令行 parser 移入 kernel 算法。原 parser、消息及 shell 主体归一核对保持。相关 release 及单元 31 项、fmt/release lib/bin strict Clippy/build 通过，不跑性能。累计 **875 exports**，见[边界与验收](../architecture/shell-and-messages.md)。
+
+## R2/R3 进程与文件 endpoint
+
+基线 `c39a740` 固定 PE32 endpoint ABI 与原生目录查询策略。四项 FileApi、两项 ProcessControlApi 接入；管道创建归 Pipes，目录查询及游标提交归 Files，Win64 child 预检与 CPU/诊断完成分离。根 Win64 ABI 声明仅剩 legacy 图形回退。release Win64 268、PE32 247、library 60 passed / 7 ignored，fmt/release lib/bin strict Clippy/build 通过，覆盖前三批连续修改；不跑性能。累计 **881 exports**，见[边界与验收](../architecture/process-control.md)。

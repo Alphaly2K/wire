@@ -43,6 +43,7 @@ mod nls;
 mod painting;
 mod paths;
 mod pointer_helpers;
+mod process_control;
 mod process_options;
 mod process_queries;
 mod process_startup;
@@ -115,6 +116,7 @@ pub use nls::{NlsApi, NLS_CONTRACTS};
 pub use painting::{PaintingApi, PAINTING_CONTRACTS};
 pub use paths::{PathApi, PATH_CONTRACTS};
 pub use pointer_helpers::{PointerHelperApi, POINTER_HELPER_CONTRACTS};
+pub use process_control::{ProcessControlApi, PROCESS_CONTROL_CONTRACTS};
 pub use process_options::{ProcessOptionApi, PROCESS_OPTION_CONTRACTS};
 pub use process_queries::{ProcessQueryApi, PROCESS_QUERY_CONTRACTS};
 pub use process_startup::{StartupApi, STARTUP_CONTRACTS};
@@ -182,6 +184,7 @@ pub enum ApiId {
     Exception(ExceptionApi),
     MessageFormat(MessageFormatApi),
     Shell(ShellApi),
+    ProcessControl(ProcessControlApi),
     Com(ComApi),
     Winrt(WinrtApi),
     Bstr(BstrApi),
@@ -463,6 +466,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         &EXCEPTION_CONTRACTS,
         &MESSAGE_FORMAT_CONTRACTS,
         &SHELL_CONTRACTS,
+        &PROCESS_CONTROL_CONTRACTS,
     ];
     FAMILIES.iter().flat_map(|family| family.iter())
 }
