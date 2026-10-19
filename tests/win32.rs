@@ -37,6 +37,8 @@ mod desktop_contract;
 mod dialog_contract;
 #[path = "win32/display_contract.rs"]
 mod display_contract;
+#[path = "win32/environment_contract.rs"]
+mod environment_contract;
 #[path = "win32/exceptions.rs"]
 mod exceptions;
 #[path = "win32/files.rs"]

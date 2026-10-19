@@ -32,6 +32,8 @@ mod desktop_contract;
 mod dialog_contract;
 #[path = "x64/display_contract.rs"]
 mod display_contract;
+#[path = "x64/environment_contract.rs"]
+mod environment_contract;
 #[path = "x64/files.rs"]
 mod files;
 #[path = "x64/gdi_contract.rs"]
