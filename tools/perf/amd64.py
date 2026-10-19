@@ -111,6 +111,10 @@ def main():
         from .fixtures.tracing_gateway import x64
         data, meta = x64(args.work)
         entries.append(('gateway-etw', data, meta))
+    if args.cases and 'gateway-token-info' in args.cases:
+        from .fixtures.token_gateway import x64
+        data, meta = x64(args.work)
+        entries.append(('gateway-token-info', data, meta))
     if args.cases and 'gateway-version' in args.cases:
         data, meta = gateway_fixture(args.work, version=True)
         entries.append(('gateway-version', data, meta))

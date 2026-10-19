@@ -15,6 +15,16 @@ from api_inventory import PE
 
 
 class AuditFixtureMigration(unittest.TestCase):
+    def test_token_queries_keep_exact_provider_and_independent_import_tables(self):
+        from perf.fixtures.token_gateway import x64
+        for work in [1, 12000, 100000000]:
+            with self.subTest(work=work):
+                data, _ = x64(work)
+                self.assertEqual([(row['dll'], row['name'], row['iat_rva'])
+                                  for row in PE(data).imports()],
+                                 [('advapi32.dll', 'OpenProcessToken', 0x1180),
+                                  ('advapi32.dll', 'GetTokenInformation', 0x1188)])
+
     def test_etw_lookup_and_iat_keep_all_eight_imports_independent(self):
         from perf.fixtures.tracing_gateway import x64
         for work in [1, 12000, 100000000]:
