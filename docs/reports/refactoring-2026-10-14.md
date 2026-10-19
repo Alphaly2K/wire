@@ -622,3 +622,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R4 PE32 sent 与 monitor callback 请求
 
 基线 `683f025`。sent selection/processing 与完成/发送方退出/wake 归 User32，Process 执行 WNDPROC；monitor adapter 只准备内存/临时 heap 请求，Process 保持 callback 后先 free 再传播 Result 的顺序。原主体归一或 rustfmt 后核对保持，frame 未改；新增 fault 释放 fixture 在迁移前通过。release 完整 Win32 257、IR 31、fmt/release lib/bin strict Clippy/build 通过。Clippy 的 Option 提前返回写法修正后通过，失败日志保留；不跑性能或游戏矩阵，累计契约仍 915。证据 `wire-out/refactoring-2026-10-14/r4-sent-monitor32-{source-checks,verification}.json`。
+
+## R3 Win64 COM 窄调用
+
+基线 `82a6949`。TaskMemory 执行 CoTaskMemAlloc/Free，仅借 Pages/内存；COM adapter 仅借 Apartment/内存/Trace，不依赖 Runtime64，删除不再使用的只读 apartment facade。原 task allocate/free、init/factory 与私有释放主体核对保持，Apartment 纯状态未改。release 完整 Win64 269、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵，累计契约仍 915。证据 `wire-out/refactoring-2026-10-14/r3-com-calls64-{source-checks,verification}.json`。

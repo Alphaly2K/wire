@@ -112,9 +112,6 @@ impl Threads {
         }
         self.handles.get(&handle).copied().ok_or(6)
     }
-    pub fn apartment(&self) -> &crate::win32::com::apartment::Apartment {
-        &self.entries[&self.active].apartment
-    }
     pub fn apartment_mut(&mut self) -> &mut crate::win32::com::apartment::Apartment {
         &mut self.entries.get_mut(&self.active).unwrap().apartment
     }

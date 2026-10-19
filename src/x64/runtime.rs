@@ -566,7 +566,21 @@ impl Runtime64 {
             }
             ApiId::Shell(id) => self.shell_call(mem, id, args),
             ApiId::Exception(_) => unreachable!("exception controls use their bound gateway route"),
-            ApiId::Com(id) => self.com_call(mem, id, args),
+            ApiId::Com(id) => {
+                use crate::win32::catalog::ComApi;
+                if matches!(id, ComApi::TaskAlloc | ComApi::TaskFree) {
+                    let last_error = self.teb() + 0x68;
+                    let mut pages = allocation::Pages {
+                        next: &mut self.next_alloc,
+                        allocations: &mut self.allocations,
+                        last_error,
+                        trace: &mut self.trace,
+                    };
+                    self.task_memory.call(mem, id, args, &mut pages)
+                } else {
+                    com::call(mem, id, args, self.threads.apartment_mut(), &mut self.trace)
+                }
+            }
             ApiId::Winrt(id) => {
                 let last_error = self.teb() + 0x68;
                 let mut pages = allocation::Pages {
