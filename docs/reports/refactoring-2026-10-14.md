@@ -458,3 +458,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R2 ETW 八项契约
 
 独立基线 `29d2a57` 固定 PE32 REGHANDLE/keyword 双 DWORD slot、Win64 BYTE/U64 trace、DWORD 截断和静态/动态 provider 差异。八项 EtwApi 统一元数据，原 owner 的资源/检查/写出顺序经源码替换核对保持，累计 **733 exports**。所属 release 7、debug AMD64 6、fmt/strict Clippy/build 和短八接口 fixture 通过；token/SID/ETW 三批合并后仅做一次 release 全量检查，664 passed / 7 ignored。307 个 src Rust SHA 与 executable SHA 已记录，不跑性能或无关游戏/native 矩阵；见[验收](refactoring-etw-contract-2026-10-20.md)。
+
+## R3 Win64 注册表
+
+独立基线 `71fef81` 固定单调句柄、累计耗尽、完整身份与查询别名/guard 顺序。处理函数迁入私有 Registry，CP932/UTF-16 名称解码复用 text helper，源码归一核对与原 handler 一致。release Win64 260、debug 注册表 3、fmt/strict Clippy/build 通过；不跑性能或无关游戏/native 矩阵。15 项元数据仍为 legacy，累计仍为 733 exports，见[验收](refactoring-registry-owner-2026-10-20.md)。

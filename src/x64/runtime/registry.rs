@@ -1,6 +1,7 @@
 //! Isolated, process-lifetime guest registry. No host registry or invented installations.
 //! HKCU is writable; system roots are read-only. Persistence and WOW32 views are absent.
-use super::{Memory, Runtime64, WRITE};
+use super::{Memory, WRITE};
+use crate::win32::x64::text::path_name;
 use std::collections::BTreeMap;
 type Key = (u32, String);
 #[derive(Default)]
@@ -64,15 +65,15 @@ pub(super) fn dwords(name: &str) -> &'static [usize] {
 fn string_type(kind: u32) -> bool {
     matches!(kind, 1 | 2 | 7)
 }
-impl Runtime64 {
-    pub(super) fn registry_call(
+impl Registry {
+    pub(super) fn call(
         &mut self,
         mem: &mut Memory,
         name: &str,
         args: &[u64],
     ) -> Result<u64, String> {
         // Registry APIs return LSTATUS directly and preserve thread LastError.
-        let (base, access) = match self.registry.resolve(args[0]) {
+        let (base, access) = match self.resolve(args[0]) {
             Ok(key) => key,
             Err(status) => return Ok(status),
         };
@@ -80,7 +81,7 @@ impl Runtime64 {
         match name {
             "RegCloseKey" => {
                 if root(args[0]).is_none() {
-                    self.registry.handles.remove(&args[0]);
+                    self.handles.remove(&args[0]);
                 }
                 Ok(0)
             }
@@ -129,7 +130,7 @@ impl Runtime64 {
                 let child = if args[1] == 0 {
                     String::new()
                 } else {
-                    Self::path_name(mem, args[1], wide)?.to_lowercase()
+                    path_name(mem, args[1], wide)?.to_lowercase()
                 };
                 if child.starts_with('\\')
                     || child.ends_with('\\')
@@ -144,7 +145,7 @@ impl Runtime64 {
                     _ => format!("{}\\{child}", base.1),
                 };
                 let key = (base.0, path.clone());
-                let exists = self.registry.nodes.contains_key(&key);
+                let exists = self.nodes.contains_key(&key);
                 if !create && !exists {
                     return Ok(2);
                 }
@@ -154,9 +155,7 @@ impl Runtime64 {
                 if base.0 != 1 && rights & (2 | 4 | 0x10000 | 0x40000 | 0x80000) != 0 {
                     return Ok(5);
                 }
-                if self.registry.handles.len() >= 4096
-                    || self.registry.next >= super::TEB + 0x510000
-                {
+                if self.handles.len() >= 4096 || self.next >= super::TEB + 0x510000 {
                     return Ok(8);
                 }
                 mem.check(output, 8, WRITE)?;
@@ -171,26 +170,23 @@ impl Runtime64 {
                             parent.push('\\');
                         }
                         parent.push_str(component);
-                        self.registry
-                            .nodes
-                            .entry((base.0, parent.clone()))
-                            .or_default();
+                        self.nodes.entry((base.0, parent.clone())).or_default();
                     }
                 }
-                let handle = self.registry.next;
+                let handle = self.next;
                 mem.write_int(output, 8, handle)?;
                 if disposition != 0 {
                     mem.write_int(disposition, 4, if exists { 2 } else { 1 })?;
                 }
-                self.registry.handles.insert(handle, (key, rights & !0x100));
-                self.registry.next += 16;
+                self.handles.insert(handle, (key, rights & !0x100));
+                self.next += 16;
                 Ok(0)
             }
             _ => {
                 let value = if args[1] == 0 {
                     String::new()
                 } else {
-                    Self::path_name(mem, args[1], wide)?.to_lowercase()
+                    path_name(mem, args[1], wide)?.to_lowercase()
                 };
                 if value.len() > 16384 {
                     return Ok(87);
@@ -218,8 +214,7 @@ impl Runtime64 {
                                 .collect();
                         }
                     }
-                    self.registry
-                        .nodes
+                    self.nodes
                         .get_mut(&base)
                         .unwrap()
                         .values
@@ -232,7 +227,6 @@ impl Runtime64 {
                     }
                     return Ok(
                         if self
-                            .registry
                             .nodes
                             .get_mut(&base)
                             .unwrap()
@@ -252,7 +246,7 @@ impl Runtime64 {
                 if args[2] != 0 || (args[4] != 0 && args[5] == 0) {
                     return Ok(87);
                 }
-                let Some((kind, stored)) = self.registry.nodes[&base].values.get(&value) else {
+                let Some((kind, stored)) = self.nodes[&base].values.get(&value) else {
                     return Ok(2);
                 };
                 let bytes = if string_type(*kind) && !wide {

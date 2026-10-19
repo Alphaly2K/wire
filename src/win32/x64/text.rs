@@ -1,5 +1,14 @@
 //! Checked Win64 raw string transfer; HRESULT policy belongs to the API adapter.
 use crate::x64::memory::Memory;
+pub(crate) fn path_name(mem: &Memory, pointer: u64, wide: bool) -> Result<String, String> {
+    if wide {
+        utf16(mem, pointer)
+    } else {
+        let bytes = string_bytes(mem, pointer, u32::MAX as u64, 1)?;
+        crate::codepage::decode(&bytes[..bytes.len() - 1], 932)
+            .map_err(|e| format!("path codepage error {e}"))
+    }
+}
 pub(crate) fn utf16(mem: &Memory, ptr: u64) -> Result<String, String> {
     let mut units = Vec::new();
     for n in 0..32768u64 {

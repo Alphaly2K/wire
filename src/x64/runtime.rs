@@ -493,13 +493,7 @@ impl Runtime64 {
         Err("unterminated Win64 export/module name".into())
     }
     fn path_name(mem: &Memory, pointer: u64, wide: bool) -> Result<String, String> {
-        if wide {
-            Self::utf16(mem, pointer)
-        } else {
-            let bytes = Self::string_bytes(mem, pointer, u32::MAX as u64, 1)?;
-            crate::codepage::decode(&bytes[..bytes.len() - 1], 932)
-                .map_err(|e| format!("path codepage error {e}"))
-        }
+        crate::win32::x64::text::path_name(mem, pointer, wide)
     }
     fn native_module(&mut self, name: &str, load: bool) -> Result<u64, String> {
         self.modules
@@ -1064,7 +1058,7 @@ impl Runtime64 {
                     }
                 }
             }
-            _ if binding.groups & (1 << 11) != 0 => self.registry_call(mem, name, args)?,
+            _ if binding.groups & (1 << 11) != 0 => self.registry.call(mem, name, args)?,
             _ if binding.control == gateways::ControlImport::MonitorEnumeration => {
                 let enumeration = self.enumerate_monitors(mem, args, &returned)?;
                 if enumeration.calls.is_empty() {
