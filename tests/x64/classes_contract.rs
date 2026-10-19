@@ -2,6 +2,20 @@
 use super::*;
 
 #[test]
+fn common_controls_contract_win64_keeps_initialization_exports_absent() {
+    for dll in [
+        "comctl32.dll",
+        "kernel32.dll",
+        "kernelbase.dll",
+        "user32.dll",
+    ] {
+        for name in ["InitCommonControls", "InitCommonControlsEx"] {
+            assert!(!wire::x64::runtime::import_supported(dll, name));
+        }
+    }
+}
+
+#[test]
 fn classes_contract_win64_keeps_static_aliases_dynamic_scope_and_absent_queries() {
     let (mut mem, mut cpu, mut rt) = startup();
     let text = STACK + 0x100;

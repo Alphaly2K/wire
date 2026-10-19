@@ -2,6 +2,102 @@
 use super::*;
 
 #[test]
+fn common_controls_contract_pe32_keeps_size_fault_provider_and_trace_rules() {
+    let mut v = Vm::new();
+    v.mem.write_u32(DATA, 7).unwrap();
+    v.k("SetLastError", &[77]);
+    assert_eq!(v.call("comctl32.dll", "InitCommonControlsEx", &[DATA]), 0);
+    assert_eq!(v.state.last_error, 87);
+    assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 8);
+    assert!(v.state.user32.classes.is_empty());
+    let line = v.log.recent.back().unwrap();
+    assert!(line.ends_with(") = 0x0"));
+    assert!(!line.contains("[UNIMPLEMENTED]"));
+    v.k("SetLastError", &[77]);
+    let calls = v.log.call_count;
+    assert!(v
+        .try_call("comctl32.dll", "InitCommonControlsEx", &[0x30000])
+        .is_err());
+    assert_eq!(v.state.last_error, 77);
+    assert!(v.state.user32.classes.is_empty());
+    assert_eq!(v.log.call_count, calls);
+    for dll in ["kernel32.dll", "kernelbase.dll", "user32.dll", "gdi32.dll"] {
+        for name in ["InitCommonControls", "InitCommonControlsEx"] {
+            v.k("SetLastError", &[77]);
+            assert_eq!(v.call(dll, name, &[0x30000]), 0);
+            assert_eq!(v.state.last_error, 120);
+            assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 4);
+            assert!(v.state.user32.classes.is_empty());
+            assert!(v.log.recent.back().unwrap().contains(
+                "[UNIMPLEMENTED] ; unknown stdcall arity, assuming cdecl/0-byte cleanup"
+            ));
+        }
+    }
+}
+
+#[test]
+fn common_controls_contract_pe32_keeps_ignored_flags_and_existing_global_classes() {
+    let mut v = Vm::new();
+    v.wide(DATA, "Button");
+    assert_eq!(
+        v.call("user32.dll", "GetClassInfoExW", &[1, DATA, DATA + 128]),
+        1
+    );
+    let button = v.state.user32.classes[&0xc000].fields;
+    // Only dwSize is read. dwICC lies in the next, uncommitted page.
+    let record = DATA + 0xfffc;
+    v.mem.write_u32(record, 8).unwrap();
+    v.k("SetLastError", &[77]);
+    assert_eq!(v.call("comctl32.dll", "InitCommonControlsEx", &[record]), 1);
+    assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 8);
+    assert_eq!(v.state.last_error, 77);
+    assert_eq!(v.state.user32.classes.len(), 10);
+    assert_eq!(v.state.user32.classes[&0xc000].fields, button);
+    let names: Vec<_> = v
+        .state
+        .user32
+        .classes
+        .values()
+        .map(|class| class.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "Button",
+            "Edit",
+            "Static",
+            "ListBox",
+            "ComboBox",
+            "ScrollBar",
+            "SysListView32",
+            "SysTreeView32",
+            "SysTabControl32",
+            "msctls_progress32",
+        ]
+    );
+    let records: Vec<_> = v.state.user32.classes.values().map(|c| c.fields).collect();
+    // Retain the original scalar return even for the void Windows entry.
+    assert_eq!(v.call("comctl32.dll", "InitCommonControls", &[]), 1);
+    assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 256 + 4);
+    assert_eq!(v.state.last_error, 77);
+    assert_eq!(
+        v.state
+            .user32
+            .classes
+            .values()
+            .map(|c| c.fields)
+            .collect::<Vec<_>>(),
+        records
+    );
+    assert!(v
+        .log
+        .recent
+        .back()
+        .unwrap()
+        .ends_with(" ; registered controls with basic window/text state"));
+}
+
+#[test]
 fn classes_contract_pe32_keeps_builtin_lookup_and_provider_scope() {
     let mut v = Vm::new();
     v.wide(DATA, "Button");
