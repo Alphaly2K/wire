@@ -72,6 +72,8 @@ mod painting_contract;
 mod process;
 #[path = "x64/process_startup_contract.rs"]
 mod process_startup_contract;
+#[path = "x64/registry_owner.rs"]
+mod registry_owner;
 #[path = "x64/resources_contract.rs"]
 mod resources_contract;
 #[path = "x64/sections.rs"]
