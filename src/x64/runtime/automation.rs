@@ -1,5 +1,5 @@
 //! Independent BSTR data layout and allocator ownership. No host pointers.
-use super::{Memory, Runtime64, WRITE};
+use super::{allocation::Pages, Memory, WRITE};
 use crate::win32::catalog::BstrApi;
 mod strings;
 pub(super) use strings::Bstrings;
@@ -29,23 +29,29 @@ fn bstr_source(mem: &Memory, p: u64, length: Option<u32>) -> Result<Option<Vec<u
     }
     Ok(None)
 }
-impl Runtime64 {
-    fn bstr_allocate(&mut self, mem: &mut Memory, bytes: &[u8]) -> Result<u64, String> {
-        let base = self.heap_alloc(mem, bytes.len() as u64 + 6)?;
+impl Bstrings {
+    fn allocate(
+        &mut self,
+        mem: &mut Memory,
+        bytes: &[u8],
+        pages: &mut Pages<'_>,
+    ) -> Result<u64, String> {
+        let base = pages.allocate(mem, bytes.len() as u64 + 6)?;
         if base == 0 {
             return Ok(0);
         }
         mem.write_int(base, 4, bytes.len() as u64)?;
         mem.write(base + 4, bytes)?;
         mem.write(base + 4 + bytes.len() as u64, &[0; 2])?;
-        self.bstrings.track(base + 4, base, bytes.len());
+        self.track(base + 4, base, bytes.len());
         Ok(base + 4)
     }
-    pub(super) fn bstr_call(
+    pub(super) fn call(
         &mut self,
         mem: &mut Memory,
         id: BstrApi,
         a: &[u64],
+        pages: &mut Pages<'_>,
     ) -> Result<u64, String> {
         use BstrApi::*;
         match id {
@@ -58,7 +64,7 @@ impl Runtime64 {
                 Ok(if id == Length { length / 2 } else { length })
             }
             Free => {
-                self.bstrings.free(mem, &mut self.allocations, a[0])?;
+                self.free(mem, pages.allocations, a[0])?;
                 Ok(0)
             }
             Allocate | AllocateLength | AllocateBytes => {
@@ -75,7 +81,7 @@ impl Runtime64 {
                 let Some(bytes) = bstr_source(mem, a[0], length)? else {
                     return Ok(0);
                 };
-                self.bstr_allocate(mem, &bytes)
+                self.allocate(mem, &bytes, pages)
             }
             Reallocate | ReallocateLength => {
                 if a[0] == 0 {
@@ -83,10 +89,9 @@ impl Runtime64 {
                 }
                 mem.check(a[0], 8, WRITE)?;
                 let old = mem.read_int(a[0], 8)?;
-                self.bstrings
-                    .validate_replacement(&self.allocations, old, a[0])?;
+                self.validate_replacement(pages.allocations, old, a[0])?;
                 if id == Reallocate && a[1] == 0 {
-                    self.bstrings.free(mem, &mut self.allocations, old)?;
+                    self.free(mem, pages.allocations, old)?;
                     mem.write_int(a[0], 8, 0)?;
                     return Ok(1);
                 }
@@ -102,15 +107,15 @@ impl Runtime64 {
                     return Ok(0);
                 };
                 if id == ReallocateLength && a[1] == 0 && old != 0 {
-                    let keep = self.bstrings.length(old).min(bytes.len());
+                    let keep = self.length(old).min(bytes.len());
                     mem.read(old, &mut bytes[..keep])?;
                 }
                 // Read aliasing source before allocating/freeing the old string.
-                let next = self.bstr_allocate(mem, &bytes)?;
+                let next = self.allocate(mem, &bytes, pages)?;
                 if next == 0 {
                     return Ok(0);
                 }
-                self.bstrings.free(mem, &mut self.allocations, old)?;
+                self.free(mem, pages.allocations, old)?;
                 mem.write_int(a[0], 8, next)?;
                 Ok(1)
             }

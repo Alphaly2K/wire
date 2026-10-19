@@ -567,8 +567,26 @@ impl Runtime64 {
             ApiId::Shell(id) => self.shell_call(mem, id, args),
             ApiId::Exception(_) => unreachable!("exception controls use their bound gateway route"),
             ApiId::Com(id) => self.com_call(mem, id, args),
-            ApiId::Winrt(id) => self.winrt_call(mem, id, args),
-            ApiId::Bstr(id) => self.bstr_call(mem, id, args),
+            ApiId::Winrt(id) => {
+                let last_error = self.teb() + 0x68;
+                let mut pages = allocation::Pages {
+                    next: &mut self.next_alloc,
+                    allocations: &mut self.allocations,
+                    last_error,
+                    trace: &mut self.trace,
+                };
+                self.hstrings.call(mem, id, args, &mut pages)
+            }
+            ApiId::Bstr(id) => {
+                let last_error = self.teb() + 0x68;
+                let mut pages = allocation::Pages {
+                    next: &mut self.next_alloc,
+                    allocations: &mut self.allocations,
+                    last_error,
+                    trace: &mut self.trace,
+                };
+                self.bstrings.call(mem, id, args, &mut pages)
+            }
             ApiId::Variant(_) => unreachable!("Variant helpers have no Win64 binding"),
             ApiId::VersionResource(_) => {
                 unreachable!("file version resources have no Win64 binding")
@@ -2423,9 +2441,6 @@ impl Runtime64 {
         self.trace.call(dll, name, args, ret);
     }
     pub(super) fn trace_note(&mut self, message: String) {
-        if self.trace.len() == 4096 {
-            self.trace.pop_front();
-        }
-        self.trace.push_back(message);
+        self.trace.note(message);
     }
 }

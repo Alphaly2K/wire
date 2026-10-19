@@ -606,3 +606,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 Win64 Local/Global 资源操作
 
 基线 `f65e0bf`。LocalMemory 私有拥有原 local-block 集合，执行 Local/Global 与 FormatMessage 分配提交，只借内存和 Pages；shell argv 与线程描述保持原 copy-out 后登记。两份算法和两个外部登记点核对保持，release 完整 Win64 269、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵，累计契约仍 915。见[Local/Global 边界](../architecture/local-memory.md)，证据 `wire-out/refactoring-2026-10-14/r3-local-memory64-owner-{source-checks,verification}.json`。
+
+## R3 Win64 BSTR/HSTRING 调用
+
+基线 `97acdf5`。原 allocation/call 直接归 Bstrings/Strings，只借内存和 Pages；原 membership/reference 实现未改。Trace 拥有原 note 服务，组合根、分配器和激活诊断共用。四个调用主体、BSTR source、note 和未改 membership 文件核对通过；release 完整 Win64 269、trace 1、fmt/release lib/bin strict Clippy/build 通过。Clippy 首次发现冗余 borrow，移除后通过，失败日志保留。不跑性能或游戏矩阵，累计契约仍 915。证据 `wire-out/refactoring-2026-10-14/r3-string-calls64-{source-checks,verification}.json`。

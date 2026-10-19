@@ -10,6 +10,8 @@
 
 整合后 [Win64 Heap](architecture/heaps.md) 与 [Local/Global](architecture/local-memory.md) 继续收敛：分配算法归各自 owner，仅借页分配、错误槽和诊断资源；LocalMemory 同时拥有 FormatMessage、shell argv 与线程描述的 local 归属。原清零、回收、ReAlloc、copy-out 及失败 trace 顺序保持，两批均通过完整 Win64 269 和必要构建。
 
+[BSTR](architecture/bstr.md) 与 [HSTRING](architecture/winrt.md) 的分配/调用也已归字符串 owner，不再借 Runtime64；原 reference/member 模型、输出顺序和诊断保持，完整 Win64 269、trace 1 及必要构建通过。
+
 ## 重构范围
 
 当前累计冻结包含[对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)、日志、五项 paint、控件初始化、资源、启动信息、环境接口与 CLI 拆分；独立历史证据继续可查。

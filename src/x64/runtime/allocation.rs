@@ -22,10 +22,7 @@ impl Pages<'_> {
         let span = size.max(1).div_ceil(PAGE) * PAGE;
         let address = *self.next;
         if let Err(error) = mem.map(address, span, READ | WRITE) {
-            if self.trace.len() == 4096 {
-                self.trace.pop_front();
-            }
-            self.trace.push_back(format!(
+            self.trace.note(format!(
                 "Win64 allocation failed: address={address:#x} size={size} span={span}: {error}"
             ));
             self.set_error(mem, 8)?;

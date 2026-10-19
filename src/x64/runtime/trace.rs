@@ -74,6 +74,13 @@ pub struct Trace {
     names: BTreeMap<String, BTreeMap<String, Arc<str>>>,
 }
 impl Trace {
+    pub(super) fn note(&mut self, message: String) {
+        if self.len() == 4096 {
+            self.pop_front();
+        }
+        self.push_back(message);
+    }
+
     pub fn len(&self) -> usize {
         self.records.len()
     }

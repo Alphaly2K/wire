@@ -11,6 +11,7 @@
 | `x64::{cpu,memory,pe,process}` | AMD64 指令、内存、装载与进程边界，保持现有 typed 热路径 |
 | `api` | PE32 stub 与 ABI 调用 facade；领域契约将集中在 `win32::catalog`，领域语义逐步拥有独立状态 |
 | `x64::runtime` | Win64 gateway 与服务组合根；已有 BoundImport 冷绑定和 HotImport 热路由，迁移中保留 |
+| `x64::runtime::{heap,local_memory,automation,winrt}` | Heap、LocalMemory、Bstrings、Strings 执行各自分配/调用，只借内存与 Pages 的原页记录、游标、错误槽和诊断；owner 保留独立归属与失败提交顺序 |
 | `fs`、`codepage`、`simd` | 已共享的纯语义或公共服务，继续复用 |
 | `runtime::environment` | 不可变 guest 身份/版本/locale/路径；私有可变环境变量模型，架构 allocator 生命周期独立 |
 | `x64::runtime::environment::Environment` | 私有拥有 Win64 变量和环境块集合，typed adapter 保持页分配、专用释放及故障顺序；PE32 空环境继续使用原 scratch allocator |
@@ -25,7 +26,7 @@
 | `gdiplus`、`gdiplus::calls` | GdiPlus 私有拥有 matrix/allocation/token；普通调用只借内存和 process heap，公开 dispatch 保留兼容签名 |
 | `wmi`、`wmi::calls` | Wmi 私有拥有 COM 对象、引用计数、游标和 vtable；调用只借内存、gateway table、heap 与 BSTR，provider 和 HRESULT 保持 |
 | `dsound`、`dsound::calls` | DSound 私有拥有对象/buffer、通知和 sink；方法只借内存、gateway、heap 及只读事件/窗口/Presenter，pump 与 signal 次序保持 |
-| `main`、`cli` | main 只收集参数并分发；四个命令模块负责参数、静态 image/IR 操作和架构报表，guest 构造与执行委托 Process32/Process64。结构与命令兼容通过，性能待复核，见 [CLI 边界](cli.md) |
+| `main`、`cli` | main 只收集参数并分发；四个命令模块负责参数、静态 image/IR 操作和架构报表，guest 构造与执行委托 Process32/Process64。结构、命令兼容及累计性能复核通过，见 [CLI 边界](cli.md) |
 
 目标依赖方向：CLI → Process → Loader/CPU/ABI adapter；ABI adapter → Win32 领域状态 → 纯算法/host 服务。共享 ISA 语义不依赖 Win32 或 host；host 产出事件，由 Process/USER 消费，host callback 不运行 guest CPU。
 
