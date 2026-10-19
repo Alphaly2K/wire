@@ -586,3 +586,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R4 PE32 callback 执行 owner
 
 基线 `1a93e31`。原 USER invoke 归入 Process，qsort/locale/USER/UnhandledExceptionFilter 共享既有 context 恢复规则；DLL/TLS/SEH/initializer 直接调用 Process，保留各自恢复和控制策略。原 helper、八个调用文件、执行循环与 callback frame 对照保持。初次编译漏迁两个 locale 调用，补齐后 release 完整 Win32 255、IR 31、fmt/release lib/bin strict Clippy/build 通过，失败日志保留；不跑性能或游戏矩阵。见[callback 边界](../architecture/callbacks32.md)，证据 `wire-out/refactoring-2026-10-14/r4-callback-owner32-{source-checks,verification}.json`。
+
+## R3 PE32 USER 队列资源操作
+
+基线 `145a271`。timer、post/host 入队、change bits 与 wake 只借 User32/LastError/Sched/start；Get/Peek/Wait 和对象消息等待共用原 timer/paint prepare。两份准备主体和原 clock/timer/host/queue/mask 策略归一核对保持，队列与取样次序未改。release 完整 Win32 255、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵。见[消息边界](../architecture/messages.md)，证据 `wire-out/refactoring-2026-10-14/r3-user-queues32-{source-checks,verification}.json`。

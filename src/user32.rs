@@ -15,6 +15,7 @@ mod messages;
 mod objects;
 mod paint;
 mod queries;
+mod queues;
 mod window_state;
 pub(crate) use classes::{call as class_call, register_system_class};
 pub use classes::{find_class, WindowClass};
@@ -23,6 +24,7 @@ pub(crate) use dialog::call as dialog_call;
 pub(crate) use messages::call as message_call;
 pub(crate) use paint::call as paint_call;
 pub(crate) use queries::desktop as desktop_query;
+use queues::{clock_ms, message_bits};
 pub(crate) use window_state::call as window_state_call;
 
 pub struct User32 {
@@ -198,31 +200,11 @@ pub fn host_message(
     wparam: u32,
     lparam: u32,
 ) {
-    let Some(w) = state.user32.windows.get(&hwnd) else {
-        return;
-    };
-    let tid = w.tid;
-    let time = clock_ms(state);
-    if !state
-        .user32
-        .keyboard
-        .host([hwnd, message, wparam, lparam, time])
-    {
-        return;
-    }
-    put_message(
-        state,
+    state.user32.host_message(
+        &mut state.last_error,
         sched,
-        tid,
-        Message {
-            hwnd,
-            message,
-            wparam,
-            lparam,
-            time,
-            synthetic_paint: false,
-            hardware_input: true,
-        },
+        state.start,
+        [hwnd, message, wparam, lparam],
     );
 }
 
@@ -340,112 +322,4 @@ pub fn dispatch(
         };
     }
     None
-}
-
-fn clock_ms(state: &ApiState) -> u32 {
-    state.start.elapsed().as_millis() as u32
-}
-
-fn refresh_timers(state: &mut ApiState, tid: u32) {
-    let now = Instant::now();
-    let time = clock_ms(state);
-    let queue = state.user32.queues.entry(tid).or_default();
-    for (&(owner, hwnd, id), timer) in &mut state.user32.timers {
-        if owner == tid && timer.deadline <= now {
-            timer.deadline = now + timer.period;
-            if !queue
-                .iter()
-                .any(|m| m.message == 0x113 && m.hwnd == hwnd && m.wparam == id)
-            {
-                queue.push_back(Message {
-                    hwnd,
-                    message: 0x113,
-                    wparam: id,
-                    lparam: timer.proc,
-                    time,
-                    synthetic_paint: false,
-                    hardware_input: false,
-                });
-                *state.user32.queue_changed.entry(tid).or_default() |= 0x10;
-            }
-        }
-    }
-}
-
-fn put_message(state: &mut ApiState, sched: &mut Sched, tid: u32, message: Message) -> bool {
-    let Some(i) = sched
-        .threads
-        .iter()
-        .position(|t| t.tid == tid && !matches!(t.state, ThreadState::Exited(_)))
-    else {
-        state.last_error = 1444;
-        return false;
-    };
-    let queue = state.user32.queues.entry(tid).or_default();
-    if queue.len() >= 10000 {
-        state.last_error = 1816;
-        return false;
-    }
-    queue.push_back(message);
-    let bits = message_bits(message.message);
-    *state.user32.queue_changed.entry(tid).or_default() |= bits;
-    if matches!(
-        sched.threads[i].state,
-        ThreadState::Waiting {
-            target: WaitTarget::Messages(_),
-            ..
-        }
-    ) || matches!(&sched.threads[i].state, ThreadState::Waiting {
-        target: WaitTarget::MessageObjects(_,_,mask),.. } if *mask & bits != 0)
-    {
-        sched.wake_thread(i, Wake::Retest);
-    }
-    true
-}
-fn message_bits(message: u32) -> u32 {
-    match message {
-        0x100..=0x109 => 1,
-        0x200 => 2,
-        0x201..=0x20e => 4,
-        0x113 => 0x10,
-        0xf => 0x20,
-        0xff => 0x400,
-        _ => 0x108,
-    }
-}
-pub(crate) fn message_wait_ready(state: &mut ApiState, tid: u32, mask: u32, old: bool) -> bool {
-    refresh_timers(state, tid);
-    let time = clock_ms(state);
-    let q = state.user32.queues.entry(tid).or_default();
-    q.retain(|m| {
-        !m.synthetic_paint
-            || state
-                .user32
-                .windows
-                .get(&m.hwnd)
-                .is_some_and(|w| w.update.is_some() && w.style & 0x10000000 != 0)
-    });
-    for (&hwnd, w) in &state.user32.windows {
-        if w.tid == tid
-            && w.style & 0x10000000 != 0
-            && w.update.is_some()
-            && !q.iter().any(|m| m.hwnd == hwnd && m.message == 0xf)
-        {
-            q.push_back(Message {
-                hwnd,
-                message: 0xf,
-                wparam: 0,
-                lparam: 0,
-                time,
-                synthetic_paint: true,
-                hardware_input: false,
-            });
-            *state.user32.queue_changed.entry(tid).or_default() |= 0x20;
-        }
-    }
-    if old {
-        q.iter().any(|m| message_bits(m.message) & mask != 0)
-    } else {
-        state.user32.queue_changed.get(&tid).copied().unwrap_or(0) & mask != 0
-    }
 }

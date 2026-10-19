@@ -1335,7 +1335,9 @@ pub fn dispatch(
                     .map(|i| mem.read_u32(ptr + i * 4).map_err(|e| e.to_string()))
                     .collect::<Result<Vec<_>, _>>()?;
                 let tid = sched.current_tid();
-                let input = crate::user32::message_wait_ready(state, tid, mask, flags & 4 != 0);
+                let input = state
+                    .user32
+                    .message_wait_ready(state.start, tid, mask, flags & 4 != 0);
                 let invalid = hs.iter().any(|h| !state.handles.contains_key(h));
                 let got = if invalid {
                     None

@@ -10,4 +10,8 @@ Win64 冷绑定保存 `ControlImport::Message(id)`。普通消息操作可以返
 
 本批只收敛调用契约和过程控制。PE32 消息/计时器仍由 User32 持有，Win64 仍由进程 User 持有；宿主事件通过已有 owned event 边界进入，guest 参数不转成可直接解引用的宿主指针。
 
+PE32 `user32/queues.rs` 随后收敛队列资源操作：计时器刷新、post/host 入队、change bits 与消息等待唤醒只借 User32、LastError、Sched 和原 start 时间值，不借 ApiState 或 CPU。Get/Peek/Wait 与对象消息等待使用同一 prepare_queue，保留 timer→过期 synthetic paint 清理→新增 paint 的顺序及两次时间取样；仍使用原队列，没有额外分配或查表。输出 fault、keyboard 消费与实际阻塞/回调继续由原调用 adapter 处理。
+
+owner 基线 `145a271`。两份原 prepare 主体归一一致，timer/host/put/mask 策略及时间取样对照保持。完整 release Win32 255、fmt/release lib/bin strict Clippy/build 通过，证据 `wire-out/refactoring-2026-10-14/r3-user-queues32-{source-checks,verification}.json`；不跑性能或游戏矩阵。
+
 独立基线与验收见[本批记录](../reports/refactoring-messages-2026-10-18.md)。

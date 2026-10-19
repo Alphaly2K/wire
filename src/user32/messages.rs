@@ -80,7 +80,7 @@ pub(crate) fn call(
                     message: 0x12,
                     wparam: a[0],
                     lparam: 0,
-                    time: clock_ms(state),
+                    time: clock_ms(state.start),
                     synthetic_paint: false,
                     hardware_input: false,
                 }
@@ -90,47 +90,19 @@ pub(crate) fn call(
                     message: a[1],
                     wparam: a[2],
                     lparam: a[3],
-                    time: clock_ms(state),
+                    time: clock_ms(state.start),
                     synthetic_paint: false,
                     hardware_input: false,
                 }
             };
-            let ok = put_message(state, sched, owner, message);
+            let ok = state
+                .user32
+                .put_message(&mut state.last_error, sched, owner, message);
             value(ok as u32, "queued message".into())
         }
         M::PeekA | M::PeekW | M::GetA | M::GetW | M::Wait => {
             sched.take_wake();
-            refresh_timers(state, tid);
-            let time = clock_ms(state);
-            let queue = state.user32.queues.entry(tid).or_default();
-            queue.retain(|m| {
-                !m.synthetic_paint
-                    || state
-                        .user32
-                        .windows
-                        .get(&m.hwnd)
-                        .is_some_and(|w| w.update.is_some() && w.style & 0x10000000 != 0)
-            });
-            // Paint follows already posted messages and timers; retrieving it
-            // never validates the region. BeginPaint/ValidateRect does that.
-            for (&hwnd, w) in &state.user32.windows {
-                if w.tid == tid
-                    && w.style & 0x10000000 != 0
-                    && w.update.is_some()
-                    && !queue.iter().any(|m| m.hwnd == hwnd && m.message == 0xf)
-                {
-                    queue.push_back(Message {
-                        hwnd,
-                        message: 0xf,
-                        wparam: 0,
-                        lparam: 0,
-                        time,
-                        synthetic_paint: true,
-                        hardware_input: false,
-                    });
-                    *state.user32.queue_changed.entry(tid).or_default() |= 0x20;
-                }
-            }
+            state.user32.prepare_queue(state.start, tid);
             let wait_only = id == M::Wait;
             if !wait_only
                 && ((a[1] != 0 && a[1] != u32::MAX && !state.user32.windows.contains_key(&a[1]))
@@ -278,8 +250,8 @@ pub(crate) fn call(
                             .collect()
                     };
                     for c in chars {
-                        put_message(
-                            state,
+                        state.user32.put_message(
+                            &mut state.last_error,
                             sched,
                             tid,
                             Message {
@@ -287,7 +259,7 @@ pub(crate) fn call(
                                 message: if msg == 0x104 { 0x106 } else { 0x102 },
                                 wparam: c,
                                 lparam: words[3],
-                                time: clock_ms(state),
+                                time: clock_ms(state.start),
                                 synthetic_paint: false,
                                 hardware_input: false,
                             },
