@@ -50,6 +50,7 @@ mod thread_control;
 mod thread_properties;
 mod timers;
 mod tokens;
+mod tracing;
 mod user_objects;
 mod variant;
 mod version;
@@ -110,6 +111,7 @@ pub use thread_control::{ThreadControlApi, THREAD_CONTROL_CONTRACTS};
 pub use thread_properties::{ThreadPropertyApi, THREAD_PROPERTY_CONTRACTS};
 pub use timers::{TimerApi, TIMER_CONTRACTS};
 pub use tokens::{TokenApi, TOKEN_CONTRACTS};
+pub use tracing::{EtwApi, ETW_CONTRACTS};
 pub use user_objects::{UserObjectApi, USER_OBJECT_CONTRACTS};
 pub use variant::{VariantApi, VARIANT_CONTRACTS};
 pub use version::{VersionApi, VERSION_CONTRACTS};
@@ -215,6 +217,7 @@ pub enum ApiId {
     Snapshot(SnapshotApi),
     Token(TokenApi),
     Sid(SidApi),
+    Etw(EtwApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -413,6 +416,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(SNAPSHOT_CONTRACTS.iter())
         .chain(TOKEN_CONTRACTS.iter())
         .chain(SID_CONTRACTS.iter())
+        .chain(ETW_CONTRACTS.iter())
 }
 
 #[cfg(test)]

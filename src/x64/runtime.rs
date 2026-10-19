@@ -211,7 +211,6 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
         && !dll.eq_ignore_ascii_case("kernelbase.dll")
         && !(dll.eq_ignore_ascii_case("shell32.dll")
             && matches!(name, "CommandLineToArgvW" | "SHGetKnownFolderPath"))
-        && !(dll.eq_ignore_ascii_case("advapi32.dll") && tracing::is_call(name))
         && !(dll.eq_ignore_ascii_case("advapi32.dll") && registry::arity(name).is_some())
         && !(dll.eq_ignore_ascii_case("ntdll.dll") && unwind::is_call(name))
         && !(dll.eq_ignore_ascii_case("ntdll.dll") && name == "NtQueryDirectoryFile")
@@ -244,7 +243,6 @@ fn kernel_export(name: &str) -> bool {
         || registry::arity(name).is_some()
         || sockets::is_call(name)
         || sspi::arity(name).is_some()
-        || tracing::is_call(name)
         || dxgi::arity(name).is_some()
         || name.starts_with("BCrypt")
         || name.starts_with("time")
@@ -279,11 +277,6 @@ fn import_arity(name: &str) -> Option<usize> {
         "RtlAddFunctionTable" | "RtlLookupFunctionEntry" => 3,
         "RtlDeleteFunctionTable" => 1,
         "RtlInstallFunctionTableCallback" => 6,
-        "EventRegister" | "EventWrite" | "EventWriteString" | "EventSetInformation" => 4,
-        "EventUnregister" => 1,
-        "EventEnabled" => 2,
-        "EventProviderEnabled" => 3,
-        "EventWriteTransfer" => 6,
         "FormatMessageA" | "FormatMessageW" => 7,
         "SHGetKnownFolderPath" => 4,
         "GetLogicalProcessorInformationEx" => 3,
@@ -332,9 +325,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "RaiseException" => &[0, 1, 2],
         "RtlAddFunctionTable" => &[1],
         "RtlInstallFunctionTableCallback" => &[2],
-        "EventWrite" => &[2],
-        "EventWriteTransfer" => &[4],
-        "EventSetInformation" => &[1, 3],
         "FormatMessageA" | "FormatMessageW" => &[0, 2, 3, 5],
         "SHGetKnownFolderPath" => &[1],
         "GetLogicalProcessorInformationEx" => &[0],
@@ -793,6 +783,7 @@ impl Runtime64 {
                 let last_error = self.teb() + 0x68;
                 crate::win32::x64::sid::call(mem, id, args, last_error)
             }
+            ApiId::Etw(id) => self.etw.call(mem, id, args),
             ApiId::Keyboard(id) => self.keyboard_call(mem, id, args),
             ApiId::Cursor(id) => self.cursor_call(mem, id, args),
             ApiId::Image(id) => self.image_call(mem, id, args),
@@ -1218,7 +1209,6 @@ impl Runtime64 {
                     });
                 }
             },
-            name if tracing::is_call(name) => self.etw.call(mem, name, args)?,
             "FormatMessageA" | "FormatMessageW" => self.format_message(mem, name, args)?,
             _ if matches!(
                 file,

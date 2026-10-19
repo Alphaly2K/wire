@@ -454,3 +454,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R2 SID 九项契约与适配器
 
 独立基线 `1df4813` 固定 provider/ABI、BYTE trace、DWORD index、高位指针、header-only 初始化及两种 guard/fault/error 提交顺序。九项 SidApi 及无状态受检内存逻辑迁出 Runtime64，token owner 删除 codec 后逐字保持，累计 **725 exports**。release 定向 5、debug AMD64 定向 4、catalog 一致性 1、fmt/strict Clippy/build 通过，306 个 src Rust SHA 与 executable SHA 记录完整。按低风险评估不跑性能或游戏/native 矩阵；详见[验收](refactoring-sid-contract-2026-10-20.md)。
+
+## R2 ETW 八项契约
+
+独立基线 `29d2a57` 固定 PE32 REGHANDLE/keyword 双 DWORD slot、Win64 BYTE/U64 trace、DWORD 截断和静态/动态 provider 差异。八项 EtwApi 统一元数据，原 owner 的资源/检查/写出顺序经源码替换核对保持，累计 **733 exports**。所属 release 7、debug AMD64 6、fmt/strict Clippy/build 和短八接口 fixture 通过；token/SID/ETW 三批合并后仅做一次 release 全量检查，664 passed / 7 ignored。307 个 src Rust SHA 与 executable SHA 已记录，不跑性能或无关游戏/native 矩阵；见[验收](refactoring-etw-contract-2026-10-20.md)。

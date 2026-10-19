@@ -1,6 +1,7 @@
 //! ETW provider registration with no tracing sessions. Every provider remains disabled.
 //! No enable callback is sent and no event payload is consumed or claimed to be recorded.
 use super::{Memory, READ, WRITE};
+use crate::win32::catalog::EtwApi;
 use std::collections::BTreeMap;
 
 /// Process-owned registrations. Callback/context carriers remain guest values;
@@ -18,27 +19,14 @@ impl Default for Providers {
     }
 }
 
-pub(super) fn is_call(name: &str) -> bool {
-    matches!(
-        name,
-        "EventRegister"
-            | "EventUnregister"
-            | "EventEnabled"
-            | "EventProviderEnabled"
-            | "EventWrite"
-            | "EventWriteString"
-            | "EventWriteTransfer"
-            | "EventSetInformation"
-    )
-}
 impl Providers {
     pub(super) fn call(
         &mut self,
         mem: &mut Memory,
-        name: &str,
+        id: EtwApi,
         args: &[u64],
     ) -> Result<u64, String> {
-        if name == "EventRegister" {
+        if id == EtwApi::Register {
             mem.check(args[0], 16, READ)?;
             mem.check(args[3], 8, WRITE)?;
             if self.registrations.len() >= 64 || self.next >= 0x7fff7000 {
@@ -53,27 +41,27 @@ impl Providers {
             return Ok(0);
         }
         if !self.registrations.contains_key(&args[0]) {
-            return Ok(if matches!(name, "EventEnabled" | "EventProviderEnabled") {
+            return Ok(if matches!(id, EtwApi::Enabled | EtwApi::ProviderEnabled) {
                 0
             } else {
                 6
             });
         }
-        Ok(match name {
-            "EventUnregister" => {
+        Ok(match id {
+            EtwApi::Unregister => {
                 self.registrations.remove(&args[0]);
                 0
             }
-            "EventEnabled" => {
+            EtwApi::Enabled => {
                 mem.check(args[1], 16, READ)?;
                 0
             }
-            "EventProviderEnabled" => 0,
-            "EventSetInformation" => 50, // Provider traits/controller information are not implemented.
-            "EventWriteString" => 0,
-            "EventWrite" | "EventWriteTransfer" => {
+            EtwApi::ProviderEnabled => 0,
+            EtwApi::SetInformation => 50, // Provider traits/controller information are not implemented.
+            EtwApi::WriteString => 0,
+            EtwApi::Write | EtwApi::WriteTransfer => {
                 mem.check(args[1], 16, READ)?;
-                let (count, data) = if name == "EventWrite" {
+                let (count, data) = if id == EtwApi::Write {
                     (args[2], args[3])
                 } else {
                     (args[4], args[5])
@@ -87,7 +75,7 @@ impl Providers {
                 }
                 0
             }
-            _ => unreachable!(),
+            EtwApi::Register => unreachable!(),
         })
     }
 }
