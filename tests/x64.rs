@@ -94,6 +94,8 @@ mod snapshot_owner;
 mod sspi_contract;
 #[path = "x64/sync.rs"]
 mod sync;
+#[path = "x64/system_paths_contract.rs"]
+mod system_paths_contract;
 #[path = "x64/thread_control.rs"]
 mod thread_control;
 #[path = "x64/thread_properties.rs"]

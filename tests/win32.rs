@@ -93,6 +93,8 @@ mod sid_contract;
 mod snapshot_contract;
 #[path = "win32/sync.rs"]
 mod sync;
+#[path = "win32/system_paths_contract.rs"]
+mod system_paths_contract;
 #[path = "win32/thread_control.rs"]
 mod thread_control;
 #[path = "win32/thread_properties.rs"]
