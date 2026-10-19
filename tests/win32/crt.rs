@@ -3,6 +3,48 @@
 use super::*;
 
 #[test]
+fn crt_pointer_state_keeps_lazy_argv_errno_and_exhaustion_order() {
+    let mut v = Vm::new();
+    let start = v.state.scratch_top;
+    v.k("SetLastError", &[77]);
+    let errno = v.call("msvcrt.dll", "_errno", &[]);
+    assert_eq!(errno, start);
+    v.mem.write_u32(errno, 34).unwrap();
+    assert_eq!(
+        v.call(
+            "msvcrt.dll",
+            "__getmainargs",
+            &[DATA, DATA + 4, DATA + 8, 0, 0]
+        ),
+        0
+    );
+    assert_eq!(v.mem.read_u32(DATA).unwrap(), 1);
+    let argv = v.mem.read_u32(DATA + 4).unwrap();
+    let envp = v.mem.read_u32(DATA + 8).unwrap();
+    assert_eq!(argv, (start + 19) & !15);
+    assert_eq!(envp, argv + 16);
+    assert_eq!(v.mem.read_u32(argv).unwrap(), v.state.cmdline_a);
+    assert_eq!(v.mem.read_u32(argv + 4).unwrap(), 0);
+    assert_eq!(v.mem.read_u32(envp).unwrap(), 0);
+    let top = v.state.scratch_top;
+    assert_eq!(v.call("msvcrt.dll", "_errno", &[]), errno);
+    assert_eq!(v.mem.read_u32(errno).unwrap(), 34);
+    assert_eq!(v.state.build_argv(&mut v.mem), (1, argv, envp));
+    assert_eq!(v.state.scratch_top, top);
+    assert_eq!(v.state.last_error, 77);
+    assert_eq!(v.state.scratch_alloc(&mut v.mem, 1, 3), 0);
+    assert_eq!(v.state.scratch_top, top);
+    assert_eq!(v.state.last_error, 8);
+    assert_eq!(v.state.scratch_alloc(&mut v.mem, 0x01000000 - top, 1), top);
+    assert_eq!(v.state.scratch_top, 0x01000000);
+    // Cached pointers survive arena exhaustion; new allocations fail in place.
+    assert_eq!(v.call("msvcrt.dll", "_errno", &[]), errno);
+    assert_eq!(v.state.build_argv(&mut v.mem), (1, argv, envp));
+    assert_eq!(v.state.scratch_alloc(&mut v.mem, 0, 1), 0);
+    assert_eq!(v.state.scratch_top, 0x01000000);
+}
+
+#[test]
 fn crt_math_returns_x87_values_and_integer_helpers_consume_st0() {
     use rustc_apfloat::{
         ieee::{Double, X87DoubleExtended as Ext},
