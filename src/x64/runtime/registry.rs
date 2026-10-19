@@ -1,6 +1,7 @@
 //! Isolated, process-lifetime guest registry. No host registry or invented installations.
 //! HKCU is writable; system roots are read-only. Persistence and WOW32 views are absent.
 use super::{Memory, WRITE};
+use crate::win32::catalog::RegistryApi;
 use crate::win32::x64::text::path_name;
 use std::collections::BTreeMap;
 type Key = (u32, String);
@@ -43,25 +44,6 @@ impl Registry {
         }
     }
 }
-pub(super) fn arity(name: &str) -> Option<usize> {
-    Some(match name {
-        "RegCreateKeyA" | "RegCreateKeyW" | "RegOpenKeyA" | "RegOpenKeyW" => 3,
-        "RegCreateKeyExA" | "RegCreateKeyExW" => 9,
-        "RegOpenKeyExA" | "RegOpenKeyExW" => 5,
-        "RegQueryValueExA" | "RegQueryValueExW" | "RegSetValueExA" | "RegSetValueExW" => 6,
-        "RegDeleteValueA" | "RegDeleteValueW" => 2,
-        "RegCloseKey" => 1,
-        _ => return None,
-    })
-}
-pub(super) fn dwords(name: &str) -> &'static [usize] {
-    match name {
-        "RegCreateKeyExA" | "RegCreateKeyExW" => &[2, 4, 5],
-        "RegOpenKeyExA" | "RegOpenKeyExW" => &[2, 3],
-        "RegSetValueExA" | "RegSetValueExW" => &[2, 3, 5],
-        _ => &[],
-    }
-}
 fn string_type(kind: u32) -> bool {
     matches!(kind, 1 | 2 | 7)
 }
@@ -69,25 +51,26 @@ impl Registry {
     pub(super) fn call(
         &mut self,
         mem: &mut Memory,
-        name: &str,
+        id: RegistryApi,
         args: &[u64],
     ) -> Result<u64, String> {
+        use RegistryApi::*;
         // Registry APIs return LSTATUS directly and preserve thread LastError.
         let (base, access) = match self.resolve(args[0]) {
             Ok(key) => key,
             Err(status) => return Ok(status),
         };
-        let wide = name.ends_with('W');
-        match name {
-            "RegCloseKey" => {
+        let wide = id.wide();
+        match id {
+            Close => {
                 if root(args[0]).is_none() {
                     self.handles.remove(&args[0]);
                 }
                 Ok(0)
             }
-            name if name.starts_with("RegCreateKey") || name.starts_with("RegOpenKey") => {
-                let create = name.starts_with("RegCreate");
-                let extended = name.contains("Ex");
+            CreateA | CreateW | CreateExA | CreateExW | OpenA | OpenW | OpenExA | OpenExW => {
+                let create = matches!(id, CreateA | CreateW | CreateExA | CreateExW);
+                let extended = matches!(id, CreateExA | CreateExW | OpenExA | OpenExW);
                 let output = args[if extended {
                     if create {
                         7
@@ -182,7 +165,8 @@ impl Registry {
                 self.next += 16;
                 Ok(0)
             }
-            _ => {
+            QueryA | QueryW => unreachable!("legacy registry query is PE32-only"),
+            QueryExA | QueryExW | SetExA | SetExW | DeleteA | DeleteW => {
                 let value = if args[1] == 0 {
                     String::new()
                 } else {
@@ -191,7 +175,7 @@ impl Registry {
                 if value.len() > 16384 {
                     return Ok(87);
                 }
-                if name.starts_with("RegSet") {
+                if matches!(id, SetExA | SetExW) {
                     if access & 2 == 0 {
                         return Ok(5);
                     }
@@ -221,7 +205,7 @@ impl Registry {
                         .insert(value, (kind, data));
                     return Ok(0);
                 }
-                if name.starts_with("RegDelete") {
+                if matches!(id, DeleteA | DeleteW) {
                     if access & 2 == 0 {
                         return Ok(5);
                     }

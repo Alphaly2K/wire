@@ -714,15 +714,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
         add(
             "advapi32.dll",
             &[
-                ("RegOpenKeyExA", 20),
-                ("RegOpenKeyExW", 20),
-                ("RegCloseKey", 4),
-                ("RegQueryValueExA", 24),
-                ("RegQueryValueExW", 24),
-                ("RegSetValueExA", 24),
-                ("RegSetValueExW", 24),
-                ("RegCreateKeyExA", 36),
-                ("RegCreateKeyExW", 36),
                 ("RegDeleteKeyA", 8),
                 ("RegDeleteKeyW", 8),
                 ("RegEnumKeyExA", 32),
@@ -1673,40 +1664,8 @@ pub fn dispatch(
             ret = crate::wsprintf::format(mem, args[0], args[1], varargs, name.ends_with('W'))?;
             note = "checked guest Windows varargs formatting".into();
         }
-        (_, "advapi32.dll", "RegOpenKeyA" | "RegOpenKeyW" | "RegOpenKeyExA" | "RegOpenKeyExW") => {
-            let output = if name.contains("Ex") {
-                args[4]
-            } else {
-                args[2]
-            };
-            mem.write_u32(output, 0).map_err(|e| e.to_string())?;
-            ret = if matches!(args[0], 0x80000000..=0x80000006) {
-                let key = crate::file_api::read_name(mem, args[1], name.ends_with('W'))
-                    .map_err(|e| format!("registry key: error {e}"))?;
-                note = format!("isolated registry: key {key:?} not present");
-                2 // no host registry or fabricated third-party installation
-            } else {
-                6
-            };
-        }
-        (
-            _,
-            "advapi32.dll",
-            "RegQueryValueExA" | "RegQueryValueExW" | "RegQueryValueA" | "RegQueryValueW",
-        ) => {
-            ret = if matches!(args[0], 0x80000000..=0x80000006) {
-                2
-            } else {
-                6
-            };
-            note = "isolated registry: no value / invalid key".into();
-        }
-        (_, "advapi32.dll", "RegCloseKey") => {
-            ret = if matches!(args[0], 0x80000000..=0x80000006) {
-                0
-            } else {
-                6
-            };
+        (Some(crate::win32::catalog::ApiId::Registry(id)), _, _) => {
+            (ret, note) = crate::win32::x86::registry::call(id, &args, mem)?;
         }
         (
             _,

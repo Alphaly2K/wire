@@ -22,6 +22,7 @@ pub(crate) mod nls;
 pub(crate) mod pointer_helpers;
 pub(crate) mod process_queries;
 pub(crate) mod process_startup;
+pub(crate) mod registry;
 pub(crate) mod resources;
 pub(crate) mod system_profile;
 pub(crate) mod thread_properties;

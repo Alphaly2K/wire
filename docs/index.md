@@ -43,6 +43,7 @@
 - [SID 九项契约与适配器](architecture/sids.md)及[验收](reports/refactoring-sid-contract-2026-10-20.md)：显式内存/错误槽、BYTE/DWORD、guard 与提交顺序；累计 725 exports。
 - [ETW 八项统一契约](reports/refactoring-etw-contract-2026-10-20.md)：PE32 U64 参数槽、Win64 typed ID 与 provider 范围；累计 733 exports，三批整合 release 664 项通过。
 - [Win64 注册表所有权](architecture/registry.md)及[验收](reports/refactoring-registry-owner-2026-10-20.md)：独立资源与处理函数、共用名称解码、生命周期及输出顺序；按影响范围验证，无性能矩阵。
+- [注册表 17 项统一契约](reports/refactoring-registry-contract-2026-10-20.md)：两架构受限能力、provider/ABI 与 typed ID，累计 750 exports；领域正确性及构建检查通过。
 - [Win64 Toolhelp 快照](architecture/snapshots.md)及[完整验收](reports/refactoring-snapshot-owner-2026-10-19.md)：冻结线程值、游标/输出故障、保护关闭；19 条协议、180 次执行及独立累计 IR 复核。
 - [Toolhelp 七项统一契约](reports/refactoring-snapshot-contract-2026-10-19.md)：双架构 provider/ABI 和 typed ID；累计 713 exports，17 个计时协议、162 次执行及三对启动前缀，保留代码别名局部成本。
 - [日历、时区与 CPU 计时调用边界](architecture/calendar.md)及[契约验收](reports/refactoring-calendar-2026-10-16.md)：11 项接口、时区独立模块、宿主 CPU 计时、32 条性能路径及局部成本调查。

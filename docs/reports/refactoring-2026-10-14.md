@@ -462,3 +462,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 Win64 注册表
 
 独立基线 `71fef81` 固定单调句柄、累计耗尽、完整身份与查询别名/guard 顺序。处理函数迁入私有 Registry，CP932/UTF-16 名称解码复用 text helper，源码归一核对与原 handler 一致。release Win64 260、debug 注册表 3、fmt/strict Clippy/build 通过；不跑性能或无关游戏/native 矩阵。15 项元数据仍为 legacy，累计仍为 733 exports，见[验收](refactoring-registry-owner-2026-10-20.md)。
+
+## R2 注册表 17 项契约
+
+独立基线 `c872fbb` 固定 provider、PE32 受限能力和 Wine fallback ABI、Win64 DWORD trace 及旧式 QueryValue 缺失。统一契约替换双架构重复声明，PE32 受限处理函数移入适配器，Win64 owner 改用 RegistryApi。相关 release 6、catalog 一致性与 fmt/strict Clippy/build 通过，不做性能矩阵；累计 **750 exports**，见[验收](refactoring-registry-contract-2026-10-20.md)。

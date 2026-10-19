@@ -211,7 +211,6 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
         && !dll.eq_ignore_ascii_case("kernelbase.dll")
         && !(dll.eq_ignore_ascii_case("shell32.dll")
             && matches!(name, "CommandLineToArgvW" | "SHGetKnownFolderPath"))
-        && !(dll.eq_ignore_ascii_case("advapi32.dll") && registry::arity(name).is_some())
         && !(dll.eq_ignore_ascii_case("ntdll.dll") && unwind::is_call(name))
         && !(dll.eq_ignore_ascii_case("ntdll.dll") && name == "NtQueryDirectoryFile")
         && !(dll.eq_ignore_ascii_case("ws2_32.dll") && sockets::is_call(name))
@@ -240,7 +239,6 @@ fn kernel_export(name: &str) -> bool {
     }
     if devices::arity(name).is_some()
         || winhttp::arity(name).is_some()
-        || registry::arity(name).is_some()
         || sockets::is_call(name)
         || sspi::arity(name).is_some()
         || dxgi::arity(name).is_some()
@@ -262,7 +260,6 @@ fn import_arity(name: &str) -> Option<usize> {
         name if sockets::arity(name).is_some() => sockets::arity(name).unwrap(),
         name if devices::arity(name).is_some() => devices::arity(name).unwrap(),
         name if dxgi::arity(name).is_some() => dxgi::arity(name).unwrap(),
-        name if registry::arity(name).is_some() => registry::arity(name).unwrap(),
         name if sspi::arity(name).is_some() => sspi::arity(name).unwrap(),
         "GetSystemDirectoryA"
         | "GetSystemDirectoryW"
@@ -312,7 +309,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         name if sockets::arity(name).is_some() => sockets::dwords(name),
         name if devices::arity(name).is_some() => devices::dwords(name),
         name if dxgi::arity(name).is_some() => dxgi::dwords(name),
-        name if registry::arity(name).is_some() => registry::dwords(name),
         name if sspi::arity(name).is_some() => sspi::dwords(name),
         "GetSystemDirectoryA"
         | "GetSystemDirectoryW"
@@ -355,7 +351,7 @@ fn import_groups(name: &str) -> u32 {
         false, // bound directory-search contracts supply bit 8; preserve bit positions
         false, // WNDPROC controls moved to catalog; preserve bit positions
         false, // scalar window controls moved to catalog; preserve bit positions
-        registry::arity(name).is_some(),
+        false, // registry moved to catalog typed IDs; preserve legacy bit positions
         false, // display moved to catalog typed/control IDs; preserve bit positions
         sspi::arity(name).is_some(),
         sockets::is_call(name),
@@ -778,6 +774,7 @@ impl Runtime64 {
                 crate::win32::x64::sid::call(mem, id, args, last_error)
             }
             ApiId::Etw(id) => self.etw.call(mem, id, args),
+            ApiId::Registry(id) => self.registry.call(mem, id, args),
             ApiId::Keyboard(id) => self.keyboard_call(mem, id, args),
             ApiId::Cursor(id) => self.cursor_call(mem, id, args),
             ApiId::Image(id) => self.image_call(mem, id, args),
@@ -1058,7 +1055,6 @@ impl Runtime64 {
                     }
                 }
             }
-            _ if binding.groups & (1 << 11) != 0 => self.registry.call(mem, name, args)?,
             _ if binding.control == gateways::ControlImport::MonitorEnumeration => {
                 let enumeration = self.enumerate_monitors(mem, args, &returned)?;
                 if enumeration.calls.is_empty() {

@@ -41,6 +41,7 @@ mod paths;
 mod pointer_helpers;
 mod process_queries;
 mod process_startup;
+mod registry;
 mod resources;
 mod sids;
 mod snapshots;
@@ -102,6 +103,7 @@ pub use paths::{PathApi, PATH_CONTRACTS};
 pub use pointer_helpers::{PointerHelperApi, POINTER_HELPER_CONTRACTS};
 pub use process_queries::{ProcessQueryApi, PROCESS_QUERY_CONTRACTS};
 pub use process_startup::{StartupApi, STARTUP_CONTRACTS};
+pub use registry::{RegistryApi, REGISTRY_CONTRACTS};
 pub use resources::{ResourceApi, RESOURCE_CONTRACTS};
 pub use sids::{SidApi, SID_CONTRACTS};
 pub use snapshots::{SnapshotApi, SNAPSHOT_CONTRACTS};
@@ -218,6 +220,7 @@ pub enum ApiId {
     Token(TokenApi),
     Sid(SidApi),
     Etw(EtwApi),
+    Registry(RegistryApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -417,6 +420,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(TOKEN_CONTRACTS.iter())
         .chain(SID_CONTRACTS.iter())
         .chain(ETW_CONTRACTS.iter())
+        .chain(REGISTRY_CONTRACTS.iter())
 }
 
 #[cfg(test)]
