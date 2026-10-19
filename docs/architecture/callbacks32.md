@@ -12,4 +12,6 @@ SEH 使用异常入口保存的上下文，DLL 初始化和 CRT initializer 也�
 
 绘制边界同样使用请求：USER 与 Graphics 准备区域/DC，Process 的 painting 协调器执行擦除并在正常返回后写 PAINTSTRUCT。sent 消息的选择/完成归 USER，monitor 临时输入归 display adapter，两类 callback 都由 Process 执行。见[绘制](painting.md)、[消息](messages.md)和[显示](display.md)。
 
+posted 消息、计时器和键盘转换由 USER 产生值、等待或 dispatch 请求；Process 的 messages 协调器执行阻塞、TIMERPROC 与 WNDPROC。参数读取、change bits、copy-out、移除和键盘消费顺序保持，等待仍在原 API stub 上重新分发。
+
 基线 `1a93e31`。原 caller-context helper、八个调用文件、Process 执行循环/frame 作格式化后源码对照，路径与策略保持。初次编译遗漏两处 locale 调用，补齐后验收；失败日志保留。release 完整 Win32 255、IR 31、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵。证据：`wire-out/refactoring-2026-10-14/r4-callback-owner32-{source-checks,verification}.json`。

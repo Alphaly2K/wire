@@ -1305,7 +1305,7 @@ pub fn dispatch(
             let Some(crate::win32::catalog::ApiId::Message(id)) = binding.typed else {
                 unreachable!();
             };
-            let (outcome, message) = crate::user32::message_call(
+            let (outcome, message) = crate::x86::process::messages::call(
                 id, &args, cpu, mem, api, state, log, sched, max_instr,
             )?;
             match outcome {

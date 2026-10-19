@@ -4,23 +4,13 @@
 
 近期完成 [GDI+](architecture/gdiplus.md)、[WMI](architecture/wmi.md)、[DirectSound](architecture/directsound.md) 与 [D3D9](architecture/d3d9.md) 的资源借用收敛，移除对象调用对整个 ApiState 的依赖及 registry/backend 临时 take；[PE32 线程创建和退出](architecture/thread-control.md)、[USER 资源退休](architecture/window-control.md)、[callback 执行](architecture/callbacks32.md) 与 [消息队列](architecture/messages.md) 也已归入各自 owner。Win64 [TLS/FLS](architecture/locals.md) 私有拥有固定槽和 callback identity，保留 TEB 与析构顺序。
 
-最新阶段整合基线 `1155a3e`：release 全目标 **690 passed / 7 ignored**，all-targets/all-features strict Clippy、**31 项工具测试**及 fmt 通过。真实 Metal 两项已在 D3D9 批次显式通过。按改动影响选择验证，普通契约和资源边界提取不逐批重跑性能或游戏矩阵；执行循环、ISA 算法和 callback frame 保持。见 [验收策略](architecture/validation-tools.md)。
+最新阶段整合覆盖至 PE32 消息请求迁移（上一提交 `d541e63`）：release 全目标 **692 passed / 7 ignored / 21 suites**，all-targets/all-features strict Clippy、build 及 fmt 通过。工具未改，沿用前次 **31 项工具测试**；真实 Metal 两项已在 D3D9 批次显式通过。按改动影响选择验证，普通契约和资源边界提取不逐批重跑性能或游戏矩阵；执行循环、ISA 算法和 callback frame 保持。见 [验收策略](architecture/validation-tools.md)。
 
 历史性能拒绝、回滚与后续复核证据继续保留，见 [API 日志累计验收](reports/refactoring-api-log-2026-10-19.md)、[后台 Unity 渲染结束后的复核](reports/refactoring-post-unity-performance-2026-10-19.md) 和 [CLI 重试](reports/refactoring-cli-followup-2026-10-19.md)。当前结构重构不宣称新的性能提升。
 
-整合后 [Win64 Heap](architecture/heaps.md) 与 [Local/Global](architecture/local-memory.md) 继续收敛：分配算法归各自 owner，仅借页分配、错误槽和诊断资源；LocalMemory 同时拥有 FormatMessage、shell argv 与线程描述的 local 归属。原清零、回收、ReAlloc、copy-out 及失败 trace 顺序保持，两批均通过完整 Win64 269 和必要构建。
+Win64 [Heap](architecture/heaps.md)、[Local/Global](architecture/local-memory.md)、[BSTR](architecture/bstr.md)、[HSTRING](architecture/winrt.md)、[COM](architecture/com-core.md) 与[窗口查询/状态](architecture/window-queries.md)普通调用已收窄到各自 owner 与明确资源借用，保留原分配、输出、LastError 和诊断顺序。
 
-[BSTR](architecture/bstr.md) 与 [HSTRING](architecture/winrt.md) 的分配/调用也已归字符串 owner，不再借 Runtime64；原 reference/member 模型、输出顺序和诊断保持，完整 Win64 269、trace 1 及必要构建通过。
-
-PE32 [窗口状态](architecture/window-state.md) 与[对话框/枚举](architecture/dialog.md) 已使用领域请求：User32 仅准备值、文本消息、通知或窗口快照，Process 执行 callback 并逐次重查目标；整数输出保留先清零、正常返回后解析的顺序。迁移前新增替换/销毁下一窗口的独立重入 fixture；两批均通过完整 Win32 **256**、IR 31 和必要构建。
-
-[跨线程发送接收](architecture/messages.md)与 [monitor callback](architecture/display.md) 也已归 Process；User32 只选择/完成 sent 请求，display adapter 只准备输入。原 sender 退出/唤醒与 callback 后释放临时 block 的顺序保持，新增独立释放 fixture 后完整 Win32 **257**、IR 31 及必要构建通过。
-
-Win64 [COM 普通调用](architecture/com-core.md) 随后收窄：task owner 只借 Pages/内存，其余调用只借 Apartment/内存/Trace；原线程状态和 missing-factory 顺序保持，完整 Win64 269 及必要构建通过。
-
-PE32 [绘制请求](architecture/painting.md) 已分离 USER/DC 准备与 Process 擦除执行；正常返回后写 PAINTSTRUCT，callback fault 后保留已提交区域/DC。完整 Win32 257、IR 31 及必要构建通过。
-
-Win64 [窗口查询](architecture/window-queries.md)与[文本/所有权](architecture/window-state.md)归 User owner，只借内存、当前错误槽和必要的只读 gateway；WNDPROC 验证顺序保持，完整 Win64 269 及必要构建通过。
+PE32 [窗口状态](architecture/window-state.md)、[对话框/枚举](architecture/dialog.md)、[消息](architecture/messages.md)、[monitor](architecture/display.md)和[绘制](architecture/painting.md)均由领域准备请求、Process 执行 callback 或阻塞；原重入重查、临时资源释放、输出 fault 与返回帧策略保持。新增的通知重入和 monitor fault 释放 fixture 已纳入完整 **257 项 Win32** 回归。
 
 ## 重构范围
 

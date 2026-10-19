@@ -634,3 +634,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 Win64 窗口 scalar owner
 
 基线 `e0524d7`。查询、title 与 focus/foreground 操作直接归 User owner，只借内存、当前错误槽和只读 Gateways；coordinator 与 query 共用原 WNDPROC 校验。两份原处理体经明确资源替换后完全一致，保留过程优先校验、HWND/长度/权限/能力/输出顺序与字段宽度。release 完整 Win64 269、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵，累计契约仍 915。证据 `wire-out/refactoring-2026-10-14/r3-user-scalar64-{source-checks,verification}.json`。
+
+## R4 PE32 消息请求与连续迁移整合
+
+基线 `d541e63`。User32 准备 timer/post/filter/MSG 输出/键盘转换、等待期限与 dispatch 请求，不依赖 CPU/ApiState/执行器；Process 执行实际阻塞或 TIMERPROC/WNDPROC，原 sent loop 未改。原 timer/post/filter/output/keyboard、deadline、dispatch 输入和等待/redispatch 主体核对保持。对自 `1155a3e` 后的连续 owner/请求迁移进行阶段整合：release all-targets 692 passed / 7 ignored / 0 failed，21 suites；all-targets/all-features strict Clippy、build 与 fmt 通过。工具未改，前次 31 项结果继续保留；执行循环/frame 未改，不跑性能或游戏矩阵。累计契约仍 915，证据 `wire-out/refactoring-2026-10-14/r4-messages32-{source-checks,verification}.json`。

@@ -22,7 +22,7 @@ pub(crate) use classes::{call as class_call, register_system_class};
 pub use classes::{find_class, WindowClass};
 pub(crate) use control::call as control_call;
 pub(crate) use dialog::{dialog_integer, DialogRequest};
-pub(crate) use messages::call as message_call;
+pub(crate) use messages::MessageRequest;
 pub(crate) use paint::{Operation as PaintingOperation, PaintRequest};
 pub(crate) use queries::desktop as desktop_query;
 use queues::{clock_ms, message_bits};
