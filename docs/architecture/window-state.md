@@ -6,7 +6,7 @@ PE32 的 `user32/window_state.rs` 仅由 User32 准备结果、文本消息或�
 
 PE32 文本操作按 HWND、所属线程顺序验证，然后发送 WM_SETTEXT/WM_GETTEXT/WM_GETTEXTLENGTH。A/W 的文本解释继续由实际 WNDPROC 决定，不能直接读写 `Window.text` 来代替应用程序回调。默认文本处理与尚未迁移的 dialog wrappers 保留原入口和 Wine LGPL 来源说明；旧的普通文本/焦点名称路由与重复 ABI 声明删除。
 
-Win64 的 `x64/runtime/user/window/state.rs` 保留已有 scalar title 和 ownership 行为，使用固定 typed ID。getter 在查询 owner 时不查 HWND；setter 先验证 HWND，NULL 返回 1400 并保持原 owner。普通 A/W 文本分别使用 CP932/UTF-16，capacity 保持 DWORD 截断，输入故障前不更改 title，输出故障保留 Err 和既有返回帧提交策略。
+Win64 的 `x64/runtime/user/window/state.rs` 由 User owner 直接处理，只借内存和当前 LastError 地址，不再依赖 Runtime64；保留已有 scalar title 和 ownership 行为，使用固定 typed ID。getter 在查询 owner 时不查 HWND；setter 先验证 HWND，NULL 返回 1400 并保持原 owner。普通 A/W 文本分别使用 CP932/UTF-16，capacity 保持 DWORD 截断，输入故障前不更改 title，输出故障保留 Err 和既有返回帧提交策略。与窗口查询一起完成 owner 验收，见 `wire-out/refactoring-2026-10-14/r3-user-scalar64-{source-checks,verification}.json`。
 
 独立回归与候选验收状态见[批次记录](../reports/refactoring-window-state-2026-10-18.md)。
 

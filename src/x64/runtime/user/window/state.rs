@@ -1,22 +1,23 @@
 //! Win64 scalar titles and ownership, with their original validation order.
-use super::{Memory, Runtime64};
+use super::super::{Memory, User};
 use crate::win32::catalog::WindowStateApi as S;
 
-impl Runtime64 {
+impl User {
     pub(in crate::x64::runtime) fn window_state_call(
         &mut self,
         mem: &mut Memory,
         id: S,
         args: &[u64],
+        last_error: u64,
     ) -> Result<u64, String> {
         match id {
-            S::Focus => return Ok(self.user.focus),
-            S::Active => return Ok(self.user.active),
-            S::Foreground => return Ok(self.user.foreground),
+            S::Focus => return Ok(self.focus),
+            S::Active => return Ok(self.active),
+            S::Foreground => return Ok(self.foreground),
             _ => {}
         }
-        let Some(w) = self.user.windows.get_mut(&args[0]) else {
-            self.set_error(mem, 1400)?;
+        let Some(w) = self.windows.get_mut(&args[0]) else {
+            mem.write_int(last_error, 4, 1400)?;
             return Ok(0);
         };
         match id {
@@ -24,7 +25,7 @@ impl Runtime64 {
                 let title = if args[1] == 0 {
                     String::new()
                 } else {
-                    Self::path_name(mem, args[1], id.wide())?
+                    crate::win32::x64::text::path_name(mem, args[1], id.wide())?
                 };
                 w.title = title;
                 Ok(1)
@@ -60,13 +61,13 @@ impl Runtime64 {
                 Ok(length as u64)
             }
             S::SetFocus => {
-                let previous = self.user.focus;
-                self.user.focus = args[0];
+                let previous = self.focus;
+                self.focus = args[0];
                 Ok(previous)
             }
             S::SetForeground => {
-                self.user.foreground = args[0];
-                self.user.active = args[0];
+                self.foreground = args[0];
+                self.active = args[0];
                 Ok(1)
             }
             _ => unreachable!("Win64 scalar window-state contract"),

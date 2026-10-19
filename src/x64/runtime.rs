@@ -688,8 +688,15 @@ impl Runtime64 {
             ApiId::GdiDc(id) => self.gdi_dc_call(mem, id, args),
             ApiId::Desktop(id) => self.desktop_call(mem, id, args),
             ApiId::Class(id) => self.class_call(mem, id, args),
-            ApiId::WindowQuery(id) => self.window_query_call(mem, id, args),
-            ApiId::WindowState(id) => self.window_state_call(mem, id, args),
+            ApiId::WindowQuery(id) => {
+                let last_error = self.teb() + 0x68;
+                self.user
+                    .window_query_call(mem, id, args, last_error, &self.gateways)
+            }
+            ApiId::WindowState(id) => {
+                let last_error = self.teb() + 0x68;
+                self.user.window_state_call(mem, id, args, last_error)
+            }
             ApiId::WindowControl(id) => self.window_value_call(mem, id, args),
             ApiId::Message(_) => unreachable!("message calls use explicit process control"),
             ApiId::Dialog(_) => unreachable!("dialog exports remain absent on Win64"),

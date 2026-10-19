@@ -630,3 +630,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R4 PE32 绘制 callback 请求
 
 基线 `94eadcb`。User32 仅借内存/Graphics/LastError，准备值、立即更新与 BeginPaint 请求；Process 执行擦除，在正常返回后写 PAINTSTRUCT。原 HWND/指针验证、DC/clip、消费区域、callback fault 与输出顺序核对保持，Graphics/frame 未改。release 完整 Win32 257、IR 31、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵，累计契约仍 915。RedrawWindow 的真实 gateway 继续为菜单未实现，公开 facade 差异保持。证据 `wire-out/refactoring-2026-10-14/r4-paint32-{source-checks,verification}.json`。
+
+## R3 Win64 窗口 scalar owner
+
+基线 `e0524d7`。查询、title 与 focus/foreground 操作直接归 User owner，只借内存、当前错误槽和只读 Gateways；coordinator 与 query 共用原 WNDPROC 校验。两份原处理体经明确资源替换后完全一致，保留过程优先校验、HWND/长度/权限/能力/输出顺序与字段宽度。release 完整 Win64 269、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵，累计契约仍 915。证据 `wire-out/refactoring-2026-10-14/r3-user-scalar64-{source-checks,verification}.json`。

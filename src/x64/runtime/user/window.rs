@@ -9,6 +9,17 @@ mod position;
 mod queries;
 mod state;
 use crate::win32::catalog::WindowControlApi as W;
+fn valid_procedure(
+    mem: &Memory,
+    gateways: &crate::x64::runtime::gateways::Gateways,
+    procedure: u64,
+) -> Result<(), String> {
+    if gateways.contains_key(&procedure) {
+        Ok(())
+    } else {
+        mem.check(procedure, 1, READ | EXECUTE)
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Operation {
     Create {
@@ -121,11 +132,7 @@ impl Runtime64 {
         self.user.events.drain(..).map(|m| m.event).collect()
     }
     fn valid_procedure(&self, mem: &Memory, procedure: u64) -> Result<(), String> {
-        if self.gateways.contains_key(&procedure) {
-            Ok(())
-        } else {
-            mem.check(procedure, 1, READ | EXECUTE)
-        }
+        valid_procedure(mem, &self.gateways, procedure)
     }
     fn prepare_window_callback(&self, mem: &Memory, returned: &Cpu64) -> Result<(), String> {
         if !self.threads.enabled {

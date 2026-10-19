@@ -1,26 +1,29 @@
 //! Win64 scalar queries; callbacks stay in the parent window coordinator.
-use super::super::{write_rect, Memory, Runtime64};
+use super::super::{write_rect, Memory, User};
+use crate::x64::runtime::gateways::Gateways;
 use crate::{win32::catalog::WindowQueryApi as Q, x64::memory::WRITE};
 
-impl Runtime64 {
+impl User {
     pub(in crate::x64::runtime) fn window_query_call(
         &mut self,
         mem: &mut Memory,
         id: Q,
         args: &[u64],
+        last_error: u64,
+        gateways: &Gateways,
     ) -> Result<u64, String> {
         if id.pointer() && id.setting() && args[1] as u32 as i32 == -4 {
             if args[2] == 0 {
-                self.set_error(mem, 87)?;
+                mem.write_int(last_error, 4, 87)?;
                 return Ok(0);
             }
-            self.valid_procedure(mem, args[2])?;
+            super::valid_procedure(mem, gateways, args[2])?;
         }
         if id == Q::IsWindow {
-            return Ok(self.user.windows.contains_key(&args[0]) as u64);
+            return Ok(self.windows.contains_key(&args[0]) as u64);
         }
-        let Some(w) = self.user.windows.get_mut(&args[0]) else {
-            self.set_error(mem, 1400)?;
+        let Some(w) = self.windows.get_mut(&args[0]) else {
+            mem.write_int(last_error, 4, 1400)?;
             return Ok(0);
         };
         match id {
@@ -43,12 +46,12 @@ impl Runtime64 {
             Q::Placement => {
                 // WINDOWPLACEMENT uses only DWORD/POINT/RECT fields, 44 bytes.
                 if args[1] == 0 || mem.read_int(args[1], 4)? != 44 {
-                    self.set_error(mem, 87)?;
+                    mem.write_int(last_error, 4, 87)?;
                     return Ok(0);
                 }
                 mem.check(args[1], 44, WRITE)?;
                 if w.style & 0x21000000 != 0 {
-                    self.set_error(mem, 50)?;
+                    mem.write_int(last_error, 4, 50)?;
                     return Ok(0);
                 }
                 let mut bytes = [0; 44];
@@ -115,7 +118,7 @@ impl Runtime64 {
                         .copy_from_slice(&w.extra[index as usize..index as usize + width]);
                     u64::from_le_bytes(bytes)
                 } else {
-                    self.set_error(mem, 1413)?;
+                    mem.write_int(last_error, 4, 1413)?;
                     return Ok(0);
                 };
                 if id.setting() {
