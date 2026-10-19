@@ -93,6 +93,8 @@ mod sync;
 mod thread_control;
 #[path = "win32/thread_properties.rs"]
 mod thread_properties;
+#[path = "win32/token_contract.rs"]
+mod token_contract;
 #[path = "win32/user.rs"]
 mod user;
 #[path = "win32/user_objects_contract.rs"]

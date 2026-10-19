@@ -27,3 +27,19 @@ def x64(work):
     result[0x3c0:0x3cd] = b'advapi32.dll\0'
     return result, dict(rax=hex(5 * n + 1), retired=12 * n + 20, work=13 * n + 21,
                         api_calls=n + 1, startup=True)
+
+
+def x86(work, pe32):
+    # ABI-only query consumes all five arguments, returns zero and writes nothing.
+    n = max(1, work // 9)
+    code = bytearray.fromhex('57 56 bf') + struct.pack('<I', n)
+    code += bytes.fromhex('31f6')
+    loop = len(code)
+    code += bytes.fromhex('6a01 6a04 6a01 6a14 6a01 ff15') + struct.pack('<I', 0x401180)
+    code += bytes.fromhex('01c6 4f')
+    at = len(code)
+    code += bytes.fromhex('0f85') + struct.pack('<i', loop - at - 6)
+    code += bytes.fromhex('89f0 5e 5f cc')
+    result = image(code, pe32, 4, [b'GetTokenInformation\0'])
+    result[0x3c0:0x3cd] = b'advapi32.dll\0'
+    return result, dict(eax=0, retired=9 * n + 7, api_calls=n)

@@ -88,6 +88,8 @@ mod sync;
 mod thread_control;
 #[path = "x64/thread_properties.rs"]
 mod thread_properties;
+#[path = "x64/token_contract.rs"]
+mod token_contract;
 #[path = "x64/token_owner.rs"]
 mod token_owner;
 #[path = "x64/tracing_owner.rs"]
