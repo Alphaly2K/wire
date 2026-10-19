@@ -121,7 +121,7 @@ pub struct Runtime64 {
     pipes: pipes::Pipes,
     files: files::Files,
     mappings: mapping::Mappings,
-    winsock_refs: u32,
+    winsock: sockets::Winsock,
     security: sspi::Security,
     graphics: dxgi::Graphics,
     registry: registry::Registry,
@@ -183,7 +183,7 @@ pub enum Control {
 /// certify every argument, COM method or optional backend capability.
 pub fn import_supported(dll: &str, name: &str) -> bool {
     use crate::win32::catalog::{resolve, Architecture, Resolution};
-    let name = bstr_symbol(dll, dxgi::symbol(dll, sockets::symbol(dll, name)));
+    let name = normalize_symbol(dll, name);
     match resolve(Architecture::X64, dll, name) {
         Resolution::Bound(contract) => {
             return contract.execution(Architecture::X64)
@@ -198,16 +198,12 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
     if name == "NtQueryDirectoryFile" && !dll.eq_ignore_ascii_case("ntdll.dll") {
         return false;
     }
-    if sockets::is_call(name) && !dll.eq_ignore_ascii_case("ws2_32.dll") {
-        return false;
-    }
     if !dll.eq_ignore_ascii_case("kernel32.dll")
         && !dll.eq_ignore_ascii_case("kernelbase.dll")
         && !(dll.eq_ignore_ascii_case("shell32.dll")
             && matches!(name, "CommandLineToArgvW" | "SHGetKnownFolderPath"))
         && !(dll.eq_ignore_ascii_case("ntdll.dll") && unwind::is_call(name))
         && !(dll.eq_ignore_ascii_case("ntdll.dll") && name == "NtQueryDirectoryFile")
-        && !(dll.eq_ignore_ascii_case("ws2_32.dll") && sockets::is_call(name))
         && !(dll.eq_ignore_ascii_case("dxgi.dll") && dxgi::export(name))
         && !(dll.eq_ignore_ascii_case("d3d12.dll") && dxgi::d3d12_export(name))
         && !(dll.eq_ignore_ascii_case("d3d11.dll") && dxgi::d3d11_export(name))
@@ -223,8 +219,7 @@ fn kernel_export(name: &str) -> bool {
             .lookup_dlls(crate::win32::catalog::Architecture::X64)
             .contains(&"kernel32.dll");
     }
-    if sockets::is_call(name)
-        || dxgi::arity(name).is_some()
+    if dxgi::arity(name).is_some()
         || name.starts_with("time")
         || name == "NtQueryDirectoryFile"
         || matches!(name, "CommandLineToArgvW" | "SHGetKnownFolderPath")
@@ -238,7 +233,6 @@ fn import_arity(name: &str) -> Option<usize> {
         return Some(contract.parameters.len());
     }
     Some(match name {
-        name if sockets::arity(name).is_some() => sockets::arity(name).unwrap(),
         name if dxgi::arity(name).is_some() => dxgi::arity(name).unwrap(),
         "GetSystemDirectoryA"
         | "GetSystemDirectoryW"
@@ -275,14 +269,16 @@ fn import_arity(name: &str) -> Option<usize> {
 }
 
 fn normalize_symbol<'a>(dll: &str, name: &'a str) -> &'a str {
-    bstr_symbol(dll, dxgi::symbol(dll, sockets::symbol(dll, name)))
+    bstr_symbol(
+        dll,
+        dxgi::symbol(dll, crate::win32::catalog::winsock_symbol(dll, name)),
+    )
 }
 fn import_dwords(name: &str) -> &'static [usize] {
     if let Some(contract) = crate::win32::catalog::by_name(name) {
         return contract.win64_dwords();
     }
     match name {
-        name if sockets::arity(name).is_some() => sockets::dwords(name),
         name if dxgi::arity(name).is_some() => dxgi::dwords(name),
         "GetSystemDirectoryA"
         | "GetSystemDirectoryW"
@@ -290,7 +286,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         | "GetWindowsDirectoryW"
         | "GetSystemWindowsDirectoryA"
         | "GetSystemWindowsDirectoryW" => &[1],
-        "WSASetLastError" => &[0],
         "AddVectoredExceptionHandler" => &[0],
         "RaiseException" => &[0, 1, 2],
         "RtlAddFunctionTable" => &[1],
@@ -325,7 +320,7 @@ fn import_groups(name: &str) -> u32 {
         false, // registry moved to catalog typed IDs; preserve legacy bit positions
         false, // display moved to catalog typed/control IDs; preserve bit positions
         false, // SSPI moved to catalog typed IDs; preserve legacy bit positions
-        sockets::is_call(name),
+        false, // Winsock moved to catalog typed/control IDs; preserve bit positions
         false, // timers moved to catalog typed IDs; preserve legacy bit positions
     ];
     predicates
@@ -416,7 +411,7 @@ impl Runtime64 {
             pipes: pipes::Pipes::default(),
             files: files::Files::default(),
             mappings: mapping::Mappings::default(),
-            winsock_refs: 0,
+            winsock: sockets::Winsock::default(),
             security: sspi::Security::default(),
             graphics: dxgi::Graphics::default(),
             registry: registry::Registry::default(),
@@ -764,6 +759,11 @@ impl Runtime64 {
                 crate::win32::x64::winhttp::call(mem, id, args, last_error)
             }
             ApiId::Device(id) => self.device_call(mem, id, args),
+            ApiId::Winsock(id) => {
+                let last_error = self.teb() + 0x68;
+                self.winsock
+                    .call(mem, id, args, last_error, &mut self.events)
+            }
             ApiId::Keyboard(id) => self.keyboard_call(mem, id, args),
             ApiId::Cursor(id) => self.cursor_call(mem, id, args),
             ApiId::Image(id) => self.image_call(mem, id, args),
@@ -1104,9 +1104,6 @@ impl Runtime64 {
                         .wake_address(args[0], id == AddressWaitApi::WakeAll);
                     0
                 }
-            }
-            _ if binding.groups & (1 << 14) != 0 && name != "WSAWaitForMultipleEvents" => {
-                self.winsock_call(mem, name, args)?
             }
             "AddVectoredExceptionHandler" => {
                 if args[1] == 0 {
@@ -2341,14 +2338,14 @@ impl Runtime64 {
                 }
             }
             _ if matches!(binding.control, gateways::ControlImport::Wait(_))
-                || name == "WSAWaitForMultipleEvents" =>
+                || binding.control == gateways::ControlImport::WinsockWait =>
             {
                 let wait = match binding.control {
                     gateways::ControlImport::Wait(id) => Some(id),
                     _ => None,
                 };
                 let winsock = wait.is_none();
-                if winsock && self.winsock_refs == 0 {
+                if winsock && !self.winsock.initialized() {
                     self.set_error(mem, 10093)?;
                     returned.regs[0] = u32::MAX as u64;
                     *cpu = returned;

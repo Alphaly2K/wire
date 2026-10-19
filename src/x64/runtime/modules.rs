@@ -1,5 +1,5 @@
 //! Queries describe loaded guest images and the logical built-in service providers.
-use super::{dxgi, kernel_export, sockets, unwind};
+use super::{dxgi, kernel_export, unwind};
 use super::{Memory, Runtime64, WRITE};
 
 /// Module adapters request control; the gateway owns CPU, trace and count commits.
@@ -115,7 +115,9 @@ impl Runtime64 {
                     };
                     let function = if args[1] <= 65535 {
                         if module.eq_ignore_ascii_case("ws2_32.dll") {
-                            sockets::ordinal(&symbol).unwrap_or(&symbol).to_owned()
+                            crate::win32::catalog::winsock_ordinal(&symbol)
+                                .unwrap_or(&symbol)
+                                .to_owned()
                         } else if module.eq_ignore_ascii_case("d3d12.dll") {
                             dxgi::symbol(module, &symbol).to_owned()
                         } else if module.eq_ignore_ascii_case("oleaut32.dll") {
@@ -145,7 +147,6 @@ impl Runtime64 {
                             "ntdll.dll" | "kernel32.dll" | "kernelbase.dll"
                         ) && unwind::is_call(&function))
                         || (provider == "ntdll.dll" && function == "NtQueryDirectoryFile")
-                        || (provider == "ws2_32.dll" && sockets::is_call(&function))
                         || (provider == "dxgi.dll" && dxgi::export(&function))
                         || (provider == "d3d12.dll" && dxgi::d3d12_export(&function))
                         || (provider == "d3d11.dll" && dxgi::d3d11_export(&function))

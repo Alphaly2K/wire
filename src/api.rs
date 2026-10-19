@@ -793,15 +793,7 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("StrStrIW", 8),
             ],
         );
-        add(
-            "ws2_32.dll",
-            &[
-                ("WSAStartup", 8),
-                ("WSACleanup", 0),
-                ("socket", 12),
-                ("closesocket", 4),
-            ],
-        );
+        add("ws2_32.dll", &[("closesocket", 4)]);
         add(
             "mpr.dll",
             &[("WNetGetUniversalNameA", 16), ("WNetGetUniversalNameW", 16)],

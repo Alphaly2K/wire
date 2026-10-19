@@ -27,6 +27,7 @@ pub(crate) enum ControlImport {
     MonitorEnumeration,
     Module(crate::win32::catalog::ModuleApi),
     Wait(crate::win32::catalog::WaitApi),
+    WinsockWait,
     Delay(crate::win32::catalog::DelayApi),
     InlineSync(crate::win32::catalog::InlineSyncApi),
     CriticalSection(crate::win32::catalog::CriticalSectionApi),
@@ -118,6 +119,7 @@ impl BoundImport {
                 crate::win32::catalog::ApiId::Module(id) if id.control() => None,
                 crate::win32::catalog::ApiId::Display(crate::win32::catalog::DisplayApi::Monitors) => None,
                 crate::win32::catalog::ApiId::Wait(_) => None,
+                crate::win32::catalog::ApiId::Winsock(crate::win32::catalog::WinsockApi::WaitEvents) => None,
                 crate::win32::catalog::ApiId::Delay(_) => None,
                 crate::win32::catalog::ApiId::InlineSync(_) => None,
                 crate::win32::catalog::ApiId::CriticalSection(_) => None,
@@ -136,6 +138,7 @@ impl BoundImport {
                 }
                 Some(crate::win32::catalog::ApiId::Display(crate::win32::catalog::DisplayApi::Monitors)) => ControlImport::MonitorEnumeration,
                 Some(crate::win32::catalog::ApiId::Wait(id)) => ControlImport::Wait(id),
+                Some(crate::win32::catalog::ApiId::Winsock(crate::win32::catalog::WinsockApi::WaitEvents)) => ControlImport::WinsockWait,
                 Some(crate::win32::catalog::ApiId::Delay(id)) => ControlImport::Delay(id),
                 Some(crate::win32::catalog::ApiId::InlineSync(id)) => ControlImport::InlineSync(id),
                 Some(crate::win32::catalog::ApiId::CriticalSection(id)) => ControlImport::CriticalSection(id),

@@ -1,94 +1,57 @@
 //! Winsock startup, events and address conversion. No network socket backend.
 //! Public ABI/behavior checked against fixed Wine 10.0 headers/protocol tests;
 //! address conversion is independently implemented with Rust's IP value types.
-use super::{Memory, Runtime64, WRITE};
+use super::{events::Events, Memory, WRITE};
+use crate::win32::{catalog::WinsockApi, x64::text::string_bytes};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-pub(super) fn ordinal(name: &str) -> Option<&'static str> {
-    match name.strip_prefix('#')?.parse::<u16>().ok()? {
-        8 => Some("htonl"),
-        9 => Some("htons"),
-        14 => Some("ntohl"),
-        15 => Some("ntohs"),
-        23 => Some("socket"),
-        111 => Some("WSAGetLastError"),
-        112 => Some("WSASetLastError"),
-        115 => Some("WSAStartup"),
-        116 => Some("WSACleanup"),
-        _ => None,
-    }
-}
-pub(super) fn symbol<'a>(dll: &str, name: &'a str) -> &'a str {
-    if dll.eq_ignore_ascii_case("ws2_32.dll") {
-        ordinal(name).unwrap_or(name)
-    } else {
-        name
-    }
-}
-pub(super) fn is_call(name: &str) -> bool {
-    arity(name).is_some()
-}
-pub(super) fn arity(name: &str) -> Option<usize> {
-    Some(match name {
-        "WSAStartup" => 2,
-        "WSACleanup" | "WSAGetLastError" | "WSACreateEvent" => 0,
-        "WSASetLastError" | "WSACloseEvent" | "WSASetEvent" | "WSAResetEvent" | "htonl"
-        | "htons" | "ntohl" | "ntohs" => 1,
-        "WSAWaitForMultipleEvents" => 5,
-        "inet_pton" | "InetPtonW" => 3,
-        "inet_ntop" | "InetNtopW" => 4,
-        "socket" => 3,
-        "WSASocketA" | "WSASocketW" => 6,
-        _ => return None,
-    })
-}
-pub(super) fn dwords(name: &str) -> &'static [usize] {
-    match name {
-        "WSASetLastError" | "htonl" | "htons" | "ntohl" | "ntohs" | "inet_pton" | "InetPtonW"
-        | "inet_ntop" | "InetNtopW" => &[0],
-        "WSAWaitForMultipleEvents" => &[0, 2, 3, 4],
-        "socket" => &[0, 1, 2],
-        "WSASocketA" | "WSASocketW" => &[0, 1, 2, 4, 5],
-        _ => &[],
-    }
+#[derive(Default)]
+pub(super) struct Winsock {
+    references: u32,
 }
 
-impl Runtime64 {
-    pub(super) fn winsock_call(
+impl Winsock {
+    pub(super) fn initialized(&self) -> bool {
+        self.references != 0
+    }
+
+    pub(super) fn call(
         &mut self,
         mem: &mut Memory,
-        name: &str,
+        id: WinsockApi,
         args: &[u64],
+        last_error: u64,
+        events: &mut Events,
     ) -> Result<u64, String> {
-        match name {
-            "socket" | "WSASocketA" | "WSASocketW" => {
+        use WinsockApi::*;
+        match id {
+            Socket | SocketA | SocketW => {
                 // This isolated Winsock profile has no installed network
                 // transport provider. Events and address values remain usable,
                 // but no address family can create a network SOCKET.
-                let error = if self.winsock_refs == 0 {
+                let error = if self.references == 0 {
                     10093 // WSANOTINITIALISED
-                } else if name != "socket" && args[3] != 0 {
+                } else if id != Socket && args[3] != 0 {
                     10045 // WSAEOPNOTSUPP: custom protocol/duplicate socket info.
                 } else {
                     10047 // WSAEAFNOSUPPORT: no transport provider for any family.
                 };
-                self.set_error(mem, error)?;
+                mem.write_int(last_error, 4, error)?;
                 Ok(u64::MAX) // INVALID_SOCKET is pointer-width on Win64.
             }
-            "htonl" | "ntohl" => Ok((args[0] as u32).swap_bytes() as u64),
-            "htons" | "ntohs" => Ok((args[0] as u16).swap_bytes() as u64),
-            "inet_pton" | "InetPtonW" => {
+            Htonl | Ntohl => Ok((args[0] as u32).swap_bytes() as u64),
+            Htons | Ntohs => Ok((args[0] as u16).swap_bytes() as u64),
+            PtonA | PtonW => {
                 if args[1] == 0 || args[2] == 0 {
-                    self.set_error(mem, 10014)?; // WSAEFAULT precedes family validation.
+                    mem.write_int(last_error, 4, 10014)?; // WSAEFAULT precedes family validation.
                     return Ok(u32::MAX as u64);
                 }
                 if !matches!(args[0], 2 | 23) {
-                    self.set_error(mem, 10047)?; // Windows AF_INET6 is 23, not host AF_INET6.
+                    mem.write_int(last_error, 4, 10047)?; // Windows AF_INET6 is 23, not host AF_INET6.
                     return Ok(u32::MAX as u64);
                 }
-                let wide = name.ends_with('W');
-                let input =
-                    Self::string_bytes(mem, args[1], u32::MAX as u64, if wide { 2 } else { 1 })?;
+                let wide = id == PtonW;
+                let input = string_bytes(mem, args[1], u32::MAX as u64, if wide { 2 } else { 1 })?;
                 let text = if wide {
                     let units: Vec<_> = input[..input.len() - 2]
                         .as_chunks::<2>()
@@ -113,23 +76,23 @@ impl Runtime64 {
                     Ok(1)
                 } else {
                     if wide {
-                        self.set_error(mem, 10022)?; // ANSI syntax failure preserves LastError.
+                        mem.write_int(last_error, 4, 10022)?; // ANSI syntax failure preserves LastError.
                     }
                     Ok(0)
                 }
             }
-            "inet_ntop" | "InetNtopW" => {
-                let wide = name.ends_with('W');
+            NtopA | NtopW => {
+                let wide = id == NtopW;
                 let invalid = if wide { 87 } else { 0xc000000d }; // Win10 ANSI returns NTSTATUS.
                 if !wide && args[2] == 0 {
-                    self.set_error(mem, invalid)?;
+                    mem.write_int(last_error, 4, invalid)?;
                     return Ok(0);
                 }
                 let count = match args[0] {
                     2 => 4,
                     23 => 16,
                     _ => {
-                        self.set_error(mem, 10047)?;
+                        mem.write_int(last_error, 4, 10047)?;
                         return Ok(0);
                     }
                 };
@@ -150,7 +113,7 @@ impl Runtime64 {
                     Ipv6Addr::from(address).to_string()
                 };
                 if args[2] == 0 || args[3] < text.len() as u64 + 1 {
-                    self.set_error(mem, invalid)?;
+                    mem.write_int(last_error, 4, invalid)?;
                     return Ok(0);
                 }
                 let bytes: Vec<_> = if wide {
@@ -164,37 +127,35 @@ impl Runtime64 {
                 mem.write(args[2], &bytes)?;
                 Ok(args[2])
             }
-            "WSACreateEvent" => {
-                if self.winsock_refs == 0 {
-                    self.set_error(mem, 10093)?;
+            CreateEvent => {
+                if self.references == 0 {
+                    mem.write_int(last_error, 4, 10093)?;
                     return Ok(0);
                 }
-                match self.events.create(true, false, None, 0x1f0003) {
+                match events.create(true, false, None, 0x1f0003) {
                     Ok((handle, _)) => Ok(handle),
                     Err(_) => {
-                        self.set_error(mem, 10055)?;
+                        mem.write_int(last_error, 4, 10055)?;
                         Ok(0)
                     }
                 }
             }
-            "WSACloseEvent" => {
-                if self.events.close(args[0]) {
+            CloseEvent => {
+                if events.close(args[0]) {
                     Ok(1)
                 } else {
-                    self.set_error(mem, 6)?;
+                    mem.write_int(last_error, 4, 6)?;
                     Ok(0)
                 }
             }
-            "WSASetEvent" | "WSAResetEvent" => {
-                match self.events.change(args[0], name == "WSASetEvent") {
-                    Ok(v) => Ok(v),
-                    Err(e) => {
-                        self.set_error(mem, e)?;
-                        Ok(0)
-                    }
+            SetEvent | ResetEvent => match events.change(args[0], id == SetEvent) {
+                Ok(v) => Ok(v),
+                Err(e) => {
+                    mem.write_int(last_error, 4, e as u64)?;
+                    Ok(0)
                 }
-            }
-            "WSAStartup" => {
+            },
+            Startup => {
                 let requested = args[0] as u16;
                 let major = requested as u8;
                 let minor = (requested >> 8) as u8;
@@ -204,7 +165,7 @@ impl Runtime64 {
                     // The unused vendor pointer and tail padding are untouched.
                     mem.check(args[1], 408, WRITE)?;
                 }
-                let next = self.winsock_refs.checked_add(1);
+                let next = self.references.checked_add(1);
                 if major != 0 && args[1] != 0 && next.is_none() {
                     return Ok(10067); // WSAEPROCLIM, no reference/output mutation.
                 }
@@ -234,25 +195,25 @@ impl Runtime64 {
                 } else if args[1] == 0 {
                     Ok(10014) // WSAEFAULT
                 } else {
-                    self.winsock_refs = next.unwrap();
+                    self.references = next.unwrap();
                     Ok(0)
                 }
             }
-            "WSACleanup" => {
-                if self.winsock_refs == 0 {
-                    self.set_error(mem, 10093)?; // WSANOTINITIALISED
+            Cleanup => {
+                if self.references == 0 {
+                    mem.write_int(last_error, 4, 10093)?; // WSANOTINITIALISED
                     Ok(u32::MAX as u64) // SOCKET_ERROR, signed 32-bit return.
                 } else {
-                    self.winsock_refs -= 1;
+                    self.references -= 1;
                     Ok(0)
                 }
             }
-            "WSAGetLastError" => mem.read_int(self.teb() + 0x68, 4),
-            "WSASetLastError" => {
-                self.set_error(mem, args[0] as u32)?;
+            GetLastError => mem.read_int(last_error, 4),
+            SetLastError => {
+                mem.write_int(last_error, 4, args[0] as u32 as u64)?;
                 Ok(0)
             }
-            _ => unreachable!(),
+            WaitEvents => unreachable!("Winsock waits are process-controlled"),
         }
     }
 }

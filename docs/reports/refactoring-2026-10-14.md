@@ -482,3 +482,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R2/R3 Devices 契约与资源所有权
 
 24 项 DeviceApi 统一 HID/SetupAPI/user32 精确 provider、arity 与 DWORD，handler 迁入设备集合与通知订阅 owner。基线 `e32efe3` 的 24 项元数据逐项核对一致，原处理函数经 typed ID、owner、窄借用与格式归一后保持一致。相关 release Win64 2、通知单元 1、catalog 一致性及 fmt/release lib/bin strict Clippy/build 通过；既有检查覆盖空设备集合、HID status/输出、通知生命周期与窗口销毁清理。按低风险评估不新增重复测试或性能矩阵。累计 **816 exports**，见[边界与验收](../architecture/devices.md)。
+
+## R2/R3 Winsock 契约与启动状态
+
+20 项声明及九项 Win64 序数归一移入 catalog，启动引用计数及标量 handler 迁入私有 Winsock owner。共用事件和等待/APC/CPU 提交仍由原所有者负责，删除重复 ABI、provider 和字符串分组。元数据、序数、标量 handler 及等待主体对照基线 `4b5e327` 保持一致。相关 release network 7、PE32 ABI-only/未知序数回归 1、catalog 一致性及 fmt/release lib/bin strict Clippy/build 通过，不做性能计时。累计 **836 exports**，见[边界与验收](../architecture/winsock.md)。

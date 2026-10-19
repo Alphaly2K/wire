@@ -65,6 +65,7 @@ mod window_queries;
 mod window_state;
 mod winhttp;
 mod winrt;
+mod winsock;
 pub use address_waits::{AddressWaitApi, ADDRESS_WAIT_CONTRACTS};
 pub use basic_strings::{BasicStringApi, BASIC_STRING_CONTRACTS};
 pub use bcrypt::{BcryptApi, BCRYPT_CONTRACTS};
@@ -131,6 +132,8 @@ pub use window_queries::{WindowQueryApi, WINDOW_QUERY_CONTRACTS};
 pub use window_state::{WindowStateApi, WINDOW_STATE_CONTRACTS};
 pub use winhttp::{WinHttpApi, WINHTTP_CONTRACTS};
 pub use winrt::{WinrtApi, WINRT_CONTRACTS};
+pub(crate) use winsock::{ordinal as winsock_ordinal, symbol as winsock_symbol};
+pub use winsock::{WinsockApi, WINSOCK_CONTRACTS};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Architecture {
@@ -233,6 +236,7 @@ pub enum ApiId {
     Sspi(SspiApi),
     WinHttp(WinHttpApi),
     Device(DeviceApi),
+    Winsock(WinsockApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -438,6 +442,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         &SSPI_CONTRACTS,
         &WINHTTP_CONTRACTS,
         &DEVICE_CONTRACTS,
+        &WINSOCK_CONTRACTS,
     ];
     FAMILIES.iter().flat_map(|family| family.iter())
 }

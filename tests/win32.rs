@@ -115,3 +115,5 @@ mod window_queries_contract;
 mod window_state_contract;
 #[path = "win32/winrt_contract.rs"]
 mod winrt_contract;
+#[path = "win32/winsock_contract.rs"]
+mod winsock_contract;
