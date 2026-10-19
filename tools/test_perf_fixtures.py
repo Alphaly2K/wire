@@ -15,6 +15,19 @@ from api_inventory import PE
 
 
 class AuditFixtureMigration(unittest.TestCase):
+    def test_etw_lookup_and_iat_keep_all_eight_imports_independent(self):
+        from perf.fixtures.tracing_gateway import x64
+        for work in [1, 12000, 100000000]:
+            with self.subTest(work=work):
+                data, _ = x64(work)
+                self.assertEqual([(row['dll'], row['name'], row['iat_rva'])
+                                  for row in PE(data).imports()],
+                                 [('advapi32.dll', name, 0x1290 + 8 * index)
+                                  for index, name in enumerate([
+                                      'EventRegister', 'EventUnregister', 'EventEnabled',
+                                      'EventProviderEnabled', 'EventWrite', 'EventWriteString',
+                                      'EventWriteTransfer', 'EventSetInformation'])])
+
     def test_pe32_rejects_unknown_cases_instead_of_substituting_integer(self):
         for name in ['gdi-gateway', 'Integer', '', 'not-a-fixture']:
             with self.subTest(case=name), self.assertRaisesRegex(ValueError, 'unknown PE32 fixture'):

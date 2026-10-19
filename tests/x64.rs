@@ -84,6 +84,8 @@ mod sync;
 mod thread_control;
 #[path = "x64/thread_properties.rs"]
 mod thread_properties;
+#[path = "x64/tracing_owner.rs"]
+mod tracing_owner;
 #[path = "x64/user.rs"]
 mod user;
 #[path = "x64/user_objects_contract.rs"]
