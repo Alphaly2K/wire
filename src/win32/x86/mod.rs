@@ -35,6 +35,7 @@ pub(crate) mod scratch;
 pub(crate) mod shell;
 pub(crate) mod sync_objects;
 pub(crate) mod system_profile;
+pub(crate) mod thread_creation;
 pub(crate) mod thread_properties;
 pub(crate) mod variant;
 pub(crate) mod version;

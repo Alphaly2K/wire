@@ -1051,14 +1051,9 @@ pub fn dispatch(
                 true,
                 "initial thread returned",
             );
-            match crate::modules::notify_process_exit(cpu, mem, api, state, log, sched, max_instr)?
-            {
-                GuestCallOutcome::Returned(_) => {}
-                _ => return Ok(()),
-            }
-            cpu.halted = true;
-            cpu.exit_code = Some(0);
-            return Ok(());
+            return crate::x86::process::termination::exit_process(
+                cpu, mem, api, state, log, sched, max_instr, 0,
+            );
         }
         (_, "wire", "ExitThread") => {
             // A worker thread function returned; its EAX is the exit code.
@@ -1072,18 +1067,9 @@ pub fn dispatch(
                 true,
                 "thread function returned",
             );
-            match crate::modules::notify_thread(
-                false, false, cpu, mem, api, state, log, sched, max_instr,
-            )? {
-                GuestCallOutcome::Returned(_) => {}
-                _ => return Ok(()),
-            }
-            state
-                .modules
-                .release_tls_thread(&mut state.heap, state.process_heap, cpu.fs_base);
-            crate::user32::thread_exit(state, sched, sched.current_tid());
-            sched.exit_current(cpu, code)?;
-            return Ok(());
+            return crate::x86::process::termination::exit_thread(
+                cpu, mem, api, state, log, sched, max_instr, code,
+            );
         }
         (
             Some(crate::win32::catalog::ApiId::ProcessControl(
@@ -1093,14 +1079,9 @@ pub fn dispatch(
             _,
         ) => {
             log.log_call(idx, dll, name, &args[..1], 0, true, "process exit");
-            match crate::modules::notify_process_exit(cpu, mem, api, state, log, sched, max_instr)?
-            {
-                GuestCallOutcome::Returned(_) => {}
-                _ => return Ok(()),
-            }
-            cpu.halted = true;
-            cpu.exit_code = Some(args[0]);
-            return Ok(());
+            return crate::x86::process::termination::exit_process(
+                cpu, mem, api, state, log, sched, max_instr, args[0],
+            );
         }
         (
             Some(crate::win32::catalog::ApiId::ThreadControl(
@@ -1110,18 +1091,9 @@ pub fn dispatch(
             _,
         ) => {
             log.log_call(idx, dll, name, &args[..1], 0, true, "thread exit");
-            match crate::modules::notify_thread(
-                false, false, cpu, mem, api, state, log, sched, max_instr,
-            )? {
-                GuestCallOutcome::Returned(_) => {}
-                _ => return Ok(()),
-            }
-            state
-                .modules
-                .release_tls_thread(&mut state.heap, state.process_heap, cpu.fs_base);
-            crate::user32::thread_exit(state, sched, sched.current_tid());
-            sched.exit_current(cpu, args[0])?;
-            return Ok(());
+            return crate::x86::process::termination::exit_thread(
+                cpu, mem, api, state, log, sched, max_instr, args[0],
+            );
         }
         (
             Some(crate::win32::catalog::ApiId::ThreadControl(
@@ -1130,29 +1102,19 @@ pub fn dispatch(
             _,
             _,
         ) => {
-            if !sched.has_thread_capacity() {
-                state.last_error = 8;
-                ret = 0;
-                note = "guest thread resource limit".into();
-            } else {
-                let (entry, param, flags) = (args[2], args[3], args[4]);
-                let tid = sched.alloc_tid();
-                let exit_stub = api.lookup("wire", "ExitThread").unwrap();
-                let handle = state.alloc_handle(HandleObj::Thread { tid });
-                sched.create_thread(mem, entry, param, flags & 4 != 0, tid, handle, exit_stub)?;
-                let teb = sched.threads.last().unwrap().teb;
-                state
-                    .modules
-                    .setup_tls_thread(mem, &mut state.heap, state.process_heap, teb)?;
-                if args[5] != 0 {
-                    mem.write_u32(args[5], tid).map_err(|e| e.to_string())?;
-                }
-                note = format!(
-                    "tid {tid} entry={entry:#x} param={param:#x}{}",
-                    if flags & 4 != 0 { " (suspended)" } else { "" }
-                );
-                ret = handle;
-            }
+            (ret, note) = crate::win32::x86::thread_creation::call(
+                &args,
+                mem,
+                api,
+                sched,
+                &mut crate::win32::x86::thread_creation::Resources {
+                    handles: &mut state.handles,
+                    modules: &mut state.modules,
+                    heap: &mut state.heap,
+                    process_heap: state.process_heap,
+                    last_error: &mut state.last_error,
+                },
+            )?;
         }
         (
             Some(crate::win32::catalog::ApiId::Delay(

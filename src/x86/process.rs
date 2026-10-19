@@ -9,6 +9,8 @@ use crate::{
 };
 use std::path::{Path, PathBuf};
 
+pub(crate) mod termination;
+
 pub struct Config {
     pub present: bool,
     pub capture_frames: Option<PathBuf>,

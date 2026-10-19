@@ -574,3 +574,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 PE32 D3D9 资源借用
 
 基线 `95b284d`。24 个生命周期/分配/绑定方法只借 heap，设备层再借只读 window/Graphics；普通方法不再接收 ApiState，根入口移除后端 take。原处理体/回滚/诊断归一或格式化后对照保持，raster/GPU 源码未改。初次编译检查误改 facade，修正后行为验收通过，失败日志保留。release 图形 11、library 4 passed / 2 ignored、显式真实 Metal 2、完整 Win32 255、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵。累计仍 **915**，见[D3D9 边界](../architecture/d3d9.md)，证据 `wire-out/refactoring-2026-10-14/r3-d3d9-owners32-{source-checks,verification}.json`。
+
+## R3/R4 PE32 线程创建与有序退出
+
+基线 `9993349`。普通创建移入窄资源适配器，保持晚 ID copy-out 与已提交的 thread/handle/TLS；有序退出移入 Process，显式 ExitThread 和 worker EAX 路径共享 DLL→TLS→USER→scheduler 清理，进程退出也共享原通知/halt 流程。原创建及退出主体归一核对保持。release 完整 Win32 255、IR 31、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵。累计契约仍 **915**，见[线程边界](../architecture/thread-control.md)，证据 `wire-out/refactoring-2026-10-14/r3-thread-lifecycle32-{source-checks,verification}.json`。

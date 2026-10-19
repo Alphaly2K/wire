@@ -12,6 +12,10 @@ CONTEXT 先解析 handle，要求非当前、已挂起且未退出，再检查 1
 
 创建线程仍由 Runtime64 协调 stack、TEB、static TLS 和 Threads 的提交：先 scheduler admission、flags/security、ID 输出预检和完整 SIZE_T 上限，映射失败只回滚本次资源，成功写 ID 后才登记新线程、handle 与 pending spawn。error mode 继续继承进程值。PE32 保留另一套历史次序：忽略 security/stack，flags 只消费掩码 0x4，先分配线程/handle/TLS，最后写 ID；ID fault 已有的创建效果保留。两架构没有套用同一个创建事务。
 
-PE32 退出继续先通知 DLL，再释放模块 TLS、清理 USER 资源，最后由调度器退出并切换 CPU；通知 callback 未正常返回时原样提前离开。普通 ExitThread 读参数，内部 worker stub 读 EAX。完整资源创建/退出编排仍借助旧 facade，后续 owner 收敛应继续按真实资源边界推进。
+PE32 创建由 `win32/x86/thread_creation.rs` 显式借 KernelObjects32、Modules、GuestHeap、process heap、LastError 和 scheduler；不接收 ApiState。capacity → tid → exit stub → handle → scheduler/TEB → TLS → ID copy-out 的原顺序保持，ID fault 不撤销已经创建的资源。
+
+PE32 退出由 `x86/process/termination.rs` 编排：先通知 DLL，再释放模块 TLS、清理 USER 资源，最后由调度器退出并切换 CPU；通知 callback 未正常返回时原样提前离开。普通 ExitThread 读参数，内部 worker stub 在通知前保存 EAX，两者共用同一清理实现。ExitProcess 与初始线程返回共用有序进程退出实现；TerminateProcess 和原 CorExitProcess 的路径保持各自策略。API 入口保留原 trace/计数及提前返回规则，未提交普通返回帧。
 
 独立回归覆盖旧行为、故障/输出别名、队列原子取出、描述 LocalFree 归属及控制结果；既有 Process64 小/大 slice 的 CONTEXT/APC、DLL 通知和 TLS 回归继续验收。见[本批记录](../reports/refactoring-thread-control-2026-10-17.md)。
+
+PE32 资源/退出迁移基线 `9993349`。创建主体、DLL/TLS/USER/scheduler 顺序及 orderly process halt 源码归一核对保持。完整 release Win32、IR 控制回归和 fmt/release lib/bin strict Clippy/build 的本批结果记录在 `wire-out/refactoring-2026-10-14/r3-thread-lifecycle32-{source-checks,verification}.json`。按普通编排提取验收，不跑性能或游戏矩阵。
