@@ -113,8 +113,7 @@ pub struct Runtime64 {
     srw: crate::win32::kernel::srw::SrwLocks,
     exception_filter: u64,
     error_mode: u32,
-    snapshots: BTreeMap<u64, snapshot::Snapshot>,
-    next_snapshot: u64,
+    snapshots: snapshot::Snapshots,
     pub api_calls: u64,
     /// Most recent calls, bounded independently of the full api_calls counter.
     pub trace: Trace,
@@ -508,8 +507,7 @@ impl Runtime64 {
             srw: Default::default(),
             exception_filter: 0,
             error_mode: 0,
-            snapshots: BTreeMap::new(),
-            next_snapshot: 0x7fff1000,
+            snapshots: snapshot::Snapshots::default(),
             api_calls: 0,
             trace: Trace::default(),
             events: events::Events::default(),
@@ -1411,7 +1409,7 @@ impl Runtime64 {
                             .duplicate(args[1], args[5] != 0, args[6] & 1 != 0)
                     } else if self.events.flags(args[1]).is_some()
                         || self.pipes.flags(args[1]).is_some()
-                        || self.snapshots.contains_key(&args[1])
+                        || self.snapshots.contains(args[1])
                     {
                         Err(50)
                     } else {
@@ -1605,87 +1603,24 @@ impl Runtime64 {
                 }
             }
             "CreateToolhelp32Snapshot" => {
-                if args[0] & 6 == 0 || args[0] & !0x80000006 != 0 {
-                    self.set_error(mem, 50)?;
-                    u64::MAX
-                } else if self.snapshots.len() >= 128 || self.next_snapshot >= 0x7fff2000 {
-                    self.set_error(mem, 8)?;
-                    u64::MAX
-                } else {
-                    let handle = self.next_snapshot;
-                    let threads = self
-                        .threads
-                        .entries
-                        .iter()
-                        .filter(|(_, t)| t.exit.is_none())
-                        .map(|(&id, t)| (id as u32, t.priority))
-                        .collect();
-                    self.snapshots.insert(
-                        handle,
-                        snapshot::Snapshot {
-                            process: args[0] & 2 != 0,
-                            enumerate_threads: args[0] & 4 != 0,
-                            threads,
-                            name: self
-                                .exe_path
-                                .rsplit('\\')
-                                .next()
-                                .unwrap_or(&self.exe_path)
-                                .to_owned(),
-                            process_done: false,
-                            thread_at: 0,
-                            flags: (args[0] >> 31) as u32,
-                        },
-                    );
-                    self.next_snapshot += 1;
-                    handle
+                let threads = self
+                    .threads
+                    .entries
+                    .iter()
+                    .filter(|(_, t)| t.exit.is_none())
+                    .map(|(&id, t)| (id as u32, t.priority));
+                match self.snapshots.create(args[0], &self.exe_path, threads) {
+                    Ok(handle) => handle,
+                    Err(error) => {
+                        self.set_error(mem, error)?;
+                        u64::MAX
+                    }
                 }
             }
             "Process32First" | "Process32Next" | "Process32FirstW" | "Process32NextW"
             | "Thread32First" | "Thread32Next" => {
-                let first = name.contains("First");
-                let thread = name.starts_with("Thread");
-                let size = if thread {
-                    28
-                } else if name.ends_with('W') {
-                    568
-                } else {
-                    304
-                };
-                if let Some(snapshot) = self.snapshots.get(&args[0]) {
-                    if mem.read_int(args[1], 4)? != size {
-                        self.set_error(mem, 24)?;
-                        0
-                    } else {
-                        let index = if first { 0 } else { snapshot.thread_at };
-                        let data = if thread {
-                            snapshot.thread_entry(index).ok_or(18)
-                        } else if !snapshot.process || !first && snapshot.process_done {
-                            Err(18)
-                        } else {
-                            snapshot.process_entry(name.ends_with('W'))
-                        };
-                        match data {
-                            Err(error) => {
-                                self.set_error(mem, error)?;
-                                0
-                            }
-                            Ok(data) => {
-                                mem.write(args[1], &data)?;
-                                let snapshot = self.snapshots.get_mut(&args[0]).unwrap();
-                                if thread {
-                                    snapshot.thread_at = index + 1;
-                                } else {
-                                    snapshot.process_done = true;
-                                }
-                                1
-                            }
-                        }
-                    }
-                } else {
-                    self.set_error(mem, 6)?;
-                    0
-                }
+                let last_error = self.teb() + 0x68;
+                self.snapshots.enumerate(mem, name, args, last_error)?
             }
             _ if matches!(binding.control, gateways::ControlImport::Thread(_)) => {
                 let gateways::ControlImport::Thread(id) = binding.control else {
@@ -2487,7 +2422,7 @@ impl Runtime64 {
                     .or_else(|| self.files.flags(args[0]))
                     .or_else(|| self.mappings.flags(args[0]))
                     .or_else(|| self.threads.flags(args[0]))
-                    .or_else(|| self.snapshots.get(&args[0]).map(|s| s.flags))
+                    .or_else(|| self.snapshots.flags(args[0]))
                     .or_else(|| self.files.standard().flags(args[0]))
                     .or_else(|| self.tokens.flags(args[0]))
                 {
@@ -2531,16 +2466,14 @@ impl Runtime64 {
                     self.record(dll, name, args, result);
                     return Ok(Control::Returned);
                 }
-                if let Some(s) = self.snapshots.get_mut(&args[0]) {
-                    let result = if args[1] & !3 != 0 {
-                        0
-                    } else {
-                        s.flags = (s.flags & !(args[1] as u32)) | (args[2] as u32 & args[1] as u32);
-                        1
+                if let Some(result) = self.snapshots.set_flags(args[0], args[1], args[2]) {
+                    let result = match result {
+                        Ok(()) => 1,
+                        Err(error) => {
+                            self.set_error(mem, error)?;
+                            0
+                        }
                     };
-                    if result == 0 {
-                        self.set_error(mem, 87)?;
-                    }
                     returned.regs[0] = result;
                     *cpu = returned;
                     self.api_calls += 1;
@@ -2863,15 +2796,14 @@ impl Runtime64 {
                             0
                         }
                     }
-                } else if handle == Some(HandleApi::CloseHandle)
-                    && self.snapshots.contains_key(&args[0])
+                } else if handle == Some(HandleApi::CloseHandle) && self.snapshots.contains(args[0])
                 {
-                    if self.snapshots[&args[0]].flags & 2 != 0 {
-                        self.set_error(mem, 5)?;
-                        0
-                    } else {
-                        self.snapshots.remove(&args[0]);
-                        1
+                    match self.snapshots.close(args[0]) {
+                        Ok(()) => 1,
+                        Err(error) => {
+                            self.set_error(mem, error)?;
+                            0
+                        }
                     }
                 } else if handle == Some(HandleApi::CloseHandle)
                     && self.threads.flags(args[0]).is_some()

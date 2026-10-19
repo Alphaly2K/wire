@@ -432,3 +432,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 query access、flags、资源表与单调编号收拢为私有 Tokens，open/query 仅借 Memory/参数/当前线程 LastError 地址，通用句柄操作显式委托。三个独立旧行为测试和原创 fixture 先提交于 `87ae227`；完整 release 650、debug 496、native 7、工具 30 及静态检查/build 通过，302 个 src Rust 文件核对一致，binary +9,536 bytes。
 
 17 条协议、162 次执行和三对 Alice 前缀完成验收。token 查询 CPU −0.639%，SSE/thread-id 初筛波动经 900M 收敛；保留 PE32 integer/IR 六对长样本 +3.320% 的局部成本、同哈希漂移与全部慢轮。两端分别两次采样、执行计数及六个执行器助记符核对完成，具体机制尚未确证，没有三对均超过 5% 的持续回退。Alice CPU/wall −3.611%/−3.871%，保持原预算/隐藏窗口/零 Draw/Present。累计仍为 706；详见[完整验收](refactoring-token-owner-2026-10-19.md)。
+
+## R3 Win64 Toolhelp 快照
+
+私有 Snapshots 拥有记录/句柄/flags/游标，组合根仅提供 guest 文件名和线程值；原 codec 除可见性外逐字保持。三个独立旧行为测试及 fixture 先提交于 `0962939`，完整 release 653、debug 499、native 7、工具 31 及静态检查/build 通过。302 个 src Rust 文件核对一致，binary 较 token −18,896 bytes。
+
+19 条协议、180 次执行及三对 Alice 前缀验收完成。保留 data-alias 900M +2.959% 与 raw 六对长样本 +2.391% 的局部成本；初筛及 raw 首轮 +10.789% 的同哈希漂移、静态代码生成差异和补测全部记录。另以 ETW 直接比较最终冻结，三对 900M PE32 integer/IR 为 −0.061%，不将 token 阶段的成本追认为收益。Alice CPU/wall −0.247%/−0.598%，保持原预算/隐藏窗口/零 Draw/Present。累计仍为 706；详见[完整验收](refactoring-snapshot-owner-2026-10-19.md)。
