@@ -1,5 +1,5 @@
 //! Queries describe loaded guest images and the logical built-in service providers.
-use super::{dxgi, kernel_export, unwind};
+use super::{dxgi, kernel_export};
 use super::{Memory, Runtime64, WRITE};
 
 /// Module adapters request control; the gateway owns CPU, trace and count commits.
@@ -142,10 +142,6 @@ impl Runtime64 {
                     .to_owned();
                     let known = (matches!(provider.as_str(), "kernel32.dll" | "kernelbase.dll")
                         && kernel_export(&function))
-                        || (matches!(
-                            provider.as_str(),
-                            "ntdll.dll" | "kernel32.dll" | "kernelbase.dll"
-                        ) && unwind::is_call(&function))
                         || (provider == "ntdll.dll" && function == "NtQueryDirectoryFile")
                         || (provider == "dxgi.dll" && dxgi::export(&function))
                         || (provider == "d3d12.dll" && dxgi::d3d12_export(&function))

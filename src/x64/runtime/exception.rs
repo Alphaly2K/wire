@@ -1,5 +1,77 @@
 //! Software exceptions: real guest handlers and checked AMD64 context records.
-use super::{unwind::Table, Cpu64, Memory, Runtime64, READ};
+use super::{Cpu64, Memory, Runtime64, READ};
+
+pub(super) struct Registrations {
+    handlers: Vec<(u64, u64)>,
+    next: u64,
+    filter: u64,
+}
+impl Default for Registrations {
+    fn default() -> Self {
+        Self {
+            handlers: Vec::new(),
+            next: 0x7fff8000,
+            filter: 0,
+        }
+    }
+}
+impl Registrations {
+    pub(super) fn is_empty(&self) -> bool {
+        self.handlers.is_empty()
+    }
+    pub(super) fn targets(&self) -> Vec<u64> {
+        self.handlers.iter().map(|&(_, target)| target).collect()
+    }
+    pub(super) fn call(
+        &mut self,
+        mem: &mut Memory,
+        id: crate::win32::catalog::ExceptionApi,
+        args: &[u64],
+        error_slot: u64,
+    ) -> Result<u64, String> {
+        use crate::win32::catalog::ExceptionApi::*;
+        Ok(match id {
+            AddVectored => {
+                if args[1] == 0 {
+                    mem.write_int(error_slot, 4, 87)?;
+                    0
+                } else if self.handlers.len() >= 64 || self.next >= 0x7fff8100 {
+                    mem.write_int(error_slot, 4, 8)?;
+                    0
+                } else {
+                    let handle = self.next;
+                    self.next += 1;
+                    if args[0] != 0 {
+                        self.handlers.insert(0, (handle, args[1]));
+                    } else {
+                        self.handlers.push((handle, args[1]));
+                    }
+                    handle
+                }
+            }
+            RemoveVectored => {
+                if let Some(index) = self
+                    .handlers
+                    .iter()
+                    .position(|&(handle, _)| handle == args[0])
+                {
+                    self.handlers.remove(index);
+                    1
+                } else {
+                    0
+                }
+            }
+            SetFilter => {
+                let previous = self.filter;
+                self.filter = args[0];
+                previous
+            }
+            _ => unreachable!(
+                "registration owner only handles vectored handlers and filter identity"
+            ),
+        })
+    }
+}
 pub(crate) const CONTEXT_SIZE: usize = 1232;
 pub(crate) fn capture(cpu: &Cpu64) -> [u8; CONTEXT_SIZE] {
     let mut data = [0; CONTEXT_SIZE];
@@ -131,26 +203,20 @@ impl Exception {
 }
 impl Runtime64 {
     pub(crate) fn vectored_handlers(&self) -> Vec<u64> {
-        self.exception_handlers
-            .iter()
-            .map(|&(_, target)| target)
-            .collect()
+        self.exception_registrations.targets()
     }
     pub(crate) fn initial_exception_handler(
         &self,
         mem: &Memory,
         cpu: &Cpu64,
     ) -> Result<Option<Handler>, String> {
-        for (&table, info) in &self.function_tables {
-            let Table::Array { base, count, .. } = info else {
-                continue;
-            };
-            if cpu.rip < *base || cpu.rip - *base > u32::MAX as u64 {
+        for (table, base, count) in self.function_tables.arrays() {
+            if cpu.rip < base || cpu.rip - base > u32::MAX as u64 {
                 continue;
             }
-            let pc = cpu.rip - *base;
+            let pc = cpu.rip - base;
             let mut low = 0;
-            let mut high = *count as u64;
+            let mut high = count as u64;
             while low < high {
                 let mid = (low + high) / 2;
                 if mem.read_int(table + mid * 12, 4)? <= pc {
@@ -198,10 +264,10 @@ impl Runtime64 {
                 .checked_add(mem.read_int(at, 4)?)
                 .ok_or("handler address overflow")?;
             return Ok(Some(Handler {
-                base: *base,
+                base,
                 entry,
-                start: *base + start,
-                end: *base + end,
+                start: base + start,
+                end: base + end,
                 frame,
                 target,
                 data: at + 4,

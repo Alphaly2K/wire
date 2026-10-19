@@ -1,7 +1,9 @@
 //! Guest function-table registration and lookup. This is metadata, never host executable code.
-//! Exception dispatch/virtual unwinding are separate and remain explicit unsupported boundaries.
+//! Process controls perform guest callbacks; this owner handles checked metadata only.
 use super::{Memory, Runtime64, READ, WRITE};
-pub(super) enum Table {
+use crate::win32::catalog::ExceptionApi;
+use std::collections::BTreeMap;
+enum Table {
     Array {
         base: u64,
         count: u32,
@@ -23,15 +25,9 @@ pub(super) enum Result64 {
         context: u64,
     },
 }
-pub(super) fn is_call(name: &str) -> bool {
-    matches!(
-        name,
-        "RtlAddFunctionTable"
-            | "RtlDeleteFunctionTable"
-            | "RtlInstallFunctionTableCallback"
-            | "RtlLookupFunctionEntry"
-            | "RtlUnwindEx"
-    )
+#[derive(Default)]
+pub(super) struct FunctionTables {
+    tables: BTreeMap<u64, Table>,
 }
 fn entries(mem: &Memory, table: u64, count: u32, base: u64) -> Result<bool, String> {
     if count == 0 || count > 1_000_000 || base >= 1 << 47 {
@@ -52,8 +48,14 @@ fn entries(mem: &Memory, table: u64, count: u32, base: u64) -> Result<bool, Stri
     }
     Ok(true)
 }
-impl Runtime64 {
-    pub(crate) fn register_static_functions(
+impl FunctionTables {
+    pub(super) fn arrays(&self) -> impl Iterator<Item = (u64, u64, u32)> + '_ {
+        self.tables.iter().filter_map(|(&table, info)| match info {
+            Table::Array { base, count, .. } => Some((table, *base, *count)),
+            Table::Callback { .. } => None,
+        })
+    }
+    fn register_static_functions(
         &mut self,
         mem: &Memory,
         base: u64,
@@ -66,7 +68,7 @@ impl Runtime64 {
         if !size.is_multiple_of(12) || !entries(mem, base + rva as u64, size / 12, base)? {
             return Err("invalid AMD64 image runtime function table".into());
         }
-        self.function_tables.insert(
+        self.tables.insert(
             base + rva as u64,
             Table::Array {
                 base,
@@ -77,7 +79,6 @@ impl Runtime64 {
         Ok(())
     }
     pub(crate) fn finish_function_lookup(
-        &self,
         mem: &mut Memory,
         entry: u64,
         base: u64,
@@ -100,21 +101,22 @@ impl Runtime64 {
         mem.write_int(output, 8, base)?;
         Ok(entry)
     }
-    pub(super) fn function_table_call(
+    pub(super) fn call(
         &mut self,
         mem: &mut Memory,
-        name: &str,
+        id: ExceptionApi,
         args: &[u64],
+        callbacks_enabled: bool,
     ) -> Result<Result64, String> {
-        let value = match name {
-            "RtlAddFunctionTable" => {
-                if self.function_tables.len() >= 128
-                    || self.function_tables.contains_key(&args[0])
+        let value = match id {
+            ExceptionApi::AddTable => {
+                if self.tables.len() >= 128
+                    || self.tables.contains_key(&args[0])
                     || !entries(mem, args[0], args[1] as u32, args[2])?
                 {
                     0
                 } else {
-                    self.function_tables.insert(
+                    self.tables.insert(
                         args[0],
                         Table::Array {
                             base: args[2],
@@ -125,22 +127,22 @@ impl Runtime64 {
                     1
                 }
             }
-            "RtlInstallFunctionTableCallback" => {
+            ExceptionApi::InstallCallback => {
                 if args[0] & 3 != 3
                     || args[2] == 0
                     || args[3] == 0
                     || args[1].checked_add(args[2]).is_none_or(|end| end > 1 << 47)
-                    || self.function_tables.len() >= 128
-                    || self.function_tables.contains_key(&args[0])
+                    || self.tables.len() >= 128
+                    || self.tables.contains_key(&args[0])
                 {
                     0
                 } else {
                     let out_of_process = if args[5] == 0 {
                         None
                     } else {
-                        Some(Self::utf16(mem, args[5])?)
+                        Some(crate::win32::x64::text::utf16(mem, args[5])?)
                     };
-                    self.function_tables.insert(
+                    self.tables.insert(
                         args[0],
                         Table::Callback {
                             base: args[1],
@@ -153,9 +155,9 @@ impl Runtime64 {
                     1
                 }
             }
-            "RtlDeleteFunctionTable" => {
+            ExceptionApi::DeleteTable => {
                 if matches!(
-                    self.function_tables.get(&args[0]),
+                    self.tables.get(&args[0]),
                     None | Some(Table::Array {
                         permanent: true,
                         ..
@@ -163,16 +165,16 @@ impl Runtime64 {
                 ) {
                     0
                 } else {
-                    self.function_tables.remove(&args[0]);
+                    self.tables.remove(&args[0]);
                     1
                 }
             }
-            "RtlLookupFunctionEntry" => {
+            ExceptionApi::LookupEntry => {
                 mem.check(args[1], 8, WRITE)?;
                 if args[2] != 0 {
                     return Err("AMD64 unwind history table cache is not implemented".into());
                 }
-                for (&table, info) in &self.function_tables {
+                for (&table, info) in &self.tables {
                     match info {
                         Table::Array { base, count, .. }
                             if args[0] >= *base && args[0] - *base <= u32::MAX as u64 =>
@@ -191,7 +193,7 @@ impl Runtime64 {
                             if lo != 0 {
                                 let entry = table + (lo - 1) * 12;
                                 if rva < mem.read_int(entry + 4, 4)? {
-                                    return Ok(Result64::Value(self.finish_function_lookup(
+                                    return Ok(Result64::Value(Self::finish_function_lookup(
                                         mem, entry, *base, args[0], args[1],
                                     )?));
                                 }
@@ -204,7 +206,7 @@ impl Runtime64 {
                             context,
                             ..
                         } if args[0] >= *base && args[0] - *base < *length as u64 => {
-                            if !self.threads.enabled {
+                            if !callbacks_enabled {
                                 return Err("AMD64 function-table lookup callback requires process execution".into());
                             }
                             return Ok(Result64::Callback {
@@ -222,5 +224,28 @@ impl Runtime64 {
             _ => unreachable!(),
         };
         Ok(Result64::Value(value))
+    }
+}
+
+impl Runtime64 {
+    pub(crate) fn register_static_functions(
+        &mut self,
+        mem: &Memory,
+        base: u64,
+        rva: u32,
+        size: u32,
+    ) -> Result<(), String> {
+        self.function_tables
+            .register_static_functions(mem, base, rva, size)
+    }
+    pub(crate) fn finish_function_lookup(
+        &self,
+        mem: &mut Memory,
+        entry: u64,
+        base: u64,
+        pc: u64,
+        output: u64,
+    ) -> Result<u64, String> {
+        FunctionTables::finish_function_lookup(mem, entry, base, pc, output)
     }
 }

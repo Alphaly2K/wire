@@ -94,9 +94,8 @@ pub struct Runtime64 {
     modules: crate::win32::x64::modules::Modules,
     tokens: token::Tokens,
     etw: tracing::Providers,
-    function_tables: BTreeMap<u64, unwind::Table>,
-    exception_handlers: Vec<(u64, u64)>,
-    next_exception_handler: u64,
+    function_tables: unwind::FunctionTables,
+    exception_registrations: exception::Registrations,
     profile: crate::runtime::environment::GuestEnvironment,
     environment: environment::Environment,
     local_blocks: std::collections::BTreeSet<u64>,
@@ -112,7 +111,6 @@ pub struct Runtime64 {
     threads: threads::Threads,
     delay_hooks: BTreeMap<u64, (String, u64, u64)>,
     srw: crate::win32::kernel::srw::SrwLocks,
-    exception_filter: u64,
     process_options: process_options::ProcessOptions,
     snapshots: snapshot::Snapshots,
     pub api_calls: u64,
@@ -202,7 +200,6 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
         && !dll.eq_ignore_ascii_case("kernelbase.dll")
         && !(dll.eq_ignore_ascii_case("shell32.dll")
             && matches!(name, "CommandLineToArgvW" | "SHGetKnownFolderPath"))
-        && !(dll.eq_ignore_ascii_case("ntdll.dll") && unwind::is_call(name))
         && !(dll.eq_ignore_ascii_case("ntdll.dll") && name == "NtQueryDirectoryFile")
         && !(dll.eq_ignore_ascii_case("dxgi.dll") && dxgi::export(name))
         && !(dll.eq_ignore_ascii_case("d3d12.dll") && dxgi::d3d12_export(name))
@@ -234,13 +231,6 @@ fn import_arity(name: &str) -> Option<usize> {
     }
     Some(match name {
         name if dxgi::arity(name).is_some() => dxgi::arity(name).unwrap(),
-        "AddVectoredExceptionHandler" => 2,
-        "RemoveVectoredExceptionHandler" => 1,
-        "RaiseException" => 4,
-        "RtlUnwindEx" => 6,
-        "RtlAddFunctionTable" | "RtlLookupFunctionEntry" => 3,
-        "RtlDeleteFunctionTable" => 1,
-        "RtlInstallFunctionTableCallback" => 6,
         "FormatMessageA" | "FormatMessageW" => 7,
         "SHGetKnownFolderPath" => 4,
         "NtQueryDirectoryFile" => 11,
@@ -248,7 +238,7 @@ fn import_arity(name: &str) -> Option<usize> {
         "CreatePipe" => 4,
         "CreateProcessW" => 10,
         "GetConsoleMode" => 2,
-        "SetUnhandledExceptionFilter" | "ExitProcess" => 1,
+        "ExitProcess" => 1,
         "WriteConsoleW" => 5,
         _ => return None,
     })
@@ -266,10 +256,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
     }
     match name {
         name if dxgi::arity(name).is_some() => dxgi::dwords(name),
-        "AddVectoredExceptionHandler" => &[0],
-        "RaiseException" => &[0, 1, 2],
-        "RtlAddFunctionTable" => &[1],
-        "RtlInstallFunctionTableCallback" => &[2],
         "FormatMessageA" | "FormatMessageW" => &[0, 2, 3, 5],
         "SHGetKnownFolderPath" => &[1],
         "NtQueryDirectoryFile" => &[6, 7],
@@ -361,9 +347,8 @@ impl Runtime64 {
             modules: crate::win32::x64::modules::Modules::new(TEB + 0x20000),
             tokens: token::Tokens::default(),
             etw: tracing::Providers::default(),
-            function_tables: BTreeMap::new(),
-            exception_handlers: Vec::new(),
-            next_exception_handler: 0x7fff8000,
+            function_tables: unwind::FunctionTables::default(),
+            exception_registrations: exception::Registrations::default(),
             profile: crate::runtime::environment::GuestEnvironment::amd64(),
             environment: Default::default(),
             local_blocks: std::collections::BTreeSet::new(),
@@ -378,7 +363,6 @@ impl Runtime64 {
             threads: threads::Threads::new(stack_size),
             delay_hooks: BTreeMap::new(),
             srw: Default::default(),
-            exception_filter: 0,
             process_options: process_options::ProcessOptions::default(),
             snapshots: snapshot::Snapshots::default(),
             api_calls: 0,
@@ -640,6 +624,7 @@ impl Runtime64 {
     ) -> Result<u64, String> {
         use crate::win32::catalog::ApiId;
         match id {
+            ApiId::Exception(_) => unreachable!("exception controls use their bound gateway route"),
             ApiId::Com(id) => self.com_call(mem, id, args),
             ApiId::Winrt(id) => self.winrt_call(mem, id, args),
             ApiId::Bstr(id) => self.bstr_call(mem, id, args),
@@ -1032,83 +1017,79 @@ impl Runtime64 {
                     0
                 }
             }
-            "AddVectoredExceptionHandler" => {
-                if args[1] == 0 {
-                    self.set_error(mem, 87)?;
-                    0
-                } else if self.exception_handlers.len() >= 64
-                    || self.next_exception_handler >= 0x7fff8100
-                {
-                    self.set_error(mem, 8)?;
-                    0
-                } else {
-                    let handle = self.next_exception_handler;
-                    self.next_exception_handler += 1;
-                    if args[0] != 0 {
-                        self.exception_handlers.insert(0, (handle, args[1]));
-                    } else {
-                        self.exception_handlers.push((handle, args[1]));
+            _ if matches!(binding.control, gateways::ControlImport::Exception(_)) => {
+                use crate::win32::catalog::ExceptionApi;
+                let gateways::ControlImport::Exception(id) = binding.control else {
+                    unreachable!()
+                };
+                match id {
+                    ExceptionApi::AddVectored
+                    | ExceptionApi::RemoveVectored
+                    | ExceptionApi::SetFilter => {
+                        let error_slot = self.teb() + 0x68;
+                        self.exception_registrations
+                            .call(mem, id, args, error_slot)?
                     }
-                    handle
+                    ExceptionApi::Raise => {
+                        if args[2] > 15 {
+                            return Err("Win64 RaiseException parameter count exceeds 15".into());
+                        }
+                        if args[2] != 0 {
+                            mem.check(args[3], args[2] as usize * 8, READ)?;
+                        }
+                        if args[1] & !1 != 0 || !self.threads.enabled {
+                            return Err(
+                                "unsupported Win64 software exception flags/scheduler".into()
+                            );
+                        }
+                        if self.exception_registrations.is_empty()
+                            && self.initial_exception_handler(mem, &returned)?.is_none()
+                        {
+                            return Err(format!("Win64 exception search beyond immediate frame is not implemented: code={:#x} flags={:#x}", args[0], args[1]));
+                        }
+                        return Ok(Control::Raise {
+                            dll: dll.into(),
+                            args: args.to_vec(),
+                            caller: Box::new(returned),
+                        });
+                    }
+                    ExceptionApi::UnwindEx => {
+                        return Ok(Control::Unwind {
+                            dll: dll.into(),
+                            args: args.to_vec(),
+                        })
+                    }
+                    ExceptionApi::AddTable
+                    | ExceptionApi::DeleteTable
+                    | ExceptionApi::InstallCallback
+                    | ExceptionApi::LookupEntry => {
+                        match self
+                            .function_tables
+                            .call(mem, id, args, self.threads.enabled)?
+                        {
+                            unwind::Result64::Value(value) => value,
+                            unwind::Result64::Callback {
+                                target,
+                                context,
+                                base,
+                            } => {
+                                *cpu = returned;
+                                self.api_calls += 1;
+                                return Ok(Control::FunctionLookup {
+                                    dll: dll.into(),
+                                    target,
+                                    context,
+                                    base,
+                                    args: args.to_vec(),
+                                });
+                            }
+                        }
+                    }
+                    ExceptionApi::UnhandledFilter | ExceptionApi::Unwind => {
+                        unreachable!("PE32-only exception controls")
+                    }
                 }
             }
-            "RemoveVectoredExceptionHandler" => {
-                if let Some(index) = self
-                    .exception_handlers
-                    .iter()
-                    .position(|&(handle, _)| handle == args[0])
-                {
-                    self.exception_handlers.remove(index);
-                    1
-                } else {
-                    0
-                }
-            }
-            "RaiseException" => {
-                if args[2] > 15 {
-                    return Err("Win64 RaiseException parameter count exceeds 15".into());
-                }
-                if args[2] != 0 {
-                    mem.check(args[3], args[2] as usize * 8, READ)?;
-                }
-                if args[1] & !1 != 0 || !self.threads.enabled {
-                    return Err("unsupported Win64 software exception flags/scheduler".into());
-                }
-                if self.exception_handlers.is_empty()
-                    && self.initial_exception_handler(mem, &returned)?.is_none()
-                {
-                    return Err(format!("Win64 exception search beyond immediate frame is not implemented: code={:#x} flags={:#x}", args[0], args[1]));
-                }
-                return Ok(Control::Raise {
-                    dll: dll.into(),
-                    args: args.to_vec(),
-                    caller: Box::new(returned),
-                });
-            }
-            "RtlUnwindEx" => {
-                return Ok(Control::Unwind {
-                    dll: dll.into(),
-                    args: args.to_vec(),
-                })
-            }
-            name if unwind::is_call(name) => match self.function_table_call(mem, name, args)? {
-                unwind::Result64::Value(value) => value,
-                unwind::Result64::Callback {
-                    target,
-                    context,
-                    base,
-                } => {
-                    *cpu = returned;
-                    self.api_calls += 1;
-                    return Ok(Control::FunctionLookup {
-                        dll: dll.into(),
-                        target,
-                        context,
-                        base,
-                        args: args.to_vec(),
-                    });
-                }
-            },
             "FormatMessageA" | "FormatMessageW" => self.format_message(mem, name, args)?,
             _ if matches!(
                 file,
@@ -2503,11 +2484,6 @@ impl Runtime64 {
                         }
                     }
                 }
-            }
-            "SetUnhandledExceptionFilter" => {
-                let previous = self.exception_filter;
-                self.exception_filter = args[0];
-                previous
             }
             _ if matches!(binding.control, gateways::ControlImport::CriticalSection(_)) => {
                 use crate::win32::x64::critical_sections::{call, Outcome};

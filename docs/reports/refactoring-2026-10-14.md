@@ -498,3 +498,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R2 标量入口补齐
 
 五项 encoding/stack guarantee/file ANSI/processor topology 入口汇入既有家族，保留 provider、架构能力、指针宽度、DWORD 和公开 facade 范围。原 topology codec 归一保持。release 双架构整合 Win64 265、PE32 244、catalog 一致性及 fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵。累计 **856 exports**，见[合并验收](refactoring-scalar-followup-2026-10-20.md)。
+
+## R2/R3 异常入口与注册元数据
+
+独立旧行为基线 `b014544` 固定 provider/ABI、完整 token/filter、返回帧预检和累计耗尽。十一项 ExceptionApi 汇入唯一契约，Win64 有序 handler/filter 与 function-table 集合成为私有 owner；Process64 继续负责 guest 回调、Raise/Unwind 和 CPU/计数提交。原查找、表项/结果校验、静态注册与 CONTEXT codec 经归一核对保持。release Win64 边界 2、Process64 8、PE32 异常 7、catalog 一致性及 fmt/release lib/bin strict Clippy/build 通过，不跑性能。累计 **867 exports**，见[边界与验收](../architecture/exceptions.md)。

@@ -17,6 +17,7 @@ mod devices;
 mod dialog;
 mod display;
 mod environment;
+mod exceptions;
 mod files;
 mod gdi_dc;
 mod gdi_operations;
@@ -86,6 +87,7 @@ pub use devices::{DeviceApi, DEVICE_CONTRACTS};
 pub use dialog::{DialogApi, DIALOG_CONTRACTS};
 pub use display::{DisplayApi, DISPLAY_CONTRACTS};
 pub use environment::{EnvironmentApi, ENVIRONMENT_CONTRACTS};
+pub use exceptions::{ExceptionApi, EXCEPTION_CONTRACTS};
 pub use files::{FileApi, FILE_CONTRACTS};
 pub use gdi_dc::{GdiDcApi, GDI_DC_CONTRACTS};
 pub use gdi_operations::{GdiApi, GDI_OPERATION_CONTRACTS};
@@ -173,6 +175,7 @@ pub enum ReturnConvention {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApiId {
+    Exception(ExceptionApi),
     Com(ComApi),
     Winrt(WinrtApi),
     Bstr(BstrApi),
@@ -451,6 +454,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         &WINSOCK_CONTRACTS,
         &PROCESS_OPTION_CONTRACTS,
         &SYSTEM_PATH_CONTRACTS,
+        &EXCEPTION_CONTRACTS,
     ];
     FAMILIES.iter().flat_map(|family| family.iter())
 }

@@ -484,8 +484,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("SetHandleCount", 4),
                 ("ExitProcess", 4),
                 ("TerminateProcess", 8),
-                ("SetUnhandledExceptionFilter", 4),
-                ("UnhandledExceptionFilter", 4),
                 ("DebugBreak", 0),
                 ("OutputDebugStringA", 4),
                 ("OutputDebugStringW", 4),
@@ -503,8 +501,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetProcessWorkingSetSize", 12),
                 ("IsWow64Process", 8),
                 ("GetLogicalProcessorInformation", 8),
-                ("RaiseException", 16),
-                ("RtlUnwind", 16),
                 ("GetCurrentPackageId", 8),
                 ("CreateThreadpoolTimer", 12),
                 ("SetThreadpoolTimer", 16),
@@ -790,7 +786,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
             "mpr.dll",
             &[("WNetGetUniversalNameA", 16), ("WNetGetUniversalNameW", 16)],
         );
-        add("ntdll.dll", &[("RtlUnwind", 16)]);
         add(
             "user32.dll",
             &[
@@ -2261,11 +2256,23 @@ pub fn dispatch(
             ret = result.0;
             note = result.1.into();
         }
-        (_, "kernel32.dll", "SetUnhandledExceptionFilter") => {
+        (
+            Some(crate::win32::catalog::ApiId::Exception(
+                crate::win32::catalog::ExceptionApi::SetFilter,
+            )),
+            _,
+            _,
+        ) => {
             ret = state.unhandled_filter;
             state.unhandled_filter = args[0];
         }
-        (_, "kernel32.dll", "RaiseException") => {
+        (
+            Some(crate::win32::catalog::ApiId::Exception(
+                crate::win32::catalog::ExceptionApi::Raise,
+            )),
+            _,
+            _,
+        ) => {
             log.log_call(
                 idx,
                 dll,
@@ -2277,7 +2284,13 @@ pub fn dispatch(
             );
             return crate::seh::raise(cpu, mem, api, state, log, sched, &args, max_instr);
         }
-        (_, "kernel32.dll", "UnhandledExceptionFilter") => {
+        (
+            Some(crate::win32::catalog::ApiId::Exception(
+                crate::win32::catalog::ExceptionApi::UnhandledFilter,
+            )),
+            _,
+            _,
+        ) => {
             if state.unhandled_filter == 0 {
                 ret = 0;
             } else {
@@ -2296,7 +2309,13 @@ pub fn dispatch(
                 }
             }
         }
-        (_, "kernel32.dll", "RtlUnwind") | (_, "ntdll.dll", "RtlUnwind") => {
+        (
+            Some(crate::win32::catalog::ApiId::Exception(
+                crate::win32::catalog::ExceptionApi::Unwind,
+            )),
+            _,
+            _,
+        ) => {
             log.log_call(idx, dll, name, &args[..4], args[3], true, "SEH unwind");
             return crate::seh::unwind(cpu, mem, api, state, log, sched, &args, max_instr);
         }
