@@ -12,6 +12,7 @@ pub enum ProcessQueryApi {
     MaximumProcessorCount,
     ActiveGroupCount,
     MaximumGroupCount,
+    PackageId,
 }
 
 const fn declaration(
@@ -29,14 +30,20 @@ const fn declaration(
         ProcessQueryApi::ActiveGroupCount | ProcessQueryApi::MaximumGroupCount
     );
     Contract::new(ApiId::ProcessQuery(id), name, parameters, returns,
-        "existing fixed PID/single-CPU profile, PE32 handle access checks before output pointers, process opening delegates handle ownership to gateway, ignored inherit flag, full group carrier validation and UINT_MAX ideal-processor failure, group-count ABI-only; Win64 only processor/group counts, low WORD consumed while preserving raw trace carrier and saved frame",
+        "existing fixed PID/single-CPU profile, PE32 unpackaged-app status without outputs or LastError mutation, handle access checks before output pointers, process opening delegates handle ownership to gateway, ignored inherit flag, full group carrier validation and UINT_MAX ideal-processor failure, group-count ABI-only; Win64 only processor/group counts, low WORD consumed while preserving raw trace carrier and saved frame",
         [ArchitecturePlan { dlls: &["kernel32.dll"], execution: if groups { ExecutionPolicy::LegacyUnimplemented } else { ExecutionPolicy::Typed } },
          ArchitecturePlan { dlls: if counts || groups { &["kernel32.dll", "kernelbase.dll"] } else { &[] }, execution: if counts || groups { ExecutionPolicy::Typed } else { ExecutionPolicy::Absent } }])
 }
 
 use Parameter::{Pointer as P, Uint16 as W, Uint32 as D};
 use ReturnConvention::{BoolLastError as B, Pointer as R, Uint32 as U};
-pub static PROCESS_QUERY_CONTRACTS: [Contract; 10] = [
+pub static PROCESS_QUERY_CONTRACTS: [Contract; 11] = [
+    declaration(
+        ProcessQueryApi::PackageId,
+        "GetCurrentPackageId",
+        &[P, P],
+        U,
+    ),
     declaration(ProcessQueryApi::Open, "OpenProcess", &[D, D, D], R),
     declaration(
         ProcessQueryApi::Affinity,

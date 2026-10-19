@@ -258,6 +258,9 @@ fn win64_dynamic_kernel_exports_are_available_before_static_gateway_registration
         "CoCreateInstance",
         "BCryptGenRandom",
         "MessageBoxW",
+        "TerminateProcess",
+        "SetHandleCount",
+        "GetCurrentPackageId",
         "DoesNotExist",
     ] {
         mem.write(text, format!("{name}\0").as_bytes()).unwrap();

@@ -1,12 +1,12 @@
 # 当前状态
 
-更新日期：2026-10-20。重构前基线为 `2e78377`；最新完成 [PE32 CRT 普通语义窄适配](architecture/crt32.md)，内存/字符串、堆与启动指针操作分离，完整 Win32 249 及 fmt/release lib/bin strict Clippy/build 通过。CPU/FPU、guest callback、cdecl 和故障提交顺序保持。此前 [同步与等待窄适配](architecture/waits.md)、[ABI 来源收敛](architecture/abi.md)、[文件窄适配器](architecture/files.md)、[kernel 对象 owner](architecture/kernel-objects32.md)及[图形创建与 COM 冷绑定](architecture/graphics-contracts.md)已接入。按影响范围选择验证，本批不重复性能或游戏矩阵。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
+更新日期：2026-10-20。重构前基线为 `2e78377`；最新三个 [PE32 kernel endpoint](architecture/process-control.md) 接入唯一契约，完整 Win32 251、Win64 modules 12、catalog 一致性及 fmt/release lib/bin strict Clippy/build 通过。此前 [CRT 普通语义窄适配](architecture/crt32.md)、[同步与等待](architecture/waits.md)、[ABI 来源](architecture/abi.md)、[文件](architecture/files.md)和[图形冷绑定](architecture/graphics-contracts.md)已接入。按影响范围选择验证，本批不重复性能或游戏矩阵。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
 
 本轮累计接入对话框/窗口枚举 22、菜单 27、GDI 对象/像素/字体 31 项，共 **80 项**，累计 **675 项**。统一声明、typed 分发与领域 owner 保持双架构范围、故障提交和既有不可用策略；保留真实 RedrawWindow 网关与公开 facade 的历史差异。精确标量 SSE 已移入独立编译单元，没有近似浮点或新增 ISA 语义。
 
 随后 **31 项契约**：5 项 paint、2 项 comctl32 初始化、10 项 PE32 资源、5 项双架构启动信息、9 项环境接口，完整正确性及累计性能复核通过，当前共 **706 项**。Unity 渲染结束后重新完成 32 条性能协议、288 次执行及三对游戏启动；原后台干扰轮次保留。实现与冻结见[五项 paint](reports/refactoring-painting-followup-2026-10-19.md)、[控件初始化](reports/refactoring-common-controls-2026-10-19.md)、[资源](reports/refactoring-resources-2026-10-19.md)、[启动信息](reports/refactoring-process-startup-2026-10-19.md)与[环境接口](reports/refactoring-environment-2026-10-19.md)。
 
-后续各家族接入明细见下表，当前累计 **888 项**契约。普通结构迁移采用按影响范围选择验证的策略，性能不再逐批执行完整矩阵，见[工具与验收边界](architecture/validation-tools.md)。
+后续各家族接入明细见下表，当前累计 **891 项**契约。普通结构迁移采用按影响范围选择验证的策略，性能不再逐批执行完整矩阵，见[工具与验收边界](architecture/validation-tools.md)。
 
 中间 GDI 冻结出现 messages/IR 三对持续回退，未准入。实际采样后将 API 日志提取为独立 runtime 服务，并用专用整数格式化保留完整 trace、频率和最近 64 条记录。最终消息 150M IR/raw CPU 中位数相对原消息冻结 −13.210%/−12.110%，GDI 150M IR/raw −16.987%/−13.229%；33 条性能协议、207 次 fixture 执行及三对真实启动前缀通过。旧冻结、失败轮次和同哈希 control 独立保留，没有用其它负载的改善抵消持续回退。
 
@@ -19,7 +19,7 @@
 | 阶段 | 已交付 | 剩余范围 |
 | --- | --- | --- |
 | R0/R1 | 冻结输入、原创正式 fixture、领域测试 harness、GUID 唯一契约和双架构适配 | 随后续家族维护独立基线 |
-| R2 | 已接入 888 个 export 的契约；明细见下表 | PE32 legacy 家族与图形 COM 方法 |
+| R2 | 已接入 891 个 export 的契约；明细见下表 | PE32 legacy 家族与图形 COM 方法 |
 | R3 | guest environment 与 Win64 变量/环境块 owner、双架构模块状态、Win64 文件、period 请求、SRW、地址等待及 APC 队列、线程标量操作与描述、双架构 apartment/BSTR、Win64 task/HSTRING/image/desktop/ETW/token/快照/注册表成员、PE32 TLS/FLS/kernel 对象/文件窄适配/scratch/CRT 与双架构 cursor、Win64 DC/class、BCrypt/SSPI/设备私有 owner | PE32 其余资源、线程资源创建/退出及 COM 其余对象；PE32 kernel 大范围抽取曾因性能撤回 |
 | R4/R5 | Process32 编排边界、owned host UI 请求、GDI 与像素状态分离 | 领域分发与资源 owner 随 R2/R3 继续收敛 |
 | R6 | 按用户要求忽略 | 不重建原生 Mono 路径 |
@@ -32,13 +32,13 @@
 | GUID | 6 | [新增 API 指引](architecture/adding-api.md)及[资源辅助验收](reports/refactoring-guid-allocation-2026-10-18.md) |
 | 异常 / 展开 / function-table | 11 | [架构策略、控制结果与注册 owner](architecture/exceptions.md) |
 | Shell / FormatMessage | 6 / 2 | [目录、命令行、消息准备与分配协调](architecture/shell-and-messages.md) |
-| 进程创建 / 退出 | 2 | [控制结果与 child preflight](architecture/process-control.md) |
+| 进程创建 / 退出 / 终止 | 3 | [控制结果与 child preflight](architecture/process-control.md) |
 | DXGI / D3D 创建 | 7 | [provider 差异、标量 ABI 与 typed 创建](architecture/graphics-contracts.md) |
 | identity / version / NLS | 6 / 8 / 42 | [环境与架构](architecture/runtime.md)、[版本](architecture/version.md)、[NLS](architecture/nls.md) |
 | module | 31 | [模块](architecture/modules.md) |
 | file | 58 | [文件及标准句柄](architecture/files.md)；包含 metadata、目录/变更、枚举、section、ANSI profile 与 endpoint |
 | Interlocked / SLIST | 6 | [同步原语边界](architecture/interlocked.md) |
-| 路径辅助 / 通用句柄 | 13 / 6 | [路径与句柄](architecture/paths-handles.md) |
+| 路径辅助 / 通用句柄 | 13 / 7 | [路径与句柄](architecture/paths-handles.md) |
 | 时钟 | 6 | [时钟](architecture/clocks.md)及[验收](reports/refactoring-clocks-2026-10-15.md) |
 | 进程身份 / LastError | 7 | [上下文](architecture/context.md)及[验收](reports/refactoring-context-2026-10-16.md) |
 | TLS / FLS | 8 | [local-slot 边界](architecture/locals.md)及[验收](reports/refactoring-locals-2026-10-16.md) |
@@ -62,7 +62,7 @@
 | WinRT HSTRING / activation | 11 | [字符串与资源边界](architecture/winrt.md)及[验收](reports/refactoring-winrt-2026-10-17.md) |
 | BSTR | 8 | [字符串与资源边界](architecture/bstr.md)及[验收](reports/refactoring-bstr-2026-10-17.md) |
 | Variant | 4 | [调用与资源边界](architecture/variants.md)及[验收](reports/refactoring-variant-2026-10-18.md) |
-| 基础字符串 / 指针与 MulDiv / 进程查询 | 14 / 7 / 10 | [基础 helper 边界](architecture/basic-helpers.md)及[验收](reports/refactoring-basic-2026-10-18.md) |
+| 基础字符串 / 指针与 MulDiv / 进程查询 | 14 / 7 / 11 | [基础 helper 边界](architecture/basic-helpers.md)及[验收](reports/refactoring-basic-2026-10-18.md) |
 | 键盘状态 / 布局 | 3 / 13 | [键盘边界](architecture/keyboard.md)及[验收](reports/refactoring-keyboard-2026-10-18.md) |
 | raw input / IME | 7 / 17 | [输入能力边界](architecture/input-profile.md)及[验收](reports/refactoring-input-profile-2026-10-18.md) |
 | 矩形 / 窗口边框 | 10 / 3 | [几何边界](architecture/geometry.md)及[验收](reports/refactoring-geometry-2026-10-18.md) |

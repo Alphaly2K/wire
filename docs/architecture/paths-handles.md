@@ -1,11 +1,11 @@
 # 路径辅助与通用句柄
 
-`win32/catalog/paths.rs` 声明 13 项路径辅助，`handles.rs` 声明六项通用句柄 API，均已接入。契约提供 export/provider、scalar 参数、返回约定、架构执行策略和冷绑定 ID。文件的 53 项契约仍由 FileApi 拥有；路径辅助与句柄作为独立家族，不复制文件声明。46 条性能路径、section/IR 的局部成本与完整验收见 [记录](../reports/refactoring-paths-handles-2026-10-15.md)。
+`win32/catalog/paths.rs` 声明 13 项路径辅助，`handles.rs` 声明七项通用句柄 API，均已接入。契约提供 export/provider、scalar 参数、返回约定、架构执行策略和冷绑定 ID。文件契约仍由 FileApi 拥有；路径辅助与句柄作为独立家族，不复制文件声明。原 46 条性能路径、section/IR 的局部成本与完整验收见 [记录](../reports/refactoring-paths-handles-2026-10-15.md)。
 
 | 家族 | PE32 | Win64 |
 | --- | --- | --- |
 | PathApi | SHLWAPI 的 Exists/IsDirectory/RemoveFileSpec/RenameExtension/AddExtension/UnquoteSpaces A/W；imagehlp 的 MakeSureDirectoryPathExists；13 Typed | 全部 Absent |
-| HandleApi | kernel32；GetStdHandle/CloseHandle Typed，其余四项 ABI-only | kernel32/kernelbase；六项 Typed |
+| HandleApi | kernel32；GetStdHandle/CloseHandle/SetHandleCount Typed，其余四项 ABI-only | kernel32/kernelbase；原六项 Typed；SetHandleCount Absent |
 
 路径的 codec、受限 GuestFs 和 Hangover/Wine 衍生算法保留于 file_api。内部互斥的 Core/Helper ID 区分文件和路径操作，运行时不再以名称推测 A/W 或 Add/Rename。公开 file_api::dispatch 保留冷 facade，仍只接受原有小写 provider，并继续排除 GetFileType；普通 gateway 直接使用绑定 ID。
 

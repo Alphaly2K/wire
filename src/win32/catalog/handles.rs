@@ -8,6 +8,7 @@ pub enum HandleApi {
     DuplicateHandle,
     GetHandleInformation,
     SetHandleInformation,
+    SetHandleCount,
 }
 
 const fn declaration(
@@ -22,7 +23,7 @@ const fn declaration(
         name,
         parameters,
         returns,
-        "existing per-resource handle ownership, flags and duplication subsets; PE32 null standard handles and close-before-return-frame-fault; Win64 full-width handles, DWORD selectors and return-frame preflight; preserve resource-specific errors and early completion/unblock order",
+        "existing per-resource handle ownership, flags and duplication subsets; PE32 null standard handles, automatic capacity hint preserving input, and close-before-return-frame-fault; Win64 capacity hint absent, full-width handles, DWORD selectors and return-frame preflight; preserve resource-specific errors and early completion/unblock order",
         [
             ArchitecturePlan {
                 dlls: &["kernel32.dll"],
@@ -33,8 +34,8 @@ const fn declaration(
                 },
             },
             ArchitecturePlan {
-                dlls: &["kernel32.dll", "kernelbase.dll"],
-                execution: ExecutionPolicy::Typed,
+                dlls: if matches!(id, HandleApi::SetHandleCount) { &[] } else { &["kernel32.dll", "kernelbase.dll"] },
+                execution: if matches!(id, HandleApi::SetHandleCount) { ExecutionPolicy::Absent } else { ExecutionPolicy::Typed },
             },
         ],
     )
@@ -43,7 +44,14 @@ const fn declaration(
 use Parameter::{Pointer as P, Uint32 as D};
 use ReturnConvention::{BoolLastError as B, Pointer as R};
 
-pub static HANDLE_CONTRACTS: [Contract; 6] = [
+pub static HANDLE_CONTRACTS: [Contract; 7] = [
+    declaration(
+        HandleApi::SetHandleCount,
+        "SetHandleCount",
+        &[D],
+        ReturnConvention::Uint32,
+        true,
+    ),
     declaration(HandleApi::GetStdHandle, "GetStdHandle", &[D], R, true),
     declaration(HandleApi::SetStdHandle, "SetStdHandle", &[D, P], B, false),
     declaration(HandleApi::CloseHandle, "CloseHandle", &[P], B, true),

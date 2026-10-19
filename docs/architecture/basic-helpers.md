@@ -18,6 +18,8 @@
 
 PE32 进程查询只借句柄视图、调度器与内存，OpenProcess 返回资源创建请求，由原入口分配句柄。固定 PID、access mask 和忽略 inherit flag 的策略保持。查询先检查句柄与权限，再检查输出；affinity 先检查两个输出，再按原顺序写入。SetThreadIdealProcessor 失败返回 UINT_MAX；未新增进程执行能力。
 
+GetCurrentPackageId 随后接入 ProcessQueryApi，保留 PE32 桌面应用的 APPMODEL_ERROR_NO_PACKAGE、输出和 LastError 不变策略；Win64 仍 absent，详见[进程 endpoint](process-control.md)。
+
 processor count 的 WORD carrier 由适配层消费，保持 Win64 trace 中原始 64 位参数。PE32 仍对完整 32 位 carrier 检查 0/0xffff，Win64 按原实现只消费低 WORD；两端成功均保留 LastError。group-count 两项在 PE32 仍为 ABI-only/LastError 120，Win64 返回单组 profile。API 返回槽别名仍分别使用 PE32 handler 后读取和 Win64 预先保存 frame 的顺序。
 
 WMI 的内部 BSTR 分配继续使用同一 Bstrings32 owner 与进程 heap；去掉转借完整 ApiState 的 common_api facade 后，资源和错误顺序保持。common_api 的混合名称分发与模块已删除。

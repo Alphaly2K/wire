@@ -542,3 +542,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 PE32 CRT 普通语义窄适配
 
 基线 `b28ecc6`。memory/string/time 仅借内存，CRT heap 仅借 allocator 与 process heap，启动 accessor 与 strtoul 由 CrtState32 显式借 scratch/error/线程资源。原普通算法、分配、启动、errno 顺序、FPU/qsort/data export/initializer 和 gateway 主体归一核对保持。release CRT 8、完整 Win32 249、fmt/release lib/bin strict Clippy/build 通过，不跑性能。没有扩大 CRT 能力或新增 catalog 计数，累计 export 仍 **888**，证据为 `wire-out/refactoring-2026-10-14/r3-crt-scalar32-{source-checks,verification}.json`，见[CRT 边界](../architecture/crt32.md)。
+
+## R2 PE32 kernel endpoint 补齐
+
+独立基线 `12ed607` 固定 TerminateProcess、SetHandleCount 和 GetCurrentPackageId 的 provider、ABI、输出不变与退出故障提交。三项接入既有家族，终止/容量主体归一保持，Win64 均维持 absent。release Win32 251、Win64 modules 12、catalog 一致性及 fmt/release lib/bin strict Clippy/build 通过，不跑性能。累计 **891 exports**，见[进程 endpoint](../architecture/process-control.md)，证据 `wire-out/refactoring-2026-10-14/r2-kernel-endpoints32-{source-checks,verification}.json`。

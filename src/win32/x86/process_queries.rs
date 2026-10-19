@@ -26,6 +26,7 @@ pub(crate) fn call(
         return Ok(ProcessQueryResult::Open { access: a[0] });
     }
     let value = match id {
+        PackageId => 0x3d54, // APPMODEL_ERROR_NO_PACKAGE; outputs and LastError unchanged.
         Affinity | SetAffinity | Id | ExitCode => {
             if a[0] != u32::MAX {
                 let Some(HandleObj::Process { access }) = handles.get(&a[0]) else {

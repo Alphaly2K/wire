@@ -685,7 +685,13 @@ pub fn dispatch(
             implemented = false;
             note = "MCI device backend unavailable".into();
         }
-        (_, "kernel32.dll", "TerminateProcess") => {
+        (
+            Some(crate::win32::catalog::ApiId::ProcessControl(
+                crate::win32::catalog::ProcessControlApi::Terminate,
+            )),
+            _,
+            _,
+        ) => {
             if args[0] == u32::MAX
                 || matches!(state.handles.get(&args[0]), Some(HandleObj::Process { .. }))
             {
@@ -785,7 +791,9 @@ pub fn dispatch(
             match result {
                 Ok(value) => {
                     ret = value;
-                    note = if matches!(id, ApiId::PointerHelper(id) if id.encoding()) {
+                    note = if id == ApiId::ProcessQuery(ProcessQueryApi::PackageId) {
+                        "not a packaged app"
+                    } else if matches!(id, ApiId::PointerHelper(id) if id.encoding()) {
                         "identity encoding"
                     } else {
                         "common process/string/COM allocation contract"
@@ -1482,7 +1490,13 @@ pub fn dispatch(
             ret = 0;
             note = "fake null handle".into();
         }
-        (_, "kernel32.dll", "SetHandleCount") => {
+        (
+            Some(crate::win32::catalog::ApiId::Handle(
+                crate::win32::catalog::HandleApi::SetHandleCount,
+            )),
+            _,
+            _,
+        ) => {
             // Legacy CRT hint; NT-style handle tables grow automatically.
             ret = args[0];
             note = "automatic handle table capacity".into();
@@ -1559,10 +1573,6 @@ pub fn dispatch(
         ) => {
             log.log_call(idx, dll, name, &args[..4], args[3], true, "SEH unwind");
             return crate::seh::unwind(cpu, mem, api, state, log, sched, &args, max_instr);
-        }
-        (_, "kernel32.dll", "GetCurrentPackageId") => {
-            ret = 0x3d54; // APPMODEL_ERROR_NO_PACKAGE (desktop app)
-            note = "not a packaged app".into();
         }
         (_, "user32.dll", "GetProcessWindowStation") => {
             ret = 0x7007_0000;
