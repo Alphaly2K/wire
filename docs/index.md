@@ -75,6 +75,7 @@
 - [本次渐进重构记录](reports/refactoring-2026-10-14.md)：阶段交付、行为差异与验收结果。
 - [R7 稳定边界整理](reports/refactoring-r7-2026-10-14.md)：PE32 目录、领域测试、freeze/replay 工具及完整对照。
 - [R7 CLI 候选](reports/refactoring-cli-2026-10-19.md)：六个函数逐体迁移和 19 组命令兼容通过；性能对照大幅漂移，源码已精确撤回，候选冻结保留。
+- [R7 CLI 重试](reports/refactoring-cli-followup-2026-10-19.md)：四个命令模块已接入，七份函数文本等价、21 组命令及启动功能通过；library 保持，性能待复核。
 - [R7 离线 inventory](reports/refactoring-inventory-2026-10-19.md)：PE/CLR 解析、运行轨迹和扫描报表各归其职，旧入口保留，24 项工具检查及机器报告对照通过。
 - [R7 CPU profile 工具](reports/refactoring-profile-tools-2026-10-19.md)：实现归入 perf 包，旧入口与 mock 保持，真实采样的 JSON/折叠栈/火焰图逐字节对照通过。
 - [R7 native 图形探针](reports/refactoring-native-probes-2026-10-19.md)：七个旧入口保留，13 个 C ABI 布局集中；三项真实 native 执行与 11 个输出对照通过。

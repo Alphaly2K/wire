@@ -56,4 +56,10 @@ python3 -B tools/cpu_profile.py summarize wire-out/new-profile/run-0/sample.txt 
 
 七个独立 native 图形探针实现归入 `tools/probes/`，共享 C ABI 布局在 `abi.py`，各探针保留自己的输入、失败断言及清理顺序。旧 `tools/probe_*.py` 脚本及导入继续委托同一实际模块；新入口可用 `python3 -B -m tools.probes.present --help` 等命令。Present 的 AppKit 源码按仓库根定位，MoltenVK 的 C 探针仍在 tools 根，不受调用工作目录影响。13 个 ABI 布局、三项真实 native 报告与 11 个 shader/像素输出对照通过；缺失外部 SDK/validator 的未重跑项目见 [native 探针验收](../reports/refactoring-native-probes-2026-10-19.md)。当前工具测试 26 项。
 
+`tools/probe_cli.py` 委托 `tools/probes/cli.py`，自行生成三个原创小型 PE，比较两个冻结 executable 的 21 组命令。固定 cwd/argv0/解释器软链接，记录输入、工具和 binary SHA；退出删除链接，输出目录必须不存在。退出码、stderr、IR 文件和 API 调用顺序严格比较；stdout 仅规范化三个既有时间/速率位置，API 频率 footer 按内容排序。检查用于命令兼容，不作性能准入；[CLI 验收](../reports/refactoring-cli-followup-2026-10-19.md)保留原始输出和初版误判。
+
+```sh
+python3 -B tools/probe_cli.py --before frozen-before/wire --after frozen-after/wire --out wire-out/new-cli-comparison
+```
+
 100M 的 AMD64 event 输入 SHA 从 `e95a32dce6313767263432f4df1ab8106745bf24526597ad643d7ceb0b961441` 变为 `f538f2f83f97fbc7152cf9f3bb8628f8663efea3306aaa937374ae194ffaf1b2`。旧正式数据与校验保留，后续使用修正输入独立配对，不跨哈希合并。本次仅修工具，没有修改运行时。
