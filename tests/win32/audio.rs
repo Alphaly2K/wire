@@ -3,6 +3,79 @@
 use super::*;
 
 #[test]
+fn unavailable_legacy_endpoints_keep_audio_errors_faults_and_aliases() {
+    let mut v = Vm::new();
+    v.k("SetLastError", &[77]);
+    v.mem.write_u32(DATA, 0xa5a5a5a5).unwrap();
+    for name in [
+        "mciSendCommandA",
+        "mciSendCommandW",
+        "mciSendStringA",
+        "mciSendStringW",
+    ] {
+        assert_eq!(
+            v.call("winmm.dll", name, &[0x30000000, DATA, u32::MAX, DATA]),
+            274
+        );
+        assert_eq!(v.mem.read_u32(DATA).unwrap(), 0xa5a5a5a5);
+        assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 236);
+        assert_eq!(v.state.last_error, 77);
+        assert_eq!(
+            v.log.unimpl_freq.get(&format!("winmm.dll!{name}")),
+            Some(&1)
+        );
+        assert!(v
+            .log
+            .recent
+            .back()
+            .unwrap()
+            .ends_with("MCI device backend unavailable"));
+    }
+    assert_eq!(v.call("winmm.dll", "waveOutGetNumDevs", &[]), 0);
+    assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 252);
+    assert!(!v
+        .log
+        .unimpl_freq
+        .contains_key("winmm.dll!waveOutGetNumDevs"));
+    let calls = v.log.call_count;
+    assert!(v
+        .try_call("winmm.dll", "waveOutOpen", &[0x30000000, 0, 0, 0, 0, 0])
+        .is_err());
+    assert_eq!(v.log.call_count, calls);
+    assert_eq!(v.state.last_error, 77);
+    let sp = STACK_BASE + STACK_SIZE - 256;
+    assert_eq!(
+        v.call(
+            "winmm.dll",
+            "waveOutOpen",
+            &[sp, u32::MAX, 0x30000000, 0, 0, 0]
+        ),
+        6
+    );
+    assert_eq!(v.cpu.eip, 0);
+    assert_eq!(v.cpu.esp(), sp + 28);
+    assert_eq!(v.state.last_error, 77);
+    assert!(v
+        .log
+        .recent
+        .back()
+        .unwrap()
+        .ends_with("wave output backend unavailable"));
+    for name in [
+        "mciSendCommandA",
+        "mciSendCommandW",
+        "mciSendStringA",
+        "mciSendStringW",
+        "waveOutGetNumDevs",
+        "waveOutOpen",
+    ] {
+        assert_eq!(v.call("kernel32.dll", name, &[0; 6]), 0);
+        assert_eq!(v.cpu.esp(), sp + 4);
+        assert_eq!(v.state.last_error, 120);
+    }
+}
+
+#[test]
 fn unsupported_audio_returns_real_failure_and_never_a_success_with_null_object() {
     let mut v = Vm::new();
     v.mem.write_u32(DATA, 0xdeadbeef).unwrap();

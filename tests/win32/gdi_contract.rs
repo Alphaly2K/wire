@@ -2,6 +2,41 @@
 use super::*;
 
 #[test]
+fn unavailable_legacy_endpoints_keep_font_outputs_error_and_cleanup() {
+    let mut v = Vm::new();
+    for (name, slots) in [
+        ("AddFontMemResourceEx", 4),
+        ("RemoveFontMemResourceEx", 1),
+        ("AddFontResourceExA", 3),
+        ("AddFontResourceExW", 3),
+        ("RemoveFontResourceExA", 3),
+        ("RemoveFontResourceExW", 3),
+    ] {
+        v.k("SetLastError", &[77]);
+        v.mem.write_u32(DATA, 0xa5a5a5a5).unwrap();
+        assert_eq!(v.call("gdi32.dll", name, &[DATA; 4][..slots]), 0);
+        assert_eq!(v.state.last_error, 120);
+        assert_eq!(v.mem.read_u32(DATA).unwrap(), 0xa5a5a5a5);
+        assert_eq!(
+            v.cpu.esp(),
+            STACK_BASE + STACK_SIZE - 252 + slots as u32 * 4
+        );
+        assert!(v
+            .log
+            .recent
+            .back()
+            .unwrap()
+            .ends_with("font resource backend not ported"));
+        assert_eq!(
+            v.log.unimpl_freq.get(&format!("gdi32.dll!{name}")),
+            Some(&1)
+        );
+        assert_eq!(v.call("user32.dll", name, &[0x30000000; 4]), 0);
+        assert_eq!(v.cpu.esp(), STACK_BASE + STACK_SIZE - 252);
+    }
+}
+
+#[test]
 fn gdi_contract_pe32_keeps_display_and_compatible_dc_lifetimes() {
     let mut v = Vm::new();
     let screen = v.call("user32.dll", "GetDC", &[0]);
