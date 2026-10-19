@@ -76,6 +76,8 @@ mod process_startup_contract;
 mod resources_contract;
 #[path = "x64/sections.rs"]
 mod sections;
+#[path = "x64/sid_contract.rs"]
+mod sid_contract;
 #[path = "x64/simd.rs"]
 mod simd;
 #[path = "x64/snapshot_contract.rs"]
