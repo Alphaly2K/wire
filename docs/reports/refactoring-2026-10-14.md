@@ -466,3 +466,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R2 注册表 17 项契约
 
 独立基线 `c872fbb` 固定 provider、PE32 受限能力和 Wine fallback ABI、Win64 DWORD trace 及旧式 QueryValue 缺失。统一契约替换双架构重复声明，PE32 受限处理函数移入适配器，Win64 owner 改用 RegistryApi。相关 release 6、catalog 一致性与 fmt/strict Clippy/build 通过，不做性能矩阵；累计 **750 exports**，见[验收](refactoring-registry-contract-2026-10-20.md)。
+
+## R2/R3 BCrypt RNG
+
+独立基线 `19517df` 固定 provider、DWORD trace、全宽复用句柄和容量/输出故障顺序。三项契约与私有 RNG owner 接入，原 OS entropy/handler 经归一核对保持；catalog 的第 64 族触发类型递归上限后改为静态分组迭代，原家族顺序保持。相关 release 3、catalog 一致性、fmt/strict Clippy/build 通过，公共 catalog 另做一次整合正确性回归；不跑性能矩阵。累计 **753 exports**，见[验收](refactoring-bcrypt-2026-10-20.md)。

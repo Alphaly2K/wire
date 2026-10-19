@@ -1,12 +1,12 @@
 # 当前状态
 
-更新日期：2026-10-20。重构前基线为 `2e78377`；最新完成 [注册表 17 项契约](reports/refactoring-registry-contract-2026-10-20.md)，独立基线 `c872fbb`，相关 release 6 项及 catalog/构建检查通过。此前 [Win64 注册表所有权](reports/refactoring-registry-owner-2026-10-20.md)完成 release Win64 260 项、debug 注册表 3 项；token/SID/ETW 三批契约整合后 release 全量 664 项通过。按影响范围选择验证，本批不重复性能或无关游戏/native 矩阵。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
+更新日期：2026-10-20。重构前基线为 `2e78377`；最新完成 [BCrypt RNG 契约与所有权](reports/refactoring-bcrypt-2026-10-20.md)，独立基线 `19517df`，相关 release 3 项及 catalog/构建检查通过。此前 [注册表 17 项契约](reports/refactoring-registry-contract-2026-10-20.md)相关 release 6 项通过，[注册表所有权](reports/refactoring-registry-owner-2026-10-20.md)完成 release Win64 260 项、debug 定向 3 项。按影响范围选择验证，本批不重复性能或无关游戏/native 矩阵。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
 
 本轮累计接入对话框/窗口枚举 22、菜单 27、GDI 对象/像素/字体 31 项，共 **80 项**，累计 **675 项**。统一声明、typed 分发与领域 owner 保持双架构范围、故障提交和既有不可用策略；保留真实 RedrawWindow 网关与公开 facade 的历史差异。精确标量 SSE 已移入独立编译单元，没有近似浮点或新增 ISA 语义。
 
 随后 **31 项契约**：5 项 paint、2 项 comctl32 初始化、10 项 PE32 资源、5 项双架构启动信息、9 项环境接口，完整正确性及累计性能复核通过，当前共 **706 项**。Unity 渲染结束后重新完成 32 条性能协议、288 次执行及三对游戏启动；原后台干扰轮次保留。实现与冻结见[五项 paint](reports/refactoring-painting-followup-2026-10-19.md)、[控件初始化](reports/refactoring-common-controls-2026-10-19.md)、[资源](reports/refactoring-resources-2026-10-19.md)、[启动信息](reports/refactoring-process-startup-2026-10-19.md)与[环境接口](reports/refactoring-environment-2026-10-19.md)。
 
-其后接入 Toolhelp 7 项、token 3 项、SID 9 项、ETW 8 项和注册表 17 项，当前累计 **750 项**。普通结构迁移采用按影响范围选择验证的策略，性能不再逐批执行完整矩阵，见[工具与验收边界](architecture/validation-tools.md)。
+其后接入 Toolhelp 7 项、token 3 项、SID 9 项、ETW 8 项、注册表 17 项和 BCrypt 3 项，当前累计 **753 项**。普通结构迁移采用按影响范围选择验证的策略，性能不再逐批执行完整矩阵，见[工具与验收边界](architecture/validation-tools.md)。
 
 中间 GDI 冻结出现 messages/IR 三对持续回退，未准入。实际采样后将 API 日志提取为独立 runtime 服务，并用专用整数格式化保留完整 trace、频率和最近 64 条记录。最终消息 150M IR/raw CPU 中位数相对原消息冻结 −13.210%/−12.110%，GDI 150M IR/raw −16.987%/−13.229%；33 条性能协议、207 次 fixture 执行及三对真实启动前缀通过。旧冻结、失败轮次和同哈希 control 独立保留，没有用其它负载的改善抵消持续回退。
 
@@ -19,7 +19,7 @@
 | 阶段 | 已交付 | 剩余范围 |
 | --- | --- | --- |
 | R0/R1 | 冻结输入、原创正式 fixture、领域测试 harness、GUID 唯一契约和双架构适配 | 随后续家族维护独立基线 |
-| R2 | 已接入 750 个 export 的契约；明细见下表 | USER、COM、图形等 legacy 家族 |
+| R2 | 已接入 753 个 export 的契约；明细见下表 | USER、COM、图形等 legacy 家族 |
 | R3 | guest environment 与 Win64 变量/环境块 owner、双架构模块状态、Win64 文件、period 请求、SRW、地址等待及 APC 队列、线程标量操作与描述、双架构 apartment/BSTR、Win64 task/HSTRING/image/desktop/ETW/token/快照/注册表成员、PE32 TLS/FLS 与双架构 cursor、Win64 DC/class 私有 owner | PE32 其余资源、线程资源创建/退出及 COM 其余对象；PE32 kernel 大范围抽取曾因性能撤回 |
 | R4/R5 | Process32 编排边界、owned host UI 请求、GDI 与像素状态分离 | 领域分发与资源 owner 随 R2/R3 继续收敛 |
 | R6 | 按用户要求忽略 | 不重建原生 Mono 路径 |
@@ -86,6 +86,7 @@
 | SID | 9 | [适配器边界](architecture/sids.md)及[验收](reports/refactoring-sid-contract-2026-10-20.md) |
 | ETW | 8 | [provider 边界](architecture/tracing.md)及[契约验收](reports/refactoring-etw-contract-2026-10-20.md) |
 | 注册表 | 17 | [领域边界](architecture/registry.md)及[契约验收](reports/refactoring-registry-contract-2026-10-20.md) |
+| BCrypt RNG | 3 | [领域边界](architecture/bcrypt.md)及[验收](reports/refactoring-bcrypt-2026-10-20.md) |
 
 ## 当前执行路径与能力
 
@@ -102,7 +103,7 @@
 
 ## 验证与性能
 
-最近三批整合：release 全量 **664 passed / 7 ignored**。ETW 所属 release **7 passed**、debug AMD64 **6 passed**，fmt/strict all-target/all-feature Clippy/release build 通过，短 ETW fixture 的返回和 retired/work/API 计数符合预期；307 个 src Rust SHA 与 executable SHA 已记录。SID 的 release 定向 5/debug 定向 4、token 的 debug 定向 7/工具 31，以及更早完整 debug 501、显式 native 7，保留各批原验收上下文。按风险评估不重跑性能和未改动的 native 图形。各批独立基线与功能证据见对应报告。
+注册表/BCrypt 与公共 catalog 整合：release 全量 **670 passed / 7 ignored**，BCrypt 所属 release 3、注册表所属 release 6、catalog 一致性与 fmt/strict all-target/all-feature Clippy/release build 通过。注册表 owner 的 debug 定向 3、此前 ETW 的 debug 定向 6/token 定向 7/工具 31，以及更早完整 debug 501、显式 native 图形 7，保留各批原验收上下文。按风险评估不重跑性能和未改动的 native 图形。各批独立基线与功能证据见对应报告。
 
 七项 Toolhelp 契约完成 17 个计时协议、162 次执行和三对 Alice 前缀。Win64 copyout CPU −12.007%，PE32 ABI-only 快捷路径 IR/raw −82.834%/−77.516%，完整诊断日志逐字节不变。code-alias 900M 保留 +4.286% 的局部成本，执行计数、实际调用栈及热区操作数已核对，具体机制尚未确证；raw 六对 900M 汇总 −0.745%。Alice CPU/wall −1.008%/−0.404%，RSS −752KiB，保持同预算、隐藏窗口及零 Draw/Present。详见[契约验收](reports/refactoring-snapshot-contract-2026-10-19.md)。
 

@@ -11,6 +11,7 @@ use std::{
 };
 mod apc;
 mod automation;
+mod bcrypt;
 mod com;
 mod command;
 mod devices;
@@ -103,7 +104,7 @@ pub struct Runtime64 {
     bstrings: automation::Bstrings,
     hstrings: winrt::Strings,
     devices: devices::Devices,
-    rng_handles: std::collections::BTreeSet<u64>,
+    rng: bcrypt::RngProviders,
     exe_path: String,
     pub gateways: Gateways,
     static_tls_count: u32,
@@ -219,11 +220,6 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
         && !(dll.eq_ignore_ascii_case("d3d12.dll") && dxgi::d3d12_export(name))
         && !(dll.eq_ignore_ascii_case("d3d11.dll") && dxgi::d3d11_export(name))
         && !(dll == dxgi::DLL && dxgi::arity(name).is_some())
-        && !(dll.eq_ignore_ascii_case("bcrypt.dll")
-            && matches!(
-                name,
-                "BCryptGenRandom" | "BCryptOpenAlgorithmProvider" | "BCryptCloseAlgorithmProvider"
-            ))
         && !devices::export(dll, name)
         && !winhttp::export(dll, name)
     {
@@ -242,7 +238,6 @@ fn kernel_export(name: &str) -> bool {
         || sockets::is_call(name)
         || sspi::arity(name).is_some()
         || dxgi::arity(name).is_some()
-        || name.starts_with("BCrypt")
         || name.starts_with("time")
         || name == "NtQueryDirectoryFile"
         || matches!(name, "CommandLineToArgvW" | "SHGetKnownFolderPath")
@@ -277,8 +272,6 @@ fn import_arity(name: &str) -> Option<usize> {
         "FormatMessageA" | "FormatMessageW" => 7,
         "SHGetKnownFolderPath" => 4,
         "GetLogicalProcessorInformationEx" => 3,
-        "BCryptGenRandom" | "BCryptOpenAlgorithmProvider" => 4,
-        "BCryptCloseAlgorithmProvider" => 2,
         "NtQueryDirectoryFile" => 11,
         "CommandLineToArgvW" => 2,
         "AreFileApisANSI" => 0,
@@ -324,9 +317,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "FormatMessageA" | "FormatMessageW" => &[0, 2, 3, 5],
         "SHGetKnownFolderPath" => &[1],
         "GetLogicalProcessorInformationEx" => &[0],
-        "BCryptGenRandom" => &[2, 3],
-        "BCryptOpenAlgorithmProvider" => &[3],
-        "BCryptCloseAlgorithmProvider" => &[1],
         "NtQueryDirectoryFile" => &[6, 7],
         "SetErrorMode" => &[0],
         "InitializeProcThreadAttributeList" => &[1, 2],
@@ -428,7 +418,7 @@ impl Runtime64 {
             task_memory: Default::default(),
             hstrings: Default::default(),
             devices: Default::default(),
-            rng_handles: std::collections::BTreeSet::new(),
+            rng: bcrypt::RngProviders::default(),
             exe_path: command.trim_matches('"').to_owned(),
             gateways: BTreeMap::new().into(),
             static_tls_count: 0,
@@ -775,6 +765,7 @@ impl Runtime64 {
             }
             ApiId::Etw(id) => self.etw.call(mem, id, args),
             ApiId::Registry(id) => self.registry.call(mem, id, args),
+            ApiId::Bcrypt(id) => self.rng.call(mem, id, args),
             ApiId::Keyboard(id) => self.keyboard_call(mem, id, args),
             ApiId::Cursor(id) => self.cursor_call(mem, id, args),
             ApiId::Image(id) => self.image_call(mem, id, args),
@@ -1573,73 +1564,6 @@ impl Runtime64 {
                 } else {
                     self.set_error(mem, 87)?;
                     0
-                }
-            }
-            "BCryptGenRandom" => {
-                if args[3] & !3 != 0 || args[3] & 2 != 0 && args[0] != 0 {
-                    0xc000000d
-                } else if args[3] & 2 == 0
-                    && args[0] != 0x81
-                    && !self.rng_handles.contains(&args[0])
-                {
-                    0xc0000008
-                } else if args[2] > 16 * 1024 * 1024 {
-                    0xc0000017
-                } else {
-                    mem.check(args[1], args[2] as usize, WRITE)?;
-                    let mut data = vec![0; args[2] as usize];
-                    let mut success = true;
-                    for bytes in data.chunks_mut(256) {
-                        if unsafe { libc::getentropy(bytes.as_mut_ptr().cast(), bytes.len()) } != 0
-                        {
-                            success = false;
-                            break;
-                        }
-                    }
-                    if success {
-                        mem.write(args[1], &data)?;
-                        0
-                    } else {
-                        0xc0000001
-                    }
-                }
-            }
-            "BCryptOpenAlgorithmProvider" => {
-                let algorithm = Self::utf16(mem, args[1])?;
-                let implementation = if args[2] == 0 {
-                    None
-                } else {
-                    Some(Self::utf16(mem, args[2])?)
-                };
-                if args[3] != 0 {
-                    0xc000000d
-                } else if algorithm != "RNG"
-                    || implementation
-                        .as_ref()
-                        .is_some_and(|name| name != "Microsoft Primitive Provider")
-                {
-                    0xc00000bb
-                } else {
-                    mem.check(args[0], 8, WRITE)?;
-                    let handle = (0..1024u64)
-                        .map(|n| TEB + 0x700000 + n * 16)
-                        .find(|h| !self.rng_handles.contains(h));
-                    if let Some(handle) = handle {
-                        mem.write_int(args[0], 8, handle)?;
-                        self.rng_handles.insert(handle);
-                        0
-                    } else {
-                        0xc0000017
-                    }
-                }
-            }
-            "BCryptCloseAlgorithmProvider" => {
-                if args[1] != 0 {
-                    0xc000000d
-                } else if self.rng_handles.remove(&args[0]) {
-                    0
-                } else {
-                    0xc0000008
                 }
             }
             _ if matches!(

@@ -2,6 +2,7 @@
 //! Unconverted families remain on explicit legacy routes.
 mod address_waits;
 mod basic_strings;
+mod bcrypt;
 mod bstr;
 mod calendar;
 mod classes;
@@ -63,6 +64,7 @@ mod window_state;
 mod winrt;
 pub use address_waits::{AddressWaitApi, ADDRESS_WAIT_CONTRACTS};
 pub use basic_strings::{BasicStringApi, BASIC_STRING_CONTRACTS};
+pub use bcrypt::{BcryptApi, BCRYPT_CONTRACTS};
 pub(crate) use bstr::symbol as bstr_symbol;
 pub use bstr::{BstrApi, BSTR_CONTRACTS};
 pub use calendar::{CalendarApi, CALENDAR_CONTRACTS};
@@ -221,6 +223,7 @@ pub enum ApiId {
     Sid(SidApi),
     Etw(EtwApi),
     Registry(RegistryApi),
+    Bcrypt(BcryptApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -357,70 +360,74 @@ pub(crate) fn by_name(name: &str) -> Option<&'static Contract> {
 }
 
 pub fn contracts() -> impl Iterator<Item = &'static Contract> {
-    GUID_CONTRACTS
-        .iter()
-        .chain(IDENTITY_CONTRACTS.iter())
-        .chain(VERSION_CONTRACTS.iter())
-        .chain(NLS_CONTRACTS.iter())
-        .chain(MODULE_CONTRACTS.iter())
-        .chain(MODULE_QUERY_CONTRACTS.iter())
-        .chain(FILE_CONTRACTS.iter())
-        .chain(INTERLOCKED_CONTRACTS.iter())
-        .chain(HANDLE_CONTRACTS.iter())
-        .chain(PATH_CONTRACTS.iter())
-        .chain(CLOCK_CONTRACTS.iter())
-        .chain(CONTEXT_CONTRACTS.iter())
-        .chain(LOCAL_CONTRACTS.iter())
-        .chain(SYNC_OBJECT_CONTRACTS.iter())
-        .chain(MUTEX_CONTRACTS.iter())
-        .chain(WAIT_CONTRACTS.iter())
-        .chain(DELAY_CONTRACTS.iter())
-        .chain(TIMER_CONTRACTS.iter())
-        .chain(VIRTUAL_MEMORY_CONTRACTS.iter())
-        .chain(HEAP_CONTRACTS.iter())
-        .chain(LOCAL_MEMORY_CONTRACTS.iter())
-        .chain(SYSTEM_PROFILE_CONTRACTS.iter())
-        .chain(CALENDAR_CONTRACTS.iter())
-        .chain(MULTIMEDIA_CONTRACTS.iter())
-        .chain(INLINE_SYNC_CONTRACTS.iter())
-        .chain(CRITICAL_SECTION_CONTRACTS.iter())
-        .chain(ADDRESS_WAIT_CONTRACTS.iter())
-        .chain(THREAD_PROPERTY_CONTRACTS.iter())
-        .chain(THREAD_CONTROL_CONTRACTS.iter())
-        .chain(COM_CONTRACTS.iter())
-        .chain(WINRT_CONTRACTS.iter())
-        .chain(BSTR_CONTRACTS.iter())
-        .chain(VARIANT_CONTRACTS.iter())
-        .chain(BASIC_STRING_CONTRACTS.iter())
-        .chain(POINTER_HELPER_CONTRACTS.iter())
-        .chain(PROCESS_QUERY_CONTRACTS.iter())
-        .chain(KEYBOARD_CONTRACTS.iter())
-        .chain(RAW_INPUT_CONTRACTS.iter())
-        .chain(IME_CONTRACTS.iter())
-        .chain(GEOMETRY_CONTRACTS.iter())
-        .chain(CURSOR_CONTRACTS.iter())
-        .chain(IMAGE_CONTRACTS.iter())
-        .chain(DISPLAY_CONTRACTS.iter())
-        .chain(GDI_DC_CONTRACTS.iter())
-        .chain(DESKTOP_CONTRACTS.iter())
-        .chain(CLASS_CONTRACTS.iter())
-        .chain(USER_OBJECT_CONTRACTS.iter())
-        .chain(WINDOW_QUERY_CONTRACTS.iter())
-        .chain(WINDOW_CONTROL_CONTRACTS.iter())
-        .chain(WINDOW_STATE_CONTRACTS.iter())
-        .chain(MESSAGE_CONTRACTS.iter())
-        .chain(DIALOG_CONTRACTS.iter())
-        .chain(PAINTING_CONTRACTS.iter())
-        .chain(MENU_CONTRACTS.iter())
-        .chain(GDI_OPERATION_CONTRACTS.iter())
-        .chain(RESOURCE_CONTRACTS.iter())
-        .chain(STARTUP_CONTRACTS.iter())
-        .chain(ENVIRONMENT_CONTRACTS.iter())
-        .chain(SNAPSHOT_CONTRACTS.iter())
-        .chain(TOKEN_CONTRACTS.iter())
-        .chain(SID_CONTRACTS.iter())
-        .chain(ETW_CONTRACTS.iter())
-        .chain(REGISTRY_CONTRACTS.iter())
+    // Keep the cold catalog iterator's type depth constant as families grow.
+    const FAMILIES: &[&[Contract]] = &[
+        &GUID_CONTRACTS,
+        &IDENTITY_CONTRACTS,
+        &VERSION_CONTRACTS,
+        &NLS_CONTRACTS,
+        &MODULE_CONTRACTS,
+        &MODULE_QUERY_CONTRACTS,
+        &FILE_CONTRACTS,
+        &INTERLOCKED_CONTRACTS,
+        &HANDLE_CONTRACTS,
+        &PATH_CONTRACTS,
+        &CLOCK_CONTRACTS,
+        &CONTEXT_CONTRACTS,
+        &LOCAL_CONTRACTS,
+        &SYNC_OBJECT_CONTRACTS,
+        &MUTEX_CONTRACTS,
+        &WAIT_CONTRACTS,
+        &DELAY_CONTRACTS,
+        &TIMER_CONTRACTS,
+        &VIRTUAL_MEMORY_CONTRACTS,
+        &HEAP_CONTRACTS,
+        &LOCAL_MEMORY_CONTRACTS,
+        &SYSTEM_PROFILE_CONTRACTS,
+        &CALENDAR_CONTRACTS,
+        &MULTIMEDIA_CONTRACTS,
+        &INLINE_SYNC_CONTRACTS,
+        &CRITICAL_SECTION_CONTRACTS,
+        &ADDRESS_WAIT_CONTRACTS,
+        &THREAD_PROPERTY_CONTRACTS,
+        &THREAD_CONTROL_CONTRACTS,
+        &COM_CONTRACTS,
+        &WINRT_CONTRACTS,
+        &BSTR_CONTRACTS,
+        &VARIANT_CONTRACTS,
+        &BASIC_STRING_CONTRACTS,
+        &POINTER_HELPER_CONTRACTS,
+        &PROCESS_QUERY_CONTRACTS,
+        &KEYBOARD_CONTRACTS,
+        &RAW_INPUT_CONTRACTS,
+        &IME_CONTRACTS,
+        &GEOMETRY_CONTRACTS,
+        &CURSOR_CONTRACTS,
+        &IMAGE_CONTRACTS,
+        &DISPLAY_CONTRACTS,
+        &GDI_DC_CONTRACTS,
+        &DESKTOP_CONTRACTS,
+        &CLASS_CONTRACTS,
+        &USER_OBJECT_CONTRACTS,
+        &WINDOW_QUERY_CONTRACTS,
+        &WINDOW_CONTROL_CONTRACTS,
+        &WINDOW_STATE_CONTRACTS,
+        &MESSAGE_CONTRACTS,
+        &DIALOG_CONTRACTS,
+        &PAINTING_CONTRACTS,
+        &MENU_CONTRACTS,
+        &GDI_OPERATION_CONTRACTS,
+        &RESOURCE_CONTRACTS,
+        &STARTUP_CONTRACTS,
+        &ENVIRONMENT_CONTRACTS,
+        &SNAPSHOT_CONTRACTS,
+        &TOKEN_CONTRACTS,
+        &SID_CONTRACTS,
+        &ETW_CONTRACTS,
+        &REGISTRY_CONTRACTS,
+        &BCRYPT_CONTRACTS,
+    ];
+    FAMILIES.iter().flat_map(|family| family.iter())
 }
 
 #[cfg(test)]
