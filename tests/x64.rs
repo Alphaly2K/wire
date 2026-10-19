@@ -90,6 +90,8 @@ mod simd;
 mod snapshot_contract;
 #[path = "x64/snapshot_owner.rs"]
 mod snapshot_owner;
+#[path = "x64/sspi_contract.rs"]
+mod sspi_contract;
 #[path = "x64/sync.rs"]
 mod sync;
 #[path = "x64/thread_control.rs"]
