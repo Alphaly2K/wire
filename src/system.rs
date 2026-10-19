@@ -13,9 +13,14 @@ pub fn dispatch(
     // Preserve this public facade's historical exact DLL spelling. Bound API
     // execution calls the typed adapter directly and does not repeat this lookup.
     if dll == "kernel32.dll" {
-        if let Some(contract) = crate::win32::catalog::SYSTEM_PROFILE_CONTRACTS
-            .iter()
-            .find(|contract| contract.name == name)
+        if let Some(contract) =
+            crate::win32::catalog::SYSTEM_PROFILE_CONTRACTS
+                .iter()
+                .find(|contract| {
+                    contract.name == name
+                        && contract.execution(crate::win32::catalog::Architecture::X86)
+                            == crate::win32::catalog::ExecutionPolicy::Typed
+                })
         {
             let crate::win32::catalog::ApiId::SystemProfile(id) = contract.id else {
                 unreachable!();

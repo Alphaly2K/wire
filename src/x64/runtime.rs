@@ -243,15 +243,12 @@ fn import_arity(name: &str) -> Option<usize> {
         "RtlInstallFunctionTableCallback" => 6,
         "FormatMessageA" | "FormatMessageW" => 7,
         "SHGetKnownFolderPath" => 4,
-        "GetLogicalProcessorInformationEx" => 3,
         "NtQueryDirectoryFile" => 11,
         "CommandLineToArgvW" => 2,
-        "AreFileApisANSI" => 0,
-        "SetThreadStackGuarantee" => 1,
         "CreatePipe" => 4,
         "CreateProcessW" => 10,
         "GetConsoleMode" => 2,
-        "EncodePointer" | "DecodePointer" | "SetUnhandledExceptionFilter" | "ExitProcess" => 1,
+        "SetUnhandledExceptionFilter" | "ExitProcess" => 1,
         "WriteConsoleW" => 5,
         _ => return None,
     })
@@ -275,7 +272,6 @@ fn import_dwords(name: &str) -> &'static [usize] {
         "RtlInstallFunctionTableCallback" => &[2],
         "FormatMessageA" | "FormatMessageW" => &[0, 2, 3, 5],
         "SHGetKnownFolderPath" => &[1],
-        "GetLogicalProcessorInformationEx" => &[0],
         "NtQueryDirectoryFile" => &[6, 7],
         "CreateProcessW" => &[4, 5],
         "CreatePipe" => &[3],
@@ -634,36 +630,6 @@ impl Runtime64 {
     fn string_bytes(mem: &Memory, ptr: u64, count: u64, width: usize) -> Result<Vec<u8>, String> {
         crate::win32::x64::text::string_bytes(mem, ptr, count, width)
     }
-    fn processor_information(relation: u32) -> Option<Vec<u8>> {
-        if !matches!(relation, 0 | 1 | 2 | 3 | 4 | 6 | 0xffff) {
-            return None;
-        }
-        let mut output = Vec::new();
-        // The interpreter exposes one virtual CPU, one NUMA node and one group.
-        // No hardware cache is advertised (also consistent with the CPUID profile).
-        for (kind, size) in [(0u32, 48usize), (1, 48), (3, 48), (4, 80), (6, 48)] {
-            if kind != relation && !(relation == 0xffff && kind != 6) {
-                continue;
-            }
-            let mut record = vec![0; size];
-            record[..4].copy_from_slice(&kind.to_le_bytes());
-            record[4..8].copy_from_slice(&(size as u32).to_le_bytes());
-            if kind == 4 {
-                record[8..10].copy_from_slice(&1u16.to_le_bytes());
-                record[10..12].copy_from_slice(&1u16.to_le_bytes());
-                record[32] = 1;
-                record[33] = 1;
-                record[72..80].copy_from_slice(&1u64.to_le_bytes());
-            } else {
-                if kind != 1 {
-                    record[30..32].copy_from_slice(&1u16.to_le_bytes());
-                }
-                record[32..40].copy_from_slice(&1u64.to_le_bytes());
-            }
-            output.extend(record);
-        }
-        Some(output)
-    }
     /// Validate the return frame first, then dispatch the exact Win64 arity.
     /// A bad return frame or checked output fault must not commit CPU/API state.
     fn catalog_call(
@@ -778,7 +744,8 @@ impl Runtime64 {
                 }
                 Ok(result.value)
             }
-            ApiId::BasicString(_) | ApiId::PointerHelper(_) => {
+            ApiId::PointerHelper(id) => Ok(crate::win32::x64::pointer_helpers::call(id, args)),
+            ApiId::BasicString(_) => {
                 unreachable!("PE32 basic helpers have no Win64 binding")
             }
             ApiId::File(_) => unreachable!("core file calls are handled by the bound gateway"),
@@ -1498,25 +1465,6 @@ impl Runtime64 {
                 }
                 self.record(dll, name, args, 0);
                 return Ok(Control::Yielded);
-            }
-            "GetLogicalProcessorInformationEx" => {
-                if let Some(data) = Self::processor_information(args[0] as u32) {
-                    mem.check(args[2], 4, WRITE)?;
-                    let capacity = mem.read_int(args[2], 4)? as usize;
-                    if capacity < data.len() {
-                        mem.write_int(args[2], 4, data.len() as u64)?;
-                        self.set_error(mem, 122)?;
-                        0
-                    } else {
-                        mem.check(args[1], data.len(), WRITE)?;
-                        mem.write(args[1], &data)?;
-                        mem.write_int(args[2], 4, data.len() as u64)?;
-                        1
-                    }
-                } else {
-                    self.set_error(mem, 87)?;
-                    0
-                }
             }
             _ if matches!(
                 file,
@@ -2290,19 +2238,6 @@ impl Runtime64 {
                     }
                 }
             }
-            "SetThreadStackGuarantee" => {
-                let requested = mem.read_int(args[0], 4)?;
-                if requested == 0 {
-                    // No overflow/unwind path exists yet, so this thread has no guaranteed
-                    // exception-handler reserve. A zero request only queries that state.
-                    mem.write_int(args[0], 4, 0)?;
-                    1
-                } else {
-                    self.set_error(mem, 50)?;
-                    0
-                }
-            }
-            "EncodePointer" | "DecodePointer" => args[0], // Optional pointer obfuscation; inverse identity.
             _ if matches!(binding.control, gateways::ControlImport::InlineSync(_)) => {
                 use crate::win32::x64::inline_sync::{call, Outcome};
                 let gateways::ControlImport::InlineSync(id) = binding.control else {
@@ -2335,7 +2270,7 @@ impl Runtime64 {
                     }
                 }
             }
-            "AreFileApisANSI" => 1, // This provider uses its declared ANSI code page for file paths.
+            _ if file == Some(FileApi::AreFileApisAnsi) => 1,
             _ if matches!(
                 handle,
                 Some(HandleApi::GetStdHandle | HandleApi::SetStdHandle)

@@ -501,8 +501,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("SetConsoleCtrlHandler", 8),
                 ("GetProcessTimes", 20),
                 ("GetProcessWorkingSetSize", 12),
-                ("EncodePointer", 4),
-                ("DecodePointer", 4),
                 ("IsWow64Process", 8),
                 ("GetLogicalProcessorInformation", 8),
                 ("RaiseException", 16),
@@ -518,7 +516,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("FlushProcessWriteBuffers", 0),
                 ("FreeLibraryWhenCallbackReturns", 8),
                 ("GetCurrentProcessorNumber", 0),
-                ("SetThreadStackGuarantee", 4),
                 ("SetDefaultDllDirectories", 4),
                 ("GlobalAddAtomW", 4),
                 ("GlobalDeleteAtom", 4),
@@ -531,7 +528,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetConsoleTitleW", 8),
                 ("GetConsoleProcessList", 8),
                 ("ReadConsoleW", 20),
-                ("AreFileApisANSI", 0),
                 ("GetVolumeInformationW", 32),
                 ("SearchPathW", 24),
                 ("CreateProcessW", 40),
@@ -1421,7 +1417,12 @@ pub fn dispatch(
             match result {
                 Ok(value) => {
                     ret = value;
-                    note = "common process/string/COM allocation contract".into();
+                    note = if matches!(id, ApiId::PointerHelper(id) if id.encoding()) {
+                        "identity encoding"
+                    } else {
+                        "common process/string/COM allocation contract"
+                    }
+                    .into();
                 }
                 Err(error) => {
                     state.last_error = error;
@@ -2249,10 +2250,6 @@ pub fn dispatch(
             // Legacy CRT hint; NT-style handle tables grow automatically.
             ret = args[0];
             note = "automatic handle table capacity".into();
-        }
-        (_, "kernel32.dll", "EncodePointer") | (_, "kernel32.dll", "DecodePointer") => {
-            ret = args[0];
-            note = "identity encoding".into();
         }
         (Some(crate::win32::catalog::ApiId::Environment(id)), _, _) => {
             let storage = if id.scratch() {

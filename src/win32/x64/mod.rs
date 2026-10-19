@@ -10,6 +10,7 @@ pub(crate) mod interlocked;
 pub(crate) mod modules;
 pub(crate) mod multimedia;
 pub(crate) mod nls;
+pub(crate) mod pointer_helpers;
 pub(crate) mod process_startup;
 pub(crate) mod sid;
 pub(crate) mod system_paths;

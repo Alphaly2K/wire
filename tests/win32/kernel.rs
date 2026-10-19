@@ -32,6 +32,14 @@ fn system_profile_keeps_pe32_layouts_public_dispatch_and_output_errors() {
     }
     let mut args = [0; 16];
     args[0] = DATA;
+    assert!(wire::system::dispatch(
+        "kernel32.dll",
+        "GetLogicalProcessorInformationEx",
+        &args,
+        &v.mem,
+        &mut v.state
+    )
+    .is_none());
     assert!(
         wire::system::dispatch("KERNEL32.dll", "GetSystemInfo", &args, &v.mem, &mut v.state)
             .is_none()

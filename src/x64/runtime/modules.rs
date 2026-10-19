@@ -166,7 +166,6 @@ impl Runtime64 {
                                 "WaitOnAddress"
                                     | "WakeByAddressSingle"
                                     | "WakeByAddressAll"
-                                    | "AreFileApisANSI"
                                     | "InitializeCriticalSectionEx"
                             ))
                         || self.gateways.values().any(|export| {

@@ -14,6 +14,16 @@ impl Threads {
         error_slot: u64,
     ) -> Result<u64, String> {
         use ThreadPropertyApi::*;
+        if id == StackGuarantee {
+            let requested = mem.read_int(args[0], 4)?;
+            if requested == 0 {
+                // No exception-handler stack reserve exists in this profile.
+                mem.write_int(args[0], 4, 0)?;
+                return Ok(1);
+            }
+            mem.write_int(error_slot, 4, 50)?;
+            return Ok(0);
+        }
         if id == GetErrorMode {
             return Ok(self.entries[&self.active].error_mode as u64);
         }
@@ -84,7 +94,9 @@ impl Threads {
                 t.suspended = old.saturating_sub(1);
                 old as u64
             }
-            GetErrorMode | SetErrorMode => unreachable!("current-thread mode handled first"),
+            GetErrorMode | SetErrorMode | StackGuarantee => {
+                unreachable!("current-thread properties handled first")
+            }
         })
     }
 }

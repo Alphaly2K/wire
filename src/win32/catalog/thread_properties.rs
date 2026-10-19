@@ -11,6 +11,7 @@ pub enum ThreadPropertyApi {
     SetPriority,
     ExitCode,
     SetAffinity,
+    StackGuarantee,
 }
 
 const fn declaration(
@@ -22,7 +23,7 @@ const fn declaration(
 ) -> Contract {
     Contract::new(
         ApiId::ThreadProperty(id), name, parameters, returns,
-        "existing cooperative thread owners; PE32 two-state suspension, priority no-op, unknown exit handle writes zero, unsaved return slot; ID/error-mode ABI-only; Win64 full-width handles/affinity, DWORD priority/mode, counted suspension capped at 127, identity before output, mode copy-out before update and saved return frame",
+        "existing cooperative thread owners; PE32 two-state suspension, priority no-op, unknown exit handle writes zero, unsaved return slot; ID/error-mode/stack guarantee ABI-only; Win64 full-width handles/affinity, DWORD priority/mode, counted suspension capped at 127, identity before output, mode copy-out before update and saved return frame; no stack reserve, zero query writes zero, nonzero guarantee preserves input and returns error 50",
         [
             ArchitecturePlan {
                 dlls: &["kernel32.dll"],
@@ -39,7 +40,7 @@ const fn declaration(
 use Parameter::{Int32 as I, Pointer as P, Uint32 as D};
 use ReturnConvention::{BoolLastError as B, Pointer as H, Uint32 as U};
 
-pub static THREAD_PROPERTY_CONTRACTS: [Contract; 9] = [
+pub static THREAD_PROPERTY_CONTRACTS: [Contract; 10] = [
     declaration(
         ThreadPropertyApi::GetErrorMode,
         "GetThreadErrorMode",
@@ -84,5 +85,12 @@ pub static THREAD_PROPERTY_CONTRACTS: [Contract; 9] = [
         &[P, P],
         H,
         true,
+    ),
+    declaration(
+        ThreadPropertyApi::StackGuarantee,
+        "SetThreadStackGuarantee",
+        &[P],
+        B,
+        false,
     ),
 ];

@@ -5,6 +5,7 @@ pub enum SystemProfileApi {
     SystemInfo,
     MemoryStatus,
     MemoryStatusEx,
+    ProcessorTopology,
 }
 
 const fn declaration(
@@ -26,7 +27,7 @@ const fn declaration(
     )
 }
 
-pub static SYSTEM_PROFILE_CONTRACTS: [Contract; 4] = [
+pub static SYSTEM_PROFILE_CONTRACTS: [Contract; 5] = [
     declaration(
         SystemProfileApi::SystemInfo,
         "GetSystemInfo",
@@ -50,5 +51,12 @@ pub static SYSTEM_PROFILE_CONTRACTS: [Contract; 4] = [
         "GlobalMemoryStatusEx",
         ReturnConvention::BoolLastError,
         true,
+    ),
+    Contract::new(
+        ApiId::SystemProfile(SystemProfileApi::ProcessorTopology), "GetLogicalProcessorInformationEx",
+        &[Parameter::Uint32, Parameter::Pointer, Parameter::Pointer], ReturnConvention::BoolLastError,
+        "one virtual guest CPU, NUMA node and group, no advertised caches; existing Win64 relation records and checked capacity/output/error order; PE32 kernel32 Wine ABI-only, excluded from the public system facade",
+        [ArchitecturePlan { dlls: &["kernel32.dll"], execution: ExecutionPolicy::LegacyUnimplemented },
+         ArchitecturePlan { dlls: &["kernel32.dll", "kernelbase.dll"], execution: ExecutionPolicy::Typed }],
     ),
 ];

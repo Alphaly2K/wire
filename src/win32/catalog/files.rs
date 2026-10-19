@@ -55,6 +55,7 @@ pub enum FileApi {
     MapViewOfFileEx,
     UnmapViewOfFile,
     FlushViewOfFile,
+    AreFileApisAnsi,
 }
 
 impl FileApi {
@@ -199,7 +200,7 @@ const fn section(
     )
 }
 
-pub static FILE_CONTRACTS: [Contract; 53] = [
+pub static FILE_CONTRACTS: [Contract; 54] = [
     declaration(
         FileApi::CreateFileA,
         "CreateFileA",
@@ -416,5 +417,11 @@ pub static FILE_CONTRACTS: [Contract; 53] = [
         &[P, P],
         B,
         true,
+    ),
+    Contract::new(
+        ApiId::File(FileApi::AreFileApisAnsi), "AreFileApisANSI", &[], B,
+        "PE32 original kernel32 ABI-only return; Win64 reports the existing ANSI file codepage policy without reading memory or changing LastError",
+        [ArchitecturePlan { dlls: &["kernel32.dll"], execution: ExecutionPolicy::LegacyUnimplemented },
+         ArchitecturePlan { dlls: &["kernel32.dll", "kernelbase.dll"], execution: ExecutionPolicy::Typed }],
     ),
 ];

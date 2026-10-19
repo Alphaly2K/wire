@@ -54,7 +54,9 @@ pub(crate) fn call(
                 }
             }
         }
-        GetErrorMode | SetErrorMode | Id => unreachable!("PE32 thread property remains ABI-only"),
+        GetErrorMode | SetErrorMode | Id | StackGuarantee => {
+            unreachable!("PE32 thread property remains ABI-only")
+        }
     };
     Ok((value, note))
 }

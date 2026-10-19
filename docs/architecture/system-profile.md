@@ -11,3 +11,5 @@ Win64 适配器只借 Memory 与 active TEB 的 LastError 地址。保留 48-byt
 独立旧行为基线、GetSystemInfo 输出校验循环及验收结果见[系统信息报告](../reports/refactoring-system-profile-2026-10-16.md)。
 
 命令行、STARTUPINFO 和 IsProcessorFeaturePresent 使用独立的[进程启动信息契约](process-startup.md)，各架构继续保留自己的原始 feature 集合。
+
+后续加入 GetLogicalProcessorInformationEx，第五项契约在 PE32 为 kernel32 ABI-only，Win64 为 kernel32/kernelbase typed。原单 CPU/NUMA/group、无 cache 的 record codec 与容量/输出/LastError 顺序整体移入 Win64 adapter；relation 参数仍截断为 DWORD。公共 `wire::system::dispatch` 只解析 PE32 typed 项，范围保持原四项，见[合并验收](../reports/refactoring-scalar-followup-2026-10-20.md)。

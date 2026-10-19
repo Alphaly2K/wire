@@ -3,6 +3,7 @@ use crate::{api::Args, mem::GuestMem, win32::catalog::PointerHelperApi};
 pub(crate) fn call(id: PointerHelperApi, a: &Args, mem: &GuestMem) -> Result<u32, u32> {
     use PointerHelperApi::*;
     Ok(match id {
+        Encode | Decode => a[0],
         BadRead | BadWrite => (a[1] != 0 && mem.ptr(a[0], a[1], id == BadWrite).is_err()) as u32,
         BadCode => mem.inspect_code(a[0], &mut [0]).is_err() as u32,
         FlushCache => {

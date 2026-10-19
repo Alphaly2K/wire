@@ -12,6 +12,9 @@ pub(crate) fn call(
 ) -> (u32, String) {
     let result = (|| -> Result<u32, u32> {
         match id {
+            SystemProfileApi::ProcessorTopology => {
+                unreachable!("PE32 processor topology remains ABI-only")
+            }
             SystemProfileApi::SystemInfo => {
                 let mut out = [0u8; 36];
                 for (offset, value) in [
