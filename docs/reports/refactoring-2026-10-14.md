@@ -426,3 +426,9 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 ## R3 Win64 ETW provider
 
 注册表与单调分配器收拢为私有 Providers，调用只借 Memory/参数，原 handler 经过 owner 改名后逐字一致。三项独立旧行为测试先提交于 `480a14e`；完整 release 647、debug 493、native 7、工具 29 与静态检查/build 通过。12 条性能协议、108 次执行及三对 Alice 前缀通过，binary +176 bytes，302 个 src Rust 文件核对一致。ETW CPU −0.149%，其它主路径最大回退 +2.110%；游戏 CPU/wall −0.168%/−0.519%，保持预算/隐藏窗口/零 Draw/Present。没有新增 export，累计仍为 706；见[完整验收](refactoring-etw-owner-2026-10-19.md)。
+
+## R3 Win64 token
+
+query access、flags、资源表与单调编号收拢为私有 Tokens，open/query 仅借 Memory/参数/当前线程 LastError 地址，通用句柄操作显式委托。三个独立旧行为测试和原创 fixture 先提交于 `87ae227`；完整 release 650、debug 496、native 7、工具 30 及静态检查/build 通过，302 个 src Rust 文件核对一致，binary +9,536 bytes。
+
+17 条协议、162 次执行和三对 Alice 前缀完成验收。token 查询 CPU −0.639%，SSE/thread-id 初筛波动经 900M 收敛；保留 PE32 integer/IR 六对长样本 +3.320% 的局部成本、同哈希漂移与全部慢轮。两端分别两次采样、执行计数及六个执行器助记符核对完成，具体机制尚未确证，没有三对均超过 5% 的持续回退。Alice CPU/wall −3.611%/−3.871%，保持原预算/隐藏窗口/零 Draw/Present。累计仍为 706；详见[完整验收](refactoring-token-owner-2026-10-19.md)。

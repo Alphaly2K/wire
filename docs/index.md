@@ -38,6 +38,7 @@
 - [进程启动信息](architecture/process-startup.md)及[迁移记录](reports/refactoring-process-startup-2026-10-19.md)：五项命令行/STARTUPINFO/feature 契约，保留双架构布局与返回帧差异；正确性及累计性能通过。
 - [环境变量与环境块](architecture/environment.md)及[迁移记录](reports/refactoring-environment-2026-10-19.md)：九项契约、Win64 私有 owner 与两种分配寿命，正确性及累计性能通过。
 - [Win64 ETW provider 所有权](architecture/tracing.md)及[完整验收](reports/refactoring-etw-owner-2026-10-19.md)：注册、退休、disabled header 边界与私有 owner；三项独立旧行为、12 条性能协议、108 次执行及三对游戏前缀通过。
+- [Win64 token 所有权](architecture/tokens.md)及[完整验收](reports/refactoring-token-owner-2026-10-19.md)：query access、故障顺序、保护关闭与单调句柄；17 条协议、162 次执行、PE32 局部成本调查及三对启动前缀。
 - [日历、时区与 CPU 计时调用边界](architecture/calendar.md)及[契约验收](reports/refactoring-calendar-2026-10-16.md)：11 项接口、时区独立模块、宿主 CPU 计时、32 条性能路径及局部成本调查。
 - [多媒体计时器调用与资源边界](architecture/multimedia.md)及[契约验收](reports/refactoring-multimedia-2026-10-16.md)：三项接口、私有 period owner、静态/动态 provider 差异、35 条性能路径与同哈希扩样。
 - [SRW、条件变量与 InitOnce 边界](architecture/inline-sync.md)及[契约验收](reports/refactoring-inline-sync-2026-10-16.md)：十二项接口、私有 SRW owner、真实线程阻塞重试、36 条性能路径。

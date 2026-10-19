@@ -91,8 +91,7 @@ pub struct Runtime64 {
     tls: [Option<u64>; 64],
     fls: [Option<(u64, u64)>; 128],
     modules: crate::win32::x64::modules::Modules,
-    tokens: BTreeMap<u64, (u32, u32)>,
-    next_token: u64,
+    tokens: token::Tokens,
     etw: tracing::Providers,
     function_tables: BTreeMap<u64, unwind::Table>,
     exception_handlers: Vec<(u64, u64)>,
@@ -488,8 +487,7 @@ impl Runtime64 {
             tls: [None; 64],
             fls: [None; 128],
             modules: crate::win32::x64::modules::Modules::new(TEB + 0x20000),
-            tokens: BTreeMap::new(),
-            next_token: 0x7fff4000,
+            tokens: token::Tokens::default(),
             etw: tracing::Providers::default(),
             function_tables: BTreeMap::new(),
             exception_handlers: Vec::new(),
@@ -1305,23 +1303,8 @@ impl Runtime64 {
                 }
             }
             "OpenProcessToken" => {
-                if args[0] != u64::MAX {
-                    self.set_error(mem, 6)?;
-                    0
-                } else if args[1] & !8 != 0 {
-                    self.set_error(mem, 50)?;
-                    0
-                } else if self.tokens.len() >= 128 || self.next_token >= 0x7fff5000 {
-                    self.set_error(mem, 8)?;
-                    0
-                } else {
-                    mem.check(args[2], 8, WRITE)?;
-                    let handle = self.next_token;
-                    mem.write_int(args[2], 8, handle)?;
-                    self.next_token += 1;
-                    self.tokens.insert(handle, (args[1] as u32, 0));
-                    1
-                }
+                let last_error = self.teb() + 0x68;
+                self.tokens.open(mem, args, last_error)?
             }
             "OpenThreadToken" => {
                 self.set_error(
@@ -1335,34 +1318,8 @@ impl Runtime64 {
                 0
             }
             "GetTokenInformation" => {
-                if !self.tokens.contains_key(&args[0]) {
-                    self.set_error(mem, 6)?;
-                    0
-                } else if self.tokens[&args[0]].0 & 8 == 0 {
-                    self.set_error(mem, 5)?;
-                    0
-                } else {
-                    let data = token::information(args[1] as u32, args[2]);
-                    match data {
-                        Err(error) => {
-                            self.set_error(mem, error)?;
-                            0
-                        }
-                        Ok(data) => {
-                            mem.check(args[4], 4, WRITE)?;
-                            if args[3] < data.len() as u64 {
-                                mem.write_int(args[4], 4, data.len() as u64)?;
-                                self.set_error(mem, 122)?;
-                                0
-                            } else {
-                                mem.check(args[2], data.len(), WRITE)?;
-                                mem.write(args[2], &data)?;
-                                mem.write_int(args[4], 4, data.len() as u64)?;
-                                1
-                            }
-                        }
-                    }
-                }
+                let last_error = self.teb() + 0x68;
+                self.tokens.query(mem, args, last_error)?
             }
             _ if matches!(
                 file,
@@ -2532,7 +2489,7 @@ impl Runtime64 {
                     .or_else(|| self.threads.flags(args[0]))
                     .or_else(|| self.snapshots.get(&args[0]).map(|s| s.flags))
                     .or_else(|| self.files.standard().flags(args[0]))
-                    .or_else(|| self.tokens.get(&args[0]).map(|h| h.1))
+                    .or_else(|| self.tokens.flags(args[0]))
                 {
                     mem.write_int(args[1], 4, flags as u64)?;
                     1
@@ -2542,16 +2499,14 @@ impl Runtime64 {
                 }
             }
             _ if handle == Some(HandleApi::SetHandleInformation) => {
-                if let Some((_, flags)) = self.tokens.get_mut(&args[0]) {
-                    let result = if args[1] & !3 != 0 {
-                        0
-                    } else {
-                        *flags = *flags & !(args[1] as u32) | args[2] as u32 & args[1] as u32;
-                        1
+                if let Some(result) = self.tokens.set_flags(args[0], args[1], args[2]) {
+                    let result = match result {
+                        Ok(()) => 1,
+                        Err(error) => {
+                            self.set_error(mem, error)?;
+                            0
+                        }
                     };
-                    if result == 0 {
-                        self.set_error(mem, 87)?;
-                    }
                     returned.regs[0] = result;
                     *cpu = returned;
                     self.api_calls += 1;
@@ -2899,14 +2854,14 @@ impl Runtime64 {
                         }
                     }
                 } else if handle == Some(HandleApi::CloseHandle)
-                    && self.tokens.contains_key(&args[0])
+                    && self.tokens.flags(args[0]).is_some()
                 {
-                    if self.tokens[&args[0]].1 & 2 != 0 {
-                        self.set_error(mem, 6)?;
-                        0
-                    } else {
-                        self.tokens.remove(&args[0]);
-                        1
+                    match self.tokens.close(args[0]) {
+                        Ok(()) => 1,
+                        Err(error) => {
+                            self.set_error(mem, error)?;
+                            0
+                        }
                     }
                 } else if handle == Some(HandleApi::CloseHandle)
                     && self.snapshots.contains_key(&args[0])
