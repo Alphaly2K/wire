@@ -39,6 +39,7 @@ mod painting;
 mod paths;
 mod pointer_helpers;
 mod process_queries;
+mod resources;
 mod sync_objects;
 mod system_profile;
 mod thread_control;
@@ -93,6 +94,7 @@ pub use painting::{PaintingApi, PAINTING_CONTRACTS};
 pub use paths::{PathApi, PATH_CONTRACTS};
 pub use pointer_helpers::{PointerHelperApi, POINTER_HELPER_CONTRACTS};
 pub use process_queries::{ProcessQueryApi, PROCESS_QUERY_CONTRACTS};
+pub use resources::{ResourceApi, RESOURCE_CONTRACTS};
 pub use sync_objects::{SyncObjectApi, SYNC_OBJECT_CONTRACTS};
 pub use system_profile::{SystemProfileApi, SYSTEM_PROFILE_CONTRACTS};
 pub use thread_control::{ThreadControlApi, THREAD_CONTROL_CONTRACTS};
@@ -197,6 +199,7 @@ pub enum ApiId {
     Painting(PaintingApi),
     Menu(MenuApi),
     GdiOperation(GdiApi),
+    Resource(ResourceApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -389,6 +392,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(PAINTING_CONTRACTS.iter())
         .chain(MENU_CONTRACTS.iter())
         .chain(GDI_OPERATION_CONTRACTS.iter())
+        .chain(RESOURCE_CONTRACTS.iter())
 }
 
 #[cfg(test)]

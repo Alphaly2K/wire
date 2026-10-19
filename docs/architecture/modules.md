@@ -16,6 +16,8 @@ Win64 的 `win32::x64::modules::Modules` 私有持有 handle/name/ref、pin、ex
 
 模块 API 的 31 个 export 由 `win32::catalog::modules` 维护唯一 provider/ABI/执行声明：13 个核心装载、查询与引用 API，4 个 DLL directory API，以及 7 个 PSAPI 查询及其 7 个 K32 名称。PE32 核心 13 个 typed，directory/K32 的 11 个保留 Wine ABI-only 策略，7 个无前缀查询仍 absent；Win64 使用全部既有子集。未知 ABI、stub 地址、序数和 data export 行为保持。
 
+PE32 映射 image 的十项资源 export 单独归入 [ResourceApi](resources.md)，不计入上述 31 项。它们借用 image 内存和 EXE 基址，不改变模块引用或资源寿命。
+
 静态导入和动态查找是独立的可见性维度。Contract 的 `dlls` 决定 import binding，`lookup_dlls` 决定 Win64 GetProcAddress 的 fresh-provider 可见性，默认相同，PSAPI 显式覆盖：原 Win64 静态调用接受 kernel32/kernelbase/psapi 的有前缀和无前缀查询；尚未绑定对应 gateway 的 provider 动态查找仅接受 K32 的 kernel32/kernelbase 导出，其余查询返回 0/LastError 127。如果 provider/export 已通过静态导入或公开注册入口绑定 gateway，原 registry fallback 仍返回该地址；PSAPI 和 kernel 无前缀名称均保留这一行为。PE32 动态绑定继续使用原 Wine/native-export 解析及其 ABI-only/unknown 策略。
 
 主路径在装载/lookup 阶段绑定 typed ID。PE32 `modules::dispatch` 保留为公开兼容 facade，根 gateway 直接调用 enum 分发，不逐调用查 catalog 或字符串。Win64 scalar query adapter 只操作 module 所属视图及明确 filesystem 借用；LoadLibrary/FreeLibrary/GetProcAddress 的 ControlImport 保存 ID，原 LoadModule、早返回、unblock、frame、API count 和 trace 顺序保持。query 的 K32/PSAPI 名称绑定到同一行为 ID，调用时不再剥前缀或判断字符串。

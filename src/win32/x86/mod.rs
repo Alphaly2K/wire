@@ -20,6 +20,7 @@ pub(crate) mod multimedia;
 pub(crate) mod nls;
 pub(crate) mod pointer_helpers;
 pub(crate) mod process_queries;
+pub(crate) mod resources;
 pub(crate) mod system_profile;
 pub(crate) mod thread_properties;
 pub(crate) mod variant;

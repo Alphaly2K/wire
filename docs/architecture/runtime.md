@@ -15,11 +15,12 @@
 | `runtime::api_log` | PE32 完整 API trace、调用频率与最近 64 条诊断；不依赖 CPU、catalog 或 ApiState，`api::ApiLogger` 保留原公开入口 |
 | `win32::{catalog,kernel,x86,x64}` | GUID、identity、version、NLS 的唯一契约、纯算法及架构适配；locale 回调通过专用控制路由，由进程执行 |
 | `modules::Modules`、`win32::{x86,x64}::modules` | PE32 guest image/TLS 与 provider 身份；Win64 module/export/path/ref/pin/search 的私有 owner。Root 注册入口委托，ABI/control adapters 分别保留 |
+| `resource`、`win32::x86::resources` | PE32 映射 image 的受检资源视图与字符串输出；只借内存、EXE 基址和错误槽，不拥有模块寿命 |
 | `x64::runtime::files::Files` | Win64 文件、标准 endpoint/alias、受限 filesystem 与属性元数据的私有 owner；路径 mutation 和资源寿命由 owner 执行，ABI/guest 输出由 adapter 提交 |
 | `host::calendar` | 提供原有宿主 localtime 值；Windows 日期格式和 guest 输出布局由领域/架构层负责 |
 | `host::ui`、`win32::{x86::host,gdi::x86}` | host 接收 owned 窗口/帧请求并产出事件；guest adapter 负责 USER 入队、GDI 语义映射及 LastError，公开 platform 路径只作 facade |
 | `graphics`、`d3d9`、`gpu` | 像素/对象核心不依赖 ApiState；DIB/font 仍有 PE32 codec，D3D9/DXGI 的其它 guest COM 适配器后续按领域迁移 |
-| `main` | CLI、IR 文件读取和报表；PE32 状态构造与执行委托 `Process32`。命令模块提取因性能对照不稳定暂缓，见 [候选设计](cli.md) |
+| `main`、`cli` | main 只收集参数并分发；四个命令模块负责参数、静态 image/IR 操作和架构报表，guest 构造与执行委托 Process32/Process64。结构与命令兼容通过，性能待复核，见 [CLI 边界](cli.md) |
 
 目标依赖方向：CLI → Process → Loader/CPU/ABI adapter；ABI adapter → Win32 领域状态 → 纯算法/host 服务。共享 ISA 语义不依赖 Win32 或 host；host 产出事件，由 Process/USER 消费，host callback 不运行 guest CPU。
 

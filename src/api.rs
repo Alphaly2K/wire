@@ -503,14 +503,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetEnvironmentVariableW", 12),
                 ("SetEnvironmentVariableA", 8),
                 ("SetEnvironmentVariableW", 8),
-                ("LoadResource", 8),
-                ("FindResourceA", 12),
-                ("FindResourceW", 12),
-                ("FindResourceExA", 16),
-                ("FindResourceExW", 16),
-                ("SizeofResource", 8),
-                ("LockResource", 4),
-                ("FreeResource", 4),
                 ("FormatMessageA", 28),
                 ("FormatMessageW", 28),
                 ("TerminateThread", 8),
@@ -569,8 +561,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
         add(
             "user32.dll",
             &[
-                ("LoadStringA", 16),
-                ("LoadStringW", 16),
                 ("GetProcessWindowStation", 0),
                 ("GetUserObjectInformationW", 20),
                 ("GetUserObjectInformationA", 20),
@@ -2286,98 +2276,15 @@ pub fn dispatch(
             // SSE/SSE2 subset is enabled; SSE3 still lacks several opcodes.
             ret = matches!(args[0], 6 | 10) as u32;
         }
-        (_, "user32.dll", "LoadStringW") | (_, "user32.dll", "LoadStringA") => {
-            let base = if args[0] == 0 {
-                state.exe_base
-            } else {
-                args[0]
-            };
-            let found = crate::resource::string(mem, base, args[1] & 0xffff);
-            let (ptr, len) = found.unwrap_or((0, 0));
-            if name.ends_with('W') && args[3] == 0 {
-                mem.write_u32(args[2], ptr).map_err(|e| e.to_string())?;
-                ret = len;
-            } else if args[3] as i32 > 0 {
-                let n = len.min(args[3] - 1);
-                if name.ends_with('W') {
-                    for i in 0..n {
-                        mem.write_u16(
-                            args[2] + i * 2,
-                            mem.read_u16(ptr + i * 2).map_err(|e| e.to_string())?,
-                        )
-                        .map_err(|e| e.to_string())?;
-                    }
-                    mem.write_u16(args[2] + n * 2, 0)
-                        .map_err(|e| e.to_string())?;
-                    ret = n;
-                } else {
-                    let mut units = Vec::new();
-                    for i in 0..len {
-                        units.push(mem.read_u16(ptr + i * 2).map_err(|e| e.to_string())?);
-                    }
-                    let bytes = crate::codepage::encode(&String::from_utf16_lossy(&units), 932)
-                        .map_err(|e| format!("code-page error {e}"))?
-                        .0;
-                    let count = bytes.len().min(args[3] as usize - 1);
-                    mem.write_bytes(args[2], &bytes[..count])
-                        .map_err(|e| e.to_string())?;
-                    mem.write_u8(args[2] + count as u32, 0)
-                        .map_err(|e| e.to_string())?;
-                    ret = count as u32;
-                }
-            } else {
-                ret = 0;
-            }
-            note = format!("resource string {}: {} UTF-16 units", args[1], len);
-        }
-        (_, "kernel32.dll", "FindResourceA")
-        | (_, "kernel32.dll", "FindResourceW")
-        | (_, "kernel32.dll", "FindResourceExA")
-        | (_, "kernel32.dll", "FindResourceExW") => {
-            let base = if args[0] == 0 {
-                state.exe_base
-            } else {
-                args[0]
-            };
-            let ex = name.contains("Ex");
-            let wide = name.ends_with('W');
-            let key = |p| -> Result<crate::resource::Key, String> {
-                if p <= 0xffff {
-                    Ok(crate::resource::Key::Id(p))
-                } else {
-                    Ok(crate::resource::Key::Name(
-                        crate::file_api::read_name(mem, p, wide)
-                            .map_err(|e| format!("resource name: {e}"))?,
-                    ))
-                }
-            };
-            let typ = key(if ex { args[1] } else { args[2] })?;
-            let id = key(if ex { args[2] } else { args[1] })?;
-            ret = crate::resource::find_key(
+        (Some(crate::win32::catalog::ApiId::Resource(id)), _, _) => {
+            (ret, note) = crate::win32::x86::resources::call(
+                id,
+                &args,
                 mem,
-                base,
-                &typ,
-                &id,
-                if ex { Some(args[3]) } else { None },
-            )
-            .unwrap_or(0);
-            if ret == 0 {
-                state.last_error = 1814;
-            }
+                state.exe_base,
+                &mut state.last_error,
+            )?;
         }
-        (_, "kernel32.dll", "LoadResource") | (_, "kernel32.dll", "SizeofResource") => {
-            let base = if args[0] == 0 {
-                state.exe_base
-            } else {
-                args[0]
-            };
-            let data = crate::resource::data(mem, base, args[1]);
-            ret = data
-                .map(|(ptr, size)| if name == "LoadResource" { ptr } else { size })
-                .unwrap_or(0);
-        }
-        (_, "kernel32.dll", "LockResource") => ret = args[0],
-        (_, "kernel32.dll", "FreeResource") => ret = 0,
         (_, "kernel32.dll", "GetStartupInfoA") | (_, "kernel32.dll", "GetStartupInfoW") => {
             let mut si = [0u8; 68];
             si[0..4].copy_from_slice(&68u32.to_le_bytes());

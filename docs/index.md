@@ -11,6 +11,7 @@
 - [测试与性能工具](architecture/validation-tools.md)：领域测试名映射、公共测量库、freeze 输入和兼容入口。
 - [稳定启动测量协议](reports/refactoring-launch-protocol-2026-10-16.md)：相同哈希副本的偏差调查、可选 argv/cwd 协议和跨模式证据隔离。
 - [模块身份与生命周期](architecture/modules.md)：31 个 export 的冷绑定契约、动态查询差异、私有 owner 与引用/pin 提交。
+- [PE32 资源查询与字符串](architecture/resources.md)及[迁移记录](reports/refactoring-resources-2026-10-19.md)：十项 ResourceApi、只读 image 视图、编码/故障/返回槽边界；完整正确性通过，性能待复核。
 - [模块 API 契约验收](reports/refactoring-module-catalog-2026-10-14.md)：模块 catalog、控制请求与独立性能调查。
 - [文件状态与标准句柄](architecture/files.md)：Win64 filesystem、属性元数据、endpoint/alias 寿命和输出提交顺序。
 - [核心文件 API 契约与验收](reports/refactoring-file-catalog-2026-10-15.md)：行为基线、失败候选、布局/调度调查与最终接入。

@@ -8,6 +8,8 @@
 
 [CLI 职责拆分重试](refactoring-cli-followup-2026-10-19.md)也已接入：main 保留参数收集/分发，四个命令模块完整保留原处理体，21 组命令与启动功能通过，library 源码保持。最新完整 release 631 / 7 ignored；同源 library 的 debug 477、native 7、工具 26 通过，静态检查和 build 通过。R2/R3 其余领域继续迁移，R6 仍忽略。
 
+随后[十项 PE32 资源契约](refactoring-resources-2026-10-19.md)接入 typed 路由与显式资源借用，Win64 保持 absent。最新完整 release 636 / 7 ignored、debug 482、native 7、工具 26 及静态检查/build 通过，296 个 src Rust 文件与冻结核对一致，executable 较 CLI 减少 3,616 bytes。16 条功能协议、96 次执行、六对资源 trace 和一对 Alice 前缀通过；当前共 17 项新契约正确性通过、性能待复核，累计性能验收仍为 675。
+
 ## 文件 section 批次（历史）
 
 八项映射 API 汇入唯一文件契约，文件 export 累计 53 个；删除重复 ABI/arity/DWORD 表，按冷绑定 FileApi ID 使用原 handler，保留 Mappings 的资源寿命、错误顺序和输出提交。PE32 八项仍为 ABI-only；Win64 六项 typed、两项 absent。
