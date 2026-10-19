@@ -16,6 +16,7 @@ mod objects;
 mod paint;
 mod queries;
 mod queues;
+mod sent;
 mod window_state;
 pub(crate) use classes::{call as class_call, register_system_class};
 pub use classes::{find_class, WindowClass};
@@ -137,59 +138,6 @@ struct SentMessage {
     processing: bool,
     result: Option<u32>,
 }
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn service_sent(
-    cpu: &mut Cpu,
-    mem: &mut GuestMem,
-    api: &mut ApiTable,
-    state: &mut ApiState,
-    log: &mut ApiLogger,
-    sched: &mut Sched,
-    max_instr: u64,
-) -> Result<Option<GuestCallOutcome>, String> {
-    let tid = sched.current_tid();
-    loop {
-        let Some((&id, msg)) = state
-            .user32
-            .sent
-            .iter()
-            .find(|(_, m)| m.receiver == tid && !m.processing && m.result.is_none())
-        else {
-            return Ok(None);
-        };
-        let args = msg.args;
-        state.user32.sent.get_mut(&id).unwrap().processing = true;
-        let result = if let Some(w) = state.user32.windows.get(&args[0]) {
-            let proc = w.wndproc;
-            invoke(cpu, mem, api, state, log, sched, proc, &args, max_instr)?
-        } else {
-            GuestCallOutcome::Returned(0)
-        };
-        let GuestCallOutcome::Returned(value) = result else {
-            return Ok(Some(result));
-        };
-        if sched.threads.iter().any(|t| {
-            t.tid == state.user32.sent[&id].sender && matches!(t.state, ThreadState::Exited(_))
-        }) {
-            state.user32.sent.remove(&id);
-            continue;
-        }
-        let msg = state
-            .user32
-            .sent
-            .get_mut(&id)
-            .ok_or("sent message removed during callback")?;
-        msg.result = Some(value);
-        let sender = msg.sender;
-        if let Some(i) = sched.threads.iter().position(|t| {
-            t.tid == sender
-                && matches!(t.state,
-            ThreadState::Waiting {target:WaitTarget::SentMessage(n),..} if n==id)
-        }) {
-            sched.wake_thread(i, Wake::Retest);
-        }
-    }
-}
 
 /// Queue a host input event at a guest scheduling boundary.
 pub fn host_message(
@@ -218,72 +166,6 @@ impl User32 {
     ) -> Result<u32, String> {
         crate::win32::x86::keyboard::call(id, args, mem, &mut self.keyboard, tid)
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn enumerate_monitors(
-    a: &crate::api::Args,
-    cpu: &mut Cpu,
-    mem: &mut GuestMem,
-    api: &mut ApiTable,
-    state: &mut ApiState,
-    log: &mut ApiLogger,
-    sched: &mut Sched,
-    max_instr: u64,
-) -> Result<(GuestCallOutcome, String), String> {
-    if a[0] != 0 || a[2] == 0 {
-        state.last_error = if a[0] != 0 { 50 } else { 87 };
-        return Ok((
-            GuestCallOutcome::Returned(0),
-            "unsupported DC or invalid monitor callback".into(),
-        ));
-    }
-    let mut rect = [0i32, 0, 1024, 768];
-    if a[1] != 0 {
-        let mut bytes = [0; 16];
-        mem.read_bytes(a[1], &mut bytes)
-            .map_err(|e| e.to_string())?;
-        let clip: [i32; 4] = std::array::from_fn(|i| {
-            i32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap())
-        });
-        rect = [
-            rect[0].max(clip[0]),
-            rect[1].max(clip[1]),
-            rect[2].min(clip[2]),
-            rect[3].min(clip[3]),
-        ];
-    }
-    if rect[0] >= rect[2] || rect[1] >= rect[3] {
-        return Ok((
-            GuestCallOutcome::Returned(1),
-            "no monitor intersects the clipping rectangle".into(),
-        ));
-    }
-    let p = state
-        .heap
-        .alloc(mem, state.process_heap, 16, false)
-        .map_err(|e| e.to_string())?;
-    mem.write_bytes(
-        p,
-        &rect
-            .into_iter()
-            .flat_map(i32::to_le_bytes)
-            .collect::<Vec<_>>(),
-    )
-    .map_err(|e| e.to_string())?;
-    let result = invoke(
-        cpu,
-        mem,
-        api,
-        state,
-        log,
-        sched,
-        a[2],
-        &[0x40000001, 0, p, a[3]],
-        max_instr,
-    );
-    state.heap.free(state.process_heap, p);
-    result.map(|value| (value, "enumerated the logical 1024x768 monitor".into()))
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -618,3 +618,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R4 PE32 控件与枚举 callback 请求
 
 基线 `3217b11`。User32 仅借内存/scratch/tid/LastError，准备控件消息与顶层/子窗口原顺序快照，Process 执行回调循环。整数转换只在正常返回后执行，原 NULL、FALSE carrier、输出前缀、已销毁快照项与退出策略保持。child、消息、数字、两种快照/循环和未改 frame/run_loop 核对通过；release 完整 Win32 256、IR 31、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵。累计契约仍 915，证据 `wire-out/refactoring-2026-10-14/r4-dialog32-{source-checks,verification}.json`。
+
+## R4 PE32 sent 与 monitor callback 请求
+
+基线 `683f025`。sent selection/processing 与完成/发送方退出/wake 归 User32，Process 执行 WNDPROC；monitor adapter 只准备内存/临时 heap 请求，Process 保持 callback 后先 free 再传播 Result 的顺序。原主体归一或 rustfmt 后核对保持，frame 未改；新增 fault 释放 fixture 在迁移前通过。release 完整 Win32 257、IR 31、fmt/release lib/bin strict Clippy/build 通过。Clippy 的 Option 提前返回写法修正后通过，失败日志保留；不跑性能或游戏矩阵，累计契约仍 915。证据 `wire-out/refactoring-2026-10-14/r4-sent-monitor32-{source-checks,verification}.json`。

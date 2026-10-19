@@ -408,7 +408,8 @@ pub fn dispatch(
                     | crate::win32::catalog::WindowControlApi::SendW
             ))
         ))
-        && crate::user32::service_sent(cpu, mem, api, state, log, sched, max_instr)?.is_some()
+        && crate::x86::process::messages::service_sent(cpu, mem, api, state, log, sched, max_instr)?
+            .is_some()
     {
         return Ok(());
     }
@@ -847,7 +848,7 @@ pub fn dispatch(
                 unreachable!();
             };
             if id == DisplayApi::Monitors {
-                let (outcome, message) = crate::user32::enumerate_monitors(
+                let (outcome, message) = crate::x86::process::display::enumerate_monitors(
                     &args, cpu, mem, api, state, log, sched, max_instr,
                 )?;
                 match outcome {

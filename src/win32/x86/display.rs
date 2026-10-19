@@ -103,3 +103,65 @@ fn enumerate(id: DisplayApi, a: &Args, mem: &GuestMem, last_error: &mut u32) -> 
         }
     }
 }
+
+pub(crate) enum MonitorRequest {
+    Value(DisplayResult),
+    Callback {
+        procedure: u32,
+        args: [u32; 4],
+        allocation: u32,
+    },
+}
+
+pub(crate) fn prepare_monitors(
+    a: &Args,
+    mem: &mut GuestMem,
+    heap: &mut crate::heap::GuestHeap,
+    process_heap: u32,
+    last_error: &mut u32,
+) -> Result<MonitorRequest, String> {
+    if a[0] != 0 || a[2] == 0 {
+        *last_error = if a[0] != 0 { 50 } else { 87 };
+        return Ok(MonitorRequest::Value(value(
+            0,
+            "unsupported DC or invalid monitor callback",
+        )));
+    }
+    let mut rect = [0i32, 0, 1024, 768];
+    if a[1] != 0 {
+        let mut bytes = [0; 16];
+        mem.read_bytes(a[1], &mut bytes)
+            .map_err(|e| e.to_string())?;
+        let clip: [i32; 4] = std::array::from_fn(|i| {
+            i32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap())
+        });
+        rect = [
+            rect[0].max(clip[0]),
+            rect[1].max(clip[1]),
+            rect[2].min(clip[2]),
+            rect[3].min(clip[3]),
+        ];
+    }
+    if rect[0] >= rect[2] || rect[1] >= rect[3] {
+        return Ok(MonitorRequest::Value(value(
+            1,
+            "no monitor intersects the clipping rectangle",
+        )));
+    }
+    let p = heap
+        .alloc(mem, process_heap, 16, false)
+        .map_err(|e| e.to_string())?;
+    mem.write_bytes(
+        p,
+        &rect
+            .into_iter()
+            .flat_map(i32::to_le_bytes)
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(MonitorRequest::Callback {
+        procedure: a[2],
+        args: [0x40000001, 0, p, a[3]],
+        allocation: p,
+    })
+}

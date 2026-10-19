@@ -4,6 +4,8 @@
 
 PE32 `user32/messages.rs` 协调既有队列、消息计时器、窗口过程、键盘转换及调度器，返回 `GuestCallOutcome`。正常返回才提交 API 返回帧，阻塞仍停留在原 stub 等待重新分发；TIMERPROC 和 WNDPROC 的非局部转移保持原处理。Get/Peek/Wait 和对象消息等待在读取参数前继续服务同步发送的消息。对象消息等待暂留 API 的进程编排位置，使用 typed ID 选择参数布局并复用原对象 acquire/deadline 规则。
 
+跨线程同步发送的接收编排位于 `x86/process/messages.rs`：User32 的 sent owner 选择请求并先标记 processing，Process 执行 WNDPROC，正常返回后再由 owner 检查发送线程退出、提交 result 并唤醒 sender。sender 已退出时沿用先删请求的策略；Transferred/Exited 或 callback fault 保留原提前离开状态。选择/完成方法只借 User32 和 scheduler，不借 CPU 或 ApiState，也不新增队列分配。
+
 Win64 冷绑定保存 `ControlImport::Message(id)`。普通消息操作可以返回值或阻塞；DispatchMessage 使用窗口协调器返回的显式 callback/resume 控制结果，保留原两次 frame 检查。旧 USER/message 的 arity、DWORD 和 provider 名单已删除。运行时名称继续用于 trace，不用于选择消息行为。
 
 队列输出与 metadata 的提交顺序保持各架构旧行为：PE32 在输出检查前清除 change bits，输出失败仍保留消息；Win64 先完成受检 MSG 输出，再提交 metadata、移除消息和消费硬件键盘状态。消息过滤、WM_QUIT 绕过范围过滤、同步专用 post 限制、PostQuitMessage trace 返回和 DWORD exit-code 都保持原差异。A/W 提取共享原 MSG 布局；TranslateMessage 继续按实际窗口过程的编码产生字符。
@@ -15,3 +17,5 @@ PE32 `user32/queues.rs` 随后收敛队列资源操作：计时器刷新、post/
 owner 基线 `145a271`。两份原 prepare 主体归一一致，timer/host/put/mask 策略及时间取样对照保持。完整 release Win32 255、fmt/release lib/bin strict Clippy/build 通过，证据 `wire-out/refactoring-2026-10-14/r3-user-queues32-{source-checks,verification}.json`；不跑性能或游戏矩阵。
 
 独立基线与验收见[本批记录](../reports/refactoring-messages-2026-10-18.md)。
+
+sent 请求提取基线 `683f025`，selection/processing 和 completion/wake 的原主体核对保持；完整 Win32/IR 与构建结果见 `wire-out/refactoring-2026-10-14/r4-sent-monitor32-{source-checks,verification}.json`。普通 callback 编排提取不重复性能矩阵。

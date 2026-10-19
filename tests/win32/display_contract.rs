@@ -2,6 +2,23 @@
 use super::*;
 
 #[test]
+fn monitor_callback_fault_releases_its_temporary_heap_block() {
+    let mut v = Vm::new();
+    let saved_pointer = DATA + 0x2000;
+    let mut callback = vec![0x8b, 0x44, 0x24, 12, 0xa3];
+    callback.extend(saved_pointer.to_le_bytes());
+    callback.extend([0x0f, 0x0b]);
+    v.mem.write_bytes(CODE, &callback).unwrap();
+    assert!(v
+        .try_call("user32.dll", "EnumDisplayMonitors", &[0, 0, CODE, 0])
+        .is_err());
+    let temporary = v.mem.read_u32(saved_pointer).unwrap();
+    assert_ne!(temporary, 0);
+    let heap = v.k("GetProcessHeap", &[]);
+    assert_eq!(v.k("HeapAlloc", &[heap, 0, 16]), temporary);
+}
+
+#[test]
 fn display_contract_pe32_keeps_metrics_monitor_lookup_and_packed_point_stack() {
     let mut v = Vm::new();
     for (metric, expected) in [

@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 
 pub(crate) mod callbacks;
 pub(crate) mod dialog;
+pub(crate) mod display;
+pub(crate) mod messages;
 pub(crate) mod termination;
 pub(crate) mod window_state;
 
