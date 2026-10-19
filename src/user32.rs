@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 mod classes;
 mod control;
 mod dialog;
+mod lifecycle;
 mod messages;
 mod objects;
 mod paint;
@@ -358,81 +359,6 @@ pub(crate) fn invoke(
         cpu.load_ctx(&saved);
     }
     result
-}
-
-fn remove_window(state: &mut ApiState, sched: &mut Sched, hwnd: u32) {
-    state.user32.keyboard.remove_window(hwnd);
-    let pending: Vec<_> = state
-        .user32
-        .sent
-        .iter()
-        .filter(|(_, m)| m.args[0] == hwnd && !m.processing && m.result.is_none())
-        .map(|(&id, m)| (id, m.sender))
-        .collect();
-    for (id, sender) in pending {
-        state.user32.sent.get_mut(&id).unwrap().result = Some(0);
-        wake_sender(sched, id, sender);
-    }
-    state.graphics.remove_window(hwnd);
-    for owner in [
-        &mut state.user32.focus,
-        &mut state.user32.active,
-        &mut state.user32.foreground,
-        &mut state.user32.capture,
-    ] {
-        if *owner == hwnd {
-            *owner = 0;
-        }
-    }
-    if let Some(window) = state.user32.windows.remove(&hwnd) {
-        if window.style & 0x40000000 == 0 && window.menu != 0 {
-            state.menus.destroy(window.menu);
-        }
-    }
-    state
-        .user32
-        .timers
-        .retain(|&(_, owner, _), _| owner != hwnd);
-    for queue in state.user32.queues.values_mut() {
-        queue.retain(|msg| msg.hwnd != hwnd);
-    }
-}
-
-fn wake_sender(sched: &mut Sched, id: u32, sender: u32) {
-    if let Some(i)=sched.threads.iter().position(|t|t.tid==sender && matches!(t.state,ThreadState::Waiting {target:WaitTarget::SentMessage(n),..} if n==id)) {
-        sched.wake_thread(i,Wake::Retest);
-    }
-}
-pub(crate) fn thread_exit(state: &mut ApiState, sched: &mut Sched, tid: u32) {
-    let windows: Vec<_> = state
-        .user32
-        .windows
-        .iter()
-        .filter_map(|(&h, w)| (w.tid == tid).then_some(h))
-        .collect();
-    for h in windows {
-        remove_window(state, sched, h);
-    }
-    let pending: Vec<_> = state
-        .user32
-        .sent
-        .iter()
-        .filter(|(_, m)| m.receiver == tid && m.result.is_none())
-        .map(|(&id, m)| (id, m.sender))
-        .collect();
-    for (id, sender) in pending {
-        state.user32.sent.get_mut(&id).unwrap().result = Some(0);
-        wake_sender(sched, id, sender);
-    }
-    state
-        .user32
-        .sent
-        .retain(|_, m| m.sender != tid || m.processing);
-    state.user32.queues.remove(&tid);
-    state.user32.queue_changed.remove(&tid);
-    state.user32.cursor.exit(tid);
-    state.user32.keyboard.exit(tid);
-    state.user32.timers.retain(|&(owner, _, _), _| owner != tid);
 }
 
 fn clock_ms(state: &ApiState) -> u32 {

@@ -19,3 +19,5 @@ PE32 退出由 `x86/process/termination.rs` 编排：先通知 DLL，再释放�
 独立回归覆盖旧行为、故障/输出别名、队列原子取出、描述 LocalFree 归属及控制结果；既有 Process64 小/大 slice 的 CONTEXT/APC、DLL 通知和 TLS 回归继续验收。见[本批记录](../reports/refactoring-thread-control-2026-10-17.md)。
 
 PE32 资源/退出迁移基线 `9993349`。创建主体、DLL/TLS/USER/scheduler 顺序及 orderly process halt 源码归一核对保持。完整 release Win32、IR 控制回归和 fmt/release lib/bin strict Clippy/build 的本批结果记录在 `wire-out/refactoring-2026-10-14/r3-thread-lifecycle32-{source-checks,verification}.json`。按普通编排提取验收，不跑性能或游戏矩阵。
+
+随后 USER 退休归入 [User32 资源方法](window-control.md)，Process 直接借 graphics/menu/scheduler 调用；旧接收 ApiState 的 thread_exit/remove_window helper 已删除。完整 Win32 255 及构建检查通过，DLL/TLS 与 USER/scheduler 的外部顺序保持。

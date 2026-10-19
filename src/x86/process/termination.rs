@@ -27,7 +27,12 @@ pub(crate) fn exit_thread(
     state
         .modules
         .release_tls_thread(&mut state.heap, state.process_heap, cpu.fs_base);
-    crate::user32::thread_exit(state, sched, sched.current_tid());
+    state.user32.exit_thread(
+        &mut state.graphics,
+        &mut state.menus,
+        sched,
+        sched.current_tid(),
+    );
     sched.exit_current(cpu, code)?;
     Ok(())
 }

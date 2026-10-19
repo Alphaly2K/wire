@@ -578,3 +578,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3/R4 PE32 线程创建与有序退出
 
 基线 `9993349`。普通创建移入窄资源适配器，保持晚 ID copy-out 与已提交的 thread/handle/TLS；有序退出移入 Process，显式 ExitThread 和 worker EAX 路径共享 DLL→TLS→USER→scheduler 清理，进程退出也共享原通知/halt 流程。原创建及退出主体归一核对保持。release 完整 Win32 255、IR 31、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵。累计契约仍 **915**，见[线程边界](../architecture/thread-control.md)，证据 `wire-out/refactoring-2026-10-14/r3-thread-lifecycle32-{source-checks,verification}.json`。
+
+## R3 PE32 USER 窗口与线程退休
+
+基线 `5af8a4b`。remove_window/exit_thread 归入 User32，仅借 Graphics/Menus/Sched；原 pending send 完成/唤醒、窗口图形/菜单、focus、队列、timer 与 cursor/keyboard 清理顺序归一核对保持，旧 ApiState helper 删除。release 完整 Win32 255、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵。见[窗口控制边界](../architecture/window-control.md)，证据 `wire-out/refactoring-2026-10-14/r3-user-retirement32-{source-checks,verification}.json`。

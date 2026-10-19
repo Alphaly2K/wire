@@ -6,6 +6,8 @@ PE32 `user32/control.rs` 协调原窗口状态和 guest 执行器，返回 `Gues
 
 默认窗口过程复用原文本、非客户区、背景和绘制实现。UpdateWindow 在 PE32 上按原 update region 决定是否执行 WM_PAINT；RedrawWindow 的同步更新也经过同一协调器。窗口记录仍由既有 User32 资源持有，本批收敛控制入口，不重排资源生命周期。
 
+`user32/lifecycle.rs` 的 User32::remove_window/exit_thread 统一管理窗口与线程退休，只借 Graphics、Menus 和 Sched；清理不借 ApiState、guest memory 或 CPU。原 keyboard→待处理 send 完成/唤醒→graphics→focus/active/foreground/capture→window/menu→timer/queue 清理，以及退出后的 cursor/keyboard/thread queue 清理次序保持。创建失败、DestroyWindow 和 Process 线程退出直接调用同一 owner 方法。基线 `5af8a4b`；完整 release Win32 255、fmt/release lib/bin strict Clippy/build 通过，覆盖跨线程 send 在窗口销毁或 owner 退出时唤醒，证据 `wire-out/refactoring-2026-10-14/r3-user-retirement32-{source-checks,verification}.json`。本批不跑性能或游戏矩阵。
+
 Win64 在冷绑定时把需要过程执行器的操作保存为 `ControlImport::Window(id)`，执行时返回显式 `WindowResult`，由进程处理 callback/resume。先验证执行器及 callback frame，再检查 HWND、参数和过程，保持故障顺序。UpdateWindow 保留原 scalar 行为，不新增 frame 检查；DefDlgProcA/W、EnableWindow、SetParent 保持 absent。DispatchMessage 暂留消息领域，进入 typed SendMessage 协调器时继续执行原有的第二次 frame 检查。
 
 两架构的现有差异继续保留：PE32 ShowWindow 将任意非零模式视为显示，且不要求 owner；Win64 只接受既有模式。PE32 支持原 GDI update region 与同步跨线程发送；Win64 保留原错误及能力范围。后续能力扩展需独立测试和验收，不借本次重构改变行为。

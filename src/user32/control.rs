@@ -442,7 +442,12 @@ fn window_dispatch(
                                 break;
                             }
                         }
-                        remove_window(state, sched, hwnd);
+                        state.user32.remove_window(
+                            &mut state.graphics,
+                            &mut state.menus,
+                            sched,
+                            hwnd,
+                        );
                         if !matches!(result, GuestCallOutcome::Returned(_)) {
                             return Ok((result, "creation cleanup transferred".into()));
                         }
@@ -450,11 +455,15 @@ fn window_dispatch(
                     return value(0, "WndProc rejected creation".into());
                 }
                 Ok(transfer) => {
-                    remove_window(state, sched, hwnd);
+                    state
+                        .user32
+                        .remove_window(&mut state.graphics, &mut state.menus, sched, hwnd);
                     return Ok((transfer, "creation transferred".into()));
                 }
                 Err(error) => {
-                    remove_window(state, sched, hwnd);
+                    state
+                        .user32
+                        .remove_window(&mut state.graphics, &mut state.menus, sched, hwnd);
                     return Err(error);
                 }
             }
@@ -615,7 +624,9 @@ fn window_dispatch(
                     return Ok((result, "destroy transferred".into()));
                 }
             }
-            remove_window(state, sched, a[0]);
+            state
+                .user32
+                .remove_window(&mut state.graphics, &mut state.menus, sched, a[0]);
             value(1, "window destroyed".into())
         }
         _ => unreachable!(),
