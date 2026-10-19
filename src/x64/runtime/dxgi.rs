@@ -84,47 +84,70 @@ const ADAPTERS: [Guid; 2] = [
     ),
 ];
 // Slots 0..6 are common; factory4 appends through slot 27, adapter1 through 10.
-const COMMON: &[(&str, usize)] = &[
-    ("Object.QueryInterface", 3),
-    ("Object.AddRef", 1),
-    ("Object.Release", 1),
-    ("Object.SetPrivateData", 4),
-    ("Object.SetPrivateDataInterface", 3),
-    ("Object.GetPrivateData", 4),
-    ("Object.GetParent", 3),
+type MethodAbi = (&'static str, usize, &'static [usize]);
+const COMMON: &[MethodAbi] = &[
+    ("Object.QueryInterface", 3, &[]),
+    ("Object.AddRef", 1, &[]),
+    ("Object.Release", 1, &[]),
+    ("Object.SetPrivateData", 4, &[2]),
+    ("Object.SetPrivateDataInterface", 3, &[]),
+    ("Object.GetPrivateData", 4, &[]),
+    ("Object.GetParent", 3, &[]),
 ];
-const FACTORY: &[(&str, usize)] = &[
-    ("Factory.EnumAdapters", 3),
-    ("Factory.MakeWindowAssociation", 3),
-    ("Factory.GetWindowAssociation", 2),
-    ("Factory.CreateSwapChain", 4),
-    ("Factory.CreateSoftwareAdapter", 3),
-    ("Factory.EnumAdapters1", 3),
-    ("Factory.IsCurrent", 1),
-    ("Factory.IsWindowedStereoEnabled", 1),
-    ("Factory.CreateSwapChainForHwnd", 7),
-    ("Factory.CreateSwapChainForCoreWindow", 6),
-    ("Factory.GetSharedResourceAdapterLuid", 3),
-    ("Factory.RegisterOcclusionStatusWindow", 4),
-    ("Factory.RegisterStereoStatusEvent", 3),
-    ("Factory.UnregisterStereoStatus", 2),
-    ("Factory.RegisterStereoStatusWindow", 4),
-    ("Factory.RegisterOcclusionStatusEvent", 3),
-    ("Factory.UnregisterOcclusionStatus", 2),
-    ("Factory.CreateSwapChainForComposition", 5),
-    ("Factory.GetCreationFlags", 1),
-    ("Factory.EnumAdapterByLuid", 4),
-    ("Factory.EnumWarpAdapter", 3),
+const FACTORY: &[MethodAbi] = &[
+    ("Factory.EnumAdapters", 3, &[1]),
+    ("Factory.MakeWindowAssociation", 3, &[2]),
+    ("Factory.GetWindowAssociation", 2, &[]),
+    ("Factory.CreateSwapChain", 4, &[]),
+    ("Factory.CreateSoftwareAdapter", 3, &[]),
+    ("Factory.EnumAdapters1", 3, &[1]),
+    ("Factory.IsCurrent", 1, &[]),
+    ("Factory.IsWindowedStereoEnabled", 1, &[]),
+    ("Factory.CreateSwapChainForHwnd", 7, &[]),
+    ("Factory.CreateSwapChainForCoreWindow", 6, &[]),
+    ("Factory.GetSharedResourceAdapterLuid", 3, &[]),
+    ("Factory.RegisterOcclusionStatusWindow", 4, &[]),
+    ("Factory.RegisterStereoStatusEvent", 3, &[]),
+    ("Factory.UnregisterStereoStatus", 2, &[]),
+    ("Factory.RegisterStereoStatusWindow", 4, &[]),
+    ("Factory.RegisterOcclusionStatusEvent", 3, &[]),
+    ("Factory.UnregisterOcclusionStatus", 2, &[]),
+    ("Factory.CreateSwapChainForComposition", 5, &[]),
+    ("Factory.GetCreationFlags", 1, &[]),
+    ("Factory.EnumAdapterByLuid", 4, &[]),
+    ("Factory.EnumWarpAdapter", 3, &[]),
 ];
-const ADAPTER: &[(&str, usize)] = &[
-    ("Adapter.EnumOutputs", 3),
-    ("Adapter.GetDesc", 2),
-    ("Adapter.CheckInterfaceSupport", 3),
-    ("Adapter.GetDesc1", 2),
+const ADAPTER: &[MethodAbi] = &[
+    ("Adapter.EnumOutputs", 3, &[1]),
+    ("Adapter.GetDesc", 2, &[]),
+    ("Adapter.CheckInterfaceSupport", 3, &[]),
+    ("Adapter.GetDesc1", 2, &[]),
 ];
-pub(super) fn arity(name: &str) -> Option<usize> {
-    if let Some(arity) = d3d11::arity(name) {
-        return Some(arity);
+
+#[derive(Clone, Copy)]
+enum MethodRoute {
+    Dxgi,
+    D3d11,
+}
+#[derive(Clone, Copy)]
+pub(super) struct BoundMethod {
+    abi: &'static MethodAbi,
+    route: MethodRoute,
+}
+impl BoundMethod {
+    pub(super) fn arity(self) -> usize {
+        self.abi.1
+    }
+    pub(super) fn dwords(self) -> &'static [usize] {
+        self.abi.2
+    }
+}
+pub(super) fn bind_method(name: &str) -> Option<BoundMethod> {
+    if let Some(abi) = d3d11::method_abi(name) {
+        return Some(BoundMethod {
+            abi,
+            route: MethodRoute::D3d11,
+        });
     }
     COMMON
         .iter()
@@ -132,25 +155,11 @@ pub(super) fn arity(name: &str) -> Option<usize> {
         .chain(ADAPTER)
         .chain(output::METHODS)
         .chain(swapchain::METHODS)
-        .find(|(n, _)| *n == name)
-        .map(|(_, a)| *a)
-}
-pub(super) fn dwords(name: &str) -> &'static [usize] {
-    if name.starts_with("SwapChain.") {
-        return swapchain::dwords(name);
-    }
-    if name.starts_with("Output.") {
-        return output::dwords(name);
-    }
-    if d3d11::arity(name).is_some() {
-        return d3d11::dwords(name);
-    }
-    match name {
-        "Object.SetPrivateData" => &[2],
-        "Factory.EnumAdapters" | "Factory.EnumAdapters1" | "Adapter.EnumOutputs" => &[1],
-        "Factory.MakeWindowAssociation" => &[2],
-        _ => &[],
-    }
+        .find(|(n, _, _)| *n == name)
+        .map(|abi| BoundMethod {
+            abi,
+            route: MethodRoute::Dxgi,
+        })
 }
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Kind {
@@ -273,17 +282,17 @@ impl Runtime64 {
         }
         let mut bytes = Vec::new();
         let methods: Vec<_> = match kind {
-            Kind::Factory => COMMON.iter().chain(FACTORY).map(|(n, _)| *n).collect(),
-            Kind::Adapter => COMMON.iter().chain(ADAPTER).map(|(n, _)| *n).collect(),
+            Kind::Factory => COMMON.iter().chain(FACTORY).map(|(n, _, _)| *n).collect(),
+            Kind::Adapter => COMMON.iter().chain(ADAPTER).map(|(n, _, _)| *n).collect(),
             Kind::Output => COMMON
                 .iter()
                 .chain(output::METHODS)
-                .map(|(n, _)| *n)
+                .map(|(n, _, _)| *n)
                 .collect(),
             Kind::SwapChain => COMMON
                 .iter()
                 .chain(swapchain::METHODS)
-                .map(|(n, _)| *n)
+                .map(|(n, _, _)| *n)
                 .collect(),
             _ => d3d11::methods(kind),
         };
@@ -482,15 +491,18 @@ impl Runtime64 {
         mem.write_int(out, 8, object)?;
         Ok(0)
     }
-    pub(super) fn dxgi_call(
+    pub(super) fn graphics_method_call(
         &mut self,
         mem: &mut Memory,
-        name: &str,
+        binding: BoundMethod,
         a: &[u64],
     ) -> Result<u64, String> {
-        if d3d11::arity(name).is_some() {
-            return self.d3d11_call(mem, name, a);
+        match binding.route {
+            MethodRoute::D3d11 => self.d3d11_call(mem, binding.abi.0, a),
+            MethodRoute::Dxgi => self.dxgi_call(mem, binding.abi.0, a),
         }
+    }
+    fn dxgi_call(&mut self, mem: &mut Memory, name: &str, a: &[u64]) -> Result<u64, String> {
         let o = self
             .graphics
             .objects

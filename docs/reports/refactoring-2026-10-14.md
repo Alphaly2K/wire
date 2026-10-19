@@ -514,3 +514,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R2 图形创建入口
 
 基线 `01b714f` 固定七个图形 export 的 provider/arity/DWORD、动态发现及 PE32 未知 ABI。契约保留 kernel 静态别名、exact-case 内部 provider、D3D12 ordinal 和现有 gateway fallback；创建通过 bound ID 分发，COM 方法处理体和槽位保持。release 图形 10、PE32 1、模块 12、catalog 1、真实 GPU swapchain 1 项以及 fmt/release lib/bin strict Clippy/build 通过。累计 **888 exports**，见[边界与验收](../architecture/graphics-contracts.md)。
+
+## R2 图形 COM 方法冷绑定
+
+基线 `7435932`。70 条 DXGI 方法的 arity/DWORD 合为同一槽位声明，D3D11 原表保持并合并查找；BoundMethod 缓存静态声明和家族路由，调用时移除 D3D11 表扫描。groups 位图改为明确 graphics/file_search 字段。槽位、处理体和参数规则核对一致；release 图形 10、真实 GPU 1、文件 17、fmt/release lib/bin strict Clippy/build 通过。COM 内部方法不计作新增 DLL export，累计仍 **888**，见[边界与验收](../architecture/graphics-contracts.md)。

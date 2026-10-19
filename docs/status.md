@@ -1,6 +1,6 @@
 # 当前状态
 
-更新日期：2026-10-20。重构前基线为 `2e78377`；最新完成[图形创建入口](architecture/graphics-contracts.md)，release 图形单元 10、PE32 未知 ABI 1、模块 12、catalog 1 及真实 GPU swapchain 1 项通过，fmt/release lib/bin strict Clippy/build 通过。此前[进程与文件 endpoint](architecture/process-control.md)完成 release 整合 Win64 268、PE32 247、library 60 passed / 7 ignored。按影响范围选择验证，本批不重复性能或游戏矩阵。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
+更新日期：2026-10-20。重构前基线为 `2e78377`；最新完成[图形创建与 COM 冷绑定](architecture/graphics-contracts.md)，70 条 DXGI 方法 ABI 合表，执行时直接选择 DXGI/D3D11 家族；release 图形 10、Win64 文件 17、真实 GPU swapchain 1 项及 fmt/release lib/bin strict Clippy/build 通过。此前创建入口完成 PE32 未知 ABI、模块和 catalog 定向回归，[进程与文件 endpoint](architecture/process-control.md)完成 release 整合 Win64 268、PE32 247、library 60 passed / 7 ignored。按影响范围选择验证，本批不重复性能或游戏矩阵。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
 
 本轮累计接入对话框/窗口枚举 22、菜单 27、GDI 对象/像素/字体 31 项，共 **80 项**，累计 **675 项**。统一声明、typed 分发与领域 owner 保持双架构范围、故障提交和既有不可用策略；保留真实 RedrawWindow 网关与公开 facade 的历史差异。精确标量 SSE 已移入独立编译单元，没有近似浮点或新增 ISA 语义。
 

@@ -47,7 +47,8 @@ pub(crate) struct BoundImport {
     pub arity: Option<usize>,
     pub supported: bool,
     pub dwords: &'static [usize],
-    pub groups: u32,
+    pub(super) graphics: Option<super::dxgi::BoundMethod>,
+    pub file_search: bool,
     pub hot: HotImport,
     pub api: Option<crate::win32::catalog::ApiId>,
     pub control: ControlImport,
@@ -70,6 +71,13 @@ impl BoundImport {
         let contract = match resolve(Architecture::X64, dll, name) {
             Resolution::Bound(contract) => Some(contract),
             Resolution::WrongDll(_) | Resolution::Legacy => None,
+        };
+        // Rejected providers still retain the historical known scalar ABI.
+        let abi_contract = contract.or_else(|| crate::win32::catalog::by_name(name));
+        let graphics = if abi_contract.is_none() {
+            super::dxgi::bind_method(name)
+        } else {
+            None
         };
         let hot = match contract.map(|contract| contract.id) {
             Some(ApiId::Clock(id)) => match id {
@@ -102,17 +110,13 @@ impl BoundImport {
             original_function: original.into(),
             name: name.into(),
             trace_export: format!("{dll}!{name}").into(),
-            arity: contract.map_or_else(|| super::import_arity(name), |c| Some(c.parameters.len())),
+            arity: abi_contract.map_or_else(|| graphics.map(|m| m.arity()), |c| Some(c.parameters.len())),
             supported: valid && super::import_supported(dll, name),
-            dwords: contract.map_or_else(|| super::import_dwords(name), |c| c.win64_dwords()),
-            groups: super::import_groups(name)
-                | if contract.is_some_and(|contract| {
-                    matches!(contract.id, crate::win32::catalog::ApiId::File(id) if id.is_search())
-                }) {
-                    1 << 8
-                } else {
-                    0
-                },
+            dwords: abi_contract.map_or_else(|| graphics.map_or(&[][..], |m| m.dwords()), |c| c.win64_dwords()),
+            graphics,
+            file_search: contract.is_some_and(|contract| {
+                matches!(contract.id, crate::win32::catalog::ApiId::File(id) if id.is_search())
+            }),
             hot,
             api: contract.and_then(|c| match c.id {
                 crate::win32::catalog::ApiId::Nls(

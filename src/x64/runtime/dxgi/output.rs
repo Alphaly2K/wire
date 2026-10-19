@@ -17,31 +17,24 @@ pub(super) const IIDS: [Guid; 2] = [
         [0xa3, 0x40, 0xa6, 0x85, 0x22, 0x66, 0x66, 0xcc],
     ),
 ];
-pub(super) const METHODS: &[(&str, usize)] = &[
-    ("Output.GetDesc", 2),
-    ("Output.GetDisplayModeList", 5),
-    ("Output.FindClosestMatchingMode", 4),
-    ("Output.WaitForVBlank", 1),
-    ("Output.TakeOwnership", 3),
-    ("Output.ReleaseOwnership", 1),
-    ("Output.GetGammaControlCapabilities", 2),
-    ("Output.SetGammaControl", 2),
-    ("Output.GetGammaControl", 2),
-    ("Output.SetDisplaySurface", 2),
-    ("Output.GetDisplaySurfaceData", 2),
-    ("Output.GetFrameStatistics", 2),
-    ("Output.GetDisplayModeList1", 5),
-    ("Output.FindClosestMatchingMode1", 4),
-    ("Output.GetDisplaySurfaceData1", 2),
-    ("Output.DuplicateOutput", 3),
+pub(super) const METHODS: &[MethodAbi] = &[
+    ("Output.GetDesc", 2, &[]),
+    ("Output.GetDisplayModeList", 5, &[1, 2]),
+    ("Output.FindClosestMatchingMode", 4, &[]),
+    ("Output.WaitForVBlank", 1, &[]),
+    ("Output.TakeOwnership", 3, &[2]),
+    ("Output.ReleaseOwnership", 1, &[]),
+    ("Output.GetGammaControlCapabilities", 2, &[]),
+    ("Output.SetGammaControl", 2, &[]),
+    ("Output.GetGammaControl", 2, &[]),
+    ("Output.SetDisplaySurface", 2, &[]),
+    ("Output.GetDisplaySurfaceData", 2, &[]),
+    ("Output.GetFrameStatistics", 2, &[]),
+    ("Output.GetDisplayModeList1", 5, &[1, 2]),
+    ("Output.FindClosestMatchingMode1", 4, &[]),
+    ("Output.GetDisplaySurfaceData1", 2, &[]),
+    ("Output.DuplicateOutput", 3, &[]),
 ];
-pub(super) fn dwords(name: &str) -> &'static [usize] {
-    match name {
-        "Output.GetDisplayModeList" | "Output.GetDisplayModeList1" => &[1, 2],
-        "Output.TakeOwnership" => &[2],
-        _ => &[],
-    }
-}
 fn mode(format: u32, extended: bool) -> Vec<u8> {
     let mut fields = vec![
         display::WIDTH,

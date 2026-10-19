@@ -165,7 +165,7 @@ pub(super) struct Device {
     latency: u32,
     exception: u32,
 }
-pub(super) fn arity(name: &str) -> Option<usize> {
+pub(super) fn method_abi(name: &str) -> Option<&'static MethodAbi> {
     abi::DEVICE
         .iter()
         .chain(abi::DEVICE1)
@@ -178,22 +178,6 @@ pub(super) fn arity(name: &str) -> Option<usize> {
         .chain(STATE_ABI)
         .chain(VIEW_ABI)
         .find(|(n, _, _)| *n == name)
-        .map(|(_, a, _)| *a)
-}
-pub(super) fn dwords(name: &str) -> &'static [usize] {
-    abi::DEVICE
-        .iter()
-        .chain(abi::DEVICE1)
-        .chain(abi::CONTEXT)
-        .chain(abi::CONTEXT1)
-        .chain(DXGI)
-        .chain(QUERY)
-        .chain(CHILD_ABI)
-        .chain(RESOURCE_ABI)
-        .chain(STATE_ABI)
-        .chain(VIEW_ABI)
-        .find(|(n, _, _)| *n == name)
-        .map_or(&[], |(_, _, d)| *d)
 }
 pub(super) fn methods(kind: Kind) -> Vec<&'static str> {
     match kind {
@@ -226,7 +210,7 @@ pub(super) fn methods(kind: Kind) -> Vec<&'static str> {
         Kind::Query => QUERY.iter().map(|(n, _, _)| *n).collect(),
         Kind::DxgiDevice => COMMON
             .iter()
-            .map(|(n, _)| *n)
+            .map(|(n, _, _)| *n)
             .chain(DXGI.iter().map(|(n, _, _)| *n))
             .collect(),
         _ => unreachable!(),

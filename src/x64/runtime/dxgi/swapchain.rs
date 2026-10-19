@@ -21,38 +21,30 @@ pub(super) const IIDS: [Guid; 3] = [
         [0xbb, 0x6c, 0x18, 0xd6, 0x29, 0x92, 0xf1, 0xa6],
     ), // DeviceSubObject.
 ];
-pub(super) const METHODS: &[(&str, usize)] = &[
-    ("SwapChain.GetDevice", 3),
-    ("SwapChain.Present", 3),
-    ("SwapChain.GetBuffer", 4),
-    ("SwapChain.SetFullscreenState", 3),
-    ("SwapChain.GetFullscreenState", 3),
-    ("SwapChain.GetDesc", 2),
-    ("SwapChain.ResizeBuffers", 6),
-    ("SwapChain.ResizeTarget", 2),
-    ("SwapChain.GetContainingOutput", 2),
-    ("SwapChain.GetFrameStatistics", 2),
-    ("SwapChain.GetLastPresentCount", 2),
-    ("SwapChain.GetDesc1", 2),
-    ("SwapChain.GetFullscreenDesc", 2),
-    ("SwapChain.GetHwnd", 2),
-    ("SwapChain.GetCoreWindow", 3),
-    ("SwapChain.Present1", 4),
-    ("SwapChain.IsTemporaryMonoSupported", 1),
-    ("SwapChain.GetRestrictToOutput", 2),
-    ("SwapChain.SetBackgroundColor", 2),
-    ("SwapChain.GetBackgroundColor", 2),
-    ("SwapChain.SetRotation", 2),
-    ("SwapChain.GetRotation", 2),
+pub(super) const METHODS: &[MethodAbi] = &[
+    ("SwapChain.GetDevice", 3, &[]),
+    ("SwapChain.Present", 3, &[1, 2]),
+    ("SwapChain.GetBuffer", 4, &[1]),
+    ("SwapChain.SetFullscreenState", 3, &[1]),
+    ("SwapChain.GetFullscreenState", 3, &[]),
+    ("SwapChain.GetDesc", 2, &[]),
+    ("SwapChain.ResizeBuffers", 6, &[1, 2, 3, 4, 5]),
+    ("SwapChain.ResizeTarget", 2, &[]),
+    ("SwapChain.GetContainingOutput", 2, &[]),
+    ("SwapChain.GetFrameStatistics", 2, &[]),
+    ("SwapChain.GetLastPresentCount", 2, &[]),
+    ("SwapChain.GetDesc1", 2, &[]),
+    ("SwapChain.GetFullscreenDesc", 2, &[]),
+    ("SwapChain.GetHwnd", 2, &[]),
+    ("SwapChain.GetCoreWindow", 3, &[]),
+    ("SwapChain.Present1", 4, &[1, 2]),
+    ("SwapChain.IsTemporaryMonoSupported", 1, &[]),
+    ("SwapChain.GetRestrictToOutput", 2, &[]),
+    ("SwapChain.SetBackgroundColor", 2, &[]),
+    ("SwapChain.GetBackgroundColor", 2, &[]),
+    ("SwapChain.SetRotation", 2, &[1]),
+    ("SwapChain.GetRotation", 2, &[]),
 ];
-pub(super) fn dwords(name: &str) -> &'static [usize] {
-    match name {
-        "SwapChain.Present" | "SwapChain.Present1" => &[1, 2],
-        "SwapChain.GetBuffer" | "SwapChain.SetFullscreenState" | "SwapChain.SetRotation" => &[1],
-        "SwapChain.ResizeBuffers" => &[1, 2, 3, 4, 5],
-        _ => &[],
-    }
-}
 #[derive(Clone)]
 struct Desc {
     mode: [u32; 7],

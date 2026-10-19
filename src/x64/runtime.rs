@@ -196,7 +196,7 @@ pub fn import_supported(dll: &str, name: &str) -> bool {
     }
     if !dll.eq_ignore_ascii_case("kernel32.dll")
         && !dll.eq_ignore_ascii_case("kernelbase.dll")
-        && !(dll == dxgi::DLL && dxgi::arity(name).is_some())
+        && !(dll == dxgi::DLL && dxgi::bind_method(name).is_some())
     {
         return false;
     }
@@ -213,7 +213,7 @@ fn import_arity(name: &str) -> Option<usize> {
     if let Some(contract) = crate::win32::catalog::by_name(name) {
         return Some(contract.parameters.len());
     }
-    dxgi::arity(name)
+    dxgi::bind_method(name).map(|method| method.arity())
 }
 
 fn normalize_symbol<'a>(dll: &str, name: &'a str) -> &'a str {
@@ -224,16 +224,6 @@ fn normalize_symbol<'a>(dll: &str, name: &'a str) -> &'a str {
             crate::win32::catalog::winsock_symbol(dll, name),
         ),
     )
-}
-fn import_dwords(name: &str) -> &'static [usize] {
-    if let Some(contract) = crate::win32::catalog::by_name(name) {
-        return contract.win64_dwords();
-    }
-    dxgi::dwords(name)
-}
-fn import_groups(name: &str) -> u32 {
-    // Legacy graphics route; directory searches bind their separate flag from FileApi.
-    (dxgi::arity(name).is_some() as u32) << 7
 }
 
 impl Runtime64 {
@@ -898,8 +888,10 @@ impl Runtime64 {
                     None => return Ok(Control::Blocked),
                 }
             }
-            _ if binding.groups & (1 << 7) != 0 => self.dxgi_call(mem, name, args)?,
-            _ if binding.groups & (1 << 8) != 0 => self.find_call(mem, file.unwrap(), args)?,
+            _ if binding.graphics.is_some() => {
+                self.graphics_method_call(mem, binding.graphics.unwrap(), args)?
+            }
+            _ if binding.file_search => self.find_call(mem, file.unwrap(), args)?,
             _ if matches!(binding.control, gateways::ControlImport::Window(_))
                 || matches!(binding.control, gateways::ControlImport::Message(id) if id.dispatch()) =>
             {
