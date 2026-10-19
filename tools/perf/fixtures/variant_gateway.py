@@ -1,6 +1,6 @@
 """Original scalar VARIANT copy/clear loop; checksum checks tag and payload."""
 import struct
-from perf.fixtures.bstr_gateway import image as bstr_image
+from .bstr_gateway import image as bstr_image
 
 
 def x86(work, pe32):

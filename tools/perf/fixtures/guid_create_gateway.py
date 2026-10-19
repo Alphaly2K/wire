@@ -1,7 +1,7 @@
 """Original CoCreateGuid null-output admission loop, without random inputs."""
 import struct
-from amd64_perf import pe64
-from perf.fixtures.com_gateway import image as com_image
+from .pe import pe64
+from .com_gateway import image as com_image
 
 
 def image(code, builder, width):

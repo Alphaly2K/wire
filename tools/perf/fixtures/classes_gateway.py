@@ -1,6 +1,6 @@
 """Original bounded class loops: duplicate registration or real metadata copy-out."""
 import struct
-from amd64_perf import pe64
+from .pe import pe64
 
 
 def image(code, builder, width, symbols):

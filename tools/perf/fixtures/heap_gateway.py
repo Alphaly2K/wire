@@ -1,6 +1,6 @@
 """Original HeapSize loops check a real small allocation and exact API counts."""
 import struct
-from amd64_perf import pe64
+from .pe import pe64
 
 
 def image(code, builder, width):

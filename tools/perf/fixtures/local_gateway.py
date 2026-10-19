@@ -1,6 +1,6 @@
 """Original allocated TLS loops: full-value reads and exact API/retirement counts."""
 import struct
-from amd64_perf import pe64
+from .pe import pe64
 
 
 def image(code, builder, width):

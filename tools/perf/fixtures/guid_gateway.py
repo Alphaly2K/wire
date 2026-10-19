@@ -1,6 +1,6 @@
 """Original Win64 GUID gateway loop, independent of runtime catalog metadata."""
 import struct
-from amd64_perf import pe64
+from .pe import pe64
 
 
 def fixture(work):

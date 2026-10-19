@@ -1,6 +1,6 @@
 """Original critical-section loop consumes TryEnter and the released recursion slot."""
 import struct
-from amd64_perf import pe64
+from .pe import pe64
 
 
 def image(code, builder, width):

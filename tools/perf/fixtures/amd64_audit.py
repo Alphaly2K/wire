@@ -5,8 +5,8 @@ The adjacent golden manifest records both smoke and 100M-work inputs.
 """
 import struct
 
-from amd64_perf import pe64
-from interpreter_perf import additional
+from .pe import pe64
+from .amd64_extra import additional
 
 
 def fixture(name,work):

@@ -1,6 +1,6 @@
 """Original NULL path-removal loop; no host filesystem or clock reads."""
 import struct
-from perf.fixtures.module_gateway import image
+from .module_gateway import image
 
 
 def x86(work, pe32):

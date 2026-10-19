@@ -1,7 +1,7 @@
 """Original SYSTEMTIME-to-FILETIME loop with a fixed 1970-01-01 input."""
 import struct
-from amd64_perf import pe64
-from perf.fixtures.module_gateway import image
+from .pe import pe64
+from .module_gateway import image
 
 
 def x64(work):

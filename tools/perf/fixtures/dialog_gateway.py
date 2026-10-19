@@ -1,6 +1,6 @@
 """Look up a real child control and consume the returned handle on every call."""
 import struct
-from perf.fixtures.window_queries_gateway import image
+from .window_queries_gateway import image
 
 
 def x86(work, pe32):

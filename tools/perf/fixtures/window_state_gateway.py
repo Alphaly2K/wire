@@ -1,7 +1,7 @@
 """Consume title lengths through scalar Win64 and real PE32 WNDPROC calls."""
 import struct
-from amd64_perf import pe64
-from perf.fixtures.window_queries_gateway import image
+from .pe import pe64
+from .window_queries_gateway import image
 
 
 def x64(work):

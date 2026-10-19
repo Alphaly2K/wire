@@ -1,6 +1,6 @@
 """Original module query loops: checksum includes every returned image handle."""
 import struct
-from amd64_perf import pe64
+from .pe import pe64
 
 
 def image(code, builder, width, symbol=b'GetModuleHandleExW\0'):

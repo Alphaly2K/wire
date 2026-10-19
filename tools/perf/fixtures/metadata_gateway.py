@@ -1,7 +1,7 @@
 """Original rejected metadata-query loops; validate every return and API count."""
 import struct
-from amd64_perf import pe64
-from perf.fixtures.module_gateway import image
+from .pe import pe64
+from .module_gateway import image
 
 
 def x64(work):

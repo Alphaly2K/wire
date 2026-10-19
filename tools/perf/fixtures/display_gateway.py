@@ -1,7 +1,7 @@
 """Original packed POINT monitor lookup loop over the virtual desktop origin."""
 import struct
-from amd64_perf import pe64
-from perf.fixtures.input_profile_gateway import image
+from .pe import pe64
+from .input_profile_gateway import image
 
 
 def x64(work):

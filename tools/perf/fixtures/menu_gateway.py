@@ -1,6 +1,6 @@
 """Toggle one real menu item's checked bit and consume both prior states."""
 import struct
-from perf.fixtures.window_queries_gateway import image
+from .window_queries_gateway import image
 
 
 def x86(work, pe32):

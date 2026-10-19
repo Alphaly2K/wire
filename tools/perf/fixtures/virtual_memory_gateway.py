@@ -1,7 +1,7 @@
 """Original VirtualQuery loops check both returned size and allocated base."""
 import struct
-from amd64_perf import pe64
-from perf.fixtures.module_gateway import image
+from .pe import pe64
+from .module_gateway import image
 
 
 def imports(code, builder, width):

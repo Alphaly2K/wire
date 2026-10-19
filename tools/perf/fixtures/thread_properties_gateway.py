@@ -1,6 +1,6 @@
 """Original thread-priority round trip; checksum consumes both API results."""
 import struct
-from amd64_perf import pe64
+from .pe import pe64
 
 
 def image(code, builder, width):

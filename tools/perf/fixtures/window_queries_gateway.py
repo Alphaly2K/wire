@@ -1,6 +1,6 @@
 """Bounded window field loops with consumed values and real logical windows."""
 import struct
-from amd64_perf import pe64
+from .pe import pe64
 
 
 def image(code, builder, width, symbols):

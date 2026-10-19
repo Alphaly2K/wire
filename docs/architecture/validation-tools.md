@@ -12,6 +12,8 @@ cargo test --release --test x64 -- cpu::amd64_integer_flags_and_rex_register_ali
 
 `tools/perf/measurement.py` 只负责 child 的 wall/CPU/RSS、timeout、report、hash 和 AB/BA 顺序。架构脚本继续拥有 fixture、work、retired、结果和 API count 校验；不会把不同架构或模式混成一个吞吐量。旧报告字段保留，新增 `timed_out` 和测量库 hash；V2 另记录使用的 replay 源 hash。PE32 wall 窗口现在与公共库一致，不包含结果文本读取；macOS RSS 仍为 bytes，Linux 的 KiB 转成 bytes。
 
+架构测量实现位于 `tools/perf/{pe32,amd64,v2}.py`，早期 AMD64 工具位于 `legacy_amd64.py`；原 `interpreter32_perf.py`、`interpreter_perf.py`、`interpreter_v2_perf.py`、`amd64_perf.py` 保留 CLI 与导入。builder/输入生成器集中在 fixture 包，内部采用相对导入，旧命令模块仍公开原 helper。三个正式协议的 input、measurement、launch、binary 字段保持；script/replay/audit hash 标识迁移后的实际源码。226 份生成输入、58 次命令兼容执行及包/自定义 audit 检查见 [测量入口验收](../reports/refactoring-perf-drivers-2026-10-19.md)。
+
 `tools/perf/freeze.py` 保存一次已构建 binary、source diff、toolchain 和输入 hash。旧 `tools/freeze_interpreter.py` 委托此入口；默认包含跟踪文件及 src/tests/tools/examples/native 下的新源码，额外输入须用 `--include` 指定仓库相对文件。未跟踪的 docs 设计稿/PDF、IDE 元数据不自动进入快照。符号链接保存链接及其目标文本 hash，不复制目标素材；复现者需要另行提供该链接引用的外部输入。
 
 ```sh

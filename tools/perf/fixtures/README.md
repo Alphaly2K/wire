@@ -8,7 +8,8 @@ retired=`13*n+22`、API=`2*n+3`；无逐轮资源增长，默认 case 集合不�
 `amd64_audit.py` 是 2026-10-09 正式 V2 测量使用的原创输入生成器，
 从 ignored audit 输出目录提取，未改变 guest PE 字节、预期 work、retired 或 checksum。
 相邻 golden JSON 由迁移前生成器固定了 12K 与 100M work 的六组输入哈希。
-`bit-test` 仍使用 `interpreter_v2_perf.py` 中已有的跟踪生成器。
+`bit-test` 使用 `tools/perf/v2.py` 中原有的跟踪生成器；旧
+`interpreter_v2_perf.py` 入口和导入保持。
 
 ```sh
 python3 -B -m unittest discover -s tools -p 'test_perf_fixtures.py'
@@ -18,7 +19,9 @@ python3 -B tools/interpreter_v2_perf.py --binary before=path/to/frozen-wire \
 ```
 
 `--audit-probes PATH` 继续接受历史模块路径。默认运行不依赖 ignored 输出；
-PE 容器与其余生成器复用 `tools/amd64_perf.py`、`tools/interpreter_perf.py` 的跟踪源码。
+PE64 容器位于 `pe.py`，基础/补充 AMD64 生成器位于 `amd64_basic.py`、
+`amd64_extra.py`，PE32 builder/生成器位于 `pe32.py`。原命令模块的公开函数
+继续重导出，fixture 包使用相对导入，不依赖命令脚本参与初始化。
 
 `guid_gateway.py`、`module_gateway.py` 提供双架构 API 密集输入；
 `standard_gateway.py` 的 Win64 GetFileType 循环校验标准 pipe 类型与 API count；

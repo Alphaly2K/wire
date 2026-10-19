@@ -1,6 +1,6 @@
 """Invalidate, begin and end a real PE32 paint cycle using a stack PAINTSTRUCT."""
 import struct
-from perf.fixtures.window_queries_gateway import image
+from .window_queries_gateway import image
 
 
 def x86(work, pe32):

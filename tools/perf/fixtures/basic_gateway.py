@@ -1,7 +1,7 @@
 """Original fixed-input processor-count and PE32 string-query loops."""
 import struct
-from amd64_perf import pe64
-from perf.fixtures.thread_properties_gateway import image as gateway_image
+from .pe import pe64
+from .thread_properties_gateway import image as gateway_image
 
 
 def image(code, builder, width, symbols):

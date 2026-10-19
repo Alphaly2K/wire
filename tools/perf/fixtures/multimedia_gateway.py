@@ -1,7 +1,7 @@
 """Original multimedia capability loops consume both timer-resolution limits."""
 import struct
-from amd64_perf import pe64
-from perf.fixtures.module_gateway import image
+from .pe import pe64
+from .module_gateway import image
 
 
 def mm_image(code, builder, width):

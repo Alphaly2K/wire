@@ -1,6 +1,6 @@
 """Original LocalAlloc/GlobalSize loops exercise their shared allocation owner."""
 import struct
-from amd64_perf import pe64
+from .pe import pe64
 
 
 def image(code, builder, width):

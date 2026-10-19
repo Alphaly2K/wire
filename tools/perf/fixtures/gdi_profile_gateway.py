@@ -1,7 +1,7 @@
 """Original valid-DC query loop; one acquisition and one release per process."""
 import struct
-from amd64_perf import pe64
-from perf.fixtures.local_gateway import image as local_image
+from .pe import pe64
+from .local_gateway import image as local_image
 
 
 def image(code, builder, width):

@@ -1,6 +1,6 @@
 """Original SRW loop checks each successful acquisition and the released token."""
 import struct
-from amd64_perf import pe64
+from .pe import pe64
 
 
 def x64(work):
