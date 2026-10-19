@@ -11,6 +11,7 @@ mod control;
 mod dialog;
 mod messages;
 mod objects;
+mod paint;
 mod queries;
 mod window_state;
 pub(crate) use classes::{call as class_call, register_system_class};
@@ -18,6 +19,7 @@ pub use classes::{find_class, WindowClass};
 pub(crate) use control::call as control_call;
 pub(crate) use dialog::call as dialog_call;
 pub(crate) use messages::call as message_call;
+pub(crate) use paint::call as paint_call;
 pub(crate) use queries::desktop as desktop_query;
 pub(crate) use window_state::call as window_state_call;
 
@@ -316,20 +318,24 @@ pub fn dispatch(
     if dll != "user32.dll" {
         return None;
     }
-    if let Some(result) =
-        crate::user32_paint::dispatch(name, a, cpu, mem, api, state, log, sched, max_instr)
-    {
-        return Some(result);
+    if name == "RedrawWindow" {
+        return Some(paint::redraw(
+            a, cpu, mem, api, state, log, sched, max_instr,
+        ));
     }
     // Compatibility facade for callers with names. Bound API gateways use
     // the typed ID directly and never resolve the export on the hot path.
     use crate::win32::catalog::{resolve, ApiId, Architecture, Resolution};
     if let Resolution::Bound(contract) = resolve(Architecture::X86, dll, name) {
-        if let ApiId::Dialog(id) = contract.id {
-            return Some(dialog_call(
+        return match contract.id {
+            ApiId::Dialog(id) => Some(dialog_call(
                 id, a, cpu, mem, api, state, log, sched, max_instr,
-            ));
-        }
+            )),
+            ApiId::Painting(id) => Some(paint_call(
+                id, a, cpu, mem, api, state, log, sched, max_instr,
+            )),
+            _ => None,
+        };
     }
     None
 }

@@ -831,6 +831,7 @@ impl Runtime64 {
             ApiId::WindowControl(id) => self.window_value_call(mem, id, args),
             ApiId::Message(_) => unreachable!("message calls use explicit process control"),
             ApiId::Dialog(_) => unreachable!("dialog exports remain absent on Win64"),
+            ApiId::Painting(_) => unreachable!("painting exports remain absent on Win64"),
             ApiId::Menu(_) => unreachable!("menu exports remain absent on Win64"),
             ApiId::GdiOperation(_) => {
                 unreachable!("GDI object/raster exports remain absent on Win64")

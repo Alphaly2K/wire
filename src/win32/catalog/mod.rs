@@ -35,6 +35,7 @@ mod modules;
 mod multimedia;
 mod mutexes;
 mod nls;
+mod painting;
 mod paths;
 mod pointer_helpers;
 mod process_queries;
@@ -88,6 +89,7 @@ pub use modules::{ModuleApi, ModuleQueryApi, MODULE_CONTRACTS, MODULE_QUERY_CONT
 pub use multimedia::{MultimediaApi, MULTIMEDIA_CONTRACTS};
 pub use mutexes::{MutexApi, MUTEX_CONTRACTS};
 pub use nls::{NlsApi, NLS_CONTRACTS};
+pub use painting::{PaintingApi, PAINTING_CONTRACTS};
 pub use paths::{PathApi, PATH_CONTRACTS};
 pub use pointer_helpers::{PointerHelperApi, POINTER_HELPER_CONTRACTS};
 pub use process_queries::{ProcessQueryApi, PROCESS_QUERY_CONTRACTS};
@@ -192,6 +194,7 @@ pub enum ApiId {
     WindowState(WindowStateApi),
     Message(MessageApi),
     Dialog(DialogApi),
+    Painting(PaintingApi),
     Menu(MenuApi),
     GdiOperation(GdiApi),
 }
@@ -383,6 +386,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         .chain(WINDOW_STATE_CONTRACTS.iter())
         .chain(MESSAGE_CONTRACTS.iter())
         .chain(DIALOG_CONTRACTS.iter())
+        .chain(PAINTING_CONTRACTS.iter())
         .chain(MENU_CONTRACTS.iter())
         .chain(GDI_OPERATION_CONTRACTS.iter())
 }

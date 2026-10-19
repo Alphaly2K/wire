@@ -574,10 +574,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetProcessWindowStation", 0),
                 ("GetUserObjectInformationW", 20),
                 ("GetUserObjectInformationA", 20),
-                ("BeginPaint", 8),
-                ("EndPaint", 8),
-                ("InvalidateRect", 12),
-                ("ValidateRect", 8),
                 ("MessageBoxA", 16),
                 ("MessageBoxW", 16),
                 ("MessageBoxExA", 20),
@@ -622,7 +618,6 @@ fn legacy_stack_args_bytes(dll: &str, name: &str) -> Option<u32> {
                 ("GetSysColor", 4),
                 ("GetSysColorBrush", 4),
                 ("AttachThreadInput", 12),
-                ("GetUpdateRect", 12),
                 ("ChangeDisplaySettingsA", 8),
                 ("ChangeDisplaySettingsW", 8),
                 ("SetWindowsHookExA", 16),
@@ -1623,6 +1618,17 @@ pub fn dispatch(
             implemented = !id.unavailable();
             let (outcome, message) =
                 crate::user32::dialog_call(id, &args, cpu, mem, api, state, log, sched, max_instr)?;
+            match outcome {
+                GuestCallOutcome::Returned(value) => {
+                    ret = value;
+                    note = message;
+                }
+                _ => return Ok(()),
+            }
+        }
+        (Some(crate::win32::catalog::ApiId::Painting(id)), _, _) => {
+            let (outcome, message) =
+                crate::user32::paint_call(id, &args, cpu, mem, api, state, log, sched, max_instr)?;
             match outcome {
                 GuestCallOutcome::Returned(value) => {
                     ret = value;

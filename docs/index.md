@@ -79,7 +79,7 @@
 - [R7 CPU profile 工具](reports/refactoring-profile-tools-2026-10-19.md)：实现归入 perf 包，旧入口与 mock 保持，真实采样的 JSON/折叠栈/火焰图逐字节对照通过。
 - [R7 native 图形探针](reports/refactoring-native-probes-2026-10-19.md)：七个旧入口保留，13 个 C ABI 布局集中；三项真实 native 执行与 11 个输出对照通过。
 - [R7 架构测量入口](reports/refactoring-perf-drivers-2026-10-19.md)：三个正式入口与早期 AMD64 工具归入 perf；226 份生成输入及 58 次兼容执行保持。
-- [五项 paint 后续基线](reports/refactoring-painting-followup-2026-10-19.md)：独立 provider/清栈/返回 frame 测试通过；同二进制控制仍离散，暂缓运行时迁移。
+- [五项 paint 迁移与后台负载](reports/refactoring-painting-followup-2026-10-19.md)：typed 契约接入，完整正确性与 120 次功能对照通过；保留宿主控制和主动中断，性能待复核。
 - [PE32 kernel 候选拒绝记录](reports/refactoring-pe32-kernel-rejected-2026-10-14.md)：独立资源故障基线、性能回退调查及运行时代码撤回。
 - [IR 执行器布局隔离](reports/refactoring-ir-layout-2026-10-14.md)：macOS 固定对齐、机器码证据与独立性能验收。
 - [原生 Mono 撤回](mono-native-rollback-2026-10-14.md)：保留通用优化，继续执行原始 guest Mono。

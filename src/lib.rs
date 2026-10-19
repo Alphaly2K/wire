@@ -29,7 +29,6 @@ pub mod thread;
 pub mod user32;
 mod user32_common;
 mod user32_geometry;
-mod user32_paint;
 mod version;
 pub mod win32;
 mod win32_abi;
