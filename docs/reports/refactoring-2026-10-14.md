@@ -526,3 +526,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 PE32 文件窄借用
 
 基线 `9090b62`。file_api 保留公开 facade，原处理体进入 win32/x86/files，仅借 GuestMem、KernelObjects32、filesystem 与 LastError；wildcard 进入 kernel，由两种架构直接复用。原文本 codec、文件/path 主体、facade 和纯算法核对保持。release Win32 248、Win64 文件 17、fmt/release lib/bin strict Clippy/build 通过，不跑性能。累计 export 仍 **888**，见[文件边界](../architecture/files.md)。
+
+## R2/R7 PE32 ABI 来源收敛
+
+基线 `0459298` 审计根手工表 301 项，270 项与已加载 spec 完全一致，零数值冲突；删除重复项，31 项例外及原因集中到 win32::abi。原 spec 解析、ordinal 准入、领域方法优先级、CRT 零清栈与未知策略保持；native_export 的被覆盖 CRT 白名单归并。release Win32 248、fmt/release lib/bin strict Clippy/build 通过，不跑性能。累计 export 仍 **888**，见[ABI 来源](../architecture/abi.md)。

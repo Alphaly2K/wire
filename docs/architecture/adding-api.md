@@ -2,6 +2,8 @@
 
 已迁移家族及各架构策略见[当前状态](../status.md)，本文保留 GUID 试点说明并补充后续控制路由规则。普通 scalar API 的操作步骤如下；尚未迁移的家族继续走明确的 legacy 路由，ABI 已知与实现能力分别记录。
 
+PE32 legacy ABI 的权威输入与显式例外位于 [win32::abi](abi.md)。新增契约前先核对该范围；不要在根 API 入口重新追加与 spec 重复的栈清理表。没有类型的 stub/ordinal 继续保持未知。
+
 1. 在 `src/win32/catalog/` 的所属领域声明 export、DLL/架构范围、typed ID、参数类型、返回约定和限制。GUID 的一份声明派生 PE32 stdcall 清栈和 Win64 DWORD 截断，执行时不查询字符串表。
 2. 把不依赖 guest 内存和进程状态的算法放入领域纯核。GUID 的 Windows little-endian 布局、canonical parser/formatter 位于 `win32/com/guid.rs`；纯核不读 CPU，不写 LastError。
 3. 在 `win32/x86` / `win32/x64` 实现对应内存访问与错误映射。返回 frame 仍由原 `api` / `x64::runtime` facade 提交。varargs、FLOAT/XMM、callback、sret 等需要专用适配器，不能塞入当前 scalar 签名模型。

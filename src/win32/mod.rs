@@ -1,5 +1,6 @@
 //! Windows contracts and architecture adapters. Existing public entry points
 //! remain facades while individual API families migrate from legacy dispatch.
+pub(crate) mod abi;
 pub mod catalog;
 pub(crate) mod com;
 pub(crate) mod gdi;

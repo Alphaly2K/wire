@@ -825,7 +825,9 @@ fn resolve(
             {
                 Ok(api.register(&dll.clone(), Some(name), None))
             }
-            Symbol::Ordinal(ordinal) if crate::win32_abi::ordinal_name(dll, *ordinal).is_some() => {
+            Symbol::Ordinal(ordinal)
+                if crate::win32::abi::ordinal_name(dll, *ordinal).is_some() =>
+            {
                 Ok(api.register(&dll.clone(), None, Some(*ordinal)))
             }
             Symbol::Ordinal(ordinal) => api
