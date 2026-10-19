@@ -2,6 +2,8 @@
 
 更新日期：2026-10-20。重构前基线为 `2e78377`；最新十二个 [不可用音频与字体入口](architecture/unavailable-endpoints.md) 接入唯一契约，保留原错误、输出、诊断和架构范围。完整 Win32 255、Win64 modules 13、catalog 一致性及 fmt/release lib/bin strict Clippy/build 通过。此前[文件版本资源](architecture/version-resources.md)、PE32 USER/MPR、[kernel endpoint](architecture/process-control.md)、[CRT](architecture/crt32.md)、[同步与等待](architecture/waits.md)等已接入。按影响范围选择验证，本批不重复性能或游戏矩阵。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
 
+随后 [GDI+ 窄依赖](architecture/gdiplus.md)完成：矩阵、分配与启动令牌操作只借自身状态、内存和 process heap。原数学、指针与分配顺序保持，release GDI+ 4、完整 Win32 255 及 fmt/release lib/bin strict Clippy/build 通过，不跑性能矩阵；catalog 数量不变。
+
 本轮累计接入对话框/窗口枚举 22、菜单 27、GDI 对象/像素/字体 31 项，共 **80 项**，累计 **675 项**。统一声明、typed 分发与领域 owner 保持双架构范围、故障提交和既有不可用策略；保留真实 RedrawWindow 网关与公开 facade 的历史差异。精确标量 SSE 已移入独立编译单元，没有近似浮点或新增 ISA 语义。
 
 随后 **31 项契约**：5 项 paint、2 项 comctl32 初始化、10 项 PE32 资源、5 项双架构启动信息、9 项环境接口，完整正确性及累计性能复核通过，当前共 **706 项**。Unity 渲染结束后重新完成 32 条性能协议、288 次执行及三对游戏启动；原后台干扰轮次保留。实现与冻结见[五项 paint](reports/refactoring-painting-followup-2026-10-19.md)、[控件初始化](reports/refactoring-common-controls-2026-10-19.md)、[资源](reports/refactoring-resources-2026-10-19.md)、[启动信息](reports/refactoring-process-startup-2026-10-19.md)与[环境接口](reports/refactoring-environment-2026-10-19.md)。

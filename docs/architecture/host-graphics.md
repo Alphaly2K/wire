@@ -10,6 +10,8 @@ Presenter 的资源限制在主线程上，类型明确不可 Send/Sync；初始
 
 GDI 的 DLL/export 接受范围、GetDC 的 USER client dimensions、LastError 和 API diagnostics 位于 `win32/gdi/x86.rs`。`graphics` 拥有 bitmap/DC/font/pixel 资源，checked object/raster operations 只借用 Graphics、PE32 GuestMem 和固定参数数组，不依赖总 API 状态。当前 DIB/font codec 仍使用 PE32 布局；这一边界没有强制统一两种架构的地址空间。D3D9、DXGI/D3D11 的其它 guest COM 适配器按后续领域迁移继续保留原路径。
 
+[GDI+](gdiplus.md) 的 matrix、allocation 和 startup token 归 GdiPlus owner；PE32 调用显式借内存和 process heap，公开 facade 保留，原 Wine ABI parser 与数学算法不变。
+
 回归入口：
 
 Win64 的七项 DXGI/D3D 创建入口已接入[图形契约](graphics-contracts.md)，创建 handler 与 COM 方法分开。现有静态/动态 provider 差异、未知 PE32 ABI 和 GPU 资源语义保持；COM 方法元数据继续迁移。

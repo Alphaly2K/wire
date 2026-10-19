@@ -558,3 +558,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R2 PE32 不可用音频与字体入口
 
 独立基线 `3bf4860` 固定十二项原拒绝行为、provider、ABI、fault 与返回槽别名。音频和字体资源各六项接入 typed 契约，Win64 保持 absent，原错误/输出/LastError/trace 语义保持。release 完整 Win32 255、Win64 modules 13、catalog 一致性及 fmt/release lib/bin strict Clippy/build 通过；普通契约迁移不跑性能或游戏矩阵。累计 **915 exports**，见[边界与验收](../architecture/unavailable-endpoints.md)，证据 `wire-out/refactoring-2026-10-14/r2-unavailable-endpoints32-{source-checks,verification}.json`。
+
+## R3 PE32 GDI+ 资源借用
+
+基线 `2760af1`。GdiPlus 的矩阵、allocation 与 startup token 调用只借自身集合、内存和 process heap；公开 facade 保留。原处理体、数学/codec、allocation 回滚及 spec ABI parser 归一核对保持。release GDI+ 4、完整 Win32 255、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵，累计契约仍 **915**。见[GDI+ 边界](../architecture/gdiplus.md)，证据 `wire-out/refactoring-2026-10-14/r3-gdiplus32-{source-checks,verification}.json`。

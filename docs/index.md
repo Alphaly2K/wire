@@ -66,6 +66,7 @@
 - PE32 USER/MPR 补齐：[诊断式 MessageBox](architecture/dialog.md)、[window-station 查询](architecture/desktop.md)及[MPR 本地盘错误](architecture/paths-handles.md)，保留公开 facade 范围。
 - [PE32 文件版本资源](architecture/version-resources.md)：六项唯一契约、独立 PE 字节 parser、窄 guest 适配器，删除六条 ABI override。
 - [不可用音频与字体入口](architecture/unavailable-endpoints.md)：十二项明确拒绝策略及 ABI 契约，保留原输出、错误与 trace。
+- [GDI+ 资源与调用边界](architecture/gdiplus.md)：矩阵、分配与启动令牌只借所属资源，保留 Wine 数学与 ABI parser。
 - [Win64 Toolhelp 快照](architecture/snapshots.md)及[完整验收](reports/refactoring-snapshot-owner-2026-10-19.md)：冻结线程值、游标/输出故障、保护关闭；19 条协议、180 次执行及独立累计 IR 复核。
 - [Toolhelp 七项统一契约](reports/refactoring-snapshot-contract-2026-10-19.md)：双架构 provider/ABI 和 typed ID；累计 713 exports，17 个计时协议、162 次执行及三对启动前缀，保留代码别名局部成本。
 - [日历、时区与 CPU 计时调用边界](architecture/calendar.md)及[契约验收](reports/refactoring-calendar-2026-10-16.md)：11 项接口、时区独立模块、宿主 CPU 计时、32 条性能路径及局部成本调查。
