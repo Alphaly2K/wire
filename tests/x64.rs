@@ -68,6 +68,8 @@ mod network;
 mod painting_contract;
 #[path = "x64/process.rs"]
 mod process;
+#[path = "x64/resources_contract.rs"]
+mod resources_contract;
 #[path = "x64/sections.rs"]
 mod sections;
 #[path = "x64/simd.rs"]

@@ -77,6 +77,8 @@ mod modules;
 mod painting_contract;
 #[path = "win32/paths.rs"]
 mod paths;
+#[path = "win32/resources_contract.rs"]
+mod resources_contract;
 #[path = "win32/sections.rs"]
 mod sections;
 #[path = "win32/sync.rs"]
