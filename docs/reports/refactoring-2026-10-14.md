@@ -422,3 +422,7 @@ locale 词汇、格式化、C1 字符分类和 calendar 算术形成纯核；宿
 日志修订 `b433c63` 完成对话框 22、菜单 27、GDI 31 项的累计验收，达到 675 项，独立旧候选及采样证据见[日志报告](refactoring-api-log-2026-10-19.md)。随后五项 paint、两项 comctl32 初始化、十项资源、五项启动信息、九项环境接口与 CLI 拆分完整正确性通过；Unity 后台渲染及同哈希显著漂移期间暂停长计时。
 
 用户确认渲染结束后，以原 675 项冻结与 `d65c389` 环境冻结作三标签轮换，32 条协议、288 次执行及三对 Alice 200M 前缀全部校验。最大 CPU 中位数回退 +2.574%，保留 SSE/control 局部成本与 GDI 同哈希漂移；fixture RSS 中位数最多 +112KiB，累计 executable +44,272 bytes。Alice CPU/wall −1.543%/−0.328%，仍为隐藏窗口、零 Draw/Present 的启动前缀。release 644、debug 490、native 7、工具 28 及静态检查/build 沿用同源码冻结，302 个 src Rust 文件重新核对。2026-10-19 累计接受 **706 exports** 及 CLI，见[完整复核](refactoring-post-unity-performance-2026-10-19.md)。
+
+## R3 Win64 ETW provider
+
+注册表与单调分配器收拢为私有 Providers，调用只借 Memory/参数，原 handler 经过 owner 改名后逐字一致。三项独立旧行为测试先提交于 `480a14e`；完整 release 647、debug 493、native 7、工具 29 与静态检查/build 通过。12 条性能协议、108 次执行及三对 Alice 前缀通过，binary +176 bytes，302 个 src Rust 文件核对一致。ETW CPU −0.149%，其它主路径最大回退 +2.110%；游戏 CPU/wall −0.168%/−0.519%，保持预算/隐藏窗口/零 Draw/Present。没有新增 export，累计仍为 706；见[完整验收](refactoring-etw-owner-2026-10-19.md)。

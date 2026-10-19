@@ -1,6 +1,23 @@
 //! ETW provider registration with no tracing sessions. Every provider remains disabled.
 //! No enable callback is sent and no event payload is consumed or claimed to be recorded.
-use super::{Memory, Runtime64, READ, WRITE};
+use super::{Memory, READ, WRITE};
+use std::collections::BTreeMap;
+
+/// Process-owned registrations. Callback/context carriers remain guest values;
+/// this disabled-provider profile never invokes them or follows event payloads.
+pub(super) struct Providers {
+    registrations: BTreeMap<u64, ([u8; 16], u64, u64)>,
+    next: u64,
+}
+impl Default for Providers {
+    fn default() -> Self {
+        Self {
+            registrations: BTreeMap::new(),
+            next: 0x7fff6000,
+        }
+    }
+}
+
 pub(super) fn is_call(name: &str) -> bool {
     matches!(
         name,
@@ -14,8 +31,8 @@ pub(super) fn is_call(name: &str) -> bool {
             | "EventSetInformation"
     )
 }
-impl Runtime64 {
-    pub(super) fn etw_call(
+impl Providers {
+    pub(super) fn call(
         &mut self,
         mem: &mut Memory,
         name: &str,
@@ -24,18 +41,18 @@ impl Runtime64 {
         if name == "EventRegister" {
             mem.check(args[0], 16, READ)?;
             mem.check(args[3], 8, WRITE)?;
-            if self.etw.len() >= 64 || self.next_etw >= 0x7fff7000 {
+            if self.registrations.len() >= 64 || self.next >= 0x7fff7000 {
                 return Ok(8);
             }
             let mut guid = [0; 16];
             mem.read(args[0], &mut guid)?;
-            let handle = self.next_etw;
+            let handle = self.next;
             mem.write_int(args[3], 8, handle)?;
-            self.etw.insert(handle, (guid, args[1], args[2]));
-            self.next_etw += 1;
+            self.registrations.insert(handle, (guid, args[1], args[2]));
+            self.next += 1;
             return Ok(0);
         }
-        if !self.etw.contains_key(&args[0]) {
+        if !self.registrations.contains_key(&args[0]) {
             return Ok(if matches!(name, "EventEnabled" | "EventProviderEnabled") {
                 0
             } else {
@@ -44,7 +61,7 @@ impl Runtime64 {
         }
         Ok(match name {
             "EventUnregister" => {
-                self.etw.remove(&args[0]);
+                self.registrations.remove(&args[0]);
                 0
             }
             "EventEnabled" => {

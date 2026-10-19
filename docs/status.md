@@ -1,6 +1,6 @@
 # 当前状态
 
-更新日期：2026-10-19。重构前基线为 `2e78377`；最新已验收运行时为 `d65c389` 环境接口冻结，见 [Unity 渲染结束后的累计性能复核](reports/refactoring-post-unity-performance-2026-10-19.md)，报告记录源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
+更新日期：2026-10-19。重构前基线为 `2e78377`；最新已验收运行时为 [ETW owner 冻结](reports/refactoring-etw-owner-2026-10-19.md)，直接基线为 `d65c389` 环境接口及 [Unity 渲染结束后的累计性能复核](reports/refactoring-post-unity-performance-2026-10-19.md)，报告记录源码和 executable SHA。完整阶段与历史验收从 [重构记录](reports/refactoring-2026-10-14.md) 和 [文档入口](index.md) 查阅。
 
 本轮累计接入对话框/窗口枚举 22、菜单 27、GDI 对象/像素/字体 31 项，共 **80 项**，累计 **675 项**。统一声明、typed 分发与领域 owner 保持双架构范围、故障提交和既有不可用策略；保留真实 RedrawWindow 网关与公开 facade 的历史差异。精确标量 SSE 已移入独立编译单元，没有近似浮点或新增 ISA 语义。
 
@@ -18,7 +18,7 @@
 | --- | --- | --- |
 | R0/R1 | 冻结输入、原创正式 fixture、领域测试 harness、GUID 唯一契约和双架构适配 | 随后续家族维护独立基线 |
 | R2 | 已验收 706 个 export 的契约；明细见下表 | USER、COM、图形等 legacy 家族 |
-| R3 | guest environment 与 Win64 变量/环境块 owner、双架构模块状态、Win64 文件、period 请求、SRW、地址等待及 APC 队列、线程标量操作与描述、双架构 apartment/BSTR、Win64 task/HSTRING/image/desktop 成员、PE32 TLS/FLS 与双架构 cursor、Win64 DC/class 私有 owner | PE32 其余资源、线程资源创建/退出及 COM 其余对象；PE32 kernel 大范围抽取曾因性能撤回 |
+| R3 | guest environment 与 Win64 变量/环境块 owner、双架构模块状态、Win64 文件、period 请求、SRW、地址等待及 APC 队列、线程标量操作与描述、双架构 apartment/BSTR、Win64 task/HSTRING/image/desktop/ETW 成员、PE32 TLS/FLS 与双架构 cursor、Win64 DC/class 私有 owner | PE32 其余资源、线程资源创建/退出、token 及 COM 其余对象；PE32 kernel 大范围抽取曾因性能撤回 |
 | R4/R5 | Process32 编排边界、owned host UI 请求、GDI 与像素状态分离 | 领域分发与资源 owner 随 R2/R3 继续收敛 |
 | R6 | 按用户要求忽略 | 不重建原生 Mono 路径 |
 | R7 | CLI 命令职责拆分及性能复核、PE32 内核目录、领域测试、公共性能工具及 profile、离线 inventory、当前/历史文档入口 | 其余工具和目录随领域迁移继续整理 |
@@ -95,7 +95,9 @@
 
 ## 验证与性能
 
-最近已验收的冻结：release **644 passed / 7 ignored**、debug **490 passed**（Win32 237、AMD64 242、FPU 9、日志单元 2）、显式 native **7 passed**、工具 **28 passed**；fmt、strict all-target/all-feature Clippy、SIMD crate 静态检查与 release build 通过。302 个 src Rust 文件和 executable 核对一致。CLI 的 21 组命令、原始 IR 与 API trace 对照，以及各领域的独立旧行为/故障检查，分别保留在对应报告。
+最近已验收的冻结：release **647 passed / 7 ignored**、debug **493 passed**（Win32 237、AMD64 245、FPU 9、日志单元 2）、显式 native **7 passed**、工具 **29 passed**；fmt、strict all-target/all-feature Clippy、SIMD crate 静态检查与 release build 通过。302 个 src Rust 文件和 executable 核对一致，ETW owner 仅增加 176 bytes。CLI 的 21 组命令、原始 IR 与 API trace 对照，以及各领域的独立旧行为/故障检查，分别保留在对应报告。
+
+ETW owner 追加 12 条性能协议、108 次执行与三对 Alice 前缀全部通过；主路径最大 CPU 中位数回退 +2.110%，保留 memory 同哈希漂移。游戏 CPU/wall −0.168%/−0.519%，RSS 中位数约 +1.03MiB，仍为相同预算/隐藏窗口/零 Draw/Present 前缀。完整结果见[ETW 验收](reports/refactoring-etw-owner-2026-10-19.md)。
 
 最新累计复核共 **32 条协议、288 次执行**全部校验；三标签轮换中穿插同一旧 binary 的 control。五个新接口家族的 CPU 中位数 −51.455% 至 +1.099%；PE32 四项计算的 raw/IR 与 AMD64 计算/别名/线程 ID 为 −4.098% 至 +2.574%。保留 AMD64 SSE after/control +3.440% 的局部成本、GDI/IR 同哈希漂移及全部离散轮次，没有持续超过 5% 的回退。fixture RSS 中位数最大增加 112KiB。相对 675 项日志冻结，累计 executable +44,272 bytes，各批独立增量仍在 +24KiB 预算内，没有扩大缓存或资源限额。
 

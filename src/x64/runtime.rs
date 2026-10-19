@@ -93,8 +93,7 @@ pub struct Runtime64 {
     modules: crate::win32::x64::modules::Modules,
     tokens: BTreeMap<u64, (u32, u32)>,
     next_token: u64,
-    etw: BTreeMap<u64, ([u8; 16], u64, u64)>,
-    next_etw: u64,
+    etw: tracing::Providers,
     function_tables: BTreeMap<u64, unwind::Table>,
     exception_handlers: Vec<(u64, u64)>,
     next_exception_handler: u64,
@@ -491,8 +490,7 @@ impl Runtime64 {
             modules: crate::win32::x64::modules::Modules::new(TEB + 0x20000),
             tokens: BTreeMap::new(),
             next_token: 0x7fff4000,
-            etw: BTreeMap::new(),
-            next_etw: 0x7fff6000,
+            etw: tracing::Providers::default(),
             function_tables: BTreeMap::new(),
             exception_handlers: Vec::new(),
             next_exception_handler: 0x7fff8000,
@@ -1236,7 +1234,7 @@ impl Runtime64 {
                     });
                 }
             },
-            name if tracing::is_call(name) => self.etw_call(mem, name, args)?,
+            name if tracing::is_call(name) => self.etw.call(mem, name, args)?,
             "FormatMessageA" | "FormatMessageW" => self.format_message(mem, name, args)?,
             "GetSidSubAuthority"
             | "GetSidSubAuthorityCount"
