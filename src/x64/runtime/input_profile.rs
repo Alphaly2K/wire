@@ -1,6 +1,6 @@
 //! The AppKit bridge currently delivers legacy mouse/keyboard messages only.
 //! No raw device or HRAWINPUT handle is advertised without a raw input backend.
-use super::{Memory, Runtime64};
+use super::{threads::Threads, user::User, Memory, Runtime64};
 use crate::win32::{
     catalog::{ApiId, RawInputApi},
     user::input_profile::{ime, InputResult},
@@ -13,13 +13,25 @@ impl Runtime64 {
         id: ApiId,
         a: &[u64],
     ) -> Result<u64, String> {
+        self.user.input_profile_call(mem, id, a, &self.threads)
+    }
+}
+
+impl User {
+    fn input_profile_call(
+        &self,
+        mem: &mut Memory,
+        id: ApiId,
+        a: &[u64],
+        threads: &Threads,
+    ) -> Result<u64, String> {
         let result = match id {
             ApiId::RawInput(id) => raw_input(mem, id, a)?,
-            ApiId::Ime(id) => ime(id, a, self.user.windows.contains_key(&a[0])),
+            ApiId::Ime(id) => ime(id, a, self.windows.contains_key(&a[0])),
             _ => unreachable!("input-profile adapter only accepts raw input and IME"),
         };
         if let Some(error) = result.error {
-            self.set_error(mem, error)?;
+            threads.set_error(mem, error)?;
         }
         Ok(result.value)
     }

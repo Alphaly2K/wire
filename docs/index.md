@@ -3,6 +3,7 @@
 ## 当前实现
 
 - [当前状态与验证矩阵](status.md)：注明代码基线、运行入口与外部测试条件。
+- [重构收尾审计](reports/refactoring-closeout-2026-10-20.md)：逐阶段交付、保留的 legacy/协调边界，以及尚未完成的真实音频验收。
 - [架构和依赖方向](architecture/runtime.md)：当前边界、保留 facade 与迁移目标。
 - [宿主与图形边界](architecture/host-graphics.md)：owned 请求、事件消费顺序、GDI 适配及 native 验证入口。
 - [新增 API 与 GUID 契约](architecture/adding-api.md)：唯一声明、冷绑定、双架构错误和提交顺序。

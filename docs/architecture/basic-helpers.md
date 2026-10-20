@@ -22,4 +22,6 @@ GetCurrentPackageId 随后接入 ProcessQueryApi，保留 PE32 桌面应用的 A
 
 processor count 的 WORD carrier 由适配层消费，保持 Win64 trace 中原始 64 位参数。PE32 仍对完整 32 位 carrier 检查 0/0xffff，Win64 按原实现只消费低 WORD；两端成功均保留 LastError。group-count 两项在 PE32 仍为 ABI-only/LastError 120，Win64 返回单组 profile。API 返回槽别名仍分别使用 PE32 handler 后读取和 Win64 预先保存 frame 的顺序。
 
+Win64 processor 查询现在是只借 Memory 和只读 Threads 的普通 adapter，不再借整个 Runtime64。原低 WORD 检查和错误槽访问位置保持，根按绑定 ID 直接组合资源。
+
 WMI 的内部 BSTR 分配继续使用同一 Bstrings32 owner 与进程 heap；去掉转借完整 ApiState 的 common_api facade 后，资源和错误顺序保持。common_api 的混合名称分发与模块已删除。

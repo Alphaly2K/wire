@@ -597,7 +597,7 @@ impl Runtime64 {
             ApiId::Audio(_) | ApiId::FontResource(_) => {
                 unreachable!("legacy audio/font endpoints have no Win64 binding")
             }
-            ApiId::ProcessQuery(id) => self.process_query_call(mem, id, args),
+            ApiId::ProcessQuery(id) => process_queries::call(mem, id, args, &self.threads),
             ApiId::Environment(id) => self.environment_call(mem, id, args),
             ApiId::Startup(id) => {
                 crate::win32::x64::process_startup::call(id, args, mem, [COMMAND_A, COMMAND_W])

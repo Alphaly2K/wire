@@ -1,99 +1,30 @@
 # 当前状态
 
-更新日期：2026-10-20。按 [重构计划](refactoring-plan-2026-10-11.md) 持续推进，重构前基线为 `2e78377`，当前累计 **919 项 export 契约**。家族明细见下表，完整提交与历史验收见 [重构记录](reports/refactoring-2026-10-14.md)。Mono 原生化已撤回，R6 按用户要求排除。
+更新日期：2026-10-20。按 [重构计划](refactoring-plan-2026-10-11.md) 推进的代码重构主体和阶段整合已交付，重构前基线为 `2e78377`，当前累计 **919 项 export 契约**。R5 的真实音频验收仍待确认；R6 按用户要求排除。分阶段核对与保留项见 [收尾审计](reports/refactoring-closeout-2026-10-20.md)，历史提交与失败记录见 [重构记录](reports/refactoring-2026-10-14.md)。
 
-近期完成 [GDI+](architecture/gdiplus.md)、[WMI](architecture/wmi.md)、[DirectSound](architecture/directsound.md) 与 [D3D9](architecture/d3d9.md) 的资源借用收敛，移除对象调用对整个 ApiState 的依赖及 registry/backend 临时 take；[PE32 线程创建和退出](architecture/thread-control.md)、[USER 资源退休](architecture/window-control.md)、[callback 执行](architecture/callbacks32.md) 与 [消息队列](architecture/messages.md) 也已归入各自 owner。Win64 [TLS/FLS](architecture/locals.md) 私有拥有固定槽和 callback identity，保留 TEB 与析构顺序。
+最新阶段整合基于 `37b2c9c` 加本批 Win64 input/processor 窄资源提取：release 全目标 **695 passed / 8 ignored / 21 suites**，工具 **31 项**、all-targets/all-features strict Clippy、release build 和 fmt 通过。此前原生窗口、真实 Metal/Vulkan、CoreText 的证据按实际执行批次保留；新增音频 fixture 在打开输出时失败，原始 C 主线程探针也失败，具体原因未确定。
 
-最新阶段整合覆盖至 host 音频/字体边界与 Win64 普通文件/endpoint 调用收敛（本批基线 `beb2a34`）：release 全目标 **694 passed / 8 ignored / 21 suites**，all-targets/all-features strict Clippy、build 及 fmt 通过；工具沿用最近 **6 项 inventory** 和其余工具 **31 项**结果。此前 PE32 原生窗口探针及两个真实 GPU draw/swapchain fixture 的证据保留；新增音频 fixture 的设备打开失败单独记录。按改动影响选择验证，普通契约和资源边界提取不逐批重跑性能或游戏矩阵；执行循环、ISA 算法和 callback frame 保持。见 [验收策略](architecture/validation-tools.md)。
+PE32 [Process](architecture/callbacks32.md) 已拥有 API 控制、USER callback、DLL/TLS 生命周期、线程退出、SEH 与 CRT 编排，各自恢复策略保留。CPU 单步/IR 不依赖这些服务，公开 Cpu::run/call_guest 委托仍兼容。USER 与 Modules 的领域 owner 已归入 win32；根模块保留兼容入口。
 
-历史性能拒绝、回滚与后续复核证据继续保留，见 [API 日志累计验收](reports/refactoring-api-log-2026-10-19.md)、[后台 Unity 渲染结束后的复核](reports/refactoring-post-unity-performance-2026-10-19.md) 和 [CLI 重试](reports/refactoring-cli-followup-2026-10-19.md)。当前结构重构不宣称新的性能提升。
+Win64 普通 [文件/endpoint/section](architecture/files.md)、[Environment](architecture/environment.md)、[TLS/FLS](architecture/locals.md)、[USER](architecture/window-queries.md)、[输入](architecture/input-profile.md)、COM/字符串及图形调用已按实际资源收窄；Runtime 保留跨 owner 的 close/duplicate/wait、装载、callback 和 present 提交协调。
 
-Win64 [Heap](architecture/heaps.md)、[Local/Global](architecture/local-memory.md)、[BSTR](architecture/bstr.md)、[HSTRING](architecture/winrt.md)、[COM](architecture/com-core.md) 与[窗口查询/状态](architecture/window-queries.md)普通调用已收窄到各自 owner 与明确资源借用，保留原分配、输出、LastError 和诊断顺序。
+[host](architecture/host-graphics.md) 现拥有 UI、AudioQueue、CoreText 与原生 Vulkan/Metal 的 Rust FFI 和资源，guest adapter 负责内存布局、消息和错误映射。[Windows printf](architecture/windows-printf.md) 四项契约明确 cdecl/stdcall 与按需变参，PE32 ABI 显式 legacy 例外剩余 23 项。
 
-PE32 [窗口状态](architecture/window-state.md)、[对话框/枚举](architecture/dialog.md)、[消息](architecture/messages.md)、[monitor](architecture/display.md)和[绘制](architecture/painting.md)均由领域准备请求、Process 执行 callback 或阻塞；原重入重查、临时资源释放、输出 fault 与返回帧策略保持。新增的通知重入和 monitor fault 释放 fixture 已纳入完整 **257 项 Win32** 回归。
-
-随后[窗口几何/更新](architecture/window-control.md)也完成准备→回调→提交拆分，默认 WM_MOVE/WM_SIZE 之间保留重查。新增独立过程替换/最小化 fixture 后，完整 Win32 **258**、IR 31 和必要构建通过。
-
-窗口创建/销毁、显示、同步发送与默认过程也已完成请求边界，`src/user32/` 内直接 CPU/guest 执行依赖清零；Process 保留原 callback/cleanup 循环，完整 Win32 258、IR 31 和必要构建通过。其余 DLL/SEH/CRT 恢复边界继续按原策略迁移。
-
-[CRT 编排](architecture/crt32.md)随后迁入 Process，API 不再处理 FPU/初始化器执行循环；qsort 与 initializer 保留各自恢复策略。新增函数表变更/首错误 fixture，完整 Win32 **259**、IR 31 和必要构建通过。
-
-Win64 的 cursor/DC/desktop 调用也归 User owner，明确借 tid、内存与错误槽；完整 Win64 269、library 61 passed / 7 ignored、fmt/strict Clippy/build 通过。
-
-Win64 class/image 调用随后归 User，PE 资源读取只借内存/Modules；原遍历和资源验证顺序保持，完整 Win64 269、library 61 passed / 7 ignored 及必要构建通过。
-
-Win64 键盘状态/布局与默认过程标量调用也归 User，只读借用 Threads，并保留错误分支才读取 TEB；callback frame 和 start/resume 主体保持。完整 Win64 269、library 61 passed / 7 ignored、fmt/strict Clippy/build 通过。
-
-PE32 SEH 搜索/展开和普通 filter 现归 Process，CONTEXT codec 独立借内存/ThreadCtx；原恢复策略与公开 seh 入口保持，完整 Win32 259、IR 31 和必要构建通过。
-
-PE32 DLL/TLS 的线程及进程退出通知也归 Process；模块表保持私有，通知按原位置取快照并重查。完整 Win32 259、IR 31、fmt/strict Clippy/build 通过，初始化/卸载等其余生命周期继续拆分。
-
-PE32 DLL 初始化/卸载执行随后归 Process，Modules 准备和提交 phase/引用/资源退休；sidecar IR 安装、依赖顺序、FALSE attach 与控制转移保持。完整 Win32 259、IR 31 和必要构建通过；typed 装载入口与失败清理继续收敛。
-
-PE32 typed 模块装载入口与失败清理也归 Process；领域模块已移除 CPU、scheduler、logger 和 guest 执行依赖，资源退休与 IR 逐个失效顺序保持。此批完成上述全目标阶段整合，链接器资源借用继续收窄。
-
-PE32 Linker 随后移除 ApiState 借用，系统类注册与依赖引用/去重/abandon 归明确 owner；只在映射/解析期间借实际资源。完整 Win32 259、IR 31、all-targets/all-features strict Clippy、build/fmt 通过。
-
-PE32 类操作及基本控件初始化也归 User32，明确借内存、gateway、Modules、scratch 和错误槽；Desktop/窗口创建保留原隐式注册顺序，公开查类入口保持。完整 Win32 259、IR 31、all-targets/all-features strict Clippy、build/fmt 通过。
-
-PE32 critical-section 阻塞/唤醒、Sleep/让出和对象/消息等待已迁入 Process 的同步协调器，不借整个 ApiState；总分发器不再直接消费 wake、设置 deadline 或阻塞/唤醒线程。原返回帧及让出顺序保持，完整 Win32 259、IR 31 和必要构建通过。
-
-Win64 Graphics 已拥有 vtable、COM 对象分配/adapter 缓存与递归释放，只借明确内存、gateway 和共享游标。完整 Win64 269、library 61 passed / 7 ignored、严格 Clippy/build/fmt 通过，并显式通过两个真实 GPU draw/swapchain 生命周期用例。
-
-Win64 虚拟 output、D3D11 context/binding 和 draw 输入准备也归 Graphics；GPU 资源检查与提交算法保持。完整 Win64 269、library 61 passed / 7 ignored、两个真实 GPU fixture 和严格构建继续通过。
-
-D3D11 主适配器及 input-layout 现在只临时借 Graphics、gateway、共享游标和 Trace，不再借 Runtime64；private-data 共用 Graphics 实现，ASCII codec 独立借内存。完整 Win64 269、library 61 passed / 7 ignored、两个 GPU fixture 及严格构建通过。
-
-DXGI factory/adapter/普通 COM 调用也归 Graphics，只借明确资源和必要的只读 User。根对象校验及 swapchain/D3D11 路由保持，完整 Win64 269、library 61 passed / 7 ignored 和严格构建通过；present 编排继续收敛。
-
-swapchain 创建/resize 和普通查询现借 Graphics、gateway、游标、Trace 与只读 User；Graphics 拥有 backbuffer、状态、frame 快照与成功计数，根保留 present 的线程/API/trace 提交。这批完成上述全目标整合及真实 GPU 验证。
-
-Win64 FindFirst/Next/Close 和目录信息调用已归 Searches/Files，错误分支只读借 Threads 写 LastError，成功输出后才推进游标。完整 Win64 269、library 61 passed / 7 ignored 和严格构建通过。
-
-PE32 桌面查询也归 User32，明确借首次初始化所需资源，删除闲置系统类转发；原创建/重复查询顺序保持。完整 Win32 259、IR 31 和严格构建通过。
-
-Win64 event/semaphore/waitable timer 普通调用已归 Events，只借 Memory 与只读 Threads，原名称、权限、计数及 deadline 算法保持。完整 Win64 269、library 61 passed / 7 ignored 和严格构建通过。
-
-PE32 USER 已拥有宿主窗口快照和事件消费，展示轮询不再 take/还原 Presenter。完整 Win32 259、library 61 passed / 7 ignored、严格构建及原生窗口主线程/上传/resize/removal/抓帧探针通过。
-
-PE32 USER 的状态、请求和文本 codec 已归入 `win32/user/pe32`；根 `user32` 保留公开类型与 find_class/host_message/dispatch 兼容入口，领域实现不依赖 CPU 或 ApiState。删除两个闲置私有辅助入口，形成上述全目标整合。
-
-Win64 显示 scalar 查询也归 User，只借 Memory 与只读 Threads；monitor callback 编排保持独立。完整 Win64 269、library 61 passed / 7 ignored 和严格构建通过。
-
-Win64 TLS/FLS 普通 adapter 只借 LocalSlots64、Memory 与只读 Threads；存活 TEB 按原顺序迭代，不新增快照分配，hot TLS 与析构处理保持。完整 Win64 269、library 61 passed / 7 ignored 和严格构建通过。
-
-PE32 模块领域错误已移除 GuestCallOutcome，Process 单独拥有 DLL/TLS 的控制结果与执行错误；原回滚、fatal 和非局部转移分支保持。完整 Win32 259、IR 31、线程回归及严格构建通过。
-
-PE32 image/TLS owner、链接器和 provider 身份也已归位到 `win32/x86/modules`；根 modules 保留公开兼容入口，形成上述全目标整合。
-
-AudioQueue 句柄与 Rust FFI 已归 host PcmOutput，DirectSound 的混音/计时/通知保持。Win32 259、library 61 passed / 8 ignored 和严格构建通过；原生音频 fixture 打开失败，独立主线程原始 C 入口同样失败，真实音频验收待可用设备环境。
-
-CoreText 字体测量的 Rust FFI 也已归 host，GDI 保留字体布局、缓存和原错误映射。Win32 259（含真实 CoreText 字体测量）、library 61 passed / 8 ignored 及严格构建通过。
-
-Win64 普通文件 metadata/大小/seek/attributes/cwd 及 read/write 输出已归 Files，只借明确的 Memory、Threads 和 write 所需的 Mappings；根保留原提前返回、计数与日志。Win64 269、library 61 passed / 8 ignored 和严格构建通过。随后路径变更、属性更新、打开文件与普通创建目录也归 Files，目录安全检查保留在根；按影响通过 17 项文件回归及严格构建。
-
-StandardHandles 的重定向/标准输出和 Pipes 的读写输出也已归各自 owner，Runtime 保留 endpoint 选择、公共 preflight 和原提前/通用提交区别；完成上述全目标阶段整合。
-
-原生 Vulkan 图形库和静态 Metal raster 的 Rust owner 已归 host，公开 gpu 和 D3D9 私有调用路径兼容。D3D9 11、library 61 passed / 8 ignored、两项真实 Metal 像素对照、两项 Vulkan draw/swapchain 及严格构建通过。
-
-[Windows printf](architecture/windows-printf.md) 四个入口现由统一契约声明 cdecl/stdcall 和固定前缀，保留按需变参与原输出/返回帧顺序；删除两条旧 ABI override。Win32 260、Win64 269、library 61 passed / 8 ignored、inventory 6 项和严格构建通过。
-
-Win64 [section 调用](architecture/files.md)也已归 Mappings，只借内存与必要的 Files/Threads；原映射生命周期与 coherence 保持。按影响通过文件 17 项及 section 过滤 5 项（含 3 项 critical-section），严格构建通过。
-
-Win64 [Environment](architecture/environment.md)的变量操作与块输出/释放现直接由 owner 执行，Runtime 只组合 Pages、账本、codepage 和必要错误资源；按影响通过环境 3 项及严格构建，保留原成功/故障提交顺序。
+普通契约和资源边界提取按影响选择行为回归及必要构建，不逐批跑性能或游戏矩阵，见 [验收策略](architecture/validation-tools.md)。历史性能拒绝、回滚、[后台 Unity 结束后的复核](reports/refactoring-post-unity-performance-2026-10-19.md)和 [CLI 验收](reports/refactoring-cli-followup-2026-10-19.md)保留，当前结构重构不宣称新的性能提升。
 
 ## 重构范围
 
 当前累计冻结包含[对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)、日志、五项 paint、控件初始化、资源、启动信息、环境接口与 CLI 拆分；独立历史证据继续可查。
 
-| 阶段 | 已交付 | 剩余范围 |
+| 阶段 | 已交付 | 保留项或待验 |
 | --- | --- | --- |
-| R0/R1 | 冻结输入、原创正式 fixture、领域测试 harness、GUID 唯一契约和双架构适配 | 随后续家族维护独立基线 |
-| R2 | 已接入 919 个 export 的契约；明细见下表 | PE32 legacy 家族与图形 COM 方法 |
-| R3 | environment、双架构 modules/apartment/BSTR/cursor、Win64 files/同步队列/TLS-FLS/task/HSTRING/USER/设备等 owner；PE32 kernel/scratch/CRT、线程创建/退出、USER 队列/退休及 GDI+/WMI/DirectSound/D3D9 窄资源调用 | 其余领域资源与 COM 对象；PE32 kernel 大范围抽取曾因性能撤回 |
-| R4/R5 | Process32 编排、线程退出与 callback 执行服务、owned host UI 请求、GDI 与像素状态分离 | 领域 callback 请求与其余分发/owner 继续收敛 |
-| R6 | 按用户要求忽略 | 不重建原生 Mono 路径 |
-| R7 | CLI 命令职责拆分及性能复核、PE32 内核与 USER 目录、领域测试、公共性能工具及 profile、离线 inventory、当前/历史文档入口 | 其余工具和目录随领域迁移继续整理 |
+| R0/R1 | 冻结输入、原创正式 fixture、领域测试 harness、GUID 唯一契约与双架构适配 | 历史基线和外部输入要求保留 |
+| R2 | 919 项 export 契约、冷绑定、架构 ABI/执行策略；Win64 普通 export 元数据已收敛 | PE32 CRT/专用对象方法和 23 项 ABI 例外明确走 legacy，见收尾清单 |
+| R3 | environment、modules、files、同步/线程、USER、COM/字符串、图形等资源 owner；普通 handler 仅借实际资源 | 跨 owner 的生命周期协调与 PE32 KernelObjects32 混合句柄表保留，不统一 arena |
+| R4 | Process32 拥有执行/调度、DLL/TLS、USER callback、SEH 与 CRT 编排 | Cpu 公开兼容委托和各家族独立恢复策略保留 |
+| R5 | owned host UI、事件消费、GDI/像素边界，audio/font/native graphics Rust owner | 原生窗口/GPU/字体已有证据；AudioQueue 输出打开失败，真实音频验收未完成 |
+| R6 | 按用户要求排除 | 不重建原生 Mono 路径 |
+| R7 | 稳定领域目录、测试 harness、CLI、perf/inventory/profile/probe 工具及当前/历史文档入口 | 公开 facade 保留；第三方/native 构建路径保持 |
 
 已迁移的 export 是契约覆盖范围；typed、ABI-only 与 absent 的架构策略分别记录，不能按数量推导完整 Windows 兼容性。
 
@@ -186,32 +117,22 @@ Win64 [Environment](architecture/environment.md)的变量操作与块输出/释�
 
 ## 验证与性能
 
-最新 SSPI 批次：release Win64 **264 passed**、网关单元 **3 passed**，catalog 一致性与 fmt/strict all-target/all-feature Clippy/release build 通过。此前注册表/BCrypt 与公共 catalog 整合的 release 全量 **670 passed / 7 ignored** 保留原上下文；注册表 owner 的 debug 定向 3、ETW 的 debug 定向 6/token 定向 7/工具 31，以及更早完整 debug 501、显式 native 图形 7 也未重复标为本批执行。按风险评估不重跑性能和未改动的 native 图形。各批独立基线与功能证据见对应报告。
+当前阶段整合为 release **695 passed / 0 failed / 8 ignored / 21 suites**，包含既有 Unicorn 参照测试；Python 工具 **31 项**、fmt、release strict all-targets/all-features Clippy 与 build 通过。当前 Cargo 无 native Mono feature，不重建已撤回的原生桥接。额外 debug、真实 native 和游戏前缀的历史结果仍按各批报告解释，不重复记为本次执行。
 
-七项 Toolhelp 契约完成 17 个计时协议、162 次执行和三对 Alice 前缀。Win64 copyout CPU −12.007%，PE32 ABI-only 快捷路径 IR/raw −82.834%/−77.516%，完整诊断日志逐字节不变。code-alias 900M 保留 +4.286% 的局部成本，执行计数、实际调用栈及热区操作数已核对，具体机制尚未确证；raw 六对 900M 汇总 −0.745%。Alice CPU/wall −1.008%/−0.404%，RSS −752KiB，保持同预算、隐藏窗口及零 Draw/Present。详见[契约验收](reports/refactoring-snapshot-contract-2026-10-19.md)。
+最近一次累计性能复核为 2026-10-19 的 [32 条协议、288 次执行与三对 Alice 前缀](reports/refactoring-post-unity-performance-2026-10-19.md)；token、快照、CLI、后台负载和失败候选的原始结果仍由 [文档入口](index.md)定位。当前代码提取未改执行循环、memory/cache 或 native 算法，依据用户要求不重复长性能矩阵。
 
-快照 owner 完成 19 条协议、180 次执行及三对 Alice 前缀，copyout 循环 CPU +0.864%。AMD64 integer/memory 初筛波动经长样本收敛；data-alias 保留 +2.959% 的局部成本，raw 两轮长样本的六对汇总 +2.391%，全部大幅漂移轮次继续保留。针对 token 阶段的 IR 成本，另将最终冻结直接与 ETW 作三对 900M 比较，累计 −0.061%。Alice CPU/wall −0.247%/−0.598%，RSS +400KiB；同预算、隐藏窗口与零 Draw/Present。详见[快照验收](reports/refactoring-snapshot-owner-2026-10-19.md)。
-
-token owner 追加 17 条协议、162 次执行和三对 Alice 前缀，查询循环 CPU −0.639%。SSE/thread-id 的初筛波动经 900M 扩样收敛；PE32 integer/IR 六对长样本保留 **+3.320%** 的局部成本，已采样并核对执行计数与代码生成，具体机制尚未确证。没有三对均超过 5% 的持续回退。Alice CPU/wall −3.611%/−3.871%，RSS +48KiB，保持同预算、隐藏窗口和零 Draw/Present。详见[token 验收](reports/refactoring-token-owner-2026-10-19.md)。
-
-ETW owner 追加 12 条性能协议、108 次执行与三对 Alice 前缀全部通过；主路径最大 CPU 中位数回退 +2.110%，保留 memory 同哈希漂移。游戏 CPU/wall −0.168%/−0.519%，RSS 中位数约 +1.03MiB，仍为相同预算/隐藏窗口/零 Draw/Present 前缀。完整结果见[ETW 验收](reports/refactoring-etw-owner-2026-10-19.md)。
-
-最新累计复核共 **32 条协议、288 次执行**全部校验；三标签轮换中穿插同一旧 binary 的 control。五个新接口家族的 CPU 中位数 −51.455% 至 +1.099%；PE32 四项计算的 raw/IR 与 AMD64 计算/别名/线程 ID 为 −4.098% 至 +2.574%。保留 AMD64 SSE after/control +3.440% 的局部成本、GDI/IR 同哈希漂移及全部离散轮次，没有持续超过 5% 的回退。fixture RSS 中位数最大增加 112KiB。相对 675 项日志冻结，累计 executable +44,272 bytes，各批独立增量仍在 +24KiB 预算内，没有扩大缓存或资源限额。
-
-三对 Alice 200M 启动前缀 CPU/wall 中位数 **−1.543%/−0.328%**，RSS 中位数 **−256KiB**；保持同一预算、隐藏窗口与零 Draw/Present。首次沙箱无法访问 Metal 的失败独立保留，正式六次使用可访问设备的宿主环境；复用原游戏资源。完整证据见[累计复核](reports/refactoring-post-unity-performance-2026-10-19.md)。旧 Unity/WindowServer 干扰、37 个已校验样本及 1 个主动中断维持历史记录，不与新协议样本混算。
-
-后续是否测性能先按改动风险评估，依据用户 2026-10-19 的要求减少验收粒度。普通契约迁移和 owner 封装优先定向正确性及必要构建，不逐批重跑性能矩阵或无关游戏/native 图形。涉及执行器、memory/cache、热网关、热点布局和实际绘制/启动路径时再选择针对性比较，较大阶段整合后决定累计复核；原 3%/5% 门槛不再作为普通结构改动的准入标准。详见[验证选择](architecture/validation-tools.md)。需要正式计时时继续使用显式 [稳定启动协议](reports/refactoring-launch-protocol-2026-10-16.md)，保留哈希、全部轮次与输入校验，编译、正式计时、采样和 diagnostics 串行，不跨协议或不同 work 汇总。
+后续性能测试先按风险评估：普通契约迁移和 owner 封装优先定向正确性及必要构建；涉及执行器、memory/cache、热网关、热点布局或实际绘制/启动路径时，选择受影响负载比较。原 3%/5% 门槛不再作为普通结构改动的准入标准。正式计时仍保持稳定启动协议、完整哈希和全部轮次，编译、采样与计时串行，见 [验证选择](architecture/validation-tools.md)。
 
 必需检查：
 
 ```sh
 cargo fmt --all -- --check
-cargo test --release --all-targets --locked
-cargo clippy --all-targets --all-features --locked -- -D warnings
+CARGO_INCREMENTAL=0 cargo test --release --all-targets --locked
+CARGO_INCREMENTAL=0 cargo clippy --release --all-targets --all-features --locked -- -D warnings
 python3 -B -m unittest discover -s tools -p 'test_*.py'
 ```
 
-七个默认 ignored 均需外部条件：两项 Metal/software 像素对照需真实 Metal device；三项 native GPU 资源/Shader/owner 及两项 Win64 DXGI draw/swapchain 需 native graphics、MoltenVK 与原创 DXBC/GS fixture。涉及这些边界时显式提供环境执行，不能将 ignored 计为通过。Unicorn 参照测试在受限 macOS 沙箱可能触发 SIGILL，已验收批次在允许参照执行的环境验证；发布运行时不使用 Unicorn。
+八个默认 ignored 均有外部条件：两项 Metal/software 像素对照需真实 Metal device；三项 native GPU 资源/Shader/owner 及两项 Win64 DXGI draw/swapchain 需 native graphics、MoltenVK 与原创 DXBC/GS fixture；新增一项 PCM 输出需可打开的 AudioQueue。音频 fixture 在 open 时失败，后续计数/重复关闭断言未执行，原始 C 主线程探针也无法打开，验收仍待确认。其它 native 的历史显式通过不代表本次全部重跑，ignored 不计为通过。Unicorn 参照测试在受限 macOS 沙箱可能触发 SIGILL，本批全目标在允许参照执行的环境通过；发布运行时不使用 Unicorn。
 
 ## 证据存储
 

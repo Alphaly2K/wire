@@ -786,3 +786,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 Win64 Environment 调用资源
 
 基线 `86314a3`。Environment 直接执行变量查询/修改、wide block 输出及专用释放；变量只借内存、codepage 与只读 Threads，块创建借原 Pages，释放只借 allocation 账本与 Threads。原三项处理体经资源替换和 rustfmt 对照一致；根 runtime、Pages、公共变量模型、Threads/Memory 与独立测试原文保持。只在原错误分支查询错误槽，写入后登记 block、unmap 后删除两个记录的顺序保持。按影响通过 release 环境 3 项与 all-targets/all-features strict Clippy/build/fmt；不重复性能或游戏矩阵，累计仍 919。证据 `wire-out/refactoring-2026-10-14/r3-environment-calls64-{source-checks,verification}.json`。
+
+## R3 Win64 普通输入/processor 资源与收尾整合
+
+基线 `37b2c9c`。raw input/IME adapter 归 User，只借 Memory 与只读 Threads；processor 查询成为只借 Memory/Threads 的普通函数。根保留输入私有委托，processor 按绑定 ID 直接调用。原处理体经资源替换和 rustfmt 对照一致，raw 算法及其 fixture、Threads 与集成测试原文保持，错误分支才查询 TEB。阶段整合通过 release 全目标 **695 passed / 0 failed / 8 ignored / 21 suites**，工具 **31 项**、all-targets/all-features strict Clippy/build/fmt 通过。本批未改 native 或执行/memory/cache 算法，沿用前述原生证据，不重复性能或游戏矩阵。源码对照与正式 executable SHA/大小见 `wire-out/refactoring-2026-10-14/r3-final-scalar64-{source-checks,verification}.json`；CPU/IR/shared SIMD 与 host 的文本依赖审计见 `r7-closeout-dependencies.json`。当前状态已压缩为领域摘要，历史过程继续保留本报告；保留的 legacy、兼容委托及未完成音频验收见 [收尾审计](refactoring-closeout-2026-10-20.md)。
