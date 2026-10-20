@@ -14,6 +14,10 @@ Win64 的 `win32::x64::modules::Modules` 私有持有 handle/name/ref、pin、ex
 - `GetModuleHandleEx` 的受检输出和引用提交由架构 adapter 安排。Win64 先检查输出和 flags，解析 handle，再准备 ReferenceUpdate；guest 写入成功后才更新 ref/pin。FreeLibrary 的 guest/provider outcome 保留原来的 CPU/trace 提交路径。
 - resource/USER 只读查询 image metadata，经 owner view 读取；PE 地址/结构范围仍由原有 checked codec 验证。
 
+PE32 的 TLS 回调、线程通知和进程退出通知由 `x86/process/module_notifications.rs` 执行，公开 modules 通知入口保留重导出。Modules 私有拥有 image/phase/order，提供原快照、当前 image 存在性和通知资格；Process 不访问其内部表。TLS 列表先取快照、每次执行前重查 image，TLS 完成后才重查 DllMain entry；线程通知按原顺序逐个重查，进程 detach 标志在取退出顺序快照前提交。直接 call_guest 的原恢复策略不变。
+
+通知边界基线 `6e13fe9`，五个执行主体及八个 metadata 操作对照保持，link/resolve/initialize/unload/rollback/call 主体未改；完整 release Win32 259、IR 31、fmt/release lib/bin strict Clippy/build 通过。不跑性能或游戏矩阵，证据 `wire-out/refactoring-2026-10-14/r4-module-notifications32-{source-checks,verification}.json`。
+
 模块 API 的 31 个 export 由 `win32::catalog::modules` 维护唯一 provider/ABI/执行声明：13 个核心装载、查询与引用 API，4 个 DLL directory API，以及 7 个 PSAPI 查询及其 7 个 K32 名称。PE32 核心 13 个 typed，directory/K32 的 11 个保留 Wine ABI-only 策略，7 个无前缀查询仍 absent；Win64 使用全部既有子集。未知 ABI、stub 地址、序数和 data export 行为保持。
 
 PE32 映射 image 的十项资源 export 单独归入 [ResourceApi](resources.md)，不计入上述 31 项。它们借用 image 内存和 EXE 基址，不改变模块引用或资源寿命。

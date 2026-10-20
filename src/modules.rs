@@ -4,6 +4,8 @@ use crate::cpu::{Cpu, GuestCallOutcome};
 use crate::mem::GuestMem;
 use crate::pe::{PeFile, DIR_BASERELOC, DIR_EXPORT};
 use crate::thread::Sched;
+use crate::x86::process::module_notifications::invoke_tls;
+pub use crate::x86::process::module_notifications::{notify_process_exit, notify_thread};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -63,12 +65,12 @@ pub struct Modules {
     process_detaching: bool,
 }
 
-enum Failure {
+pub(crate) enum Failure {
     Expected(u32, String),
     Fatal(String),
     Control(GuestCallOutcome),
 }
-type LoadResult<T> = Result<T, Failure>;
+pub(crate) type LoadResult<T> = Result<T, Failure>;
 fn bad(message: impl Into<String>) -> Failure {
     Failure::Expected(193, message.into())
 }
@@ -388,6 +390,38 @@ pub fn native_module(name: &str) -> bool {
     )
 }
 impl Modules {
+    pub(crate) fn tls_callbacks(&self, handle: u32) -> Vec<u32> {
+        self.images
+            .get(&handle)
+            .and_then(|m| m.tls.as_ref())
+            .map(|t| t.callbacks.clone())
+            .unwrap_or_default()
+    }
+    pub(crate) fn image_present(&self, handle: u32) -> bool {
+        self.images.contains_key(&handle)
+    }
+    pub(crate) fn notification_entry(&self, handle: u32) -> u32 {
+        self.images.get(&handle).map_or(0, |m| m.entry)
+    }
+    pub(crate) fn process_detaching(&self) -> bool {
+        self.process_detaching
+    }
+    pub(crate) fn begin_process_detach(&mut self) {
+        self.process_detaching = true;
+    }
+    pub(crate) fn notification_order(&self) -> Vec<u32> {
+        self.init_order.clone()
+    }
+    pub(crate) fn thread_notification_enabled(&self, handle: u32) -> bool {
+        self.images
+            .get(&handle)
+            .is_some_and(|m| m.phase == Phase::Ready && !m.thread_calls_disabled)
+    }
+    pub(crate) fn notification_ready(&self, handle: u32) -> bool {
+        self.images
+            .get(&handle)
+            .is_some_and(|m| m.phase == Phase::Ready)
+    }
     /// Existing logical provider handles are persistent for the process.
     pub fn provider_handle_for(&mut self, dll: &str) -> u32 {
         self.providers.handle_for(dll)
@@ -888,186 +922,6 @@ fn resolve(
         }
     }
 }
-#[allow(clippy::too_many_arguments)]
-fn invoke_tls(
-    handle: u32,
-    reason: u32,
-    cpu: &mut Cpu,
-    mem: &mut GuestMem,
-    api: &mut ApiTable,
-    state: &mut ApiState,
-    log: &mut ApiLogger,
-    sched: &mut Sched,
-    max_instr: u64,
-) -> LoadResult<()> {
-    let callbacks = state
-        .modules
-        .images
-        .get(&handle)
-        .and_then(|m| m.tls.as_ref())
-        .map(|t| t.callbacks.clone())
-        .unwrap_or_default();
-    for function in callbacks {
-        if !state.modules.images.contains_key(&handle) {
-            break;
-        }
-        log.note(&format!(
-            "TLS callback module={handle:#x} entry={function:#x} reason={reason}"
-        ));
-        match crate::x86::process::call_guest(
-            cpu,
-            mem,
-            api,
-            state,
-            log,
-            sched,
-            function,
-            &[handle, reason, 0],
-            max_instr,
-        )
-        .map_err(Failure::Fatal)?
-        {
-            GuestCallOutcome::Returned(_) => {} // TLS callbacks return void.
-            outcome => return Err(Failure::Control(outcome)),
-        }
-    }
-    Ok(())
-}
-#[allow(clippy::too_many_arguments)]
-fn notification(
-    handle: u32,
-    reason: u32,
-    reserved: u32,
-    cpu: &mut Cpu,
-    mem: &mut GuestMem,
-    api: &mut ApiTable,
-    state: &mut ApiState,
-    log: &mut ApiLogger,
-    sched: &mut Sched,
-    max_instr: u64,
-) -> LoadResult<()> {
-    invoke_tls(handle, reason, cpu, mem, api, state, log, sched, max_instr)?;
-    let entry = state.modules.images.get(&handle).map_or(0, |m| m.entry);
-    if entry != 0 {
-        match crate::x86::process::call_guest(
-            cpu,
-            mem,
-            api,
-            state,
-            log,
-            sched,
-            entry,
-            &[handle, reason, reserved],
-            max_instr,
-        )
-        .map_err(Failure::Fatal)?
-        {
-            GuestCallOutcome::Returned(_) => {}
-            outcome => return Err(Failure::Control(outcome)),
-        }
-    }
-    Ok(())
-}
-fn notification_result(result: LoadResult<()>) -> Result<GuestCallOutcome, String> {
-    match result {
-        Ok(()) => Ok(GuestCallOutcome::Returned(1)),
-        Err(Failure::Control(outcome)) => Ok(outcome),
-        Err(Failure::Fatal(message) | Failure::Expected(_, message)) => Err(message),
-    }
-}
-/// Execute notifications in the owning thread, after TLS storage exists and
-/// before its entry, or before releasing that storage on orderly thread exit.
-#[allow(clippy::too_many_arguments)]
-pub fn notify_thread(
-    main: bool,
-    attach: bool,
-    cpu: &mut Cpu,
-    mem: &mut GuestMem,
-    api: &mut ApiTable,
-    state: &mut ApiState,
-    log: &mut ApiLogger,
-    sched: &mut Sched,
-    max_instr: u64,
-) -> Result<GuestCallOutcome, String> {
-    if state.modules.process_detaching {
-        return Ok(GuestCallOutcome::Returned(1));
-    }
-    let reason = if attach {
-        if main {
-            1
-        } else {
-            2
-        }
-    } else {
-        3
-    };
-    let result = (|| -> LoadResult<()> {
-        if !main || !attach {
-            let mut order = state.modules.init_order.clone();
-            if !attach {
-                order.reverse();
-            }
-            for handle in order {
-                if handle == state.exe_base {
-                    continue;
-                }
-                let eligible = state
-                    .modules
-                    .images
-                    .get(&handle)
-                    .is_some_and(|m| m.phase == Phase::Ready && !m.thread_calls_disabled);
-                if eligible {
-                    notification(
-                        handle, reason, 0, cpu, mem, api, state, log, sched, max_instr,
-                    )?;
-                }
-            }
-        }
-        invoke_tls(
-            state.exe_base,
-            reason,
-            cpu,
-            mem,
-            api,
-            state,
-            log,
-            sched,
-            max_instr,
-        )
-    })();
-    notification_result(result)
-}
-#[allow(clippy::too_many_arguments)]
-pub fn notify_process_exit(
-    cpu: &mut Cpu,
-    mem: &mut GuestMem,
-    api: &mut ApiTable,
-    state: &mut ApiState,
-    log: &mut ApiLogger,
-    sched: &mut Sched,
-    max_instr: u64,
-) -> Result<GuestCallOutcome, String> {
-    if state.modules.process_detaching {
-        return Ok(GuestCallOutcome::Returned(1));
-    }
-    state.modules.process_detaching = true;
-    let order = state.modules.init_order.clone();
-    let result = (|| -> LoadResult<()> {
-        for handle in order.into_iter().rev() {
-            if state
-                .modules
-                .images
-                .get(&handle)
-                .is_some_and(|m| m.phase == Phase::Ready)
-            {
-                notification(handle, 0, 1, cpu, mem, api, state, log, sched, max_instr)?;
-            }
-        }
-        Ok(())
-    })();
-    notification_result(result)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn initialize(
     handle: u32,

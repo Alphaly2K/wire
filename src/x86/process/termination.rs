@@ -19,8 +19,9 @@ pub(crate) fn exit_thread(
     max_instr: u64,
     code: u32,
 ) -> Result<(), String> {
-    match crate::modules::notify_thread(false, false, cpu, mem, api, state, log, sched, max_instr)?
-    {
+    match super::module_notifications::notify_thread(
+        false, false, cpu, mem, api, state, log, sched, max_instr,
+    )? {
         GuestCallOutcome::Returned(_) => {}
         _ => return Ok(()),
     }
@@ -48,7 +49,9 @@ pub(crate) fn exit_process(
     max_instr: u64,
     code: u32,
 ) -> Result<(), String> {
-    match crate::modules::notify_process_exit(cpu, mem, api, state, log, sched, max_instr)? {
+    match super::module_notifications::notify_process_exit(
+        cpu, mem, api, state, log, sched, max_instr,
+    )? {
         GuestCallOutcome::Returned(_) => {}
         _ => return Ok(()),
     }

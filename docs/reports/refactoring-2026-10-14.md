@@ -670,3 +670,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R4 PE32 异常执行与 CONTEXT 适配
 
 基线 `c42be9b`。异常搜索/展开和普通 filter 执行归 Process，CONTEXT 编解码独立只借内存/ThreadCtx；API 直接调用 Process，公开 seh 入口重导出。两个 codec、raise/unwind 主体经调用路径替换后原文一致，callback helper 未改；普通 filter 使用原 caller-context 策略，SEH 保持异常入口上下文恢复和非局部转移。完整 release Win32 259、IR 31、fmt/release lib/bin strict Clippy/build 通过。不跑性能或游戏矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r4-exceptions32-{source-checks,verification}.json`。
+
+## R4 PE32 DLL/TLS 通知执行
+
+基线 `6e13fe9`。TLS、线程和进程退出通知由 Process 执行，Modules 提供私有 metadata 的快照/重查，公开 modules 通知入口重导出。五个执行主体及八个 owner 操作对照保持，link/resolve/initialize/unload/rollback/call 未改；回调顺序、直接 call_guest 的恢复策略和重入后的重查保持。完整 release Win32 259、IR 31、fmt/release lib/bin strict Clippy/build 通过。不跑性能或游戏矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r4-module-notifications32-{source-checks,verification}.json`。

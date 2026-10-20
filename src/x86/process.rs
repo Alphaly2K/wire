@@ -16,6 +16,7 @@ pub(crate) mod dialog;
 pub(crate) mod display;
 pub(crate) mod exceptions;
 pub(crate) mod messages;
+pub(crate) mod module_notifications;
 pub(crate) mod painting;
 pub(crate) mod termination;
 pub(crate) mod window;
@@ -149,7 +150,7 @@ pub(crate) fn run_loop(
             let main = sched.threads[sched.current].is_main;
             sched.threads[sched.current].loader_initialized = true;
             let saved = cpu.save_ctx();
-            match crate::modules::notify_thread(
+            match module_notifications::notify_thread(
                 main, true, cpu, mem, api, state, log, sched, max_instr,
             ) {
                 Ok(GuestCallOutcome::Returned(_)) => cpu.load_ctx(&saved),
