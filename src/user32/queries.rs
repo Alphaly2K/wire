@@ -248,7 +248,7 @@ pub(crate) fn desktop(
     const DESKTOP: u32 = 0x4000fffc;
     if !state.user32.windows.contains_key(&DESKTOP) {
         let module = state.module_handle_for("user32.dll");
-        super::register_system_class(mem, api, state, module, "Desktop", true)?;
+        state.register_system_class(mem, api, module, "Desktop", true)?;
         let (&atom, class) = state
             .user32
             .classes

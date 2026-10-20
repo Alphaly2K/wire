@@ -18,9 +18,6 @@ mod queues;
 mod sent;
 mod window_geometry;
 mod window_state;
-pub(crate) use classes::{
-    call as class_call, ensure_builtin, persistent_strings, register_system_class,
-};
 pub use classes::{find_class, WindowClass};
 pub(crate) use control::{ControlRequest, CreationRequest, DefaultRequest};
 pub(crate) use dialog::{dialog_integer, DialogRequest};

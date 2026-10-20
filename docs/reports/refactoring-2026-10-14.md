@@ -686,3 +686,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 PE32 链接器明确资源借用
 
 基线 `8707f16`。Linker 在映射/解析期间只借 Modules、ABI、USER/scratch/error 和只读 filesystem/EXE path/cmdline，不再借 ApiState；模块依赖引用/去重/abandon 归 Modules。系统类注册主体归 User32，原 Desktop 兼容入口保持。link/resolve、三个 owner 操作、系统类/字符串和 Process 调用对照保持；生命周期/回滚/TLS 未改。首次编译遗漏兼容入口，恢复后完整 release Win32 259、IR 31、all-targets/all-features strict Clippy、build/fmt 通过；失败日志保留。不跑性能或游戏矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r3-module-linker32-{source-checks,verification}.json`。
+
+## R3 PE32 类调用归属
+
+基线 `9e74aa0`。User32 执行类注册/查询/字段、comctl32 初始化和隐式系统类注册，只借实际内存、gateway、Modules、scratch 和错误槽；ApiState 组合资源，公开 find_class facade 保留。四个调用主体经资源替换后对照一致，持久字符串、查类和系统类注册算法原文保持；Desktop/创建前注册顺序保持。完整 release Win32 259、IR 31、all-targets/all-features strict Clippy、build/fmt 通过。不跑性能或游戏矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r3-user-classes32-{source-checks,verification}.json`。

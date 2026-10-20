@@ -391,12 +391,22 @@ impl ApiState {
     pub fn crt_app_type(&self) -> u32 {
         self.crt.app_type()
     }
-    pub(crate) fn class_strings(
+    pub(crate) fn class_call(
         &mut self,
+        id: crate::win32::catalog::ClassApi,
+        args: &Args,
         mem: &mut GuestMem,
-        text: &str,
-    ) -> Result<[u32; 2], String> {
-        crate::user32::persistent_strings(mem, &mut self.scratch, &mut self.last_error, text)
+        api: &mut ApiTable,
+    ) -> Result<(u32, String), String> {
+        self.user32.class_call(
+            id,
+            args,
+            mem,
+            api,
+            &mut self.modules,
+            &mut self.scratch,
+            &mut self.last_error,
+        )
     }
     pub(crate) fn window_creation_request(
         &mut self,
@@ -406,7 +416,15 @@ impl ApiState {
         api: &mut ApiTable,
         tid: u32,
     ) -> Result<crate::user32::CreationRequest, String> {
-        crate::user32::ensure_builtin(mem, api, self, args[1], id.wide())?;
+        self.user32.ensure_builtin(
+            mem,
+            api,
+            &mut self.modules,
+            &mut self.scratch,
+            &mut self.last_error,
+            args[1],
+            id.wide(),
+        )?;
         self.user32.prepare_creation(
             args,
             id.wide(),
@@ -1096,7 +1114,7 @@ pub fn dispatch(
             let Some(crate::win32::catalog::ApiId::Class(id)) = binding.typed else {
                 unreachable!();
             };
-            (ret, note) = crate::user32::class_call(id, &args, mem, api, state)?;
+            (ret, note) = state.class_call(id, &args, mem, api)?;
         }
         (Some(crate::win32::catalog::ApiId::Desktop(_)), _, _) => {
             let Some(crate::win32::catalog::ApiId::Desktop(id)) = binding.typed else {

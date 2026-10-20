@@ -69,19 +69,6 @@ impl User32 {
     }
 }
 
-/// Minimal system controls with real window/text ownership. Specialized
-/// control messages and rich formatting remain separate backend work.
-pub(crate) fn register_system_class(
-    mem: &mut GuestMem,
-    api: &mut ApiTable,
-    state: &mut ApiState,
-    module: u32,
-    name: &str,
-    wide: bool,
-) -> Result<(), String> {
-    state.register_system_class(mem, api, module, name, wide)
-}
-
 impl User32 {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn register_system_class(
@@ -135,221 +122,240 @@ impl User32 {
     }
 }
 
-fn initialize_controls(
-    extended: bool,
-    record: u32,
-    mem: &mut GuestMem,
-    api: &mut ApiTable,
-    state: &mut ApiState,
-) -> Result<(u32, String), String> {
-    if extended && mem.read_u32(record).map_err(|e| e.to_string())? != 8 {
-        state.last_error = 87;
-        return Ok((0, String::new()));
+impl User32 {
+    #[allow(clippy::too_many_arguments)]
+    fn initialize_controls(
+        &mut self,
+        extended: bool,
+        record: u32,
+        mem: &mut GuestMem,
+        api: &mut ApiTable,
+        modules: &mut crate::modules::Modules,
+        scratch: &mut crate::win32::x86::scratch::Scratch32,
+        last_error: &mut u32,
+    ) -> Result<(u32, String), String> {
+        if extended && mem.read_u32(record).map_err(|e| e.to_string())? != 8 {
+            *last_error = 87;
+            return Ok((0, String::new()));
+        }
+        let module = modules.provider_handle_for("comctl32.dll");
+        for class in [
+            "Button",
+            "Edit",
+            "Static",
+            "ListBox",
+            "ComboBox",
+            "ScrollBar",
+            "SysListView32",
+            "SysTreeView32",
+            "SysTabControl32",
+            "msctls_progress32",
+        ] {
+            self.register_system_class(mem, api, scratch, last_error, module, class, true)?;
+        }
+        Ok((1, "registered controls with basic window/text state".into()))
     }
-    let module = state.module_handle_for("comctl32.dll");
-    for class in [
-        "Button",
-        "Edit",
-        "Static",
-        "ListBox",
-        "ComboBox",
-        "ScrollBar",
-        "SysListView32",
-        "SysTreeView32",
-        "SysTabControl32",
-        "msctls_progress32",
-    ] {
-        register_system_class(mem, api, state, module, class, true)?;
-    }
-    Ok((1, "registered controls with basic window/text state".into()))
-}
-
-pub(crate) fn call(
-    id: ClassApi,
-    a: &crate::api::Args,
-    mem: &mut GuestMem,
-    api: &mut ApiTable,
-    state: &mut ApiState,
-) -> Result<(u32, String), String> {
-    if matches!(
-        id,
-        ClassApi::InitializeControls | ClassApi::InitializeControlsEx
-    ) {
-        return initialize_controls(id == ClassApi::InitializeControlsEx, a[0], mem, api, state);
-    }
-    if id.field() {
-        return field_call(id, a, state);
-    }
-    if matches!(id, ClassApi::NameA | ClassApi::NameW) {
-        let Some(window) = state.user32.windows.get(&a[0]) else {
-            state.last_error = 1400;
-            return Ok((0, "USER32 error 1400".into()));
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn class_call(
+        &mut self,
+        id: ClassApi,
+        a: &crate::api::Args,
+        mem: &mut GuestMem,
+        api: &mut ApiTable,
+        modules: &mut crate::modules::Modules,
+        scratch: &mut crate::win32::x86::scratch::Scratch32,
+        last_error: &mut u32,
+    ) -> Result<(u32, String), String> {
+        if matches!(
+            id,
+            ClassApi::InitializeControls | ClassApi::InitializeControlsEx
+        ) {
+            return self.initialize_controls(
+                id == ClassApi::InitializeControlsEx,
+                a[0],
+                mem,
+                api,
+                modules,
+                scratch,
+                last_error,
+            );
+        }
+        if id.field() {
+            return self.field_call(id, a, last_error);
+        }
+        if matches!(id, ClassApi::NameA | ClassApi::NameW) {
+            let Some(window) = self.windows.get(&a[0]) else {
+                *last_error = 1400;
+                return Ok((0, "USER32 error 1400".into()));
+            };
+            let text: Vec<u16> = self.classes[&window.class].name.encode_utf16().collect();
+            let value = crate::user32_common::copy_text(mem, a[1], a[2], &text, id.wide())?;
+            return Ok((value, "class name".into()));
+        }
+        let wide = id.wide();
+        let extended = id.extended();
+        if id.query() {
+            self.ensure_builtin(mem, api, modules, scratch, last_error, a[1], wide)?;
+        }
+        let fail = |last_error: &mut u32, code| {
+            *last_error = code;
+            Ok((0, format!("window class error {code}")))
         };
-        let text: Vec<u16> = state.user32.classes[&window.class]
-            .name
-            .encode_utf16()
-            .collect();
-        let value = crate::user32_common::copy_text(mem, a[1], a[2], &text, id.wide())?;
-        return Ok((value, "class name".into()));
-    }
-    let wide = id.wide();
-    let extended = id.extended();
-    if id.query() {
-        ensure_builtin(mem, api, state, a[1], wide)?;
-    }
-    let fail = |state: &mut ApiState, code| {
-        state.last_error = code;
-        Ok((0, format!("window class error {code}")))
-    };
-    if id.register() {
-        if extended && mem.read_u32(a[0]).map_err(|e| e.to_string())? != 48 {
-            return fail(state, 87);
-        }
-        let mut fields = [0; 11];
-        for (i, value) in fields
-            .iter_mut()
-            .take(if extended { 11 } else { 10 })
-            .enumerate()
-        {
-            *value = mem
-                .read_u32(a[0] + (i as u32 + extended as u32) * 4)
-                .map_err(|e| e.to_string())?;
-        }
-        if fields[1] == 0 || fields[9] <= 0xffff || fields[2] > 4096 || fields[3] > 4096 {
-            return fail(state, 87);
-        }
-        let text = crate::file_api::read_name(mem, fields[9], wide)
-            .map_err(|e| format!("class name: {e}"))?;
-        if text.is_empty() || text.encode_utf16().count() > 255 {
-            return fail(state, 87);
-        }
-        if find_class(mem, state, fields[9], fields[4], wide)?.is_some() {
-            return fail(state, 1410);
-        }
-        if state.user32.next_atom > 0xffff {
-            return fail(state, 8);
-        }
-        let name_ptrs = state.class_strings(mem, &text)?;
-        let menu_ptrs = if fields[8] <= 0xffff {
-            [fields[8]; 2]
-        } else {
-            let menu = crate::file_api::read_name(mem, fields[8], wide)
-                .map_err(|e| format!("class menu: {e}"))?;
-            state.class_strings(mem, &menu)?
-        };
-        let atom = state.user32.next_atom as u16;
-        state.user32.next_atom += 1;
-        state.user32.classes.insert(
-            atom,
-            WindowClass {
-                name: text.clone(),
-                fields,
-                wide,
-                name_ptrs,
-                menu_ptrs,
-            },
-        );
-        return Ok((atom as u32, format!("registered {text}")));
-    }
-    let unregister = id.unregister();
-    let (instance, id) = if unregister {
-        (a[1], a[0])
-    } else {
-        (a[0], a[1])
-    };
-    let Some(atom) = find_class(mem, state, id, instance, wide)? else {
-        return fail(state, 1411);
-    };
-    if unregister {
-        if state.user32.windows.values().any(|w| w.class == atom) {
-            return fail(state, 1412);
-        }
-        state.user32.classes.remove(&atom);
-        return Ok((1, "class unregistered".into()));
-    }
-    let class = state.user32.classes.get(&atom).unwrap();
-    let mut fields = class.fields;
-    fields[8] = class.menu_ptrs[wide as usize];
-    fields[9] = class.name_ptrs[wide as usize];
-    let mut bytes = Vec::new();
-    if extended {
-        bytes.extend(48u32.to_le_bytes());
-    }
-    for value in fields.into_iter().take(if extended { 11 } else { 10 }) {
-        bytes.extend(value.to_le_bytes());
-    }
-    mem.write_bytes(a[2], &bytes).map_err(|e| e.to_string())?;
-    Ok((1, format!("class {} atom={atom:#x}", class.name)))
-}
-
-pub(crate) fn ensure_builtin(
-    mem: &mut GuestMem,
-    api: &mut ApiTable,
-    state: &mut ApiState,
-    pointer: u32,
-    wide: bool,
-) -> Result<(), String> {
-    if pointer > 0xffff {
-        if let Ok(class) = crate::file_api::read_name(mem, pointer, wide) {
-            if let Some(builtin) = [
-                "Button",
-                "Edit",
-                "Static",
-                "ListBox",
-                "ComboBox",
-                "ScrollBar",
-            ]
-            .into_iter()
-            .find(|name| name.eq_ignore_ascii_case(&class))
+        if id.register() {
+            if extended && mem.read_u32(a[0]).map_err(|e| e.to_string())? != 48 {
+                return fail(last_error, 87);
+            }
+            let mut fields = [0; 11];
+            for (i, value) in fields
+                .iter_mut()
+                .take(if extended { 11 } else { 10 })
+                .enumerate()
             {
-                let module = state.module_handle_for("user32.dll");
-                register_system_class(mem, api, state, module, builtin, true)?;
+                *value = mem
+                    .read_u32(a[0] + (i as u32 + extended as u32) * 4)
+                    .map_err(|e| e.to_string())?;
+            }
+            if fields[1] == 0 || fields[9] <= 0xffff || fields[2] > 4096 || fields[3] > 4096 {
+                return fail(last_error, 87);
+            }
+            let text = crate::file_api::read_name(mem, fields[9], wide)
+                .map_err(|e| format!("class name: {e}"))?;
+            if text.is_empty() || text.encode_utf16().count() > 255 {
+                return fail(last_error, 87);
+            }
+            if self.find_class(mem, fields[9], fields[4], wide)?.is_some() {
+                return fail(last_error, 1410);
+            }
+            if self.next_atom > 0xffff {
+                return fail(last_error, 8);
+            }
+            let name_ptrs = persistent_strings(mem, scratch, last_error, &text)?;
+            let menu_ptrs = if fields[8] <= 0xffff {
+                [fields[8]; 2]
+            } else {
+                let menu = crate::file_api::read_name(mem, fields[8], wide)
+                    .map_err(|e| format!("class menu: {e}"))?;
+                persistent_strings(mem, scratch, last_error, &menu)?
+            };
+            let atom = self.next_atom as u16;
+            self.next_atom += 1;
+            self.classes.insert(
+                atom,
+                WindowClass {
+                    name: text.clone(),
+                    fields,
+                    wide,
+                    name_ptrs,
+                    menu_ptrs,
+                },
+            );
+            return Ok((atom as u32, format!("registered {text}")));
+        }
+        let unregister = id.unregister();
+        let (instance, id) = if unregister {
+            (a[1], a[0])
+        } else {
+            (a[0], a[1])
+        };
+        let Some(atom) = self.find_class(mem, id, instance, wide)? else {
+            return fail(last_error, 1411);
+        };
+        if unregister {
+            if self.windows.values().any(|w| w.class == atom) {
+                return fail(last_error, 1412);
+            }
+            self.classes.remove(&atom);
+            return Ok((1, "class unregistered".into()));
+        }
+        let class = self.classes.get(&atom).unwrap();
+        let mut fields = class.fields;
+        fields[8] = class.menu_ptrs[wide as usize];
+        fields[9] = class.name_ptrs[wide as usize];
+        let mut bytes = Vec::new();
+        if extended {
+            bytes.extend(48u32.to_le_bytes());
+        }
+        for value in fields.into_iter().take(if extended { 11 } else { 10 }) {
+            bytes.extend(value.to_le_bytes());
+        }
+        mem.write_bytes(a[2], &bytes).map_err(|e| e.to_string())?;
+        Ok((1, format!("class {} atom={atom:#x}", class.name)))
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn ensure_builtin(
+        &mut self,
+        mem: &mut GuestMem,
+        api: &mut ApiTable,
+        modules: &mut crate::modules::Modules,
+        scratch: &mut crate::win32::x86::scratch::Scratch32,
+        last_error: &mut u32,
+        pointer: u32,
+        wide: bool,
+    ) -> Result<(), String> {
+        if pointer > 0xffff {
+            if let Ok(class) = crate::file_api::read_name(mem, pointer, wide) {
+                if let Some(builtin) = [
+                    "Button",
+                    "Edit",
+                    "Static",
+                    "ListBox",
+                    "ComboBox",
+                    "ScrollBar",
+                ]
+                .into_iter()
+                .find(|name| name.eq_ignore_ascii_case(&class))
+                {
+                    let module = modules.provider_handle_for("user32.dll");
+                    self.register_system_class(
+                        mem, api, scratch, last_error, module, builtin, true,
+                    )?;
+                }
             }
         }
+        Ok(())
     }
-    Ok(())
-}
-
-fn field_call(
-    id: ClassApi,
-    a: &crate::api::Args,
-    state: &mut ApiState,
-) -> Result<(u32, String), String> {
-    let Some(window) = state.user32.windows.get(&a[0]) else {
-        state.last_error = 1400;
-        return Ok((0, "invalid class HWND".into()));
-    };
-    if a[1] as i32 == -32 && !id.set() {
-        return Ok((window.class as u32, "class atom".into()));
+    fn field_call(
+        &mut self,
+        id: ClassApi,
+        a: &crate::api::Args,
+        last_error: &mut u32,
+    ) -> Result<(u32, String), String> {
+        let Some(window) = self.windows.get(&a[0]) else {
+            *last_error = 1400;
+            return Ok((0, "invalid class HWND".into()));
+        };
+        if a[1] as i32 == -32 && !id.set() {
+            return Ok((window.class as u32, "class atom".into()));
+        }
+        let index = match a[1] as i32 {
+            -26 => 0,
+            -24 => 1,
+            -20 => 2,
+            -18 => 3,
+            -16 => 4,
+            -14 => 5,
+            -12 => 6,
+            -10 => 7,
+            -8 => 8,
+            -34 => 10,
+            _ => {
+                *last_error = 1413;
+                return Ok((0, "unsupported class index".into()));
+            }
+        };
+        let class = self.classes.get_mut(&window.class).unwrap();
+        let old = class.fields[index];
+        if id.set() {
+            if matches!(index, 2 | 3) && a[2] > 4096 {
+                *last_error = 87;
+                return Ok((0, "class extra storage too large".into()));
+            }
+            if index == 8 {
+                *last_error = 120;
+                return Ok((0, "class menu-name change unavailable".into()));
+            }
+            class.fields[index] = a[2];
+        }
+        Ok((old, "class field state".into()))
     }
-    let index = match a[1] as i32 {
-        -26 => 0,
-        -24 => 1,
-        -20 => 2,
-        -18 => 3,
-        -16 => 4,
-        -14 => 5,
-        -12 => 6,
-        -10 => 7,
-        -8 => 8,
-        -34 => 10,
-        _ => {
-            state.last_error = 1413;
-            return Ok((0, "unsupported class index".into()));
-        }
-    };
-    let class = state.user32.classes.get_mut(&window.class).unwrap();
-    let old = class.fields[index];
-    if id.set() {
-        if matches!(index, 2 | 3) && a[2] > 4096 {
-            state.last_error = 87;
-            return Ok((0, "class extra storage too large".into()));
-        }
-        if index == 8 {
-            state.last_error = 120;
-            return Ok((0, "class menu-name change unavailable".into()));
-        }
-        class.fields[index] = a[2];
-    }
-    Ok((old, "class field state".into()))
 }

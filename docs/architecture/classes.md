@@ -1,6 +1,6 @@
 # 窗口类注册与元数据
 
-PE32 名称匹配由 User32 提供，公开 find_class facade 继续委托；持久字符串编码只借内存、Scratch32 和 LastError，类调用通过 ApiState 的窄组合方法借用私有 scratch。创建窗口使用同一存储算法，保留 ANSI→wide 两次分配与逐步写入顺序，见[窗口控制](window-control.md)。
+PE32 类注册、查询、字段修改、comctl32 初始化和隐式系统类注册均由 User32 执行。类调用只借内存、ApiTable、Modules、Scratch32 和 LastError，ApiState 的窄组合方法提供这些资源；公开 find_class facade 继续委托。持久字符串编码只借内存、Scratch32 和 LastError。创建窗口使用同一存储算法，保留 ANSI→wide 两次分配与逐步写入顺序，见[窗口控制](window-control.md)。
 
 `win32/catalog/classes.rs` 是十九项 class API 的 provider、参数与执行策略权威来源：原十七项 USER 类操作，加两项 comctl32 初始化。PE32 全部接入 typed ID；Win64 只绑定原有六项注册/注销，信息、字段、类名查询和 comctl32 初始化仍 absent。Win64 静态接受 kernel32/kernelbase/user32，默认动态只有 user32；已有 gateway fallback 仍保留。
 
