@@ -42,3 +42,4 @@ pub(crate) mod variant;
 pub(crate) mod version;
 pub(crate) mod version_resources;
 pub(crate) mod virtual_memory;
+pub(crate) mod windows_printf;

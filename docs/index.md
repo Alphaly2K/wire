@@ -6,6 +6,7 @@
 - [架构和依赖方向](architecture/runtime.md)：当前边界、保留 facade 与迁移目标。
 - [宿主与图形边界](architecture/host-graphics.md)：owned 请求、事件消费顺序、GDI 适配及 native 验证入口。
 - [新增 API 与 GUID 契约](architecture/adding-api.md)：唯一声明、冷绑定、双架构错误和提交顺序。
+- [Windows printf](architecture/windows-printf.md)：四项 PE32 cdecl/stdcall 契约、固定前缀与按需变参，保留输出和返回槽顺序。
 - [Windows version 契约](architecture/version.md)：架构 provider 范围、ABI-only 策略与故障提交。
 - [NLS/locale 契约](architecture/nls.md)：转换、字符分类、日历与进程回调的边界。
 - [测试与性能工具](architecture/validation-tools.md)：领域测试名映射、公共测量库、freeze 输入和兼容入口。
@@ -59,7 +60,7 @@
 - [图形 COM 冷绑定](architecture/graphics-contracts.md)：70 条 DXGI 方法的 ABI 合表、D3D11 共用查找及家族路由缓存；保留槽位和 handler，文件回归与真实 GPU 验证通过。
 - [PE32 kernel 对象](architecture/kernel-objects32.md)：原 HANDLE 表、命名索引和分配位置归入私有 owner，保留同名与关闭寿命；完整 Win32 回归通过。
 - [PE32 文件 adapter](architecture/files.md)：文件/path 处理体只借 filesystem、对象和错误槽，旧公开入口保留；两种架构共享 kernel wildcard。
-- [PE32 ABI 来源](architecture/abi.md)：spec、当前 25 条显式例外与原未知/CRT 策略集中到 win32::abi，先后删除 270 条根表重复声明和六条版本资源 override。
+- [PE32 ABI 来源](architecture/abi.md)：spec、当前 23 条显式例外与原未知/CRT 策略集中到 win32::abi，先后删除 270 条根表重复声明、六条版本资源及两条 printf override。
 - [PE32 scratch 与 CRT](architecture/crt32.md)：私有指针 owner、普通内存/字符串、堆和启动适配器，保留 CPU/callback 边界及故障提交顺序。
 - [PE32 同步与等待适配](architecture/waits.md)：event/semaphore/mutex 与对象 readiness/acquire/wake 仅借明确资源，音频通知复用同一对象操作。
 - [PE32 kernel endpoint 补齐](architecture/process-control.md)：终止进程、句柄容量提示和 package 查询接入唯一契约，保留退出故障顺序与 Win64 absent。

@@ -774,3 +774,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R5/R7 原生图形 Rust owner 归位
 
 基线 `1fc2436`。Vulkan 图形库及 draw/geometry helper 归 host/graphics，公开 gpu 保留兼容重导出；静态 Metal raster owner 归 host/raster，D3D9 以私有 gpu alias 保留所有调用。graphics/draw/geometry 逐字保持，raster 仅改变 crate 可见性，shader include 仍解析到同一原文件；native C/C++/Metal、build.rs、DXGI 和软件 raster 原文保持。release D3D9 11、library 61 passed / 8 ignored、两项真实 Metal 像素对照及两项 Vulkan draw/swapchain fixture 通过，all-targets/all-features strict Clippy/build/fmt 通过。沿用刚完成的全目标阶段整合，纯目录归位不跑性能或游戏矩阵，累计仍 915；证据 `wire-out/refactoring-2026-10-14/r7-host-graphics-layout-{source-checks,verification}.json`。
+
+## R2 Windows printf 调用契约
+
+基线 `8ffd8c4`。wsprintfA/W 与 wvsprintfA/W 的固定前缀、cdecl/stdcall 与架构/provider 策略归唯一契约，typed adapter 只借参数、内存和原 ESP，原格式化器逐字保持。两条 wsprintf ABI override 删除，legacy 例外剩余 23 项，累计契约 919 项。新增独立边界回归将固定参数放在映射末端、va_list 指向不可读区，并检查清栈、LastError 与 wide 输出覆盖返回地址；既有混合格式/故障回归保留。最终 release Win32 260、Win64 269、library 61 passed / 8 ignored，inventory 6 项及 all-targets/all-features strict Clippy/build/fmt 通过；本批三个测试套件合计 590 passed / 8 ignored，不将上一阶段全目标结果冒充本批全目标结果。首次 Win64 match 放置错误导致的编译失败、inventory 的错误 unittest 入口日志均保留，修正后重跑通过。冷契约与调用路由提取，formatter、CPU 和返回帧算法保持，不跑性能或游戏矩阵。证据 `wire-out/refactoring-2026-10-14/r2-windows-printf-{source-checks,verification}.json`。

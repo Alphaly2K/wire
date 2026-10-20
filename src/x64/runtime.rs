@@ -538,6 +538,7 @@ impl Runtime64 {
     ) -> Result<u64, String> {
         use crate::win32::catalog::ApiId;
         match id {
+            ApiId::WindowsPrintf(_) => unreachable!("Windows formatting has no Win64 binding"),
             ApiId::GraphicsExport(id) => self.graphics_export_call(mem, id, args),
             ApiId::ProcessControl(_) => {
                 unreachable!("process controls use their bound gateway route")

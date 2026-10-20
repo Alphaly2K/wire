@@ -4,6 +4,8 @@
 
 PE32 legacy ABI 的权威输入与显式例外位于 [win32::abi](abi.md)。新增契约前先核对该范围；不要在根 API 入口重新追加与 spec 重复的栈清理表。没有类型的 stub/ordinal 继续保持未知。
 
+契约默认 PE32 Stdcall；cdecl 由 CallingConvention32 显式声明并返回零 callee 清栈。变参只声明固定前缀，并通过专用 adapter 按需读取；[Windows printf](windows-printf.md)保留 wsprintf 两参数 cdecl 与 wvsprintf 三参数 stdcall 的原行为，没有通用化 CRT 或 Win64 变参。
+
 1. 在 `src/win32/catalog/` 的所属领域声明 export、DLL/架构范围、typed ID、参数类型、返回约定和限制。GUID 的一份声明派生 PE32 stdcall 清栈和 Win64 DWORD 截断，执行时不查询字符串表。
 2. 把不依赖 guest 内存和进程状态的算法放入领域纯核。GUID 的 Windows little-endian 布局、canonical parser/formatter 位于 `win32/com/guid.rs`；纯核不读 CPU，不写 LastError。
 3. 在 `win32/x86` / `win32/x64` 实现对应内存访问与错误映射。返回 frame 仍由原 `api` / `x64::runtime` facade 提交。varargs、FLOAT/XMM、callback、sret 等需要专用适配器，不能塞入当前 scalar 签名模型。

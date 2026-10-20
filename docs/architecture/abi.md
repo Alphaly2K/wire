@@ -11,3 +11,5 @@ native_export 继续只描述 ABI 可知性；旧 msvcrt 名称白名单已被�
 原 spec 输入、解析主体、ordinal 范围、COM 优先级及 31 项例外逐项核对保持。release 完整 Win32 248、fmt/release lib/bin strict Clippy/build 通过；不重复性能或游戏矩阵。证据见 `wire-out/refactoring-2026-10-14/r2-pe32-abi-{inventory,source-checks,verification}.json` 及 validation 日志。
 
 随后六项 version.dll 文件资源入口接入 [唯一领域契约](version-resources.md)，删除对应 override；当前 legacy 例外剩余 25 项，原 ABI 字节数和 ordinal 范围保持。前文 31 项是来源收敛时的历史基线。
+
+[Windows printf](windows-printf.md) 后续将 wsprintfA/W 的 cdecl 零清栈也归入契约，wvsprintfA/W 保留原三参数 stdcall。删除两条 override 后，当前 legacy 例外为 23 项；Contract 默认 Stdcall，cdecl 显式声明，stdcall_bytes 兼容查询返回实际 callee 清栈字节数。固定前缀与清栈均由同一 typed ID 派生，其余 spec/CRT/未知规则保持。

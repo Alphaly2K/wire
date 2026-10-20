@@ -414,6 +414,68 @@ fn crt_data_imports_and_accessors_share_writable_guest_storage() {
 }
 
 #[test]
+fn windows_printf_contract_keeps_lazy_arguments_cleanup_and_return_slot_alias() {
+    let mut v = Vm::new();
+    v.k("SetLastError", &[123]);
+    let top = STACK_BASE + STACK_SIZE;
+    assert!(v.mem.read_u32(top).is_err());
+    for (name, wide, list) in [
+        ("wsprintfA", false, false),
+        ("wsprintfW", true, false),
+        ("wvsprintfA", false, true),
+        ("wvsprintfW", true, true),
+    ] {
+        if wide {
+            v.wide(DATA, "ok");
+        } else {
+            v.mem.write_bytes(DATA, b"ok\0").unwrap();
+        }
+        let address = v.api.register("user32.dll", Some(name), None);
+        let sp = top - if list { 16 } else { 12 };
+        v.cpu.eip = address;
+        v.cpu.set_esp(sp);
+        v.mem.write_u32(sp, RET).unwrap();
+        v.mem.write_u32(sp + 4, DATA + 0x300).unwrap();
+        v.mem.write_u32(sp + 8, DATA).unwrap();
+        if list {
+            // A literal format must not touch this inaccessible va_list.
+            v.mem.write_u32(sp + 12, top).unwrap();
+        }
+        let index = v.api.stub_index(address).unwrap();
+        api::dispatch(
+            index,
+            &mut v.cpu,
+            &mut v.mem,
+            &mut v.api,
+            &mut v.state,
+            &mut v.log,
+            &mut v.sched,
+            1_000_000,
+        )
+        .unwrap();
+        assert_eq!(v.cpu.regs[0], 2, "{name}");
+        assert_eq!(v.cpu.eip, RET, "{name}");
+        assert_eq!(v.cpu.esp(), if list { top } else { sp + 4 }, "{name}");
+        assert_eq!(v.state.last_error, 123, "{name}");
+        assert_eq!(
+            if wide {
+                v.mem.read_wstr(DATA + 0x300, 4).unwrap()
+            } else {
+                v.mem.read_cstr(DATA + 0x300, 4).unwrap()
+            },
+            "ok"
+        );
+        assert!(!api::native_export("kernel32.dll", name));
+        assert!(!wire::x64::runtime::import_supported("user32.dll", name));
+    }
+    v.wide(DATA, "X");
+    let slot = STACK_BASE + STACK_SIZE - 256;
+    assert_eq!(v.call("user32.dll", "wvsprintfW", &[slot, DATA, 0]), 1);
+    assert_eq!(v.cpu.eip, b'X' as u32);
+    assert_eq!(v.cpu.esp(), slot + 16);
+}
+
+#[test]
 fn crt_byte_comparison_and_c_locale_case_preserve_unsigned_bytes_eof_and_cdecl() {
     let mut v = Vm::new();
     v.mem.write_bytes(DATA, &[0, 0x80, 0xff, 3]).unwrap();

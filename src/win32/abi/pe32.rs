@@ -158,8 +158,6 @@ pub(crate) fn stack_bytes(dll: &str, name: &str) -> Option<u32> {
 
 fn override_stack_bytes(dll: &str, name: &str) -> Option<u32> {
     Some(match (dll, name) {
-        // cdecl varargs have no stdcall declaration in the spec parser.
-        ("user32.dll", "wsprintfA" | "wsprintfW") => 0,
         // Existing gdi32 aliases lack typed entries in the loaded spec.
         ("gdi32.dll", "TransparentBlt" | "AlphaBlend") => 44,
         ("gdi32.dll", "GradientFill") => 24,

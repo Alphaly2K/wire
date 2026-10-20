@@ -73,6 +73,7 @@ mod waits;
 mod window_control;
 mod window_queries;
 mod window_state;
+mod windows_printf;
 mod winhttp;
 mod winrt;
 mod winsock;
@@ -151,6 +152,7 @@ pub use waits::{WaitApi, WAIT_CONTRACTS};
 pub use window_control::{WindowControlApi, WINDOW_CONTROL_CONTRACTS};
 pub use window_queries::{WindowQueryApi, WINDOW_QUERY_CONTRACTS};
 pub use window_state::{WindowStateApi, WINDOW_STATE_CONTRACTS};
+pub use windows_printf::{WindowsPrintfApi, WINDOWS_PRINTF_CONTRACTS};
 pub use winhttp::{WinHttpApi, WINHTTP_CONTRACTS};
 pub use winrt::{WinrtApi, WINRT_CONTRACTS};
 pub(crate) use winsock::{ordinal as winsock_ordinal, symbol as winsock_symbol};
@@ -190,6 +192,7 @@ pub enum ReturnConvention {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApiId {
+    WindowsPrintf(WindowsPrintfApi),
     Audio(AudioApi),
     FontResource(FontResourceApi),
     GraphicsExport(GraphicsExportApi),
@@ -285,6 +288,12 @@ pub struct ArchitecturePlan {
     pub execution: ExecutionPolicy,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallingConvention32 {
+    Stdcall,
+    Cdecl,
+}
+
 #[derive(Debug)]
 pub struct Contract {
     pub id: ApiId,
@@ -292,6 +301,7 @@ pub struct Contract {
     pub parameters: &'static [Parameter],
     pub returns: ReturnConvention,
     pub limits: &'static str,
+    pub x86_calling_convention: CallingConvention32,
     plans: [ArchitecturePlan; 2],
     lookup_dlls: Option<[&'static [&'static str]; 2]>,
     exact_dlls: &'static [&'static str],
@@ -325,6 +335,7 @@ impl Contract {
             parameters,
             returns,
             limits,
+            x86_calling_convention: CallingConvention32::Stdcall,
             plans,
             lookup_dlls: None,
             exact_dlls: &[],
@@ -337,6 +348,10 @@ impl Contract {
             Architecture::X86 => self.plans[0].dlls,
             Architecture::X64 => self.plans[1].dlls,
         }
+    }
+    pub(super) const fn with_x86_cdecl(mut self) -> Self {
+        self.x86_calling_convention = CallingConvention32::Cdecl;
+        self
     }
     /// Some legacy providers accept static imports that GetProcAddress rejects.
     /// Preserve that distinction explicitly without changing the import plan.
@@ -368,6 +383,9 @@ impl Contract {
         .execution
     }
     pub fn stdcall_bytes(&self) -> u32 {
+        if self.x86_calling_convention == CallingConvention32::Cdecl {
+            return 0;
+        }
         self.parameters
             .iter()
             .map(|parameter| {
@@ -493,6 +511,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         &SHELL_CONTRACTS,
         &PROCESS_CONTROL_CONTRACTS,
         &GRAPHICS_EXPORT_CONTRACTS,
+        &WINDOWS_PRINTF_CONTRACTS,
     ];
     FAMILIES.iter().flat_map(|family| family.iter())
 }

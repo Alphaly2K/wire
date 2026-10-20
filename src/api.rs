@@ -537,7 +537,8 @@ pub fn dispatch(
     let mut args = [0u32; 16];
     let stack_bytes = binding.stack_bytes;
     let cdecl = dll.contains("crt") || dll.starts_with("msvcr");
-    let count = if dll == "user32.dll" && matches!(name, "wsprintfA" | "wsprintfW") {
+    let count = if matches!(binding.typed, Some(crate::win32::catalog::ApiId::WindowsPrintf(id)) if !id.list())
+    {
         2 // cdecl varargs are read on demand by the formatter
     } else if cdecl {
         match name {
@@ -1159,13 +1160,8 @@ pub fn dispatch(
             (ret, note, implemented) =
                 crate::wmi::dispatch(dll, name, &args, mem, api, state).unwrap();
         }
-        (_, "user32.dll", "wsprintfA" | "wsprintfW" | "wvsprintfA" | "wvsprintfW") => {
-            let varargs = if name.starts_with("wvs") {
-                args[2]
-            } else {
-                esp.checked_add(12).ok_or("wsprintf stack overflow")?
-            };
-            ret = crate::wsprintf::format(mem, args[0], args[1], varargs, name.ends_with('W'))?;
+        (Some(crate::win32::catalog::ApiId::WindowsPrintf(id)), _, _) => {
+            ret = crate::win32::x86::windows_printf::call(id, &args, mem, esp)?;
             note = "checked guest Windows varargs formatting".into();
         }
         (Some(crate::win32::catalog::ApiId::Registry(id)), _, _) => {

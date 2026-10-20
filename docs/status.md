@@ -1,6 +1,6 @@
 # 当前状态
 
-更新日期：2026-10-20。按 [重构计划](refactoring-plan-2026-10-11.md) 持续推进，重构前基线为 `2e78377`，当前累计 **915 项 export 契约**。家族明细见下表，完整提交与历史验收见 [重构记录](reports/refactoring-2026-10-14.md)。Mono 原生化已撤回，R6 按用户要求排除。
+更新日期：2026-10-20。按 [重构计划](refactoring-plan-2026-10-11.md) 持续推进，重构前基线为 `2e78377`，当前累计 **919 项 export 契约**。家族明细见下表，完整提交与历史验收见 [重构记录](reports/refactoring-2026-10-14.md)。Mono 原生化已撤回，R6 按用户要求排除。
 
 近期完成 [GDI+](architecture/gdiplus.md)、[WMI](architecture/wmi.md)、[DirectSound](architecture/directsound.md) 与 [D3D9](architecture/d3d9.md) 的资源借用收敛，移除对象调用对整个 ApiState 的依赖及 registry/backend 临时 take；[PE32 线程创建和退出](architecture/thread-control.md)、[USER 资源退休](architecture/window-control.md)、[callback 执行](architecture/callbacks32.md) 与 [消息队列](architecture/messages.md) 也已归入各自 owner。Win64 [TLS/FLS](architecture/locals.md) 私有拥有固定槽和 callback identity，保留 TEB 与析构顺序。
 
@@ -76,6 +76,8 @@ StandardHandles 的重定向/标准输出和 Pipes 的读写输出也已归各�
 
 原生 Vulkan 图形库和静态 Metal raster 的 Rust owner 已归 host，公开 gpu 和 D3D9 私有调用路径兼容。D3D9 11、library 61 passed / 8 ignored、两项真实 Metal 像素对照、两项 Vulkan draw/swapchain 及严格构建通过。
 
+[Windows printf](architecture/windows-printf.md) 四个入口现由统一契约声明 cdecl/stdcall 和固定前缀，保留按需变参与原输出/返回帧顺序；删除两条旧 ABI override。Win32 260、Win64 269、library 61 passed / 8 ignored、inventory 6 项和严格构建通过。
+
 ## 重构范围
 
 当前累计冻结包含[对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)、日志、五项 paint、控件初始化、资源、启动信息、环境接口与 CLI 拆分；独立历史证据继续可查。
@@ -83,7 +85,7 @@ StandardHandles 的重定向/标准输出和 Pipes 的读写输出也已归各�
 | 阶段 | 已交付 | 剩余范围 |
 | --- | --- | --- |
 | R0/R1 | 冻结输入、原创正式 fixture、领域测试 harness、GUID 唯一契约和双架构适配 | 随后续家族维护独立基线 |
-| R2 | 已接入 915 个 export 的契约；明细见下表 | PE32 legacy 家族与图形 COM 方法 |
+| R2 | 已接入 919 个 export 的契约；明细见下表 | PE32 legacy 家族与图形 COM 方法 |
 | R3 | environment、双架构 modules/apartment/BSTR/cursor、Win64 files/同步队列/TLS-FLS/task/HSTRING/USER/设备等 owner；PE32 kernel/scratch/CRT、线程创建/退出、USER 队列/退休及 GDI+/WMI/DirectSound/D3D9 窄资源调用 | 其余领域资源与 COM 对象；PE32 kernel 大范围抽取曾因性能撤回 |
 | R4/R5 | Process32 编排、线程退出与 callback 执行服务、owned host UI 请求、GDI 与像素状态分离 | 领域 callback 请求与其余分发/owner 继续收敛 |
 | R6 | 按用户要求忽略 | 不重建原生 Mono 路径 |
@@ -94,6 +96,7 @@ StandardHandles 的重定向/标准输出和 Pipes 的读写输出也已归各�
 | 已验收家族 | export 数 | 契约与证据 |
 | --- | ---: | --- |
 | GUID | 6 | [新增 API 指引](architecture/adding-api.md)及[资源辅助验收](reports/refactoring-guid-allocation-2026-10-18.md) |
+| Windows printf | 4 | [cdecl/stdcall 固定前缀与按需变参](architecture/windows-printf.md) |
 | 异常 / 展开 / function-table | 11 | [架构策略、控制结果与注册 owner](architecture/exceptions.md) |
 | Shell / FormatMessage | 6 / 2 | [目录、命令行、消息准备与分配协调](architecture/shell-and-messages.md) |
 | 进程创建 / 退出 / 终止 | 3 | [控制结果与 child preflight](architecture/process-control.md) |
