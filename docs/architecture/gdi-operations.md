@@ -6,6 +6,8 @@
 
 原对象、DIB 和字体处理体改为匹配枚举，没有第二张逐调用名称表。font 的优先处理保持：字体选择/删除/查询和 stock 字体先由字体分支处理，剩余对象再按位图/DC 分支处理。这个顺序也保留了 stock 字体与 stock bitmap 不同的删除结果。ANSI/Wide LOGFONT、CP932、字体 metrics 缓存与宿主调用都保持。
 
+CoreText 的 Rust FFI 位于 `host/font.rs`，只接收宿主 UTF-16 face slice 和 height/width/weight/italic 标量，返回测量值。`graphics/font.rs` 继续解码 LOGFONT、编码 TEXTMETRICW 并将宿主失败映射为原 error120；italic 保留原 i32 carrier，非 macOS 仍直接返回 error120。字体缓存、native C 与构建输入保持。
+
 适配器保留 COLORREF 的 `u32::MAX` 与 BOOL/handle 的零错误值差异；error120 标记 unimplemented，其它既有错误继续标记 implemented。DIB 失败仍按原 handle/flags/input 顺序判定，并在原位置读取可访问 BITMAPINFO 生成诊断。该读取与调用 trace 没有移入像素核心。
 
 输出和返回帧顺序按 PE32 保持：GetObject 的 BITMAP 输出可先覆盖返回地址，网关随后读取覆盖后的返回地址；跨不可写页的输出保持既有预检和原字节。origin、颜色、blit、GetDIBits 与 font 参数的部分提交和资源释放均使用原实现。

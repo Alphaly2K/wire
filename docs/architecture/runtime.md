@@ -38,6 +38,7 @@
 | `x64::runtime::{events::Events,sync_objects,timers}` | Events 执行事件、信号量和 waitable timer 的普通调用，只借 Memory 与只读 Threads；原命名、权限、计数、deadline 和等待语义保持 |
 | `host::calendar` | 提供原有宿主 localtime 值；Windows 日期格式和 guest 输出布局由领域/架构层负责 |
 | `host::audio::PcmOutput` | 独占 AudioQueue 句柄与 Rust FFI，只接收宿主样本/统计；DirectSound 保留 guest 混音/计时/通知和关闭顺序 |
+| `host::font` | 以宿主 face slice/标量调用 CoreText 并返回 metrics；GDI 保留 guest 字体布局、缓存与输出错误映射 |
 | `host::ui`、`win32::{x86::host,gdi::x86}` | host 接收 owned 窗口/帧请求并产出事件；guest adapter 负责 USER 入队、GDI 语义映射及 LastError，公开 platform 路径只作 facade |
 | `win32::user::pe32::host` | User32 准备 PE32 owned 窗口快照并消费宿主事件；adapter 直接借 Presenter 与各资源，删除 Presenter 的临时 take/还原 |
 | `graphics`、`d3d9`、`gpu` | 像素/对象核心不依赖 ApiState；D3D9 生命周期只借 heap，设备调用再借 windows/Graphics，DIB/font 仍有 PE32 codec；DXGI 其余适配器继续迁移 |

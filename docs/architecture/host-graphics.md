@@ -10,6 +10,8 @@ PE32 的 `win32/user/pe32/host.rs` 现拥有窗口筛选、owned 窗口快照和
 
 AudioQueue 的 Rust 句柄与 FFI 归 `host/audio.rs::PcmOutput`，仅接收宿主样本/统计；guest buffer 读取、混音、通知和计时仍由 DirectSound 负责。关闭先于 guest 资源字段销毁，原 C 回调只消费宿主 ring buffer。
 
+CoreText 测量的 Rust FFI 归 `host/font.rs`，接收 face slice 与标量，返回宿主 metrics；LOGFONT/TEXTMETRICW 布局、错误映射和缓存归 GDI。host 不解析 guest 字节，原 font.c 的测量与资源释放顺序保持。
+
 Win64 的 `Presenter64` 继续拥有 guest HWND → native ID 映射，保留隐藏 bootstrap window、强制 poll、topmost 与带符号 lparam 扩展规则；owned window 请求交给同一 host UI。正常 D3D11 Present 仍通过 GPU surface 提交 texture，诊断 capture 才读取像素。保留的 MetalLayer 用 Rc 管理 native retain/release，surface 在 native 窗口删除后仍持有 layer。
 
 Win64 User 的 host 入口负责窗口快照与 owned event 入队，只借原 start 时间；Runtime64 保留公开 facade。HWND/容量检查、时间取样、鼠标坐标调整、键盘过滤和入队顺序保持，host 侧不执行 guest callback。

@@ -754,3 +754,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R5 host PCM output 所有权
 
 基线 `1148314`。PcmOutput 独占 AudioQueue 句柄及 Rust create/push/stats/destroy FFI，只收宿主样本/统计，不导入 guest 状态；DSound 保留 guest 对象、混音、时钟和通知。原 create 位置、push→dropped→stats 与先关闭 sink 再销毁 guest 字段的顺序保持，host close 幂等。mixer、buffer codec、打开 output 后的对象调用、audio.c 和 build.rs 对照保持。完整 release Win32 259、library 61 passed / 8 ignored、all-targets/all-features strict Clippy/build/fmt 通过。新增原生静音样本/计数/重复关闭 fixture 显式运行，在 open 时失败；独立主线程原始 audio.c 探针同样无法打开，真实输出验收仍待环境可用，失败日志保留，不宣称该 native 用例通过。未改 PCM/native C 算法，不跑性能或游戏矩阵，累计仍 915；证据 `wire-out/refactoring-2026-10-14/r5-host-audio-{source-checks,verification}.json`。
+
+## R5 host 字体测量边界
+
+基线 `e3d7ae9`。CoreText Rust FFI 移入 host/font，只接收宿主 UTF-16 face slice 和标量，返回原 metrics 值。GDI 保留 LOGFONT 解码、TEXTMETRICW 编码、缓存与 error120 映射；italic 保留原 i32 carrier，非 macOS 仍直接失败。GDI dispatch、face 解码、输出编码、原生签名、font.c 和 build.rs 对照保持，既有字体 fixture 未改。完整 release Win32 259（包含真实 CoreText 测量）、library 61 passed / 8 ignored、all-targets/all-features strict Clippy/build/fmt 通过。普通 FFI 职责提取，不跑性能或游戏矩阵，累计仍 915；证据 `wire-out/refactoring-2026-10-14/r5-host-font-{source-checks,verification}.json`。

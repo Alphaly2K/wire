@@ -2,4 +2,6 @@
 pub(crate) mod audio;
 pub(crate) mod calendar;
 pub(crate) mod cpu_time;
+#[cfg(target_os = "macos")]
+pub(crate) mod font;
 pub mod ui;
