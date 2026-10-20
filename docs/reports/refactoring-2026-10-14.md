@@ -750,3 +750,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R7 PE32 模块目录整合
 
 基线 `9dd1c36`。已形成的 PE32 image/TLS owner 和链接器迁到 `win32/x86/modules`，既有 provider 实现归入其私有子模块；根 modules 只保留公开类型/函数与内部类型重导出。owner 除移除 facade 和改用本地 Providers 外经 rustfmt 全文对照保持，provider/linker 原文保持；Process 四个模块与 API 原文保持，领域不导入 Process。阶段整合通过 release 全目标 694 passed / 7 ignored / 21 suites、all-targets/all-features strict Clippy/build/fmt 和 6 项 inventory 工具测试。无 include/native/构建输入变化，评估为稳定职责的目录归位，不跑性能或游戏矩阵，累计仍 915；证据 `wire-out/refactoring-2026-10-14/r7-modules32-layout-{source-checks,verification}.json`。
+
+## R5 host PCM output 所有权
+
+基线 `1148314`。PcmOutput 独占 AudioQueue 句柄及 Rust create/push/stats/destroy FFI，只收宿主样本/统计，不导入 guest 状态；DSound 保留 guest 对象、混音、时钟和通知。原 create 位置、push→dropped→stats 与先关闭 sink 再销毁 guest 字段的顺序保持，host close 幂等。mixer、buffer codec、打开 output 后的对象调用、audio.c 和 build.rs 对照保持。完整 release Win32 259、library 61 passed / 8 ignored、all-targets/all-features strict Clippy/build/fmt 通过。新增原生静音样本/计数/重复关闭 fixture 显式运行，在 open 时失败；独立主线程原始 audio.c 探针同样无法打开，真实输出验收仍待环境可用，失败日志保留，不宣称该 native 用例通过。未改 PCM/native C 算法，不跑性能或游戏矩阵，累计仍 915；证据 `wire-out/refactoring-2026-10-14/r5-host-audio-{source-checks,verification}.json`。

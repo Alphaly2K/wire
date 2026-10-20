@@ -66,6 +66,8 @@ PE32 模块领域错误已移除 GuestCallOutcome，Process 单独拥有 DLL/TLS
 
 PE32 image/TLS owner、链接器和 provider 身份也已归位到 `win32/x86/modules`；根 modules 保留公开兼容入口，形成上述全目标整合。
 
+AudioQueue 句柄与 Rust FFI 已归 host PcmOutput，DirectSound 的混音/计时/通知保持。Win32 259、library 61 passed / 8 ignored 和严格构建通过；原生音频 fixture 打开失败，独立主线程原始 C 入口同样失败，真实音频验收待可用设备环境。
+
 ## 重构范围
 
 当前累计冻结包含[对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)、日志、五项 paint、控件初始化、资源、启动信息、环境接口与 CLI 拆分；独立历史证据继续可查。

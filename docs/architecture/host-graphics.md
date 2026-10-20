@@ -8,6 +8,8 @@ PE32 的 `win32/user/pe32/host.rs` 现拥有窗口筛选、owned 窗口快照和
 
 [DirectSound](directsound.md) 的普通方法只借所属音频资源及只读 event/window/Presenter；poll 和调用后 signal 显式借 kernel 对象与 scheduler，PCM 和 AudioQueue 主体保持。
 
+AudioQueue 的 Rust 句柄与 FFI 归 `host/audio.rs::PcmOutput`，仅接收宿主样本/统计；guest buffer 读取、混音、通知和计时仍由 DirectSound 负责。关闭先于 guest 资源字段销毁，原 C 回调只消费宿主 ring buffer。
+
 Win64 的 `Presenter64` 继续拥有 guest HWND → native ID 映射，保留隐藏 bootstrap window、强制 poll、topmost 与带符号 lparam 扩展规则；owned window 请求交给同一 host UI。正常 D3D11 Present 仍通过 GPU surface 提交 texture，诊断 capture 才读取像素。保留的 MetalLayer 用 Rc 管理 native retain/release，surface 在 native 窗口删除后仍持有 layer。
 
 Win64 User 的 host 入口负责窗口快照与 owned event 入队，只借原 start 时间；Runtime64 保留公开 facade。HWND/容量检查、时间取样、鼠标坐标调整、键盘过滤和入队顺序保持，host 侧不执行 guest callback。
@@ -33,4 +35,4 @@ cargo run --release --example host_ui_probe -- CAPTURE_DIR
 python3 -B tools/interpreter32_perf.py --binary before=FROZEN_BEFORE --binary after=FROZEN_AFTER --out NEW_RESULTS --cases gateway-gdi --discard-api-log
 ```
 
-第二条需要按 [当前状态](../status.md) 显式提供 native graphics、MoltenVK 和 shader fixture 环境；第三条在 macOS 主线程创建自己的探针窗口，验证 upload/failure、resize/remove 与抓帧，不使用游戏素材。原 native `.m/.c`、build.rs 和构建工具路径未迁移。正式原始日志与输入 SHA 位于本轮报告关联的 `wire-out/refactoring-2026-10-14/`。
+第二条需要按 [当前状态](../status.md) 显式提供 native graphics、MoltenVK、shader fixture 和可打开的 AudioQueue 输出设备环境；第三条在 macOS 主线程创建自己的探针窗口，验证 upload/failure、resize/remove 与抓帧，不使用游戏素材。原 native `.m/.c`、build.rs 和构建工具路径未迁移。正式原始日志与输入 SHA 位于本轮报告关联的 `wire-out/refactoring-2026-10-14/`。

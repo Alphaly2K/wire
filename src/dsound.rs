@@ -14,13 +14,6 @@ const INVALID: u32 = 0x80070057;
 const UNSUPPORTED: u32 = 0x80004001;
 const CONTROL: u32 = 0x8878001e;
 const ABI: &str = include_str!("../third_party/hangover/dsound-methods.tsv");
-#[cfg(target_os = "macos")]
-extern "C" {
-    fn wire_audio_create() -> *mut std::ffi::c_void;
-    fn wire_audio_destroy(ctx: *mut std::ffi::c_void);
-    fn wire_audio_push(ctx: *mut std::ffi::c_void, samples: *const i16, count: u32) -> u32;
-    fn wire_audio_stats(ctx: *mut std::ffi::c_void, values: *mut u64);
-}
 #[derive(Clone, Copy)]
 struct Format {
     channels: u16,
@@ -84,7 +77,7 @@ pub struct DSound {
     objects: BTreeMap<u32, Object>,
     tables: BTreeMap<&'static str, u32>,
     allocated: u64,
-    native: usize,
+    native: crate::host::audio::PcmOutput,
     last: Instant,
     fraction: u128,
     pub mixed_frames: u64,
@@ -101,7 +94,7 @@ impl Default for DSound {
             objects: BTreeMap::new(),
             tables: BTreeMap::new(),
             allocated: 0,
-            native: 0,
+            native: Default::default(),
             last: Instant::now(),
             fraction: 0,
             mixed_frames: 0,
@@ -116,10 +109,8 @@ impl Default for DSound {
 }
 impl Drop for DSound {
     fn drop(&mut self) {
-        #[cfg(target_os = "macos")]
-        if self.native != 0 {
-            unsafe { wire_audio_destroy(self.native as *mut _) }
-        }
+        // Stop the sink before retiring guest-side object and buffer state.
+        self.native.close();
     }
 }
 pub(crate) fn stack_bytes(name: &str) -> Option<u32> {
@@ -409,22 +400,11 @@ impl DSound {
         let frames = (total / 1_000_000_000).min(44100) as u32;
         match self.mix(mem, frames) {
             Ok(samples) => {
-                #[cfg(target_os = "macos")]
-                if self.native != 0 {
-                    let n = unsafe {
-                        wire_audio_push(
-                            self.native as *mut _,
-                            samples.as_ptr(),
-                            samples.len() as u32,
-                        )
-                    };
+                if self.native.active() {
+                    let n = self.native.push(&samples);
                     self.dropped_samples += samples.len() as u64 - n as u64;
-                    unsafe {
-                        wire_audio_stats(self.native as *mut _, self.output_stats.as_mut_ptr())
-                    };
+                    self.native.stats(&mut self.output_stats);
                 }
-                #[cfg(not(target_os = "macos"))]
-                let _ = samples;
             }
             Err(e) => {
                 self.error = Some(format!("PCM guest read failed: {e:#x}"));
@@ -472,7 +452,7 @@ pub(crate) fn dispatch(
     let note = format!(
         "software PCM; frames={}; native={}; error={:?}",
         sound.mixed_frames,
-        sound.native != 0,
+        sound.native.active(),
         result.as_ref().err()
     );
     let note = if name.ends_with(".CreateSoundBuffer") {

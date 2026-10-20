@@ -1,6 +1,4 @@
 //! DirectSound object operations borrow only their heap and read-only device prerequisites.
-#[cfg(target_os = "macos")]
-use super::wire_audio_create;
 use super::{alloc, put, DSound, Format, Object, SoundBuffer, ABI, INVALID, UNSUPPORTED};
 use crate::{
     api::{ApiTable, Args},
@@ -81,15 +79,7 @@ impl DSound {
                     return Err(0x88780078);
                 }
             }
-            if self.native == 0 && resources.presenter.active() {
-                #[cfg(target_os = "macos")]
-                {
-                    self.native = unsafe { wire_audio_create() } as usize;
-                    if self.native == 0 {
-                        return Err(0x88780078);
-                    }
-                }
-                #[cfg(not(target_os = "macos"))]
+            if !self.native.active() && resources.presenter.active() && !self.native.open() {
                 return Err(0x88780078);
             }
             let kind = if name.ends_with('8') {
