@@ -674,3 +674,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R4 PE32 DLL/TLS 通知执行
 
 基线 `6e13fe9`。TLS、线程和进程退出通知由 Process 执行，Modules 提供私有 metadata 的快照/重查，公开 modules 通知入口重导出。五个执行主体及八个 owner 操作对照保持，link/resolve/initialize/unload/rollback/call 未改；回调顺序、直接 call_guest 的恢复策略和重入后的重查保持。完整 release Win32 259、IR 31、fmt/release lib/bin strict Clippy/build 通过。不跑性能或游戏矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r4-module-notifications32-{source-checks,verification}.json`。
+
+## R4 PE32 DLL 初始化与卸载
+
+基线 `db3c4fe`。Process 执行 sidecar IR、依赖初始化、TLS/DllMain 和卸载后的 CPU IR 移除；Modules 拥有 phase、引用和资源退休的准备/提交。初始化/卸载与四个 owner 操作经拆分对照保持，link/resolve/rollback/call 和通知未改；FALSE attach、部分资源失败及非局部转移的原顺序保持。完整 release Win32 259、IR 31、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r4-module-lifecycle32-{source-checks,verification}.json`。

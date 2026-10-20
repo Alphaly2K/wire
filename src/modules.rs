@@ -4,6 +4,7 @@ use crate::cpu::{Cpu, GuestCallOutcome};
 use crate::mem::GuestMem;
 use crate::pe::{PeFile, DIR_BASERELOC, DIR_EXPORT};
 use crate::thread::Sched;
+use crate::x86::process::module_lifecycle::{initialize, unload};
 use crate::x86::process::module_notifications::invoke_tls;
 pub use crate::x86::process::module_notifications::{notify_process_exit, notify_thread};
 use std::collections::{HashMap, HashSet};
@@ -389,7 +390,87 @@ pub fn native_module(name: &str) -> bool {
             | "imagehlp.dll"
     )
 }
+pub(crate) struct Initialization {
+    pub dependencies: Vec<u32>,
+    pub entry: u32,
+    pub path: PathBuf,
+}
+pub(crate) struct RetiredImage {
+    pub size: u32,
+    pub dependencies: Vec<u32>,
+}
 impl Modules {
+    pub(crate) fn begin_initialization(
+        &mut self,
+        handle: u32,
+    ) -> LoadResult<Option<Initialization>> {
+        let Some(module) = self.images.get_mut(&handle) else {
+            return Ok(None);
+        };
+        if matches!(module.phase, Phase::Initializing | Phase::Ready) {
+            return Ok(None);
+        }
+        if module.phase != Phase::Linked {
+            return Err(bad("module graph not fully linked"));
+        }
+        module.phase = Phase::Initializing;
+        let dependencies = module.dependencies.clone();
+        let entry = module.entry;
+        let path = module.path.clone();
+        Ok(Some(Initialization {
+            dependencies,
+            entry,
+            path,
+        }))
+    }
+    pub(crate) fn complete_initialization(&mut self, handle: u32, txn: &mut Transaction) {
+        self.images.get_mut(&handle).unwrap().phase = Phase::Ready;
+        txn.record_initialization(handle);
+        self.init_order.push(handle);
+    }
+    pub(crate) fn begin_unload(&mut self, handle: u32) -> LoadResult<Option<u32>> {
+        if self.provider_name(handle).is_some() {
+            return Ok(None);
+        }
+        let module = self
+            .images
+            .get_mut(&handle)
+            .ok_or_else(|| Failure::Expected(6, "invalid module handle".into()))?;
+        if module.pinned {
+            return Ok(None);
+        }
+        if module.phase != Phase::Ready {
+            return Err(Failure::Expected(
+                6,
+                "module is not ready for unload".into(),
+            ));
+        }
+        if module.refs > 1 {
+            module.refs -= 1;
+            return Ok(None);
+        }
+        module.phase = Phase::Unloading;
+        let entry = module.entry;
+        Ok(Some(entry))
+    }
+    pub(crate) fn finish_unload(
+        &mut self,
+        mem: &mut GuestMem,
+        heap: &mut crate::heap::GuestHeap,
+        process_heap: u32,
+        handle: u32,
+    ) -> LoadResult<RetiredImage> {
+        let mut module = self.images.remove(&handle).unwrap();
+        self.release_module_tls(&mut module, mem, heap, process_heap)
+            .map_err(Failure::Fatal)?;
+        self.paths.remove(&module.path);
+        self.init_order.retain(|&h| h != handle);
+        mem.decommit_image(handle, module.size).map_err(memory)?;
+        Ok(RetiredImage {
+            size: module.size,
+            dependencies: module.dependencies,
+        })
+    }
     pub(crate) fn tls_callbacks(&self, handle: u32) -> Vec<u32> {
         self.images
             .get(&handle)
@@ -624,11 +705,16 @@ impl Modules {
 }
 
 #[derive(Default)]
-struct Transaction {
+pub(crate) struct Transaction {
     created: Vec<u32>,
     acquired: Vec<u32>,
     initialized: Vec<u32>,
     edges: Vec<(u32, u32)>,
+}
+impl Transaction {
+    pub(crate) fn record_initialization(&mut self, handle: u32) {
+        self.initialized.push(handle);
+    }
 }
 #[derive(Clone, Debug)]
 enum Symbol {
@@ -922,82 +1008,6 @@ fn resolve(
         }
     }
 }
-#[allow(clippy::too_many_arguments)]
-fn initialize(
-    handle: u32,
-    cpu: &mut Cpu,
-    mem: &mut GuestMem,
-    api: &mut ApiTable,
-    state: &mut ApiState,
-    log: &mut ApiLogger,
-    sched: &mut Sched,
-    max_instr: u64,
-    txn: &mut Transaction,
-) -> LoadResult<()> {
-    let Some(module) = state.modules.images.get_mut(&handle) else {
-        return Ok(());
-    };
-    if matches!(module.phase, Phase::Initializing | Phase::Ready) {
-        return Ok(());
-    }
-    if module.phase != Phase::Linked {
-        return Err(bad("module graph not fully linked"));
-    }
-    module.phase = Phase::Initializing;
-    let dependencies = module.dependencies.clone();
-    let entry = module.entry;
-    let path = module.path.clone();
-    // Optional install-time sidecar. Its source hash and each instruction's
-    // loaded bytes must match; stale/unsupported IR never prevents loading.
-    let sidecar = path.with_file_name(format!(
-        "{}.wir",
-        path.file_name().unwrap().to_string_lossy()
-    ));
-    if cpu.uses_ir() && sidecar.is_file() {
-        let result = (|| -> Result<usize, String> {
-            let bytes = std::fs::read(&sidecar).map_err(|e| e.to_string())?;
-            let source = std::fs::read(&path).map_err(|e| e.to_string())?;
-            let image = crate::ir::Image::parse(&bytes, &source)?.at_base(handle)?;
-            cpu.add_module_ir(image, mem)
-        })();
-        log.note(&format!("module IR {}: {result:?}", path.display()));
-    }
-    for dependency in dependencies {
-        initialize(dependency, cpu, mem, api, state, log, sched, max_instr, txn)?;
-    }
-    invoke_tls(handle, 1, cpu, mem, api, state, log, sched, max_instr)?;
-    if entry != 0 {
-        log.note(&format!(
-            "DllMain attach module={handle:#x} entry={entry:#x}"
-        ));
-        match crate::x86::process::call_guest(
-            cpu,
-            mem,
-            api,
-            state,
-            log,
-            sched,
-            entry,
-            &[handle, 1, 0],
-            max_instr,
-        )
-        .map_err(Failure::Fatal)?
-        {
-            GuestCallOutcome::Returned(0) => {
-                // A failed PROCESS_ATTACH is followed by PROCESS_DETACH while
-                // its dependencies and static TLS are still mapped.
-                txn.initialized.push(handle);
-                return Err(Failure::Expected(1114, "DllMain returned FALSE".into()));
-            }
-            GuestCallOutcome::Returned(_) => {}
-            outcome => return Err(Failure::Control(outcome)),
-        }
-    }
-    state.modules.images.get_mut(&handle).unwrap().phase = Phase::Ready;
-    txn.initialized.push(handle);
-    state.modules.init_order.push(handle);
-    Ok(())
-}
 fn rollback(
     state: &mut ApiState,
     mem: &mut GuestMem,
@@ -1028,76 +1038,6 @@ fn rollback(
                 .map_err(|e| e.to_string())?;
             cpu.remove_module_ir(handle, module.size);
         }
-    }
-    Ok(())
-}
-#[allow(clippy::too_many_arguments)]
-fn unload(
-    handle: u32,
-    cpu: &mut Cpu,
-    mem: &mut GuestMem,
-    api: &mut ApiTable,
-    state: &mut ApiState,
-    log: &mut ApiLogger,
-    sched: &mut Sched,
-    max_instr: u64,
-) -> LoadResult<()> {
-    if state.modules.provider_name(handle).is_some() {
-        return Ok(());
-    }
-    let module = state
-        .modules
-        .images
-        .get_mut(&handle)
-        .ok_or_else(|| Failure::Expected(6, "invalid module handle".into()))?;
-    if module.pinned {
-        return Ok(());
-    }
-    if module.phase != Phase::Ready {
-        return Err(Failure::Expected(
-            6,
-            "module is not ready for unload".into(),
-        ));
-    }
-    if module.refs > 1 {
-        module.refs -= 1;
-        return Ok(());
-    }
-    module.phase = Phase::Unloading;
-    let entry = module.entry;
-    invoke_tls(handle, 0, cpu, mem, api, state, log, sched, max_instr)?;
-    if entry != 0 {
-        log.note(&format!(
-            "DllMain detach module={handle:#x} entry={entry:#x}"
-        ));
-        if let outcome @ (GuestCallOutcome::Transferred | GuestCallOutcome::Exited(_)) =
-            crate::x86::process::call_guest(
-                cpu,
-                mem,
-                api,
-                state,
-                log,
-                sched,
-                entry,
-                &[handle, 0, 0],
-                max_instr,
-            )
-            .map_err(Failure::Fatal)?
-        {
-            return Err(Failure::Control(outcome));
-        }
-    }
-    let mut module = state.modules.images.remove(&handle).unwrap();
-    state
-        .modules
-        .release_module_tls(&mut module, mem, &mut state.heap, state.process_heap)
-        .map_err(Failure::Fatal)?;
-    state.modules.paths.remove(&module.path);
-    state.modules.init_order.retain(|&h| h != handle);
-    mem.decommit_image(handle, module.size).map_err(memory)?;
-    cpu.remove_module_ir(handle, module.size);
-    for dependency in module.dependencies {
-        unload(dependency, cpu, mem, api, state, log, sched, max_instr)?;
     }
     Ok(())
 }
