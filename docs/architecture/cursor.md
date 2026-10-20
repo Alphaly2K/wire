@@ -9,3 +9,5 @@
 PE32 适配只借 Args、GuestMem、cursor、tid 和 LastError；位置设置不裁剪，输出仍由 handler 写入后再读取返回槽。Win64 Cursor64 拥有虚拟桌面 clip，裁剪与 host 鼠标事件复用同一 owner；只约束 guest 指针，不改变宿主桌面。invalid clip 保持旧状态，NULL clip 恢复固定桌面，position 同步 clamp。消息入队与元数据从 owner 取得坐标，原有消息时间和键盘处理顺序保持。
 
 Win64 tracking 只借 Memory 和窗口存在性查询，先检查完整 24-byte TRACKMOUSEEVENT，再按旧顺序处理 size/query/HWND/flags/cancel/unsupported 注册。没有 hover/leave 或 WM_POINTER 后端时保留既有错误。入口负责提交 LastError，saved return frame 与跨页输出故障行为保持。旧手写 ABI/arity/DWORD/provider 特例和名称分发删除。
+
+Win64 `x64/runtime/user/cursor.rs` 的调用由 User owner 处理，只借 Memory、tid 与当前错误槽；images/windows/cursor 由同一 USER 组合，handler 不再借 Runtime64。与 DC/desktop 一起完成普通 owner 提取，证据 `wire-out/refactoring-2026-10-14/r3-user-services64-{source-checks,verification}.json`。

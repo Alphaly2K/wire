@@ -682,11 +682,22 @@ impl Runtime64 {
                 crate::win32::x64::system_paths::call(mem, id, args, &self.profile)
             }
             ApiId::Keyboard(id) => self.keyboard_call(mem, id, args),
-            ApiId::Cursor(id) => self.cursor_call(mem, id, args),
+            ApiId::Cursor(id) => {
+                let last_error = self.teb() + 0x68;
+                self.user
+                    .cursor_call(mem, id, args, self.threads.active, last_error)
+            }
             ApiId::Image(id) => self.image_call(mem, id, args),
             ApiId::Display(id) => self.display_call(mem, id, args),
-            ApiId::GdiDc(id) => self.gdi_dc_call(mem, id, args),
-            ApiId::Desktop(id) => self.desktop_call(mem, id, args),
+            ApiId::GdiDc(id) => {
+                let last_error = self.teb() + 0x68;
+                self.user
+                    .gdi_dc_call(mem, id, args, self.threads.active, last_error)
+            }
+            ApiId::Desktop(id) => {
+                let last_error = self.teb() + 0x68;
+                self.user.desktop_call(mem, id, args, last_error)
+            }
             ApiId::Class(id) => self.class_call(mem, id, args),
             ApiId::WindowQuery(id) => {
                 let last_error = self.teb() + 0x68;

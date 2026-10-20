@@ -266,33 +266,60 @@ mod tests {
     fn mouse_tracking_reports_empty_state_and_real_absent_delivery() {
         use crate::win32::catalog::CursorApi::Track;
         let (mut r, mut m) = fixture();
+        let last_error = r.teb() + 0x68;
+        let tid = r.threads.active;
         let data = STACK + 128;
         m.write_int(data, 4, 24).unwrap();
         m.write_int(data + 8, 8, HWND).unwrap();
         for flags in [1, 2, 3, 0x11, 0x12] {
             m.write_int(data + 4, 4, flags).unwrap();
-            assert_eq!(r.cursor_call(&mut m, Track, &[data]).unwrap(), 0);
+            assert_eq!(
+                r.user
+                    .cursor_call(&mut m, Track, &[data], tid, last_error)
+                    .unwrap(),
+                0
+            );
             assert_eq!(m.read_int(crate::x64::runtime::TEB + 0x68, 4).unwrap(), 50);
             assert!(r.user.events.is_empty());
         }
         m.write_int(data + 4, 4, 0x80000003).unwrap();
-        assert_eq!(r.cursor_call(&mut m, Track, &[data]).unwrap(), 1);
+        assert_eq!(
+            r.user
+                .cursor_call(&mut m, Track, &[data], tid, last_error)
+                .unwrap(),
+            1
+        );
         m.write_int(data + 4, 4, 0x40000000).unwrap();
         m.write_int(data + 8, 8, u64::MAX).unwrap();
-        assert_eq!(r.cursor_call(&mut m, Track, &[data]).unwrap(), 1);
+        assert_eq!(
+            r.user
+                .cursor_call(&mut m, Track, &[data], tid, last_error)
+                .unwrap(),
+            1
+        );
         assert_eq!(m.read_int(data, 4).unwrap(), 24);
         assert_eq!(m.read_int(data + 4, 4).unwrap(), 0);
         assert_eq!(m.read_int(data + 8, 8).unwrap(), 0);
         assert_eq!(m.read_int(data + 16, 8).unwrap(), 0);
         m.write_int(data + 4, 4, 2).unwrap();
         m.write_int(data + 8, 8, HWND ^ (1 << 40)).unwrap();
-        assert_eq!(r.cursor_call(&mut m, Track, &[data]).unwrap(), 0);
+        assert_eq!(
+            r.user
+                .cursor_call(&mut m, Track, &[data], tid, last_error)
+                .unwrap(),
+            0
+        );
         assert_eq!(
             m.read_int(crate::x64::runtime::TEB + 0x68, 4).unwrap(),
             1400
         );
         m.write_int(data, 4, 16).unwrap();
-        assert_eq!(r.cursor_call(&mut m, Track, &[data]).unwrap(), 0);
+        assert_eq!(
+            r.user
+                .cursor_call(&mut m, Track, &[data], tid, last_error)
+                .unwrap(),
+            0
+        );
         assert_eq!(m.read_int(crate::x64::runtime::TEB + 0x68, 4).unwrap(), 87);
         // QUERY writes the complete Win64 structure atomically.
         let crossing = STACK + 4090;
@@ -302,7 +329,10 @@ mod tests {
         let mut before = [0; 24];
         m.read(crossing, &mut before).unwrap();
         m.protect(STACK + 4096, 4096, READ).unwrap();
-        assert!(r.cursor_call(&mut m, Track, &[crossing]).is_err());
+        assert!(r
+            .user
+            .cursor_call(&mut m, Track, &[crossing], tid, last_error)
+            .is_err());
         let mut after = [0; 24];
         m.read(crossing, &mut after).unwrap();
         assert_eq!(after, before);

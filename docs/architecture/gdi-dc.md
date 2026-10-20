@@ -4,7 +4,7 @@
 
 PE32 `win32/gdi/dc_x86.rs` 仅借 Args、实际 Graphics owner、窗口尺寸查询与 LastError。`graphics/dc.rs` 提供 compatible DC 创建、删除和 capability 查询；窗口 DC 的 bitmap backing、字体/位图选择、handle 数值与容量、释放顺序仍由 Graphics 管理。[其余 raster/font/bitmap](gdi-operations.md)使用 typed GdiOperation 和只借 Graphics/错误槽的 adapter，没有复制 DC 表。
 
-Win64 `win32/gdi/dc.rs::DeviceContexts` 私有拥有 DC 成员、完整窗口/线程身份、compatible 类型与单调 next/end；`x64/runtime/user/gdi.rs` 负责参数协调和 guest LastError。创建仅借窗口存在性 closure，失败验证不分配 handle；查询允许原线程范围，释放检查原创建线程和类型。销毁窗口时的旧 DC 生命周期保持。
+Win64 `win32/gdi/dc.rs::DeviceContexts` 私有拥有 DC 成员、完整窗口/线程身份、compatible 类型与单调 next/end；`x64/runtime/user/gdi.rs` 由 User owner 协调，只借内存、tid 与当前错误槽，不再借 Runtime64。创建仅借窗口存在性 closure，失败验证不分配 handle；查询允许原线程范围，释放检查原创建线程和类型。销毁窗口时的旧 DC 生命周期保持。owner 提取证据 `wire-out/refactoring-2026-10-14/r3-user-services64-{source-checks,verification}.json`。
 
 | 行为 | PE32 | Win64 |
 | --- | --- | --- |

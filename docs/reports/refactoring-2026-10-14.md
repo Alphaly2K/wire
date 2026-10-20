@@ -650,3 +650,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R4 PE32 CRT 执行编排
 
 基线 `790480e`。CRT 的 CPU/FPU 返回、initializer、模块数据与 exit 编排归 Process，qsort 算法原文迁到其私有子模块；普通 strtoul/memory/heap/startup 通过组合根窄借资源。原 provider/CPU、initializer/SEH transfer、exit、scalar 主体与 qsort 全文核对保持，callback frame 未改。新增独立函数表变更/首错误但继续执行 fixture 在迁移前通过。release 完整 Win32 259、IR 31、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r4-crt-process32-{source-checks,verification}.json`。
+
+## R3 Win64 USER cursor/DC/desktop 调用
+
+基线 `af6681c`。三个 adapter 归 User owner，只借内存、tid（需要时）和当前错误槽，不再借 Runtime64；各自纯 owner 与 root frame 不变。原主体经资源替换和 rustfmt 规范化后完全一致；六处内部 tracking 调用改为借 owner，期望值不变。release 完整 Win64 269、library 61 passed / 7 ignored、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r3-user-services64-{source-checks,verification}.json`。

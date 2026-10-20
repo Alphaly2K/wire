@@ -18,6 +18,8 @@ PE32 [窗口状态](architecture/window-state.md)、[对话框/枚举](architect
 
 [CRT 编排](architecture/crt32.md)随后迁入 Process，API 不再处理 FPU/初始化器执行循环；qsort 与 initializer 保留各自恢复策略。新增函数表变更/首错误 fixture，完整 Win32 **259**、IR 31 和必要构建通过。
 
+Win64 的 cursor/DC/desktop 调用也归 User owner，明确借 tid、内存与错误槽；完整 Win64 269、library 61 passed / 7 ignored、fmt/strict Clippy/build 通过。
+
 ## 重构范围
 
 当前累计冻结包含[对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)、日志、五项 paint、控件初始化、资源、启动信息、环境接口与 CLI 拆分；独立历史证据继续可查。

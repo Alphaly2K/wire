@@ -6,7 +6,7 @@ GetProcessWindowStation 保留原 synthetic handle 0x70070000。GetUserObjectInf
 
 `win32/user/desktop.rs::Settings` 私有拥有进程逻辑 screen-reader 设置，由 Win64 User 组合；不访问宿主偏好。默认 false，setter 仅在原支持的 action/flags 验证成功后提交。PE32 固定 double-click 时间与 dialog font units 从同一领域 profile 取值，无复制状态。
 
-Win64 架构协调在 `x64/runtime/user/desktop.rs`：SystemParametersInfo 保留 DWORD 截断、GET 对输出指针的受检写入、SET 忽略 pvParam 的原规则，以及 error50/LastError；DWM composition 明确为关闭，window attribute 仅支持原 frame bounds/no-cloak 子集。DWM 保留 HWND→NULL→attribute/size 的验证顺序及 HRESULT，不修改 LastError。
+Win64 架构协调在 `x64/runtime/user/desktop.rs`，由 User owner 直接处理，只借内存和当前错误槽，不再借 Runtime64。SystemParametersInfo 保留 DWORD 截断、GET 对输出指针的受检写入、SET 忽略 pvParam 的原规则，以及 error50/LastError；DWM composition 明确为关闭，window attribute 仅支持原 frame bounds/no-cloak 子集。DWM 保留 HWND→NULL→attribute/size 的验证顺序及 HRESULT，不修改 LastError。owner 提取证据 `wire-out/refactoring-2026-10-14/r3-user-services64-{source-checks,verification}.json`。
 
 静态/动态范围有意保留原差异：设置的静态 kernel32/kernelbase/user32 别名可用，默认动态导出表缺口与已有 gateway fallback 保留；DWM 静态还接受 dwmapi，动态接受 user32/dwmapi。PE32 不因 Win64 声明获得 DWM 参数栈信息。
 
