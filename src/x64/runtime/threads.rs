@@ -275,7 +275,7 @@ impl Runtime64 {
             Some(Block::Srw(ptr, shared)) => self.srw.available(*ptr, *shared),
             Some(Block::Once(ptr)) => mem.read_int(*ptr, 8)? != 1,
             Some(Block::Messages { window, min, max }) => {
-                self.message_ready(id, *window, *min, *max)
+                self.user.message_ready(id, *window, *min, *max)
             }
         })
     }

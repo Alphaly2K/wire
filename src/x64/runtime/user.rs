@@ -5,6 +5,7 @@ mod classes;
 mod cursor;
 mod desktop;
 mod gdi;
+mod host;
 mod images;
 mod message;
 mod window;

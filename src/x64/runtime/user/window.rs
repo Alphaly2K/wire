@@ -61,75 +61,13 @@ pub(in crate::x64::runtime) enum WindowResult {
 }
 impl Runtime64 {
     pub fn window_info(&self) -> Vec<super::super::WindowInfo> {
-        self.user
-            .windows
-            .iter()
-            .filter(|(_, w)| w.ready && w.parent == 0)
-            .map(|(&handle, w)| super::super::WindowInfo {
-                handle,
-                title: w.title.clone(),
-                width: (w.client[2] - w.client[0]).max(0) as u32,
-                height: (w.client[3] - w.client[1]).max(0) as u32,
-                visible: w.style & 0x10000000 != 0,
-                topmost: w.ex_style & 8 != 0,
-            })
-            .collect()
+        self.user.window_info()
     }
-    pub fn queue_window_event(
-        &mut self,
-        mut event: super::super::WindowEvent,
-    ) -> Result<(), String> {
-        if !self.user.windows.contains_key(&event.window) {
-            return Ok(());
-        }
-        if self.user.events.len() >= 4096 {
-            return Err("Win64 native window event capacity exceeded".into());
-        }
-        let time = self.start.elapsed().as_millis() as u32;
-        if (0x200..=0x20e).contains(&event.message) {
-            let w = &self.user.windows[&event.window];
-            let screen = matches!(event.message, 0x20a | 0x20e);
-            let input = [
-                event.lparam as u16 as i16 as i32,
-                (event.lparam >> 16) as u16 as i16 as i32,
-            ];
-            let point = std::array::from_fn(|n| {
-                if screen {
-                    input[n]
-                } else {
-                    w.client[n].wrapping_add(input[n])
-                }
-            });
-            let point = self.user.cursor.host_position(point);
-            let local: [i32; 2] = std::array::from_fn(|n| {
-                if screen {
-                    point[n]
-                } else {
-                    point[n].wrapping_sub(w.client[n])
-                }
-            });
-            event.lparam = (local[0] as u16 as u64) | ((local[1] as u16 as u64) << 16);
-        }
-        if !self.user.keyboard.host64([
-            event.window,
-            event.message as u64,
-            event.wparam,
-            event.lparam,
-            time as u64,
-        ]) {
-            return Ok(());
-        }
-        self.user.events.push_back(super::message::Message {
-            event,
-            time,
-            tid: self.user.windows[&event.window].tid,
-            point: self.user.cursor.position(),
-            hardware: true,
-        });
-        Ok(())
+    pub fn queue_window_event(&mut self, event: super::super::WindowEvent) -> Result<(), String> {
+        self.user.queue_window_event(event, self.start)
     }
     pub fn take_window_events(&mut self) -> Vec<super::super::WindowEvent> {
-        self.user.events.drain(..).map(|m| m.event).collect()
+        self.user.take_window_events()
     }
     fn valid_procedure(&self, mem: &Memory, procedure: u64) -> Result<(), String> {
         valid_procedure(mem, &self.gateways, procedure)

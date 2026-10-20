@@ -8,6 +8,8 @@ PE32 `user32/messages.rs` 由 User32 处理既有队列、消息计时器和键�
 
 Win64 冷绑定保存 `ControlImport::Message(id)`。普通消息操作可以返回值或阻塞；DispatchMessage 使用窗口协调器返回的显式 callback/resume 控制结果，保留原两次 frame 检查。旧 USER/message 的 arity、DWORD 和 provider 名单已删除。运行时名称继续用于 trace，不用于选择消息行为。
 
+Win64 普通消息由 User 准备值、错误或等待请求，只借内存、只读 Threads 和原 start 时间；Runtime64 协调器在错误时写 LastError，在等待时阻塞。错误槽仍按需读取，纯 metadata 查询不提前访问 TEB；调度器通过 User 查询队列是否就绪。过滤、受检输出、metadata、移除及硬件键盘消费保持原顺序。
+
 队列输出与 metadata 的提交顺序保持各架构旧行为：PE32 在输出检查前清除 change bits，输出失败仍保留消息；Win64 先完成受检 MSG 输出，再提交 metadata、移除消息和消费硬件键盘状态。消息过滤、WM_QUIT 绕过范围过滤、同步专用 post 限制、PostQuitMessage trace 返回和 DWORD exit-code 都保持原差异。A/W 提取共享原 MSG 布局；TranslateMessage 继续按实际窗口过程的编码产生字符。
 
 本批只收敛调用契约和过程控制。PE32 消息/计时器仍由 User32 持有，Win64 仍由进程 User 持有；宿主事件通过已有 owned event 边界进入，guest 参数不转成可直接解引用的宿主指针。
@@ -21,3 +23,5 @@ owner 基线 `145a271`。两份原 prepare 主体归一一致，timer/host/put/m
 sent 请求提取基线 `683f025`，selection/processing 和 completion/wake 的原主体核对保持；完整 Win32/IR 与构建结果见 `wire-out/refactoring-2026-10-14/r4-sent-monitor32-{source-checks,verification}.json`。普通 callback 编排提取不重复性能矩阵。
 
 消息请求提取基线 `d541e63`，原 timer/post/filter/output/keyboard、deadline、dispatch 输入与 sent loop 对照保持。连续重构阶段整合通过 release 全目标 692 passed / 7 ignored（21 suites）、all-targets/all-features strict Clippy、build 和 fmt。未改执行循环/frame，不跑性能或游戏矩阵，证据 `wire-out/refactoring-2026-10-14/r4-messages32-{source-checks,verification}.json`。
+
+Win64 owner 基线 `c551314`，消息处理、host 入队和窗口协调器对照保持；首次测试发现错误槽读取提前，改为显式错误结果后，release 全目标 694 passed / 7 ignored（21 suites）、all-targets/all-features strict Clippy、build 与 fmt 通过。证据 `wire-out/refactoring-2026-10-14/r3-user-messages64-{source-checks,verification}.json`。

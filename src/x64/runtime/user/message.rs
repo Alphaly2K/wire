@@ -1,10 +1,12 @@
 //! Win64 MSGs and per-thread posted/native messages. Guest pointers remain u64.
-use super::{Memory, Runtime64};
+use super::{Memory, Runtime64, User};
 use crate::win32::catalog::MessageApi as M;
+use crate::x64::runtime::threads::Threads;
 use crate::x64::{
     memory::WRITE,
     runtime::{threads::Block, WindowEvent},
 };
+use std::time::Instant;
 #[derive(Clone, Copy)]
 pub(in crate::x64::runtime) struct Message {
     pub event: WindowEvent,
@@ -24,9 +26,14 @@ pub(in crate::x64::runtime) fn read(mem: &Memory, pointer: u64) -> Result<[u64; 
         u32::from_le_bytes(data[32..36].try_into().unwrap()) as u64,
     ])
 }
-impl Runtime64 {
+enum MessageResult {
+    Value(u64),
+    Error { error: u32, value: u64 },
+    Wait(Block),
+}
+impl User {
     fn message_index(&self, tid: u64, window: u64, min: u32, max: u32) -> Option<usize> {
-        self.user.events.iter().position(|m| {
+        self.events.iter().position(|m| {
             m.tid == tid
                 && (m.event.message == 0x12
                     || ((window == 0
@@ -44,16 +51,18 @@ impl Runtime64 {
     ) -> bool {
         self.message_index(tid, window, min, max).is_some()
     }
-    pub(in crate::x64::runtime) fn message_call(
+    fn prepare_message(
         &mut self,
         mem: &mut Memory,
         id: M,
         a: &[u64],
-    ) -> Result<Option<u64>, String> {
-        let tid = self.threads.active;
+        threads: &Threads,
+        start: Instant,
+    ) -> Result<MessageResult, String> {
+        let tid = threads.active;
         let value = match id {
             M::Extra | M::Time | M::Position => {
-                let state = self.user.message_state.get(&tid).copied().unwrap_or([0; 3]);
+                let state = self.message_state.get(&tid).copied().unwrap_or([0; 3]);
                 state[match id {
                     M::Extra => 0,
                     M::Time => 1,
@@ -61,7 +70,7 @@ impl Runtime64 {
                 }]
             }
             M::SetExtra => {
-                let state = self.user.message_state.entry(tid).or_default();
+                let state = self.message_state.entry(tid).or_default();
                 std::mem::replace(&mut state[0], a[0])
             }
             M::Quit | M::PostA | M::PostW | M::PostThreadA | M::PostThreadW => {
@@ -69,34 +78,37 @@ impl Runtime64 {
                 let thread = matches!(id, M::PostThreadA | M::PostThreadW);
                 let window = if quit || thread { 0 } else { a[0] };
                 let owner = if thread {
-                    if !self
-                        .threads
-                        .entries
-                        .get(&a[0])
-                        .is_some_and(|t| t.exit.is_none())
-                    {
-                        self.set_error(mem, 1444)?;
-                        return Ok(Some(0));
+                    if !threads.entries.get(&a[0]).is_some_and(|t| t.exit.is_none()) {
+                        return Ok(MessageResult::Error {
+                            error: 1444,
+                            value: 0,
+                        });
                     }
                     a[0]
                 } else if window == 0 {
                     tid
-                } else if let Some(w) = self.user.windows.get(&window) {
+                } else if let Some(w) = self.windows.get(&window) {
                     w.tid
                 } else {
-                    self.set_error(mem, if window == 65535 { 50 } else { 1400 })?;
-                    return Ok(Some(0));
+                    return Ok(MessageResult::Error {
+                        error: if window == 65535 { 50 } else { 1400 },
+                        value: 0,
+                    });
                 };
                 let message = if quit { 0x12 } else { a[1] as u32 };
                 if !quit && matches!(message, 1 | 0xc | 0xd | 0x24 | 0x46 | 0x47 | 0x4a | 0x83) {
-                    self.set_error(mem, 1159)?; // ERROR_MESSAGE_SYNC_ONLY
-                    return Ok(Some(0));
+                    return Ok(MessageResult::Error {
+                        error: 1159,
+                        value: 0,
+                    }); // ERROR_MESSAGE_SYNC_ONLY
                 }
-                if self.user.events.len() >= 4096 {
-                    self.set_error(mem, 1816)?;
-                    return Ok(Some(0));
+                if self.events.len() >= 4096 {
+                    return Ok(MessageResult::Error {
+                        error: 1816,
+                        value: 0,
+                    });
                 }
-                self.user.events.push_back(Message {
+                self.events.push_back(Message {
                     event: WindowEvent {
                         window,
                         message,
@@ -104,44 +116,45 @@ impl Runtime64 {
                         lparam: if quit { 0 } else { a[3] },
                     },
                     tid: owner,
-                    time: self.start.elapsed().as_millis() as u32,
-                    point: self.user.cursor.position(),
+                    time: start.elapsed().as_millis() as u32,
+                    point: self.cursor.position(),
                     hardware: false,
                 });
                 (!quit) as u64
             }
             M::PeekA | M::PeekW | M::GetA | M::GetW => {
                 let get = id.get();
-                if (a[1] != 0 && a[1] != u64::MAX && !self.user.windows.contains_key(&a[1]))
+                if (a[1] != 0 && a[1] != u64::MAX && !self.windows.contains_key(&a[1]))
                     || ((a[2] != 0 || a[3] != 0) && a[2] > a[3])
                 {
-                    self.set_error(
-                        mem,
-                        if a[1] != 0 && a[1] != u64::MAX && !self.user.windows.contains_key(&a[1]) {
+                    return Ok(MessageResult::Error {
+                        error: if a[1] != 0 && a[1] != u64::MAX && !self.windows.contains_key(&a[1])
+                        {
                             1400
                         } else {
                             87
                         },
-                    )?;
-                    return Ok(Some(if get { u32::MAX as u64 } else { 0 }));
+                        value: if get { u32::MAX as u64 } else { 0 },
+                    });
                 }
                 if !get && a[4] & !3 != 0 {
-                    self.set_error(mem, 50)?;
-                    return Ok(Some(0));
+                    return Ok(MessageResult::Error {
+                        error: 50,
+                        value: 0,
+                    });
                 }
                 let Some(index) = self.message_index(tid, a[1], a[2] as u32, a[3] as u32) else {
                     if !get {
-                        return Ok(Some(0));
+                        return Ok(MessageResult::Value(0));
                     }
                     mem.check(a[0], 48, WRITE)?;
-                    self.block(Block::Messages {
+                    return Ok(MessageResult::Wait(Block::Messages {
                         window: a[1],
                         min: a[2] as u32,
                         max: a[3] as u32,
-                    })?;
-                    return Ok(None);
+                    }));
                 };
-                let m = self.user.events[index];
+                let m = self.events[index];
                 let mut bytes = [0; 48];
                 bytes[..8].copy_from_slice(&m.event.window.to_le_bytes());
                 bytes[8..12].copy_from_slice(&m.event.message.to_le_bytes());
@@ -154,7 +167,7 @@ impl Runtime64 {
                 mem.write(a[0], &bytes)?;
                 // Native and posted messages in this bridge have no injected
                 // extra-info tag. Publish metadata only after checked output.
-                self.user.message_state.insert(
+                self.message_state.insert(
                     tid,
                     [
                         0,
@@ -163,9 +176,9 @@ impl Runtime64 {
                     ],
                 );
                 if get || a[4] & 1 != 0 {
-                    self.user.events.remove(index);
+                    self.events.remove(index);
                     if m.hardware {
-                        self.user.keyboard.consumed64(
+                        self.keyboard.consumed64(
                             tid,
                             m.event.message,
                             m.event.wparam as u32,
@@ -182,15 +195,15 @@ impl Runtime64 {
             M::Translate => {
                 let words = read(mem, a[0])?;
                 if !matches!(words[1], 0x100 | 0x101 | 0x104 | 0x105) {
-                    return Ok(Some(0));
+                    return Ok(MessageResult::Value(0));
                 }
                 if matches!(words[1], 0x100 | 0x104) {
                     // Reserve enough capacity before consuming cached host text.
-                    if self.user.events.len() > 4096 - 64 {
+                    if self.events.len() > 4096 - 64 {
                         return Err("Win64 translated message capacity exceeded".into());
                     }
-                    let text = self.user.keyboard.translate64(words);
-                    let wide = self.user.windows.get(&words[0]).is_none_or(|w| w.wide);
+                    let text = self.keyboard.translate64(words);
+                    let wide = self.windows.get(&words[0]).is_none_or(|w| w.wide);
                     let chars: Vec<_> = if wide {
                         text.into_iter().map(u32::from).collect()
                     } else {
@@ -202,7 +215,7 @@ impl Runtime64 {
                             .collect()
                     };
                     for c in chars {
-                        self.user.events.push_back(Message {
+                        self.events.push_back(Message {
                             event: WindowEvent {
                                 window: words[0],
                                 message: if words[1] == 0x104 { 0x106 } else { 0x102 },
@@ -210,8 +223,8 @@ impl Runtime64 {
                                 lparam: words[3],
                             },
                             tid,
-                            time: self.start.elapsed().as_millis() as u32,
-                            point: self.user.cursor.position(),
+                            time: start.elapsed().as_millis() as u32,
+                            point: self.cursor.position(),
                             hardware: false,
                         });
                     }
@@ -220,7 +233,31 @@ impl Runtime64 {
             }
             _ => unreachable!(),
         };
-        Ok(Some(value))
+        Ok(MessageResult::Value(value))
+    }
+}
+
+impl Runtime64 {
+    pub(in crate::x64::runtime) fn message_call(
+        &mut self,
+        mem: &mut Memory,
+        id: M,
+        a: &[u64],
+    ) -> Result<Option<u64>, String> {
+        match self
+            .user
+            .prepare_message(mem, id, a, &self.threads, self.start)?
+        {
+            MessageResult::Value(value) => Ok(Some(value)),
+            MessageResult::Error { error, value } => {
+                self.set_error(mem, error)?;
+                Ok(Some(value))
+            }
+            MessageResult::Wait(reason) => {
+                self.block(reason)?;
+                Ok(None)
+            }
+        }
     }
 }
 

@@ -658,3 +658,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 Win64 class/image 与资源读取
 
 基线 `09a5dfc`。class/image 调用归 User owner，仅借内存、当前错误槽和 image 所需只读 Modules；资源 key/PE tree 读取移除 Runtime64 依赖。原 class/image、resource key/traversal 经资源替换与 rustfmt 对照一致，entry 原文未改；内部 native fixture 的 class 调用只适配签名。release 完整 Win64 269、library 61 passed / 7 ignored、fmt/release lib/bin strict Clippy/build 通过。未改图形 backend，不跑 native/游戏或性能矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r3-user-resources64-{source-checks,verification}.json`。
+
+## R3 Win64 消息与 host USER owner
+
+基线 `c551314`。User 准备普通消息结果、错误与等待，组合根按需写 LastError 或阻塞；队列 ready 和 host 窗口快照/事件入队也归 owner。原消息、host、窗口协调器和 scheduler 对照保持，内部 fixture 原文未改。首次全目标测试抓到错误槽提前读取，改用显式错误结果后通过 release 全目标 694 passed / 7 ignored、21 suites；all-targets/all-features strict Clippy、build 与 fmt 通过。首次失败日志保留。没有修改执行循环、frame 或 backend，不跑性能或游戏矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r3-user-messages64-{source-checks,verification}.json`。
