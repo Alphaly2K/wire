@@ -1270,10 +1270,12 @@ mod tests {
         let mut args = parameters;
         let window = loop {
             let value = r
+                .user
                 .window_value_call(
                     &mut m,
                     crate::win32::catalog::WindowControlApi::DefaultW,
                     &args,
+                    &r.threads,
                 )
                 .unwrap();
             match r.window_resume(&mut m, &mut window_call, value).unwrap() {

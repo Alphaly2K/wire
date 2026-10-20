@@ -95,6 +95,9 @@ impl Threads {
             next_address_wait: 0,
         }
     }
+    pub(super) fn teb(&self) -> u64 {
+        self.entries[&self.active].teb
+    }
     fn block(&mut self, reason: Block) -> Result<(), String> {
         if !self.enabled {
             return Err("Win64 blocking operation requires a thread scheduler".into());
@@ -175,7 +178,7 @@ impl Runtime64 {
         self.threads.entries[&self.threads.active].suspended != 0
     }
     pub(crate) fn teb(&self) -> u64 {
-        self.threads.entries[&self.threads.active].teb
+        self.threads.teb()
     }
     pub(crate) fn take_threads(&mut self) -> Vec<Spawn> {
         std::mem::take(&mut self.threads.pending)

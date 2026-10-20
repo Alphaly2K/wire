@@ -662,3 +662,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 Win64 消息与 host USER owner
 
 基线 `c551314`。User 准备普通消息结果、错误与等待，组合根按需写 LastError 或阻塞；队列 ready 和 host 窗口快照/事件入队也归 owner。原消息、host、窗口协调器和 scheduler 对照保持，内部 fixture 原文未改。首次全目标测试抓到错误槽提前读取，改用显式错误结果后通过 release 全目标 694 passed / 7 ignored、21 suites；all-targets/all-features strict Clippy、build 与 fmt 通过。首次失败日志保留。没有修改执行循环、frame 或 backend，不跑性能或游戏矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r3-user-messages64-{source-checks,verification}.json`。
+
+## R3 Win64 键盘与窗口标量处理
+
+基线 `8f5b3d6`。键盘状态/布局和默认过程标量处理归 User，只借内存与只读 Threads；TEB 地址查询归 Threads，错误分支才读取。原 handler、线程地址读取及 window start/resume/退休/frame 检查对照保持；内部调用仅调整资源借用。完整 release Win64 269、library 61 passed / 7 ignored、fmt/release lib/bin strict Clippy/build 通过。不跑性能或游戏矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r3-user-keyboard64-{source-checks,verification}.json`。

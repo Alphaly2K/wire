@@ -14,6 +14,8 @@ PE32 `user32/control.rs` 只准备创建、显示、销毁、同步发送和默�
 
 Win64 在冷绑定时把需要过程执行器的操作保存为 `ControlImport::Window(id)`，执行时返回显式 `WindowResult`，由进程处理 callback/resume。先验证执行器及 callback frame，再检查 HWND、参数和过程，保持故障顺序。UpdateWindow 保留原 scalar 行为，不新增 frame 检查；DefDlgProcA/W、EnableWindow、SetParent 保持 absent。DispatchMessage 暂留消息领域，进入 typed SendMessage 协调器时继续执行原有的第二次 frame 检查。
 
+Win64 默认过程的 NCCALCSIZE/标量处理与 UpdateWindow 归 User，只借内存和只读 Threads；协调器仍在原 frame 检查之后调用。原处理体及窗口 start/resume/退休顺序核对保持，和键盘 owner 一并通过完整 Win64 269、library 61 passed / 7 ignored 及必要构建，基线 `8f5b3d6`，证据 `wire-out/refactoring-2026-10-14/r3-user-keyboard64-{source-checks,verification}.json`。
+
 两架构的现有差异继续保留：PE32 ShowWindow 将任意非零模式视为显示，且不要求 owner；Win64 只接受既有模式。PE32 支持原 GDI update region 与同步跨线程发送；Win64 保留原错误及能力范围。后续能力扩展需独立测试和验收，不借本次重构改变行为。
 
 验证与性能证据见[本批记录](../reports/refactoring-window-control-2026-10-18.md)。

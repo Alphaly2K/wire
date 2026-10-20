@@ -681,7 +681,7 @@ impl Runtime64 {
             ApiId::SystemPath(id) => {
                 crate::win32::x64::system_paths::call(mem, id, args, &self.profile)
             }
-            ApiId::Keyboard(id) => self.keyboard_call(mem, id, args),
+            ApiId::Keyboard(id) => self.user.keyboard_call(mem, id, args, &self.threads),
             ApiId::Cursor(id) => {
                 let last_error = self.teb() + 0x68;
                 self.user
@@ -715,7 +715,7 @@ impl Runtime64 {
                 let last_error = self.teb() + 0x68;
                 self.user.window_state_call(mem, id, args, last_error)
             }
-            ApiId::WindowControl(id) => self.window_value_call(mem, id, args),
+            ApiId::WindowControl(id) => self.user.window_value_call(mem, id, args, &self.threads),
             ApiId::Message(_) => unreachable!("message calls use explicit process control"),
             ApiId::Dialog(_) => unreachable!("dialog exports remain absent on Win64"),
             ApiId::Painting(_) => unreachable!("painting exports remain absent on Win64"),

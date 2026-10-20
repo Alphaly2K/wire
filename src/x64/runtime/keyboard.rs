@@ -1,38 +1,34 @@
 //! Win64 keyboard adapters keep full-width HKLs and the existing input owner.
-use super::{Memory, Runtime64};
+use super::{threads::Threads, user::User, Memory};
 use crate::win32::{
     catalog::KeyboardApi,
     user::keyboard_layout::{character, key_name, map_key, HKL},
 };
 
-impl Runtime64 {
-    pub(super) fn keyboard_call(
+impl User {
+    pub(in crate::x64::runtime) fn keyboard_call(
         &mut self,
         mem: &mut Memory,
         id: KeyboardApi,
         a: &[u64],
+        threads: &Threads,
     ) -> Result<u64, String> {
         use KeyboardApi::*;
         match id {
-            AsyncState => Ok(self.user.keyboard.asynchronous(a[0] as u32) as u64),
+            AsyncState => Ok(self.keyboard.asynchronous(a[0] as u32) as u64),
             State => {
-                let keys = self.user.keyboard.state64(self.threads.active);
+                let keys = self.keyboard.state64(threads.active);
                 let key = keys.get(a[0] as usize).copied().unwrap_or(0);
                 Ok((((key as u16 & 0x80) << 8) | (key as u16 & 1)) as i16 as i32 as u32 as u64)
             }
             StateArray => {
-                mem.write(a[0], &self.user.keyboard.state64(self.threads.active))?;
+                mem.write(a[0], &self.keyboard.state64(threads.active))?;
                 Ok(1)
             }
             Layout => {
-                let tid = if a[0] == 0 { self.threads.active } else { a[0] };
+                let tid = if a[0] == 0 { threads.active } else { a[0] };
                 Ok(
-                    if self
-                        .threads
-                        .entries
-                        .get(&tid)
-                        .is_some_and(|t| t.exit.is_none())
-                    {
+                    if threads.entries.get(&tid).is_some_and(|t| t.exit.is_none()) {
                         HKL
                     } else {
                         0
@@ -41,7 +37,7 @@ impl Runtime64 {
             }
             LayoutList => {
                 if (a[0] as u32 as i32) < 0 {
-                    self.set_error(mem, 87)?;
+                    mem.write_int(threads.teb() + 0x68, 4, 87)?;
                     return Ok(0);
                 }
                 if a[0] != 0 && a[1] != 0 {
@@ -71,7 +67,7 @@ impl Runtime64 {
             }),
             MapA | MapW | MapExA | MapExW => {
                 if matches!(id, MapExA | MapExW) && a[2] != 0 && a[2] != HKL {
-                    self.set_error(mem, 87)?;
+                    mem.write_int(threads.teb() + 0x68, 4, 87)?;
                     return Ok(0);
                 }
                 Ok(map_key(a[0] as u32, a[1] as u32) as u64)
@@ -81,7 +77,7 @@ impl Runtime64 {
                     return Ok(0);
                 }
                 if a[5] & !7 != 0 || (id == UnicodeEx && a[6] != 0 && a[6] != HKL) {
-                    self.set_error(mem, 87)?;
+                    mem.write_int(threads.teb() + 0x68, 4, 87)?;
                     return Ok(0);
                 }
                 let mut state = [0; 256];
@@ -125,6 +121,7 @@ impl Runtime64 {
 mod tests {
     use super::*;
     use crate::x64::memory::{READ, WRITE};
+    use crate::x64::runtime::Runtime64;
     #[test]
     fn unicode_query_does_not_consume_host_resolved_text_or_change_queued_keys() {
         let mut m = Memory::default();
@@ -137,12 +134,14 @@ mod tests {
         r.user.keyboard.consumed64(1, 0x100, 65, 1);
         let before = r.user.keyboard.state64(1);
         assert_eq!(
-            r.keyboard_call(
-                &mut m,
-                KeyboardApi::Unicode,
-                &[65, 0x1e, DATA, DATA + 512, 2, 0]
-            )
-            .unwrap(),
+            r.user
+                .keyboard_call(
+                    &mut m,
+                    KeyboardApi::Unicode,
+                    &[65, 0x1e, DATA, DATA + 512, 2, 0],
+                    &r.threads
+                )
+                .unwrap(),
             1
         );
         assert_eq!(m.read_int(DATA + 512, 2).unwrap(), 97);

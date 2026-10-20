@@ -612,20 +612,39 @@ mod tests {
         .unwrap();
         assert_eq!(r.user.events.len(), 1);
         assert_eq!(
-            r.keyboard_call(&mut m, AsyncState, &[0x41]).unwrap(),
+            r.user
+                .keyboard_call(&mut m, AsyncState, &[0x41], &r.threads)
+                .unwrap(),
             0xffff8001
         );
         assert_eq!(
-            r.keyboard_call(&mut m, AsyncState, &[0x41]).unwrap(),
+            r.user
+                .keyboard_call(&mut m, AsyncState, &[0x41], &r.threads)
+                .unwrap(),
             0xffff8000
         );
-        assert_eq!(r.keyboard_call(&mut m, State, &[0x41]).unwrap(), 0);
+        assert_eq!(
+            r.user
+                .keyboard_call(&mut m, State, &[0x41], &r.threads)
+                .unwrap(),
+            0
+        );
         r.message_call(&mut m, M::PeekW, &[out, 0, 0, 0, 0])
             .unwrap();
-        assert_eq!(r.keyboard_call(&mut m, State, &[0x41]).unwrap(), 0);
+        assert_eq!(
+            r.user
+                .keyboard_call(&mut m, State, &[0x41], &r.threads)
+                .unwrap(),
+            0
+        );
         r.message_call(&mut m, M::PeekW, &[out, 0, 0, 0, 1])
             .unwrap();
-        assert_eq!(r.keyboard_call(&mut m, State, &[0x41]).unwrap(), 0xffff8000);
+        assert_eq!(
+            r.user
+                .keyboard_call(&mut m, State, &[0x41], &r.threads)
+                .unwrap(),
+            0xffff8000
+        );
         assert_eq!(
             r.message_call(&mut m, M::Translate, &[out]).unwrap(),
             Some(1)
@@ -640,9 +659,19 @@ mod tests {
             lparam: 0xc0000001,
         })
         .unwrap();
-        assert_eq!(r.keyboard_call(&mut m, AsyncState, &[0x41]).unwrap(), 0);
+        assert_eq!(
+            r.user
+                .keyboard_call(&mut m, AsyncState, &[0x41], &r.threads)
+                .unwrap(),
+            0
+        );
         r.message_call(&mut m, M::PeekW, &[out, 0, 0, 0, 1])
             .unwrap();
-        assert_eq!(r.keyboard_call(&mut m, State, &[0x41]).unwrap(), 0);
+        assert_eq!(
+            r.user
+                .keyboard_call(&mut m, State, &[0x41], &r.threads)
+                .unwrap(),
+            0
+        );
     }
 }

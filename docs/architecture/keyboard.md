@@ -14,3 +14,5 @@
 布局查询使用既有 US HKL `0x04090409`，与 guest 的日语 NLS profile 分开。线程查询继续检查存活线程；HKL 在 Win64 保留完整指针宽度。纯 scan/VK、character 和 key-name 规则集中到 `win32/user/keyboard_layout.rs`，不依赖 guest 内存或进程总状态，保留 Hangover/Wine 来源和 LGPL 声明。
 
 ToUnicode 使用调用者的 256-byte 状态，signed 容量检查先于 flags、layout 和指针访问；读取完整输入后写入输出，保留输入/输出别名。flag 范围、keyup 分支、NUL、截断及失败输出顺序保持。US profile 没有 IME、dead-key、AltGr 或组合状态；API 查询与 host 已解析的 WM_CHAR 文字仍各自按原路径处理。
+
+Win64 状态/布局适配器现归 User，只借内存与只读 Threads；原错误分支才通过 Threads 读取当前 TEB 并写 LastError。原 handler 经资源替换对照一致，内部 fixture 只调整调用资源，期望不变。基线 `8f5b3d6`，完整 release Win64 269、library 61 passed / 7 ignored、fmt/strict Clippy/build 通过；证据 `wire-out/refactoring-2026-10-14/r3-user-keyboard64-{source-checks,verification}.json`。

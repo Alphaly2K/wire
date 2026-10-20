@@ -1,5 +1,6 @@
 //! Win64 window creation and WNDPROC transitions resumed by the guest executor.
-use super::{rectangle, write_rect, Memory, Runtime64, Window};
+use super::{rectangle, write_rect, Memory, Runtime64, User, Window};
+use crate::x64::runtime::threads::Threads;
 use crate::x64::{
     cpu::Cpu64,
     memory::{EXECUTE, READ, WRITE},
@@ -129,7 +130,8 @@ impl Runtime64 {
                 return self.default_position_start(mem, name, args);
             }
             return self
-                .window_value_call(mem, id, args)
+                .user
+                .window_value_call(mem, id, args, &self.threads)
                 .map(WindowResult::Value);
         }
         if matches!(id, W::Position | W::Move) {
@@ -460,14 +462,17 @@ impl Runtime64 {
             self.user.foreground = 0;
         }
     }
+}
+impl User {
     pub(in crate::x64::runtime) fn window_value_call(
         &mut self,
         mem: &mut Memory,
         id: W,
         args: &[u64],
+        threads: &Threads,
     ) -> Result<u64, String> {
-        let Some(w) = self.user.windows.get_mut(&args[0]) else {
-            self.set_error(mem, 1400)?;
+        let Some(w) = self.windows.get_mut(&args[0]) else {
+            mem.write_int(threads.teb() + 0x68, 4, 1400)?;
             return Ok(0);
         };
         match id {
