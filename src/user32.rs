@@ -2,8 +2,7 @@
 use crate::api::{ApiLogger, ApiState, ApiTable};
 use crate::cpu::{Cpu, GuestCallOutcome};
 use crate::mem::GuestMem;
-use crate::thread::{Sched, ThreadState, WaitTarget, Wake};
-use crate::x86::process::callbacks::invoke;
+use crate::thread::Sched;
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -19,9 +18,11 @@ mod queues;
 mod sent;
 mod window_geometry;
 mod window_state;
-pub(crate) use classes::{call as class_call, register_system_class};
+pub(crate) use classes::{
+    call as class_call, ensure_builtin, persistent_strings, register_system_class,
+};
 pub use classes::{find_class, WindowClass};
-pub(crate) use control::call as control_call;
+pub(crate) use control::{ControlRequest, CreationRequest, DefaultRequest};
 pub(crate) use dialog::{dialog_integer, DialogRequest};
 pub(crate) use messages::MessageRequest;
 pub(crate) use paint::{Operation as PaintingOperation, PaintRequest};

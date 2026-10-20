@@ -642,3 +642,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R4 PE32 窗口几何与默认位置通知
 
 基线 `c8c735e`。USER 准备 enable/parent/position/update 请求，Process 执行 callback，正常返回后 USER 读取 guest WINDOWPOS 并提交；位置通知保留原过程快照。默认 WM_MOVE/WM_SIZE 分两次准备，后者取得回调后的窗口/过程/style/client。user32_common 只借 User32/内存，删除闲置私有坐标 facade。原 parent、enable precommit、position prepare/commit、update、text/codec 与 callback frame 核对保持；新增过程替换/最小化 fixture 在迁移前通过。release 完整 Win32 258、IR 31、fmt/release lib/bin strict Clippy/build 通过，首次 dead-code 失败日志保留，删除闲置入口后重跑必要构建；不跑性能或游戏矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r4-window-geometry32-{source-checks,verification}.json`。
+
+## R4 PE32 窗口生命周期与同步发送
+
+基线 `2f87673`。USER 准备创建、显示、销毁、发送和默认过程请求，Process 的 window 协调器执行 callback、等待和原 cleanup；内置类注册由组合根协调，class 匹配与持久字符串按明确资源借用。`src/user32/` 内直接 CPU/guest 执行依赖清零，sent 仍封装。创建准备/cleanup、发送完成/入队/wake、show/destroy commit、默认 nonclient/background、class 字符串分配/匹配和 callback frame 核对保持。完整 release Win32 258、IR 31、fmt/release lib/bin strict Clippy/build 通过；字段简写 lint 修正后通过，首次日志保留。不跑性能或游戏矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r4-window-control32-{source-checks,verification}.json`。

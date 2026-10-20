@@ -14,6 +14,8 @@ PE32 [窗口状态](architecture/window-state.md)、[对话框/枚举](architect
 
 随后[窗口几何/更新](architecture/window-control.md)也完成准备→回调→提交拆分，默认 WM_MOVE/WM_SIZE 之间保留重查。新增独立过程替换/最小化 fixture 后，完整 Win32 **258**、IR 31 和必要构建通过。
 
+窗口创建/销毁、显示、同步发送与默认过程也已完成请求边界，`src/user32/` 内直接 CPU/guest 执行依赖清零；Process 保留原 callback/cleanup 循环，完整 Win32 258、IR 31 和必要构建通过。其余 DLL/SEH/CRT 恢复边界继续按原策略迁移。
+
 ## 重构范围
 
 当前累计冻结包含[对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)、日志、五项 paint、控件初始化、资源、启动信息、环境接口与 CLI 拆分；独立历史证据继续可查。

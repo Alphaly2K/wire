@@ -11,17 +11,18 @@ pub struct WindowClass {
     menu_ptrs: [u32; 2],
 }
 
-pub(super) fn persistent_strings(
+pub(crate) fn persistent_strings(
     mem: &mut GuestMem,
-    state: &mut ApiState,
+    scratch: &mut crate::win32::x86::scratch::Scratch32,
+    last_error: &mut u32,
     text: &str,
 ) -> Result<[u32; 2], String> {
     let ansi = crate::codepage::encode(text, 932)
         .map_err(|e| format!("class name encoding: {e}"))?
         .0;
     let wide: Vec<u16> = text.encode_utf16().collect();
-    let a = state.scratch_alloc(mem, ansi.len() as u32 + 1, 1);
-    let w = state.scratch_alloc(mem, (wide.len() as u32 + 1) * 2, 2);
+    let a = scratch.alloc(mem, ansi.len() as u32 + 1, 1, last_error);
+    let w = scratch.alloc(mem, (wide.len() as u32 + 1) * 2, 2, last_error);
     mem.write_bytes(a, &ansi).map_err(|e| e.to_string())?;
     mem.write_u8(a + ansi.len() as u32, 0)
         .map_err(|e| e.to_string())?;
@@ -39,22 +40,33 @@ pub fn find_class(
     instance: u32,
     wide: bool,
 ) -> Result<Option<u16>, String> {
-    let name = if id > 0xffff {
-        Some(
-            crate::file_api::read_name(mem, id, wide)
-                .map_err(|e| format!("class name: {e}"))?
-                .to_lowercase(),
-        )
-    } else {
-        None
-    };
-    Ok(state.user32.classes.iter().find_map(|(&atom, class)| {
-        let matches_name = name
-            .as_ref()
-            .map_or(atom as u32 == id, |n| class.name.to_lowercase() == *n);
-        (matches_name && (class.fields[4] == instance || class.fields[0] & 0x4000 != 0))
-            .then_some(atom)
-    }))
+    state.user32.find_class(mem, id, instance, wide)
+}
+impl User32 {
+    pub(super) fn find_class(
+        &self,
+        mem: &GuestMem,
+        id: u32,
+        instance: u32,
+        wide: bool,
+    ) -> Result<Option<u16>, String> {
+        let name = if id > 0xffff {
+            Some(
+                crate::file_api::read_name(mem, id, wide)
+                    .map_err(|e| format!("class name: {e}"))?
+                    .to_lowercase(),
+            )
+        } else {
+            None
+        };
+        Ok(self.classes.iter().find_map(|(&atom, class)| {
+            let matches_name = name
+                .as_ref()
+                .map_or(atom as u32 == id, |n| class.name.to_lowercase() == *n);
+            (matches_name && (class.fields[4] == instance || class.fields[0] & 0x4000 != 0))
+                .then_some(atom)
+        }))
+    }
 }
 
 /// Minimal system controls with real window/text ownership. Specialized
@@ -78,7 +90,7 @@ pub(crate) fn register_system_class(
     if state.user32.next_atom > 0xffff {
         return Err("system class atom table exhausted".into());
     }
-    let name_ptrs = persistent_strings(mem, state, name)?;
+    let name_ptrs = state.class_strings(mem, name)?;
     let mut fields = [0; 11];
     fields[0] = 0x4000; // CS_GLOBALCLASS
     fields[1] = api.register(
@@ -202,13 +214,13 @@ pub(crate) fn call(
         if state.user32.next_atom > 0xffff {
             return fail(state, 8);
         }
-        let name_ptrs = persistent_strings(mem, state, &text)?;
+        let name_ptrs = state.class_strings(mem, &text)?;
         let menu_ptrs = if fields[8] <= 0xffff {
             [fields[8]; 2]
         } else {
             let menu = crate::file_api::read_name(mem, fields[8], wide)
                 .map_err(|e| format!("class menu: {e}"))?;
-            persistent_strings(mem, state, &menu)?
+            state.class_strings(mem, &menu)?
         };
         let atom = state.user32.next_atom as u16;
         state.user32.next_atom += 1;

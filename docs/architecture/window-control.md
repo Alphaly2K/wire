@@ -2,9 +2,11 @@
 
 `win32/catalog/window_control.rs` 是十七项创建、销毁、默认过程、过程转发、显示/更新、启用、父窗口、位置和同步发送接口的唯一 provider、参数宽度及架构策略声明。PE32 的 ABI 清栈和 Win64 的 DWORD 截断由契约生成；Win64 静态兼容 kernel32/kernelbase/user32，动态查询保留仅 user32 的范围。
 
-PE32 `user32/control.rs` 仍协调创建、销毁和同步发送，其余几何/更新已拆为请求：`user32/window_geometry.rs` 只借 USER、内存、scratch 与 LastError，`x86/process/window_geometry.rs` 执行启用、位置和绘制通知。只有正常返回才由 API 层完成返回帧，阻塞或非局部转移继续交给进程编排。创建保持 WM_NCCREATE/WM_CREATE 和原清理顺序，后续通知重新读取窗口过程；ShowWindow 和 DestroyWindow 在回调前提交原状态，回调失败时保留该状态。MoveWindow/SetWindowPos 的 guest WINDOWPOS 可在回调中修改，之后才提交位置并发送 WM_WINDOWPOSCHANGED，继续使用操作开始时的过程快照。同步发送保留跨线程排队、唤醒及重新分发。
+PE32 `user32/control.rs` 只准备创建、显示、销毁、同步发送和默认过程请求，不依赖 CPU、ApiState 或 guest 执行器；`x86/process/window.rs` 执行生命周期回调、过程转发与发送等待。内置类注册仍由组合根协调，创建记录只借 USER、内存、scratch、tid 和 LastError。几何/更新由 `user32/window_geometry.rs` 准备，`x86/process/window_geometry.rs` 执行通知。只有正常返回才由 API 层完成返回帧，阻塞或非局部转移继续交给进程编排。创建保持 WM_NCCREATE/WM_CREATE 和原清理顺序，后续通知重新读取窗口过程；ShowWindow 和 DestroyWindow 在回调前提交原状态，回调失败时保留该状态。MoveWindow/SetWindowPos 的 guest WINDOWPOS 可在回调中修改，之后才提交位置并发送 WM_WINDOWPOSCHANGED，继续使用操作开始时的过程快照。同步发送保留跨线程排队、唤醒及重新分发。
 
 默认窗口过程复用原文本、非客户区、背景和绘制实现。UpdateWindow 在 PE32 上按原 update region 决定是否执行 WM_PAINT；RedrawWindow 的同步更新也经过同一协调器。窗口记录仍由既有 User32 资源持有，本批收敛控制入口，不重排资源生命周期。
+
+同步发送的完成查找先于 HWND 验证，发送方退出、消息上限、ID 提交和 receiver wake 仍由 USER 管理；Process 消费等待请求后才 block_current，重醒仍重新分发同一 stub。创建拒绝时的 cleanup 继续复用一次过程快照，普通创建/销毁通知按原位置重查过程；callback fault 不额外回滚已提交状态。
 
 默认 WM_WINDOWPOSCHANGED 由 USER 准备 WM_MOVE，然后 Process 执行；执行后重新向 USER 取得当前窗口、过程、style 和 client size，再发送 WM_SIZE。初始 flags 继续取自回调前的 WINDOWPOS。`user32_common.rs` 只保留文本与内存 codec，不依赖 CPU/ApiState，闲置的私有 client_origin 转发入口删除。
 
@@ -17,3 +19,5 @@ Win64 在冷绑定时把需要过程执行器的操作保存为 `ControlImport::
 验证与性能证据见[本批记录](../reports/refactoring-window-control-2026-10-18.md)。
 
 几何请求基线 `c8c735e`，新增独立 guest fixture 在迁移前固定 WM_MOVE 替换过程并最小化、WM_SIZE 使用新过程/状态。原 parent、enable precommit、position prepare/commit、update、text/codec 与 frame 核对保持，release 完整 Win32 258、IR 31、fmt/release lib/bin strict Clippy/build 通过。删除闲置 facade 后重跑必要构建，首次 dead-code Clippy 日志保留；不跑性能或游戏矩阵。证据 `wire-out/refactoring-2026-10-14/r4-window-geometry32-{source-checks,verification}.json`。
+
+生命周期/发送请求基线 `2f87673`。创建准备与 callback/cleanup、发送完成/入队/wake、show/destroy commit、默认 nonclient/background、class 字符串分配/查找与 frame 核对保持。完整 release Win32 258、IR 31、fmt/release lib/bin strict Clippy/build 通过；字段简写 lint 修正后通过，首次日志保留。不跑性能或游戏矩阵，证据 `wire-out/refactoring-2026-10-14/r4-window-control32-{source-checks,verification}.json`。

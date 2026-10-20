@@ -15,6 +15,7 @@ pub(crate) mod display;
 pub(crate) mod messages;
 pub(crate) mod painting;
 pub(crate) mod termination;
+pub(crate) mod window;
 pub(crate) mod window_geometry;
 pub(crate) mod window_state;
 

@@ -322,6 +322,31 @@ impl ApiState {
     pub fn crt_app_type(&self) -> u32 {
         self.crt.app_type()
     }
+    pub(crate) fn class_strings(
+        &mut self,
+        mem: &mut GuestMem,
+        text: &str,
+    ) -> Result<[u32; 2], String> {
+        crate::user32::persistent_strings(mem, &mut self.scratch, &mut self.last_error, text)
+    }
+    pub(crate) fn window_creation_request(
+        &mut self,
+        id: crate::win32::catalog::WindowControlApi,
+        args: &Args,
+        mem: &mut GuestMem,
+        api: &mut ApiTable,
+        tid: u32,
+    ) -> Result<crate::user32::CreationRequest, String> {
+        crate::user32::ensure_builtin(mem, api, self, args[1], id.wide())?;
+        self.user32.prepare_creation(
+            args,
+            id.wide(),
+            mem,
+            &mut self.scratch,
+            tid,
+            &mut self.last_error,
+        )
+    }
     pub(crate) fn window_geometry_request(
         &mut self,
         id: crate::win32::catalog::WindowControlApi,
@@ -929,7 +954,7 @@ pub fn dispatch(
             let Some(crate::win32::catalog::ApiId::WindowControl(id)) = binding.typed else {
                 unreachable!();
             };
-            let (outcome, message) = crate::user32::control_call(
+            let (outcome, message) = crate::x86::process::window::call(
                 id, &args, cpu, mem, api, state, log, sched, max_instr,
             )?;
             match outcome {

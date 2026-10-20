@@ -85,7 +85,7 @@ fn execute(
         &mut state.last_error,
     )? {
         PaintRequest::Value(n) => value(n),
-        PaintRequest::Update => crate::user32::control_call(
+        PaintRequest::Update => super::window::call(
             crate::win32::catalog::WindowControlApi::Update,
             a,
             cpu,
