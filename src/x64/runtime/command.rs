@@ -84,7 +84,8 @@ mod tests {
         expected.extend(args);
         assert_eq!(arguments(&wide), expected);
         assert!(wide.contains("\"-force-windows-7-like-d3d11\""));
-        let ansi = Runtime64::string_bytes(&m, COMMAND_A, u32::MAX as u64, 1).unwrap();
+        let ansi =
+            crate::win32::x64::text::string_bytes(&m, COMMAND_A, u32::MAX as u64, 1).unwrap();
         assert_eq!(
             crate::codepage::decode(&ansi[..ansi.len() - 1], 932).unwrap(),
             wide
@@ -100,7 +101,7 @@ mod tests {
         m.protect(COMMAND_W, PAGE, READ).unwrap();
         assert!(r.append_guest_arguments(&mut m, &["new".into()]).is_err());
         assert_eq!(
-            Runtime64::string_bytes(&m, COMMAND_A, u32::MAX as u64, 1).unwrap(),
+            crate::win32::x64::text::string_bytes(&m, COMMAND_A, u32::MAX as u64, 1).unwrap(),
             ansi
         );
         assert_eq!(Runtime64::utf16(&m, COMMAND_W).unwrap(), wide);

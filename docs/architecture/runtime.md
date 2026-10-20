@@ -32,6 +32,7 @@
 | `resource`、`win32::x86::resources` | PE32 映射 image 的受检资源视图与字符串输出；只借内存、EXE 基址和错误槽，不拥有模块寿命 |
 | `x64::runtime::files::Files` | Win64 文件、标准 endpoint/alias、受限 filesystem 与属性元数据的私有 owner；路径 mutation 和资源寿命由 owner 执行，ABI/guest 输出由 adapter 提交 |
 | `x64::runtime::{find::Searches,files::directory}` | Searches 执行 FindFirst/Next/Close，Files 编码 metadata 和执行目录 batch 输出；只读借 Threads 在实际错误分支写 LastError，原游标提交顺序保持 |
+| `x64::runtime::{events::Events,sync_objects,timers}` | Events 执行事件、信号量和 waitable timer 的普通调用，只借 Memory 与只读 Threads；原命名、权限、计数、deadline 和等待语义保持 |
 | `host::calendar` | 提供原有宿主 localtime 值；Windows 日期格式和 guest 输出布局由领域/架构层负责 |
 | `host::ui`、`win32::{x86::host,gdi::x86}` | host 接收 owned 窗口/帧请求并产出事件；guest adapter 负责 USER 入队、GDI 语义映射及 LastError，公开 platform 路径只作 facade |
 | `graphics`、`d3d9`、`gpu` | 像素/对象核心不依赖 ApiState；D3D9 生命周期只借 heap，设备调用再借 windows/Graphics，DIB/font 仍有 PE32 codec；DXGI 其余适配器继续迁移 |

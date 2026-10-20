@@ -16,4 +16,6 @@ PE32 沿用共享 handle/name map：同名对象跨 event/mutex/semaphore 类型
 
 Win64 的 Events owner 保留对象与每个 alias 的 access，命名对象跨类型冲突报 error 6。Create/Open 的错误、Local 前缀、长度及 access 检查、非零 SECURITY_ATTRIBUTES 拒绝都按原顺序执行。ReleaseSemaphore 先验证 count/权限并获得 previous，再写 guest 输出，最后提交 count；输出 fault 不增加 count。公共 gateway 仍预先保存 return frame，CPU/API count/trace 的最终提交顺序保持。
 
+Win64 普通调用现直接由 Events 执行，只借 Memory 和只读 Threads；文本读取直接使用受检 codec，Threads 在实际写错误时读取当前 TEB。Runtime64 入口只组合资源；对象、alias 和等待算法保持。与 timer 一起通过完整 Win64 269、library 61 passed / 7 ignored 及严格构建，见 `r3-sync-services64` 证据。
+
 本批不迁移 mutex、timer、WaitFor* 或合作线程调度，也不统一两架构不同的命名、权限、count 和 fault 策略。独立旧行为基线与迁移验收见[本批记录](../reports/refactoring-sync-objects-2026-10-16.md)。

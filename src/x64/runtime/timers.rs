@@ -1,6 +1,6 @@
 //! Waitable timers use monotonic deadlines and the cooperative wait scheduler.
-use super::{Memory, Runtime64, UNIX_EPOCH};
-use crate::win32::catalog::TimerApi;
+use super::{events::Events, threads::Threads, Memory, Runtime64, UNIX_EPOCH};
+use crate::win32::{catalog::TimerApi, x64::text};
 use std::time::SystemTime;
 use std::time::{Duration, Instant};
 
@@ -11,6 +11,18 @@ impl Runtime64 {
         id: TimerApi,
         a: &[u64],
     ) -> Result<u64, String> {
+        self.events.timer_call(mem, id, a, &self.threads)
+    }
+}
+
+impl Events {
+    pub(super) fn timer_call(
+        &mut self,
+        mem: &mut Memory,
+        id: TimerApi,
+        a: &[u64],
+        threads: &Threads,
+    ) -> Result<u64, String> {
         let result = if id.creating() || id.opening() {
             let opening = id.opening();
             let extended = id.extended();
@@ -18,27 +30,26 @@ impl Runtime64 {
             let object_name = if pointer == 0 {
                 None
             } else {
-                Some(Self::path_name(mem, pointer, id.wide())?)
+                Some(text::path_name(mem, pointer, id.wide())?)
             };
             if opening {
                 object_name
                     .ok_or(87u32)
-                    .and_then(|n| self.events.open_timer(n, a[0] as u32))
+                    .and_then(|n| self.open_timer(n, a[0] as u32))
                     .map(|h| (h, false))
             } else if a[0] != 0 {
                 Err(50)
             } else if extended && a[2] & !3 != 0 {
                 Err(87)
             } else {
-                self.events.timer(
+                self.timer(
                     if extended { a[2] & 1 != 0 } else { a[1] != 0 },
                     object_name,
                     if extended { a[3] as u32 } else { 0x1f0003 },
                 )
             }
         } else if id == TimerApi::Cancel {
-            self.events
-                .set_timer(a[0], None, Duration::ZERO)
+            self.set_timer(a[0], None, Duration::ZERO)
                 .map(|()| (1, false))
         } else {
             let due = mem.read_int(a[1], 8)? as i64;
@@ -65,7 +76,6 @@ impl Runtime64 {
                 match Instant::now().checked_add(delay) {
                     None => Err(87),
                     Some(deadline) => self
-                        .events
                         .set_timer(a[0], Some(deadline), Duration::from_millis(a[2]))
                         .map(|()| (1, false)),
                 }
@@ -74,12 +84,12 @@ impl Runtime64 {
         match result {
             Ok((value, existed)) => {
                 if id.creating() {
-                    self.set_error(mem, if existed { 183 } else { 0 })?;
+                    threads.set_error(mem, if existed { 183 } else { 0 })?;
                 }
                 Ok(value)
             }
             Err(error) => {
-                self.set_error(mem, error)?;
+                threads.set_error(mem, error)?;
                 Ok(0)
             }
         }

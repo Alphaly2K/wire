@@ -1,6 +1,6 @@
 //! Typed event/semaphore adapters; Events retains object and alias ownership.
-use super::*;
-use crate::win32::catalog::SyncObjectApi;
+use super::{events::Events, threads::Threads, Memory, Runtime64};
+use crate::win32::{catalog::SyncObjectApi, x64::text};
 
 impl Runtime64 {
     pub(super) fn sync_object_call(
@@ -8,6 +8,18 @@ impl Runtime64 {
         id: SyncObjectApi,
         args: &[u64],
         mem: &mut Memory,
+    ) -> Result<u64, String> {
+        self.events.sync_object_call(id, args, mem, &self.threads)
+    }
+}
+
+impl Events {
+    pub(super) fn sync_object_call(
+        &mut self,
+        id: SyncObjectApi,
+        args: &[u64],
+        mem: &mut Memory,
+        threads: &Threads,
     ) -> Result<u64, String> {
         use SyncObjectApi::*;
         Ok(match id {
@@ -28,9 +40,9 @@ impl Runtime64 {
                 let event_name = if pointer == 0 {
                     None
                 } else if id.wide() {
-                    Some(Self::utf16(mem, pointer)?)
+                    Some(text::utf16(mem, pointer)?)
                 } else {
-                    let bytes = Self::string_bytes(mem, pointer, u32::MAX as u64, 1)?;
+                    let bytes = text::string_bytes(mem, pointer, u32::MAX as u64, 1)?;
                     Some(
                         crate::codepage::decode(&bytes[..bytes.len() - 1], 932)
                             .map_err(|e| format!("event codepage error {e}"))?,
@@ -38,8 +50,7 @@ impl Runtime64 {
                 };
                 let result = if opening {
                     if let Some(event_name) = event_name {
-                        self.events
-                            .open(event_name, args[0] as u32, false)
+                        self.open(event_name, args[0] as u32, false)
                             .map(|h| (h, false))
                     } else {
                         Err(87)
@@ -52,15 +63,15 @@ impl Runtime64 {
                     } else {
                         (args[1] != 0, args[2] != 0, 0x1f0003)
                     };
-                    self.events.create(manual, initial, event_name, access)
+                    self.create(manual, initial, event_name, access)
                 };
                 match result {
                     Ok((handle, existed)) => {
-                        self.set_error(mem, if existed { 183 } else { 0 })?;
+                        threads.set_error(mem, if existed { 183 } else { 0 })?;
                         handle
                     }
                     Err(error) => {
-                        self.set_error(mem, error)?;
+                        threads.set_error(mem, error)?;
                         0
                     }
                 }
@@ -75,20 +86,18 @@ impl Runtime64 {
                 let object_name = if pointer == 0 {
                     None
                 } else if id.wide() {
-                    Some(Self::utf16(mem, pointer)?)
+                    Some(text::utf16(mem, pointer)?)
                 } else {
-                    let bytes = Self::string_bytes(mem, pointer, u32::MAX as u64, 1)?;
+                    let bytes = text::string_bytes(mem, pointer, u32::MAX as u64, 1)?;
                     Some(
                         crate::codepage::decode(&bytes[..bytes.len() - 1], 932)
                             .map_err(|e| format!("semaphore codepage error {e}"))?,
                     )
                 };
                 let result = if opening {
-                    object_name.ok_or(87u32).and_then(|n| {
-                        self.events
-                            .open(n, args[0] as u32, true)
-                            .map(|h| (h, false))
-                    })
+                    object_name
+                        .ok_or(87u32)
+                        .and_then(|n| self.open(n, args[0] as u32, true).map(|h| (h, false)))
                 } else if id.extended() && args[4] != 0 {
                     Err(87)
                 } else {
@@ -97,37 +106,36 @@ impl Runtime64 {
                     } else {
                         0x1f0003
                     };
-                    self.events
-                        .semaphore(args[1] as i32, args[2] as i32, object_name, access)
+                    self.semaphore(args[1] as i32, args[2] as i32, object_name, access)
                 };
                 match result {
                     Ok((handle, existed)) => {
-                        self.set_error(mem, if existed { 183 } else { 0 })?;
+                        threads.set_error(mem, if existed { 183 } else { 0 })?;
                         handle
                     }
                     Err(error) => {
-                        self.set_error(mem, error)?;
+                        threads.set_error(mem, error)?;
                         0
                     }
                 }
             }
-            ReleaseSemaphore => match self.events.release_count(args[0], args[1] as i32) {
+            ReleaseSemaphore => match self.release_count(args[0], args[1] as i32) {
                 Ok(previous) => {
                     if args[2] != 0 {
                         mem.write_int(args[2], 4, previous as u64)?;
                     }
-                    self.events.release(args[0], args[1] as i32);
+                    self.release(args[0], args[1] as i32);
                     1
                 }
                 Err(error) => {
-                    self.set_error(mem, error)?;
+                    threads.set_error(mem, error)?;
                     0
                 }
             },
-            SetEvent | ResetEvent => match self.events.change(args[0], id == SetEvent) {
+            SetEvent | ResetEvent => match self.change(args[0], id == SetEvent) {
                 Ok(result) => result,
                 Err(error) => {
-                    self.set_error(mem, error)?;
+                    threads.set_error(mem, error)?;
                     0
                 }
             },

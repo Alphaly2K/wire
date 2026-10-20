@@ -528,9 +528,6 @@ impl Runtime64 {
         }
         .allocate(mem, size)
     }
-    fn string_bytes(mem: &Memory, ptr: u64, count: u64, width: usize) -> Result<Vec<u8>, String> {
-        crate::win32::x64::text::string_bytes(mem, ptr, count, width)
-    }
     /// Validate the return frame first, then dispatch the exact Win64 arity.
     /// A bad return frame or checked output fault must not commit CPU/API state.
     fn catalog_call(
