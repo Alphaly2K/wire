@@ -16,6 +16,8 @@ PE32 [窗口状态](architecture/window-state.md)、[对话框/枚举](architect
 
 窗口创建/销毁、显示、同步发送与默认过程也已完成请求边界，`src/user32/` 内直接 CPU/guest 执行依赖清零；Process 保留原 callback/cleanup 循环，完整 Win32 258、IR 31 和必要构建通过。其余 DLL/SEH/CRT 恢复边界继续按原策略迁移。
 
+[CRT 编排](architecture/crt32.md)随后迁入 Process，API 不再处理 FPU/初始化器执行循环；qsort 与 initializer 保留各自恢复策略。新增函数表变更/首错误 fixture，完整 Win32 **259**、IR 31 和必要构建通过。
+
 ## 重构范围
 
 当前累计冻结包含[对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)、日志、五项 paint、控件初始化、资源、启动信息、环境接口与 CLI 拆分；独立历史证据继续可查。

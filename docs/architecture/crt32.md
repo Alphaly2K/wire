@@ -8,6 +8,10 @@ ApiState 的 build_argv、errno 与 scratch 入口显式委托；crt_app_type �
 
 普通 CRT 语义按依赖分离：`win32/x86/crt_memory.rs` 仅借 GuestMem，负责原 time、CP932 byte helper、memory、比较、C locale case 和 strlen；`heaps::crt_call` 仅借 GuestMem、GuestHeap 和 process heap ID，负责 malloc/calloc/realloc/free/strdup。CrtState32 的 startup_call 负责原 scratch 指针 accessor、mainargs 与既有零返回启动策略，strtoul 直接借本 owner 的 errno、Scratch32 和线程 ID。保留读取限额、原字节比较、NULL/overflow、宽字符 accessor 现状与分配后输出故障的提交顺序。
 
-CRT CPU/FPU 返回、qsort guest callback、初始化函数数组、模块数据 export 和退出控制继续由原进程入口编排，数学、排序和 callback transfer 语义保持。cdecl 的 provider 判定、参数预读、零清栈及 trace 仍沿用原规则；本批没有把这些入口算作新增 catalog 契约。
+CRT CPU/FPU 返回、初始化函数数组、模块数据 export 和退出控制由 `x86/process/crt.rs` 编排，qsort 位于 `x86/process/crt_sort.rs`；API facade 只委托 Process。普通 strtoul、memory/heap/startup 通过 ApiState 的窄组合方法借用私有 CRT/scratch 状态，不暴露字段。数学、排序和 callback transfer 语义保持。cdecl 的 provider 判定、参数预读、零清栈及 trace 仍沿用原规则，没有把这些入口算作新增 catalog 契约。
+
+初始化器继续逐项读取可变 guest 函数表，读取失败按原策略跳过；`_initterm_e` 记录第一个非零结果并继续原循环。它直接使用 Process::call_guest，保留 SEH catch 的非局部转移。qsort 使用原 caller-context invoke、预算检查、逐次比较和原 swap 顺序，没有把两种恢复策略合并。
 
 旧行为基线 `53f620d` 独立固定懒分配、指针身份、对齐、缓存后耗尽与游标失败顺序。原 allocator、errno、argv 及 CRT dispatch 主体归一核对保持。环境耗尽测试通过真实分配填满 arena，使用只读游标查询，原错误/TEB/log/stack 期望值保持。release 完整 Win32 249、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵。证据为 `wire-out/refactoring-2026-10-14/r3-crt32-{source-checks,verification}.json` 及 baseline/validation 日志。
+
+Process 提取基线 `790480e`。新增独立函数表变更/首错误 fixture 在迁移前通过；原 provider/FPU、initializer、exit、scalar 资源借用、qsort 全文件与 callback frame 核对保持。release 完整 Win32 259、IR 31、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵，证据 `wire-out/refactoring-2026-10-14/r4-crt-process32-{source-checks,verification}.json`。

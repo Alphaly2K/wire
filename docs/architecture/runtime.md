@@ -7,6 +7,7 @@
 | `x86::process` | PE32 进程组合根，拥有装载状态、CPU、内存、API、调度器和日志；执行 DLL 通知、API trap、callback 与分时编排 |
 | `x86::process::termination`、`win32::x86::thread_creation` | Process 统一有序线程/进程退出；普通线程创建只借对象、模块、heap、错误与 scheduler，late ID fault 的部分提交保持 |
 | `user32`、`x86::process::{window,window_geometry,window_state,dialog,messages,painting,display}` | USER 准备状态、资源与 callback/等待请求；Process 执行 guest 与阻塞并完成后置输出。USER 领域文件不依赖 CPU/执行器，创建/销毁、重入重查和部分提交策略各自保持 |
+| `x86::process::{crt,crt_sort}`、`win32::x86::{crt,crt_memory}` | Process 负责 CRT CPU/FPU 返回、初始化器与排序 callback；领域负责私有指针状态与普通内存算法。caller-context 与 SEH initializer 恢复策略分别保留 |
 | `x86::{cpu,ir,memory,pe,loader}` | PE32 ISA/IR/内存与装载；根 `cpu/ir/mem/pe/loader` 仅重导出旧公开入口。`cpu::process_facade` 委托旧 run/call_guest，单步/段执行保持专用静态路径 |
 | `x86::address_space` | PE32 gateway 保留地址、stride 与容量；执行内核直接引用架构布局，`api` 继续公开重导出原常量 |
 | `x64::{cpu,memory,pe,process}` | AMD64 指令、内存、装载与进程边界，保持现有 typed 热路径 |

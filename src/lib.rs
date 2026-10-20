@@ -1,7 +1,6 @@
 pub mod api;
 pub mod codepage;
 pub mod cpu;
-mod crt_sort;
 mod d3d9;
 mod dsound;
 pub mod file_api;

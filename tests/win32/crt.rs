@@ -239,6 +239,36 @@ fn crt_qsort_calls_guest_comparator_preserves_records_and_callback_boundaries() 
 }
 
 #[test]
+fn crt_initializers_reload_later_entries_and_keep_first_error_while_continuing() {
+    for (name, result) in [("_initterm", 0), ("_initterm_e", 7)] {
+        let mut v = Vm::new();
+        let second = CODE + 0x100;
+        let third = CODE + 0x200;
+        let mut first = vec![0xc7, 0x05];
+        first.extend((DATA + 4).to_le_bytes());
+        first.extend(second.to_le_bytes());
+        first.extend([0xb8, 7, 0, 0, 0, 0xc3]);
+        v.mem.write_bytes(CODE, &first).unwrap();
+        for (procedure, counter, error) in
+            [(second, DATA + 0x100, 11u32), (third, DATA + 0x104, 13u32)]
+        {
+            let mut code = vec![0xff, 0x05];
+            code.extend(counter.to_le_bytes());
+            code.push(0xb8);
+            code.extend(error.to_le_bytes());
+            code.push(0xc3);
+            v.mem.write_bytes(procedure, &code).unwrap();
+        }
+        for (i, value) in [CODE, 0, third].into_iter().enumerate() {
+            v.mem.write_u32(DATA + i as u32 * 4, value).unwrap();
+        }
+        assert_eq!(v.call("msvcrt.dll", name, &[DATA, DATA + 12]), result);
+        assert_eq!(v.mem.read_u32(DATA + 0x100).unwrap(), 1);
+        assert_eq!(v.mem.read_u32(DATA + 0x104).unwrap(), 1);
+    }
+}
+
+#[test]
 fn kernel_and_crt_strings_preserve_bytes_lengths_and_numeric_errors() {
     let mut v = Vm::new();
     v.mem.write_bytes(DATA, &[0x83, 0x5c, 0xff, 0]).unwrap();

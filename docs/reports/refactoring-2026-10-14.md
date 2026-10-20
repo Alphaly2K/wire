@@ -646,3 +646,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R4 PE32 窗口生命周期与同步发送
 
 基线 `2f87673`。USER 准备创建、显示、销毁、发送和默认过程请求，Process 的 window 协调器执行 callback、等待和原 cleanup；内置类注册由组合根协调，class 匹配与持久字符串按明确资源借用。`src/user32/` 内直接 CPU/guest 执行依赖清零，sent 仍封装。创建准备/cleanup、发送完成/入队/wake、show/destroy commit、默认 nonclient/background、class 字符串分配/匹配和 callback frame 核对保持。完整 release Win32 258、IR 31、fmt/release lib/bin strict Clippy/build 通过；字段简写 lint 修正后通过，首次日志保留。不跑性能或游戏矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r4-window-control32-{source-checks,verification}.json`。
+
+## R4 PE32 CRT 执行编排
+
+基线 `790480e`。CRT 的 CPU/FPU 返回、initializer、模块数据与 exit 编排归 Process，qsort 算法原文迁到其私有子模块；普通 strtoul/memory/heap/startup 通过组合根窄借资源。原 provider/CPU、initializer/SEH transfer、exit、scalar 主体与 qsort 全文核对保持，callback frame 未改。新增独立函数表变更/首错误但继续执行 fixture 在迁移前通过。release 完整 Win32 259、IR 31、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r4-crt-process32-{source-checks,verification}.json`。
