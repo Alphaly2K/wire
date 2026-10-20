@@ -58,6 +58,8 @@ PE32 USER 已拥有宿主窗口快照和事件消费，展示轮询不再 take/�
 
 PE32 USER 的状态、请求和文本 codec 已归入 `win32/user/pe32`；根 `user32` 保留公开类型与 find_class/host_message/dispatch 兼容入口，领域实现不依赖 CPU 或 ApiState。删除两个闲置私有辅助入口，形成上述全目标整合。
 
+Win64 显示 scalar 查询也归 User，只借 Memory 与只读 Threads；monitor callback 编排保持独立。完整 Win64 269、library 61 passed / 7 ignored 和严格构建通过。
+
 ## 重构范围
 
 当前累计冻结包含[对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)、日志、五项 paint、控件初始化、资源、启动信息、环境接口与 CLI 拆分；独立历史证据继续可查。

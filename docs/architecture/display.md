@@ -4,6 +4,8 @@
 
 `win32/user/display.rs` 提供不可变 1024×768、32-bit、60-Hz desktop profile，以及 DISPLAY_DEVICE、DEVMODE、MONITORINFO 的显式 little-endian 编码和 metrics 纯核。它不访问 guest 内存或执行 CPU。`win32/x86/display.rs` 和 `x64/runtime/display.rs` 保留架构验证与输出提交；monitor callback 的临时 heap、guest executor、frame 和释放顺序由原进程路径管理。
 
+Win64 标量查询由 User 执行，只借 Memory 和只读 Threads；Runtime64 只组合资源。HWND 检查、DEVMODE/设备输出、flags 与错误槽访问保持原顺序，EnumDisplayMonitors 的 callback coordinator 保持独立。
+
 | 行为 | PE32 | Win64 |
 | --- | --- | --- |
 | 静态 provider | user32 | kernel32/kernelbase/user32 |

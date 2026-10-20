@@ -734,3 +734,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R7 PE32 USER 目录与兼容入口整合
 
 基线 `ed2fbf2`。已形成的 USER owner、十三个子模块及文本 codec 迁入 `win32/user/pe32`；根 user32 保留原公开类型与 find_class/host_message/dispatch，内部请求显式重导出。领域层移除 ApiState/CPU 导入；两个闲置私有辅助模块删除，PE32/Win64 frame 直接调用既有纯几何核。逐文件按路径/可见性/import 替换与 rustfmt 对照保持，三个公开 wrapper、状态结构与算法保持；没有 include/build/native 输入迁移，许可标注保留。首次 check 发现将私有 Message 列入 re-export，移除后阶段整合通过 release 全目标 694 passed / 7 ignored / 21 suites、all-targets/all-features strict Clippy/build/fmt 及 6 项 inventory 工具测试。真实 host/GPU 实现未改，沿用前述证据；评估为职责形成后的纯目录归位，不跑性能或游戏矩阵。累计仍 915；证据 `wire-out/refactoring-2026-10-14/r7-user32-layout-{source-checks,verification}.json`。
+
+## R3 Win64 显示 scalar owner
+
+基线 `3801f7d`。显示 scalar 由 User 执行，只借 Memory 和只读 Threads，Runtime64 入口仅组合资源；设备名解码直接使用原 codec。完整 scalar 主体经资源替换和 rustfmt 对照一致，monitor callback coordinator 与纯 profile 原文保持。完整 release Win64 269、library 61 passed / 7 ignored、all-targets/all-features strict Clippy/build/fmt 通过。原输出、HWND/flags/结构长度验证和错误槽顺序保持，不跑性能或游戏/native 矩阵，累计仍 915；证据 `wire-out/refactoring-2026-10-14/r3-display-scalar64-{source-checks,verification}.json`。

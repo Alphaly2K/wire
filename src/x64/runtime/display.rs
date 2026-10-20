@@ -1,5 +1,5 @@
 //! Virtual desktop queries and explicit process-owned monitor callbacks.
-use super::{Cpu64, Memory, Runtime64, READ, WRITE};
+use super::{threads::Threads, user::User, Cpu64, Memory, Runtime64, READ, WRITE};
 pub(in crate::x64::runtime) use crate::win32::user::display::{DEVICE, HEIGHT, REFRESH_HZ, WIDTH};
 use crate::win32::x64::geometry::read_rect as rect;
 use crate::win32::{catalog::DisplayApi, user::display as profile};
@@ -16,17 +16,29 @@ impl Runtime64 {
         id: DisplayApi,
         args: &[u64],
     ) -> Result<u64, String> {
+        self.user.display_call(mem, id, args, &self.threads)
+    }
+}
+
+impl User {
+    pub(super) fn display_call(
+        &self,
+        mem: &mut Memory,
+        id: DisplayApi,
+        args: &[u64],
+        threads: &Threads,
+    ) -> Result<u64, String> {
         let wide = id.wide();
         if id.devices() || id.settings() {
             let device = if args[0] == 0 {
                 String::new()
             } else {
-                Self::path_name(mem, args[0], wide)?
+                crate::win32::x64::text::path_name(mem, args[0], wide)?
             };
             if id.devices() {
                 let size = if wide { 840 } else { 424 };
                 if mem.read_int(args[2], 4)? != size || args[3] & !1 != 0 {
-                    self.set_error(mem, 87)?;
+                    threads.set_error(mem, 87)?;
                     return Ok(0);
                 }
                 if args[1] != 0 || (!device.is_empty() && !device.eq_ignore_ascii_case(DEVICE)) {
@@ -51,7 +63,7 @@ impl Runtime64 {
                 return Ok(0);
             }
             if id.extended() && args[3] & !3 != 0 {
-                self.set_error(mem, 87)?;
+                threads.set_error(mem, 87)?;
                 return Ok(0);
             }
             let size_offset = if wide { 68 } else { 36 };
@@ -60,7 +72,7 @@ impl Runtime64 {
                 2,
             )? as usize;
             if !(if wide { 188..=220 } else { 124..=156 }).contains(&size) {
-                self.set_error(mem, 87)?;
+                threads.set_error(mem, 87)?;
                 return Ok(0);
             }
             mem.write(args[2], &profile::mode(wide, size))?;
@@ -71,7 +83,7 @@ impl Runtime64 {
             DisplayApi::InfoA | DisplayApi::InfoW => {
                 let size = mem.read_int(args[1], 4)? as usize;
                 if args[0] != MONITOR || (size != 40 && size != if wide { 104 } else { 72 }) {
-                    self.set_error(mem, 87)?;
+                    threads.set_error(mem, 87)?;
                     return Ok(0);
                 }
                 mem.write(args[1], &profile::monitor(wide, size))?;
@@ -79,7 +91,7 @@ impl Runtime64 {
             }
             DisplayApi::FromPoint | DisplayApi::FromRect | DisplayApi::FromWindow => {
                 if args[1] > 2 {
-                    self.set_error(mem, 87)?;
+                    threads.set_error(mem, 87)?;
                     return Ok(0);
                 }
                 let intersects = match id {
@@ -100,8 +112,8 @@ impl Runtime64 {
                     }
                     _ if args[0] == 0 => false,
                     _ => {
-                        let Some(window) = self.user.windows.get(&args[0]) else {
-                            self.set_error(mem, 1400)?;
+                        let Some(window) = self.windows.get(&args[0]) else {
+                            threads.set_error(mem, 1400)?;
                             return Ok(0);
                         };
                         let r = window.rect;
@@ -122,6 +134,9 @@ impl Runtime64 {
             _ => unreachable!(),
         }
     }
+}
+
+impl Runtime64 {
     pub(super) fn enumerate_monitors(
         &mut self,
         mem: &mut Memory,

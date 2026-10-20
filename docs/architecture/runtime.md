@@ -19,6 +19,7 @@
 | `api` | PE32 stub 与 ABI 调用 facade；领域契约将集中在 `win32::catalog`，领域语义逐步拥有独立状态 |
 | `x64::runtime` | Win64 gateway 与服务组合根；已有 BoundImport 冷绑定和 HotImport 热路由，迁移中保留 |
 | `x64::runtime::user::{message,host}` | User 处理消息、队列就绪与宿主事件；只借明确资源。Runtime 协调 LastError 和实际阻塞，窗口 callback frame 保持独立 |
+| `x64::runtime::display` | User 执行 Win64 显示 scalar 查询，只借 Memory/只读 Threads；Runtime 保留 monitor callback 的真实资源和执行编排 |
 | `x64::runtime::{heap,local_memory,automation,winrt}` | Heap、LocalMemory、Bstrings、Strings 执行各自分配/调用，只借内存与 Pages 的原页记录、游标、错误槽和诊断；owner 保留独立归属与失败提交顺序 |
 | `fs`、`codepage`、`simd` | 已共享的纯语义或公共服务，继续复用 |
 | `runtime::environment` | 不可变 guest 身份/版本/locale/路径；私有可变环境变量模型，架构 allocator 生命周期独立 |
