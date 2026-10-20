@@ -37,6 +37,7 @@
 | `x64::runtime::dxgi::{output,d3d11::draw}` | Graphics 执行虚拟 output、context/binding 引用与 draw 输入准备；分配借 gateway/游标，其余按需只借内存，根保留公开统计 facade |
 | `x64::runtime::dxgi::d3d11::Calls` | 创建/COM/input-layout adapter 临时借 Graphics、Gateways、共享游标和 Trace；不借 Runtime64/线程/USER，内存按次传入，private-data 由 Graphics 共用实现 |
 | `x64::runtime::dxgi::calls` | Graphics 执行 factory/D3D12 能力创建及普通 factory/adapter/COM；明确借 gateway/游标与必要的只读 User，根保留对象 preflight 和 swapchain 控制路由 |
+| `x64::runtime::dxgi::swapchain` | 临时 Calls 借图形资源、分配/trace 和只读 User；Graphics 拥有 buffer/status/frame/计数，根继续协调 present 的 API count、unblock 和 record |
 | `gdiplus`、`gdiplus::calls` | GdiPlus 私有拥有 matrix/allocation/token；普通调用只借内存和 process heap，公开 dispatch 保留兼容签名 |
 | `wmi`、`wmi::calls` | Wmi 私有拥有 COM 对象、引用计数、游标和 vtable；调用只借内存、gateway table、heap 与 BSTR，provider 和 HRESULT 保持 |
 | `dsound`、`dsound::calls` | DSound 私有拥有对象/buffer、通知和 sink；方法只借内存、gateway、heap 及只读事件/窗口/Presenter，pump 与 signal 次序保持 |

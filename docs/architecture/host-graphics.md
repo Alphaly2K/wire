@@ -22,6 +22,8 @@ Win64 的七项 DXGI/D3D 创建入口已接入[图形契约](graphics-contracts.
 
 Win64 Graphics 现直接执行 COM 对象分配和递归资源释放，内存、gateway 和分配游标明确借用。原生 backend 未改，两个已有 GPU 资源生命周期 fixture 已显式通过；其余 guest COM handler 继续收敛资源边界。
 
+DXGI/D3D11 普通调用和 swapchain 创建/resize 也已收窄资源借用；Graphics 提供 owned frame 的 native texture/backend 引用快照与成功计数。Runtime/Process/Presenter 继续执行原 present 协议，surface 提交、返回帧和 unblock/trace 顺序保持。阶段整合全目标 694 passed / 7 ignored，两个真实 GPU fixture 显式通过。
+
 ```sh
 cargo test --release --all-targets --locked
 cargo test --release --lib --locked -- --ignored --test-threads=1

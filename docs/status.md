@@ -4,7 +4,7 @@
 
 近期完成 [GDI+](architecture/gdiplus.md)、[WMI](architecture/wmi.md)、[DirectSound](architecture/directsound.md) 与 [D3D9](architecture/d3d9.md) 的资源借用收敛，移除对象调用对整个 ApiState 的依赖及 registry/backend 临时 take；[PE32 线程创建和退出](architecture/thread-control.md)、[USER 资源退休](architecture/window-control.md)、[callback 执行](architecture/callbacks32.md) 与 [消息队列](architecture/messages.md) 也已归入各自 owner。Win64 [TLS/FLS](architecture/locals.md) 私有拥有固定槽和 callback identity，保留 TEB 与析构顺序。
 
-最新阶段整合覆盖至 PE32 模块装载与失败清理（上一提交 `1e6eacc`）：release 全目标 **694 passed / 7 ignored / 21 suites**，all-targets/all-features strict Clippy、build 及 fmt 通过。工具未改，沿用前次 **31 项工具测试**；真实 Metal 两项已在 D3D9 批次显式通过。按改动影响选择验证，普通契约和资源边界提取不逐批重跑性能或游戏矩阵；执行循环、ISA 算法和 callback frame 保持。见 [验收策略](architecture/validation-tools.md)。
+最新阶段整合覆盖至 PE32 同步编排与 Win64 DXGI/D3D11/swapchain 资源边界（上一提交 `b617169`）：release 全目标 **694 passed / 7 ignored / 21 suites**，all-targets/all-features strict Clippy、build 及 fmt 通过；两个真实 GPU draw/swapchain fixture 显式通过。工具未改，沿用前次 **31 项工具测试**。按改动影响选择验证，普通契约和资源边界提取不逐批重跑性能或游戏矩阵；执行循环、ISA 算法和 callback frame 保持。见 [验收策略](architecture/validation-tools.md)。
 
 历史性能拒绝、回滚与后续复核证据继续保留，见 [API 日志累计验收](reports/refactoring-api-log-2026-10-19.md)、[后台 Unity 渲染结束后的复核](reports/refactoring-post-unity-performance-2026-10-19.md) 和 [CLI 重试](reports/refactoring-cli-followup-2026-10-19.md)。当前结构重构不宣称新的性能提升。
 
@@ -45,6 +45,8 @@ Win64 虚拟 output、D3D11 context/binding 和 draw 输入准备也归 Graphics
 D3D11 主适配器及 input-layout 现在只临时借 Graphics、gateway、共享游标和 Trace，不再借 Runtime64；private-data 共用 Graphics 实现，ASCII codec 独立借内存。完整 Win64 269、library 61 passed / 7 ignored、两个 GPU fixture 及严格构建通过。
 
 DXGI factory/adapter/普通 COM 调用也归 Graphics，只借明确资源和必要的只读 User。根对象校验及 swapchain/D3D11 路由保持，完整 Win64 269、library 61 passed / 7 ignored 和严格构建通过；present 编排继续收敛。
+
+swapchain 创建/resize 和普通查询现借 Graphics、gateway、游标、Trace 与只读 User；Graphics 拥有 backbuffer、状态、frame 快照与成功计数，根保留 present 的线程/API/trace 提交。这批完成上述全目标整合及真实 GPU 验证。
 
 ## 重构范围
 

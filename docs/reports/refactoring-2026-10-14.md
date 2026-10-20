@@ -710,3 +710,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 Win64 DXGI 普通对象调用
 
 基线 `f84ff70`。Graphics 的 calls 模块执行 factory/D3D12 能力创建和普通 factory/adapter/COM，仅借 Memory、Gateways、共享页游标及必要的只读 User。根保留原对象/类型 preflight、parent 快照、D3D11 QueryInterface 与 swapchain 控制路由。两个修改文件经明确资源替换及完整 rustfmt 对照一致，D3D11、output、生命周期、swapchain 和根 runtime 原文未改。完整 release Win64 269、library 61 passed / 7 ignored、all-targets/all-features strict Clippy、build/fmt 通过。未改 GPU/present/生命周期算法，沿用上一批真实 GPU 证据，不重复 native/性能/游戏矩阵。累计仍 915，证据 `wire-out/refactoring-2026-10-14/r3-dxgi-calls64-{source-checks,verification}.json`。
+
+## R3/R5 Win64 swapchain 资源与 present 提交整合
+
+基线 `b617169`。swapchain 创建/查询/resize 临时借 Graphics、Gateways、游标、Trace 和只读 User，Graphics 拥有 backbuffer、status、frame 快照与成功计数。根保留公共 facade 和成功后的 API count/unblock/record 原顺序，Process/Presenter 协议未改。buffer/status/frame/create/call、present 判断、两侧提交和统计经资源替换及 rustfmt 对照一致；GetDevice 的三个参数在建立借用前复制。连续同步/图形迁移整合通过 release 全目标 694 passed / 7 ignored、21 suites，all-targets/all-features strict Clippy/build/fmt 及两个显式真实 GPU draw/swapchain fixture。不跑性能或游戏矩阵，累计仍 915；证据 `wire-out/refactoring-2026-10-14/r3-swapchain-calls64-{source-checks,verification}.json`。

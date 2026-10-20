@@ -1,6 +1,7 @@
 //! Windowed DXGI discard/sequential swapchains with owned native back buffers.
 //! Public Win64 ABI reviewed against DXVK Native c8dc91fa dxgi*.h.
 use super::*;
+use crate::x64::runtime::{gateways::Gateways, trace::Trace, user::User};
 pub(super) const IIDS: [Guid; 3] = [
     guid(
         0x310d36a0,
@@ -122,11 +123,26 @@ pub(super) struct SwapChain {
     pub(super) buffer: u64,
     presents: u32,
 }
-impl Runtime64 {
-    fn swapchain_buffer(&mut self, mem: &mut Memory, device: u64, d: &Desc) -> Result<u64, String> {
+
+struct Calls<'a> {
+    graphics: &'a mut Graphics,
+    gateways: &'a mut Gateways,
+    next_alloc: &'a mut u64,
+    trace: &'a mut Trace,
+    user: &'a User,
+}
+
+impl Graphics {
+    fn swapchain_buffer(
+        &mut self,
+        mem: &mut Memory,
+        gateways: &mut Gateways,
+        next: &mut u64,
+        device: u64,
+        d: &Desc,
+    ) -> Result<u64, String> {
         let bind = 0x20 | if d.usage & 0x10 != 0 { 8 } else { 0 };
         let native = self
-            .graphics
             .backend
             .as_ref()
             .ok_or("swapchain backend missing")?
@@ -138,14 +154,8 @@ impl Runtime64 {
                 format: d.mode[4],
                 bind: bind | 0x400, // Backbuffers permit UNORM/sRGB view reinterpretation.
             })?;
-        let p = self.graphics.object(
-            mem,
-            &mut self.gateways,
-            &mut self.next_alloc,
-            Kind::Texture,
-            device,
-        )?;
-        self.graphics.resources.insert(
+        let p = self.object(mem, gateways, next, Kind::Texture, device)?;
+        self.resources.insert(
             p,
             d3d11::Resource::Texture {
                 desc: bytes(&[d.mode[0], d.mode[1], 1, 1, d.mode[4], 1, 0, 0, bind, 0, 0]),
@@ -155,12 +165,71 @@ impl Runtime64 {
         );
         Ok(p)
     }
-    pub(super) fn create_swapchain(
-        &mut self,
-        mem: &mut Memory,
+    fn present_status(
+        &self,
+        mem: &Memory,
+        user: &User,
         name: &str,
         a: &[u64],
     ) -> Result<u64, String> {
+        let chain = self.swapchains.get(&a[0]).ok_or("invalid DXGI swapchain")?;
+        if a[1] > 4 {
+            return Ok(INVALID);
+        }
+        if a[1] > 1 || a[2] & !1 != 0 {
+            return Ok(UNSUPPORTED);
+        }
+        if name.ends_with('1') {
+            if a[3] == 0 {
+                return Ok(INVALID_ARG);
+            }
+            let mut parameters = [0; 32];
+            mem.read(a[3], &mut parameters)?;
+            if u32::from_le_bytes(parameters[..4].try_into().unwrap()) != 0
+                || parameters[16..32].iter().any(|&b| b != 0)
+            {
+                return Ok(UNSUPPORTED);
+            }
+        }
+        let Some(w) = user
+            .window_info()
+            .into_iter()
+            .find(|w| w.handle == chain.desc.window)
+        else {
+            return Ok(INVALID);
+        };
+        Ok(if !w.visible || w.width == 0 || w.height == 0 {
+            0x087a0001
+        } else {
+            0
+        })
+    }
+    fn frame(&self, chain: u64) -> Result<(u64, crate::gpu::Texture, NativeGraphics), String> {
+        let c = self
+            .swapchains
+            .get(&chain)
+            .ok_or("invalid DXGI swapchain")?;
+        let Some(d3d11::Resource::Texture { native, .. }) = self.resources.get(&c.buffer) else {
+            return Err("swapchain buffer missing".into());
+        };
+        Ok((
+            c.desc.window,
+            native.clone(),
+            self.backend
+                .as_ref()
+                .ok_or("swapchain backend missing")?
+                .clone(),
+        ))
+    }
+    fn present_completed(&mut self, address: u64) {
+        let chain = self.swapchains.get_mut(&address).unwrap();
+        chain.presents = chain.presents.wrapping_add(1);
+        self.presented = self.presented.saturating_add(1);
+    }
+}
+
+impl Calls<'_> {
+    fn create(&mut self, mem: &mut Memory, name: &str, a: &[u64]) -> Result<u64, String> {
         let extended = name.ends_with("Hwnd");
         let out = a[if extended { 6 } else { 3 }];
         if out == 0 {
@@ -173,7 +242,7 @@ impl Runtime64 {
             return Ok(INVALID_ARG);
         }
         let d = words(mem, ptr, if extended { 12 } else { 18 })?;
-        self.trace_note(format!("DXGI swapchain descriptor={d:x?}"));
+        self.trace.note(format!("DXGI swapchain descriptor={d:x?}"));
         let mut desc = if extended {
             Desc {
                 mode: [d[0], d[1], 0, 0, d[2], 0, 0],
@@ -216,6 +285,7 @@ impl Runtime64 {
             }
         };
         let window = self
+            .user
             .window_info()
             .into_iter()
             .find(|w| w.handle == desc.window);
@@ -245,27 +315,29 @@ impl Runtime64 {
                 .ok_or("swapchain reference capacity")?;
         }
         self.graphics.retain(device)?;
-        let buffer = match self.swapchain_buffer(mem, device, &desc) {
-            Ok(p) => p,
-            Err(e) => {
-                self.graphics.release(mem, device)?;
-                return Err(e);
-            }
-        };
-        let chain = match self.graphics.object(
-            mem,
-            &mut self.gateways,
-            &mut self.next_alloc,
-            Kind::SwapChain,
-            a[0],
-        ) {
-            Ok(p) => p,
-            Err(e) => {
-                self.graphics.release(mem, buffer)?;
-                self.graphics.release(mem, device)?;
-                return Err(e);
-            }
-        };
+        let buffer =
+            match self
+                .graphics
+                .swapchain_buffer(mem, self.gateways, self.next_alloc, device, &desc)
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    self.graphics.release(mem, device)?;
+                    return Err(e);
+                }
+            };
+        let chain =
+            match self
+                .graphics
+                .object(mem, self.gateways, self.next_alloc, Kind::SwapChain, a[0])
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    self.graphics.release(mem, buffer)?;
+                    self.graphics.release(mem, device)?;
+                    return Err(e);
+                }
+            };
         self.graphics.swapchains.insert(
             chain,
             SwapChain {
@@ -278,96 +350,22 @@ impl Runtime64 {
         mem.write_int(out, 8, chain)?;
         Ok(0)
     }
-    fn present_status(&self, mem: &Memory, name: &str, a: &[u64]) -> Result<u64, String> {
-        let chain = self
-            .graphics
-            .swapchains
-            .get(&a[0])
-            .ok_or("invalid DXGI swapchain")?;
-        if a[1] > 4 {
-            return Ok(INVALID);
-        }
-        if a[1] > 1 || a[2] & !1 != 0 {
-            return Ok(UNSUPPORTED);
-        }
-        if name.ends_with('1') {
-            if a[3] == 0 {
-                return Ok(INVALID_ARG);
-            }
-            let mut parameters = [0; 32];
-            mem.read(a[3], &mut parameters)?;
-            if u32::from_le_bytes(parameters[..4].try_into().unwrap()) != 0
-                || parameters[16..32].iter().any(|&b| b != 0)
-            {
-                return Ok(UNSUPPORTED);
-            }
-        }
-        let Some(w) = self
-            .window_info()
-            .into_iter()
-            .find(|w| w.handle == chain.desc.window)
-        else {
-            return Ok(INVALID);
-        };
-        Ok(if !w.visible || w.width == 0 || w.height == 0 {
-            0x087a0001
-        } else {
-            0
-        })
-    }
-    pub(in crate::x64::runtime) fn dxgi_present_needed(
-        &self,
-        mem: &Memory,
-        name: &str,
-        a: &[u64],
-    ) -> Result<bool, String> {
-        Ok(self.present_status(mem, name, a)? == 0 && a[2] & 1 == 0)
-    }
-    pub(crate) fn graphics_frame(
-        &self,
-        chain: u64,
-    ) -> Result<(u64, crate::gpu::Texture, NativeGraphics), String> {
-        let c = self
-            .graphics
-            .swapchains
-            .get(&chain)
-            .ok_or("invalid DXGI swapchain")?;
-        let Some(d3d11::Resource::Texture { native, .. }) = self.graphics.resources.get(&c.buffer)
-        else {
-            return Err("swapchain buffer missing".into());
-        };
-        Ok((
-            c.desc.window,
-            native.clone(),
-            self.graphics
-                .backend
-                .as_ref()
-                .ok_or("swapchain backend missing")?
-                .clone(),
-        ))
-    }
-    pub(crate) fn complete_present(&mut self, dll: &str, name: &str, a: &[u64]) {
-        let chain = self.graphics.swapchains.get_mut(&a[0]).unwrap();
-        chain.presents = chain.presents.wrapping_add(1);
-        self.graphics.presented = self.graphics.presented.saturating_add(1);
-        self.api_calls += 1;
-        self.unblock();
-        self.record(dll, name, a, 0);
-    }
-    pub(super) fn swapchain_call(
-        &mut self,
-        mem: &mut Memory,
-        name: &str,
-        a: &[u64],
-    ) -> Result<u64, String> {
+    fn call(&mut self, mem: &mut Memory, name: &str, a: &[u64]) -> Result<u64, String> {
         let chain = &self.graphics.swapchains[&a[0]];
         match name {
-            "SwapChain.Present" | "SwapChain.Present1" => self.present_status(mem, name, a),
-            "SwapChain.GetDevice" => self.d3d11_call(
-                mem,
-                "D3D.Device.QueryInterface",
-                &[chain.device, a[1], a[2]],
-            ),
+            "SwapChain.Present" | "SwapChain.Present1" => {
+                self.graphics.present_status(mem, self.user, name, a)
+            }
+            "SwapChain.GetDevice" => {
+                let args = [chain.device, a[1], a[2]];
+                d3d11::Calls {
+                    graphics: self.graphics,
+                    gateways: self.gateways,
+                    next_alloc: self.next_alloc,
+                    trace: self.trace,
+                }
+                .call(mem, "D3D.Device.QueryInterface", &args)
+            }
             "SwapChain.GetBuffer" => {
                 if a[3] == 0 || a[2] == 0 {
                     return Ok(INVALID_ARG);
@@ -444,7 +442,7 @@ impl Runtime64 {
                 mem.check(a[1], 8, WRITE)?;
                 let adapter = self.graphics.objects[&chain.device].parent;
                 self.graphics
-                    .output(mem, &mut self.gateways, &mut self.next_alloc, adapter, a[1])
+                    .output(mem, self.gateways, self.next_alloc, adapter, a[1])
             }
             "SwapChain.GetLastPresentCount" => {
                 if a[1] == 0 {
@@ -492,6 +490,7 @@ impl Runtime64 {
                     d.count = a[1] as u32;
                 }
                 let Some(w) = self
+                    .user
                     .window_info()
                     .into_iter()
                     .find(|w| w.handle == d.window)
@@ -507,7 +506,13 @@ impl Runtime64 {
                 if !d.valid() {
                     return Ok(UNSUPPORTED);
                 }
-                let next = self.swapchain_buffer(mem, device, &d)?;
+                let next = self.graphics.swapchain_buffer(
+                    mem,
+                    self.gateways,
+                    self.next_alloc,
+                    device,
+                    &d,
+                )?;
                 self.graphics.release(mem, old)?;
                 let c = self.graphics.swapchains.get_mut(&a[0]).unwrap();
                 c.buffer = next;
@@ -516,6 +521,59 @@ impl Runtime64 {
             }
             _ => Ok(UNSUPPORTED),
         }
+    }
+}
+
+impl Runtime64 {
+    pub(super) fn create_swapchain(
+        &mut self,
+        mem: &mut Memory,
+        name: &str,
+        a: &[u64],
+    ) -> Result<u64, String> {
+        Calls {
+            graphics: &mut self.graphics,
+            gateways: &mut self.gateways,
+            next_alloc: &mut self.next_alloc,
+            trace: &mut self.trace,
+            user: &self.user,
+        }
+        .create(mem, name, a)
+    }
+    pub(in crate::x64::runtime) fn dxgi_present_needed(
+        &self,
+        mem: &Memory,
+        name: &str,
+        a: &[u64],
+    ) -> Result<bool, String> {
+        Ok(self.graphics.present_status(mem, &self.user, name, a)? == 0 && a[2] & 1 == 0)
+    }
+    pub(crate) fn graphics_frame(
+        &self,
+        chain: u64,
+    ) -> Result<(u64, crate::gpu::Texture, NativeGraphics), String> {
+        self.graphics.frame(chain)
+    }
+    pub(crate) fn complete_present(&mut self, dll: &str, name: &str, a: &[u64]) {
+        self.graphics.present_completed(a[0]);
+        self.api_calls += 1;
+        self.unblock();
+        self.record(dll, name, a, 0);
+    }
+    pub(super) fn swapchain_call(
+        &mut self,
+        mem: &mut Memory,
+        name: &str,
+        a: &[u64],
+    ) -> Result<u64, String> {
+        Calls {
+            graphics: &mut self.graphics,
+            gateways: &mut self.gateways,
+            next_alloc: &mut self.next_alloc,
+            trace: &mut self.trace,
+            user: &self.user,
+        }
+        .call(mem, name, a)
     }
     pub fn graphics_presents(&self) -> u64 {
         self.graphics.presented

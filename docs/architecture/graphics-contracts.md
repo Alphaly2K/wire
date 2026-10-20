@@ -25,3 +25,7 @@ D3D11 创建、COM 方法与 input-layout 解析通过临时 `d3d11::Calls` 借�
 DXGI 和 D3D11 的 private-data 字节/容量处理共用 Graphics 的原实现；对象/provider 校验仍由各入口按原顺序执行。input-layout 的名称读取使用 `win32/x64/text.rs` 中原样提取的 ASCII codec，Runtime64 的旧静态方法继续委托。
 
 DXGI factory/D3D12 能力创建及普通 factory/adapter/COM 操作位于 Graphics 的 `dxgi/calls.rs`，明确借内存、gateway、共享游标及必要的只读 User。原对象类型检查、D3D11 QueryInterface 转发和 swapchain 控制路由仍由根协调器先执行；parent 使用检查时取得的值。窗口关联只查询 User 的现有窗口成员关系。vtable、provider、对象查询与错误输出顺序保持。
+
+swapchain 创建/查询/resize 使用临时 Calls，只借 Graphics、gateway、共享游标、Trace 和只读 User。Graphics 拥有 backbuffer 创建、present 状态检查、帧资源快照和成功计数；窗口快照仍在原验证位置读取，resize 仍先建立新 buffer，再释放旧 buffer，最后替换记录。GetDevice 在构造 D3D11 资源借用前复制原三个参数。
+
+Runtime64 的 present 协调器保留公共 frame/统计入口，成功时仍先更新图形计数，再 API count → unblock → record；Process/Presenter 的 GPU surface 提交和 guest 返回帧保持。连续图形迁移整合通过 release 全目标 694 passed / 7 ignored、21 suites，严格 Clippy/build/fmt 与两个显式 GPU fixture；证据 `r3-swapchain-calls64-{source-checks,verification}.json`。
