@@ -10,8 +10,8 @@
 //! Wine 10.0 window-text and dialog-control message flow, with wire's logical
 //! window state, guest callbacks and checked pointers replacing NT/backend
 //! calls. Geometry/rectangle utilities follow the Win32 contracts directly.
+use super::User32;
 use crate::mem::GuestMem;
-use crate::user32::User32;
 
 pub(crate) fn copy_text(
     mem: &GuestMem,

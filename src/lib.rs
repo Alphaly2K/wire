@@ -26,8 +26,6 @@ mod simd;
 pub mod system;
 pub mod thread;
 pub mod user32;
-mod user32_common;
-mod user32_geometry;
 pub mod win32;
 mod wmi;
 mod wsprintf;

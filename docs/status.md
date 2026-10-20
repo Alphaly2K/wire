@@ -4,7 +4,7 @@
 
 近期完成 [GDI+](architecture/gdiplus.md)、[WMI](architecture/wmi.md)、[DirectSound](architecture/directsound.md) 与 [D3D9](architecture/d3d9.md) 的资源借用收敛，移除对象调用对整个 ApiState 的依赖及 registry/backend 临时 take；[PE32 线程创建和退出](architecture/thread-control.md)、[USER 资源退休](architecture/window-control.md)、[callback 执行](architecture/callbacks32.md) 与 [消息队列](architecture/messages.md) 也已归入各自 owner。Win64 [TLS/FLS](architecture/locals.md) 私有拥有固定槽和 callback identity，保留 TEB 与析构顺序。
 
-最新阶段整合覆盖至 PE32 同步编排与 Win64 DXGI/D3D11/swapchain 资源边界（上一提交 `b617169`）：release 全目标 **694 passed / 7 ignored / 21 suites**，all-targets/all-features strict Clippy、build 及 fmt 通过；两个真实 GPU draw/swapchain fixture 显式通过。工具未改，沿用前次 **31 项工具测试**。按改动影响选择验证，普通契约和资源边界提取不逐批重跑性能或游戏矩阵；执行循环、ISA 算法和 callback frame 保持。见 [验收策略](architecture/validation-tools.md)。
+最新阶段整合覆盖至 USER32 目录归位及公开 facade 分离（上一提交 `ed2fbf2`）：release 全目标 **694 passed / 7 ignored / 21 suites**，all-targets/all-features strict Clippy、build 及 fmt 通过；另通过 **6 项 inventory 工具测试**。此前 PE32 原生窗口探针及两个真实 GPU draw/swapchain fixture 的证据保留，其余工具沿用前次 31 项结果。按改动影响选择验证，普通契约和资源边界提取不逐批重跑性能或游戏矩阵；执行循环、ISA 算法和 callback frame 保持。见 [验收策略](architecture/validation-tools.md)。
 
 历史性能拒绝、回滚与后续复核证据继续保留，见 [API 日志累计验收](reports/refactoring-api-log-2026-10-19.md)、[后台 Unity 渲染结束后的复核](reports/refactoring-post-unity-performance-2026-10-19.md) 和 [CLI 重试](reports/refactoring-cli-followup-2026-10-19.md)。当前结构重构不宣称新的性能提升。
 
@@ -56,6 +56,8 @@ Win64 event/semaphore/waitable timer 普通调用已归 Events，只借 Memory �
 
 PE32 USER 已拥有宿主窗口快照和事件消费，展示轮询不再 take/还原 Presenter。完整 Win32 259、library 61 passed / 7 ignored、严格构建及原生窗口主线程/上传/resize/removal/抓帧探针通过。
 
+PE32 USER 的状态、请求和文本 codec 已归入 `win32/user/pe32`；根 `user32` 保留公开类型与 find_class/host_message/dispatch 兼容入口，领域实现不依赖 CPU 或 ApiState。删除两个闲置私有辅助入口，形成上述全目标整合。
+
 ## 重构范围
 
 当前累计冻结包含[对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)、日志、五项 paint、控件初始化、资源、启动信息、环境接口与 CLI 拆分；独立历史证据继续可查。
@@ -67,7 +69,7 @@ PE32 USER 已拥有宿主窗口快照和事件消费，展示轮询不再 take/�
 | R3 | environment、双架构 modules/apartment/BSTR/cursor、Win64 files/同步队列/TLS-FLS/task/HSTRING/USER/设备等 owner；PE32 kernel/scratch/CRT、线程创建/退出、USER 队列/退休及 GDI+/WMI/DirectSound/D3D9 窄资源调用 | 其余领域资源与 COM 对象；PE32 kernel 大范围抽取曾因性能撤回 |
 | R4/R5 | Process32 编排、线程退出与 callback 执行服务、owned host UI 请求、GDI 与像素状态分离 | 领域 callback 请求与其余分发/owner 继续收敛 |
 | R6 | 按用户要求忽略 | 不重建原生 Mono 路径 |
-| R7 | CLI 命令职责拆分及性能复核、PE32 内核目录、领域测试、公共性能工具及 profile、离线 inventory、当前/历史文档入口 | 其余工具和目录随领域迁移继续整理 |
+| R7 | CLI 命令职责拆分及性能复核、PE32 内核与 USER 目录、领域测试、公共性能工具及 profile、离线 inventory、当前/历史文档入口 | 其余工具和目录随领域迁移继续整理 |
 
 已迁移的 export 是契约覆盖范围；typed、ABI-only 与 absent 的架构策略分别记录，不能按数量推导完整 Windows 兼容性。
 

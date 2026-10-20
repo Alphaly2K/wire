@@ -484,7 +484,7 @@ impl User {
                     }
                     let mut rect = rectangle(mem, args[3])?;
                     let frame =
-                        crate::user32_geometry::frame(w.style, w.ex_style, w.menu != 0, true);
+                        crate::win32::user::geometry::frame(w.style, w.ex_style, w.menu != 0, true);
                     for i in 0..4 {
                         rect[i] = if i < 2 {
                             rect[i].wrapping_add(frame[i])

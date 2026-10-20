@@ -6,7 +6,7 @@
 | --- | --- |
 | `x86::process` | PE32 进程组合根，拥有装载状态、CPU、内存、API、调度器和日志；执行 DLL 通知、API trap、callback 与分时编排 |
 | `x86::process::termination`、`win32::x86::thread_creation` | Process 统一有序线程/进程退出；普通线程创建只借对象、模块、heap、错误与 scheduler，late ID fault 的部分提交保持 |
-| `user32`、`x86::process::{window,window_geometry,window_state,dialog,messages,painting,display}` | USER 准备状态、资源与 callback/等待请求；Process 执行 guest 与阻塞并完成后置输出。USER 领域文件不依赖 CPU/执行器，创建/销毁、重入重查和部分提交策略各自保持 |
+| `win32::user::pe32`（公开 `user32` facade）、`x86::process::{window,window_geometry,window_state,dialog,messages,painting,display}` | USER 准备状态、资源与 callback/等待请求；Process 执行 guest 与阻塞并完成后置输出。USER 领域文件不依赖 CPU/执行器，创建/销毁、重入重查和部分提交策略各自保持 |
 | `x86::process::{crt,crt_sort}`、`win32::x86::{crt,crt_memory}` | Process 负责 CRT CPU/FPU 返回、初始化器与排序 callback；领域负责私有指针状态与普通内存算法。caller-context 与 SEH initializer 恢复策略分别保留 |
 | `x86::process::exceptions`、`win32::x86::context` | Process 负责 SEH 搜索/展开与普通 filter；受检 CONTEXT codec 不借进程状态，公开 seh 入口保持兼容 |
 | `x86::process::synchronization` | Process 执行 critical-section 阻塞/唤醒、Sleep/让出及对象/消息等待；明确借资源并返回控制结果，API facade 在返回帧提交后才执行让出 |
@@ -27,15 +27,15 @@
 | `win32::{catalog,kernel,x86,x64}` | GUID、identity、version、NLS 的唯一契约、纯算法及架构适配；locale 回调通过专用控制路由，由进程执行 |
 | `modules::Modules`、`win32::{x86,x64}::modules` | PE32 guest image/TLS 与 provider 身份；Win64 module/export/path/ref/pin/search 的私有 owner。Root 注册入口委托，ABI/control adapters 分别保留 |
 | `modules::linker::Linker` | 在映射/解析期间明确借 Modules、ABI、USER/scratch/error 和只读路径/命令行资源；不借 ApiState，不执行 CPU，回调前释放借用 |
-| `user32::classes` | User32 执行类注册/查询/字段及基本控件初始化，只借内存、gateway、Modules、scratch 和错误槽；公开 find_class 兼容 facade 保留 |
-| `user32::queries` | User32 执行 scalar 和桌面查询；桌面首次初始化明确借 Modules、gateway、scratch 和错误槽，ApiState 只组合资源 |
+| `win32::user::pe32::classes` | User32 执行类注册/查询/字段及基本控件初始化，只借内存、gateway、Modules、scratch 和错误槽；公开 find_class 兼容 facade 保留 |
+| `win32::user::pe32::queries` | User32 执行 scalar 和桌面查询；桌面首次初始化明确借 Modules、gateway、scratch 和错误槽，ApiState 只组合资源 |
 | `resource`、`win32::x86::resources` | PE32 映射 image 的受检资源视图与字符串输出；只借内存、EXE 基址和错误槽，不拥有模块寿命 |
 | `x64::runtime::files::Files` | Win64 文件、标准 endpoint/alias、受限 filesystem 与属性元数据的私有 owner；路径 mutation 和资源寿命由 owner 执行，ABI/guest 输出由 adapter 提交 |
 | `x64::runtime::{find::Searches,files::directory}` | Searches 执行 FindFirst/Next/Close，Files 编码 metadata 和执行目录 batch 输出；只读借 Threads 在实际错误分支写 LastError，原游标提交顺序保持 |
 | `x64::runtime::{events::Events,sync_objects,timers}` | Events 执行事件、信号量和 waitable timer 的普通调用，只借 Memory 与只读 Threads；原命名、权限、计数、deadline 和等待语义保持 |
 | `host::calendar` | 提供原有宿主 localtime 值；Windows 日期格式和 guest 输出布局由领域/架构层负责 |
 | `host::ui`、`win32::{x86::host,gdi::x86}` | host 接收 owned 窗口/帧请求并产出事件；guest adapter 负责 USER 入队、GDI 语义映射及 LastError，公开 platform 路径只作 facade |
-| `user32::host` | User32 准备 PE32 owned 窗口快照并消费宿主事件；adapter 直接借 Presenter 与各资源，删除 Presenter 的临时 take/还原 |
+| `win32::user::pe32::host` | User32 准备 PE32 owned 窗口快照并消费宿主事件；adapter 直接借 Presenter 与各资源，删除 Presenter 的临时 take/还原 |
 | `graphics`、`d3d9`、`gpu` | 像素/对象核心不依赖 ApiState；D3D9 生命周期只借 heap，设备调用再借 windows/Graphics，DIB/font 仍有 PE32 codec；DXGI 其余适配器继续迁移 |
 | `x64::runtime::dxgi::{Graphics,objects}` | Graphics 拥有 vtable、COM 对象分配/adapter 缓存及递归释放；分配明确借内存、Gateways 和共享游标，释放只借内存 |
 | `x64::runtime::dxgi::{output,d3d11::draw}` | Graphics 执行虚拟 output、context/binding 引用与 draw 输入准备；分配借 gateway/游标，其余按需只借内存，根保留公开统计 facade |
@@ -58,3 +58,5 @@ CPU 热循环、FLAGS/fault 提交、Memory/cache 所有权、stub 地址和 `.w
 PE32 领域 callback 已直接调用 Process；[回调服务](callbacks32.md)统一原 USER 的 context 恢复策略，DLL/SEH/CRT initializer 继续使用原独立策略。Cpu 的 run/call_guest 兼容 facade 保留给外部使用者，普通 CPU/IR 语义不经过它。领域控制请求仍按家族继续收敛。IR 链引用 `x86::address_space::STUB_BASE` 作为保留地址边界；不能将它误当作可继续链执行的普通指令地址。根目录重导出 facade 的删除条件是公开使用者迁入架构入口；当前不要求 tests/examples 一起换路径。
 
 host/graphics 的调用顺序、所有权与原生验证见 [宿主与图形边界](host-graphics.md)。native 源码和 build.rs 未迁移，保留的第三方构建输入不变。
+
+R7 已将稳定的 PE32 USER owner、请求及文本 codec 迁到 `win32/user/pe32.rs` 与其子目录。根 `user32` 只重导出原公开类型/内部请求，并保留 find_class、host_message 和名称分发兼容函数；CPU/ApiState 借用限于这些兼容函数。原私有 user32_common/user32_geometry 入口删除，几何调用直接使用既有纯核，来源和许可标注保留。没有新增公开模块或要求外部调用方换路径。

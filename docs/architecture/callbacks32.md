@@ -16,7 +16,7 @@ posted 消息、计时器和键盘转换由 USER 产生值、等待或 dispatch 
 
 窗口几何和更新由 USER 准备；Process 在 WM_WINDOWPOSCHANGING 正常返回后让 USER 读取可变 WINDOWPOS 并提交，然后执行 WM_WINDOWPOSCHANGED。默认 WM_MOVE 与 WM_SIZE 之间重新查询过程/状态，见[窗口控制](window-control.md)。
 
-窗口生命周期、显示、同步发送与默认过程随后迁入同一请求模式；`src/user32/` 内已没有 CPU、GuestCallOutcome、invoke 或 call_guest 依赖。创建/销毁循环与各自 cleanup 策略由 Process 的 window 协调器拥有，sent 表仍封装在 USER。其余 DLL/SEH/CRT 等进程边界按各自恢复策略继续收敛。
+窗口生命周期、显示、同步发送与默认过程随后迁入同一请求模式；`src/win32/user/pe32/` 内已没有 CPU、GuestCallOutcome、invoke 或 call_guest 依赖。创建/销毁循环与各自 cleanup 策略由 Process 的 window 协调器拥有，sent 表仍封装在 USER。其余 DLL/SEH/CRT 等进程边界按各自恢复策略继续收敛。
 
 CRT 的数学返回、初始化器数组和 qsort 编排也归 Process；qsort 保留 caller-context invoke，初始化器继续直接 call_guest。函数表在每次调用后重读，首个错误与继续执行策略保持，见[CRT 边界](crt32.md)。
 

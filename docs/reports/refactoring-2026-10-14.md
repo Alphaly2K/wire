@@ -730,3 +730,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3/R5 PE32 USER 宿主边界
 
 基线 `0b46a23`。User32 的 host 模块拥有窗口筛选/owned 快照与事件消费，架构 adapter 直接分别借 Presenter/USER/错误槽和帧资源，移除临时 take/还原。窗口快照经资源替换对照一致，事件入队主体、frame sequence/像素快照/上传及公开 host_message 原文保持；host FFI 与音频未改。完整 release Win32 259、library 61 passed / 7 ignored、all-targets/all-features strict Clippy/build/fmt 通过；现有原创原生窗口探针通过 main-thread、upload/failure、resize/removal 与 RGB 抓帧检查。无游戏素材、无性能矩阵，累计仍 915；证据 `wire-out/refactoring-2026-10-14/r5-host-user32-{source-checks,verification}.json`。
+
+## R7 PE32 USER 目录与兼容入口整合
+
+基线 `ed2fbf2`。已形成的 USER owner、十三个子模块及文本 codec 迁入 `win32/user/pe32`；根 user32 保留原公开类型与 find_class/host_message/dispatch，内部请求显式重导出。领域层移除 ApiState/CPU 导入；两个闲置私有辅助模块删除，PE32/Win64 frame 直接调用既有纯几何核。逐文件按路径/可见性/import 替换与 rustfmt 对照保持，三个公开 wrapper、状态结构与算法保持；没有 include/build/native 输入迁移，许可标注保留。首次 check 发现将私有 Message 列入 re-export，移除后阶段整合通过 release 全目标 694 passed / 7 ignored / 21 suites、all-targets/all-features strict Clippy/build/fmt 及 6 项 inventory 工具测试。真实 host/GPU 实现未改，沿用前述证据；评估为职责形成后的纯目录归位，不跑性能或游戏矩阵。累计仍 915；证据 `wire-out/refactoring-2026-10-14/r7-user32-layout-{source-checks,verification}.json`。

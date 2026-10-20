@@ -4,7 +4,7 @@ PE32 进程和 API 的轮询入口位于 `win32/x86/host.rs`；`host/ui.rs` 只�
 
 PE32 顺序仍为：DSound 轮询 → enabled/capture 与 16ms gate → guest 窗口筛选 → native 窗口更新/删除 → 最多 512 个事件逐个送 USER 入队 → 判断并消费 frame sequence → guest 像素快照 → RGBA 上传/抓帧。像素快照不能提前到事件消费前；frame sequence 在 snapshot failure 时也会消耗，保持旧的重试行为。host/native 回调只排事件，不执行 guest CPU。
 
-PE32 的 `user32/host.rs` 现拥有窗口筛选、owned 窗口快照和事件入队；guest adapter 直接分别借 Presenter、USER、错误槽与帧资源，不再临时 take/还原 Presenter。公开 `user32::host_message` 兼容入口保持；窗口条件、标题生成、事件过滤、键盘状态和 frame 顺序保持。
+PE32 的 `win32/user/pe32/host.rs` 现拥有窗口筛选、owned 窗口快照和事件入队；guest adapter 直接分别借 Presenter、USER、错误槽与帧资源，不再临时 take/还原 Presenter。公开 `user32::host_message` 兼容入口保持；窗口条件、标题生成、事件过滤、键盘状态和 frame 顺序保持。
 
 [DirectSound](directsound.md) 的普通方法只借所属音频资源及只读 event/window/Presenter；poll 和调用后 signal 显式借 kernel 对象与 scheduler，PCM 和 AudioQueue 主体保持。
 

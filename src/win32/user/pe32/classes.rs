@@ -33,17 +33,8 @@ pub(crate) fn persistent_strings(
     Ok([a, w])
 }
 
-pub fn find_class(
-    mem: &GuestMem,
-    state: &ApiState,
-    id: u32,
-    instance: u32,
-    wide: bool,
-) -> Result<Option<u16>, String> {
-    state.user32.find_class(mem, id, instance, wide)
-}
 impl User32 {
-    pub(super) fn find_class(
+    pub(crate) fn find_class(
         &self,
         mem: &GuestMem,
         id: u32,
@@ -189,7 +180,7 @@ impl User32 {
                 return Ok((0, "USER32 error 1400".into()));
             };
             let text: Vec<u16> = self.classes[&window.class].name.encode_utf16().collect();
-            let value = crate::user32_common::copy_text(mem, a[1], a[2], &text, id.wide())?;
+            let value = super::text::copy_text(mem, a[1], a[2], &text, id.wide())?;
             return Ok((value, "class name".into()));
         }
         let wide = id.wide();

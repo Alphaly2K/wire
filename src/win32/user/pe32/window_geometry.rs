@@ -4,11 +4,13 @@
  * in user32_common.rs is adapted from Wine 10.0.
  */
 //! Window geometry and update preparation without guest execution.
-use super::User32;
+use super::{
+    text::{words, write_words},
+    User32,
+};
 use crate::{
     api::Args,
     mem::GuestMem,
-    user32_common::{words, write_words},
     win32::{catalog::WindowControlApi as W, x86::scratch::Scratch32},
 };
 use std::collections::BTreeSet;

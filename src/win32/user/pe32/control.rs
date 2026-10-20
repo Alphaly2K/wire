@@ -242,7 +242,7 @@ impl User32 {
         if a[1] == 0x10 {
             return Ok(DefaultRequest::Destroy);
         }
-        if let Some(ret) = crate::user32_common::default_text(wide, a, mem, self)? {
+        if let Some(ret) = super::text::default_text(wide, a, mem, self)? {
             return value(ret, "default window text".into());
         }
         if a[1] == 0x47 {
