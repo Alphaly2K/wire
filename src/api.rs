@@ -253,24 +253,6 @@ impl ApiState {
             [self.cmdline_a, self.cmdline_w],
         )
     }
-    pub(crate) fn register_system_class(
-        &mut self,
-        mem: &mut GuestMem,
-        api: &mut ApiTable,
-        module: u32,
-        name: &str,
-        wide: bool,
-    ) -> Result<(), String> {
-        self.user32.register_system_class(
-            mem,
-            api,
-            &mut self.scratch,
-            &mut self.last_error,
-            module,
-            name,
-            wide,
-        )
-    }
     pub fn new(exe_base: u32, exe_path: String, cmdline_a: u32, cmdline_w: u32) -> ApiState {
         let mut s = ApiState {
             environment: crate::runtime::environment::GuestEnvironment::pe32(),
@@ -400,6 +382,19 @@ impl ApiState {
         self.user32.class_call(
             id,
             args,
+            mem,
+            api,
+            &mut self.modules,
+            &mut self.scratch,
+            &mut self.last_error,
+        )
+    }
+    pub(crate) fn desktop_query(
+        &mut self,
+        mem: &mut GuestMem,
+        api: &mut ApiTable,
+    ) -> Result<(u32, String), String> {
+        self.user32.desktop_query(
             mem,
             api,
             &mut self.modules,
@@ -1039,7 +1034,7 @@ pub fn dispatch(
                 unreachable!();
             };
             (ret, note) = if id == WindowQueryApi::Desktop {
-                crate::user32::desktop_query(mem, api, state)?
+                state.desktop_query(mem, api)?
             } else {
                 state
                     .user32

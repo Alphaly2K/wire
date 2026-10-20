@@ -718,3 +718,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 Win64 文件搜索与目录游标
 
 基线 `0347ec7`。Searches 执行 FindFirst/Next/Close，只借 Memory、只读 Files/Threads；metadata 归 Files，全文目录信息也由 Files 执行。Threads 拥有原当前 TEB 的 LastError 写入，根入口委托，错误槽仍在实际写入时读取。metadata/search/目录/LastError 主体经明确资源替换后对照一致，directory_batch/NtQueryDirectoryFile 保持；整份修改文件按 rustfmt 对照一致。完整 release Win64 269、library 61 passed / 7 ignored、all-targets/all-features strict Clippy/build/fmt 通过。原输出、句柄/游标提交及错误优先级保持，不跑性能或游戏/native 矩阵，累计仍 915；证据 `wire-out/refactoring-2026-10-14/r3-file-searches64-{source-checks,verification}.json`。
+
+## R3 PE32 桌面窗口初始化
+
+基线 `ea248cd`。桌面查询由 User32 执行，明确借 Modules、gateway、scratch 和错误槽，ApiState 仅组合资源；删除闲置系统类 wrapper 和私有查询 re-export。原桌面构造体经资源替换与 rustfmt 对照一致，scalar 查询及公开 find_class 保持；首次创建、失败部分提交和重复查询顺序保持。完整 release Win32 259、IR 31、all-targets/all-features strict Clippy/build/fmt 通过。未改执行循环或图形路径，不跑性能或游戏矩阵，累计仍 915；证据 `wire-out/refactoring-2026-10-14/r3-user-desktop32-{source-checks,verification}.json`。

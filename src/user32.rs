@@ -23,7 +23,6 @@ pub(crate) use control::{ControlRequest, CreationRequest, DefaultRequest};
 pub(crate) use dialog::{dialog_integer, DialogRequest};
 pub(crate) use messages::MessageRequest;
 pub(crate) use paint::{Operation as PaintingOperation, PaintRequest};
-pub(crate) use queries::desktop as desktop_query;
 use queues::{clock_ms, message_bits};
 pub(crate) use window_geometry::WindowRequest;
 pub(crate) use window_state::WindowStateRequest;

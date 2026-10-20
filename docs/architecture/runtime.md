@@ -28,6 +28,7 @@
 | `modules::Modules`、`win32::{x86,x64}::modules` | PE32 guest image/TLS 与 provider 身份；Win64 module/export/path/ref/pin/search 的私有 owner。Root 注册入口委托，ABI/control adapters 分别保留 |
 | `modules::linker::Linker` | 在映射/解析期间明确借 Modules、ABI、USER/scratch/error 和只读路径/命令行资源；不借 ApiState，不执行 CPU，回调前释放借用 |
 | `user32::classes` | User32 执行类注册/查询/字段及基本控件初始化，只借内存、gateway、Modules、scratch 和错误槽；公开 find_class 兼容 facade 保留 |
+| `user32::queries` | User32 执行 scalar 和桌面查询；桌面首次初始化明确借 Modules、gateway、scratch 和错误槽，ApiState 只组合资源 |
 | `resource`、`win32::x86::resources` | PE32 映射 image 的受检资源视图与字符串输出；只借内存、EXE 基址和错误槽，不拥有模块寿命 |
 | `x64::runtime::files::Files` | Win64 文件、标准 endpoint/alias、受限 filesystem 与属性元数据的私有 owner；路径 mutation 和资源寿命由 owner 执行，ABI/guest 输出由 adapter 提交 |
 | `x64::runtime::{find::Searches,files::directory}` | Searches 执行 FindFirst/Next/Close，Files 编码 metadata 和执行目录 batch 输出；只读借 Threads 在实际错误分支写 LastError，原游标提交顺序保持 |

@@ -7,7 +7,7 @@
  * GNU Lesser General Public License, version 2.1 or later. No warranty.
  * Original excerpt and license: third_party/hangover/.
  */
-//! PE32 scalar queries borrow USER state, checked memory and LastError only.
+//! PE32 queries borrow USER state and the explicit resources needed on first use.
 use crate::{api::Args, mem::GuestMem, win32::catalog::WindowQueryApi as Q};
 
 impl super::User32 {
@@ -239,44 +239,47 @@ impl super::User32 {
     }
 }
 
-// Desktop construction needs the module/class coordinator only on first use.
-pub(crate) fn desktop(
-    mem: &mut GuestMem,
-    api: &mut crate::api::ApiTable,
-    state: &mut crate::api::ApiState,
-) -> Result<(u32, String), String> {
-    const DESKTOP: u32 = 0x4000fffc;
-    if !state.user32.windows.contains_key(&DESKTOP) {
-        let module = state.module_handle_for("user32.dll");
-        state.register_system_class(mem, api, module, "Desktop", true)?;
-        let (&atom, class) = state
-            .user32
-            .classes
-            .iter()
-            .find(|(_, c)| c.name == "Desktop")
-            .unwrap();
-        state.user32.windows.insert(
-            DESKTOP,
-            super::Window {
-                class: atom,
-                wndproc: class.fields[1],
-                instance: module,
-                parent: 0,
-                menu: 0,
-                style: 0x10000000,
-                ex_style: 0,
-                rect: [0, 0, 1024, 768],
-                user_data: 0,
-                extra: Vec::new(),
-                wide: true,
-                tid: 0,
-                text: Vec::new(),
-                destroying: false,
-                update: None,
-                erase: false,
-                props: Default::default(),
-            },
-        );
+impl super::User32 {
+    pub(crate) fn desktop_query(
+        &mut self,
+        mem: &mut GuestMem,
+        api: &mut crate::api::ApiTable,
+        modules: &mut crate::modules::Modules,
+        scratch: &mut crate::win32::x86::scratch::Scratch32,
+        last_error: &mut u32,
+    ) -> Result<(u32, String), String> {
+        const DESKTOP: u32 = 0x4000fffc;
+        if !self.windows.contains_key(&DESKTOP) {
+            let module = modules.provider_handle_for("user32.dll");
+            self.register_system_class(mem, api, scratch, last_error, module, "Desktop", true)?;
+            let (&atom, class) = self
+                .classes
+                .iter()
+                .find(|(_, c)| c.name == "Desktop")
+                .unwrap();
+            self.windows.insert(
+                DESKTOP,
+                super::Window {
+                    class: atom,
+                    wndproc: class.fields[1],
+                    instance: module,
+                    parent: 0,
+                    menu: 0,
+                    style: 0x10000000,
+                    ex_style: 0,
+                    rect: [0, 0, 1024, 768],
+                    user_data: 0,
+                    extra: Vec::new(),
+                    wide: true,
+                    tid: 0,
+                    text: Vec::new(),
+                    destroying: false,
+                    update: None,
+                    erase: false,
+                    props: Default::default(),
+                },
+            );
+        }
+        Ok((DESKTOP, "virtual desktop".into()))
     }
-    Ok((DESKTOP, "virtual desktop".into()))
 }
