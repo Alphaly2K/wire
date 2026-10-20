@@ -381,7 +381,7 @@ impl Runtime64 {
             return Err("DXGI method/object mismatch".into());
         }
         if name.starts_with("Output.") {
-            return self.output_call(mem, name, a);
+            return self.graphics.output_call(mem, name, a);
         }
         if name.starts_with("SwapChain.") {
             return self.swapchain_call(mem, name, a);
@@ -399,7 +399,8 @@ impl Runtime64 {
                     mem.write_int(a[2], 8, 0)?;
                     return Ok(NOT_FOUND);
                 }
-                self.dxgi_output(mem, a[0], a[2])
+                self.graphics
+                    .output(mem, &mut self.gateways, &mut self.next_alloc, a[0], a[2])
             }
             "Object.QueryInterface" | "Object.GetParent" => {
                 if a[1] == 0 || a[2] == 0 {

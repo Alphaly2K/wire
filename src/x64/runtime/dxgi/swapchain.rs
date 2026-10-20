@@ -443,7 +443,8 @@ impl Runtime64 {
                 }
                 mem.check(a[1], 8, WRITE)?;
                 let adapter = self.graphics.objects[&chain.device].parent;
-                self.dxgi_output(mem, adapter, a[1])
+                self.graphics
+                    .output(mem, &mut self.gateways, &mut self.next_alloc, adapter, a[1])
             }
             "SwapChain.GetLastPresentCount" => {
                 if a[1] == 0 {

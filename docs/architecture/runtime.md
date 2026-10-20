@@ -34,6 +34,7 @@
 | `host::ui`、`win32::{x86::host,gdi::x86}` | host 接收 owned 窗口/帧请求并产出事件；guest adapter 负责 USER 入队、GDI 语义映射及 LastError，公开 platform 路径只作 facade |
 | `graphics`、`d3d9`、`gpu` | 像素/对象核心不依赖 ApiState；D3D9 生命周期只借 heap，设备调用再借 windows/Graphics，DIB/font 仍有 PE32 codec；DXGI 其余适配器继续迁移 |
 | `x64::runtime::dxgi::{Graphics,objects}` | Graphics 拥有 vtable、COM 对象分配/adapter 缓存及递归释放；分配明确借内存、Gateways 和共享游标，释放只借内存 |
+| `x64::runtime::dxgi::{output,d3d11::draw}` | Graphics 执行虚拟 output、context/binding 引用与 draw 输入准备；分配借 gateway/游标，其余按需只借内存，根保留公开统计 facade |
 | `gdiplus`、`gdiplus::calls` | GdiPlus 私有拥有 matrix/allocation/token；普通调用只借内存和 process heap，公开 dispatch 保留兼容签名 |
 | `wmi`、`wmi::calls` | Wmi 私有拥有 COM 对象、引用计数、游标和 vtable；调用只借内存、gateway table、heap 与 BSTR，provider 和 HRESULT 保持 |
 | `dsound`、`dsound::calls` | DSound 私有拥有对象/buffer、通知和 sink；方法只借内存、gateway、heap 及只读事件/窗口/Presenter，pump 与 signal 次序保持 |

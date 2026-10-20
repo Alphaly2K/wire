@@ -334,28 +334,27 @@ fn texture_layout(format: u32, width: u32, height: u32) -> (u32, u32) {
     };
     (width.div_ceil(block) * bytes, height.div_ceil(block))
 }
-impl Runtime64 {
-    fn d3d_context(&mut self, mem: &mut Memory, device: u64) -> Result<u64, String> {
+impl Graphics {
+    fn context(
+        &mut self,
+        mem: &mut Memory,
+        gateways: &mut crate::x64::runtime::gateways::Gateways,
+        next: &mut u64,
+        device: u64,
+    ) -> Result<u64, String> {
         if let Some(address) = self
-            .graphics
             .objects
             .iter()
             .find_map(|(&p, o)| (o.kind == Kind::Context && o.parent == device).then_some(p))
         {
-            self.graphics.retain(address)?;
+            self.retain(address)?;
             return Ok(address);
         }
-        let c = self.graphics.object(
-            mem,
-            &mut self.gateways,
-            &mut self.next_alloc,
-            Kind::Context,
-            device,
-        )?;
-        self.graphics.contexts.insert(c, Context::default());
+        let c = self.object(mem, gateways, next, Kind::Context, device)?;
+        self.contexts.insert(c, Context::default());
         Ok(c)
     }
-    fn d3d_bind_one(
+    fn bind_one(
         &mut self,
         mem: &mut Memory,
         context: u64,
@@ -363,20 +362,15 @@ impl Runtime64 {
         p: u64,
         want: Kind,
     ) -> Result<(), String> {
-        let owner = self.graphics.objects[&context].parent;
+        let owner = self.objects[&context].parent;
         if p != 0 {
-            let o = self
-                .graphics
-                .objects
-                .get(&p)
-                .ok_or("invalid D3D11 state binding")?;
+            let o = self.objects.get(&p).ok_or("invalid D3D11 state binding")?;
             if o.kind != want || o.parent != owner {
                 return Err("D3D11 state type/device mismatch".into());
             }
-            self.graphics.retain(p)?;
+            self.retain(p)?;
         }
         let old = self
-            .graphics
             .contexts
             .get_mut(&context)
             .unwrap()
@@ -385,12 +379,14 @@ impl Runtime64 {
         if let Some(old) = old {
             for p in old {
                 if p != 0 {
-                    self.graphics.release(mem, p)?;
+                    self.release(mem, p)?;
                 }
             }
         }
         Ok(())
     }
+}
+impl Runtime64 {
     pub(super) fn d3d11_create(
         &mut self,
         mem: &mut Memory,
@@ -487,7 +483,8 @@ impl Runtime64 {
             self.graphics.release(mem, adapter)?;
         }
         let context = if a[9] != 0 {
-            self.d3d_context(mem, device)?
+            self.graphics
+                .context(mem, &mut self.gateways, &mut self.next_alloc, device)?
         } else {
             0
         };
@@ -727,7 +724,9 @@ impl Runtime64 {
             }
             "GetImmediateContext" => {
                 mem.check(a[1], 8, WRITE)?;
-                let c = self.d3d_context(mem, a[0])?;
+                let c =
+                    self.graphics
+                        .context(mem, &mut self.gateways, &mut self.next_alloc, a[0])?;
                 mem.write_int(a[1], 8, c)?;
                 Ok(0)
             }
@@ -1974,7 +1973,8 @@ impl Runtime64 {
                 if a[1] != 0 && !matches!(a[2], 42 | 57) {
                     return Err("D3D11 index format".into());
                 }
-                self.d3d_bind_one(mem, a[0], method, a[1], Kind::Buffer)?;
+                self.graphics
+                    .bind_one(mem, a[0], method, a[1], Kind::Buffer)?;
                 let mut values = (a[2] as u32).to_le_bytes().to_vec();
                 values.extend_from_slice(&(a[3] as u32).to_le_bytes());
                 self.graphics
@@ -2199,11 +2199,12 @@ impl Runtime64 {
                 {
                     return Err("D3D11 shader stage mismatch".into());
                 }
-                self.d3d_bind_one(mem, a[0], method, a[1], Kind::Shader)?;
+                self.graphics
+                    .bind_one(mem, a[0], method, a[1], Kind::Shader)?;
                 Ok(0)
             }
             "IASetInputLayout" | "RSSetState" => {
-                self.d3d_bind_one(
+                self.graphics.bind_one(
                     mem,
                     a[0],
                     method,
@@ -2231,7 +2232,7 @@ impl Runtime64 {
                 } else {
                     (a[2] as u32).to_le_bytes().to_vec()
                 };
-                self.d3d_bind_one(
+                self.graphics.bind_one(
                     mem,
                     a[0],
                     method,
@@ -2429,7 +2430,7 @@ impl Runtime64 {
                 self.dxgi_call(mem, &format!("Object.{method}"), a)
             }
             "Draw" | "DrawIndexed" | "DrawInstanced" | "DrawIndexedInstanced" => {
-                self.d3d_draw(method, a)
+                self.graphics.draw(method, a)
             }
             _ => Err(format!(
                 "unimplemented Win64 D3D11 method: {name}; args={a:x?}"

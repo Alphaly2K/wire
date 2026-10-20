@@ -40,6 +40,8 @@ PE32 critical-section 阻塞/唤醒、Sleep/让出和对象/消息等待已迁�
 
 Win64 Graphics 已拥有 vtable、COM 对象分配/adapter 缓存与递归释放，只借明确内存、gateway 和共享游标。完整 Win64 269、library 61 passed / 7 ignored、严格 Clippy/build/fmt 通过，并显式通过两个真实 GPU draw/swapchain 生命周期用例。
 
+Win64 虚拟 output、D3D11 context/binding 和 draw 输入准备也归 Graphics；GPU 资源检查与提交算法保持。完整 Win64 269、library 61 passed / 7 ignored、两个真实 GPU fixture 和严格构建继续通过。
+
 ## 重构范围
 
 当前累计冻结包含[对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)、日志、五项 paint、控件初始化、资源、启动信息、环境接口与 CLI 拆分；独立历史证据继续可查。

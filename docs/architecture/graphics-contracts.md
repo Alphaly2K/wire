@@ -17,3 +17,5 @@ BoundMethod 在冷阶段保存静态方法声明与 DXGI/D3D11 家族路由，ga
 Win64 COM 的 vtable、对象分配、adapter 缓存及递归释放现由 Graphics 的 `dxgi/objects.rs` 拥有。分配明确借 Memory、Gateways 和共享页游标；释放只借 Memory，按原顺序处理 swapchain、映射 buffer/texture、view、context 绑定与 parent。表的 gateway 注册、map/write/seal、游标推进和引用提交顺序保持，公开 attach_graphics 继续委托。其它 D3D11/DXGI handler 暂由 Runtime64 组合资源。
 
 该 owner 提取经五个生命周期主体及全部调用点源码对照，release Win64 269、library 61 passed / 7 ignored、严格 Clippy/build/fmt 通过；另显式通过原生 procedural draw 和 swapchain/backbuffer/resize/lifetime 两项 GPU 测试。证据 `r3-graphics-objects64-{source-checks,verification}.json`。
+
+虚拟 output 的缓存/模式查询、D3D11 context 建立、单项 binding 引用替换以及 native draw 输入准备也直接归 Graphics。output/context 分配借 gateway 和游标，其余操作仅用 owner 状态与必要内存；public graphics_draws 保留原 facade。所有修改文件按明确资源替换对照一致，draw 的 shader/资源检查和 GPU 提交算法保持。完整 Win64 269、library 61 passed / 7 ignored、两个显式 GPU fixture 及严格构建通过，见 `r3-graphics-services64-{source-checks,verification}.json`。

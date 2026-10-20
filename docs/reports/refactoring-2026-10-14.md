@@ -698,3 +698,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 Win64 图形对象生命周期
 
 基线 `e3772fc`。Graphics 拥有 backend attach、vtable、COM 对象分配/adapter 缓存和递归释放，分配只借 Memory/Gateways/共享页游标，释放只借 Memory；公开 attach_graphics facade 保留。五个生命周期主体和根/子模块全部调用点经资源替换及 rustfmt 对照一致，测试期望未改，shader/draw/view、gateway 和 backend 主体未改。release 完整 Win64 269、library 61 passed / 7 ignored、all-targets/all-features strict Clippy、build/fmt 通过；另显式通过两个真实 GPU procedural draw 与 swapchain/backbuffer/resize/lifetime 测试。仅调用点和状态借用收敛，不跑性能或游戏矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r3-graphics-objects64-{source-checks,verification}.json`。
+
+## R3 Win64 output、context/binding 与 draw owner
+
+基线 `0c23b00`。Graphics 直接执行虚拟 output 缓存/模式查询、D3D11 context 建立/单项绑定替换及 draw 输入准备；分配借 gateway/游标，其余仅借必要内存，公开 graphics_draws 保持。全部五个修改文件经明确资源替换和 rustfmt 对照一致；shader/资源检查、绑定 retain/replace/release 与 GPU 提交顺序保持。完整 release Win64 269、library 61 passed / 7 ignored、all-targets/all-features strict Clippy、build/fmt 通过；两个原生 GPU draw/swapchain fixture 显式通过。不跑性能或游戏矩阵，累计仍 915，证据 `wire-out/refactoring-2026-10-14/r3-graphics-services64-{source-checks,verification}.json`。

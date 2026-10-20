@@ -13,7 +13,9 @@ impl Runtime64 {
     pub fn graphics_draws(&self) -> u64 {
         self.graphics.drawn
     }
-    pub(super) fn d3d_draw(&mut self, method: &str, a: &[u64]) -> Result<u64, String> {
+}
+impl Graphics {
+    pub(super) fn draw(&mut self, method: &str, a: &[u64]) -> Result<u64, String> {
         let indexed = method.contains("Indexed");
         let instanced = method.contains("Instanced");
         let count = a[1] as u32;
@@ -21,7 +23,7 @@ impl Runtime64 {
         if count == 0 || instances == 0 {
             return Ok(0);
         }
-        let context = &self.graphics.contexts[&a[0]];
+        let context = &self.contexts[&a[0]];
         let bound = |name: &str, slot: usize| {
             context
                 .bindings
@@ -31,14 +33,14 @@ impl Runtime64 {
                 .unwrap_or(0)
         };
         let state = |name: &str| -> Result<&[u8], String> {
-            match self.graphics.resources.get(&bound(name, 0)) {
+            match self.resources.get(&bound(name, 0)) {
                 Some(Resource::State(s)) => Ok(s),
                 _ => Err(format!("D3D11 missing {name} state")),
             }
         };
         let value = |name: &str| context.values.get(name).map(Vec::as_slice).unwrap_or(&[]);
         let buffer = |p: u64| -> Result<&crate::gpu::Buffer, String> {
-            match self.graphics.resources.get(&p) {
+            match self.resources.get(&p) {
                 Some(Resource::Buffer {
                     native,
                     mapped: None,
@@ -48,13 +50,13 @@ impl Runtime64 {
             }
         };
         let view = |p: u64| -> Result<&crate::gpu::ImageView, String> {
-            match self.graphics.resources.get(&p) {
+            match self.resources.get(&p) {
                 Some(Resource::View {
                     native: NativeView::Image(v),
                     resource,
                     ..
                 }) => {
-                    if !matches!(self.graphics.resources.get(resource), Some(Resource::Texture {mapped, ..}) if mapped.is_empty())
+                    if !matches!(self.resources.get(resource), Some(Resource::Texture {mapped, ..}) if mapped.is_empty())
                     {
                         return Err("D3D11 draw image is mapped".into());
                     }
@@ -72,7 +74,7 @@ impl Runtime64 {
             return Err("D3D11 guest draw multiple render targets unsupported".into());
         }
         let shader = |name: &str| -> Result<&crate::gpu::Shader, String> {
-            match self.graphics.resources.get(&bound(name, 0)) {
+            match self.resources.get(&bound(name, 0)) {
                 Some(Resource::Shader(s)) => Ok(s),
                 _ => Err(format!("D3D11 draw {name} missing")),
             }
@@ -100,7 +102,7 @@ impl Runtime64 {
                             native: NativeView::Buffer(v),
                             resource,
                             ..
-                        }) = self.graphics.resources.get(&p)
+                        }) = self.resources.get(&p)
                         else {
                             return Err("D3D11 draw buffer SRV missing".into());
                         };
@@ -109,7 +111,7 @@ impl Runtime64 {
                     }
                     (slot @ 142..158, 0) => {
                         let p = bound(&format!("{stage}SetSamplers"), (slot - 142) as usize);
-                        let Some(Resource::State(s)) = self.graphics.resources.get(&p) else {
+                        let Some(Resource::State(s)) = self.resources.get(&p) else {
                             return Err("D3D11 draw sampler missing".into());
                         };
                         BindingResource::Sampler(words(s, "sampler")?)
@@ -246,12 +248,11 @@ impl Runtime64 {
             sample_mask,
             stencil_ref,
         };
-        self.graphics
-            .backend
+        self.backend
             .as_ref()
             .ok_or("D3D11 draw backend missing")?
             .draw(&d)?;
-        self.graphics.drawn += 1;
+        self.drawn += 1;
         Ok(0)
     }
 }

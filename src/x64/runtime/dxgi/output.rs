@@ -2,7 +2,7 @@
 //! gamma ramp, duplication or vblank synchronization is claimed.
 //! Public Win64 layouts/slots reviewed against DXVK Native c8dc91fa dxgi*.h.
 use super::*;
-use crate::x64::runtime::display;
+use crate::x64::runtime::{display, gateways::Gateways};
 pub(super) const IIDS: [Guid; 2] = [
     guid(
         0xae02eedb,
@@ -50,33 +50,28 @@ fn mode(format: u32, extended: bool) -> Vec<u8> {
     } // Stereo FALSE.
     fields.into_iter().flat_map(u32::to_le_bytes).collect()
 }
-impl Runtime64 {
-    pub(super) fn dxgi_output(
+impl Graphics {
+    pub(super) fn output(
         &mut self,
         mem: &mut Memory,
+        gateways: &mut Gateways,
+        next: &mut u64,
         adapter: u64,
         out: u64,
     ) -> Result<u64, String> {
         let cached = self
-            .graphics
             .objects
             .iter()
             .find_map(|(&p, o)| (o.kind == Kind::Output && o.parent == adapter).then_some(p));
         let address = if let Some(p) = cached {
-            self.graphics.retain(p)?;
+            self.retain(p)?;
             p
         } else {
-            if self.graphics.objects.len() >= OBJECT_LIMIT {
+            if self.objects.len() >= OBJECT_LIMIT {
                 mem.write_int(out, 8, 0)?;
                 return Ok(OUT_OF_MEMORY);
             }
-            self.graphics.object(
-                mem,
-                &mut self.gateways,
-                &mut self.next_alloc,
-                Kind::Output,
-                adapter,
-            )?
+            self.object(mem, gateways, next, Kind::Output, adapter)?
         };
         mem.write_int(out, 8, address)?;
         Ok(0)
@@ -150,7 +145,7 @@ impl Runtime64 {
                     return Ok(INVALID);
                 }
                 if a[3] != 0 {
-                    let Some(device) = self.graphics.objects.get(&a[3]) else {
+                    let Some(device) = self.objects.get(&a[3]) else {
                         return Ok(INVALID_ARG);
                     };
                     let owner = if device.kind == Kind::DxgiDevice {
@@ -158,8 +153,8 @@ impl Runtime64 {
                     } else {
                         a[3]
                     };
-                    if self.graphics.objects.get(&owner).is_none_or(|o| {
-                        o.kind != Kind::Device || o.parent != self.graphics.objects[&a[0]].parent
+                    if self.objects.get(&owner).is_none_or(|o| {
+                        o.kind != Kind::Device || o.parent != self.objects[&a[0]].parent
                     }) {
                         return Ok(INVALID_ARG);
                     }
