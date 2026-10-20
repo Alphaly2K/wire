@@ -762,3 +762,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 Win64 普通文件查询与读写输出
 
 基线 `8f73bc8`。Files 执行 metadata、大小/flush、seek、attributes/cwd 和普通文件 read/write 输出，只借内存、只读 Threads 及 write 所需的只读 Mappings；根保留原 read preflight、提前返回、计数和 trace。三个处理体经明确资源替换、FileApi 模式规范化与 rustfmt 对照一致，整个根分发按相应调用替换对照一致；Files 模型、Mapping、目录与独立测试原文保持。首次编译暴露 timer 依赖根 UNIX_EPOCH 导入，恢复原导入后 release Win64 269、library 61 passed / 8 ignored、all-targets/all-features strict Clippy/build/fmt 通过，失败日志保留。定位/输出和 LastError 次序、写入后映射同步的部分提交保持；不跑性能或游戏/native 矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r3-file-io64-{source-checks,verification}.json`。
+
+## R3 Win64 路径与文件创建调用
+
+基线 `e67b4e0`。Files 执行路径变更、属性设置、普通创建目录与打开文件，只借内存、只读 Threads，open 再只读借 Mappings 检查活动映射。目录的安全描述符和提前提交原样留在根。四个处理体与根调用替换经 rustfmt 对照一致，原 query/I/O、Files/Mapping 模型和测试原文保持。按影响运行 release Win64 文件 17 项，all-targets/all-features strict Clippy/build/fmt 通过，沿用上一批完整 Win64/library 结果。未改故障顺序、sharing、truncate 或映射算法，不跑性能或游戏/native 矩阵，累计仍 915；证据 `wire-out/refactoring-2026-10-14/r3-file-paths64-{source-checks,verification}.json`。

@@ -1116,42 +1116,8 @@ impl Runtime64 {
                 )
             ) =>
             {
-                let id = file.unwrap();
-                let path = Self::path_name(mem, args[0], id.wide())?;
-                let moving = matches!(
-                    id,
-                    FileApi::MoveFileA
-                        | FileApi::MoveFileW
-                        | FileApi::MoveFileExA
-                        | FileApi::MoveFileExW
-                );
-                let destination = if moving && args[1] != 0 {
-                    Some(Self::path_name(mem, args[1], id.wide())?)
-                } else {
-                    None
-                };
-                let mutation = if moving {
-                    files::PathMutation::Move {
-                        destination: destination.as_deref(),
-                        flags: if matches!(id, FileApi::MoveFileExA | FileApi::MoveFileExW) {
-                            args[2]
-                        } else {
-                            0
-                        },
-                    }
-                } else if matches!(id, FileApi::RemoveDirectoryA | FileApi::RemoveDirectoryW) {
-                    files::PathMutation::RemoveDirectory
-                } else {
-                    files::PathMutation::DeleteFile
-                };
-                let result = self.files.mutate_path(&path, mutation);
-                match result {
-                    Ok(()) => 1,
-                    Err(error) => {
-                        self.set_error(mem, error)?;
-                        0
-                    }
-                }
+                self.files
+                    .mutate_call(mem, file.unwrap(), args, &self.threads)?
             }
             _ if handle == Some(HandleApi::DuplicateHandle) => {
                 mem.check(args[3], 8, WRITE)?;
@@ -1234,15 +1200,8 @@ impl Runtime64 {
                 Some(FileApi::SetFileAttributesW | FileApi::SetFileAttributesA)
             ) =>
             {
-                let path = Self::path_name(mem, args[0], file.unwrap().wide())?;
-                let result = self.files.set_attributes(&path, args[1]);
-                match result {
-                    Ok(()) => 1,
-                    Err(error) => {
-                        self.set_error(mem, error)?;
-                        0
-                    }
-                }
+                self.files
+                    .set_attribute_call(mem, file.unwrap(), args, &self.threads)?
             }
             _ if matches!(
                 file,
@@ -1270,28 +1229,8 @@ impl Runtime64 {
                         return Ok(Control::Returned);
                     }
                 }
-                let path = Self::path_name(mem, args[0], file.unwrap().wide())?;
-                let result = self
-                    .files
-                    .filesystem()
-                    .ok_or("Win64 directory requires filesystem")?
-                    .resolve(&path)
-                    .and_then(|p| {
-                        std::fs::create_dir(p).map_err(|e| {
-                            if e.kind() == std::io::ErrorKind::AlreadyExists {
-                                183
-                            } else {
-                                crate::fs::win_error(&e)
-                            }
-                        })
-                    });
-                match result {
-                    Ok(()) => 1,
-                    Err(error) => {
-                        self.set_error(mem, error)?;
-                        0
-                    }
-                }
+                self.files
+                    .create_directory_call(mem, file.unwrap(), args, &self.threads)?
             }
             _ if binding.control == gateways::ControlImport::LocaleEnumeration => {
                 if args[0] == 0 || args[3] != 0 || args[1] & !0x37 != 0 {
@@ -1470,55 +1409,9 @@ impl Runtime64 {
                     }
                 }
             }
-            _ if matches!(file, Some(FileApi::CreateFileW | FileApi::CreateFileA)) => {
-                if args[6] != 0 {
-                    return Err("Win64 file template handle not implemented".into());
-                }
-                let path = Self::path_name(mem, args[0], file.unwrap().wide())?;
-                let inherit = if args[3] == 0 {
-                    false
-                } else {
-                    mem.check(args[3], 24, READ)?;
-                    if mem.read_int(args[3], 4)? != 24 || mem.read_int(args[3] + 8, 8)? != 0 {
-                        return Err("Win64 file security descriptor not implemented".into());
-                    }
-                    mem.read_int(args[3] + 16, 4)? != 0
-                };
-                let result = self
-                    .files
-                    .filesystem()
-                    .ok_or("Win64 file open has no mounted filesystem")?
-                    .resolve(&path)
-                    .and_then(|path| {
-                        if args[4] == 2 || args[4] == 5 {
-                            if let Ok(meta) = std::fs::metadata(&path) {
-                                if self.mappings.has_file(&meta)? {
-                                    return Err(1224);
-                                }
-                            }
-                        }
-                        self.files.open(
-                            path,
-                            args[1] as u32,
-                            args[2] as u32,
-                            args[4] as u32,
-                            args[5] as u32,
-                            inherit,
-                        )
-                    });
-                match result {
-                    Ok((handle, existed)) => {
-                        if args[4] == 2 || args[4] == 4 {
-                            self.set_error(mem, if existed { 183 } else { 0 })?;
-                        }
-                        handle
-                    }
-                    Err(error) => {
-                        self.set_error(mem, error)?;
-                        u64::MAX
-                    }
-                }
-            }
+            _ if matches!(file, Some(FileApi::CreateFileW | FileApi::CreateFileA)) => self
+                .files
+                .open_call(mem, file.unwrap(), args, &self.mappings, &self.threads)?,
             _ if file == Some(FileApi::NtQueryDirectory) => {
                 self.files.nt_query_directory(mem, args)?
             }

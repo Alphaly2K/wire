@@ -2,7 +2,7 @@
 
 Win64 的 `x64::runtime::files::Files` 拥有真实文件描述符、sharing/access/flags、目录 cursor、受限 GuestFs、NOT_CONTENT_INDEXED 元数据和标准句柄状态。Runtime64 的 set_filesystem 和供 Process 使用的 filesystem facade 继续委托；文件系统只以明确的只读/可写借用交给需要它的 adapter、loader 和目录查询，没有公开字段或 Deref 到 Runtime64。
 
-移动、删除、目录删除和属性更新由 Files 完成。`PathMutation` 区分各操作；ABI adapter 读取 guest 路径和原始 flags，并处理 LastError、返回 frame 和 trace。路径受限规则、open-handle/cwd 冲突、replace/read-only 检查与原错误码保持原样。
+移动、删除、目录删除和属性更新由 Files 完成。`PathMutation` 区分各操作；`files/calls.rs` adapter 读取 guest 路径和原始 flags，在原错误分支只读借 Threads 写 LastError，Runtime 保留返回 frame 和 trace。路径受限规则、open-handle/cwd 冲突、replace/read-only 检查与原错误码保持原样。
 
 元数据的提交顺序保持原行为：rename 成功后解析目标 canonical path，再收集源目录树的 metadata；先清目标前缀，再将源键迁入。删除成功后清理源键。host 操作与 canonicalize 之间仍可能产生已有的失败状态，没有顺便改为通用原子事务。FindFirst/Next 的原路径键查询与其它 API 的 canonicalize 查询区别也保留。
 
@@ -41,6 +41,8 @@ Win64 普通 metadata、大小/flush、seek、attributes 和 cwd adapter 位于 
 Win64 普通文件读写和管道写入继续在原位置提前返回 Control::Returned，gateway 提交提前保存的 CPU return frame、计数和 trace，保留这些 endpoint 原来不调用 scheduler unblock 的行为。管道读入和标准输出写入走原来的通用 unblock/提交路径。没有新建文件完成框架或另移 CPU 提交；这项边界保留是前几个候选性能失败后的渐进取舍。WriteConsoleW 保持原来的拒绝结果，没有借迁移扩展 console 能力。
 
 普通查询和文件读写提取基线 `8f73bc8`。处理体经资源替换、FileApi 模式规范化及 rustfmt 对照一致，根分发除对应调用替换外保持；读入 preflight 仍在原位置。Files 模型、Mapping/目录主体和文件回归期望未改；Threads 只在原错误分支写 LastError，错误槽不提前取样。
+
+后续基线 `e67b4e0` 将路径变更、SetFileAttributes、普通创建目录及 CreateFile 的 guest 解码/输出也归 Files。打开文件只读借 Mappings 核对活动映射，truncate 与 sharing 的原次序保持；创建目录的安全描述符检查及其提前提交仍在 Runtime。四个处理体及根调用替换经 rustfmt 对照一致，未改文件/Mapping 模型或既有 query/I/O 核。
 
 文件 section 的八个 export 也由 FileApi 声明：CreateFileMappingA/W、OpenFileMappingA/W、MapViewOfFile/Ex、UnmapViewOfFile、FlushViewOfFile。文件契约在该批合计 53 个，PE32 32 Typed/21 ABI-only，Win64 45 Typed/8 Absent。PE32 八项均保留未实现策略；Win64 OpenFileMappingA/W 保持 absent，其余为原有 unnamed、read-only、file-backed 子集。HANDLE、view size 和可选 base 保留指针宽度，protection/access/offset high/low 使用 DWORD；SECURITY_ATTRIBUTES、access/alignment、handle 查询、错误码和故障提交顺序保持。
 

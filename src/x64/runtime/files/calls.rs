@@ -1,12 +1,168 @@
 //! Ordinary file queries and checked I/O output borrow only their actual resources.
-use super::{attributes, change_time, filetime, identity, Files};
+use super::{attributes, change_time, filetime, identity, Files, PathMutation};
 use crate::{
     win32::{catalog::FileApi, x64::text},
-    x64::runtime::{mapping::Mappings, threads::Threads, Memory, WRITE},
+    x64::runtime::{mapping::Mappings, threads::Threads, Memory, READ, WRITE},
 };
 use std::time::UNIX_EPOCH;
 
 impl Files {
+    pub(in crate::x64::runtime) fn mutate_call(
+        &mut self,
+        mem: &mut Memory,
+        id: FileApi,
+        args: &[u64],
+        threads: &Threads,
+    ) -> Result<u64, String> {
+        Ok({
+            let path = text::path_name(mem, args[0], id.wide())?;
+            let moving = matches!(
+                id,
+                FileApi::MoveFileA
+                    | FileApi::MoveFileW
+                    | FileApi::MoveFileExA
+                    | FileApi::MoveFileExW
+            );
+            let destination = if moving && args[1] != 0 {
+                Some(text::path_name(mem, args[1], id.wide())?)
+            } else {
+                None
+            };
+            let mutation = if moving {
+                PathMutation::Move {
+                    destination: destination.as_deref(),
+                    flags: if matches!(id, FileApi::MoveFileExA | FileApi::MoveFileExW) {
+                        args[2]
+                    } else {
+                        0
+                    },
+                }
+            } else if matches!(id, FileApi::RemoveDirectoryA | FileApi::RemoveDirectoryW) {
+                PathMutation::RemoveDirectory
+            } else {
+                PathMutation::DeleteFile
+            };
+            let result = self.mutate_path(&path, mutation);
+            match result {
+                Ok(()) => 1,
+                Err(error) => {
+                    threads.set_error(mem, error)?;
+                    0
+                }
+            }
+        })
+    }
+
+    pub(in crate::x64::runtime) fn set_attribute_call(
+        &mut self,
+        mem: &mut Memory,
+        id: FileApi,
+        args: &[u64],
+        threads: &Threads,
+    ) -> Result<u64, String> {
+        Ok({
+            let path = text::path_name(mem, args[0], id.wide())?;
+            let result = self.set_attributes(&path, args[1]);
+            match result {
+                Ok(()) => 1,
+                Err(error) => {
+                    threads.set_error(mem, error)?;
+                    0
+                }
+            }
+        })
+    }
+
+    pub(in crate::x64::runtime) fn create_directory_call(
+        &mut self,
+        mem: &mut Memory,
+        id: FileApi,
+        args: &[u64],
+        threads: &Threads,
+    ) -> Result<u64, String> {
+        Ok({
+            let path = text::path_name(mem, args[0], id.wide())?;
+            let result = self
+                .filesystem()
+                .ok_or("Win64 directory requires filesystem")?
+                .resolve(&path)
+                .and_then(|p| {
+                    std::fs::create_dir(p).map_err(|e| {
+                        if e.kind() == std::io::ErrorKind::AlreadyExists {
+                            183
+                        } else {
+                            crate::fs::win_error(&e)
+                        }
+                    })
+                });
+            match result {
+                Ok(()) => 1,
+                Err(error) => {
+                    threads.set_error(mem, error)?;
+                    0
+                }
+            }
+        })
+    }
+
+    pub(in crate::x64::runtime) fn open_call(
+        &mut self,
+        mem: &mut Memory,
+        id: FileApi,
+        args: &[u64],
+        mappings: &Mappings,
+        threads: &Threads,
+    ) -> Result<u64, String> {
+        Ok({
+            if args[6] != 0 {
+                return Err("Win64 file template handle not implemented".into());
+            }
+            let path = text::path_name(mem, args[0], id.wide())?;
+            let inherit = if args[3] == 0 {
+                false
+            } else {
+                mem.check(args[3], 24, READ)?;
+                if mem.read_int(args[3], 4)? != 24 || mem.read_int(args[3] + 8, 8)? != 0 {
+                    return Err("Win64 file security descriptor not implemented".into());
+                }
+                mem.read_int(args[3] + 16, 4)? != 0
+            };
+            let result = self
+                .filesystem()
+                .ok_or("Win64 file open has no mounted filesystem")?
+                .resolve(&path)
+                .and_then(|path| {
+                    if args[4] == 2 || args[4] == 5 {
+                        if let Ok(meta) = std::fs::metadata(&path) {
+                            if mappings.has_file(&meta)? {
+                                return Err(1224);
+                            }
+                        }
+                    }
+                    self.open(
+                        path,
+                        args[1] as u32,
+                        args[2] as u32,
+                        args[4] as u32,
+                        args[5] as u32,
+                        inherit,
+                    )
+                });
+            match result {
+                Ok((handle, existed)) => {
+                    if args[4] == 2 || args[4] == 4 {
+                        threads.set_error(mem, if existed { 183 } else { 0 })?;
+                    }
+                    handle
+                }
+                Err(error) => {
+                    threads.set_error(mem, error)?;
+                    u64::MAX
+                }
+            }
+        })
+    }
+
     pub(in crate::x64::runtime) fn query_call(
         &mut self,
         mem: &mut Memory,
