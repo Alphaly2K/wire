@@ -1,6 +1,7 @@
 //! Variable values and issued environment blocks have one private owner.
-use super::{Memory, Runtime64};
+use super::{allocation::Pages, threads::Threads, Memory, Runtime64};
 use crate::win32::catalog::EnvironmentApi;
+use std::collections::BTreeMap;
 #[derive(Default)]
 pub(super) struct Environment {
     variables: crate::runtime::environment::EnvironmentVariables,
@@ -13,30 +14,65 @@ impl Runtime64 {
         id: EnvironmentApi,
         args: &[u64],
     ) -> Result<u64, String> {
+        match id {
+            EnvironmentApi::BlockW => {
+                let last_error = self.teb() + 0x68;
+                let mut pages = Pages {
+                    next: &mut self.next_alloc,
+                    allocations: &mut self.allocations,
+                    last_error,
+                    trace: &mut self.trace,
+                };
+                self.environment.block_call(mem, &mut pages)
+            }
+            EnvironmentApi::FreeW => {
+                self.environment
+                    .free_block_call(mem, args[0], &mut self.allocations, &self.threads)
+            }
+            _ => self.environment.variable_call(
+                mem,
+                id,
+                args,
+                self.profile.codepage(),
+                &self.threads,
+            ),
+        }
+    }
+}
+
+impl Environment {
+    fn variable_call(
+        &mut self,
+        mem: &mut Memory,
+        id: EnvironmentApi,
+        args: &[u64],
+        codepage: u32,
+        threads: &Threads,
+    ) -> Result<u64, String> {
         Ok(match id {
             EnvironmentApi::GetA
             | EnvironmentApi::GetW
             | EnvironmentApi::SetA
             | EnvironmentApi::SetW => {
                 let wide = id.wide();
-                let variable = Self::path_name(mem, args[0], wide)?;
+                let variable = crate::win32::x64::text::path_name(mem, args[0], wide)?;
                 if variable.is_empty() || variable.contains('=') {
-                    self.set_error(mem, 87)?;
+                    threads.set_error(mem, 87)?;
                     0
                 } else if id.set() {
                     if args[1] == 0 {
-                        if self.environment.variables.remove(&variable) {
+                        if self.variables.remove(&variable) {
                             1
                         } else {
-                            self.set_error(mem, 203)?;
+                            threads.set_error(mem, 203)?;
                             0
                         }
                     } else {
-                        let value = Self::path_name(mem, args[1], wide)?;
-                        self.environment.variables.set(variable, value);
+                        let value = crate::win32::x64::text::path_name(mem, args[1], wide)?;
+                        self.variables.set(variable, value);
                         1
                     }
-                } else if let Some(value) = self.environment.variables.get(&variable) {
+                } else if let Some(value) = self.variables.get(&variable) {
                     let bytes: Vec<u8> = if wide {
                         value
                             .encode_utf16()
@@ -44,7 +80,7 @@ impl Runtime64 {
                             .flat_map(u16::to_le_bytes)
                             .collect()
                     } else {
-                        crate::codepage::encode(&(value.to_owned() + "\0"), self.profile.codepage())
+                        crate::codepage::encode(&(value.to_owned() + "\0"), codepage)
                             .map_err(|e| format!("environment codepage error {e}"))?
                             .0
                     };
@@ -56,34 +92,42 @@ impl Runtime64 {
                         required as u64 - 1
                     }
                 } else {
-                    self.set_error(mem, 203)?;
+                    threads.set_error(mem, 203)?;
                     0
-                }
-            }
-            EnvironmentApi::BlockW => {
-                let bytes = self.environment.variables.wide_block();
-                let ptr = self.heap_alloc(mem, bytes.len() as u64)?;
-                if ptr != 0 {
-                    mem.write(ptr, &bytes)?;
-                    self.environment.blocks.insert(ptr);
-                }
-                ptr
-            }
-            EnvironmentApi::FreeW => {
-                if !self.environment.blocks.contains(&args[0])
-                    || !self.allocations.contains_key(&args[0])
-                {
-                    self.set_error(mem, 87)?;
-                    0
-                } else {
-                    let (_, span) = self.allocations[&args[0]];
-                    mem.unmap(args[0], span)?;
-                    self.environment.blocks.remove(&args[0]);
-                    self.allocations.remove(&args[0]);
-                    1
                 }
             }
             _ => unreachable!("ANSI environment block exports remain absent on Win64"),
         })
+    }
+
+    fn block_call(&mut self, mem: &mut Memory, pages: &mut Pages<'_>) -> Result<u64, String> {
+        let bytes = self.variables.wide_block();
+        let ptr = pages.allocate(mem, bytes.len() as u64)?;
+        if ptr != 0 {
+            mem.write(ptr, &bytes)?;
+            self.blocks.insert(ptr);
+        }
+        Ok(ptr)
+    }
+
+    fn free_block_call(
+        &mut self,
+        mem: &mut Memory,
+        pointer: u64,
+        allocations: &mut BTreeMap<u64, (usize, u64)>,
+        threads: &Threads,
+    ) -> Result<u64, String> {
+        Ok(
+            if !self.blocks.contains(&pointer) || !allocations.contains_key(&pointer) {
+                threads.set_error(mem, 87)?;
+                0
+            } else {
+                let (_, span) = allocations[&pointer];
+                mem.unmap(pointer, span)?;
+                self.blocks.remove(&pointer);
+                allocations.remove(&pointer);
+                1
+            },
+        )
     }
 }

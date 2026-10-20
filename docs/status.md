@@ -80,6 +80,8 @@ StandardHandles 的重定向/标准输出和 Pipes 的读写输出也已归各�
 
 Win64 [section 调用](architecture/files.md)也已归 Mappings，只借内存与必要的 Files/Threads；原映射生命周期与 coherence 保持。按影响通过文件 17 项及 section 过滤 5 项（含 3 项 critical-section），严格构建通过。
 
+Win64 [Environment](architecture/environment.md)的变量操作与块输出/释放现直接由 owner 执行，Runtime 只组合 Pages、账本、codepage 和必要错误资源；按影响通过环境 3 项及严格构建，保留原成功/故障提交顺序。
+
 ## 重构范围
 
 当前累计冻结包含[对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)、日志、五项 paint、控件初始化、资源、启动信息、环境接口与 CLI 拆分；独立历史证据继续可查。

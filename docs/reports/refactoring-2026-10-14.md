@@ -782,3 +782,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 Win64 section 调用资源
 
 基线 `15e3faf`。Mappings 直接执行 section 创建、map/unmap 和 flush 的 guest adapter，只借 Memory、只读 Threads 及创建所需的只读 Files。四个处理体经明确资源替换及 rustfmt 对照一致，整个根分发除四处委托外保持；mapping 模型只注册 calls，Files/Threads/Memory 与独立回归原文保持。SECURITY_ATTRIBUTES 提前读取、指针与 DWORD 宽度、LastError 和返回帧提交次序保持，未改 view/coherence 或内存算法。按影响通过 release 文件 17 项及 section 过滤 5 项（2 项 section、3 项 critical-section），all-targets/all-features strict Clippy/build/fmt 通过；不重复性能或游戏矩阵，累计仍 919。证据 `wire-out/refactoring-2026-10-14/r3-section-calls64-{source-checks,verification}.json`。
+
+## R3 Win64 Environment 调用资源
+
+基线 `86314a3`。Environment 直接执行变量查询/修改、wide block 输出及专用释放；变量只借内存、codepage 与只读 Threads，块创建借原 Pages，释放只借 allocation 账本与 Threads。原三项处理体经资源替换和 rustfmt 对照一致；根 runtime、Pages、公共变量模型、Threads/Memory 与独立测试原文保持。只在原错误分支查询错误槽，写入后登记 block、unmap 后删除两个记录的顺序保持。按影响通过 release 环境 3 项与 all-targets/all-features strict Clippy/build/fmt；不重复性能或游戏矩阵，累计仍 919。证据 `wire-out/refactoring-2026-10-14/r3-environment-calls64-{source-checks,verification}.json`。
