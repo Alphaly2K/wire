@@ -746,3 +746,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3/R4 PE32 模块错误依赖
 
 基线 `524c405`。领域 Failure 只保留 Expected/Fatal，Process 的 module_error 单独拥有原三分支执行错误和 GuestCallOutcome。From 转换原样移动 code/message；link 错误加路径的原位置保持，DisableThreadLibraryCalls 显式转换结果。领域实现仅删除不可产生的 Control 分支与依赖；生命周期、通知和 callback 主体原文保持，装载入口经上述两处边界转换对照一致，Linker 未改。完整 release Win32 259、IR 31、thread regression 1、all-targets/all-features strict Clippy/build/fmt 通过。不跑性能或游戏/native 矩阵，累计仍 915；证据 `wire-out/refactoring-2026-10-14/r4-module-errors32-{source-checks,verification}.json`。
+
+## R7 PE32 模块目录整合
+
+基线 `9dd1c36`。已形成的 PE32 image/TLS owner 和链接器迁到 `win32/x86/modules`，既有 provider 实现归入其私有子模块；根 modules 只保留公开类型/函数与内部类型重导出。owner 除移除 facade 和改用本地 Providers 外经 rustfmt 全文对照保持，provider/linker 原文保持；Process 四个模块与 API 原文保持，领域不导入 Process。阶段整合通过 release 全目标 694 passed / 7 ignored / 21 suites、all-targets/all-features strict Clippy/build/fmt 和 6 项 inventory 工具测试。无 include/native/构建输入变化，评估为稳定职责的目录归位，不跑性能或游戏矩阵，累计仍 915；证据 `wire-out/refactoring-2026-10-14/r7-modules32-layout-{source-checks,verification}.json`。

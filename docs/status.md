@@ -4,7 +4,7 @@
 
 近期完成 [GDI+](architecture/gdiplus.md)、[WMI](architecture/wmi.md)、[DirectSound](architecture/directsound.md) 与 [D3D9](architecture/d3d9.md) 的资源借用收敛，移除对象调用对整个 ApiState 的依赖及 registry/backend 临时 take；[PE32 线程创建和退出](architecture/thread-control.md)、[USER 资源退休](architecture/window-control.md)、[callback 执行](architecture/callbacks32.md) 与 [消息队列](architecture/messages.md) 也已归入各自 owner。Win64 [TLS/FLS](architecture/locals.md) 私有拥有固定槽和 callback identity，保留 TEB 与析构顺序。
 
-最新阶段整合覆盖至 USER32 目录归位及公开 facade 分离（上一提交 `ed2fbf2`）：release 全目标 **694 passed / 7 ignored / 21 suites**，all-targets/all-features strict Clippy、build 及 fmt 通过；另通过 **6 项 inventory 工具测试**。此前 PE32 原生窗口探针及两个真实 GPU draw/swapchain fixture 的证据保留，其余工具沿用前次 31 项结果。按改动影响选择验证，普通契约和资源边界提取不逐批重跑性能或游戏矩阵；执行循环、ISA 算法和 callback frame 保持。见 [验收策略](architecture/validation-tools.md)。
+最新阶段整合覆盖至 PE32 模块目录归位及领域/Process 错误分离（上一提交 `9dd1c36`）：release 全目标 **694 passed / 7 ignored / 21 suites**，all-targets/all-features strict Clippy、build 及 fmt 通过；另通过 **6 项 inventory 工具测试**。此前 PE32 原生窗口探针及两个真实 GPU draw/swapchain fixture 的证据保留，其余工具沿用前次 31 项结果。按改动影响选择验证，普通契约和资源边界提取不逐批重跑性能或游戏矩阵；执行循环、ISA 算法和 callback frame 保持。见 [验收策略](architecture/validation-tools.md)。
 
 历史性能拒绝、回滚与后续复核证据继续保留，见 [API 日志累计验收](reports/refactoring-api-log-2026-10-19.md)、[后台 Unity 渲染结束后的复核](reports/refactoring-post-unity-performance-2026-10-19.md) 和 [CLI 重试](reports/refactoring-cli-followup-2026-10-19.md)。当前结构重构不宣称新的性能提升。
 
@@ -63,6 +63,8 @@ Win64 显示 scalar 查询也归 User，只借 Memory 与只读 Threads；monito
 Win64 TLS/FLS 普通 adapter 只借 LocalSlots64、Memory 与只读 Threads；存活 TEB 按原顺序迭代，不新增快照分配，hot TLS 与析构处理保持。完整 Win64 269、library 61 passed / 7 ignored 和严格构建通过。
 
 PE32 模块领域错误已移除 GuestCallOutcome，Process 单独拥有 DLL/TLS 的控制结果与执行错误；原回滚、fatal 和非局部转移分支保持。完整 Win32 259、IR 31、线程回归及严格构建通过。
+
+PE32 image/TLS owner、链接器和 provider 身份也已归位到 `win32/x86/modules`；根 modules 保留公开兼容入口，形成上述全目标整合。
 
 ## 重构范围
 

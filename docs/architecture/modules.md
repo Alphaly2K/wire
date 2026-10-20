@@ -1,6 +1,6 @@
 # 模块身份与生命周期
 
-PE32 的 `modules::Modules` 继续拥有 guest images、路径、引用计数、pin、TLS 和初始化/退休顺序；内建逻辑 provider 的名字、handle 反查及 numeric allocator 现在也由它拥有。`win32::x86::modules::Providers` 私有实现保留初值 `0x70001000`、stride `0x10000`、ASCII 小写注册与进程级持久寿命。查找只消费既有 lowercase key，不能顺便注册模块。
+PE32 的 `win32::x86::modules::Modules` 拥有 guest images、路径、引用计数、pin、TLS 和初始化/退休顺序；内建逻辑 provider 的名字、handle 反查及 numeric allocator 也由它拥有。`modules/providers.rs` 私有实现保留初值 `0x70001000`、stride `0x10000`、ASCII 小写注册与进程级持久寿命。查找只消费既有 lowercase key，不能顺便注册模块。根 `modules::Modules` 保留公开重导出。
 
 `ApiState::module_handle_for` 保留并委托 owner。原 `module_handles/handle_to_dll/next_module_handle` 三个公开可写字段已移除，属于 Rust 源接口变化；仓库中除运行时外只有一个测试直接读取它们，改用独立的 legacy handle 黄金值。外部调用者使用 `state.modules.provider_handle_for/provider_handle/provider_name`，不再写两张表或改 allocator。公开 root 模块路径保持兼容。
 
@@ -28,7 +28,9 @@ typed 模块入口及失败清理由 `x86/process/module_loading.rs` 协调，AP
 
 装载入口基线 `1e6eacc`，call/dispatch、回滚与领域操作对照保持，链接/生命周期方法未改；阶段整合 release 全目标 694 passed / 7 ignored（21 suites）、all-targets/all-features strict Clippy、build 和 fmt 通过。证据 `wire-out/refactoring-2026-10-14/r4-module-loading32-{source-checks,verification}.json`。
 
-`modules/linker.rs` 的 Linker 只在映射/解析期间借 Modules、ApiTable、USER、scratch、错误槽、只读 filesystem/EXE path 和两个 cmdline 地址，回调前借用即结束。模块领域不再借 ApiState。依赖引用、去重与 abandon 由 Modules 方法处理；系统类注册直接借 USER 的明确资源。原查找/读取/映射/IAT/保护和 provider/data-export/forwarder 顺序保持，不增加逐调用解析。
+`win32/x86/modules/linker.rs` 的 Linker 只在映射/解析期间借 Modules、ApiTable、USER、scratch、错误槽、只读 filesystem/EXE path 和两个 cmdline 地址，回调前借用即结束。模块领域不再借 ApiState。依赖引用、去重与 abandon 由 Modules 方法处理；系统类注册直接借 USER 的明确资源。原查找/读取/映射/IAT/保护和 provider/data-export/forwarder 顺序保持，不增加逐调用解析。
+
+R7 在职责分离后将 PE32 image/TLS owner 与链接器归入 `win32/x86/modules`；根模块只重导出原 Modules/native_module、Process 的公开装载/通知函数和内部类型。领域目录不导入 Process；错误转换与 guest 执行继续位于 Process。没有移动 fixture、第三方输入或构建路径。
 
 链接资源基线 `8707f16`，link/resolve、引用/边/abandon、系统类与 Process 调用对照保持，生命周期/回滚/TLS 方法未改。首次编译遗漏 Desktop 使用的兼容类入口，保留入口后完整 release Win32 259、IR 31、all-targets/all-features strict Clippy、build/fmt 通过，原失败日志保留。不跑性能或游戏矩阵，证据 `wire-out/refactoring-2026-10-14/r3-module-linker32-{source-checks,verification}.json`。
 
