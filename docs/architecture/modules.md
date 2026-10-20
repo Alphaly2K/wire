@@ -24,6 +24,8 @@ PE32 的 TLS 回调、线程通知和进程退出通知由 `x86/process/module_n
 
 typed 模块入口及失败清理由 `x86/process/module_loading.rs` 协调，API 直接调用；公开 modules::dispatch 重导出兼容入口。Modules 独立执行 disable-thread、pin、metadata 查询和回滚资源操作，Process 保留原 expected/fatal/control 分支和 TLS/DllMain 失败清理。回滚仍先撤销边/引用，再逆序逐个退休 image，每次成功 decommit 后立即删除 CPU IR；后续失败不延迟已完成的失效动作。领域模块不再依赖 Cpu、scheduler、logger 或 guest 执行器，链接器对组合根的借用继续收窄。
 
+领域 Failure 现只表达 Expected/Fatal，不再携带 GuestCallOutcome。`x86/process/module_error.rs` 拥有含 Control 的执行错误；从领域错误显式转换时原样移交 code/message，不改 callback 或清理次序。预期错误触发回滚、fatal 传播与异常/退出控制转移仍由原 Process 分支处理。
+
 装载入口基线 `1e6eacc`，call/dispatch、回滚与领域操作对照保持，链接/生命周期方法未改；阶段整合 release 全目标 694 passed / 7 ignored（21 suites）、all-targets/all-features strict Clippy、build 和 fmt 通过。证据 `wire-out/refactoring-2026-10-14/r4-module-loading32-{source-checks,verification}.json`。
 
 `modules/linker.rs` 的 Linker 只在映射/解析期间借 Modules、ApiTable、USER、scratch、错误槽、只读 filesystem/EXE path 和两个 cmdline 地址，回调前借用即结束。模块领域不再借 ApiState。依赖引用、去重与 abandon 由 Modules 方法处理；系统类注册直接借 USER 的明确资源。原查找/读取/映射/IAT/保护和 provider/data-export/forwarder 顺序保持，不增加逐调用解析。

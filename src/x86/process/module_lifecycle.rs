@@ -1,11 +1,15 @@
 //! Process-owned PE32 DLL initialization, sidecar IR and unload execution.
 //! Modules validates and commits lifecycle state using owned requests.
-use super::{module_notifications::invoke_tls, GuestCallOutcome};
+use super::{
+    module_error::{Failure, LoadResult},
+    module_notifications::invoke_tls,
+    GuestCallOutcome,
+};
 use crate::{
     api::{ApiLogger, ApiState, ApiTable},
     cpu::Cpu,
     mem::GuestMem,
-    modules::{Failure, Initialization, LoadResult, Transaction},
+    modules::{Initialization, Transaction},
     thread::Sched,
 };
 

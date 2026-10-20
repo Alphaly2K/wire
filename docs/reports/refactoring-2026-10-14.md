@@ -742,3 +742,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 Win64 local-slot 调用资源
 
 基线 `b51a04a`。普通 TLS/FLS adapter 只借 LocalSlots64、Memory 和只读 Threads；Threads 按原 BTreeMap 顺序迭代存活 TEB，不新增集合分配。Runtime64 仅组合资源，两遍 preflight/写零、FLS free 检查及错误槽访问顺序保持。完整 handler 经资源/循环变量替换和 rustfmt 对照一致，Threads 只新增迭代方法，hot TLS、槽位模型及 FLS destructor 原文保持。完整 release Win64 269、library 61 passed / 7 ignored、all-targets/all-features strict Clippy/build/fmt 通过。不跑性能或游戏/native 矩阵，累计仍 915；证据 `wire-out/refactoring-2026-10-14/r3-local-calls64-{source-checks,verification}.json`。
+
+## R3/R4 PE32 模块错误依赖
+
+基线 `524c405`。领域 Failure 只保留 Expected/Fatal，Process 的 module_error 单独拥有原三分支执行错误和 GuestCallOutcome。From 转换原样移动 code/message；link 错误加路径的原位置保持，DisableThreadLibraryCalls 显式转换结果。领域实现仅删除不可产生的 Control 分支与依赖；生命周期、通知和 callback 主体原文保持，装载入口经上述两处边界转换对照一致，Linker 未改。完整 release Win32 259、IR 31、thread regression 1、all-targets/all-features strict Clippy/build/fmt 通过。不跑性能或游戏/native 矩阵，累计仍 915；证据 `wire-out/refactoring-2026-10-14/r4-module-errors32-{source-checks,verification}.json`。

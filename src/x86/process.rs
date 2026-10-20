@@ -16,6 +16,7 @@ pub(crate) mod dialog;
 pub(crate) mod display;
 pub(crate) mod exceptions;
 pub(crate) mod messages;
+mod module_error;
 pub(crate) mod module_lifecycle;
 pub(crate) mod module_loading;
 pub(crate) mod module_notifications;

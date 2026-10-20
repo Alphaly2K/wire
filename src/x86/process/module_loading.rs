@@ -1,6 +1,7 @@
 //! PE32 module API and failed-load cleanup execute at the process boundary.
 //! Modules owns mapping metadata and transaction logs; CPU IR changes stay here.
 use super::{
+    module_error::{Failure, LoadResult},
     module_lifecycle::{initialize, unload},
     module_notifications::invoke_tls,
     GuestCallOutcome,
@@ -9,7 +10,7 @@ use crate::{
     api::{ApiLogger, ApiState, ApiTable},
     cpu::Cpu,
     mem::GuestMem,
-    modules::{memory, Failure, LoadResult, Symbol, Transaction},
+    modules::{memory, Symbol, Transaction},
     thread::Sched,
 };
 use std::collections::HashSet;
@@ -85,10 +86,10 @@ pub(crate) fn call(
                     .module_linker(api)
                     .link(&path, None, mem, &mut txn, 0)
                     .map_err(|e| match e {
-                        Failure::Expected(code, reason) => {
+                        crate::modules::Failure::Expected(code, reason) => {
                             Failure::Expected(code, format!("{path:?}: {reason}"))
                         }
-                        other => other,
+                        other => other.into(),
                     })?;
                 for thread in &sched.threads {
                     if !matches!(thread.state, crate::thread::ThreadState::Exited(_)) {
@@ -104,7 +105,10 @@ pub(crate) fn call(
                 note = format!("loaded {path:?} at {handle:#x}");
                 Ok(handle)
             }
-            ModuleApi::DisableThreadLibraryCalls => state.modules.disable_thread_calls(a[0]),
+            ModuleApi::DisableThreadLibraryCalls => state
+                .modules
+                .disable_thread_calls(a[0])
+                .map_err(Failure::from),
             ModuleApi::FreeLibrary => {
                 unload(a[0], cpu, mem, api, state, log, sched, max_instr)?;
                 Ok(1)

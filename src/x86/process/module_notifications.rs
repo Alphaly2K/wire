@@ -1,11 +1,13 @@
 //! PE32 DLL/TLS notifications execute in the owning guest thread.
 //! Module metadata remains private to Modules; snapshots preserve reentry rules.
-use super::GuestCallOutcome;
+use super::{
+    module_error::{Failure, LoadResult},
+    GuestCallOutcome,
+};
 use crate::{
     api::{ApiLogger, ApiState, ApiTable},
     cpu::Cpu,
     mem::GuestMem,
-    modules::{Failure, LoadResult},
     thread::Sched,
 };
 

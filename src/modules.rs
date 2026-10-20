@@ -3,7 +3,6 @@ use crate::mem::GuestMem;
 use crate::pe::{PeFile, DIR_BASERELOC, DIR_EXPORT};
 pub use crate::x86::process::module_loading::dispatch;
 pub use crate::x86::process::module_notifications::{notify_process_exit, notify_thread};
-use crate::x86::process::GuestCallOutcome;
 use std::collections::HashMap;
 use std::path::PathBuf;
 mod linker;
@@ -68,7 +67,6 @@ pub struct Modules {
 pub(crate) enum Failure {
     Expected(u32, String),
     Fatal(String),
-    Control(GuestCallOutcome),
 }
 pub(crate) type LoadResult<T> = Result<T, Failure>;
 fn bad(message: impl Into<String>) -> Failure {
@@ -633,7 +631,6 @@ impl Modules {
         })();
         result.map_err(|e| match e {
             Failure::Expected(_, msg) | Failure::Fatal(msg) => msg,
-            _ => unreachable!(),
         })
     }
     fn handle(&self, name: &str, fs: Option<&crate::fs::GuestFs>) -> Option<u32> {

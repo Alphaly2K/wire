@@ -62,6 +62,8 @@ Win64 显示 scalar 查询也归 User，只借 Memory 与只读 Threads；monito
 
 Win64 TLS/FLS 普通 adapter 只借 LocalSlots64、Memory 与只读 Threads；存活 TEB 按原顺序迭代，不新增快照分配，hot TLS 与析构处理保持。完整 Win64 269、library 61 passed / 7 ignored 和严格构建通过。
 
+PE32 模块领域错误已移除 GuestCallOutcome，Process 单独拥有 DLL/TLS 的控制结果与执行错误；原回滚、fatal 和非局部转移分支保持。完整 Win32 259、IR 31、线程回归及严格构建通过。
+
 ## 重构范围
 
 当前累计冻结包含[对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)、日志、五项 paint、控件初始化、资源、启动信息、环境接口与 CLI 拆分；独立历史证据继续可查。
