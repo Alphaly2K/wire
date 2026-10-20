@@ -32,6 +32,8 @@ PE32 的 immutable binding 同时缓存 LegacyUnimplemented 执行策略，在�
 
 枚举保持无效 handle/Ex flags 先于路径和输出检查，成功输出后才分配搜索句柄或推进游标。PE32 FindClose 不会删除普通文件句柄；搜索输出仍按原顺序分步写入，保留可能的部分提交。Win64 先检查整块输出再读取路径，输出可覆盖返回槽和栈参数，gateway 使用预先保存的参数及返回 frame。原搜索句柄空间、entry/handle 上限、metadata 和 LastError 行为不变，Searches 继续拥有 Win64 的枚举状态。
 
+Win64 FindFirst/Next/Close 的处理也由 Searches 执行，只借内存、只读 Files 和 Threads；Files 提供原 metadata 编码。全文目录信息调用归 Files，batch 准备、guest 输出、cursor 提交和 NO_MORE_FILES 后更新的顺序保持。Threads 拥有当前 TEB 的 LastError 写入，错误分支才查询 TEB；成功路径不增加错误槽读取。Runtime64 的旧调用入口仅组合这些资源，原 NtQueryDirectoryFile 与 directory_batch 主体保持。
+
 PE32 adapter 位于 `win32/x86/files.rs`：主 gateway 用 bound FileApi/PathApi ID 调用，公开 `file_api::dispatch` 保留原来的大小写/DLL 和函数范围，作为冷解析 facade。adapter 只借 GuestMem、KernelObjects32、filesystem 和 LastError 槽，不接收 ApiState；公开 read_name/write_string 路径继续重导出。内部互斥 Core/Helper ID 区分文件与 SHLWAPI/imagehlp 操作，已迁移调用不再解析 DLL 或 export。GetFileType 仍由主 gateway 执行，invalid/non-file handle 返回 0 并保持 LastError。读写先清零 count，再查 handle/权限和数据 buffer；SetFilePointer/Ex 先定位并清 LastError，再写可选输出，输出失败时定位已提交。错误仍映射成原来的返回值、LastError 和日志文本。
 
 Win64 adapter 暂留 Runtime64 的原 gateway 分支位置，分支由 bound FileApi ID 选择，继续借用已存在的 Files、Pipes、Mappings、标准 endpoint owner 和 guest 内存。打开/读取/写入的权限、sharing、16MiB transfer 上限、section coherence、可选输出及 confined path 保持。定位输出先检查，再改变 offset；GetFileSize 清 LastError 的次序保持。GetFileType 按 standard → file → pipe 查询，未知 handle 返回 0/LastError=6。

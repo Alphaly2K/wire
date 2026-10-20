@@ -714,3 +714,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3/R5 Win64 swapchain 资源与 present 提交整合
 
 基线 `b617169`。swapchain 创建/查询/resize 临时借 Graphics、Gateways、游标、Trace 和只读 User，Graphics 拥有 backbuffer、status、frame 快照与成功计数。根保留公共 facade 和成功后的 API count/unblock/record 原顺序，Process/Presenter 协议未改。buffer/status/frame/create/call、present 判断、两侧提交和统计经资源替换及 rustfmt 对照一致；GetDevice 的三个参数在建立借用前复制。连续同步/图形迁移整合通过 release 全目标 694 passed / 7 ignored、21 suites，all-targets/all-features strict Clippy/build/fmt 及两个显式真实 GPU draw/swapchain fixture。不跑性能或游戏矩阵，累计仍 915；证据 `wire-out/refactoring-2026-10-14/r3-swapchain-calls64-{source-checks,verification}.json`。
+
+## R3 Win64 文件搜索与目录游标
+
+基线 `0347ec7`。Searches 执行 FindFirst/Next/Close，只借 Memory、只读 Files/Threads；metadata 归 Files，全文目录信息也由 Files 执行。Threads 拥有原当前 TEB 的 LastError 写入，根入口委托，错误槽仍在实际写入时读取。metadata/search/目录/LastError 主体经明确资源替换后对照一致，directory_batch/NtQueryDirectoryFile 保持；整份修改文件按 rustfmt 对照一致。完整 release Win64 269、library 61 passed / 7 ignored、all-targets/all-features strict Clippy/build/fmt 通过。原输出、句柄/游标提交及错误优先级保持，不跑性能或游戏/native 矩阵，累计仍 915；证据 `wire-out/refactoring-2026-10-14/r3-file-searches64-{source-checks,verification}.json`。

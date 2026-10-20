@@ -246,20 +246,20 @@ impl Files {
         Ok(status as u64)
     }
 }
-impl Runtime64 {
+impl Files {
     pub(in crate::x64::runtime) fn full_directory_info(
         &mut self,
         mem: &mut Memory,
         a: &[u64],
+        threads: &crate::x64::runtime::threads::Threads,
     ) -> Result<u64, String> {
         if a[3] > 16 * 1024 * 1024 {
-            self.set_error(mem, 8)?;
+            threads.set_error(mem, 8)?;
             return Ok(0);
         }
         mem.check(a[2], a[3] as usize, WRITE)?;
-        let result = self.files.directory_batch(
-            self.files
-                .filesystem()
+        let result = self.directory_batch(
+            self.filesystem()
                 .ok_or("directory query has no mounted filesystem")?,
             a[0],
             a[3] as usize,
@@ -282,13 +282,22 @@ impl Runtime64 {
                 if batch.status == NO_MORE_FILES {
                     batch.commit();
                 }
-                self.set_error(mem, error)?;
+                threads.set_error(mem, error)?;
                 Ok(0)
             }
             Err(error) => {
-                self.set_error(mem, error)?;
+                threads.set_error(mem, error)?;
                 Ok(0)
             }
         }
+    }
+}
+impl Runtime64 {
+    pub(in crate::x64::runtime) fn full_directory_info(
+        &mut self,
+        mem: &mut Memory,
+        a: &[u64],
+    ) -> Result<u64, String> {
+        self.files.full_directory_info(mem, a, &self.threads)
     }
 }

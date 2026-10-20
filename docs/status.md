@@ -48,6 +48,8 @@ DXGI factory/adapter/普通 COM 调用也归 Graphics，只借明确资源和必
 
 swapchain 创建/resize 和普通查询现借 Graphics、gateway、游标、Trace 与只读 User；Graphics 拥有 backbuffer、状态、frame 快照与成功计数，根保留 present 的线程/API/trace 提交。这批完成上述全目标整合及真实 GPU 验证。
 
+Win64 FindFirst/Next/Close 和目录信息调用已归 Searches/Files，错误分支只读借 Threads 写 LastError，成功输出后才推进游标。完整 Win64 269、library 61 passed / 7 ignored 和严格构建通过。
+
 ## 重构范围
 
 当前累计冻结包含[对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)、日志、五项 paint、控件初始化、资源、启动信息、环境接口与 CLI 拆分；独立历史证据继续可查。

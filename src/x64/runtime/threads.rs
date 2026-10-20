@@ -98,6 +98,9 @@ impl Threads {
     pub(super) fn teb(&self) -> u64 {
         self.entries[&self.active].teb
     }
+    pub(super) fn set_error(&self, mem: &mut Memory, error: u32) -> Result<(), String> {
+        mem.write_int(self.teb() + 0x68, 4, error as u64)
+    }
     fn block(&mut self, reason: Block) -> Result<(), String> {
         if !self.enabled {
             return Err("Win64 blocking operation requires a thread scheduler".into());

@@ -314,7 +314,7 @@ impl Runtime64 {
         })
     }
     fn set_error(&self, mem: &mut Memory, error: u32) -> Result<(), String> {
-        mem.write_int(self.teb() + 0x68, 4, error as u64)
+        self.threads.set_error(mem, error)
     }
     fn remove_device_notifications(&mut self, window: u64) {
         self.devices.remove_notifications(window);

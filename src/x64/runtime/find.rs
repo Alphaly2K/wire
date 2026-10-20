@@ -18,7 +18,7 @@ impl Default for Searches {
         }
     }
 }
-impl Runtime64 {
+impl files::Files {
     fn find_data(&self, path: &std::path::Path, wide: bool) -> Result<Vec<u8>, u32> {
         let meta = path.metadata().map_err(|e| crate::fs::win_error(&e))?;
         let filename = path.file_name().ok_or(123u32)?.to_str().ok_or(1113u32)?;
@@ -34,9 +34,8 @@ impl Runtime64 {
             return Err(206);
         }
         let mut bytes = vec![0; if wide { 592 } else { 320 }];
-        bytes[..4].copy_from_slice(
-            &files::attributes(&meta, self.files.is_not_indexed(path)).to_le_bytes(),
-        );
+        bytes[..4]
+            .copy_from_slice(&files::attributes(&meta, self.is_not_indexed(path)).to_le_bytes());
         for (offset, time) in [
             (4, meta.created()),
             (12, meta.accessed()),
@@ -56,11 +55,15 @@ impl Runtime64 {
         // The confined filesystem has no DOS 8.3 aliases or reparse-point service.
         Ok(bytes)
     }
-    pub(super) fn find_call(
+}
+impl Searches {
+    pub(super) fn call(
         &mut self,
         mem: &mut Memory,
         id: FileApi,
         args: &[u64],
+        files: &files::Files,
+        threads: &super::threads::Threads,
     ) -> Result<u64, String> {
         let wide = id.wide();
         let first = matches!(
@@ -71,31 +74,32 @@ impl Runtime64 {
                 | FileApi::FindFirstFileExW
         );
         if id == FileApi::FindClose {
-            if self.searches.handles.remove(&args[0]).is_some() {
+            if self.handles.remove(&args[0]).is_some() {
                 return Ok(1);
             }
-            self.set_error(mem, 6)?;
+            threads.set_error(mem, 6)?;
             return Ok(0);
         }
-        if !first && !self.searches.handles.contains_key(&args[0]) {
-            self.set_error(mem, 6)?;
+        if !first && !self.handles.contains_key(&args[0]) {
+            threads.set_error(mem, 6)?;
             return Ok(0);
         }
         let extended = matches!(id, FileApi::FindFirstFileExA | FileApi::FindFirstFileExW);
         if first && extended && (args[1] > 1 || args[3] != 0 || args[4] != 0 || args[5] & !2 != 0) {
-            self.set_error(mem, 87)?;
+            threads.set_error(mem, 87)?;
             return Ok(u64::MAX);
         }
         let output = args[if first && extended { 2 } else { 1 }];
         mem.check(output, if wide { 592 } else { 320 }, WRITE)?;
         if first {
-            let pattern = Self::path_name(mem, args[0], wide)?.replace('\\', "/");
+            let pattern =
+                crate::win32::x64::text::path_name(mem, args[0], wide)?.replace('\\', "/");
             let entries = (|| -> Result<Vec<PathBuf>, u32> {
                 if pattern.ends_with('/') {
                     return Err(2);
                 }
                 let (directory, wildcard) = pattern.rsplit_once('/').unwrap_or((".", &pattern));
-                let fs = self.files.filesystem().ok_or(3u32)?;
+                let fs = files.filesystem().ok_or(3u32)?;
                 let directory = fs.resolve(if directory == "C:" {
                     "C:/"
                 } else if directory.is_empty() {
@@ -126,45 +130,52 @@ impl Runtime64 {
                 }
             })();
             let prepared = entries.and_then(|entries| {
-                if self.searches.handles.len() >= 4096
-                    || self.searches.next >= super::TEB + 0x680000
-                {
+                if self.handles.len() >= 4096 || self.next >= super::TEB + 0x680000 {
                     return Err(8);
                 }
-                let data = self.find_data(&entries[0], wide)?;
+                let data = files.find_data(&entries[0], wide)?;
                 Ok((entries, data))
             });
             let (entries, data) = match prepared {
                 Ok(prepared) => prepared,
                 Err(error) => {
-                    self.set_error(mem, error)?;
+                    threads.set_error(mem, error)?;
                     return Ok(u64::MAX);
                 }
             };
             mem.write(output, &data)?;
-            let handle = self.searches.next;
-            self.searches.next += 16;
-            self.searches
-                .handles
-                .insert(handle, Search { entries, next: 1 });
+            let handle = self.next;
+            self.next += 16;
+            self.handles.insert(handle, Search { entries, next: 1 });
             Ok(handle)
         } else {
-            let search = &self.searches.handles[&args[0]];
+            let search = &self.handles[&args[0]];
             let prepared = search
                 .entries
                 .get(search.next)
                 .ok_or(18u32)
-                .and_then(|path| self.find_data(path, wide));
+                .and_then(|path| files.find_data(path, wide));
             let data = match prepared {
                 Ok(data) => data,
                 Err(error) => {
-                    self.set_error(mem, error)?;
+                    threads.set_error(mem, error)?;
                     return Ok(0);
                 }
             };
             mem.write(output, &data)?;
-            self.searches.handles.get_mut(&args[0]).unwrap().next += 1;
+            self.handles.get_mut(&args[0]).unwrap().next += 1;
             Ok(1)
         }
+    }
+}
+impl Runtime64 {
+    pub(super) fn find_call(
+        &mut self,
+        mem: &mut Memory,
+        id: FileApi,
+        args: &[u64],
+    ) -> Result<u64, String> {
+        self.searches
+            .call(mem, id, args, &self.files, &self.threads)
     }
 }
