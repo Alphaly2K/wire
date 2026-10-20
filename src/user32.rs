@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 mod classes;
 mod control;
 mod dialog;
+mod host;
 mod lifecycle;
 mod messages;
 mod objects;

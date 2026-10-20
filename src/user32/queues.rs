@@ -128,36 +128,4 @@ impl User32 {
             self.queue_changed.get(&tid).copied().unwrap_or(0) & mask != 0
         }
     }
-
-    pub(super) fn host_message(
-        &mut self,
-        last_error: &mut u32,
-        sched: &mut Sched,
-        start: Instant,
-        event: [u32; 4],
-    ) {
-        let [hwnd, message, wparam, lparam] = event;
-        let Some(w) = self.windows.get(&hwnd) else {
-            return;
-        };
-        let tid = w.tid;
-        let time = clock_ms(start);
-        if !self.keyboard.host([hwnd, message, wparam, lparam, time]) {
-            return;
-        }
-        self.put_message(
-            last_error,
-            sched,
-            tid,
-            Message {
-                hwnd,
-                message,
-                wparam,
-                lparam,
-                time,
-                synthetic_paint: false,
-                hardware_input: true,
-            },
-        );
-    }
 }

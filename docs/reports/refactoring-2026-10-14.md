@@ -726,3 +726,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 Win64 同步对象与 timer 服务
 
 基线 `e943a96`。Events 直接执行 event/semaphore/waitable timer 的普通调用，只借 Memory 和只读 Threads；Runtime64 只组合资源。文本读取改用原受检 codec，删除无生产调用的 string_bytes wrapper，内部测试仅改 codec 入口。两个 handler 经资源替换及 rustfmt 对照一致，Events 对象/等待、Threads/APC 与 thread control 原文保持。完整 release Win64 269、library 61 passed / 7 ignored、all-targets/all-features strict Clippy/build/fmt 通过；首次 wrapper warning 和测试行格式检查日志保留，清理后通过。原校验、输出、计数和错误槽访问顺序保持；不跑性能、游戏或 GPU 矩阵，累计仍 915；证据 `wire-out/refactoring-2026-10-14/r3-sync-services64-{source-checks,verification}.json`。
+
+## R3/R5 PE32 USER 宿主边界
+
+基线 `0b46a23`。User32 的 host 模块拥有窗口筛选/owned 快照与事件消费，架构 adapter 直接分别借 Presenter/USER/错误槽和帧资源，移除临时 take/还原。窗口快照经资源替换对照一致，事件入队主体、frame sequence/像素快照/上传及公开 host_message 原文保持；host FFI 与音频未改。完整 release Win32 259、library 61 passed / 7 ignored、all-targets/all-features strict Clippy/build/fmt 通过；现有原创原生窗口探针通过 main-thread、upload/failure、resize/removal 与 RGB 抓帧检查。无游戏素材、无性能矩阵，累计仍 915；证据 `wire-out/refactoring-2026-10-14/r5-host-user32-{source-checks,verification}.json`。

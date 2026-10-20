@@ -54,6 +54,8 @@ PE32 桌面查询也归 User32，明确借首次初始化所需资源，删除�
 
 Win64 event/semaphore/waitable timer 普通调用已归 Events，只借 Memory 与只读 Threads，原名称、权限、计数及 deadline 算法保持。完整 Win64 269、library 61 passed / 7 ignored 和严格构建通过。
 
+PE32 USER 已拥有宿主窗口快照和事件消费，展示轮询不再 take/还原 Presenter。完整 Win32 259、library 61 passed / 7 ignored、严格构建及原生窗口主线程/上传/resize/removal/抓帧探针通过。
+
 ## 重构范围
 
 当前累计冻结包含[对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)、日志、五项 paint、控件初始化、资源、启动信息、环境接口与 CLI 拆分；独立历史证据继续可查。
