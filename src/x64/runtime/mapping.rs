@@ -1,5 +1,7 @@
 //! Read-only file sections over owned checked guest pages. Retained descriptors
 //! outlive file handles; guest WriteFile updates every live view of the same inode.
+mod calls;
+
 use super::{files, Memory};
 use std::{
     collections::BTreeMap,

@@ -778,3 +778,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R2 Windows printf 调用契约
 
 基线 `8ffd8c4`。wsprintfA/W 与 wvsprintfA/W 的固定前缀、cdecl/stdcall 与架构/provider 策略归唯一契约，typed adapter 只借参数、内存和原 ESP，原格式化器逐字保持。两条 wsprintf ABI override 删除，legacy 例外剩余 23 项，累计契约 919 项。新增独立边界回归将固定参数放在映射末端、va_list 指向不可读区，并检查清栈、LastError 与 wide 输出覆盖返回地址；既有混合格式/故障回归保留。最终 release Win32 260、Win64 269、library 61 passed / 8 ignored，inventory 6 项及 all-targets/all-features strict Clippy/build/fmt 通过；本批三个测试套件合计 590 passed / 8 ignored，不将上一阶段全目标结果冒充本批全目标结果。首次 Win64 match 放置错误导致的编译失败、inventory 的错误 unittest 入口日志均保留，修正后重跑通过。冷契约与调用路由提取，formatter、CPU 和返回帧算法保持，不跑性能或游戏矩阵。证据 `wire-out/refactoring-2026-10-14/r2-windows-printf-{source-checks,verification}.json`。
+
+## R3 Win64 section 调用资源
+
+基线 `15e3faf`。Mappings 直接执行 section 创建、map/unmap 和 flush 的 guest adapter，只借 Memory、只读 Threads 及创建所需的只读 Files。四个处理体经明确资源替换及 rustfmt 对照一致，整个根分发除四处委托外保持；mapping 模型只注册 calls，Files/Threads/Memory 与独立回归原文保持。SECURITY_ATTRIBUTES 提前读取、指针与 DWORD 宽度、LastError 和返回帧提交次序保持，未改 view/coherence 或内存算法。按影响通过 release 文件 17 项及 section 过滤 5 项（2 项 section、3 项 critical-section），all-targets/all-features strict Clippy/build/fmt 通过；不重复性能或游戏矩阵，累计仍 919。证据 `wire-out/refactoring-2026-10-14/r3-section-calls64-{source-checks,verification}.json`。

@@ -78,6 +78,8 @@ StandardHandles 的重定向/标准输出和 Pipes 的读写输出也已归各�
 
 [Windows printf](architecture/windows-printf.md) 四个入口现由统一契约声明 cdecl/stdcall 和固定前缀，保留按需变参与原输出/返回帧顺序；删除两条旧 ABI override。Win32 260、Win64 269、library 61 passed / 8 ignored、inventory 6 项和严格构建通过。
 
+Win64 [section 调用](architecture/files.md)也已归 Mappings，只借内存与必要的 Files/Threads；原映射生命周期与 coherence 保持。按影响通过文件 17 项及 section 过滤 5 项（含 3 项 critical-section），严格构建通过。
+
 ## 重构范围
 
 当前累计冻结包含[对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)、日志、五项 paint、控件初始化、资源、启动信息、环境接口与 CLI 拆分；独立历史证据继续可查。

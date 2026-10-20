@@ -1344,71 +1344,22 @@ impl Runtime64 {
                 Some(FileApi::CreateFileMappingW | FileApi::CreateFileMappingA)
             ) =>
             {
-                let inherit = if args[1] == 0 {
-                    false
-                } else {
-                    mem.check(args[1], 24, READ)?;
-                    if mem.read_int(args[1], 4)? != 24 || mem.read_int(args[1] + 8, 8)? != 0 {
-                        return Err("Win64 mapping security descriptor not implemented".into());
-                    }
-                    mem.read_int(args[1] + 16, 4)? != 0
-                };
-                let result = if args[5] != 0 || args[2] != 2 || args[0] == u64::MAX {
-                    Err(50)
-                } else {
-                    self.files.mapping_file(args[0]).and_then(|file| {
-                        self.mappings.create(file, args[3] << 32 | args[4], inherit)
-                    })
-                };
-                match result {
-                    Ok(handle) => handle,
-                    Err(error) => {
-                        self.set_error(mem, error)?;
-                        0
-                    }
-                }
+                self.mappings
+                    .create_call(mem, args, &self.files, &self.threads)?
             }
             _ if matches!(
                 file,
                 Some(FileApi::MapViewOfFile | FileApi::MapViewOfFileEx)
             ) =>
             {
-                match self.mappings.map(
-                    mem,
-                    args[0],
-                    args[1] as u32,
-                    args[2] << 32 | args[3],
-                    args[4],
-                    if file == Some(FileApi::MapViewOfFileEx) {
-                        args[5]
-                    } else {
-                        0
-                    },
-                ) {
-                    Ok(base) => base,
-                    Err(error) => {
-                        self.set_error(mem, error)?;
-                        0
-                    }
-                }
+                self.mappings
+                    .map_call(mem, file.unwrap(), args, &self.threads)?
             }
             _ if file == Some(FileApi::UnmapViewOfFile) => {
-                if self.mappings.contains_view(args[0]) {
-                    self.mappings.unmap(mem, args[0])?;
-                    1
-                } else {
-                    self.set_error(mem, 487)?;
-                    0
-                }
+                self.mappings.unmap_call(mem, args, &self.threads)?
             }
             _ if file == Some(FileApi::FlushViewOfFile) => {
-                match self.mappings.flush(args[0], args[1]) {
-                    Ok(()) => 1,
-                    Err(error) => {
-                        self.set_error(mem, error)?;
-                        0
-                    }
-                }
+                self.mappings.flush_call(mem, args, &self.threads)?
             }
             _ if matches!(file, Some(FileApi::CreateFileW | FileApi::CreateFileA)) => self
                 .files

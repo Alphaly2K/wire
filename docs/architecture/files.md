@@ -56,6 +56,8 @@ CreatePipe、GetConsoleMode、WriteConsoleW 与 NtQueryDirectoryFile 接入后�
 
 Mappings 独立拥有 section/view 与 retained file descriptor，view 持有 section 引用，文件或 section handle 关闭后已有 view 继续存活。guest WriteFile 更新同 inode 的活动 view；64 位 offset、64KiB 对齐、资源上限及原 backing 生命周期保持。adapter 按冷绑定 ID 调用原 Mappings 方法，不新增通用结果框架。独立行为与性能证据见 [section 验收](../reports/refactoring-file-section-catalog-2026-10-15.md)。
 
+Win64 section 创建、映射、解除与 flush 的 guest adapter 随后也归 `mapping/calls.rs`。Mappings 按需只读借 Files 取得保留描述符、只读借 Threads 在原错误分支写 LastError，并直接借 Memory；不借 Runtime64 或 CPU。SECURITY_ATTRIBUTES 的读取仍先于 named/pagefile 拒绝，DWORD 半部与指针宽度由原绑定计划保持。根只组合资源，返回帧、unblock、计数和 trace 继续在原位置提交；map/unmap/coherence 与内存算法未改。
+
 SHLWAPI/imagehlp 的 13 项与六项通用句柄契约已在 section/Interlocked 新基线上通过验收，详见 [路径与句柄边界](paths-handles.md)。标准句柄及跨资源 CloseHandle 按冷绑定 HandleApi 选择原 owner 的分支，保留保护位、查询顺序和故障提交。PE32 的混合 HandleObj 表、命名索引与分配位置现由 [KernelObjects32](kernel-objects32.md) 私有拥有。
 
 PE32 文件窄借用迁移基线为 `9090b62`。原文件/path 处理体、文本 codec、公开 facade 及 wildcard 归一核对保持；通配算法移入 `win32/kernel/file_patterns.rs`，Win64 Find 和 NtQueryDirectory 直接复用纯算法。release 完整 Win32 248、Win64 文件 17、fmt/release lib/bin strict Clippy/build 通过。证据位于 `wire-out/refactoring-2026-10-14/r3-files32-{source-checks,verification}.json` 及 validation 日志，不重复性能或游戏矩阵。
