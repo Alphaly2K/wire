@@ -122,7 +122,7 @@ fn format_size(format: u32) -> Option<(u32, u32)> {
         _ => return None,
     })
 }
-impl Runtime64 {
+impl Calls<'_> {
     pub(super) fn create_input_layout(
         &mut self,
         mem: &mut Memory,
@@ -148,7 +148,7 @@ impl Runtime64 {
         let inputs = match signature(&blob) {
             Ok(s) => s,
             Err(e) => {
-                self.trace_note(e);
+                self.trace.note(e);
                 return Ok(INVALID_ARG);
             }
         };
@@ -162,7 +162,7 @@ impl Runtime64 {
             if pointer == 0 {
                 return Ok(INVALID_ARG);
             }
-            let name = Self::ascii(mem, pointer)?.to_ascii_uppercase();
+            let name = crate::win32::x64::text::ascii(mem, pointer)?.to_ascii_uppercase();
             let d: Vec<_> = b[8..]
                 .as_chunks::<4>()
                 .0
@@ -216,17 +216,14 @@ impl Runtime64 {
             };
             attributes.extend([reg, e.format, e.slot, e.offset, e.class, e.step]);
         }
-        self.trace_note(format!("D3D11 input layout attributes={attributes:x?}"));
+        self.trace
+            .note(format!("D3D11 input layout attributes={attributes:x?}"));
         if a[5] == 0 {
             return Ok(1);
         }
-        let p = self.graphics.object(
-            mem,
-            &mut self.gateways,
-            &mut self.next_alloc,
-            Kind::Layout,
-            a[0],
-        )?;
+        let p = self
+            .graphics
+            .object(mem, self.gateways, self.next_alloc, Kind::Layout, a[0])?;
         self.graphics.resources.insert(
             p,
             Resource::State(attributes.into_iter().flat_map(u32::to_le_bytes).collect()),

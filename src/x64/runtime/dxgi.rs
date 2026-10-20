@@ -351,6 +351,29 @@ impl Runtime64 {
         mem.write_int(out, 8, object)?;
         Ok(0)
     }
+    fn d3d11_create(&mut self, mem: &mut Memory, combined: bool, a: &[u64]) -> Result<u64, String> {
+        d3d11::Calls {
+            graphics: &mut self.graphics,
+            gateways: &mut self.gateways,
+            next_alloc: &mut self.next_alloc,
+            trace: &mut self.trace,
+        }
+        .create(mem, combined, a)
+    }
+    pub(in crate::x64::runtime) fn d3d11_call(
+        &mut self,
+        mem: &mut Memory,
+        name: &str,
+        a: &[u64],
+    ) -> Result<u64, String> {
+        d3d11::Calls {
+            graphics: &mut self.graphics,
+            gateways: &mut self.gateways,
+            next_alloc: &mut self.next_alloc,
+            trace: &mut self.trace,
+        }
+        .call(mem, name, a)
+    }
     pub(super) fn graphics_method_call(
         &mut self,
         mem: &mut Memory,
@@ -427,72 +450,9 @@ impl Runtime64 {
             }
             "Object.AddRef" => self.graphics.retain(a[0]),
             "Object.Release" => self.graphics.release(mem, a[0]),
-            "Object.SetPrivateData" | "Object.SetPrivateDataInterface" => {
-                let key = read_guid(mem, a[1])?;
-                if name.ends_with("Interface") && a[2] != 0 {
-                    return Err(
-                        "DXGI private IUnknown callback ownership is not implemented".into(),
-                    );
-                }
-                let size = if name.ends_with("Interface") {
-                    0
-                } else {
-                    a[2] as usize
-                };
-                if size == 0 {
-                    self.graphics
-                        .objects
-                        .get_mut(&a[0])
-                        .unwrap()
-                        .private
-                        .remove(&key);
-                    return Ok(0);
-                }
-                let data = &self.graphics.objects[&a[0]].private;
-                let total: usize = data.values().map(Vec::len).sum();
-                if size > DATA_LIMIT
-                    || total - data.get(&key).map_or(0, Vec::len) + size > DATA_LIMIT
-                    || (!data.contains_key(&key) && data.len() >= 64)
-                {
-                    return Ok(OUT_OF_MEMORY);
-                }
-                if a[3] == 0 {
-                    return Ok(INVALID_ARG);
-                }
-                let mut bytes = vec![0; size];
-                mem.read(a[3], &mut bytes)?;
-                self.graphics
-                    .objects
-                    .get_mut(&a[0])
-                    .unwrap()
-                    .private
-                    .insert(key, bytes);
-                Ok(0)
-            }
-            "Object.GetPrivateData" => {
-                if a[2] == 0 {
-                    return Ok(INVALID_ARG);
-                }
-                mem.check(a[2], 4, READ | WRITE)?;
-                let capacity = mem.read_int(a[2], 4)? as usize;
-                let key = read_guid(mem, a[1])?;
-                let Some(data) = self.graphics.objects[&a[0]].private.get(&key) else {
-                    mem.write_int(a[2], 4, 0)?;
-                    return Ok(NOT_FOUND);
-                };
-                if a[3] != 0 && capacity >= data.len() {
-                    mem.check(a[3], data.len(), WRITE)?;
-                }
-                mem.write_int(a[2], 4, data.len() as u64)?;
-                if a[3] == 0 {
-                    return Ok(0);
-                }
-                if capacity < data.len() {
-                    return Ok(MORE_DATA);
-                }
-                mem.write(a[3], data)?;
-                Ok(0)
-            }
+            "Object.SetPrivateData"
+            | "Object.SetPrivateDataInterface"
+            | "Object.GetPrivateData" => self.graphics.private_call(mem, name, a),
             "Factory.EnumAdapters" | "Factory.EnumAdapters1" | "Factory.EnumAdapterByLuid" => {
                 let out = a[if name.ends_with("Luid") { 3 } else { 2 }];
                 if out == 0 {

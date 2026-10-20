@@ -4,6 +4,14 @@ use super::*;
 mod draw;
 mod layout;
 mod view;
+
+/// Scoped D3D11 resources; no process, thread or USER state is available.
+pub(super) struct Calls<'a> {
+    pub(super) graphics: &'a mut Graphics,
+    pub(super) gateways: &'a mut crate::x64::runtime::gateways::Gateways,
+    pub(super) next_alloc: &'a mut u64,
+    pub(super) trace: &'a mut crate::x64::runtime::trace::Trace,
+}
 const DEVICE: Guid = guid(
     0xdb6f6ddb,
     0xac77,
@@ -386,8 +394,8 @@ impl Graphics {
         Ok(())
     }
 }
-impl Runtime64 {
-    pub(super) fn d3d11_create(
+impl Calls<'_> {
+    pub(super) fn create(
         &mut self,
         mem: &mut Memory,
         combined: bool,
@@ -433,17 +441,13 @@ impl Runtime64 {
             }
             // The default hardware adapter is the same attached Vulkan device.
             self.graphics.info()?;
-            let factory = self.graphics.object(
-                mem,
-                &mut self.gateways,
-                &mut self.next_alloc,
-                Kind::Factory,
-                0,
-            )?;
+            let factory =
+                self.graphics
+                    .object(mem, self.gateways, self.next_alloc, Kind::Factory, 0)?;
             let adapter = self.graphics.object(
                 mem,
-                &mut self.gateways,
-                &mut self.next_alloc,
+                self.gateways,
+                self.next_alloc,
                 Kind::Adapter,
                 factory,
             )?;
@@ -462,13 +466,9 @@ impl Runtime64 {
             }
             return Ok(UNSUPPORTED);
         };
-        let device = self.graphics.object(
-            mem,
-            &mut self.gateways,
-            &mut self.next_alloc,
-            Kind::Device,
-            adapter,
-        )?;
+        let device =
+            self.graphics
+                .object(mem, self.gateways, self.next_alloc, Kind::Device, adapter)?;
         self.graphics.devices.insert(
             device,
             Device {
@@ -484,7 +484,7 @@ impl Runtime64 {
         }
         let context = if a[9] != 0 {
             self.graphics
-                .context(mem, &mut self.gateways, &mut self.next_alloc, device)?
+                .context(mem, self.gateways, self.next_alloc, device)?
         } else {
             0
         };
@@ -500,15 +500,10 @@ impl Runtime64 {
         if a[7] == 0 {
             self.graphics.release(mem, device)?;
         }
-        self.trace_note(format!("experimental D3D11 native Vulkan compatibility subset: level={level:#x}; full FL10_0 conformance not claimed"));
+        self.trace.note(format!("experimental D3D11 native Vulkan compatibility subset: level={level:#x}; full FL10_0 conformance not claimed"));
         Ok(0)
     }
-    pub(in crate::x64::runtime) fn d3d11_call(
-        &mut self,
-        mem: &mut Memory,
-        name: &str,
-        a: &[u64],
-    ) -> Result<u64, String> {
+    pub(super) fn call(&mut self, mem: &mut Memory, name: &str, a: &[u64]) -> Result<u64, String> {
         let o = self
             .graphics
             .objects
@@ -553,7 +548,7 @@ impl Runtime64 {
         }
         let method = name.rsplit('.').next().unwrap();
         match method {
-            "GetImmediateContext1" => self.d3d11_call(mem, "D3D.Device.GetImmediateContext", a),
+            "GetImmediateContext1" => self.call(mem, "D3D.Device.GetImmediateContext", a),
             "CreateDeferredContext1"
             | "CreateBlendState1"
             | "CreateRasterizerState1"
@@ -577,10 +572,10 @@ impl Runtime64 {
                 Ok(UNSUPPORTED)
             }
             "CopySubresourceRegion1" if a[9] == 0 => {
-                self.d3d11_call(mem, "D3D.Context.CopySubresourceRegion", &a[..9])
+                self.call(mem, "D3D.Context.CopySubresourceRegion", &a[..9])
             }
             "UpdateSubresource1" if a[7] == 0 => {
-                self.d3d11_call(mem, "D3D.Context.UpdateSubresource", &a[..7])
+                self.call(mem, "D3D.Context.UpdateSubresource", &a[..7])
             }
             method if method.ends_with("SetConstantBuffers1") => {
                 if a[1] > 14 || a[2] > 14 - a[1] {
@@ -595,7 +590,7 @@ impl Runtime64 {
                         );
                     }
                 }
-                self.d3d11_call(
+                self.call(
                     mem,
                     &format!("D3D.Context.{}", method.trim_end_matches('1')),
                     &a[..4],
@@ -694,8 +689,8 @@ impl Runtime64 {
                     } else {
                         self.graphics.object(
                             mem,
-                            &mut self.gateways,
-                            &mut self.next_alloc,
+                            self.gateways,
+                            self.next_alloc,
                             Kind::DxgiDevice,
                             a[0],
                         )?
@@ -724,9 +719,9 @@ impl Runtime64 {
             }
             "GetImmediateContext" => {
                 mem.check(a[1], 8, WRITE)?;
-                let c =
-                    self.graphics
-                        .context(mem, &mut self.gateways, &mut self.next_alloc, a[0])?;
+                let c = self
+                    .graphics
+                    .context(mem, self.gateways, self.next_alloc, a[0])?;
                 mem.write_int(a[1], 8, c)?;
                 Ok(0)
             }
@@ -784,8 +779,8 @@ impl Runtime64 {
                     self.graphics.retain(a[1])?;
                     let p = match self.graphics.object(
                         mem,
-                        &mut self.gateways,
-                        &mut self.next_alloc,
+                        self.gateways,
+                        self.next_alloc,
                         Kind::Srv,
                         a[0],
                     ) {
@@ -991,13 +986,10 @@ impl Runtime64 {
                     return Ok(1);
                 }
                 self.graphics.retain(a[1])?;
-                let p = match self.graphics.object(
-                    mem,
-                    &mut self.gateways,
-                    &mut self.next_alloc,
-                    kind,
-                    a[0],
-                ) {
+                let p = match self
+                    .graphics
+                    .object(mem, self.gateways, self.next_alloc, kind, a[0])
+                {
                     Ok(p) => p,
                     Err(e) => {
                         self.graphics.release(mem, a[1])?;
@@ -1070,7 +1062,7 @@ impl Runtime64 {
                     .iter()
                     .map(|b| u32::from_le_bytes(*b))
                     .collect();
-                self.trace_note(format!("D3D11 volume descriptor={d:x?}"));
+                self.trace.note(format!("D3D11 volume descriptor={d:x?}"));
                 if d[..3].iter().any(|&v| v == 0 || v > 2048)
                     || d[5] > 1
                     || d[6] != 8
@@ -1145,8 +1137,8 @@ impl Runtime64 {
                 }
                 let p = self.graphics.object(
                     mem,
-                    &mut self.gateways,
-                    &mut self.next_alloc,
+                    self.gateways,
+                    self.next_alloc,
                     Kind::Texture,
                     a[0],
                 )?;
@@ -1176,7 +1168,7 @@ impl Runtime64 {
                     .iter()
                     .map(|b| u32::from_le_bytes(*b))
                     .collect();
-                self.trace_note(format!(
+                self.trace.note(format!(
                     "D3D11 texture descriptor={d:x?}; format={} (0x{:x}), bind=0x{:x}",
                     d[4], d[4], d[8]
                 ));
@@ -1258,8 +1250,8 @@ impl Runtime64 {
                 }
                 let p = self.graphics.object(
                     mem,
-                    &mut self.gateways,
-                    &mut self.next_alloc,
+                    self.gateways,
+                    self.next_alloc,
                     Kind::Texture,
                     a[0],
                 )?;
@@ -1327,8 +1319,8 @@ impl Runtime64 {
                 }
                 let p = self.graphics.object(
                     mem,
-                    &mut self.gateways,
-                    &mut self.next_alloc,
+                    self.gateways,
+                    self.next_alloc,
                     Kind::Buffer,
                     a[0],
                 )?;
@@ -1372,8 +1364,8 @@ impl Runtime64 {
                 }
                 let p = self.graphics.object(
                     mem,
-                    &mut self.gateways,
-                    &mut self.next_alloc,
+                    self.gateways,
+                    self.next_alloc,
                     Kind::Shader,
                     a[0],
                 )?;
@@ -1454,9 +1446,9 @@ impl Runtime64 {
                 if a[2] == 0 {
                     return Ok(1);
                 }
-                let p =
-                    self.graphics
-                        .object(mem, &mut self.gateways, &mut self.next_alloc, k, a[0])?;
+                let p = self
+                    .graphics
+                    .object(mem, self.gateways, self.next_alloc, k, a[0])?;
                 self.graphics.resources.insert(p, Resource::State(desc));
                 mem.write_int(a[2], 8, p)?;
                 Ok(0)
@@ -1527,10 +1519,10 @@ impl Runtime64 {
                         native.read(a[2] as u32, bytes)?
                     };
                     let size = (bytes as u64).div_ceil(PAGE) * PAGE;
-                    let p = self.next_alloc;
+                    let p = *self.next_alloc;
                     mem.map(p, size, READ | WRITE)?;
                     mem.write(p, &contents)?;
-                    self.next_alloc += size;
+                    *self.next_alloc += size;
                     let Some(Resource::Texture { mapped, .. }) =
                         self.graphics.resources.get_mut(&a[1])
                     else {
@@ -1577,10 +1569,10 @@ impl Runtime64 {
                     native.read(0, native.size())?
                 };
                 let size = (bytes.len() as u64).div_ceil(PAGE) * PAGE;
-                let p = self.next_alloc;
+                let p = *self.next_alloc;
                 mem.map(p, size, READ | WRITE)?;
                 mem.write(p, &bytes)?;
-                self.next_alloc += size;
+                *self.next_alloc += size;
                 let Some(Resource::Buffer { mapped, .. }) = self.graphics.resources.get_mut(&a[1])
                 else {
                     unreachable!()
@@ -2004,13 +1996,9 @@ impl Runtime64 {
                 if a[2] == 0 {
                     return Ok(1);
                 }
-                let p = self.graphics.object(
-                    mem,
-                    &mut self.gateways,
-                    &mut self.next_alloc,
-                    Kind::Query,
-                    a[0],
-                )?;
+                let p =
+                    self.graphics
+                        .object(mem, self.gateways, self.next_alloc, Kind::Query, a[0])?;
                 self.graphics.queries.insert(
                     p,
                     Query {
@@ -2426,9 +2414,9 @@ impl Runtime64 {
                 mem.write(a[2], &vec![0; size as usize])?;
                 Ok(0)
             }
-            "GetPrivateData" | "SetPrivateData" | "SetPrivateDataInterface" => {
-                self.dxgi_call(mem, &format!("Object.{method}"), a)
-            }
+            "GetPrivateData" | "SetPrivateData" | "SetPrivateDataInterface" => self
+                .graphics
+                .private_call(mem, &format!("Object.{method}"), a),
             "Draw" | "DrawIndexed" | "DrawInstanced" | "DrawIndexedInstanced" => {
                 self.graphics.draw(method, a)
             }

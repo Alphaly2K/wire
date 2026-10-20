@@ -57,3 +57,16 @@ pub(crate) fn string_bytes(
     mem.read(ptr, &mut bytes)?;
     Ok(bytes)
 }
+
+pub(crate) fn ascii(mem: &Memory, ptr: u64) -> Result<String, String> {
+    let mut bytes = Vec::new();
+    for n in 0..32768u64 {
+        let u = mem.read_int(ptr.checked_add(n).ok_or("string overflow")?, 1)? as u8;
+        if u == 0 {
+            return String::from_utf8(bytes)
+                .map_err(|_| "non-ASCII Win64 export/module name".into());
+        }
+        bytes.push(u);
+    }
+    Err("unterminated Win64 export/module name".into())
+}

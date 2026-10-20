@@ -702,3 +702,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 Win64 output、context/binding 与 draw owner
 
 基线 `0c23b00`。Graphics 直接执行虚拟 output 缓存/模式查询、D3D11 context 建立/单项绑定替换及 draw 输入准备；分配借 gateway/游标，其余仅借必要内存，公开 graphics_draws 保持。全部五个修改文件经明确资源替换和 rustfmt 对照一致；shader/资源检查、绑定 retain/replace/release 与 GPU 提交顺序保持。完整 release Win64 269、library 61 passed / 7 ignored、all-targets/all-features strict Clippy、build/fmt 通过；两个原生 GPU draw/swapchain fixture 显式通过。不跑性能或游戏矩阵，累计仍 915，证据 `wire-out/refactoring-2026-10-14/r3-graphics-services64-{source-checks,verification}.json`。
+
+## R3 Win64 D3D11 调用资源
+
+基线 `27c6813`。D3D11 创建/COM/input-layout 通过临时 Calls 借 Graphics、Gateways、共享页游标和 Trace，内存按次传入，不借 Runtime64、USER、线程或 CPU。根方法只组合资源；11.1 递归路由、Map 部分提交与错误/trace 顺序保持。private-data 共用 Graphics 的原字节/容量处理，ASCII codec 原样迁到受检文本模块，旧静态方法委托。六个修改文件经明确资源替换/方法改名/纯实现提取和 rustfmt 全文对照一致。完整 release Win64 269、library 61 passed / 7 ignored、all-targets/all-features strict Clippy、build/fmt 通过，两个真实 GPU fixture 显式通过。不跑性能或游戏矩阵，累计仍 915，证据 `wire-out/refactoring-2026-10-14/r3-d3d11-calls64-{source-checks,verification}.json`。

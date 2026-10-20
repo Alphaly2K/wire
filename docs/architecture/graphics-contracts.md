@@ -19,3 +19,7 @@ Win64 COM 的 vtable、对象分配、adapter 缓存及递归释放现由 Graphi
 该 owner 提取经五个生命周期主体及全部调用点源码对照，release Win64 269、library 61 passed / 7 ignored、严格 Clippy/build/fmt 通过；另显式通过原生 procedural draw 和 swapchain/backbuffer/resize/lifetime 两项 GPU 测试。证据 `r3-graphics-objects64-{source-checks,verification}.json`。
 
 虚拟 output 的缓存/模式查询、D3D11 context 建立、单项 binding 引用替换以及 native draw 输入准备也直接归 Graphics。output/context 分配借 gateway 和游标，其余操作仅用 owner 状态与必要内存；public graphics_draws 保留原 facade。所有修改文件按明确资源替换对照一致，draw 的 shader/资源检查和 GPU 提交算法保持。完整 Win64 269、library 61 passed / 7 ignored、两个显式 GPU fixture 及严格构建通过，见 `r3-graphics-services64-{source-checks,verification}.json`。
+
+D3D11 创建、COM 方法与 input-layout 解析通过临时 `d3d11::Calls` 借用 Graphics、Gateways、共享页游标和 Trace；内存仍是每次调用的明确参数。它不拥有第二份状态，不借 Runtime64、线程、USER 或 CPU。Runtime64 的创建/调用方法只组合这四项资源。递归 11.1→11.0 路由在同一借用内完成；Map 的游标推进和输出故障顺序保持。
+
+DXGI 和 D3D11 的 private-data 字节/容量处理共用 Graphics 的原实现；对象/provider 校验仍由各入口按原顺序执行。input-layout 的名称读取使用 `win32/x64/text.rs` 中原样提取的 ASCII codec，Runtime64 的旧静态方法继续委托。

@@ -42,6 +42,8 @@ Win64 Graphics 已拥有 vtable、COM 对象分配/adapter 缓存与递归释放
 
 Win64 虚拟 output、D3D11 context/binding 和 draw 输入准备也归 Graphics；GPU 资源检查与提交算法保持。完整 Win64 269、library 61 passed / 7 ignored、两个真实 GPU fixture 和严格构建继续通过。
 
+D3D11 主适配器及 input-layout 现在只临时借 Graphics、gateway、共享游标和 Trace，不再借 Runtime64；private-data 共用 Graphics 实现，ASCII codec 独立借内存。完整 Win64 269、library 61 passed / 7 ignored、两个 GPU fixture 及严格构建通过。
+
 ## 重构范围
 
 当前累计冻结包含[对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)、日志、五项 paint、控件初始化、资源、启动信息、环境接口与 CLI 拆分；独立历史证据继续可查。

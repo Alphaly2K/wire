@@ -351,16 +351,7 @@ impl Runtime64 {
         crate::win32::x64::text::utf16(mem, ptr)
     }
     fn ascii(mem: &Memory, ptr: u64) -> Result<String, String> {
-        let mut bytes = Vec::new();
-        for n in 0..32768u64 {
-            let u = mem.read_int(ptr.checked_add(n).ok_or("string overflow")?, 1)? as u8;
-            if u == 0 {
-                return String::from_utf8(bytes)
-                    .map_err(|_| "non-ASCII Win64 export/module name".into());
-            }
-            bytes.push(u);
-        }
-        Err("unterminated Win64 export/module name".into())
+        crate::win32::x64::text::ascii(mem, ptr)
     }
     fn path_name(mem: &Memory, pointer: u64, wide: bool) -> Result<String, String> {
         crate::win32::x64::text::path_name(mem, pointer, wide)
