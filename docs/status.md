@@ -36,6 +36,8 @@ PE32 Linker 随后移除 ApiState 借用，系统类注册与依赖引用/去重
 
 PE32 类操作及基本控件初始化也归 User32，明确借内存、gateway、Modules、scratch 和错误槽；Desktop/窗口创建保留原隐式注册顺序，公开查类入口保持。完整 Win32 259、IR 31、all-targets/all-features strict Clippy、build/fmt 通过。
 
+PE32 critical-section 阻塞/唤醒、Sleep/让出和对象/消息等待已迁入 Process 的同步协调器，不借整个 ApiState；总分发器不再直接消费 wake、设置 deadline 或阻塞/唤醒线程。原返回帧及让出顺序保持，完整 Win32 259、IR 31 和必要构建通过。
+
 ## 重构范围
 
 当前累计冻结包含[对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)、日志、五项 paint、控件初始化、资源、启动信息、环境接口与 CLI 拆分；独立历史证据继续可查。

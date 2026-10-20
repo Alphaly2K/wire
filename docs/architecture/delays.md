@@ -6,4 +6,6 @@ Win64 冷绑定为 `ControlImport::Delay(id)`，保留进程框架的控制结�
 
 PE32 保留三个原 body：Sleep/SleepEx 先消费 wake，零延时在完成返回帧后才 round-robin，非零延时 arm deadline 后阻塞；SleepEx 继续忽略 alertable。SwitchToThread 先 poll timeout，再根据其它 runnable 线程设置 BOOL 和 yield。公共 gateway 先写 EAX，再读返回槽，之后才允许线程让出；故障时保留已写 EAX，未执行切换。LastError 不额外清除。
 
+三个 PE32 body 归 `x86/process/synchronization.rs`，只借 CPU、日志和 scheduler；返回结果携带 `yield_after_return`，实际 round-robin 仍在公共 gateway 完成返回帧之后执行。阻塞结果直接回到进程循环，不提交普通 API 返回帧。
+
 两架构的原 deadline、INFINITE、返回/trace/调度差异保持，没有合并 sleep 与 wait 状态，也未新增回调能力。独立故障基线、实际线程切换/APC/timeout 与原创零延时循环见[验收记录](../reports/refactoring-delays-2026-10-16.md)。

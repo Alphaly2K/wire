@@ -20,6 +20,7 @@ pub(crate) mod module_lifecycle;
 pub(crate) mod module_loading;
 pub(crate) mod module_notifications;
 pub(crate) mod painting;
+pub(crate) mod synchronization;
 pub(crate) mod termination;
 pub(crate) mod window;
 pub(crate) mod window_geometry;

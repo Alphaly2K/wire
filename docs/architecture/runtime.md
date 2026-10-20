@@ -9,6 +9,7 @@
 | `user32`、`x86::process::{window,window_geometry,window_state,dialog,messages,painting,display}` | USER 准备状态、资源与 callback/等待请求；Process 执行 guest 与阻塞并完成后置输出。USER 领域文件不依赖 CPU/执行器，创建/销毁、重入重查和部分提交策略各自保持 |
 | `x86::process::{crt,crt_sort}`、`win32::x86::{crt,crt_memory}` | Process 负责 CRT CPU/FPU 返回、初始化器与排序 callback；领域负责私有指针状态与普通内存算法。caller-context 与 SEH initializer 恢复策略分别保留 |
 | `x86::process::exceptions`、`win32::x86::context` | Process 负责 SEH 搜索/展开与普通 filter；受检 CONTEXT codec 不借进程状态，公开 seh 入口保持兼容 |
+| `x86::process::synchronization` | Process 执行 critical-section 阻塞/唤醒、Sleep/让出及对象/消息等待；明确借资源并返回控制结果，API facade 在返回帧提交后才执行让出 |
 | `x86::process::module_notifications`、`modules::Modules` | Process 执行 DLL/TLS、线程与退出通知；Modules 提供私有 metadata 的原快照和重查，不暴露 image 表 |
 | `x86::process::module_lifecycle` | Process 执行依赖初始化、sidecar IR 与卸载回调；Modules 准备/提交 phase、引用与映射退休，顺序保持 |
 | `x86::process::module_loading` | typed 模块 API、失败 callback/清理与 CPU IR 失效编排；Modules 处理私有元数据和资源退休，公开 modules::dispatch 保留兼容 |

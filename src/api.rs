@@ -9,8 +9,7 @@
 
 use crate::cpu::{Cpu, GuestCallOutcome, EDX};
 use crate::mem::GuestMem;
-use crate::thread::{Sched, ThreadState, WaitTarget, Wake, WAIT_OBJECT_0, WAIT_TIMEOUT};
-use crate::win32::x86::object_waits::{obj_acquire, obj_ready};
+use crate::thread::Sched;
 use std::collections::HashMap;
 pub type Args = [u32; 16];
 use std::sync::Arc;
@@ -766,34 +765,45 @@ pub fn dispatch(
             };
             (ret, note) = crate::win32::x86::multimedia::call(id, &args, mem);
         }
-        (Some(crate::win32::catalog::ApiId::CriticalSection(_)), _, _) => {
-            use crate::win32::x86::critical_sections::{call, Outcome};
-            let Some(crate::win32::catalog::ApiId::CriticalSection(id)) = binding.typed else {
-                unreachable!();
-            };
-            match call(id, &args, mem, sched.current_tid())? {
-                Outcome::Value(value) => ret = value,
-                Outcome::Block { address: cs, owner } => {
-                    sched.take_wake();
-                    log.note(&format!(
-                        "thread {} blocks on CRITICAL_SECTION {cs:#x} (owner tid {owner})",
-                        sched.current_tid()
-                    ));
-                    sched.block_current(cpu, WaitTarget::CriticalSection(cs), None)?;
-                    return Ok(());
+        (
+            Some(
+                id @ (crate::win32::catalog::ApiId::CriticalSection(_)
+                | crate::win32::catalog::ApiId::Delay(_)
+                | crate::win32::catalog::ApiId::Wait(_)),
+            ),
+            _,
+            _,
+        ) => {
+            use crate::win32::catalog::ApiId;
+            use crate::x86::process::synchronization;
+            let outcome = match id {
+                ApiId::CriticalSection(id) => {
+                    synchronization::critical_section(id, &args, cpu, mem, log, sched)
                 }
-                Outcome::WakeOne(cs) => {
-                    for i in 0..sched.threads.len() {
-                        if matches!(&sched.threads[i].state, ThreadState::Waiting {
-                            target: WaitTarget::CriticalSection(a), ..
-                        } if *a == cs)
-                        {
-                            sched.wake_thread(i, Wake::Retest);
-                            break;
-                        }
-                    }
-                    ret = 0;
+                ApiId::Delay(id) => synchronization::delay(id, &args, cpu, log, sched),
+                ApiId::Wait(id) => synchronization::wait(
+                    id,
+                    &args,
+                    cpu,
+                    mem,
+                    &mut state.handles,
+                    &mut state.last_error,
+                    log,
+                    sched,
+                ),
+                _ => unreachable!(),
+            }?;
+            match outcome {
+                crate::x86::process::synchronization::Outcome::Returned {
+                    value,
+                    note: message,
+                    yield_after_return: should_yield,
+                } => {
+                    ret = value;
+                    note = message;
+                    yield_after_return = should_yield;
                 }
+                crate::x86::process::synchronization::Outcome::Blocked => return Ok(()),
             }
         }
         (Some(crate::win32::catalog::ApiId::ThreadProperty(_)), _, _) => {
@@ -1250,54 +1260,6 @@ pub fn dispatch(
                 },
             )?;
         }
-        (
-            Some(crate::win32::catalog::ApiId::Delay(
-                crate::win32::catalog::DelayApi::SwitchThread,
-            )),
-            _,
-            _,
-        ) => {
-            sched.poll_timeouts();
-            ret = sched.any_other_runnable() as u32;
-            yield_after_return = ret != 0;
-        }
-        (
-            Some(crate::win32::catalog::ApiId::Delay(crate::win32::catalog::DelayApi::Sleep)),
-            _,
-            _,
-        ) => {
-            if sched.take_wake().is_some() {
-                ret = 0; // void; woke after the full delay
-            } else if args[0] == 0 {
-                yield_after_return = true;
-                ret = 0;
-            } else {
-                let d = sched.arm_deadline(args[0]);
-                log.note(&format!(
-                    "thread {} sleeps {}ms",
-                    sched.current_tid(),
-                    args[0]
-                ));
-                sched.block_current(cpu, WaitTarget::Sleep, d)?;
-                return Ok(());
-            }
-        }
-        (
-            Some(crate::win32::catalog::ApiId::Delay(crate::win32::catalog::DelayApi::SleepEx)),
-            _,
-            _,
-        ) => {
-            if sched.take_wake().is_some() {
-                ret = 0;
-            } else if args[0] == 0 {
-                yield_after_return = true;
-                ret = 0;
-            } else {
-                let d = sched.arm_deadline(args[0]);
-                sched.block_current(cpu, WaitTarget::Sleep, d)?;
-                return Ok(());
-            }
-        }
         // --- events and semaphores: resolved once by the catalog ---
         (Some(crate::win32::catalog::ApiId::SyncObject(id)), _, _) => {
             (ret, note) = crate::win32::x86::sync_objects::sync_call(
@@ -1318,103 +1280,6 @@ pub fn dispatch(
                 sched,
                 &mut state.last_error,
             )?;
-        }
-        // --- waits ---
-        (
-            Some(crate::win32::catalog::ApiId::Wait(
-                crate::win32::catalog::WaitApi::Single | crate::win32::catalog::WaitApi::SingleEx,
-            )),
-            _,
-            _,
-        ) => {
-            let (h, timeout) = (args[0], args[1]);
-            match sched.take_wake() {
-                Some(Wake::Completed(r)) => {
-                    ret = r;
-                    note = "wait completed".into();
-                }
-                wake => {
-                    if obj_acquire(&mut state.handles, sched, h) {
-                        sched.clear_deadline();
-                        ret = WAIT_OBJECT_0;
-                    } else if !state.handles.contains_key(&h) {
-                        sched.clear_deadline();
-                        state.last_error = 6;
-                        ret = 0xffff_ffff; // WAIT_FAILED
-                        note = "invalid handle".into();
-                    } else if timeout == 0 && wake.is_none() {
-                        ret = WAIT_TIMEOUT;
-                        note = "poll, not ready".into();
-                    } else {
-                        let d = sched.arm_deadline(timeout);
-                        log.note(&format!(
-                            "thread {} blocks in WaitForSingleObject({h:#x}, {}ms)",
-                            sched.current_tid(),
-                            if timeout == u32::MAX {
-                                "inf".into()
-                            } else {
-                                timeout.to_string()
-                            }
-                        ));
-                        sched.block_current(cpu, WaitTarget::Object(h), d)?;
-                        return Ok(());
-                    }
-                }
-            }
-        }
-        (
-            Some(crate::win32::catalog::ApiId::Wait(crate::win32::catalog::WaitApi::Multiple)),
-            _,
-            _,
-        ) => {
-            let (n, ptr, wait_all, timeout) = (args[0], args[1], args[2] != 0, args[3]);
-            let mut hs = Vec::new();
-            for i in 0..n.min(64) {
-                hs.push(mem.read_u32(ptr + 4 * i).map_err(|e| e.to_string())?);
-            }
-            match sched.take_wake() {
-                Some(Wake::Completed(r)) => {
-                    ret = r;
-                    note = "wait completed".into();
-                }
-                wake => {
-                    let mut got = None;
-                    if wait_all {
-                        if hs.iter().all(|&h| obj_ready(&state.handles, sched, h)) {
-                            for &h in &hs {
-                                obj_acquire(&mut state.handles, sched, h);
-                            }
-                            got = Some(0);
-                        }
-                    } else {
-                        for (i, &h) in hs.iter().enumerate() {
-                            if obj_acquire(&mut state.handles, sched, h) {
-                                got = Some(i as u32);
-                                break;
-                            }
-                        }
-                    }
-                    match got {
-                        Some(i) => {
-                            sched.clear_deadline();
-                            ret = WAIT_OBJECT_0 + i;
-                        }
-                        None if timeout == 0 && wake.is_none() => {
-                            ret = WAIT_TIMEOUT;
-                            note = "poll, not ready".into();
-                        }
-                        None => {
-                            let d = sched.arm_deadline(timeout);
-                            log.note(&format!(
-                                "thread {} blocks in WaitForMultipleObjects({hs:?}, all={wait_all})",
-                                sched.current_tid()
-                            ));
-                            sched.block_current(cpu, WaitTarget::Multi(hs, wait_all), d)?;
-                            return Ok(());
-                        }
-                    }
-                }
-            }
         }
         (Some(crate::win32::catalog::ApiId::Message(id)), _, _)
             if !matches!(
@@ -1439,92 +1304,34 @@ pub fn dispatch(
         }
         (
             Some(crate::win32::catalog::ApiId::Message(
-                crate::win32::catalog::MessageApi::WaitObjects
-                | crate::win32::catalog::MessageApi::WaitObjectsEx,
+                id @ (crate::win32::catalog::MessageApi::WaitObjects
+                | crate::win32::catalog::MessageApi::WaitObjectsEx),
             )),
             _,
             _,
         ) => {
-            let (n, ptr, timeout, mask, flags) = if binding.typed
-                == Some(crate::win32::catalog::ApiId::Message(
-                    crate::win32::catalog::MessageApi::WaitObjectsEx,
-                )) {
-                (args[0], args[1], args[2], args[3], args[4])
-            } else {
-                (
-                    args[0],
-                    args[1],
-                    args[3],
-                    args[4],
-                    if args[2] != 0 { 1 } else { 0 },
-                )
-            };
-            sched.take_wake();
-            if n > 63 || flags & !7 != 0 || flags & 2 != 0 || mask & !0x5ff != 0 {
-                sched.clear_deadline();
-                state.last_error = 87;
-                ret = u32::MAX;
-            } else {
-                let hs = (0..n)
-                    .map(|i| mem.read_u32(ptr + i * 4).map_err(|e| e.to_string()))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let tid = sched.current_tid();
-                let input = state
-                    .user32
-                    .message_wait_ready(state.start, tid, mask, flags & 4 != 0);
-                let invalid = hs.iter().any(|h| !state.handles.contains_key(h));
-                let got = if invalid {
-                    None
-                } else if flags & 1 != 0 {
-                    if input && hs.iter().all(|&h| obj_ready(&state.handles, sched, h)) {
-                        for &h in &hs {
-                            obj_acquire(&mut state.handles, sched, h);
-                        }
-                        Some(0)
-                    } else {
-                        None
-                    }
-                } else {
-                    hs.iter()
-                        .enumerate()
-                        .find_map(|(i, &h)| {
-                            obj_acquire(&mut state.handles, sched, h).then_some(i as u32)
-                        })
-                        .or(input.then_some(n))
-                };
-                if invalid {
-                    sched.clear_deadline();
-                    state.last_error = 6;
-                    ret = u32::MAX;
-                } else if let Some(r) = got {
-                    sched.clear_deadline();
-                    ret = r;
-                } else {
-                    let deadline = sched.arm_deadline(timeout);
-                    if timeout == 0 || deadline.is_some_and(|d| d <= Instant::now()) {
-                        sched.clear_deadline();
-                        ret = WAIT_TIMEOUT;
-                    } else {
-                        let timer = state
-                            .user32
-                            .timers
-                            .iter()
-                            .filter(|((owner, _, _), _)| *owner == tid && mask & 0x10 != 0)
-                            .map(|(_, t)| t.deadline)
-                            .min();
-                        let wake = match (deadline, timer) {
-                            (Some(a), Some(b)) => Some(a.min(b)),
-                            (a, b) => a.or(b),
-                        };
-                        sched.block_current(
-                            cpu,
-                            WaitTarget::MessageObjects(hs, tid, mask),
-                            wake,
-                        )?;
-                        return Ok(());
-                    }
+            let outcome = crate::x86::process::synchronization::message_wait(
+                id,
+                &args,
+                cpu,
+                mem,
+                &mut state.handles,
+                &mut state.user32,
+                state.start,
+                &mut state.last_error,
+                sched,
+            )?;
+            match outcome {
+                crate::x86::process::synchronization::Outcome::Returned {
+                    value,
+                    note: message,
+                    yield_after_return: should_yield,
+                } => {
+                    ret = value;
+                    note = message;
+                    yield_after_return = should_yield;
                 }
-                note = "checked object/message wait".into();
+                crate::x86::process::synchronization::Outcome::Blocked => return Ok(()),
             }
         }
         (

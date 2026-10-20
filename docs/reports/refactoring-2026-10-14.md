@@ -690,3 +690,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 PE32 类调用归属
 
 基线 `9e74aa0`。User32 执行类注册/查询/字段、comctl32 初始化和隐式系统类注册，只借实际内存、gateway、Modules、scratch 和错误槽；ApiState 组合资源，公开 find_class facade 保留。四个调用主体经资源替换后对照一致，持久字符串、查类和系统类注册算法原文保持；Desktop/创建前注册顺序保持。完整 release Win32 259、IR 31、all-targets/all-features strict Clippy、build/fmt 通过。不跑性能或游戏矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r3-user-classes32-{source-checks,verification}.json`。
+
+## R4 PE32 同步阻塞与唤醒编排
+
+基线 `3eb0236`。critical-section、Sleep/让出、single/multiple 和对象/消息等待归 Process 的 synchronization 协调器，按入口借实际资源，不借 ApiState/ApiTable。七个旧处理体经资源替换及局部 match 返回值规范化后对照一致；领域对象获取、critical-section codec、USER 队列、callback 和公共 gateway 返回帧保持。Returned/Blocked 显式区分控制结果，零延时让出仍在返回帧提交后执行。完整 release Win32 259、IR 31、all-targets/all-features strict Clippy、build/fmt 通过；首次 late-init lint 日志保留。不跑性能或游戏矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r4-synchronization32-{source-checks,verification}.json`。
