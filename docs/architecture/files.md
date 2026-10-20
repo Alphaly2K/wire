@@ -36,9 +36,11 @@ Win64 FindFirst/Next/Close 的处理也由 Searches 执行，只借内存、只�
 
 PE32 adapter 位于 `win32/x86/files.rs`：主 gateway 用 bound FileApi/PathApi ID 调用，公开 `file_api::dispatch` 保留原来的大小写/DLL 和函数范围，作为冷解析 facade。adapter 只借 GuestMem、KernelObjects32、filesystem 和 LastError 槽，不接收 ApiState；公开 read_name/write_string 路径继续重导出。内部互斥 Core/Helper ID 区分文件与 SHLWAPI/imagehlp 操作，已迁移调用不再解析 DLL 或 export。GetFileType 仍由主 gateway 执行，invalid/non-file handle 返回 0 并保持 LastError。读写先清零 count，再查 handle/权限和数据 buffer；SetFilePointer/Ex 先定位并清 LastError，再写可选输出，输出失败时定位已提交。错误仍映射成原来的返回值、LastError 和日志文本。
 
-Win64 adapter 暂留 Runtime64 的原 gateway 分支位置，分支由 bound FileApi ID 选择，继续借用已存在的 Files、Pipes、Mappings、标准 endpoint owner 和 guest 内存。打开/读取/写入的权限、sharing、16MiB transfer 上限、section coherence、可选输出及 confined path 保持。定位输出先检查，再改变 offset；GetFileSize 清 LastError 的次序保持。GetFileType 按 standard → file → pipe 查询，未知 handle 返回 0/LastError=6。
+Win64 普通 metadata、大小/flush、seek、attributes 和 cwd adapter 位于 `files/calls.rs`，由 Files 执行，只借 Memory 与只读 Threads。普通文件的 read/write 输出也归 Files；write 明确只读借 Mappings 更新 view。Runtime64 按 bound FileApi 选择原分支，保留跨 Files/Pipes/Mappings/标准 endpoint 的协调。打开/读取/写入的权限、sharing、16MiB transfer 上限、section coherence、可选输出及 confined path 保持。定位输出先检查，再改变 offset；GetFileSize 清 LastError 的次序保持。GetFileType 按 standard → file → pipe 查询，未知 handle 返回 0/LastError=6。
 
 Win64 普通文件读写和管道写入继续在原位置提前返回 Control::Returned，gateway 提交提前保存的 CPU return frame、计数和 trace，保留这些 endpoint 原来不调用 scheduler unblock 的行为。管道读入和标准输出写入走原来的通用 unblock/提交路径。没有新建文件完成框架或另移 CPU 提交；这项边界保留是前几个候选性能失败后的渐进取舍。WriteConsoleW 保持原来的拒绝结果，没有借迁移扩展 console 能力。
+
+普通查询和文件读写提取基线 `8f73bc8`。处理体经资源替换、FileApi 模式规范化及 rustfmt 对照一致，根分发除对应调用替换外保持；读入 preflight 仍在原位置。Files 模型、Mapping/目录主体和文件回归期望未改；Threads 只在原错误分支写 LastError，错误槽不提前取样。
 
 文件 section 的八个 export 也由 FileApi 声明：CreateFileMappingA/W、OpenFileMappingA/W、MapViewOfFile/Ex、UnmapViewOfFile、FlushViewOfFile。文件契约在该批合计 53 个，PE32 32 Typed/21 ABI-only，Win64 45 Typed/8 Absent。PE32 八项均保留未实现策略；Win64 OpenFileMappingA/W 保持 absent，其余为原有 unnamed、read-only、file-backed 子集。HANDLE、view size 和可选 base 保留指针宽度，protection/access/offset high/low 使用 DWORD；SECURITY_ATTRIBUTES、access/alignment、handle 查询、错误码和故障提交顺序保持。
 

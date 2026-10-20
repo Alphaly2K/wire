@@ -70,6 +70,8 @@ AudioQueue 句柄与 Rust FFI 已归 host PcmOutput，DirectSound 的混音/计�
 
 CoreText 字体测量的 Rust FFI 也已归 host，GDI 保留字体布局、缓存和原错误映射。Win32 259（含真实 CoreText 字体测量）、library 61 passed / 8 ignored 及严格构建通过。
 
+Win64 普通文件 metadata/大小/seek/attributes/cwd 及 read/write 输出已归 Files，只借明确的 Memory、Threads 和 write 所需的 Mappings；根保留原提前返回、计数与日志。Win64 269、library 61 passed / 8 ignored 和严格构建通过。
+
 ## 重构范围
 
 当前累计冻结包含[对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)、日志、五项 paint、控件初始化、资源、启动信息、环境接口与 CLI 拆分；独立历史证据继续可查。

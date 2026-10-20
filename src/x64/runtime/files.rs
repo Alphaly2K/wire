@@ -1,4 +1,5 @@
 //! Real confined file handles, with sharing, access and endpoint lifetime checks.
+mod calls;
 mod directory;
 mod standard;
 use standard::StandardHandles;

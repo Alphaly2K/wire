@@ -758,3 +758,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R5 host 字体测量边界
 
 基线 `e3d7ae9`。CoreText Rust FFI 移入 host/font，只接收宿主 UTF-16 face slice 和标量，返回原 metrics 值。GDI 保留 LOGFONT 解码、TEXTMETRICW 编码、缓存与 error120 映射；italic 保留原 i32 carrier，非 macOS 仍直接失败。GDI dispatch、face 解码、输出编码、原生签名、font.c 和 build.rs 对照保持，既有字体 fixture 未改。完整 release Win32 259（包含真实 CoreText 测量）、library 61 passed / 8 ignored、all-targets/all-features strict Clippy/build/fmt 通过。普通 FFI 职责提取，不跑性能或游戏矩阵，累计仍 915；证据 `wire-out/refactoring-2026-10-14/r5-host-font-{source-checks,verification}.json`。
+
+## R3 Win64 普通文件查询与读写输出
+
+基线 `8f73bc8`。Files 执行 metadata、大小/flush、seek、attributes/cwd 和普通文件 read/write 输出，只借内存、只读 Threads 及 write 所需的只读 Mappings；根保留原 read preflight、提前返回、计数和 trace。三个处理体经明确资源替换、FileApi 模式规范化与 rustfmt 对照一致，整个根分发按相应调用替换对照一致；Files 模型、Mapping、目录与独立测试原文保持。首次编译暴露 timer 依赖根 UNIX_EPOCH 导入，恢复原导入后 release Win64 269、library 61 passed / 8 ignored、all-targets/all-features strict Clippy/build/fmt 通过，失败日志保留。定位/输出和 LastError 次序、写入后映射同步的部分提交保持；不跑性能或游戏/native 矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r3-file-io64-{source-checks,verification}.json`。
