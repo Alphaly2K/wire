@@ -20,6 +20,8 @@ GDI 的 DLL/export 接受范围、GetDC 的 USER client dimensions、LastError �
 
 Win64 的七项 DXGI/D3D 创建入口已接入[图形契约](graphics-contracts.md)，创建 handler 与 COM 方法分开。现有静态/动态 provider 差异、未知 PE32 ABI 和 GPU 资源语义保持；COM 方法元数据继续迁移。
 
+Win64 Graphics 现直接执行 COM 对象分配和递归资源释放，内存、gateway 和分配游标明确借用。原生 backend 未改，两个已有 GPU 资源生命周期 fixture 已显式通过；其余 guest COM handler 继续收敛资源边界。
+
 ```sh
 cargo test --release --all-targets --locked
 cargo test --release --lib --locked -- --ignored --test-threads=1

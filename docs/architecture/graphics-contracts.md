@@ -13,3 +13,7 @@ gateway 在冷绑定阶段取得 GraphicsExportApi、arity 和 DWORD 位图，�
 BoundMethod 在冷阶段保存静态方法声明与 DXGI/D3D11 家族路由，gateway 直接进入相应 handler，每次调用不再扫描 D3D11 方法表。handler 内仍保留原名称分支与对象类型检查；这一步没有将全部 COM 方法改为独立 enum。旧 groups 位图同时收敛为 graphics binding 与 file_search 标志，文件枚举行为保持。
 
 该批 release 图形 10、真实 GPU swapchain 1、Win64 文件 17 项通过，fmt/release lib/bin strict Clippy/build 通过。检查中发现并收窄了 BoundImport.graphics 的可见性；最终静态检查和构建通过。源码核对与验证记录为 `r2-graphics-methods-{source-checks,verification}.json`，不重复性能矩阵或 PE32 游戏。
+
+Win64 COM 的 vtable、对象分配、adapter 缓存及递归释放现由 Graphics 的 `dxgi/objects.rs` 拥有。分配明确借 Memory、Gateways 和共享页游标；释放只借 Memory，按原顺序处理 swapchain、映射 buffer/texture、view、context 绑定与 parent。表的 gateway 注册、map/write/seal、游标推进和引用提交顺序保持，公开 attach_graphics 继续委托。其它 D3D11/DXGI handler 暂由 Runtime64 组合资源。
+
+该 owner 提取经五个生命周期主体及全部调用点源码对照，release Win64 269、library 61 passed / 7 ignored、严格 Clippy/build/fmt 通过；另显式通过原生 procedural draw 和 swapchain/backbuffer/resize/lifetime 两项 GPU 测试。证据 `r3-graphics-objects64-{source-checks,verification}.json`。

@@ -70,7 +70,13 @@ impl Runtime64 {
                 mem.write_int(out, 8, 0)?;
                 return Ok(OUT_OF_MEMORY);
             }
-            self.dxgi_object(mem, Kind::Output, adapter)?
+            self.graphics.object(
+                mem,
+                &mut self.gateways,
+                &mut self.next_alloc,
+                Kind::Output,
+                adapter,
+            )?
         };
         mem.write_int(out, 8, address)?;
         Ok(0)

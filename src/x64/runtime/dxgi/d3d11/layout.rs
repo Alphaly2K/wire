@@ -220,7 +220,13 @@ impl Runtime64 {
         if a[5] == 0 {
             return Ok(1);
         }
-        let p = self.dxgi_object(mem, Kind::Layout, a[0])?;
+        let p = self.graphics.object(
+            mem,
+            &mut self.gateways,
+            &mut self.next_alloc,
+            Kind::Layout,
+            a[0],
+        )?;
         self.graphics.resources.insert(
             p,
             Resource::State(attributes.into_iter().flat_map(u32::to_le_bytes).collect()),

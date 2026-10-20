@@ -138,7 +138,13 @@ impl Runtime64 {
                 format: d.mode[4],
                 bind: bind | 0x400, // Backbuffers permit UNORM/sRGB view reinterpretation.
             })?;
-        let p = self.dxgi_object(mem, Kind::Texture, device)?;
+        let p = self.graphics.object(
+            mem,
+            &mut self.gateways,
+            &mut self.next_alloc,
+            Kind::Texture,
+            device,
+        )?;
         self.graphics.resources.insert(
             p,
             d3d11::Resource::Texture {
@@ -242,15 +248,21 @@ impl Runtime64 {
         let buffer = match self.swapchain_buffer(mem, device, &desc) {
             Ok(p) => p,
             Err(e) => {
-                self.dxgi_release(mem, device)?;
+                self.graphics.release(mem, device)?;
                 return Err(e);
             }
         };
-        let chain = match self.dxgi_object(mem, Kind::SwapChain, a[0]) {
+        let chain = match self.graphics.object(
+            mem,
+            &mut self.gateways,
+            &mut self.next_alloc,
+            Kind::SwapChain,
+            a[0],
+        ) {
             Ok(p) => p,
             Err(e) => {
-                self.dxgi_release(mem, buffer)?;
-                self.dxgi_release(mem, device)?;
+                self.graphics.release(mem, buffer)?;
+                self.graphics.release(mem, device)?;
                 return Err(e);
             }
         };
@@ -495,7 +507,7 @@ impl Runtime64 {
                     return Ok(UNSUPPORTED);
                 }
                 let next = self.swapchain_buffer(mem, device, &d)?;
-                self.dxgi_release(mem, old)?;
+                self.graphics.release(mem, old)?;
                 let c = self.graphics.swapchains.get_mut(&a[0]).unwrap();
                 c.buffer = next;
                 c.desc = d;

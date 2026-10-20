@@ -7,6 +7,7 @@ use crate::win32::catalog::GraphicsExportApi;
 use std::collections::BTreeMap;
 mod abi;
 mod d3d11;
+mod objects;
 mod output;
 mod swapchain;
 
@@ -270,154 +271,7 @@ fn supports(kind: Kind, iid: &Guid) -> bool {
 }
 impl Runtime64 {
     pub fn attach_graphics(&mut self, graphics: NativeGraphics) -> Result<(), String> {
-        if self.graphics.backend.is_some() || !self.graphics.objects.is_empty() {
-            return Err("Win64 graphics backend already attached".into());
-        }
-        self.graphics.backend = Some(graphics);
-        Ok(())
-    }
-    fn dxgi_table(&mut self, mem: &mut Memory, kind: Kind) -> Result<u64, String> {
-        if let Some(&address) = self.graphics.tables.get(&kind) {
-            return Ok(address);
-        }
-        let mut bytes = Vec::new();
-        let methods: Vec<_> = match kind {
-            Kind::Factory => COMMON.iter().chain(FACTORY).map(|(n, _, _)| *n).collect(),
-            Kind::Adapter => COMMON.iter().chain(ADAPTER).map(|(n, _, _)| *n).collect(),
-            Kind::Output => COMMON
-                .iter()
-                .chain(output::METHODS)
-                .map(|(n, _, _)| *n)
-                .collect(),
-            Kind::SwapChain => COMMON
-                .iter()
-                .chain(swapchain::METHODS)
-                .map(|(n, _, _)| *n)
-                .collect(),
-            _ => d3d11::methods(kind),
-        };
-        for name in methods {
-            bytes.extend_from_slice(&self.register(DLL, name).to_le_bytes());
-        }
-        let address = self.next_alloc;
-        mem.map(address, PAGE, READ | WRITE)?;
-        mem.write(address, &bytes)?;
-        mem.seal_runtime_readonly(address)?;
-        self.next_alloc += PAGE;
-        self.graphics.tables.insert(kind, address);
-        Ok(address)
-    }
-    fn dxgi_object(&mut self, mem: &mut Memory, kind: Kind, parent: u64) -> Result<u64, String> {
-        if self.graphics.objects.len() >= OBJECT_LIMIT {
-            return Err("graphics object capacity exceeded".into());
-        }
-        let table = self.dxgi_table(mem, kind)?;
-        if parent != 0
-            && self
-                .graphics
-                .objects
-                .get(&parent)
-                .is_none_or(|o| o.refs == u32::MAX)
-        {
-            return Err("DXGI parent reference capacity".into());
-        }
-        let address = self.next_alloc;
-        mem.map(address, PAGE, READ | WRITE)?;
-        mem.write_int(address, 8, table)?;
-        mem.seal_runtime_readonly(address)?;
-        if parent != 0 {
-            self.graphics.retain(parent)?;
-        }
-        self.next_alloc += PAGE;
-        self.graphics.objects.insert(
-            address,
-            Object {
-                kind,
-                refs: 1,
-                parent,
-                association: if matches!(kind, Kind::Buffer | Kind::Texture) {
-                    0x78000000
-                } else {
-                    0
-                },
-                private: BTreeMap::new(),
-            },
-        );
-        Ok(address)
-    }
-    fn dxgi_release(&mut self, mem: &mut Memory, address: u64) -> Result<u64, String> {
-        let o = self
-            .graphics
-            .objects
-            .get_mut(&address)
-            .ok_or("invalid DXGI object")?;
-        if o.refs > 1 {
-            o.refs -= 1;
-            return Ok(o.refs as u64);
-        }
-        let parent = o.parent;
-        mem.unmap(address, PAGE)?;
-        self.graphics.objects.remove(&address);
-        self.graphics.devices.remove(&address);
-        self.graphics.queries.remove(&address);
-        if let Some(chain) = self.graphics.swapchains.remove(&address) {
-            self.dxgi_release(mem, chain.buffer)?;
-            self.dxgi_release(mem, chain.device)?;
-        }
-        if let Some(d3d11::Resource::Buffer {
-            mapped: Some((p, size, _)),
-            ..
-        }) = self.graphics.resources.get(&address)
-        {
-            mem.unmap(*p, *size)?;
-        }
-        if let Some(d3d11::Resource::Texture { mapped, .. }) = self.graphics.resources.get(&address)
-        {
-            for &(p, size, _) in mapped.values() {
-                mem.unmap(p, size)?;
-            }
-        }
-        if let Some(d3d11::Resource::View { resource, .. }) =
-            self.graphics.resources.remove(&address)
-        {
-            self.dxgi_release(mem, resource)?;
-        }
-        if let Some(context) = self.graphics.contexts.remove(&address) {
-            for target in context.references() {
-                self.dxgi_release(mem, target)?;
-            }
-        }
-        if parent != 0 {
-            self.dxgi_release(mem, parent)?;
-        }
-        Ok(0)
-    }
-    fn dxgi_adapter(
-        &mut self,
-        mem: &mut Memory,
-        parent: u64,
-        out: u64,
-        iid: &Guid,
-    ) -> Result<u64, String> {
-        if !supports(Kind::Adapter, iid) {
-            mem.write_int(out, 8, 0)?;
-            return Ok(NO_INTERFACE);
-        }
-        let cached = self.graphics.objects.iter().find_map(|(&address, o)| {
-            (o.kind == Kind::Adapter && o.parent == parent).then_some(address)
-        });
-        let address = if let Some(address) = cached {
-            self.graphics.retain(address)?;
-            address
-        } else {
-            if self.graphics.objects.len() >= OBJECT_LIMIT {
-                mem.write_int(out, 8, 0)?;
-                return Ok(OUT_OF_MEMORY);
-            }
-            self.dxgi_object(mem, Kind::Adapter, parent)?
-        };
-        mem.write_int(out, 8, address)?;
-        Ok(0)
+        self.graphics.attach(graphics)
     }
     pub(super) fn graphics_export_call(
         &mut self,
@@ -487,7 +341,13 @@ impl Runtime64 {
             return Ok(result);
         }
         self.graphics.info()?;
-        let object = self.dxgi_object(mem, Kind::Factory, 0)?;
+        let object = self.graphics.object(
+            mem,
+            &mut self.gateways,
+            &mut self.next_alloc,
+            Kind::Factory,
+            0,
+        )?;
         mem.write_int(out, 8, object)?;
         Ok(0)
     }
@@ -565,7 +425,7 @@ impl Runtime64 {
                 Ok(0)
             }
             "Object.AddRef" => self.graphics.retain(a[0]),
-            "Object.Release" => self.dxgi_release(mem, a[0]),
+            "Object.Release" => self.graphics.release(mem, a[0]),
             "Object.SetPrivateData" | "Object.SetPrivateDataInterface" => {
                 let key = read_guid(mem, a[1])?;
                 if name.ends_with("Interface") && a[2] != 0 {
@@ -652,7 +512,14 @@ impl Runtime64 {
                     mem.write_int(out, 8, 0)?;
                     return Ok(NOT_FOUND);
                 }
-                self.dxgi_adapter(mem, a[0], out, &iid)
+                self.graphics.adapter(
+                    mem,
+                    &mut self.gateways,
+                    &mut self.next_alloc,
+                    a[0],
+                    out,
+                    &iid,
+                )
             }
             "Factory.EnumWarpAdapter" => {
                 if a[2] == 0 {
@@ -855,7 +722,10 @@ mod tests {
     #[test]
     fn blend_state_validates_only_active_target_and_enabled_factors() {
         let (mut r, mut m) = setup();
-        let device = r.dxgi_object(&mut m, Kind::Device, 0).unwrap();
+        let device = r
+            .graphics
+            .object(&mut m, &mut r.gateways, &mut r.next_alloc, Kind::Device, 0)
+            .unwrap();
         let mut desc = [0u32; 66];
         // Valid alpha blending in RT0; unused RT1..7 have zero enum fields.
         desc[2..10].copy_from_slice(&[1, 5, 6, 1, 2, 1, 1, 15]);
@@ -1020,7 +890,16 @@ mod tests {
         .unwrap();
         // A retained POSITION layout and a mapped VB are harmless when the VS
         // only uses VertexId; switching to a VS using POSITION must fail.
-        let layout = r.dxgi_object(&mut m, Kind::Layout, device).unwrap();
+        let layout = r
+            .graphics
+            .object(
+                &mut m,
+                &mut r.gateways,
+                &mut r.next_alloc,
+                Kind::Layout,
+                device,
+            )
+            .unwrap();
         r.graphics.resources.insert(
             layout,
             d3d11::Resource::State(
@@ -1078,7 +957,16 @@ mod tests {
             .unwrap()
             .create_buffer(&[0; 16], 1)
             .unwrap();
-        let cb = r.dxgi_object(&mut m, Kind::Buffer, device).unwrap();
+        let cb = r
+            .graphics
+            .object(
+                &mut m,
+                &mut r.gateways,
+                &mut r.next_alloc,
+                Kind::Buffer,
+                device,
+            )
+            .unwrap();
         r.graphics.resources.insert(
             cb,
             d3d11::Resource::Buffer {

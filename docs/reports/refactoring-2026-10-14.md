@@ -694,3 +694,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R4 PE32 同步阻塞与唤醒编排
 
 基线 `3eb0236`。critical-section、Sleep/让出、single/multiple 和对象/消息等待归 Process 的 synchronization 协调器，按入口借实际资源，不借 ApiState/ApiTable。七个旧处理体经资源替换及局部 match 返回值规范化后对照一致；领域对象获取、critical-section codec、USER 队列、callback 和公共 gateway 返回帧保持。Returned/Blocked 显式区分控制结果，零延时让出仍在返回帧提交后执行。完整 release Win32 259、IR 31、all-targets/all-features strict Clippy、build/fmt 通过；首次 late-init lint 日志保留。不跑性能或游戏矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r4-synchronization32-{source-checks,verification}.json`。
+
+## R3 Win64 图形对象生命周期
+
+基线 `e3772fc`。Graphics 拥有 backend attach、vtable、COM 对象分配/adapter 缓存和递归释放，分配只借 Memory/Gateways/共享页游标，释放只借 Memory；公开 attach_graphics facade 保留。五个生命周期主体和根/子模块全部调用点经资源替换及 rustfmt 对照一致，测试期望未改，shader/draw/view、gateway 和 backend 主体未改。release 完整 Win64 269、library 61 passed / 7 ignored、all-targets/all-features strict Clippy、build/fmt 通过；另显式通过两个真实 GPU procedural draw 与 swapchain/backbuffer/resize/lifetime 测试。仅调用点和状态借用收敛，不跑性能或游戏矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r3-graphics-objects64-{source-checks,verification}.json`。

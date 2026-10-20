@@ -345,7 +345,13 @@ impl Runtime64 {
             self.graphics.retain(address)?;
             return Ok(address);
         }
-        let c = self.dxgi_object(mem, Kind::Context, device)?;
+        let c = self.graphics.object(
+            mem,
+            &mut self.gateways,
+            &mut self.next_alloc,
+            Kind::Context,
+            device,
+        )?;
         self.graphics.contexts.insert(c, Context::default());
         Ok(c)
     }
@@ -379,7 +385,7 @@ impl Runtime64 {
         if let Some(old) = old {
             for p in old {
                 if p != 0 {
-                    self.dxgi_release(mem, p)?;
+                    self.graphics.release(mem, p)?;
                 }
             }
         }
@@ -431,9 +437,21 @@ impl Runtime64 {
             }
             // The default hardware adapter is the same attached Vulkan device.
             self.graphics.info()?;
-            let factory = self.dxgi_object(mem, Kind::Factory, 0)?;
-            let adapter = self.dxgi_object(mem, Kind::Adapter, factory)?;
-            self.dxgi_release(mem, factory)?;
+            let factory = self.graphics.object(
+                mem,
+                &mut self.gateways,
+                &mut self.next_alloc,
+                Kind::Factory,
+                0,
+            )?;
+            let adapter = self.graphics.object(
+                mem,
+                &mut self.gateways,
+                &mut self.next_alloc,
+                Kind::Adapter,
+                factory,
+            )?;
+            self.graphics.release(mem, factory)?;
             adapter
         };
         self.graphics.info()?;
@@ -444,11 +462,17 @@ impl Runtime64 {
                 }
             }
             if a[0] == 0 {
-                self.dxgi_release(mem, adapter)?;
+                self.graphics.release(mem, adapter)?;
             }
             return Ok(UNSUPPORTED);
         };
-        let device = self.dxgi_object(mem, Kind::Device, adapter)?;
+        let device = self.graphics.object(
+            mem,
+            &mut self.gateways,
+            &mut self.next_alloc,
+            Kind::Device,
+            adapter,
+        )?;
         self.graphics.devices.insert(
             device,
             Device {
@@ -460,7 +484,7 @@ impl Runtime64 {
             },
         );
         if a[0] == 0 {
-            self.dxgi_release(mem, adapter)?;
+            self.graphics.release(mem, adapter)?;
         }
         let context = if a[9] != 0 {
             self.d3d_context(mem, device)?
@@ -477,7 +501,7 @@ impl Runtime64 {
             mem.write_int(a[9], 8, context)?;
         }
         if a[7] == 0 {
-            self.dxgi_release(mem, device)?;
+            self.graphics.release(mem, device)?;
         }
         self.trace_note(format!("experimental D3D11 native Vulkan compatibility subset: level={level:#x}; full FL10_0 conformance not claimed"));
         Ok(0)
@@ -671,7 +695,13 @@ impl Runtime64 {
                         self.graphics.retain(p)?;
                         p
                     } else {
-                        self.dxgi_object(mem, Kind::DxgiDevice, a[0])?
+                        self.graphics.object(
+                            mem,
+                            &mut self.gateways,
+                            &mut self.next_alloc,
+                            Kind::DxgiDevice,
+                            a[0],
+                        )?
                     }
                 } else if iid == UNKNOWN
                     || resource_iid == Some(iid)
@@ -688,7 +718,7 @@ impl Runtime64 {
                 Ok(0)
             }
             "AddRef" => self.graphics.retain(a[0]),
-            "Release" => self.dxgi_release(mem, a[0]),
+            "Release" => self.graphics.release(mem, a[0]),
             "GetDevice" => {
                 mem.check(a[1], 8, WRITE)?;
                 self.graphics.retain(owner)?;
@@ -753,10 +783,16 @@ impl Runtime64 {
                         return Ok(1);
                     }
                     self.graphics.retain(a[1])?;
-                    let p = match self.dxgi_object(mem, Kind::Srv, a[0]) {
+                    let p = match self.graphics.object(
+                        mem,
+                        &mut self.gateways,
+                        &mut self.next_alloc,
+                        Kind::Srv,
+                        a[0],
+                    ) {
                         Ok(p) => p,
                         Err(e) => {
-                            self.dxgi_release(mem, a[1])?;
+                            self.graphics.release(mem, a[1])?;
                             return Err(e);
                         }
                     };
@@ -956,10 +992,16 @@ impl Runtime64 {
                     return Ok(1);
                 }
                 self.graphics.retain(a[1])?;
-                let p = match self.dxgi_object(mem, kind, a[0]) {
+                let p = match self.graphics.object(
+                    mem,
+                    &mut self.gateways,
+                    &mut self.next_alloc,
+                    kind,
+                    a[0],
+                ) {
                     Ok(p) => p,
                     Err(e) => {
-                        self.dxgi_release(mem, a[1])?;
+                        self.graphics.release(mem, a[1])?;
                         return Err(e);
                     }
                 };
@@ -1102,7 +1144,13 @@ impl Runtime64 {
                 if a[3] == 0 {
                     return Ok(1);
                 }
-                let p = self.dxgi_object(mem, Kind::Texture, a[0])?;
+                let p = self.graphics.object(
+                    mem,
+                    &mut self.gateways,
+                    &mut self.next_alloc,
+                    Kind::Texture,
+                    a[0],
+                )?;
                 self.graphics.resources.insert(
                     p,
                     Resource::Texture {
@@ -1209,7 +1257,13 @@ impl Runtime64 {
                 if a[3] == 0 {
                     return Ok(1);
                 }
-                let p = self.dxgi_object(mem, Kind::Texture, a[0])?;
+                let p = self.graphics.object(
+                    mem,
+                    &mut self.gateways,
+                    &mut self.next_alloc,
+                    Kind::Texture,
+                    a[0],
+                )?;
                 self.graphics.resources.insert(
                     p,
                     Resource::Texture {
@@ -1272,7 +1326,13 @@ impl Runtime64 {
                 if a[3] == 0 {
                     return Ok(1);
                 }
-                let p = self.dxgi_object(mem, Kind::Buffer, a[0])?;
+                let p = self.graphics.object(
+                    mem,
+                    &mut self.gateways,
+                    &mut self.next_alloc,
+                    Kind::Buffer,
+                    a[0],
+                )?;
                 self.graphics.resources.insert(
                     p,
                     Resource::Buffer {
@@ -1311,7 +1371,13 @@ impl Runtime64 {
                 if a[4] == 0 {
                     return Ok(1);
                 }
-                let p = self.dxgi_object(mem, Kind::Shader, a[0])?;
+                let p = self.graphics.object(
+                    mem,
+                    &mut self.gateways,
+                    &mut self.next_alloc,
+                    Kind::Shader,
+                    a[0],
+                )?;
                 self.graphics.resources.insert(p, Resource::Shader(native));
                 mem.write_int(a[4], 8, p)?;
                 Ok(0)
@@ -1389,7 +1455,9 @@ impl Runtime64 {
                 if a[2] == 0 {
                     return Ok(1);
                 }
-                let p = self.dxgi_object(mem, k, a[0])?;
+                let p =
+                    self.graphics
+                        .object(mem, &mut self.gateways, &mut self.next_alloc, k, a[0])?;
                 self.graphics.resources.insert(p, Resource::State(desc));
                 mem.write_int(a[2], 8, p)?;
                 Ok(0)
@@ -1897,7 +1965,7 @@ impl Runtime64 {
                 values[a[1] as usize * 8..(a[1] + a[2]) as usize * 8].copy_from_slice(&layout);
                 for p in old {
                     if p != 0 {
-                        self.dxgi_release(mem, p)?;
+                        self.graphics.release(mem, p)?;
                     }
                 }
                 Ok(0)
@@ -1936,7 +2004,13 @@ impl Runtime64 {
                 if a[2] == 0 {
                     return Ok(1);
                 }
-                let p = self.dxgi_object(mem, Kind::Query, a[0])?;
+                let p = self.graphics.object(
+                    mem,
+                    &mut self.gateways,
+                    &mut self.next_alloc,
+                    Kind::Query,
+                    a[0],
+                )?;
                 self.graphics.queries.insert(
                     p,
                     Query {
@@ -2037,7 +2111,7 @@ impl Runtime64 {
                     .insert(a[0], Context::default())
                     .unwrap();
                 for p in old.references() {
-                    self.dxgi_release(mem, p)?;
+                    self.graphics.release(mem, p)?;
                 }
                 Ok(0)
             }
@@ -2100,7 +2174,7 @@ impl Runtime64 {
                 slots[start..end].copy_from_slice(&incoming);
                 for p in old {
                     if p != 0 {
-                        self.dxgi_release(mem, p)?;
+                        self.graphics.release(mem, p)?;
                     }
                 }
                 Ok(0)
@@ -2228,7 +2302,7 @@ impl Runtime64 {
                 if let Some(old) = old {
                     for p in old {
                         if p != 0 {
-                            self.dxgi_release(mem, p)?;
+                            self.graphics.release(mem, p)?;
                         }
                     }
                 }
