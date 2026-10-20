@@ -22,6 +22,10 @@ PE32 的 TLS 回调、线程通知和进程退出通知由 `x86/process/module_n
 
 生命周期基线 `db3c4fe`，初始化/卸载与四个准备/提交方法对照保持；link/resolve/rollback/call 和通知主体未改。完整 release Win32 259、IR 31、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵，证据 `wire-out/refactoring-2026-10-14/r4-module-lifecycle32-{source-checks,verification}.json`。
 
+typed 模块入口及失败清理由 `x86/process/module_loading.rs` 协调，API 直接调用；公开 modules::dispatch 重导出兼容入口。Modules 独立执行 disable-thread、pin、metadata 查询和回滚资源操作，Process 保留原 expected/fatal/control 分支和 TLS/DllMain 失败清理。回滚仍先撤销边/引用，再逆序逐个退休 image，每次成功 decommit 后立即删除 CPU IR；后续失败不延迟已完成的失效动作。领域模块不再依赖 Cpu、scheduler、logger 或 guest 执行器，链接器对组合根的借用继续收窄。
+
+装载入口基线 `1e6eacc`，call/dispatch、回滚与领域操作对照保持，链接/生命周期方法未改；阶段整合 release 全目标 694 passed / 7 ignored（21 suites）、all-targets/all-features strict Clippy、build 和 fmt 通过。证据 `wire-out/refactoring-2026-10-14/r4-module-loading32-{source-checks,verification}.json`。
+
 模块 API 的 31 个 export 由 `win32::catalog::modules` 维护唯一 provider/ABI/执行声明：13 个核心装载、查询与引用 API，4 个 DLL directory API，以及 7 个 PSAPI 查询及其 7 个 K32 名称。PE32 核心 13 个 typed，directory/K32 的 11 个保留 Wine ABI-only 策略，7 个无前缀查询仍 absent；Win64 使用全部既有子集。未知 ABI、stub 地址、序数和 data export 行为保持。
 
 PE32 映射 image 的十项资源 export 单独归入 [ResourceApi](resources.md)，不计入上述 31 项。它们借用 image 内存和 EXE 基址，不改变模块引用或资源寿命。

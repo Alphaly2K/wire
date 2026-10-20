@@ -1514,8 +1514,9 @@ pub fn dispatch(
             let Some(crate::win32::catalog::ApiId::Module(id)) = binding.typed else {
                 unreachable!();
             };
-            let (outcome, message) =
-                crate::modules::call(id, &args, cpu, mem, api, state, log, sched, max_instr)?;
+            let (outcome, message) = crate::x86::process::module_loading::call(
+                id, &args, cpu, mem, api, state, log, sched, max_instr,
+            )?;
             match outcome {
                 crate::cpu::GuestCallOutcome::Returned(value) => {
                     ret = value;

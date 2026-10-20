@@ -4,7 +4,7 @@
 
 近期完成 [GDI+](architecture/gdiplus.md)、[WMI](architecture/wmi.md)、[DirectSound](architecture/directsound.md) 与 [D3D9](architecture/d3d9.md) 的资源借用收敛，移除对象调用对整个 ApiState 的依赖及 registry/backend 临时 take；[PE32 线程创建和退出](architecture/thread-control.md)、[USER 资源退休](architecture/window-control.md)、[callback 执行](architecture/callbacks32.md) 与 [消息队列](architecture/messages.md) 也已归入各自 owner。Win64 [TLS/FLS](architecture/locals.md) 私有拥有固定槽和 callback identity，保留 TEB 与析构顺序。
 
-最新阶段整合覆盖至 Win64 消息与 host USER owner（上一提交 `c551314`）：release 全目标 **694 passed / 7 ignored / 21 suites**，all-targets/all-features strict Clippy、build 及 fmt 通过。工具未改，沿用前次 **31 项工具测试**；真实 Metal 两项已在 D3D9 批次显式通过。按改动影响选择验证，普通契约和资源边界提取不逐批重跑性能或游戏矩阵；执行循环、ISA 算法和 callback frame 保持。见 [验收策略](architecture/validation-tools.md)。
+最新阶段整合覆盖至 PE32 模块装载与失败清理（上一提交 `1e6eacc`）：release 全目标 **694 passed / 7 ignored / 21 suites**，all-targets/all-features strict Clippy、build 及 fmt 通过。工具未改，沿用前次 **31 项工具测试**；真实 Metal 两项已在 D3D9 批次显式通过。按改动影响选择验证，普通契约和资源边界提取不逐批重跑性能或游戏矩阵；执行循环、ISA 算法和 callback frame 保持。见 [验收策略](architecture/validation-tools.md)。
 
 历史性能拒绝、回滚与后续复核证据继续保留，见 [API 日志累计验收](reports/refactoring-api-log-2026-10-19.md)、[后台 Unity 渲染结束后的复核](reports/refactoring-post-unity-performance-2026-10-19.md) 和 [CLI 重试](reports/refactoring-cli-followup-2026-10-19.md)。当前结构重构不宣称新的性能提升。
 
@@ -29,6 +29,8 @@ PE32 SEH 搜索/展开和普通 filter 现归 Process，CONTEXT codec 独立借�
 PE32 DLL/TLS 的线程及进程退出通知也归 Process；模块表保持私有，通知按原位置取快照并重查。完整 Win32 259、IR 31、fmt/strict Clippy/build 通过，初始化/卸载等其余生命周期继续拆分。
 
 PE32 DLL 初始化/卸载执行随后归 Process，Modules 准备和提交 phase/引用/资源退休；sidecar IR 安装、依赖顺序、FALSE attach 与控制转移保持。完整 Win32 259、IR 31 和必要构建通过；typed 装载入口与失败清理继续收敛。
+
+PE32 typed 模块装载入口与失败清理也归 Process；领域模块已移除 CPU、scheduler、logger 和 guest 执行依赖，资源退休与 IR 逐个失效顺序保持。此批完成上述全目标阶段整合，链接器资源借用继续收窄。
 
 ## 重构范围
 

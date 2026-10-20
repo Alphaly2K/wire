@@ -1,12 +1,10 @@
 //! Guest PE32 DLL mapping, linking and initialization. Never maps host code.
-use crate::api::{ApiLogger, ApiState, ApiTable};
-use crate::cpu::{Cpu, GuestCallOutcome};
+use crate::api::{ApiState, ApiTable};
 use crate::mem::GuestMem;
 use crate::pe::{PeFile, DIR_BASERELOC, DIR_EXPORT};
-use crate::thread::Sched;
-use crate::x86::process::module_lifecycle::{initialize, unload};
-use crate::x86::process::module_notifications::invoke_tls;
+pub use crate::x86::process::module_loading::dispatch;
 pub use crate::x86::process::module_notifications::{notify_process_exit, notify_thread};
+use crate::x86::process::GuestCallOutcome;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -75,7 +73,7 @@ pub(crate) type LoadResult<T> = Result<T, Failure>;
 fn bad(message: impl Into<String>) -> Failure {
     Failure::Expected(193, message.into())
 }
-fn memory(error: impl std::fmt::Display) -> Failure {
+pub(crate) fn memory(error: impl std::fmt::Display) -> Failure {
     Failure::Fatal(error.to_string())
 }
 fn read32(bytes: &[u8], offset: usize) -> LoadResult<u32> {
@@ -400,6 +398,67 @@ pub(crate) struct RetiredImage {
     pub dependencies: Vec<u32>,
 }
 impl Modules {
+    pub(crate) fn disable_thread_calls(&mut self, handle: u32) -> LoadResult<u32> {
+        if self.provider_name(handle).is_some() {
+            return Ok(1);
+        }
+        let module = self
+            .images
+            .get_mut(&handle)
+            .ok_or_else(|| Failure::Expected(126, "module is not loaded".into()))?;
+        if module.tls.is_some() {
+            return Err(Failure::Expected(
+                126,
+                "static TLS requires thread notifications".into(),
+            ));
+        }
+        module.thread_calls_disabled = true;
+        Ok(1)
+    }
+    pub(crate) fn lookup_handle(&self, name: &str, fs: Option<&crate::fs::GuestFs>) -> Option<u32> {
+        self.handle(name, fs)
+            .or_else(|| self.provider_handle(&basename(&library_name(name))))
+    }
+    pub(crate) fn pin_image(&mut self, handle: u32) {
+        if let Some(module) = self.images.get_mut(&handle) {
+            module.pinned = true;
+        }
+    }
+    pub(crate) fn guest_image_path(&self, handle: u32) -> Option<&String> {
+        self.images.get(&handle).map(|m| &m.guest_path)
+    }
+    pub(crate) fn initialized_entry(&self, handle: u32) -> u32 {
+        self.images[&handle].entry
+    }
+    pub(crate) fn rollback_references(&mut self, txn: &Transaction) {
+        for &(owner, dependency) in txn.edges.iter().rev() {
+            if let Some(module) = self.images.get_mut(&owner) {
+                module.dependencies.retain(|&h| h != dependency);
+            }
+        }
+        for &handle in txn.acquired.iter().rev() {
+            if let Some(module) = self.images.get_mut(&handle) {
+                module.refs -= 1;
+            }
+        }
+    }
+    pub(crate) fn rollback_image(
+        &mut self,
+        mem: &mut GuestMem,
+        heap: &mut crate::heap::GuestHeap,
+        process_heap: u32,
+        handle: u32,
+    ) -> Result<Option<u32>, String> {
+        if let Some(mut module) = self.images.remove(&handle) {
+            self.release_module_tls(&mut module, mem, heap, process_heap)?;
+            self.paths.remove(&module.path);
+            self.init_order.retain(|&h| h != handle);
+            mem.decommit_image(handle, module.size)
+                .map_err(|e| e.to_string())?;
+            return Ok(Some(module.size));
+        }
+        Ok(None)
+    }
     pub(crate) fn begin_initialization(
         &mut self,
         handle: u32,
@@ -594,7 +653,7 @@ impl Modules {
             .min_by_key(|(&h, _)| h)
             .map(|(&h, _)| h)
     }
-    fn address(&self, address: u32) -> Option<u32> {
+    pub(crate) fn address(&self, address: u32) -> Option<u32> {
         self.images
             .iter()
             .find(|(&base, module)| {
@@ -712,16 +771,22 @@ pub(crate) struct Transaction {
     edges: Vec<(u32, u32)>,
 }
 impl Transaction {
+    pub(crate) fn created(&self) -> &[u32] {
+        &self.created
+    }
+    pub(crate) fn initialized(&self) -> &[u32] {
+        &self.initialized
+    }
     pub(crate) fn record_initialization(&mut self, handle: u32) {
         self.initialized.push(handle);
     }
 }
 #[derive(Clone, Debug)]
-enum Symbol {
+pub(crate) enum Symbol {
     Name(String),
     Ordinal(u16),
 }
-fn abandon(state: &mut ApiState, txn: &Transaction) {
+pub(crate) fn abandon(state: &mut ApiState, txn: &Transaction) {
     for &handle in &txn.created {
         if let Some(module) = state.modules.images.get_mut(&handle) {
             module.phase = Phase::Abandoned;
@@ -751,7 +816,7 @@ fn attach_dependency(owner: u32, dependency: u32, state: &mut ApiState, txn: &mu
     }
 }
 #[allow(clippy::too_many_arguments)]
-fn link(
+pub(crate) fn link(
     name: &str,
     parent: Option<&Path>,
     mem: &mut GuestMem,
@@ -897,7 +962,7 @@ fn link(
     state.modules.images.get_mut(&base).unwrap().phase = Phase::Linked;
     Ok(base)
 }
-fn acquire(state: &mut ApiState, txn: &mut Transaction, handle: u32) -> LoadResult<()> {
+pub(crate) fn acquire(state: &mut ApiState, txn: &mut Transaction, handle: u32) -> LoadResult<()> {
     if let Some(module) = state.modules.images.get_mut(&handle) {
         if matches!(module.phase, Phase::Unloading | Phase::Abandoned) {
             return Err(Failure::Expected(126, "module unloading".into()));
@@ -913,7 +978,7 @@ fn acquire(state: &mut ApiState, txn: &mut Transaction, handle: u32) -> LoadResu
     Ok(())
 }
 #[allow(clippy::too_many_arguments)]
-fn resolve(
+pub(crate) fn resolve(
     handle: u32,
     symbol: Symbol,
     owner: Option<u32>,
@@ -1005,322 +1070,6 @@ fn resolve(
                 Symbol::Name(name.into())
             };
             resolve(next, symbol, owner, mem, api, state, txn, seen)
-        }
-    }
-}
-fn rollback(
-    state: &mut ApiState,
-    mem: &mut GuestMem,
-    cpu: &mut Cpu,
-    txn: &Transaction,
-) -> Result<(), String> {
-    for &(owner, dependency) in txn.edges.iter().rev() {
-        if let Some(module) = state.modules.images.get_mut(&owner) {
-            module.dependencies.retain(|&h| h != dependency);
-        }
-    }
-    for &handle in txn.acquired.iter().rev() {
-        if let Some(module) = state.modules.images.get_mut(&handle) {
-            module.refs -= 1;
-        }
-    }
-    for &handle in txn.created.iter().rev() {
-        if let Some(mut module) = state.modules.images.remove(&handle) {
-            state.modules.release_module_tls(
-                &mut module,
-                mem,
-                &mut state.heap,
-                state.process_heap,
-            )?;
-            state.modules.paths.remove(&module.path);
-            state.modules.init_order.retain(|&h| h != handle);
-            mem.decommit_image(handle, module.size)
-                .map_err(|e| e.to_string())?;
-            cpu.remove_module_ir(handle, module.size);
-        }
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn dispatch(
-    name: &str,
-    a: &crate::api::Args,
-    cpu: &mut Cpu,
-    mem: &mut GuestMem,
-    api: &mut ApiTable,
-    state: &mut ApiState,
-    log: &mut ApiLogger,
-    sched: &mut Sched,
-    max_instr: u64,
-) -> Result<(GuestCallOutcome, String), String> {
-    let Some(crate::win32::catalog::ApiId::Module(id)) =
-        crate::win32::catalog::by_name(name).map(|c| c.id)
-    else {
-        unreachable!();
-    };
-    call(id, a, cpu, mem, api, state, log, sched, max_instr)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn call(
-    id: crate::win32::catalog::ModuleApi,
-    a: &crate::api::Args,
-    cpu: &mut Cpu,
-    mem: &mut GuestMem,
-    api: &mut ApiTable,
-    state: &mut ApiState,
-    log: &mut ApiLogger,
-    sched: &mut Sched,
-    max_instr: u64,
-) -> Result<(GuestCallOutcome, String), String> {
-    use crate::win32::catalog::ModuleApi;
-    let mut txn = Transaction::default();
-    let mut note = String::new();
-    let result = (|| -> LoadResult<u32> {
-        match id {
-            ModuleApi::LoadLibraryA
-            | ModuleApi::LoadLibraryW
-            | ModuleApi::LoadLibraryExA
-            | ModuleApi::LoadLibraryExW => {
-                if id.extended() && (a[1] != 0 || a[2] & !8 != 0) {
-                    return Err(Failure::Expected(
-                        87,
-                        "unsupported LoadLibraryEx flags/file handle".into(),
-                    ));
-                }
-                let path = crate::api::read_str(mem, a[0], id.wide());
-                let handle =
-                    link(&path, None, mem, api, state, &mut txn, 0).map_err(|e| match e {
-                        Failure::Expected(code, reason) => {
-                            Failure::Expected(code, format!("{path:?}: {reason}"))
-                        }
-                        other => other,
-                    })?;
-                for thread in &sched.threads {
-                    if !matches!(thread.state, crate::thread::ThreadState::Exited(_)) {
-                        state
-                            .modules
-                            .setup_tls_thread(mem, &mut state.heap, state.process_heap, thread.teb)
-                            .map_err(Failure::Fatal)?;
-                    }
-                }
-                initialize(
-                    handle, cpu, mem, api, state, log, sched, max_instr, &mut txn,
-                )?;
-                note = format!("loaded {path:?} at {handle:#x}");
-                Ok(handle)
-            }
-            ModuleApi::DisableThreadLibraryCalls => {
-                if state.modules.provider_name(a[0]).is_some() {
-                    return Ok(1);
-                }
-                let module = state
-                    .modules
-                    .images
-                    .get_mut(&a[0])
-                    .ok_or_else(|| Failure::Expected(126, "module is not loaded".into()))?;
-                if module.tls.is_some() {
-                    return Err(Failure::Expected(
-                        126,
-                        "static TLS requires thread notifications".into(),
-                    ));
-                }
-                module.thread_calls_disabled = true;
-                Ok(1)
-            }
-            ModuleApi::FreeLibrary => {
-                unload(a[0], cpu, mem, api, state, log, sched, max_instr)?;
-                Ok(1)
-            }
-            ModuleApi::GetProcAddress => {
-                let symbol = if a[1] >> 16 == 0 {
-                    Symbol::Ordinal(a[1] as u16)
-                } else {
-                    Symbol::Name(mem.read_cstr(a[1], 1024).map_err(memory)?)
-                };
-                note = format!("module={:#x} export={symbol:?}", a[0]);
-                let owner = state.modules.images.contains_key(&a[0]).then_some(a[0]);
-                let value = resolve(
-                    a[0],
-                    symbol,
-                    owner,
-                    mem,
-                    api,
-                    state,
-                    &mut txn,
-                    &mut HashSet::new(),
-                )?;
-                for handle in txn.created.clone() {
-                    for thread in &sched.threads {
-                        if !matches!(thread.state, crate::thread::ThreadState::Exited(_)) {
-                            state
-                                .modules
-                                .setup_tls_thread(
-                                    mem,
-                                    &mut state.heap,
-                                    state.process_heap,
-                                    thread.teb,
-                                )
-                                .map_err(Failure::Fatal)?;
-                        }
-                    }
-                    initialize(
-                        handle, cpu, mem, api, state, log, sched, max_instr, &mut txn,
-                    )?;
-                }
-                Ok(value)
-            }
-            ModuleApi::GetModuleHandleA
-            | ModuleApi::GetModuleHandleW
-            | ModuleApi::GetModuleHandleExA
-            | ModuleApi::GetModuleHandleExW => {
-                let extended = id.extended();
-                let flags = if extended { a[0] } else { 2 };
-                if flags & !7 != 0 || flags & 3 == 3 {
-                    return Err(Failure::Expected(87, "invalid module handle flags".into()));
-                }
-                let pointer = if extended { a[1] } else { a[0] };
-                let handle = if flags & 4 != 0 {
-                    state.modules.address(pointer).or_else(|| {
-                        api.stub_index(pointer)
-                            .and_then(|i| state.modules.provider_handle(&api.entries[i].dll))
-                    })
-                } else if pointer == 0 {
-                    Some(state.exe_base)
-                } else {
-                    let path = crate::api::read_str(mem, pointer, id.wide());
-                    state.modules.handle(&path, state.fs.as_ref()).or_else(|| {
-                        state
-                            .modules
-                            .provider_handle(&basename(&library_name(&path)))
-                    })
-                }
-                .ok_or_else(|| Failure::Expected(126, "module is not loaded".into()))?;
-                if extended {
-                    mem.ptr(a[2], 4, true).map_err(memory)?;
-                    if flags & 2 == 0 {
-                        acquire(state, &mut txn, handle)?;
-                    }
-                    if flags & 1 != 0 {
-                        if let Some(module) = state.modules.images.get_mut(&handle) {
-                            module.pinned = true;
-                        }
-                    }
-                    mem.write_u32(a[2], handle).map_err(memory)?;
-                    Ok(1)
-                } else {
-                    Ok(handle)
-                }
-            }
-            ModuleApi::GetModuleFileNameA | ModuleApi::GetModuleFileNameW => {
-                let path = if a[0] == 0 || a[0] == state.exe_base {
-                    state.exe_path.clone()
-                } else if let Some(module) = state.modules.images.get(&a[0]) {
-                    module.guest_path.clone()
-                } else if let Some(path) = state.modules.provider_name(a[0]) {
-                    format!("C:\\Windows\\System32\\{path}")
-                } else {
-                    return Err(Failure::Expected(6, "invalid module handle".into()));
-                };
-                let wide = id.wide();
-                let length = if wide {
-                    path.encode_utf16().count()
-                } else {
-                    crate::codepage::encode(&path, 932)
-                        .map_err(|e| {
-                            Failure::Expected(e, "module filename encoding failed".into())
-                        })?
-                        .0
-                        .len()
-                } as u32;
-                if a[2] == 0 {
-                    state.last_error = 122;
-                    return Ok(0);
-                }
-                let mut bytes = if wide {
-                    path.encode_utf16()
-                        .flat_map(u16::to_le_bytes)
-                        .collect::<Vec<_>>()
-                } else {
-                    crate::codepage::encode(&path, 932)
-                        .map_err(|e| {
-                            Failure::Expected(e, "module filename encoding failed".into())
-                        })?
-                        .0
-                };
-                let width = if wide { 2 } else { 1 };
-                bytes.truncate(a[2].saturating_sub(1) as usize * width);
-                bytes.extend(std::iter::repeat_n(0, width));
-                mem.write_bytes(a[1], &bytes).map_err(memory)?;
-                if length >= a[2] {
-                    state.last_error = 122;
-                    Ok(a[2])
-                } else {
-                    Ok(length)
-                }
-            }
-            ModuleApi::GetDllDirectoryA
-            | ModuleApi::GetDllDirectoryW
-            | ModuleApi::SetDllDirectoryA
-            | ModuleApi::SetDllDirectoryW => {
-                unreachable!("ABI-only DLL directory call entered PE32 typed adapter")
-            }
-        }
-    })();
-    match result {
-        Ok(value) => Ok((GuestCallOutcome::Returned(value), note)),
-        Err(Failure::Expected(code, message)) => {
-            // Undo successful dependency callbacks in reverse init order.
-            for &handle in txn.initialized.iter().rev() {
-                let entry = state.modules.images[&handle].entry;
-                if let Err(failure) =
-                    invoke_tls(handle, 0, cpu, mem, api, state, log, sched, max_instr)
-                {
-                    abandon(state, &txn);
-                    return match failure {
-                        Failure::Control(outcome) => {
-                            Ok((outcome, "TLS rollback transferred control".into()))
-                        }
-                        Failure::Fatal(message) | Failure::Expected(_, message) => Err(message),
-                    };
-                }
-                if entry != 0 {
-                    match crate::x86::process::call_guest(
-                        cpu,
-                        mem,
-                        api,
-                        state,
-                        log,
-                        sched,
-                        entry,
-                        &[handle, 0, 0],
-                        max_instr,
-                    )? {
-                        GuestCallOutcome::Returned(_) => {}
-                        outcome => {
-                            abandon(state, &txn);
-                            return Ok((
-                                outcome,
-                                "DLL rollback callback transferred control".into(),
-                            ));
-                        }
-                    }
-                }
-            }
-            rollback(state, mem, cpu, &txn)?;
-            state.last_error = code;
-            Ok((GuestCallOutcome::Returned(0), message))
-        }
-        Err(Failure::Fatal(message)) => {
-            rollback(state, mem, cpu, &txn)?;
-            Err(message)
-        }
-        // Guest exception/exit already chose a new architectural context.
-        // Preserve mapped code while it may still be executing there.
-        Err(Failure::Control(outcome)) => {
-            abandon(state, &txn);
-            Ok((outcome, "DLL callback transferred control".into()))
         }
     }
 }

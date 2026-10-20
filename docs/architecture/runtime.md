@@ -11,6 +11,7 @@
 | `x86::process::exceptions`、`win32::x86::context` | Process 负责 SEH 搜索/展开与普通 filter；受检 CONTEXT codec 不借进程状态，公开 seh 入口保持兼容 |
 | `x86::process::module_notifications`、`modules::Modules` | Process 执行 DLL/TLS、线程与退出通知；Modules 提供私有 metadata 的原快照和重查，不暴露 image 表 |
 | `x86::process::module_lifecycle` | Process 执行依赖初始化、sidecar IR 与卸载回调；Modules 准备/提交 phase、引用与映射退休，顺序保持 |
+| `x86::process::module_loading` | typed 模块 API、失败 callback/清理与 CPU IR 失效编排；Modules 处理私有元数据和资源退休，公开 modules::dispatch 保留兼容 |
 | `x86::{cpu,ir,memory,pe,loader}` | PE32 ISA/IR/内存与装载；根 `cpu/ir/mem/pe/loader` 仅重导出旧公开入口。`cpu::process_facade` 委托旧 run/call_guest，单步/段执行保持专用静态路径 |
 | `x86::address_space` | PE32 gateway 保留地址、stride 与容量；执行内核直接引用架构布局，`api` 继续公开重导出原常量 |
 | `x64::{cpu,memory,pe,process}` | AMD64 指令、内存、装载与进程边界，保持现有 typed 热路径 |
