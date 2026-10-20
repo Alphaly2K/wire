@@ -706,3 +706,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 Win64 D3D11 调用资源
 
 基线 `27c6813`。D3D11 创建/COM/input-layout 通过临时 Calls 借 Graphics、Gateways、共享页游标和 Trace，内存按次传入，不借 Runtime64、USER、线程或 CPU。根方法只组合资源；11.1 递归路由、Map 部分提交与错误/trace 顺序保持。private-data 共用 Graphics 的原字节/容量处理，ASCII codec 原样迁到受检文本模块，旧静态方法委托。六个修改文件经明确资源替换/方法改名/纯实现提取和 rustfmt 全文对照一致。完整 release Win64 269、library 61 passed / 7 ignored、all-targets/all-features strict Clippy、build/fmt 通过，两个真实 GPU fixture 显式通过。不跑性能或游戏矩阵，累计仍 915，证据 `wire-out/refactoring-2026-10-14/r3-d3d11-calls64-{source-checks,verification}.json`。
+
+## R3 Win64 DXGI 普通对象调用
+
+基线 `f84ff70`。Graphics 的 calls 模块执行 factory/D3D12 能力创建和普通 factory/adapter/COM，仅借 Memory、Gateways、共享页游标及必要的只读 User。根保留原对象/类型 preflight、parent 快照、D3D11 QueryInterface 与 swapchain 控制路由。两个修改文件经明确资源替换及完整 rustfmt 对照一致，D3D11、output、生命周期、swapchain 和根 runtime 原文未改。完整 release Win64 269、library 61 passed / 7 ignored、all-targets/all-features strict Clippy、build/fmt 通过。未改 GPU/present/生命周期算法，沿用上一批真实 GPU 证据，不重复 native/性能/游戏矩阵。累计仍 915，证据 `wire-out/refactoring-2026-10-14/r3-dxgi-calls64-{source-checks,verification}.json`。

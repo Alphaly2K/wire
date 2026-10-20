@@ -23,3 +23,5 @@ Win64 COM 的 vtable、对象分配、adapter 缓存及递归释放现由 Graphi
 D3D11 创建、COM 方法与 input-layout 解析通过临时 `d3d11::Calls` 借用 Graphics、Gateways、共享页游标和 Trace；内存仍是每次调用的明确参数。它不拥有第二份状态，不借 Runtime64、线程、USER 或 CPU。Runtime64 的创建/调用方法只组合这四项资源。递归 11.1→11.0 路由在同一借用内完成；Map 的游标推进和输出故障顺序保持。
 
 DXGI 和 D3D11 的 private-data 字节/容量处理共用 Graphics 的原实现；对象/provider 校验仍由各入口按原顺序执行。input-layout 的名称读取使用 `win32/x64/text.rs` 中原样提取的 ASCII codec，Runtime64 的旧静态方法继续委托。
+
+DXGI factory/D3D12 能力创建及普通 factory/adapter/COM 操作位于 Graphics 的 `dxgi/calls.rs`，明确借内存、gateway、共享游标及必要的只读 User。原对象类型检查、D3D11 QueryInterface 转发和 swapchain 控制路由仍由根协调器先执行；parent 使用检查时取得的值。窗口关联只查询 User 的现有窗口成员关系。vtable、provider、对象查询与错误输出顺序保持。
