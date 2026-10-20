@@ -4,7 +4,7 @@
 
 近期完成 [GDI+](architecture/gdiplus.md)、[WMI](architecture/wmi.md)、[DirectSound](architecture/directsound.md) 与 [D3D9](architecture/d3d9.md) 的资源借用收敛，移除对象调用对整个 ApiState 的依赖及 registry/backend 临时 take；[PE32 线程创建和退出](architecture/thread-control.md)、[USER 资源退休](architecture/window-control.md)、[callback 执行](architecture/callbacks32.md) 与 [消息队列](architecture/messages.md) 也已归入各自 owner。Win64 [TLS/FLS](architecture/locals.md) 私有拥有固定槽和 callback identity，保留 TEB 与析构顺序。
 
-最新阶段整合覆盖至 PE32 模块目录归位及领域/Process 错误分离（上一提交 `9dd1c36`）：release 全目标 **694 passed / 7 ignored / 21 suites**，all-targets/all-features strict Clippy、build 及 fmt 通过；另通过 **6 项 inventory 工具测试**。此前 PE32 原生窗口探针及两个真实 GPU draw/swapchain fixture 的证据保留，其余工具沿用前次 31 项结果。按改动影响选择验证，普通契约和资源边界提取不逐批重跑性能或游戏矩阵；执行循环、ISA 算法和 callback frame 保持。见 [验收策略](architecture/validation-tools.md)。
+最新阶段整合覆盖至 host 音频/字体边界与 Win64 普通文件/endpoint 调用收敛（本批基线 `beb2a34`）：release 全目标 **694 passed / 8 ignored / 21 suites**，all-targets/all-features strict Clippy、build 及 fmt 通过；工具沿用最近 **6 项 inventory** 和其余工具 **31 项**结果。此前 PE32 原生窗口探针及两个真实 GPU draw/swapchain fixture 的证据保留；新增音频 fixture 的设备打开失败单独记录。按改动影响选择验证，普通契约和资源边界提取不逐批重跑性能或游戏矩阵；执行循环、ISA 算法和 callback frame 保持。见 [验收策略](architecture/validation-tools.md)。
 
 历史性能拒绝、回滚与后续复核证据继续保留，见 [API 日志累计验收](reports/refactoring-api-log-2026-10-19.md)、[后台 Unity 渲染结束后的复核](reports/refactoring-post-unity-performance-2026-10-19.md) 和 [CLI 重试](reports/refactoring-cli-followup-2026-10-19.md)。当前结构重构不宣称新的性能提升。
 
@@ -71,6 +71,8 @@ AudioQueue 句柄与 Rust FFI 已归 host PcmOutput，DirectSound 的混音/计�
 CoreText 字体测量的 Rust FFI 也已归 host，GDI 保留字体布局、缓存和原错误映射。Win32 259（含真实 CoreText 字体测量）、library 61 passed / 8 ignored 及严格构建通过。
 
 Win64 普通文件 metadata/大小/seek/attributes/cwd 及 read/write 输出已归 Files，只借明确的 Memory、Threads 和 write 所需的 Mappings；根保留原提前返回、计数与日志。Win64 269、library 61 passed / 8 ignored 和严格构建通过。随后路径变更、属性更新、打开文件与普通创建目录也归 Files，目录安全检查保留在根；按影响通过 17 项文件回归及严格构建。
+
+StandardHandles 的重定向/标准输出和 Pipes 的读写输出也已归各自 owner，Runtime 保留 endpoint 选择、公共 preflight 和原提前/通用提交区别；完成上述全目标阶段整合。
 
 ## 重构范围
 

@@ -1,4 +1,5 @@
 //! Anonymous byte streams with real endpoint lifetime and bounded buffering.
+use super::threads::Threads;
 use crate::x64::memory::{Memory, READ, WRITE};
 use std::collections::{BTreeMap, VecDeque};
 struct Pipe {
@@ -22,6 +23,55 @@ impl Default for Pipes {
     }
 }
 impl Pipes {
+    pub(in crate::x64::runtime) fn read_output(
+        &mut self,
+        mem: &mut Memory,
+        args: &[u64],
+        count: usize,
+        threads: &Threads,
+    ) -> Result<u64, String> {
+        Ok(match self.read(args[0], count) {
+            Ok(Some(bytes)) => {
+                mem.write(args[1], &bytes)?;
+                mem.write_int(args[3], 4, bytes.len() as u64)?;
+                1
+            }
+            Ok(None) => return Err("Win64 blocking pipe read requires a thread scheduler".into()),
+            Err(error) => {
+                mem.write_int(args[3], 4, 0)?;
+                threads.set_error(mem, error)?;
+                0
+            }
+        })
+    }
+
+    pub(in crate::x64::runtime) fn write_output(
+        &mut self,
+        mem: &mut Memory,
+        args: &[u64],
+        threads: &Threads,
+    ) -> Result<u64, String> {
+        if args[4] != 0 || args[2] > 16 * 1024 * 1024 || args[3] == 0 {
+            return Err("unsupported Win64 pipe write overlap/size/result pointer".into());
+        }
+        mem.check(args[3], 4, WRITE)?;
+        let mut bytes = vec![0; args[2] as usize];
+        mem.read(args[1], &mut bytes)?;
+        let value = match self.write(args[0], &bytes) {
+            Ok(true) => {
+                mem.write_int(args[3], 4, args[2])?;
+                1
+            }
+            Ok(false) => return Err("Win64 blocking pipe write requires a thread scheduler".into()),
+            Err(error) => {
+                mem.write_int(args[3], 4, 0)?;
+                threads.set_error(mem, error)?;
+                0
+            }
+        };
+        Ok(value)
+    }
+
     pub(super) fn create_call(
         &mut self,
         mem: &mut Memory,

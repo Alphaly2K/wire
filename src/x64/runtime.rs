@@ -1593,21 +1593,7 @@ impl Runtime64 {
                     self.record(dll, name, args, result);
                     return Ok(Control::Returned);
                 }
-                match self.pipes.read(args[0], count) {
-                    Ok(Some(bytes)) => {
-                        mem.write(args[1], &bytes)?;
-                        mem.write_int(args[3], 4, bytes.len() as u64)?;
-                        1
-                    }
-                    Ok(None) => {
-                        return Err("Win64 blocking pipe read requires a thread scheduler".into())
-                    }
-                    Err(error) => {
-                        mem.write_int(args[3], 4, 0)?;
-                        self.set_error(mem, error)?;
-                        0
-                    }
-                }
+                self.pipes.read_output(mem, args, count, &self.threads)?
             }
             _ if matches!(binding.control, gateways::ControlImport::Wait(_))
                 || binding.control == gateways::ControlImport::WinsockWait =>
@@ -1720,27 +1706,12 @@ impl Runtime64 {
                 Some(HandleApi::GetStdHandle | HandleApi::SetStdHandle)
             ) =>
             {
-                let index = match args[0] as u32 {
-                    0xfffffff6 => Some(0),
-                    0xfffffff5 => Some(1),
-                    0xfffffff4 => Some(2),
-                    _ => None,
-                };
-                if let Some(index) = index {
-                    if handle == Some(HandleApi::GetStdHandle) {
-                        self.files.standard().redirect(index)
-                    } else {
-                        self.files.standard_mut().set_redirect(index, args[1]);
-                        1
-                    }
-                } else {
-                    self.set_error(mem, 87)?;
-                    if handle == Some(HandleApi::GetStdHandle) {
-                        u64::MAX
-                    } else {
-                        0
-                    }
-                }
+                self.files.standard_mut().redirect_call(
+                    mem,
+                    handle.unwrap(),
+                    args,
+                    &self.threads,
+                )?
             }
             _ if file == Some(FileApi::GetFileType)
                 || handle == Some(HandleApi::CloseHandle)
@@ -1854,72 +1825,16 @@ impl Runtime64 {
                     return Ok(Control::Returned);
                 }
                 if file == Some(FileApi::WriteFile) && self.pipes.flags(args[0]).is_some() {
-                    if args[4] != 0 || args[2] > 16 * 1024 * 1024 || args[3] == 0 {
-                        return Err(
-                            "unsupported Win64 pipe write overlap/size/result pointer".into()
-                        );
-                    }
-                    mem.check(args[3], 4, WRITE)?;
-                    let mut bytes = vec![0; args[2] as usize];
-                    mem.read(args[1], &mut bytes)?;
-                    let value = match self.pipes.write(args[0], &bytes) {
-                        Ok(true) => {
-                            mem.write_int(args[3], 4, args[2])?;
-                            1
-                        }
-                        Ok(false) => {
-                            return Err(
-                                "Win64 blocking pipe write requires a thread scheduler".into()
-                            )
-                        }
-                        Err(error) => {
-                            mem.write_int(args[3], 4, 0)?;
-                            self.set_error(mem, error)?;
-                            0
-                        }
-                    };
+                    let value = self.pipes.write_output(mem, args, &self.threads)?;
                     returned.regs[0] = value;
                     *cpu = returned;
                     self.api_calls += 1;
                     self.record(dll, name, args, value);
                     return Ok(Control::Returned);
                 }
-                let index = self.files.standard().index(args[0]).filter(|&i| i != 0);
-                if file == Some(FileApi::WriteConsoleW) || index.is_none() {
-                    self.set_error(mem, 6)?;
-                    0
-                } else if args[4] != 0 {
-                    self.set_error(mem, 50)?;
-                    0
-                } else {
-                    use std::io::Write;
-                    let count = args[2] as u32 as usize;
-                    if count > 16 * 1024 * 1024 {
-                        return Err("Win64 stdio transfer exceeds capacity".into());
-                    }
-                    if args[3] != 0 {
-                        mem.check(args[3], 4, WRITE)?;
-                    }
-                    let mut bytes = vec![0; count];
-                    mem.read(args[1], &mut bytes)?;
-                    let result = if index == Some(1) {
-                        std::io::stdout().lock().write_all(&bytes)
-                    } else {
-                        std::io::stderr().lock().write_all(&bytes)
-                    };
-                    match result {
-                        Ok(()) => {
-                            if args[3] != 0 {
-                                mem.write_int(args[3], 4, count as u64)?;
-                            }
-                            1
-                        }
-                        Err(error) => {
-                            self.set_error(mem, crate::fs::win_error(&error))?;
-                            0
-                        }
-                    }
-                }
+                self.files
+                    .standard()
+                    .write_output(mem, file.unwrap(), args, &self.threads)?
             }
             _ if matches!(binding.control, gateways::ControlImport::CriticalSection(_)) => {
                 use crate::win32::x64::critical_sections::{call, Outcome};

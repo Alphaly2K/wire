@@ -14,6 +14,8 @@ Win64 的 `x64::runtime::files::Files` 拥有真实文件描述符、sharing/acc
 - DuplicateHandle 的输出 preflight、process/options 校验和 source-protect 检查顺序保持。新 alias 分配后由 adapter 写出 guest handle；仅在输出成功后执行 CLOSE_SOURCE。
 - narrowed standard access 仍显式拒绝；标准 endpoint 作为重定向 host pipe 查询，console mode 仍失败。stdio 数据传输与 guest 输出检查留在 adapter。
 
+StandardHandles 也拥有 Get/SetStdHandle 的 slot 编码和标准输出 adapter，只借 Memory 与只读 Threads；stdout/stderr 选择、overlap 拒绝和可选计数输出保持原顺序。Pipes 拥有管道 read/write 输出，公共 ReadFile 参数/输出 preflight 和 endpoint 选择仍在 Runtime，管道满/空继续产生原 scheduler 限制错误。
+
 目录 batch 的 cursor 准备/输出/提交、文件 section owner 和 coherence 行为保持各自既有实现。Mappings、Pipes、Searches 的内部状态仍有自己的 owner；本批不合并这些资源。
 
 核心文件 API 的 11 个 export 由 `win32/catalog/files.rs` 统一声明：CreateFileA/W、ReadFile、WriteFile、GetFileSize/Ex、SetFilePointer/Ex、SetEndOfFile、FlushFileBuffers、GetFileType。PE32 全部为 typed 路由，DLL 保持 kernel32；Win64 其中 9 个为 typed，DLL 保持 kernel32/kernelbase，SetFilePointer 与 SetEndOfFile 仍为 absent。Int64 参数明确描述 SetFilePointerEx 的有符号距离，PE32 占两个栈 slot，Win64 占一个 64 位 carrier；DWORD 截断只在 gateway 取参时进行。
@@ -43,6 +45,8 @@ Win64 普通文件读写和管道写入继续在原位置提前返回 Control::R
 普通查询和文件读写提取基线 `8f73bc8`。处理体经资源替换、FileApi 模式规范化及 rustfmt 对照一致，根分发除对应调用替换外保持；读入 preflight 仍在原位置。Files 模型、Mapping/目录主体和文件回归期望未改；Threads 只在原错误分支写 LastError，错误槽不提前取样。
 
 后续基线 `e67b4e0` 将路径变更、SetFileAttributes、普通创建目录及 CreateFile 的 guest 解码/输出也归 Files。打开文件只读借 Mappings 核对活动映射，truncate 与 sharing 的原次序保持；创建目录的安全描述符检查及其提前提交仍在 Runtime。四个处理体及根调用替换经 rustfmt 对照一致，未改文件/Mapping 模型或既有 query/I/O 核。
+
+endpoint 输出提取基线 `beb2a34`：四个处理体及根调用替换经 rustfmt 对照一致，原 StandardHandles/Pipes 模型、Files 调用和测试不变。连续迁移阶段整合通过 release 全目标 694 passed / 8 ignored / 21 suites；严格检查通过。普通文件/管道写的提前返回、管道读/标准输出的通用 unblock 保持区别。
 
 文件 section 的八个 export 也由 FileApi 声明：CreateFileMappingA/W、OpenFileMappingA/W、MapViewOfFile/Ex、UnmapViewOfFile、FlushViewOfFile。文件契约在该批合计 53 个，PE32 32 Typed/21 ABI-only，Win64 45 Typed/8 Absent。PE32 八项均保留未实现策略；Win64 OpenFileMappingA/W 保持 absent，其余为原有 unnamed、read-only、file-backed 子集。HANDLE、view size 和可选 base 保留指针宽度，protection/access/offset high/low 使用 DWORD；SECURITY_ATTRIBUTES、access/alignment、handle 查询、错误码和故障提交顺序保持。
 

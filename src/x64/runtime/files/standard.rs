@@ -1,4 +1,8 @@
 //! Process redirect slots and standard endpoint lifetimes are distinct state.
+use crate::{
+    win32::catalog::{FileApi, HandleApi},
+    x64::runtime::{threads::Threads, Memory, WRITE},
+};
 use std::collections::BTreeMap;
 
 pub(in crate::x64::runtime) struct StandardHandles {
@@ -20,6 +24,85 @@ impl Default for StandardHandles {
     }
 }
 impl StandardHandles {
+    pub(in crate::x64::runtime) fn redirect_call(
+        &mut self,
+        mem: &mut Memory,
+        id: HandleApi,
+        args: &[u64],
+        threads: &Threads,
+    ) -> Result<u64, String> {
+        Ok({
+            let index = match args[0] as u32 {
+                0xfffffff6 => Some(0),
+                0xfffffff5 => Some(1),
+                0xfffffff4 => Some(2),
+                _ => None,
+            };
+            if let Some(index) = index {
+                if id == HandleApi::GetStdHandle {
+                    self.redirect(index)
+                } else {
+                    self.set_redirect(index, args[1]);
+                    1
+                }
+            } else {
+                threads.set_error(mem, 87)?;
+                if id == HandleApi::GetStdHandle {
+                    u64::MAX
+                } else {
+                    0
+                }
+            }
+        })
+    }
+
+    pub(in crate::x64::runtime) fn write_output(
+        &self,
+        mem: &mut Memory,
+        id: FileApi,
+        args: &[u64],
+        threads: &Threads,
+    ) -> Result<u64, String> {
+        Ok({
+            let index = self.index(args[0]).filter(|&i| i != 0);
+            if id == FileApi::WriteConsoleW || index.is_none() {
+                threads.set_error(mem, 6)?;
+                0
+            } else if args[4] != 0 {
+                threads.set_error(mem, 50)?;
+                0
+            } else {
+                use std::io::Write;
+                let count = args[2] as u32 as usize;
+                if count > 16 * 1024 * 1024 {
+                    return Err("Win64 stdio transfer exceeds capacity".into());
+                }
+                if args[3] != 0 {
+                    mem.check(args[3], 4, WRITE)?;
+                }
+                let mut bytes = vec![0; count];
+                mem.read(args[1], &mut bytes)?;
+                let result = if index == Some(1) {
+                    std::io::stdout().lock().write_all(&bytes)
+                } else {
+                    std::io::stderr().lock().write_all(&bytes)
+                };
+                match result {
+                    Ok(()) => {
+                        if args[3] != 0 {
+                            mem.write_int(args[3], 4, count as u64)?;
+                        }
+                        1
+                    }
+                    Err(error) => {
+                        threads.set_error(mem, crate::fs::win_error(&error))?;
+                        0
+                    }
+                }
+            }
+        })
+    }
+
     pub(in crate::x64::runtime) fn redirect(&self, slot: usize) -> u64 {
         self.redirects[slot]
     }

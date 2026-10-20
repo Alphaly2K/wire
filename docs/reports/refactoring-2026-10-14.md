@@ -766,3 +766,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 Win64 路径与文件创建调用
 
 基线 `e67b4e0`。Files 执行路径变更、属性设置、普通创建目录与打开文件，只借内存、只读 Threads，open 再只读借 Mappings 检查活动映射。目录的安全描述符和提前提交原样留在根。四个处理体与根调用替换经 rustfmt 对照一致，原 query/I/O、Files/Mapping 模型和测试原文保持。按影响运行 release Win64 文件 17 项，all-targets/all-features strict Clippy/build/fmt 通过，沿用上一批完整 Win64/library 结果。未改故障顺序、sharing、truncate 或映射算法，不跑性能或游戏/native 矩阵，累计仍 915；证据 `wire-out/refactoring-2026-10-14/r3-file-paths64-{source-checks,verification}.json`。
+
+## R3 Win64 standard/pipe 输出与阶段整合
+
+基线 `beb2a34`。标准句柄 slot 编码/标准输出归 StandardHandles，管道 read/write 输出归 Pipes，均只借 Memory 与只读 Threads。Runtime 保留公共 ReadFile preflight、endpoint 选择和提前/通用返回区别。三个修改文件按四个处理体的资源替换及 rustfmt 全文对照一致，原 endpoint 模型、Files 调用、线程和独立测试未改。连续 host/文件迁移整合通过 release 全目标 694 passed / 8 ignored / 21 suites、all-targets/all-features strict Clippy/build/fmt；无新算法或 native 输入，不跑性能、游戏或重复 GPU 矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r3-endpoint-io64-{source-checks,verification}.json`。
