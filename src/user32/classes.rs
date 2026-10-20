@@ -79,45 +79,60 @@ pub(crate) fn register_system_class(
     name: &str,
     wide: bool,
 ) -> Result<(), String> {
-    if state
-        .user32
-        .classes
-        .values()
-        .any(|c| c.name.eq_ignore_ascii_case(name))
-    {
-        return Ok(());
+    state.register_system_class(mem, api, module, name, wide)
+}
+
+impl User32 {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn register_system_class(
+        &mut self,
+        mem: &mut GuestMem,
+        api: &mut ApiTable,
+        scratch: &mut crate::win32::x86::scratch::Scratch32,
+        last_error: &mut u32,
+        module: u32,
+        name: &str,
+        wide: bool,
+    ) -> Result<(), String> {
+        if self
+            .classes
+            .values()
+            .any(|c| c.name.eq_ignore_ascii_case(name))
+        {
+            return Ok(());
+        }
+        if self.next_atom > 0xffff {
+            return Err("system class atom table exhausted".into());
+        }
+        let name_ptrs = persistent_strings(mem, scratch, last_error, name)?;
+        let mut fields = [0; 11];
+        fields[0] = 0x4000; // CS_GLOBALCLASS
+        fields[1] = api.register(
+            "user32.dll",
+            Some(if wide {
+                "DefWindowProcW"
+            } else {
+                "DefWindowProcA"
+            }),
+            None,
+        );
+        fields[3] = 16;
+        fields[4] = module;
+        fields[9] = name_ptrs[usize::from(wide)];
+        let atom = self.next_atom as u16;
+        self.next_atom += 1;
+        self.classes.insert(
+            atom,
+            WindowClass {
+                name: name.into(),
+                fields,
+                wide,
+                name_ptrs,
+                menu_ptrs: [0; 2],
+            },
+        );
+        Ok(())
     }
-    if state.user32.next_atom > 0xffff {
-        return Err("system class atom table exhausted".into());
-    }
-    let name_ptrs = state.class_strings(mem, name)?;
-    let mut fields = [0; 11];
-    fields[0] = 0x4000; // CS_GLOBALCLASS
-    fields[1] = api.register(
-        "user32.dll",
-        Some(if wide {
-            "DefWindowProcW"
-        } else {
-            "DefWindowProcA"
-        }),
-        None,
-    );
-    fields[3] = 16;
-    fields[4] = module;
-    fields[9] = name_ptrs[usize::from(wide)];
-    let atom = state.user32.next_atom as u16;
-    state.user32.next_atom += 1;
-    state.user32.classes.insert(
-        atom,
-        WindowClass {
-            name: name.into(),
-            fields,
-            wide,
-            name_ptrs,
-            menu_ptrs: [0; 2],
-        },
-    );
-    Ok(())
 }
 
 fn initialize_controls(

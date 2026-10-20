@@ -32,6 +32,8 @@ PE32 DLL 初始化/卸载执行随后归 Process，Modules 准备和提交 phase
 
 PE32 typed 模块装载入口与失败清理也归 Process；领域模块已移除 CPU、scheduler、logger 和 guest 执行依赖，资源退休与 IR 逐个失效顺序保持。此批完成上述全目标阶段整合，链接器资源借用继续收窄。
 
+PE32 Linker 随后移除 ApiState 借用，系统类注册与依赖引用/去重/abandon 归明确 owner；只在映射/解析期间借实际资源。完整 Win32 259、IR 31、all-targets/all-features strict Clippy、build/fmt 通过。
+
 ## 重构范围
 
 当前累计冻结包含[对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)、日志、五项 paint、控件初始化、资源、启动信息、环境接口与 CLI 拆分；独立历史证据继续可查。

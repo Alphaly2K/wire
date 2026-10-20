@@ -9,7 +9,7 @@ use crate::{
     api::{ApiLogger, ApiState, ApiTable},
     cpu::Cpu,
     mem::GuestMem,
-    modules::{abandon, acquire, link, memory, resolve, Failure, LoadResult, Symbol, Transaction},
+    modules::{memory, Failure, LoadResult, Symbol, Transaction},
     thread::Sched,
 };
 use std::collections::HashSet;
@@ -81,8 +81,10 @@ pub(crate) fn call(
                     ));
                 }
                 let path = crate::api::read_str(mem, a[0], id.wide());
-                let handle =
-                    link(&path, None, mem, api, state, &mut txn, 0).map_err(|e| match e {
+                let handle = state
+                    .module_linker(api)
+                    .link(&path, None, mem, &mut txn, 0)
+                    .map_err(|e| match e {
                         Failure::Expected(code, reason) => {
                             Failure::Expected(code, format!("{path:?}: {reason}"))
                         }
@@ -115,13 +117,11 @@ pub(crate) fn call(
                 };
                 note = format!("module={:#x} export={symbol:?}", a[0]);
                 let owner = state.modules.image_present(a[0]).then_some(a[0]);
-                let value = resolve(
+                let value = state.module_linker(api).resolve(
                     a[0],
                     symbol,
                     owner,
                     mem,
-                    api,
-                    state,
                     &mut txn,
                     &mut HashSet::new(),
                 )?;
@@ -170,7 +170,7 @@ pub(crate) fn call(
                 if extended {
                     mem.ptr(a[2], 4, true).map_err(memory)?;
                     if flags & 2 == 0 {
-                        acquire(state, &mut txn, handle)?;
+                        state.modules.acquire(&mut txn, handle)?;
                     }
                     if flags & 1 != 0 {
                         state.modules.pin_image(handle);
@@ -245,7 +245,7 @@ pub(crate) fn call(
                 if let Err(failure) =
                     invoke_tls(handle, 0, cpu, mem, api, state, log, sched, max_instr)
                 {
-                    abandon(state, &txn);
+                    state.modules.abandon(&txn);
                     return match failure {
                         Failure::Control(outcome) => {
                             Ok((outcome, "TLS rollback transferred control".into()))
@@ -267,7 +267,7 @@ pub(crate) fn call(
                     )? {
                         GuestCallOutcome::Returned(_) => {}
                         outcome => {
-                            abandon(state, &txn);
+                            state.modules.abandon(&txn);
                             return Ok((
                                 outcome,
                                 "DLL rollback callback transferred control".into(),
@@ -287,7 +287,7 @@ pub(crate) fn call(
         // Guest exception/exit already chose a new architectural context.
         // Preserve mapped code while it may still be executing there.
         Err(Failure::Control(outcome)) => {
-            abandon(state, &txn);
+            state.modules.abandon(&txn);
             Ok((outcome, "DLL callback transferred control".into()))
         }
     }

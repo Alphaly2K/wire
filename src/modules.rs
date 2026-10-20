@@ -1,12 +1,13 @@
 //! Guest PE32 DLL mapping, linking and initialization. Never maps host code.
-use crate::api::{ApiState, ApiTable};
 use crate::mem::GuestMem;
 use crate::pe::{PeFile, DIR_BASERELOC, DIR_EXPORT};
 pub use crate::x86::process::module_loading::dispatch;
 pub use crate::x86::process::module_notifications::{notify_process_exit, notify_thread};
 use crate::x86::process::GuestCallOutcome;
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::path::PathBuf;
+mod linker;
+pub(crate) use linker::Linker;
 
 const ARENA_START: u32 = 0x5000_0000;
 const ARENA_END: u32 = 0x6800_0000;
@@ -786,290 +787,43 @@ pub(crate) enum Symbol {
     Name(String),
     Ordinal(u16),
 }
-pub(crate) fn abandon(state: &mut ApiState, txn: &Transaction) {
-    for &handle in &txn.created {
-        if let Some(module) = state.modules.images.get_mut(&handle) {
-            module.phase = Phase::Abandoned;
-        }
-    }
-}
-fn attach_dependency(owner: u32, dependency: u32, state: &mut ApiState, txn: &mut Transaction) {
-    if owner == dependency
-        || state.modules.images[&owner]
-            .dependencies
-            .contains(&dependency)
-    {
-        // One reference per graph edge, including repeated forwarded lookups.
-        if let Some(index) = txn.acquired.iter().rposition(|&h| h == dependency) {
-            txn.acquired.remove(index);
-            state.modules.images.get_mut(&dependency).unwrap().refs -= 1;
-        }
-    } else {
-        state
-            .modules
-            .images
-            .get_mut(&owner)
-            .unwrap()
-            .dependencies
-            .push(dependency);
-        txn.edges.push((owner, dependency));
-    }
-}
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn link(
-    name: &str,
-    parent: Option<&Path>,
-    mem: &mut GuestMem,
-    api: &mut ApiTable,
-    state: &mut ApiState,
-    txn: &mut Transaction,
-    depth: usize,
-) -> LoadResult<u32> {
-    if depth > 64 {
-        return Err(bad("DLL dependency depth exceeded"));
-    }
-    let name = library_name(name);
-    let short = basename(&name);
-    if native_module(&short) {
-        let handle = state.module_handle_for(&short);
-        let classes: &[(&str, bool)] = match short.as_str() {
-            "riched32.dll" => &[("RichEdit", false)],
-            "riched20.dll" => &[("RichEdit20A", false), ("RichEdit20W", true)],
-            "msftedit.dll" => &[("RICHEDIT50W", true)],
-            _ => &[],
-        };
-        for &(name, wide) in classes {
-            crate::user32::register_system_class(mem, api, state, handle, name, wide)
-                .map_err(Failure::Fatal)?;
-        }
-        return Ok(handle);
-    }
-    // Consult the loaded module list before searching the filesystem.
-    if !name.contains(['\\', '/', ':']) {
-        if let Some(handle) = state.modules.handle(&name, state.fs.as_ref()) {
-            acquire(state, txn, handle)?;
-            return Ok(handle);
-        }
-    }
-    let fs = state
-        .fs
-        .as_ref()
-        .ok_or_else(|| Failure::Expected(126, "guest filesystem unavailable".into()))?;
-    let mut candidates = Vec::new();
-    if !name.contains(['\\', '/', ':']) {
-        if let Some(parent) = parent {
-            candidates.push(parent.join(&name).to_string_lossy().into_owned());
-        }
-        let exe_dir = state.exe_path.rsplit_once('\\').map_or("C:\\", |(p, _)| p);
-        candidates.push(format!("{exe_dir}\\{name}"));
-    }
-    candidates.push(name);
-    let mut found = None;
-    for candidate in candidates {
-        let path = fs
-            .resolve(&candidate)
-            .map_err(|e| Failure::Expected(e, "invalid DLL path".into()))?;
-        if path.is_file() {
-            found = Some(path.canonicalize().map_err(memory)?);
-            break;
-        }
-    }
-    let path = found.ok_or_else(|| Failure::Expected(126, format!("DLL {short} not found")))?;
-    if let Some(&handle) = state.modules.paths.get(&path) {
-        acquire(state, txn, handle)?;
-        return Ok(handle);
-    }
-    let bytes = std::fs::read(&path).map_err(memory)?;
-    let (pe, mut image, table) = prepare(&bytes)?;
-    let imports = pe.imports(&bytes).map_err(bad)?;
-    let (base, size) = state.modules.allocate(&pe, mem)?;
-    relocate(&pe, &mut image, base)?;
-    let tls = if let Some(spec) = static_tls(&pe, &image, base)? {
-        let index = (0..TLS_SLOTS)
-            .find(|&index| {
-                !state
-                    .modules
-                    .images
-                    .values()
-                    .any(|m| m.tls.as_ref().is_some_and(|t| t.index == index))
-            })
-            .ok_or_else(|| Failure::Expected(8, "static TLS slots exhausted".into()))?;
-        image[(spec.index_va - base) as usize..(spec.index_va - base) as usize + 4]
-            .copy_from_slice(&(index as u32).to_le_bytes());
-        Some(StaticTls {
-            index,
-            template: spec.template,
-            callbacks: spec.callbacks,
-            blocks: HashMap::new(),
-        })
-    } else {
-        None
-    };
-    image.resize(size as usize, 0);
-    mem.map_image(base, size)
-        .map_err(|e| Failure::Expected(e, "image mapping failed".into()))?;
-    mem.write_bytes(base, &image).map_err(memory)?;
-    let guest_path = fs.guest_path(&path);
-    state.modules.paths.insert(path.clone(), base);
-    state.modules.images.insert(
-        base,
-        Module {
-            path: path.clone(),
-            guest_path,
-            size,
-            entry: if pe.entry_rva == 0 {
-                0
-            } else {
-                base + pe.entry_rva
-            },
-            exports: table,
-            dependencies: Vec::new(),
-            refs: 1,
-            pinned: false,
-            phase: Phase::Linking,
-            tls,
-            thread_calls_disabled: false,
-        },
-    );
-    txn.created.push(base);
-    for dll in imports {
-        let dependency = link(&dll.dll, path.parent(), mem, api, state, txn, depth + 1)?;
-        attach_dependency(base, dependency, state, txn);
-        for function in dll.functions {
-            if function.iat_rva as u64 + 4 > pe.size_of_image as u64 {
-                return Err(bad("IAT out of image"));
-            }
-            let symbol = match function.name {
-                Some(name) => Symbol::Name(name),
-                None => Symbol::Ordinal(function.ordinal.unwrap()),
-            };
-            let target = resolve(
-                dependency,
-                symbol,
-                Some(base),
-                mem,
-                api,
-                state,
-                txn,
-                &mut HashSet::new(),
-            )?;
-            mem.write_u32(base + function.iat_rva, target)
-                .map_err(memory)?;
-        }
-    }
-    mem.protect_image(base, &pe)
-        .map_err(|e| Failure::Expected(e, "image protection failed".into()))?;
-    state.modules.images.get_mut(&base).unwrap().phase = Phase::Linked;
-    Ok(base)
-}
-pub(crate) fn acquire(state: &mut ApiState, txn: &mut Transaction, handle: u32) -> LoadResult<()> {
-    if let Some(module) = state.modules.images.get_mut(&handle) {
-        if matches!(module.phase, Phase::Unloading | Phase::Abandoned) {
-            return Err(Failure::Expected(126, "module unloading".into()));
-        }
-        if !module.pinned {
-            module.refs = module
-                .refs
-                .checked_add(1)
-                .ok_or_else(|| bad("DLL refcount overflow"))?;
-            txn.acquired.push(handle);
-        }
-    }
-    Ok(())
-}
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn resolve(
-    handle: u32,
-    symbol: Symbol,
-    owner: Option<u32>,
-    mem: &mut GuestMem,
-    api: &mut ApiTable,
-    state: &mut ApiState,
-    txn: &mut Transaction,
-    seen: &mut HashSet<(u32, String)>,
-) -> LoadResult<u32> {
-    let key = match &symbol {
-        Symbol::Name(s) => s.clone(),
-        Symbol::Ordinal(o) => format!("#{o}"),
-    };
-    if seen.len() >= 64 || !seen.insert((handle, key.clone())) {
-        return Err(Failure::Expected(127, "export forwarder cycle".into()));
-    }
-    if let Some(dll) = state.modules.provider_name(handle) {
-        if let Symbol::Name(name) = &symbol {
-            if let Some(addr) = api
-                .data_export(mem, dll, name, state.cmdline_a, state.cmdline_w)
-                .map_err(Failure::Fatal)?
-            {
-                return Ok(addr);
+impl Modules {
+    pub(crate) fn abandon(&mut self, txn: &Transaction) {
+        for &handle in &txn.created {
+            if let Some(module) = self.images.get_mut(&handle) {
+                module.phase = Phase::Abandoned;
             }
         }
-        return match &symbol {
-            Symbol::Name(name)
-                if crate::api::native_export(dll, name) || api.lookup(dll, name).is_some() =>
-            {
-                Ok(api.register(&dll.clone(), Some(name), None))
-            }
-            Symbol::Ordinal(ordinal)
-                if crate::win32::abi::ordinal_name(dll, *ordinal).is_some() =>
-            {
-                Ok(api.register(&dll.clone(), None, Some(*ordinal)))
-            }
-            Symbol::Ordinal(ordinal) => api
-                .entries
-                .iter()
-                .position(|e| &e.dll == dll && e.ordinal == Some(*ordinal))
-                .map(|i| crate::api::STUB_BASE + i as u32 * crate::api::STUB_STRIDE)
-                .ok_or_else(|| Failure::Expected(127, format!("native export {key} unavailable"))),
-            _ => Err(Failure::Expected(
-                127,
-                format!("native export {key} unavailable"),
-            )),
-        };
     }
-    let module = state
-        .modules
-        .images
-        .get(&handle)
-        .ok_or_else(|| Failure::Expected(6, "invalid module handle".into()))?;
-    if module.phase == Phase::Abandoned {
-        return Err(Failure::Expected(
-            1114,
-            "DLL initialization abandoned".into(),
-        ));
-    }
-    let index = match &symbol {
-        Symbol::Name(name) => module.exports.names.get(name).copied(),
-        Symbol::Ordinal(ordinal) => (*ordinal as u32)
-            .checked_sub(module.exports.ordinal_base)
-            .map(|i| i as usize),
-    };
-    let export = index
-        .and_then(|i| module.exports.functions.get(i))
-        .cloned()
-        .unwrap_or(Export::Missing);
-    let parent = module.path.parent().map(Path::to_path_buf);
-    match export {
-        Export::Address(rva) => Ok(handle + rva),
-        Export::Missing => Err(Failure::Expected(127, format!("export {key} not found"))),
-        Export::Forward(text) => {
-            let (dll, name) = text
-                .rsplit_once('.')
-                .ok_or_else(|| bad("invalid export forwarder"))?;
-            let next = link(dll, parent.as_deref(), mem, api, state, txn, seen.len())?;
-            if let Some(owner) = owner {
-                attach_dependency(owner, next, state, txn);
+    fn attach_dependency(&mut self, owner: u32, dependency: u32, txn: &mut Transaction) {
+        if owner == dependency || self.images[&owner].dependencies.contains(&dependency) {
+            // One reference per graph edge, including repeated forwarded lookups.
+            if let Some(index) = txn.acquired.iter().rposition(|&h| h == dependency) {
+                txn.acquired.remove(index);
+                self.images.get_mut(&dependency).unwrap().refs -= 1;
             }
-            let symbol = if let Some(ordinal) = name.strip_prefix('#') {
-                Symbol::Ordinal(
-                    ordinal
-                        .parse()
-                        .map_err(|_| bad("invalid forwarded ordinal"))?,
-                )
-            } else {
-                Symbol::Name(name.into())
-            };
-            resolve(next, symbol, owner, mem, api, state, txn, seen)
+        } else {
+            self.images
+                .get_mut(&owner)
+                .unwrap()
+                .dependencies
+                .push(dependency);
+            txn.edges.push((owner, dependency));
         }
+    }
+    pub(crate) fn acquire(&mut self, txn: &mut Transaction, handle: u32) -> LoadResult<()> {
+        if let Some(module) = self.images.get_mut(&handle) {
+            if matches!(module.phase, Phase::Unloading | Phase::Abandoned) {
+                return Err(Failure::Expected(126, "module unloading".into()));
+            }
+            if !module.pinned {
+                module.refs = module
+                    .refs
+                    .checked_add(1)
+                    .ok_or_else(|| bad("DLL refcount overflow"))?;
+                txn.acquired.push(handle);
+            }
+        }
+        Ok(())
     }
 }

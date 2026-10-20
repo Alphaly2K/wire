@@ -25,6 +25,7 @@
 | `runtime::api_log` | PE32 完整 API trace、调用频率与最近 64 条诊断；不依赖 CPU、catalog 或 ApiState，`api::ApiLogger` 保留原公开入口 |
 | `win32::{catalog,kernel,x86,x64}` | GUID、identity、version、NLS 的唯一契约、纯算法及架构适配；locale 回调通过专用控制路由，由进程执行 |
 | `modules::Modules`、`win32::{x86,x64}::modules` | PE32 guest image/TLS 与 provider 身份；Win64 module/export/path/ref/pin/search 的私有 owner。Root 注册入口委托，ABI/control adapters 分别保留 |
+| `modules::linker::Linker` | 在映射/解析期间明确借 Modules、ABI、USER/scratch/error 和只读路径/命令行资源；不借 ApiState，不执行 CPU，回调前释放借用 |
 | `resource`、`win32::x86::resources` | PE32 映射 image 的受检资源视图与字符串输出；只借内存、EXE 基址和错误槽，不拥有模块寿命 |
 | `x64::runtime::files::Files` | Win64 文件、标准 endpoint/alias、受限 filesystem 与属性元数据的私有 owner；路径 mutation 和资源寿命由 owner 执行，ABI/guest 输出由 adapter 提交 |
 | `host::calendar` | 提供原有宿主 localtime 值；Windows 日期格式和 guest 输出布局由领域/架构层负责 |

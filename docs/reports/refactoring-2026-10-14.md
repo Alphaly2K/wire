@@ -682,3 +682,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R4 PE32 模块装载入口与失败清理整合
 
 基线 `1e6eacc`。typed 模块 API 与 expected/fatal/control 清理归 Process，公开 modules::dispatch 重导出；领域操作管理 disable/pin/query、引用回滚与逐个 image 退休，不再借 CPU/scheduler/logger 或执行 guest。call/dispatch、回滚及 owner 操作对照保持，link/resolve/acquire/abandon/生命周期方法未改。连续 Process/USER 重构阶段整合通过 release 全目标 694 passed / 7 ignored、21 suites，all-targets/all-features strict Clippy、build 与 fmt。原映射/IR 逐个清理、错误和非局部转移顺序保持；不跑性能或游戏矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r4-module-loading32-{source-checks,verification}.json`。
+
+## R3 PE32 链接器明确资源借用
+
+基线 `8707f16`。Linker 在映射/解析期间只借 Modules、ABI、USER/scratch/error 和只读 filesystem/EXE path/cmdline，不再借 ApiState；模块依赖引用/去重/abandon 归 Modules。系统类注册主体归 User32，原 Desktop 兼容入口保持。link/resolve、三个 owner 操作、系统类/字符串和 Process 调用对照保持；生命周期/回滚/TLS 未改。首次编译遗漏兼容入口，恢复后完整 release Win32 259、IR 31、all-targets/all-features strict Clippy、build/fmt 通过；失败日志保留。不跑性能或游戏矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r3-module-linker32-{source-checks,verification}.json`。

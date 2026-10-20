@@ -239,6 +239,39 @@ pub struct ApiState {
 }
 
 impl ApiState {
+    pub(crate) fn module_linker<'a>(
+        &'a mut self,
+        api: &'a mut ApiTable,
+    ) -> crate::modules::Linker<'a> {
+        crate::modules::Linker::new(
+            &mut self.modules,
+            api,
+            &mut self.user32,
+            &mut self.scratch,
+            &mut self.last_error,
+            self.fs.as_ref(),
+            &self.exe_path,
+            [self.cmdline_a, self.cmdline_w],
+        )
+    }
+    pub(crate) fn register_system_class(
+        &mut self,
+        mem: &mut GuestMem,
+        api: &mut ApiTable,
+        module: u32,
+        name: &str,
+        wide: bool,
+    ) -> Result<(), String> {
+        self.user32.register_system_class(
+            mem,
+            api,
+            &mut self.scratch,
+            &mut self.last_error,
+            module,
+            name,
+            wide,
+        )
+    }
     pub fn new(exe_base: u32, exe_path: String, cmdline_a: u32, cmdline_w: u32) -> ApiState {
         let mut s = ApiState {
             environment: crate::runtime::environment::GuestEnvironment::pe32(),

@@ -26,6 +26,10 @@ typed 模块入口及失败清理由 `x86/process/module_loading.rs` 协调，AP
 
 装载入口基线 `1e6eacc`，call/dispatch、回滚与领域操作对照保持，链接/生命周期方法未改；阶段整合 release 全目标 694 passed / 7 ignored（21 suites）、all-targets/all-features strict Clippy、build 和 fmt 通过。证据 `wire-out/refactoring-2026-10-14/r4-module-loading32-{source-checks,verification}.json`。
 
+`modules/linker.rs` 的 Linker 只在映射/解析期间借 Modules、ApiTable、USER、scratch、错误槽、只读 filesystem/EXE path 和两个 cmdline 地址，回调前借用即结束。模块领域不再借 ApiState。依赖引用、去重与 abandon 由 Modules 方法处理；系统类注册直接借 USER 的明确资源。原查找/读取/映射/IAT/保护和 provider/data-export/forwarder 顺序保持，不增加逐调用解析。
+
+链接资源基线 `8707f16`，link/resolve、引用/边/abandon、系统类与 Process 调用对照保持，生命周期/回滚/TLS 方法未改。首次编译遗漏 Desktop 使用的兼容类入口，保留入口后完整 release Win32 259、IR 31、all-targets/all-features strict Clippy、build/fmt 通过，原失败日志保留。不跑性能或游戏矩阵，证据 `wire-out/refactoring-2026-10-14/r3-module-linker32-{source-checks,verification}.json`。
+
 模块 API 的 31 个 export 由 `win32::catalog::modules` 维护唯一 provider/ABI/执行声明：13 个核心装载、查询与引用 API，4 个 DLL directory API，以及 7 个 PSAPI 查询及其 7 个 K32 名称。PE32 核心 13 个 typed，directory/K32 的 11 个保留 Wine ABI-only 策略，7 个无前缀查询仍 absent；Win64 使用全部既有子集。未知 ABI、stub 地址、序数和 data export 行为保持。
 
 PE32 映射 image 的十项资源 export 单独归入 [ResourceApi](resources.md)，不计入上述 31 项。它们借用 image 内存和 EXE 基址，不改变模块引用或资源寿命。
