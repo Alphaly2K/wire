@@ -74,6 +74,8 @@ Win64 普通文件 metadata/大小/seek/attributes/cwd 及 read/write 输出已�
 
 StandardHandles 的重定向/标准输出和 Pipes 的读写输出也已归各自 owner，Runtime 保留 endpoint 选择、公共 preflight 和原提前/通用提交区别；完成上述全目标阶段整合。
 
+原生 Vulkan 图形库和静态 Metal raster 的 Rust owner 已归 host，公开 gpu 和 D3D9 私有调用路径兼容。D3D9 11、library 61 passed / 8 ignored、两项真实 Metal 像素对照、两项 Vulkan draw/swapchain 及严格构建通过。
+
 ## 重构范围
 
 当前累计冻结包含[对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)、日志、五项 paint、控件初始化、资源、启动信息、环境接口与 CLI 拆分；独立历史证据继续可查。

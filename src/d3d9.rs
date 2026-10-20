@@ -10,7 +10,7 @@ mod access;
 use access::{DeviceResources, HeapResources};
 
 mod device;
-mod gpu;
+use crate::host::raster as gpu;
 mod raster;
 mod reset;
 mod resource;

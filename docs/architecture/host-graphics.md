@@ -12,6 +12,8 @@ AudioQueue 的 Rust 句柄与 FFI 归 `host/audio.rs::PcmOutput`，仅接收宿�
 
 CoreText 测量的 Rust FFI 归 `host/font.rs`，接收 face slice 与标量，返回宿主 metrics；LOGFONT/TEXTMETRICW 布局、错误映射和缓存归 GDI。host 不解析 guest 字节，原 font.c 的测量与资源释放顺序保持。
 
+原生 Vulkan 图形库 owner 和 draw/geometry helper 位于 `host/graphics.rs` 及子目录，公开 `gpu` 路径只作兼容重导出。静态 Metal raster owner 位于 `host/raster.rs`，D3D9 内部以原 gpu 名称引用；该 owner 只接收宿主 slice/标量，guest raster 准备和软件路径仍在 D3D9。原生源码、shader include 目标和 build.rs 路径保持。
+
 Win64 的 `Presenter64` 继续拥有 guest HWND → native ID 映射，保留隐藏 bootstrap window、强制 poll、topmost 与带符号 lparam 扩展规则；owned window 请求交给同一 host UI。正常 D3D11 Present 仍通过 GPU surface 提交 texture，诊断 capture 才读取像素。保留的 MetalLayer 用 Rc 管理 native retain/release，surface 在 native 窗口删除后仍持有 layer。
 
 Win64 User 的 host 入口负责窗口快照与 owned event 入队，只借原 start 时间；Runtime64 保留公开 facade。HWND/容量检查、时间取样、鼠标坐标调整、键盘过滤和入队顺序保持，host 侧不执行 guest callback。

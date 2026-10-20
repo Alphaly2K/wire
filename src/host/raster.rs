@@ -26,7 +26,7 @@ extern "C" {
     ) -> i32;
 }
 #[derive(Default)]
-pub(super) struct GpuRaster {
+pub(crate) struct GpuRaster {
     #[cfg(target_os = "macos")]
     native: usize,
     #[cfg(target_os = "macos")]

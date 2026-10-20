@@ -770,3 +770,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 Win64 standard/pipe 输出与阶段整合
 
 基线 `beb2a34`。标准句柄 slot 编码/标准输出归 StandardHandles，管道 read/write 输出归 Pipes，均只借 Memory 与只读 Threads。Runtime 保留公共 ReadFile preflight、endpoint 选择和提前/通用返回区别。三个修改文件按四个处理体的资源替换及 rustfmt 全文对照一致，原 endpoint 模型、Files 调用、线程和独立测试未改。连续 host/文件迁移整合通过 release 全目标 694 passed / 8 ignored / 21 suites、all-targets/all-features strict Clippy/build/fmt；无新算法或 native 输入，不跑性能、游戏或重复 GPU 矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r3-endpoint-io64-{source-checks,verification}.json`。
+
+## R5/R7 原生图形 Rust owner 归位
+
+基线 `1fc2436`。Vulkan 图形库及 draw/geometry helper 归 host/graphics，公开 gpu 保留兼容重导出；静态 Metal raster owner 归 host/raster，D3D9 以私有 gpu alias 保留所有调用。graphics/draw/geometry 逐字保持，raster 仅改变 crate 可见性，shader include 仍解析到同一原文件；native C/C++/Metal、build.rs、DXGI 和软件 raster 原文保持。release D3D9 11、library 61 passed / 8 ignored、两项真实 Metal 像素对照及两项 Vulkan draw/swapchain fixture 通过，all-targets/all-features strict Clippy/build/fmt 通过。沿用刚完成的全目标阶段整合，纯目录归位不跑性能或游戏矩阵，累计仍 915；证据 `wire-out/refactoring-2026-10-14/r7-host-graphics-layout-{source-checks,verification}.json`。
