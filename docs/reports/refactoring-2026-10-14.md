@@ -738,3 +738,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 Win64 显示 scalar owner
 
 基线 `3801f7d`。显示 scalar 由 User 执行，只借 Memory 和只读 Threads，Runtime64 入口仅组合资源；设备名解码直接使用原 codec。完整 scalar 主体经资源替换和 rustfmt 对照一致，monitor callback coordinator 与纯 profile 原文保持。完整 release Win64 269、library 61 passed / 7 ignored、all-targets/all-features strict Clippy/build/fmt 通过。原输出、HWND/flags/结构长度验证和错误槽顺序保持，不跑性能或游戏/native 矩阵，累计仍 915；证据 `wire-out/refactoring-2026-10-14/r3-display-scalar64-{source-checks,verification}.json`。
+
+## R3 Win64 local-slot 调用资源
+
+基线 `b51a04a`。普通 TLS/FLS adapter 只借 LocalSlots64、Memory 和只读 Threads；Threads 按原 BTreeMap 顺序迭代存活 TEB，不新增集合分配。Runtime64 仅组合资源，两遍 preflight/写零、FLS free 检查及错误槽访问顺序保持。完整 handler 经资源/循环变量替换和 rustfmt 对照一致，Threads 只新增迭代方法，hot TLS、槽位模型及 FLS destructor 原文保持。完整 release Win64 269、library 61 passed / 7 ignored、all-targets/all-features strict Clippy/build/fmt 通过。不跑性能或游戏/native 矩阵，累计仍 915；证据 `wire-out/refactoring-2026-10-14/r3-local-calls64-{source-checks,verification}.json`。

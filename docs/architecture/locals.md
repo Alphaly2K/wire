@@ -22,4 +22,6 @@ Win64 冷绑定由 LocalApi 选择原 TlsGet/TlsSet/TlsFree HotImport；执行 b
 
 `win32/kernel/locals64.rs` 私有拥有 TLS 64/FLS 128 两个原数组，提供 vacancy、受检查询、显式 commit 与按索引顺序遍历 active FLS。Runtime64 不再暴露这两张表。架构层仍先检查/写 TEB，再 commit 标记；FLS destructor 保留先读取并预检全部 active 槽，再清 callback 槽的两遍处理，包括 callback=0 时原先的值读取。静态 TLS 模板/块与 thread 创建仍由原进程路径管理。
 
+普通 TLS/FLS adapter 也已收窄到 LocalSlots64、Memory 和只读 Threads，Runtime64 只组合资源。Threads 按原 BTreeMap 顺序提供存活线程 TEB，不建立快照或额外分配；两遍 preflight/写零与 FLS free 检查保持。专用 hot TLS、槽位模型和 FLS destructor 未改。
+
 Win64 owner 基线 `1e3a534`。普通 local_call 与 hot TLS 的 TEB/error/commit 主体归一核对保持；完整 release Win64 269、fmt/release lib/bin strict Clippy/build 通过。无新增分配、槽容量或动态分发，按普通状态封装不跑性能矩阵。证据 `wire-out/refactoring-2026-10-14/r3-locals64-owner-{source-checks,verification}.json`。

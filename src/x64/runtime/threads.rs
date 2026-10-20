@@ -98,6 +98,12 @@ impl Threads {
     pub(super) fn teb(&self) -> u64 {
         self.entries[&self.active].teb
     }
+    pub(super) fn live_tebs(&self) -> impl Iterator<Item = u64> + '_ {
+        self.entries
+            .values()
+            .filter(|thread| thread.exit.is_none())
+            .map(|thread| thread.teb)
+    }
     pub(super) fn set_error(&self, mem: &mut Memory, error: u32) -> Result<(), String> {
         mem.write_int(self.teb() + 0x68, 4, error as u64)
     }

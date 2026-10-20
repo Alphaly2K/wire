@@ -60,6 +60,8 @@ PE32 USER 的状态、请求和文本 codec 已归入 `win32/user/pe32`；根 `u
 
 Win64 显示 scalar 查询也归 User，只借 Memory 与只读 Threads；monitor callback 编排保持独立。完整 Win64 269、library 61 passed / 7 ignored 和严格构建通过。
 
+Win64 TLS/FLS 普通 adapter 只借 LocalSlots64、Memory 与只读 Threads；存活 TEB 按原顺序迭代，不新增快照分配，hot TLS 与析构处理保持。完整 Win64 269、library 61 passed / 7 ignored 和严格构建通过。
+
 ## 重构范围
 
 当前累计冻结包含[对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)、日志、五项 paint、控件初始化、资源、启动信息、环境接口与 CLI 拆分；独立历史证据继续可查。
