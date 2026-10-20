@@ -20,4 +20,6 @@ posted 消息、计时器和键盘转换由 USER 产生值、等待或 dispatch 
 
 CRT 的数学返回、初始化器数组和 qsort 编排也归 Process；qsort 保留 caller-context invoke，初始化器继续直接 call_guest。函数表在每次调用后重读，首个错误与继续执行策略保持，见[CRT 边界](crt32.md)。
 
+SEH 搜索、展开和普通 filter 入口随后归 Process 的 exceptions 协调器；CONTEXT codec 单独借内存与 ThreadCtx。SEH 原来的异常入口上下文恢复和普通 filter 的 caller-context 策略分别保留，公开 seh 路径只重导出，见[异常边界](exceptions.md)。
+
 基线 `1a93e31`。原 caller-context helper、八个调用文件、Process 执行循环/frame 作格式化后源码对照，路径与策略保持。初次编译遗漏两处 locale 调用，补齐后验收；失败日志保留。release 完整 Win32 255、IR 31、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵。证据：`wire-out/refactoring-2026-10-14/r4-callback-owner32-{source-checks,verification}.json`。

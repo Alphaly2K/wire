@@ -1581,7 +1581,9 @@ pub fn dispatch(
                 true,
                 "first-chance SEH dispatch",
             );
-            return crate::seh::raise(cpu, mem, api, state, log, sched, &args, max_instr);
+            return crate::x86::process::exceptions::raise(
+                cpu, mem, api, state, log, sched, &args, max_instr,
+            );
         }
         (
             Some(crate::win32::catalog::ApiId::Exception(
@@ -1590,26 +1592,11 @@ pub fn dispatch(
             _,
             _,
         ) => {
-            if state.unhandled_filter == 0 {
-                ret = 0;
-            } else {
-                let filter = state.unhandled_filter;
-                match crate::x86::process::callbacks::invoke(
-                    cpu,
-                    mem,
-                    api,
-                    state,
-                    log,
-                    sched,
-                    filter,
-                    &[args[0]],
-                    max_instr,
-                )? {
-                    crate::cpu::GuestCallOutcome::Returned(value) => {
-                        ret = value;
-                    }
-                    _ => return Ok(()),
-                }
+            match crate::x86::process::exceptions::unhandled_filter(
+                cpu, mem, api, state, log, sched, args[0], max_instr,
+            )? {
+                GuestCallOutcome::Returned(value) => ret = value,
+                _ => return Ok(()),
             }
         }
         (
@@ -1620,7 +1607,9 @@ pub fn dispatch(
             _,
         ) => {
             log.log_call(idx, dll, name, &args[..4], args[3], true, "SEH unwind");
-            return crate::seh::unwind(cpu, mem, api, state, log, sched, &args, max_instr);
+            return crate::x86::process::exceptions::unwind(
+                cpu, mem, api, state, log, sched, &args, max_instr,
+            );
         }
         (Some(crate::win32::catalog::ApiId::MessageFormat(id)), _, _) => {
             (ret, note) = crate::win32::x86::message_format::call(

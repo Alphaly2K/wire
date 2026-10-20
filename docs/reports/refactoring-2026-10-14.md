@@ -666,3 +666,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 Win64 键盘与窗口标量处理
 
 基线 `8f5b3d6`。键盘状态/布局和默认过程标量处理归 User，只借内存与只读 Threads；TEB 地址查询归 Threads，错误分支才读取。原 handler、线程地址读取及 window start/resume/退休/frame 检查对照保持；内部调用仅调整资源借用。完整 release Win64 269、library 61 passed / 7 ignored、fmt/release lib/bin strict Clippy/build 通过。不跑性能或游戏矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r3-user-keyboard64-{source-checks,verification}.json`。
+
+## R4 PE32 异常执行与 CONTEXT 适配
+
+基线 `c42be9b`。异常搜索/展开和普通 filter 执行归 Process，CONTEXT 编解码独立只借内存/ThreadCtx；API 直接调用 Process，公开 seh 入口重导出。两个 codec、raise/unwind 主体经调用路径替换后原文一致，callback helper 未改；普通 filter 使用原 caller-context 策略，SEH 保持异常入口上下文恢复和非局部转移。完整 release Win32 259、IR 31、fmt/release lib/bin strict Clippy/build 通过。不跑性能或游戏矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r4-exceptions32-{source-checks,verification}.json`。

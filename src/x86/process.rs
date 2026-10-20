@@ -14,6 +14,7 @@ pub(crate) mod crt;
 mod crt_sort;
 pub(crate) mod dialog;
 pub(crate) mod display;
+pub(crate) mod exceptions;
 pub(crate) mod messages;
 pub(crate) mod painting;
 pub(crate) mod termination;

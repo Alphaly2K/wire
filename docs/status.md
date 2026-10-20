@@ -24,6 +24,8 @@ Win64 class/image 调用随后归 User，PE 资源读取只借内存/Modules；�
 
 Win64 键盘状态/布局与默认过程标量调用也归 User，只读借用 Threads，并保留错误分支才读取 TEB；callback frame 和 start/resume 主体保持。完整 Win64 269、library 61 passed / 7 ignored、fmt/strict Clippy/build 通过。
 
+PE32 SEH 搜索/展开和普通 filter 现归 Process，CONTEXT codec 独立借内存/ThreadCtx；原恢复策略与公开 seh 入口保持，完整 Win32 259、IR 31 和必要构建通过。
+
 ## 重构范围
 
 当前累计冻结包含[对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)、日志、五项 paint、控件初始化、资源、启动信息、环境接口与 CLI 拆分；独立历史证据继续可查。
