@@ -687,7 +687,11 @@ impl Runtime64 {
                 self.user
                     .cursor_call(mem, id, args, self.threads.active, last_error)
             }
-            ApiId::Image(id) => self.image_call(mem, id, args),
+            ApiId::Image(id) => {
+                let last_error = self.teb() + 0x68;
+                self.user
+                    .image_call(mem, id, args, &self.modules, last_error)
+            }
             ApiId::Display(id) => self.display_call(mem, id, args),
             ApiId::GdiDc(id) => {
                 let last_error = self.teb() + 0x68;
@@ -698,7 +702,10 @@ impl Runtime64 {
                 let last_error = self.teb() + 0x68;
                 self.user.desktop_call(mem, id, args, last_error)
             }
-            ApiId::Class(id) => self.class_call(mem, id, args),
+            ApiId::Class(id) => {
+                let last_error = self.teb() + 0x68;
+                self.user.class_call(mem, id, args, last_error)
+            }
             ApiId::WindowQuery(id) => {
                 let last_error = self.teb() + 0x68;
                 self.user

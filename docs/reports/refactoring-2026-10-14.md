@@ -654,3 +654,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 Win64 USER cursor/DC/desktop 调用
 
 基线 `af6681c`。三个 adapter 归 User owner，只借内存、tid（需要时）和当前错误槽，不再借 Runtime64；各自纯 owner 与 root frame 不变。原主体经资源替换和 rustfmt 规范化后完全一致；六处内部 tracking 调用改为借 owner，期望值不变。release 完整 Win64 269、library 61 passed / 7 ignored、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r3-user-services64-{source-checks,verification}.json`。
+
+## R3 Win64 class/image 与资源读取
+
+基线 `09a5dfc`。class/image 调用归 User owner，仅借内存、当前错误槽和 image 所需只读 Modules；资源 key/PE tree 读取移除 Runtime64 依赖。原 class/image、resource key/traversal 经资源替换与 rustfmt 对照一致，entry 原文未改；内部 native fixture 的 class 调用只适配签名。release 完整 Win64 269、library 61 passed / 7 ignored、fmt/release lib/bin strict Clippy/build 通过。未改图形 backend，不跑 native/游戏或性能矩阵，累计仍 915。证据 `wire-out/refactoring-2026-10-14/r3-user-resources64-{source-checks,verification}.json`。

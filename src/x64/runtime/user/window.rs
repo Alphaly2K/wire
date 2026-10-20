@@ -198,7 +198,7 @@ impl Runtime64 {
             return self.position_start(mem, id, name, args);
         }
         let (target, parameters, operation, release) = if matches!(id, W::CreateA | W::CreateW) {
-            let key = Self::resource_key(mem, args[1], wide)?;
+            let key = super::super::resources::resource_key(mem, args[1], wide)?;
             let key = match &key {
                 super::super::resources::Key::Id(id) => crate::win32::user::classes64::Key::Id(*id),
                 super::super::resources::Key::Name(name) => {

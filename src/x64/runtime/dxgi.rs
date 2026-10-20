@@ -1224,13 +1224,16 @@ mod tests {
         m.write_int(DATA + 648, 8, procedure).unwrap();
         m.write_int(DATA + 664, 8, 0x140000000).unwrap();
         m.write_int(DATA + 704, 8, DATA + 512).unwrap();
+        let last_error = r.teb() + 0x68;
         assert_ne!(
-            r.class_call(
-                &mut m,
-                crate::win32::catalog::ClassApi::RegisterExW,
-                &[DATA + 640],
-            )
-            .unwrap(),
+            r.user
+                .class_call(
+                    &mut m,
+                    crate::win32::catalog::ClassApi::RegisterExW,
+                    &[DATA + 640],
+                    last_error,
+                )
+                .unwrap(),
             0
         );
         let returned = Cpu64::new(0x140001234, STACK + 128);

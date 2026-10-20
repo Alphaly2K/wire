@@ -10,6 +10,8 @@ InitCommonControls/Ex 只接受 PE32 comctl32.dll，同一类模块按原顺序�
 
 Win64 的 `win32/user/classes64.rs::Classes` 私有拥有类记录和 next atom，提供注册、按 instance/key 查找与注销。注册先检查同 instance 的重名，再检查单调 atom 上限；窗口创建借用只读记录并复制所需属性，注销仍由架构协调层先检查存活窗口。guest 记录解析、受检内存和 LastError 在 `x64/runtime/user/classes.rs`，不进入领域 owner。
 
+Win64 架构调用现由 User 组合 owner 处理，只借内存和当前错误槽，不再借 Runtime64；注册/注销及存活窗口检查顺序保持。名称/ID 的资源 key 解码共用受检内存函数，见 `wire-out/refactoring-2026-10-14/r3-user-resources64-{source-checks,verification}.json`。
+
 | 现有规则 | PE32 | Win64 |
 | --- | --- | --- |
 | 类名限制 | 255 UTF-16 code units | 256 UTF-8 bytes |

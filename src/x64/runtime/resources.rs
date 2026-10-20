@@ -1,72 +1,70 @@
 //! Bounded PE32+ resource tree traversal. RVAs are u32; all guest pointers are u64.
-use super::{Memory, Runtime64};
+use super::Memory;
 pub(super) use crate::win32::user::images::Key;
-impl Runtime64 {
-    pub(super) fn resource_key(mem: &Memory, pointer: u64, wide: bool) -> Result<Key, String> {
-        if pointer <= 65535 {
-            Ok(Key::Id(pointer as u32))
-        } else {
-            Ok(Key::Name(Self::path_name(mem, pointer, wide)?))
-        }
+use crate::win32::x64::modules::Modules;
+pub(super) fn resource_key(mem: &Memory, pointer: u64, wide: bool) -> Result<Key, String> {
+    if pointer <= 65535 {
+        Ok(Key::Id(pointer as u32))
+    } else {
+        Ok(Key::Name(crate::win32::x64::text::path_name(
+            mem, pointer, wide,
+        )?))
     }
-    pub(super) fn resource(
-        &self,
-        mem: &Memory,
-        base: u64,
-        kind: u32,
-        key: &Key,
-    ) -> Result<Option<Vec<u8>>, String> {
-        let (image_size, _) = self
-            .modules
-            .image(base)
-            .ok_or("invalid Win64 resource module")?;
-        let nt = mem.read_int(base + 0x3c, 4)?;
-        if nt
-            > (image_size as u64)
-                .checked_sub(160)
-                .ok_or("truncated resource image")?
-            || mem.read_int(base + nt, 4)? != 0x4550
-            || mem.read_int(base + nt + 24, 2)? != 0x20b
-        {
-            return Err("invalid PE32+ resource header".into());
-        }
-        let directory = base + nt + 24 + 112 + 2 * 8;
-        let rva = mem.read_int(directory, 4)?;
-        let size = mem.read_int(directory + 4, 4)?;
-        if rva == 0 || size == 0 {
-            return Ok(None);
-        }
-        if rva + size > image_size as u64 {
-            return Err("resource directory outside image".into());
-        }
-        let root = base + rva;
-        let Some(kind) = entry(mem, root, size, 0, Some(&Key::Id(kind)))? else {
-            return Ok(None);
-        };
-        if kind & 0x80000000 == 0 {
-            return Err("resource type is not a directory".into());
-        }
-        let Some(item) = entry(mem, root, size, kind & 0x7fffffff, Some(key))? else {
-            return Ok(None);
-        };
-        if item & 0x80000000 == 0 {
-            return Err("resource name is not a directory".into());
-        }
-        let Some(data) = entry(mem, root, size, item & 0x7fffffff, None)? else {
-            return Ok(None);
-        };
-        if data & 0x80000000 != 0 || data + 16 > size {
-            return Err("invalid resource data entry".into());
-        }
-        let payload = mem.read_int(root + data, 4)?;
-        let length = mem.read_int(root + data + 4, 4)?;
-        if payload + length > image_size as u64 || length > 4 * 1024 * 1024 {
-            return Err("resource payload outside image/capacity".into());
-        }
-        let mut bytes = vec![0; length as usize];
-        mem.read(base + payload, &mut bytes)?;
-        Ok(Some(bytes))
+}
+pub(super) fn resource(
+    mem: &Memory,
+    modules: &Modules,
+    base: u64,
+    kind: u32,
+    key: &Key,
+) -> Result<Option<Vec<u8>>, String> {
+    let (image_size, _) = modules.image(base).ok_or("invalid Win64 resource module")?;
+    let nt = mem.read_int(base + 0x3c, 4)?;
+    if nt
+        > (image_size as u64)
+            .checked_sub(160)
+            .ok_or("truncated resource image")?
+        || mem.read_int(base + nt, 4)? != 0x4550
+        || mem.read_int(base + nt + 24, 2)? != 0x20b
+    {
+        return Err("invalid PE32+ resource header".into());
     }
+    let directory = base + nt + 24 + 112 + 2 * 8;
+    let rva = mem.read_int(directory, 4)?;
+    let size = mem.read_int(directory + 4, 4)?;
+    if rva == 0 || size == 0 {
+        return Ok(None);
+    }
+    if rva + size > image_size as u64 {
+        return Err("resource directory outside image".into());
+    }
+    let root = base + rva;
+    let Some(kind) = entry(mem, root, size, 0, Some(&Key::Id(kind)))? else {
+        return Ok(None);
+    };
+    if kind & 0x80000000 == 0 {
+        return Err("resource type is not a directory".into());
+    }
+    let Some(item) = entry(mem, root, size, kind & 0x7fffffff, Some(key))? else {
+        return Ok(None);
+    };
+    if item & 0x80000000 == 0 {
+        return Err("resource name is not a directory".into());
+    }
+    let Some(data) = entry(mem, root, size, item & 0x7fffffff, None)? else {
+        return Ok(None);
+    };
+    if data & 0x80000000 != 0 || data + 16 > size {
+        return Err("invalid resource data entry".into());
+    }
+    let payload = mem.read_int(root + data, 4)?;
+    let length = mem.read_int(root + data + 4, 4)?;
+    if payload + length > image_size as u64 || length > 4 * 1024 * 1024 {
+        return Err("resource payload outside image/capacity".into());
+    }
+    let mut bytes = vec![0; length as usize];
+    mem.read(base + payload, &mut bytes)?;
+    Ok(Some(bytes))
 }
 fn entry(
     mem: &Memory,

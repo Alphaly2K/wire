@@ -20,6 +20,8 @@ PE32 [窗口状态](architecture/window-state.md)、[对话框/枚举](architect
 
 Win64 的 cursor/DC/desktop 调用也归 User owner，明确借 tid、内存与错误槽；完整 Win64 269、library 61 passed / 7 ignored、fmt/strict Clippy/build 通过。
 
+Win64 class/image 调用随后归 User，PE 资源读取只借内存/Modules；原遍历和资源验证顺序保持，完整 Win64 269、library 61 passed / 7 ignored 及必要构建通过。
+
 ## 重构范围
 
 当前累计冻结包含[对话框](architecture/dialog.md)、[菜单](architecture/menus.md)、[GDI 对象/像素/字体](architecture/gdi-operations.md)、日志、五项 paint、控件初始化、资源、启动信息、环境接口与 CLI 拆分；独立历史证据继续可查。
