@@ -126,6 +126,7 @@ pub(super) fn lower(i: &Instruction, mut ir: ScalarIr) -> Option<ScalarIr> {
         }
     }
     ir.opcode = (op << 2) | ScalarIr::type_code(bits)?;
+    ir.addressing |= CHECKED_SEGMENT;
     Some(ir)
 }
 impl ScalarIr {

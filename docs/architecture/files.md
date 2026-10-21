@@ -18,7 +18,7 @@ StandardHandles 也拥有 Get/SetStdHandle 的 slot 编码和标准输出 adapte
 
 目录 batch 的 cursor 准备/输出/提交、文件 section owner 和 coherence 行为保持各自既有实现。Mappings、Pipes、Searches 的内部状态仍有自己的 owner；本批不合并这些资源。
 
-核心文件 API 的 11 个 export 由 `win32/catalog/files.rs` 统一声明：CreateFileA/W、ReadFile、WriteFile、GetFileSize/Ex、SetFilePointer/Ex、SetEndOfFile、FlushFileBuffers、GetFileType。PE32 全部为 typed 路由，DLL 保持 kernel32；Win64 其中 9 个为 typed，DLL 保持 kernel32/kernelbase，SetFilePointer 与 SetEndOfFile 仍为 absent。Int64 参数明确描述 SetFilePointerEx 的有符号距离，PE32 占两个栈 slot，Win64 占一个 64 位 carrier；DWORD 截断只在 gateway 取参时进行。
+核心文件 API 的 11 个 export 由 `win32/catalog/files.rs` 统一声明：CreateFileA/W、ReadFile、WriteFile、GetFileSize/Ex、SetFilePointer/Ex、SetEndOfFile、FlushFileBuffers、GetFileType。PE32 全部为 typed 路由，DLL 保持 kernel32；Win64 在 Alice 接续补齐 SetFilePointer 与 SetEndOfFile 后十一项全部 typed，DLL 保持 kernel32/kernelbase。Int64 参数明确描述 SetFilePointerEx 的有符号距离，PE32 占两个栈 slot，Win64 占一个 64 位 carrier；DWORD 截断只在 gateway 取参时进行。
 
 路径与属性的 10 个 export 也由同一契约声明：GetCurrentDirectoryA/W、SetCurrentDirectoryA/W、GetFullPathNameA/W、GetFileAttributesA/W、SetFileAttributesA/W。PE32 全部 typed/kernel32，Win64 其中 8 个 typed/kernel32+kernelbase，GetFullPathNameA/W 保持 absent。查询容量和属性 flags 是 DWORD，指针不截断，A/W 选择由绑定 ID 决定。
 
@@ -38,7 +38,7 @@ Win64 FindFirst/Next/Close 的处理也由 Searches 执行，只借内存、只�
 
 PE32 adapter 位于 `win32/x86/files.rs`：主 gateway 用 bound FileApi/PathApi ID 调用，公开 `file_api::dispatch` 保留原来的大小写/DLL 和函数范围，作为冷解析 facade。adapter 只借 GuestMem、KernelObjects32、filesystem 和 LastError 槽，不接收 ApiState；公开 read_name/write_string 路径继续重导出。内部互斥 Core/Helper ID 区分文件与 SHLWAPI/imagehlp 操作，已迁移调用不再解析 DLL 或 export。GetFileType 仍由主 gateway 执行，invalid/non-file handle 返回 0 并保持 LastError。读写先清零 count，再查 handle/权限和数据 buffer；SetFilePointer/Ex 先定位并清 LastError，再写可选输出，输出失败时定位已提交。错误仍映射成原来的返回值、LastError 和日志文本。
 
-Win64 普通 metadata、大小/flush、seek、attributes 和 cwd adapter 位于 `files/calls.rs`，由 Files 执行，只借 Memory 与只读 Threads。普通文件的 read/write 输出也归 Files；write 明确只读借 Mappings 更新 view。Runtime64 按 bound FileApi 选择原分支，保留跨 Files/Pipes/Mappings/标准 endpoint 的协调。打开/读取/写入的权限、sharing、16MiB transfer 上限、section coherence、可选输出及 confined path 保持。定位输出先检查，再改变 offset；GetFileSize 清 LastError 的次序保持。GetFileType 按 standard → file → pipe 查询，未知 handle 返回 0/LastError=6。
+Win64 普通 metadata、大小/flush、seek、attributes 和 cwd adapter 位于 `files/calls.rs`，由 Files 执行，只借 Memory 与只读 Threads。普通文件的 read/write 输出也归 Files；write 明确只读借 Mappings 更新 view。Runtime64 按 bound FileApi 选择原分支，保留跨 Files/Pipes/Mappings/标准 endpoint 的协调。打开/读取/写入的权限、sharing、section coherence、可选输出及 confined path 保持。普通文件大块同步读取的后续扩展见文末；写入和其它 endpoint 保留原 transfer 上限。定位输出先检查，再改变 offset；GetFileSize 清 LastError 的次序保持。GetFileType 按 standard → file → pipe 查询，未知 handle 返回 0/LastError=6。
 
 Win64 普通文件读写和管道写入继续在原位置提前返回 Control::Returned，gateway 提交提前保存的 CPU return frame、计数和 trace，保留这些 endpoint 原来不调用 scheduler unblock 的行为。管道读入和标准输出写入走原来的通用 unblock/提交路径。没有新建文件完成框架或另移 CPU 提交；这项边界保留是前几个候选性能失败后的渐进取舍。WriteConsoleW 保持原来的拒绝结果，没有借迁移扩展 console 能力。
 
@@ -52,7 +52,7 @@ endpoint 输出提取基线 `beb2a34`：四个处理体及根调用替换经 rus
 
 AreFileApisANSI 随后汇入同一契约，该批合计 54 项：PE32 32 Typed/22 ABI-only，Win64 46 Typed/8 Absent。Win64 仍返回 1，PE32 保留零参数 ABI 与未实现策略，公开 file facade 继续排除 ABI-only 项，见[标量入口补齐](../reports/refactoring-scalar-followup-2026-10-20.md)。
 
-CreatePipe、GetConsoleMode、WriteConsoleW 与 NtQueryDirectoryFile 接入后，当前合计 58 项：PE32 32 Typed/25 ABI-only/1 Absent，Win64 50 Typed/8 Absent。管道创建归 Pipes，原生目录查询及 cursor 提交归 Files；标准 console 拒绝、BOOLEAN carrier、输出检查及 LastError 顺序保持，见[进程与 endpoint 边界](process-control.md)。
+CreatePipe、GetConsoleMode、WriteConsoleW 与 NtQueryDirectoryFile 接入时合计 58 项：PE32 32 Typed/25 ABI-only/1 Absent，Win64 50 Typed/8 Absent；后续 Alice 接续的两项 Win64 补齐见下文。管道创建归 Pipes，原生目录查询及 cursor 提交归 Files；标准 console 拒绝、BOOLEAN carrier、输出检查及 LastError 顺序保持，见[进程与 endpoint 边界](process-control.md)。
 
 Mappings 独立拥有 section/view 与 retained file descriptor，view 持有 section 引用，文件或 section handle 关闭后已有 view 继续存活。guest WriteFile 更新同 inode 的活动 view；64 位 offset、64KiB 对齐、资源上限及原 backing 生命周期保持。adapter 按冷绑定 ID 调用原 Mappings 方法，不新增通用结果框架。独立行为与性能证据见 [section 验收](../reports/refactoring-file-section-catalog-2026-10-15.md)。
 
@@ -61,3 +61,9 @@ Win64 section 创建、映射、解除与 flush 的 guest adapter 随后也归 `
 SHLWAPI/imagehlp 的 13 项与六项通用句柄契约已在 section/Interlocked 新基线上通过验收，详见 [路径与句柄边界](paths-handles.md)。标准句柄及跨资源 CloseHandle 按冷绑定 HandleApi 选择原 owner 的分支，保留保护位、查询顺序和故障提交。PE32 的混合 HandleObj 表、命名索引与分配位置现由 [KernelObjects32](kernel-objects32.md) 私有拥有。
 
 PE32 文件窄借用迁移基线为 `9090b62`。原文件/path 处理体、文本 codec、公开 facade 及 wildcard 归一核对保持；通配算法移入 `win32/kernel/file_patterns.rs`，Win64 Find 和 NtQueryDirectory 直接复用纯算法。release 完整 Win32 248、Win64 文件 17、fmt/release lib/bin strict Clippy/build 通过。证据位于 `wire-out/refactoring-2026-10-14/r3-files32-{source-checks,verification}.json` 及 validation 日志，不重复性能或游戏矩阵。
+
+2026-10-20 Alice 执行接续补齐 Win64 SetFilePointer 和 SetEndOfFile，沿用既有 FileApi ID，不增加 export 总数；文件家族变为 Win64 52 Typed/6 Absent，PE32 策略保持。SetFilePointer 的无 high-pointer 距离按 LONG 符号扩展，有 high-pointer 时读取四字节并合成 signed 64-bit；high 输出先检查写权限，再调用同一 Files seek owner。返回 low DWORD，成功 low=0xffffffff 时清 LastError 以区分失败，其它成功保留 LastError；失败返回 0xffffffff 并写对应错误。返回 frame 在调用前保存，high 输出可与它别名。SetFilePointerEx 的既有 BOOL 和八字节输出约定保持。
+
+SetEndOfFile 只借 Files、只读 Mappings/Threads 与错误槽，按当前文件位置真实截断或延长，保持 cursor；要求写权限且拒绝目录。任何同一 volume/inode 的 section handle 或 retained view 存活时返回 ERROR_USER_MAPPED_FILE（1224），关闭 section 但仍保留 view 也不能截断。两项新增回归覆盖 >4GiB、负距离、sentinel、DWORD 截断、输出边界/只读/返回槽别名、长度与内容、失败不截断及映射存活；完整 Win64 文件 19 项、strict Clippy/build 通过。
+
+同轮 Alice 随后发出 64MiB 同步 ReadFile。普通文件现支持完整 DWORD 请求长度：gateway 在 I/O 前检查全部输出范围与 count，原有至多 16MiB 的调用保留单次读取；更大的请求以 1MiB scratch 分段写入 guest，遇短读/EOF 即返回实际总量。整个调用不切换 guest 线程，返回 frame 和 count 的最终覆盖顺序保持；主机中途失败时可能已提交部分数据/游标，返回失败与零 count，不作回滚。管道等 endpoint 仍保留原大小限制，OVERLAPPED 继续拒绝。新增 64MiB 请求、17MiB+3 字节内容对照、EOF 尾部不变及远端保护页故障不消费 cursor 的回归后，完整 Win64 文件 20 项与严格检查通过。

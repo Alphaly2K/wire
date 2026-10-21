@@ -107,11 +107,17 @@ impl Runtime64 {
         use ThreadControlApi::*;
         let value = match id {
             Create => self.create_thread(mem, args)?,
-            Exit => {
+            Exit | FreeAndExit => {
                 if !self.threads.enabled {
                     return Err("Win64 ExitThread requires a thread scheduler".into());
                 }
-                return Ok(ThreadControlResult::Exit(args[0] as u32));
+                let code = if id == FreeAndExit {
+                    self.modules.release(args[0])?;
+                    args[1]
+                } else {
+                    args[0]
+                };
+                return Ok(ThreadControlResult::Exit(code as u32));
             }
             QueueApc => {
                 let error_slot = self.teb() + 0x68;

@@ -7,3 +7,5 @@ VirtualAlloc/Free/Protect/Query 及 Ex 八项接口由 `win32/catalog/virtual_me
 Ex 版本先验证完整架构位宽的当前进程伪 handle，再访问其它参数。PE32 VirtualQuery 保持 28 字节结构及 error 87，Win64 保持 48 字节结构及短长度 error 24；原输出访存错误策略分别保留。VirtualProtect 继续先验证输出与目标页，再写旧权限，最后应用新权限；允许输出与目标别名，故障顺序保持。
 
 PE32 的旧 gateway 在 handler 之后读取返回槽，因此 VirtualProtect 输出若覆盖该槽，会改变返回 EIP；Win64 gateway 先保存返回 frame，输出写入不改变 RIP。此处保留两套既有行为，后续语义修正应独立验收。成功保持原 LastError，API 失败写入原错误；Win64 checked output fault 不提交 CPU/API count。见[独立基线与验收](../reports/refactoring-virtual-memory-2026-10-16.md)。
+
+Win64 的 committed page 总量限制为 **2 GiB**，单次 map/commit 保持 **256 MiB**。普通 map、image merge、VirtualAlloc commit 和 GlobalMemoryStatusEx 使用同一总容量边界；reserved 地址不计为 committed。容量检查在插页或更新 allocation 之前完成，超限不留下部分映射。这样可以同时容纳普通运行时页面和 256 MiB 的 CPU 可访问 texture 映射。容量边界、整数溢出、超限失败不改状态有单元回归，真实 GPU fixture 另验证总提交超过旧 512 MiB 边界后的 map/unmap 和资源释放。

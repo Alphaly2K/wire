@@ -2,3 +2,4 @@
 *.log
 wire-out/
 tests/control/*.exe
+.DS_Store

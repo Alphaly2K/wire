@@ -715,6 +715,7 @@ impl Cpu64 {
             | M::Fsqrt
             | M::Frndint
             | M::Fscale
+            | M::Fprem
             | M::F2xm1
             | M::Fyl2x
             | M::Fyl2xp1
@@ -734,6 +735,10 @@ impl Cpu64 {
             | M::Prefetcht0
             | M::Prefetcht1
             | M::Prefetcht2 => {}
+            M::Mfence | M::Lfence | M::Sfence => {
+                // Guest threads execute cooperatively; every memory operation
+                // completes before the next instruction, with no store buffer.
+            }
             M::Fnstcw => mem.write_int(self.address(i)?, 2, self.fpu.cw as u64)?,
             M::Fnstsw => self.write(i, 0, self.fpu.sw as u64, mem)?,
             M::Fldcw | M::Wait => {

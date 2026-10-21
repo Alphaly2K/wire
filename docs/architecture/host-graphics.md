@@ -18,6 +18,10 @@ Win64 的 `Presenter64` 继续拥有 guest HWND → native ID 映射，保留隐
 
 Win64 User 的 host 入口负责窗口快照与 owned event 入队，只借原 start 时间；Runtime64 保留公开 facade。HWND/容量检查、时间取样、鼠标坐标调整、键盘过滤和入队顺序保持，host 侧不执行 guest callback。
 
+随后补齐的[键鼠事件](input-events.md)共用 AppKit 回调与 Keyboard owner，包含物理键码/文本、左右修饰键、五键鼠标、拖动和双轴滚轮。native 统一提供 client 坐标，两个 guest adapter 再转换滚轮的 screen 坐标，并记录 MSG.pt；Win64 保留 ClipCursor。原有重构阶段的等价性结论不覆盖这些新增行为。
+
+人工试用发现 Retina 裁剪后，CAMetalLayer 的 drawableSize 改用 view bounds 的实际 backing 像素尺寸，并同步当前窗口 backingScaleFactor；guest 输入仍使用逻辑 client 像素。真实 Vulkan/Metal 原创图案探针验证了横竖窗口切换、同一保留图层、drawable 尺寸与输入中心，旧错误已由 backing 尺寸断言独立复现。
+
 Presenter 的资源限制在主线程上，类型明确不可 Send/Sync；初始化继续要求 AppKit main thread。构造 Frame 时检查尺寸与 RGBA 长度，避免把不足的缓冲区送到 native FFI。frame upload failure 保留错误并继续可选 capture；displayed 只统计成功上传。抓帧仍使用 RGB PPM、完整 RGBA hash 去重、最多 16 个不同 frame，错误文本和 sequence 文件名保持。
 
 GDI 的 DLL/export 接受范围、GetDC 的 USER client dimensions、LastError 和 API diagnostics 位于 `win32/gdi/x86.rs`。`graphics` 拥有 bitmap/DC/font/pixel 资源，checked object/raster operations 只借用 Graphics、PE32 GuestMem 和固定参数数组，不依赖总 API 状态。当前 DIB/font codec 仍使用 PE32 布局；这一边界没有强制统一两种架构的地址空间。[D3D9](d3d9.md)的分配/引用/绑定方法只借 heap，设备调用再借只读 window 与 Graphics，公开组合根保留；DXGI/D3D11 的其它 guest COM 适配器继续按领域迁移。
@@ -28,7 +32,11 @@ GDI 的 DLL/export 接受范围、GetDC 的 USER client dimensions、LastError �
 
 Win64 的七项 DXGI/D3D 创建入口已接入[图形契约](graphics-contracts.md)，创建 handler 与 COM 方法分开。现有静态/动态 provider 差异、未知 PE32 ABI 和 GPU 资源语义保持；COM 方法元数据继续迁移。
 
-Win64 Graphics 现直接执行 COM 对象分配和递归资源释放，内存、gateway 和分配游标明确借用。原生 backend 未改，两个已有 GPU 资源生命周期 fixture 已显式通过；其余 guest COM handler 继续收敛资源边界。
+重构阶段将 Win64 COM 对象分配和递归资源释放归入 Graphics，内存、gateway 和分配游标明确借用。该阶段原生 backend 未改，两个已有 GPU 资源生命周期 fixture 已显式通过。
+
+2026-10-20 的功能接续将单个 texture 的总容量上限统一为 **256 MiB**，包含全部 mip、layer 与 depth slice；guest 创建检查、Rust readback 和 native 分配使用相同边界。大于 64 MiB 的上传/读回按不超过 8 MiB 的行带同步传输，避免突破通用 staging buffer 的 64 MiB 上限；普通传输路径保持。8192×8192 RGBA8 的完整写入/读回 SHA-256、超限拒绝、view 保留 texture/device，以及 guest COM 输出故障和释放顺序均有显式原生测试。NULL resource 创建 view 返回 E_INVALIDARG，并清零有效的输出槽。详见[执行报告](../reports/alice-execution-2026-10-20.md)。
+
+shader stage 接口允许 producer 向 consumer 提供同 location/component、同 scalar 类型的向量子集，例如 float4 → float3。该放宽仅在设备实际支持并启用 Vulkan maintenance4 时生效；组件不足、缺少 location 或 scalar 类型不同仍拒绝。原创 `tools/probe_graphics_varyings.py` 使用自包含 DXBC fixture 验证 4096 个实际输出像素，并检查三类非法接口拒绝且 target 不变。
 
 DXGI/D3D11 普通调用和 swapchain 创建/resize 也已收窄资源借用；Graphics 提供 owned frame 的 native texture/backend 引用快照与成功计数。Runtime/Process/Presenter 继续执行原 present 协议，surface 提交、返回帧和 unblock/trace 顺序保持。阶段整合全目标 694 passed / 7 ignored，两个真实 GPU fixture 显式通过。
 

@@ -729,6 +729,12 @@ impl Calls<'_> {
                 if a[3] != 0 {
                     mem.check(a[3], 8, WRITE)?;
                 }
+                if a[1] == 0 {
+                    if a[3] != 0 {
+                        mem.write_int(a[3], 8, 0)?;
+                    }
+                    return Ok(INVALID_ARG);
+                }
                 if let Some(Resource::Buffer {
                     desc: buffer_desc,
                     native,
@@ -1091,7 +1097,7 @@ impl Calls<'_> {
                     let depth = (d[2] >> mip).max(1);
                     let bytes = row as usize * rows as usize * depth as usize;
                     total += bytes;
-                    if total > 128 * 1024 * 1024 {
+                    if total > crate::gpu::TEXTURE_BYTE_LIMIT {
                         return Ok(OUT_OF_MEMORY);
                     }
                     if a[2] != 0 {
@@ -1206,7 +1212,7 @@ impl Calls<'_> {
                         let (row, rows) =
                             texture_layout(d[4], (d[0] >> mip).max(1), (d[1] >> mip).max(1));
                         total += row as usize * rows as usize;
-                        if total > 128 * 1024 * 1024 {
+                        if total > crate::gpu::TEXTURE_BYTE_LIMIT {
                             return Ok(OUT_OF_MEMORY);
                         }
                         if a[2] != 0 {
@@ -1514,14 +1520,16 @@ impl Calls<'_> {
                         texture_layout(d.format, (d.width >> mip).max(1), (d.height >> mip).max(1));
                     let bytes = row as usize * rows as usize;
                     let contents = if a[3] == 4 || a[3] == 2 {
-                        vec![0; bytes]
+                        None
                     } else {
-                        native.read(a[2] as u32, bytes)?
+                        Some(native.read(a[2] as u32, bytes)?)
                     };
                     let size = (bytes as u64).div_ceil(PAGE) * PAGE;
                     let p = *self.next_alloc;
                     mem.map(p, size, READ | WRITE)?;
-                    mem.write(p, &contents)?;
+                    if let Some(contents) = contents {
+                        mem.write(p, &contents)?;
+                    }
                     *self.next_alloc += size;
                     let Some(Resource::Texture { mapped, .. }) =
                         self.graphics.resources.get_mut(&a[1])
@@ -2254,6 +2262,39 @@ impl Calls<'_> {
             "SOSetTargets" => {
                 if a[1] != 0 {
                     return Err("D3D11 stream output unsupported".into());
+                }
+                Ok(0)
+            }
+            "OMGetRenderTargets" => {
+                if a[1] > 8 {
+                    return Err("D3D11 render target count".into());
+                }
+                if a[2] != 0 {
+                    mem.check(a[2], a[1] as usize * 8, WRITE)?;
+                }
+                if a[3] != 0 {
+                    mem.check(a[3], 8, WRITE)?;
+                }
+                let targets = self.graphics.contexts[&a[0]]
+                    .bindings
+                    .get("OMSetRenderTargets")
+                    .cloned()
+                    .unwrap_or_else(|| vec![0; 9]);
+                let mut returned = Vec::with_capacity(a[1] as usize + 1);
+                if a[2] != 0 {
+                    returned.extend_from_slice(&targets[..a[1] as usize]);
+                }
+                if a[3] != 0 {
+                    returned.push(targets[8]);
+                }
+                self.graphics.retain_many(&returned)?;
+                if a[2] != 0 {
+                    for i in 0..a[1] {
+                        mem.write_int(a[2] + i * 8, 8, targets[i as usize])?;
+                    }
+                }
+                if a[3] != 0 {
+                    mem.write_int(a[3], 8, targets[8])?;
                 }
                 Ok(0)
             }

@@ -60,6 +60,7 @@ struct Message {
     wparam: u32,
     lparam: u32,
     time: u32,
+    point: [i32; 2],
     synthetic_paint: bool,
     hardware_input: bool,
 }

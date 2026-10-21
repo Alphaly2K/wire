@@ -115,7 +115,15 @@ pub(super) fn lower(i: &Instruction, mut ir: ScalarIr) -> Option<ScalarIr> {
     if ir.register_safe() {
         ir.addressing |= REGISTER_ONLY;
     }
+    ir.addressing |= CHECKED_SEGMENT;
     Some(ir)
+}
+pub(super) fn memory_size(ir: &ScalarIr) -> usize {
+    if matches!(ir.opcode >> 2, SCALAR_MOVE | TRANSFER) {
+        1usize << (ir.opcode & 3)
+    } else {
+        16
+    }
 }
 
 impl ScalarIr {

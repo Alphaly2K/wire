@@ -11,6 +11,8 @@
 
 异步状态、已读取消息的队列状态、toggle、文字和线程隔离仍由同一个 Keyboard owner 管理。PE32 状态适配器只借明确参数、内存、owner 和当前 tid；异步查询继续消费原有低位标志。GetKeyboardState 只读取当前线程的快照，成功保留 LastError，访存失败沿原错误路径返回。两端返回槽别名分别保留 handler 后读取与预先保存 frame 的顺序。
 
+2026-10-20 的功能接续补齐了[宿主键鼠事件](input-events.md)：同一 owner 解析扫描码区分左右修饰键，并维护通用键聚合状态；中键和两个侧键进入相同的异步/队列状态路径，重复 key-down 不重新设置异步低位。WM_SYSCHAR 与 WM_CHAR 一样先缓存实际 UTF-16，再由 TranslateMessage 交付。原重构验收记录保留为历史结果。
+
 布局查询使用既有 US HKL `0x04090409`，与 guest 的日语 NLS profile 分开。线程查询继续检查存活线程；HKL 在 Win64 保留完整指针宽度。纯 scan/VK、character 和 key-name 规则集中到 `win32/user/keyboard_layout.rs`，不依赖 guest 内存或进程总状态，保留 Hangover/Wine 来源和 LGPL 声明。
 
 ToUnicode 使用调用者的 256-byte 状态，signed 容量检查先于 flags、layout 和指针访问；读取完整输入后写入输出，保留输入/输出别名。flag 范围、keyup 分支、NUL、截断及失败输出顺序保持。US profile 没有 IME、dead-key、AltGr 或组合状态；API 查询与 host 已解析的 WM_CHAR 文字仍各自按原路径处理。

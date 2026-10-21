@@ -12,6 +12,8 @@ pub const READ: u8 = 1;
 pub const WRITE: u8 = 2;
 pub const EXECUTE: u8 = 4;
 const USER_END: u64 = 1 << 47;
+const COMMIT_BYTE_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
+const MAPPING_BYTE_LIMIT: u64 = 256 * 1024 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TranslationCacheLayout {
     Direct16K,
@@ -813,9 +815,7 @@ impl Memory {
         Self::range(addr, len as usize).is_ok_and(|range| self.free_range(range.start, range.end))
     }
     pub fn merge(&mut self, mut other: Memory) -> Result<(), String> {
-        let exceeds_capacity =
-            (self.pages.len() + other.pages.len()) as u64 * PAGE > 512 * 1024 * 1024;
-        if exceeds_capacity
+        if !Self::commit_capacity(self.pages.len(), other.pages.len())
             || other
                 .allocations
                 .iter()
@@ -843,6 +843,10 @@ impl Memory {
         }
         Ok(addr..end)
     }
+    fn commit_capacity(used: usize, additional: usize) -> bool {
+        let limit = (COMMIT_BYTE_LIMIT / PAGE) as usize;
+        additional <= limit && used <= limit - additional
+    }
     pub fn map(&mut self, addr: u64, len: u64, permissions: u8) -> Result<(), String> {
         if !addr.is_multiple_of(PAGE)
             || len == 0
@@ -852,8 +856,9 @@ impl Memory {
             return Err("invalid AMD64 mapping".into());
         }
         let range = Self::range(addr, usize::try_from(len).map_err(|_| "mapping too large")?)?;
-        let used = self.pages.len() as u64 * PAGE;
-        if len > 256 * 1024 * 1024 || used + len > 512 * 1024 * 1024 {
+        if len > MAPPING_BYTE_LIMIT
+            || !Self::commit_capacity(self.pages.len(), (len / PAGE) as usize)
+        {
             return Err("AMD64 mapping capacity exceeded".into());
         }
         if !self.free_range(range.start, range.end) {
@@ -1295,6 +1300,24 @@ impl Memory {
 mod generation_tests {
     use super::*;
     use crate::x64::cpu::Cpu64;
+    #[test]
+    fn committed_capacity_rejects_overflow_and_oversized_mappings_without_partial_state() {
+        let pages = (COMMIT_BYTE_LIMIT / PAGE) as usize;
+        assert!(Memory::commit_capacity(pages, 0));
+        assert!(Memory::commit_capacity(pages - 1, 1));
+        assert!(!Memory::commit_capacity(pages, 1));
+        assert!(!Memory::commit_capacity(usize::MAX, 1));
+        assert!(!Memory::commit_capacity(1, usize::MAX));
+        let mut mem = Memory::default();
+        let base = 0x600000000;
+        let span = MAPPING_BYTE_LIMIT + PAGE;
+        let status = mem.memory_status();
+        assert!(mem.map(base, span, READ | WRITE).is_err());
+        assert_eq!(mem.virtual_alloc(base, span, 0x3000, 4), Err(8));
+        assert_eq!(mem.memory_status(), status);
+        assert!(mem.available(base, span));
+        assert!(mem.read_int(base, 1).is_err());
+    }
     #[test]
     fn generation_wrap_discards_every_translation_and_segment() {
         let pc = 0x140000000;

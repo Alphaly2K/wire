@@ -96,6 +96,20 @@ impl Runtime64 {
         self.prepare_window_callback(mem, returned)?;
         let wide = id == crate::win32::catalog::MessageApi::DispatchW;
         let words = super::message::read(mem, args[0])?;
+        if matches!(words[1], 6 | 7 | 8 | 0x1c | 0xff)
+            || (0x100..=0x109).contains(&words[1])
+            || (0x200..=0x20e).contains(&words[1])
+            || (0x245..=0x24f).contains(&words[1])
+        {
+            crate::host::ui::trace_input(
+                "dispatch",
+                words[0],
+                words[1] as u32,
+                words[2],
+                words[3],
+                self.threads.active,
+            );
+        }
         if words[0] == 0 {
             return Ok(WindowResult::Value(0));
         }
@@ -212,10 +226,12 @@ impl Runtime64 {
                 (44, dimensions[0] as u32),
                 (48, args[3] as u32),
                 (72, args[0] as u32),
-                (96 + 24, 1024),
-                (96 + 28, 768),
-                (96 + 32, 1),
-                (96 + 36, 1),
+                (96 + 8, self.user.display_size[0]),
+                (96 + 12, self.user.display_size[1]),
+                (96 + 24, 112),
+                (96 + 28, 27),
+                (96 + 32, self.user.display_size[0]),
+                (96 + 36, self.user.display_size[1]),
             ] {
                 bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
             }
@@ -452,6 +468,8 @@ impl Runtime64 {
         self.user.windows.remove(&handle);
         self.user.events.retain(|m| m.event.window != handle);
         self.user.keyboard.remove_window64(handle);
+        self.user.raw_input.remove_window(handle);
+        self.user.mouse_pointer.remove_window(handle);
         if self.user.focus == handle {
             self.user.focus = 0;
         }
@@ -477,6 +495,10 @@ impl User {
         };
         match id {
             W::DefaultA | W::DefaultW => match args[1] {
+                0xff => {
+                    self.raw_input.packets.remove(&args[3]);
+                    Ok(0)
+                }
                 0x81 => Ok(1),
                 0x83 => {
                     if args[2] > 1 {

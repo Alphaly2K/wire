@@ -1,6 +1,6 @@
 # 线程查询、设置与状态 owner
 
-十项 export 的 provider、参数宽度、返回约定与 ID 集中在 `win32/catalog/thread_properties.rs`：Get/SetThreadErrorMode、Resume/SuspendThread、GetThreadId、Get/SetThreadPriority、GetExitCodeThread、SetThreadAffinityMask、SetThreadStackGuarantee。Win64 接受 kernel32/kernelbase；PE32 仅 kernel32，其中 GetThreadId、两项 error mode 与 stack guarantee 保持 ABI-only/error 120，其余六项使用 typed adapter。错 DLL 的历史未知 ABI/拒绝策略保持。
+十一项 export 的 provider、参数宽度、返回约定与 ID 集中在 `win32/catalog/thread_properties.rs`：OpenThread、Get/SetThreadErrorMode、Resume/SuspendThread、GetThreadId、Get/SetThreadPriority、GetExitCodeThread、SetThreadAffinityMask、SetThreadStackGuarantee。Win64 接受 kernel32/kernelbase；PE32 仅 kernel32，其中 OpenThread、GetThreadId、两项 error mode 与 stack guarantee 保持 ABI-only/error 120，其余六项使用 typed adapter。错 DLL 的历史未知 ABI/拒绝策略保持。
 
 Win64 冷绑定普通 scalar ID，由 Runtime64 保存返回帧后交给 `Threads::property_call`。owner 只借 Memory 和当前 LastError 地址，内部 error mode 字段私有。CPU、公共 unblock、trace 和 API 次数仍由进程提交。Create/ExitThread、APC、CONTEXT 和 description 分配保留专用路径。
 
@@ -15,3 +15,5 @@ PE32 adapter 只借 GuestMem、Sched 和 LastError。Sched 拥有 exit 状态读
 后续六项创建、退出、APC、CONTEXT 和 description 已迁入独立[线程控制边界](thread-control.md)，继续保留专用控制结果和资源提交规则。
 
 SetThreadStackGuarantee 在 thread handle 解析之前处理指针参数：零请求查询并写回零，非零请求保持输入、返回失败/error 50，不新增异常栈预留能力。其指针宽度、读写故障和返回帧次序保持，见[补齐验收](../reports/refactoring-scalar-followup-2026-10-20.md)。
+
+2026-10-20 功能接续加入 Win64 OpenThread：三个参数均按 DWORD 读取，只打开已有的 guest thread ID；运行中的线程即使原 handle 已关闭也可重开，已退出线程则必须仍有 handle 保留。每次打开使用与 DuplicateHandle 共用的独立 alias、继承标志、1024 live/4096 lifetime 容量；关闭 alias 不结束线程。未知 ID 返回 error 87，超限 error 8，不支持的 access 位返回 error 50。接受线程/标准权限、generic access 和 MAXIMUM_ALLOWED；沿用既有受限 profile，不模拟 ACL/privilege 或逐 handle access 检查。成功保留 LastError。PE32 保持 ABI-only/error 120，清栈 12 字节。

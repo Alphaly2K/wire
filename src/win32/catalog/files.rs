@@ -234,7 +234,7 @@ pub static FILE_CONTRACTS: [Contract; 58] = [
         "SetFilePointer",
         &[P, I, P, D],
         U,
-        false,
+        true,
     ),
     declaration(
         FileApi::SetFilePointerEx,
@@ -243,7 +243,7 @@ pub static FILE_CONTRACTS: [Contract; 58] = [
         B,
         true,
     ),
-    declaration(FileApi::SetEndOfFile, "SetEndOfFile", &[P], B, false),
+    declaration(FileApi::SetEndOfFile, "SetEndOfFile", &[P], B, true),
     declaration(FileApi::FlushFileBuffers, "FlushFileBuffers", &[P], B, true),
     declaration(FileApi::GetFileType, "GetFileType", &[P], U, true),
     declaration(

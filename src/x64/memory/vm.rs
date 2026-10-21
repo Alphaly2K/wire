@@ -1,5 +1,8 @@
 //! Windows virtual memory contracts over checked 64-bit data pages.
-use super::{Allocation, Memory, Page, EXECUTE, PAGE, READ, USER_END, WRITE};
+use super::{
+    Allocation, Memory, Page, COMMIT_BYTE_LIMIT, EXECUTE, MAPPING_BYTE_LIMIT, PAGE, READ, USER_END,
+    WRITE,
+};
 use crate::mem::{MEM_COMMIT, MEM_FREE, MEM_PRIVATE, MEM_RESERVE, PAGE_GUARD};
 use std::cell::Cell;
 const GRANULARITY: u64 = 65536;
@@ -62,7 +65,7 @@ impl Memory {
         Ok(())
     }
     pub fn memory_status(&self) -> [u8; 64] {
-        let total = 512 * 1024 * 1024u64;
+        let total = COMMIT_BYTE_LIMIT;
         let used = self.pages.len() as u64 * PAGE;
         let virtual_total = APP_END - GRANULARITY;
         let reserved: u64 = self.allocations.iter().map(|(&base, a)| a.end - base).sum();
@@ -189,15 +192,14 @@ impl Memory {
     }
     fn commit(&mut self, start: u64, end: u64, protection: u32) -> Result<(), u32> {
         let permissions = Self::protection_permissions(protection)?;
-        if end - start > 256 * 1024 * 1024 {
+        if end - start > MAPPING_BYTE_LIMIT {
             return Err(8);
         }
         let missing = (start..end)
             .step_by(PAGE as usize)
             .filter(|p| !self.pages.contains_key(p))
             .count();
-        let exceeds_capacity = (self.pages.len() + missing) as u64 * PAGE > 512 * 1024 * 1024;
-        if exceeds_capacity {
+        if !Self::commit_capacity(self.pages.len(), missing) {
             return Err(8);
         }
         for p in (start..end).step_by(PAGE as usize) {

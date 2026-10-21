@@ -342,7 +342,9 @@ impl Runtime64 {
             return Err("DXGI method/object mismatch".into());
         }
         if name.starts_with("Output.") {
-            return self.graphics.output_call(mem, name, a);
+            return self
+                .graphics
+                .output_call(mem, name, a, self.user.display_size);
         }
         if name.starts_with("SwapChain.") {
             return self.swapchain_call(mem, name, a);
@@ -442,6 +444,105 @@ mod tests {
             0
         );
         m.read_int(DATA + 32, 8).unwrap()
+    }
+    #[test]
+    fn output_target_query_retains_returned_views_and_preflights_all_outputs() {
+        let (mut r, mut m) = setup();
+        let device = r
+            .graphics
+            .object(&mut m, &mut r.gateways, &mut r.next_alloc, Kind::Device, 0)
+            .unwrap();
+        let context = r
+            .graphics
+            .object(
+                &mut m,
+                &mut r.gateways,
+                &mut r.next_alloc,
+                Kind::Context,
+                device,
+            )
+            .unwrap();
+        r.graphics
+            .contexts
+            .insert(context, d3d11::Context::default());
+        let mut views = Vec::new();
+        for kind in [Kind::Rtv, Kind::Dsv] {
+            views.push(
+                r.graphics
+                    .object(&mut m, &mut r.gateways, &mut r.next_alloc, kind, device)
+                    .unwrap(),
+            );
+        }
+        call(
+            &mut r,
+            &mut m,
+            "D3D.Context.OMGetRenderTargets",
+            &[context, 2, DATA + 128, DATA + 160],
+        )
+        .unwrap();
+        assert_eq!(m.read_int(DATA + 128, 8).unwrap(), 0);
+        assert_eq!(m.read_int(DATA + 136, 8).unwrap(), 0);
+        assert_eq!(m.read_int(DATA + 160, 8).unwrap(), 0);
+        m.write_int(DATA + 64, 8, views[0]).unwrap();
+        m.write_int(DATA + 72, 8, views[0]).unwrap();
+        call(
+            &mut r,
+            &mut m,
+            "D3D.Context.OMSetRenderTargets",
+            &[context, 2, DATA + 64, views[1]],
+        )
+        .unwrap();
+        assert_eq!(r.graphics.objects[&views[0]].refs, 3);
+        assert_eq!(r.graphics.objects[&views[1]].refs, 2);
+        m.write(DATA + 128, &[0xa5; 40]).unwrap();
+        assert!(call(
+            &mut r,
+            &mut m,
+            "D3D.Context.OMGetRenderTargets",
+            &[context, 2, DATA + 128, DATA + 2 * PAGE - 4]
+        )
+        .is_err());
+        assert_eq!(m.read_int(DATA + 128, 8).unwrap(), 0xa5a5a5a5a5a5a5a5);
+        assert_eq!(r.graphics.objects[&views[0]].refs, 3);
+        assert_eq!(r.graphics.objects[&views[1]].refs, 2);
+        call(
+            &mut r,
+            &mut m,
+            "D3D.Context.OMGetRenderTargets",
+            &[context, 3, DATA + 128, DATA + 160],
+        )
+        .unwrap();
+        for (slot, expected) in [(0, views[0]), (1, views[0]), (2, 0)] {
+            assert_eq!(m.read_int(DATA + 128 + slot * 8, 8).unwrap(), expected);
+        }
+        assert_eq!(m.read_int(DATA + 160, 8).unwrap(), views[1]);
+        assert_eq!(r.graphics.objects[&views[0]].refs, 5);
+        assert_eq!(r.graphics.objects[&views[1]].refs, 3);
+        call(
+            &mut r,
+            &mut m,
+            "D3D.Context.OMGetRenderTargets",
+            &[context, 2, 0, 0],
+        )
+        .unwrap();
+        assert_eq!(r.graphics.objects[&views[0]].refs, 5);
+        assert_eq!(r.graphics.objects[&views[1]].refs, 3);
+        r.graphics.objects.get_mut(&views[1]).unwrap().refs = u32::MAX;
+        assert!(call(
+            &mut r,
+            &mut m,
+            "D3D.Context.OMGetRenderTargets",
+            &[context, 2, DATA + 128, DATA + 160]
+        )
+        .is_err());
+        assert_eq!(r.graphics.objects[&views[0]].refs, 5);
+        assert!(call(
+            &mut r,
+            &mut m,
+            "D3D.Context.OMGetRenderTargets",
+            &[context, 9, DATA + 128, 0]
+        )
+        .is_err());
     }
     #[test]
     fn graphics_export_baseline_preserves_provider_visibility_and_scalar_abi() {
@@ -973,6 +1074,150 @@ mod tests {
         );
         let device = m.read_int(DATA + 40, 8).unwrap();
         let mut desc = [0u8; 72];
+        let atlas_objects = r.graphics.objects.len();
+        for method in [
+            "CreateShaderResourceView",
+            "CreateRenderTargetView",
+            "CreateDepthStencilView",
+        ] {
+            m.write_int(DATA + 48, 8, u64::MAX).unwrap();
+            assert_eq!(
+                call(
+                    &mut r,
+                    &mut m,
+                    &format!("D3D.Device.{method}"),
+                    &[device, 0, 0, DATA + 48]
+                )
+                .unwrap(),
+                INVALID_ARG
+            );
+            assert_eq!(m.read_int(DATA + 48, 8).unwrap(), 0);
+        }
+        let atlas_desc = [8192u32, 8192, 1, 1, 28, 1, 0, 0, 8, 0, 0];
+        m.write(
+            DATA + 128,
+            &atlas_desc
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert!(call(
+            &mut r,
+            &mut m,
+            "D3D.Device.CreateTexture2D",
+            &[device, DATA + 128, 0, DATA + 2 * PAGE - 4]
+        )
+        .is_err());
+        assert_eq!(r.graphics.objects.len(), atlas_objects);
+        assert_eq!(
+            call(
+                &mut r,
+                &mut m,
+                "D3D.Device.CreateTexture2D",
+                &[device, DATA + 128, 0, DATA + 48]
+            )
+            .unwrap(),
+            0
+        );
+        let atlas = m.read_int(DATA + 48, 8).unwrap();
+        assert_ne!(atlas, 0);
+        assert_eq!(
+            call(
+                &mut r,
+                &mut m,
+                "D3D.Device.CreateShaderResourceView",
+                &[device, atlas, 0, DATA + 56]
+            )
+            .unwrap(),
+            0
+        );
+        let atlas_view = m.read_int(DATA + 56, 8).unwrap();
+        call(&mut r, &mut m, "D3D.Child.Release", &[atlas]).unwrap();
+        assert!(r.graphics.resources.contains_key(&atlas));
+        call(&mut r, &mut m, "D3D.Child.Release", &[atlas_view]).unwrap();
+        assert!(!r.graphics.resources.contains_key(&atlas));
+        assert_eq!(r.graphics.objects.len(), atlas_objects);
+        let staging_desc = [8192u32, 8192, 1, 1, 28, 1, 0, 3, 0, 0x30000, 0];
+        m.write(
+            DATA + 128,
+            &staging_desc
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert_eq!(
+            call(
+                &mut r,
+                &mut m,
+                "D3D.Device.CreateTexture2D",
+                &[device, DATA + 128, 0, DATA + 48]
+            )
+            .unwrap(),
+            0
+        );
+        let staging = m.read_int(DATA + 48, 8).unwrap();
+        call(
+            &mut r,
+            &mut m,
+            "D3D.Device.GetImmediateContext",
+            &[device, DATA + 56],
+        )
+        .unwrap();
+        let context = m.read_int(DATA + 56, 8).unwrap();
+        let background = DATA + 0x100000000;
+        let bytes = crate::gpu::TEXTURE_BYTE_LIMIT as u64;
+        m.map(background, bytes, READ | WRITE).unwrap();
+        let status = m.memory_status();
+        let cursor = r.next_alloc;
+        assert!(call(
+            &mut r,
+            &mut m,
+            "D3D.Context.Map",
+            &[context, staging, 0, 2, 0, DATA + 2 * PAGE - 8]
+        )
+        .is_err());
+        assert_eq!(m.memory_status(), status);
+        assert_eq!(r.next_alloc, cursor);
+        assert_eq!(
+            call(
+                &mut r,
+                &mut m,
+                "D3D.Context.Map",
+                &[context, staging, 0, 2, 0, DATA + 128]
+            )
+            .unwrap(),
+            0
+        );
+        let mapping = m.read_int(DATA + 128, 8).unwrap();
+        assert_eq!(m.read_int(DATA + 136, 4).unwrap(), 8192 * 4);
+        assert_eq!(m.read_int(DATA + 140, 4).unwrap(), bytes);
+        for offset in [0, 8 * 1024 * 1024 - 4, bytes - 4] {
+            assert_eq!(m.read_int(mapping + offset, 4).unwrap(), 0);
+            m.write_int(mapping + offset, 4, offset + 1).unwrap();
+        }
+        call(&mut r, &mut m, "D3D.Context.Unmap", &[context, staging, 0]).unwrap();
+        assert!(m.read_int(mapping, 1).is_err());
+        assert_eq!(m.memory_status(), status);
+        assert_eq!(
+            call(
+                &mut r,
+                &mut m,
+                "D3D.Context.Map",
+                &[context, staging, 0, 1, 0, DATA + 128]
+            )
+            .unwrap(),
+            0
+        );
+        let mapping = m.read_int(DATA + 128, 8).unwrap();
+        for offset in [0, 8 * 1024 * 1024 - 4, bytes - 4] {
+            assert_eq!(m.read_int(mapping + offset, 4).unwrap(), offset + 1);
+        }
+        call(&mut r, &mut m, "D3D.Child.Release", &[staging]).unwrap();
+        assert!(m.read_int(mapping, 1).is_err());
+        m.unmap(background, bytes).unwrap();
+        call(&mut r, &mut m, "D3D.Context.Release", &[context]).unwrap();
         for (offset, value) in [
             (0, 64u32),
             (4, 32),
@@ -1571,6 +1816,44 @@ mod tests {
         assert!(r.graphics.resources.is_empty());
         // A native texture clone still owns its GPU after guest COM destruction.
         assert_eq!(texture.read(0, 96 * 48 * 4).unwrap().len(), 96 * 48 * 4);
+    }
+    #[test]
+    fn configured_desktop_matches_dxgi_output_modes_and_desc() {
+        let (mut r, mut m) = setup();
+        r.configure_desktop(1920, 1080).unwrap();
+        let f = factory(&mut r, &mut m);
+        call(&mut r, &mut m, "Factory.EnumAdapters1", &[f, 0, DATA + 32]).unwrap();
+        let adapter = m.read_int(DATA + 32, 8).unwrap();
+        call(
+            &mut r,
+            &mut m,
+            "Adapter.EnumOutputs",
+            &[adapter, 0, DATA + 32],
+        )
+        .unwrap();
+        let output = m.read_int(DATA + 32, 8).unwrap();
+        call(&mut r, &mut m, "Output.GetDesc", &[output, DATA + 128]).unwrap();
+        assert_eq!(m.read_int(DATA + 200, 4).unwrap(), 1920);
+        assert_eq!(m.read_int(DATA + 204, 4).unwrap(), 1080);
+        m.write_int(DATA + 96, 4, 1).unwrap();
+        call(
+            &mut r,
+            &mut m,
+            "Output.GetDisplayModeList1",
+            &[output, 87, 0, DATA + 96, DATA + 128],
+        )
+        .unwrap();
+        assert_eq!(m.read_int(DATA + 128, 4).unwrap(), 1920);
+        assert_eq!(m.read_int(DATA + 132, 4).unwrap(), 1080);
+        call(
+            &mut r,
+            &mut m,
+            "Output.FindClosestMatchingMode1",
+            &[output, DATA + 128, DATA + 128, 0],
+        )
+        .unwrap();
+        assert_eq!(m.read_int(DATA + 128, 4).unwrap(), 1920);
+        assert_eq!(m.read_int(DATA + 132, 4).unwrap(), 1080);
     }
     #[test]
     fn virtual_output_identity_win64_desc_and_parent_lifetime_match_display_profile() {

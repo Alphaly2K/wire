@@ -1,6 +1,8 @@
 // Independently implemented owned Vulkan images and synchronous transfer scope.
 // SPDX-License-Identifier: LGPL-2.1-only
 // Typeless is a resource storage choice, never a shader/vertex/view format.
+constexpr uint64_t texture_byte_limit=256ull*1024*1024;
+constexpr size_t texture_transfer_limit=8*1024*1024;
 VkFormat texture_storage_format(uint32_t format,uint32_t bind=0) {
   if(format==39)return (bind&0x40)?VK_FORMAT_D32_SFLOAT:VK_FORMAT_R32_SFLOAT;
   if(format==53)return (bind&0x40)?VK_FORMAT_D16_UNORM:VK_FORMAT_R16_SFLOAT;
@@ -87,7 +89,7 @@ std::unique_ptr<Texture> create_texture(Context& c,const WireTextureDesc& d) {
     throw std::runtime_error("texture dimensions/format/usage unsupported");
   auto t=std::make_unique<Texture>(c,d);uint64_t total=0;
   for(uint32_t mip=0;mip<d.mips;mip++)total+=uint64_t(t->size(mip))*(t->volume()?1:d.layers);
-  if(total>128*1024*1024)throw std::runtime_error("texture allocation limit");
+  if(total>texture_byte_limit)throw std::runtime_error("texture allocation limit");
   VkFormatProperties fp={};c.format_properties(c.physical,t->format,&fp);
   if((d.bind&8) && !(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT))throw std::runtime_error("texture sampling format unsupported");
   if((d.bind&0x20) && !(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT))throw std::runtime_error("render target format unsupported");
@@ -113,6 +115,24 @@ void texture_write(Texture& t,uint32_t subresource,const uint8_t *data,size_t si
   if(subresource>=t.subresources() || !data || t.aspect!=VK_IMAGE_ASPECT_COLOR_BIT)throw std::runtime_error("texture write subresource/aspect");
   uint32_t mip=subresource%t.desc.mips,layer=t.volume()?0:subresource/t.desc.mips;
   if(size!=t.size(mip))throw std::runtime_error("texture tight data size");
+  if(size>64*1024*1024) {
+    uint32_t width=std::max(1u,t.desc.width>>mip),height=std::max(1u,t.desc.height>>mip);
+    size_t row_bytes=size_t((width+t.block-1)/t.block)*t.bytes;
+    uint32_t rows=(height+t.block-1)/t.block;
+    uint32_t band_rows=uint32_t(std::max(size_t(1),texture_transfer_limit/row_bytes));
+    for(uint32_t z=0;z<t.depth(mip);z++)for(uint32_t y=0;y<rows;) {
+      uint32_t count=std::min(rows-y,band_rows);size_t bytes=size_t(count)*row_bytes;
+      auto staging=create_buffer(t.c,data+(size_t(z)*rows+y)*row_bytes,bytes,2);Commands cmd(t.c);
+      t.barrier(cmd.command,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_GENERAL,mip,layer,1,1);
+      VkBufferImageCopy copy={};copy.imageSubresource={t.aspect,mip,layer,1};
+      copy.imageOffset={0,int32_t(y*t.block),int32_t(z)};
+      copy.imageExtent={width,std::min(height-y*t.block,count*t.block),1};
+      t.c.fn<PFN_vkCmdCopyBufferToImage>("vkCmdCopyBufferToImage")(cmd.command,staging->handle,t.handle,VK_IMAGE_LAYOUT_GENERAL,1,&copy);
+      t.barrier(cmd.command,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_GENERAL,mip,layer,1,1);cmd.submit();
+      y+=count;
+    }
+    return;
+  }
   auto staging=create_buffer(t.c,data,size,2);Commands cmd(t.c);
   t.barrier(cmd.command,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_GENERAL,mip,layer,1,1);
   VkBufferImageCopy copy={};copy.imageSubresource={t.aspect,mip,layer,1};copy.imageExtent={std::max(1u,t.desc.width>>mip),std::max(1u,t.desc.height>>mip),t.depth(mip)};
@@ -126,6 +146,34 @@ void texture_read(Texture& t,uint32_t subresource,uint8_t *data,size_t size) {
   if(t.aspect!=VK_IMAGE_ASPECT_COLOR_BIT && !depth)throw std::runtime_error("texture read depth format unsupported");
   uint32_t mip=subresource%t.desc.mips,layer=t.volume()?0:subresource/t.desc.mips;
   if(size!=t.size(mip))throw std::runtime_error("texture tight read size");
+  if(size>64*1024*1024) {
+    uint32_t width=std::max(1u,t.desc.width>>mip),height=std::max(1u,t.desc.height>>mip);
+    size_t row_bytes=size_t((width+t.block-1)/t.block)*t.bytes;
+    uint32_t rows=(height+t.block-1)/t.block;
+    uint32_t band_rows=uint32_t(std::max(size_t(1),texture_transfer_limit/row_bytes));
+    for(uint32_t z=0;z<t.depth(mip);z++)for(uint32_t y=0;y<rows;) {
+      uint32_t count=std::min(rows-y,band_rows);size_t bytes=size_t(count)*row_bytes;
+      auto staging=create_buffer(t.c,nullptr,bytes,2);Commands cmd(t.c);
+      t.barrier(cmd.command,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_GENERAL,mip,layer,1,1);
+      VkBufferImageCopy copies[2]={};auto& copy=copies[0];
+      copy.imageSubresource={depth?VkImageAspectFlags(VK_IMAGE_ASPECT_DEPTH_BIT):t.aspect,mip,layer,1};
+      copy.imageOffset={0,int32_t(y*t.block),int32_t(z)};
+      copy.imageExtent={width,std::min(height-y*t.block,count*t.block),1};
+      size_t pixels=bytes/t.bytes;bool stencil=depth && (t.aspect&VK_IMAGE_ASPECT_STENCIL_BIT);
+      if(stencil) {copies[1]=copy;copies[1].bufferOffset=pixels*4;copies[1].imageSubresource.aspectMask=VK_IMAGE_ASPECT_STENCIL_BIT;}
+      t.c.fn<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(cmd.command,t.handle,VK_IMAGE_LAYOUT_GENERAL,staging->handle,stencil?2:1,copies);
+      VkBufferMemoryBarrier b={VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};b.buffer=staging->handle;b.offset=0;b.size=bytes;
+      b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;b.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;b.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
+      t.c.fn<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(cmd.command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,0,nullptr,1,&b,0,nullptr);
+      cmd.submit();auto output=data+(size_t(z)*rows+y)*row_bytes;
+      if(stencil) {
+        auto source=static_cast<const uint8_t*>(staging->mapped);std::memset(output,0,bytes);
+        for(size_t p=0;p<pixels;p++) {std::memcpy(output+p*8,source+p*4,4);output[p*8+4]=source[pixels*4+p];}
+      }else std::memcpy(output,staging->mapped,bytes);
+      y+=count;
+    }
+    return;
+  }
   auto staging=create_buffer(t.c,nullptr,size,2);Commands cmd(t.c);
   t.barrier(cmd.command,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_GENERAL,mip,layer,1,1);
   VkBufferImageCopy copies[2]={};auto& copy=copies[0];

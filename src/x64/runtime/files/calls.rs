@@ -4,7 +4,7 @@ use crate::{
     win32::{catalog::FileApi, x64::text},
     x64::runtime::{mapping::Mappings, threads::Threads, Memory, READ, WRITE},
 };
-use std::time::UNIX_EPOCH;
+use std::{io::Seek, time::UNIX_EPOCH};
 
 impl Files {
     pub(in crate::x64::runtime) fn mutate_call(
@@ -311,6 +311,30 @@ impl Files {
                     }
                 }
             }
+            FileApi::SetFilePointer => {
+                let distance = if args[2] == 0 {
+                    args[1] as i32 as i64
+                } else {
+                    mem.check(args[2], 4, WRITE)?;
+                    ((mem.read_int(args[2], 4)? << 32) | args[1] as u32 as u64) as i64
+                };
+                match self.seek(args[0], distance, args[3] as u32) {
+                    Ok(position) => {
+                        if args[2] != 0 {
+                            mem.write_int(args[2], 4, position >> 32)?;
+                        }
+                        let low = position as u32;
+                        if low == u32::MAX {
+                            threads.set_error(mem, 0)?;
+                        }
+                        low as u64
+                    }
+                    Err(error) => {
+                        threads.set_error(mem, error)?;
+                        u32::MAX as u64
+                    }
+                }
+            }
             FileApi::SetFilePointerEx => {
                 if args[2] != 0 {
                     mem.check(args[2], 8, WRITE)?;
@@ -456,20 +480,36 @@ impl Files {
         count: usize,
         threads: &Threads,
     ) -> Result<u64, String> {
-        let mut bytes = vec![0; count];
-        let result = match self.read(args[0], &mut bytes) {
-            Ok(read) => {
-                mem.write(args[1], &bytes[..read])?;
-                mem.write_int(args[3], 4, read as u64)?;
-                1
-            }
-            Err(error) => {
-                mem.write_int(args[3], 4, 0)?;
-                threads.set_error(mem, error)?;
-                0
-            }
+        // Keep the existing single read for ordinary transfers. Larger DWORD
+        // requests reuse a 1 MiB scratch buffer after the gateway's full preflight.
+        let chunk = if count <= 16 * 1024 * 1024 {
+            count
+        } else {
+            1024 * 1024
         };
-        Ok(result)
+        let mut bytes = vec![0; chunk];
+        let mut total = 0;
+        loop {
+            let requested = bytes.len().min(count - total);
+            match self.read(args[0], &mut bytes[..requested]) {
+                Ok(read) => {
+                    let output = args[1]
+                        .checked_add(total as u64)
+                        .ok_or("Win64 file read output address overflow")?;
+                    mem.write(output, &bytes[..read])?;
+                    total += read;
+                    if read < requested || total == count {
+                        mem.write_int(args[3], 4, total as u64)?;
+                        return Ok(1);
+                    }
+                }
+                Err(error) => {
+                    mem.write_int(args[3], 4, 0)?;
+                    threads.set_error(mem, error)?;
+                    return Ok(0);
+                }
+            }
+        }
     }
 
     pub(in crate::x64::runtime) fn write_output(
@@ -506,5 +546,36 @@ impl Files {
             }
         };
         Ok(result)
+    }
+
+    pub(in crate::x64::runtime) fn end_of_file_call(
+        &mut self,
+        mem: &mut Memory,
+        args: &[u64],
+        mappings: &Mappings,
+        threads: &Threads,
+    ) -> Result<u64, String> {
+        let result = (|| {
+            let file = self.handles.get_mut(&args[0]).ok_or(6u32)?;
+            if file.access & 2 == 0 || file.directory.is_some() {
+                return Err(5);
+            }
+            let metadata = file.file.metadata().map_err(|e| crate::fs::win_error(&e))?;
+            if mappings.has_file(&metadata)? {
+                return Err(1224);
+            }
+            let end = file
+                .file
+                .stream_position()
+                .map_err(|e| crate::fs::win_error(&e))?;
+            file.file.set_len(end).map_err(|e| crate::fs::win_error(&e))
+        })();
+        match result {
+            Ok(()) => Ok(1),
+            Err(error) => {
+                threads.set_error(mem, error)?;
+                Ok(0)
+            }
+        }
     }
 }

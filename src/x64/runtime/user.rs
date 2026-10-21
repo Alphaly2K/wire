@@ -30,6 +30,7 @@ pub(super) struct Window {
     ready: bool,
 }
 pub(super) struct User {
+    pub(super) display_size: [u32; 2],
     desktop: crate::win32::user::desktop::Settings,
     images: crate::win32::user::images::Images,
     classes: crate::win32::user::classes64::Classes,
@@ -42,11 +43,14 @@ pub(super) struct User {
     dcs: crate::win32::gdi::dc::DeviceContexts,
     pub(super) events: std::collections::VecDeque<message::Message>,
     pub(super) keyboard: crate::keyboard::Keyboard,
+    pub(super) raw_input: crate::win32::user::raw_input::RawInput,
+    pub(super) mouse_pointer: crate::win32::user::mouse_pointer::MousePointer,
     message_state: BTreeMap<u64, [u64; 3]>,
 }
 impl Default for User {
     fn default() -> Self {
         Self {
+            display_size: [super::display::WIDTH, super::display::HEIGHT],
             desktop: Default::default(),
             images: crate::win32::user::images::Images::new(
                 super::TEB + 0x610000,
@@ -70,6 +74,8 @@ impl Default for User {
             ),
             events: std::collections::VecDeque::new(),
             keyboard: Default::default(),
+            raw_input: Default::default(),
+            mouse_pointer: Default::default(),
             message_state: BTreeMap::new(),
         }
     }

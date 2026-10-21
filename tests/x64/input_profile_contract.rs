@@ -45,11 +45,11 @@ fn input_profile_contract_win64_keeps_raw_count_alias_and_validation_precedence(
             &mut rt,
             "user32.dll",
             "GetRawInputDeviceList",
-            &[1, slot, 0xabcdef01_00000010]
+            &[0, slot, 0xabcdef01_00000010]
         ),
         0
     );
-    assert_eq!(mem.read_int(slot, 8).unwrap(), 0x1_00000000);
+    assert_eq!(mem.read_int(slot, 8).unwrap(), 0x1_00000002);
     assert_eq!(cpu.rip, BASE);
     assert_eq!(
         startup_call(&mut mem, &mut cpu, &mut rt, "GetLastError", &[]),
@@ -87,7 +87,7 @@ fn input_profile_contract_win64_removal_keeps_dword_counts_and_full_target_width
     let device = STACK + 0x200;
     mem.write_int(device, 2, 1).unwrap();
     mem.write_int(device + 2, 2, 2).unwrap();
-    for (flags, target, expected, error) in [(0, 0, 0, 50), (1, 0, 1, 123), (1, 1u64 << 32, 0, 50)]
+    for (flags, target, expected, error) in [(0, 0, 1, 123), (1, 0, 1, 123), (1, 1u64 << 32, 0, 87)]
     {
         mem.write_int(device + 4, 4, flags).unwrap();
         mem.write_int(device + 8, 8, target).unwrap();

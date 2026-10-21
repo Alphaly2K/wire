@@ -1,5 +1,7 @@
 # AMD64 / Unity / Mono 启动推进（2026-10-08 接续）
 
+2026-10-20 的[Alice 新接续](reports/alice-execution-2026-10-20.md)已越过下述 SRW 条件变量、文件定位和大纹理边界，并继续原始 guest Mono 执行。以下为此前各阶段的历史记录。
+
 这是接续 `654a605` 的Unity logo之后初始化检查点。普通 `wire run` 仍拒绝 AMD64；
 实际启动使用 `wire probe64 --startup`。解释器是主路径，所有高地址访问仍经过 checked guest memory，
 没有把 guest 机器码交给宿主 CPU，也没有引入 QEMU GPL 实现。

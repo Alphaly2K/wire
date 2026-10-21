@@ -90,6 +90,7 @@ fn thread_properties_keep_pe32_abi_only_and_wrong_provider_cleanup() {
     let mut v = Vm::new();
     for (name, args, bytes) in [
         ("GetThreadId", vec![u32::MAX - 1], 4),
+        ("OpenThread", vec![0x1fffff, 1, 1], 12),
         ("GetThreadErrorMode", vec![], 0),
         ("SetThreadErrorMode", vec![0x8007, DATA], 8),
     ] {

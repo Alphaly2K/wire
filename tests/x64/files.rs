@@ -468,11 +468,11 @@ fn core_file_contract_keeps_win64_widths_preflight_and_return_slot_alias() {
         "user32.dll",
         "ReadFile"
     ));
-    assert!(!wire::x64::runtime::import_supported(
+    assert!(wire::x64::runtime::import_supported(
         "kernel32.dll",
         "SetEndOfFile"
     ));
-    assert!(!wire::x64::runtime::import_supported(
+    assert!(wire::x64::runtime::import_supported(
         "kernel32.dll",
         "SetFilePointer"
     ));
@@ -2399,5 +2399,399 @@ fn win64_file_io_is_real_checks_sharing_and_preflights_before_advancing_offsets(
         "CloseHandle",
         &[duplicate],
     );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn win64_set_file_pointer_keeps_signed_split_offsets_sentinels_and_fault_order() {
+    use wire::x64::runtime::{Control, TEB};
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let root = std::env::temp_dir().join(format!("wire64-split-seek-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("seek.bin"), b"abcdef").unwrap();
+    runtime.set_filesystem(wire::fs::GuestFs::new(&root).unwrap());
+    let path = STACK + 0x100;
+    let output = path + 128;
+    mem.write(path, b"C:\\seek.bin\0").unwrap();
+    let file = startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "CreateFileA",
+        &[path, 0x80000000, 7, 0, 3, 0x80, 0],
+    );
+    assert_ne!(file, u64::MAX);
+    let carrier = 0xfacefeed00000000;
+    for (low, input_high, method, position, error) in [
+        (2, Some(1), 0, 0x100000002u64, 123),
+        (u32::MAX, None, 1, 0x100000001, 123),
+        (u32::MAX, Some(0), 0, 0xffffffff, 0),
+        (1, None, 1, 0x100000000, 123),
+        (u32::MAX, Some(u32::MAX), 1, 0xffffffff, 0),
+    ] {
+        mem.write_int(TEB + 0x68, 4, 123).unwrap();
+        if let Some(high) = input_high {
+            mem.write_int(output, 4, high as u64).unwrap();
+        }
+        let high_ptr = if input_high.is_some() { output } else { 0 };
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "kernelbase.dll",
+                "SetFilePointer",
+                &[file, carrier | low as u64, high_ptr, carrier | method]
+            ),
+            position as u32 as u64
+        );
+        if input_high.is_some() {
+            assert_eq!(mem.read_int(output, 4).unwrap(), position >> 32);
+        }
+        assert_eq!(mem.read_int(TEB + 0x68, 4).unwrap(), error);
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "SetFilePointerEx",
+            &[file, 0, output + 8, 1],
+        );
+        assert_eq!(mem.read_int(output + 8, 8).unwrap(), position);
+    }
+    for (handle, distance, method, error) in [
+        (file, u32::MAX as u64, 0, 131),
+        (file, 0, 5, 87),
+        (carrier | file, 0, 0, 6),
+    ] {
+        assert_eq!(
+            startup_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "SetFilePointer",
+                &[handle, distance, 0, method]
+            ),
+            u32::MAX as u64
+        );
+        assert_eq!(mem.read_int(TEB + 0x68, 4).unwrap(), error);
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "SetFilePointerEx",
+            &[file, 0, output + 8, 1],
+        );
+        assert_eq!(mem.read_int(output + 8, 8).unwrap(), 0xffffffff);
+    }
+    // The high word is exactly four bytes, including at the mapping boundary.
+    let tail = STACK + 8192 - 4;
+    mem.write_int(tail, 4, 0).unwrap();
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "SetFilePointer",
+            &[file, 3, tail, 0]
+        ),
+        3
+    );
+    for high_ptr in [STACK + 8192 - 2, 0xdeadbeef, output] {
+        cpu.regs[4] = STACK + 0x1f88;
+        mem.write_int(cpu.regs[4], 8, BASE).unwrap();
+        for (reg, value) in [1, 2, 8, 9].into_iter().zip([file, 0, high_ptr, 0]) {
+            cpu.regs[reg] = value;
+        }
+        if high_ptr == output {
+            mem.protect(STACK, 4096, READ).unwrap();
+        }
+        let before = cpu.clone();
+        let count = runtime.api_calls;
+        assert!(runtime
+            .dispatch("kernel32.dll", "SetFilePointer", &mut cpu, &mut mem)
+            .is_err());
+        assert_eq!(cpu, before);
+        assert_eq!(runtime.api_calls, count);
+        mem.protect(STACK, 4096, READ | WRITE).unwrap();
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "SetFilePointerEx",
+            &[file, 0, output + 8, 1],
+        );
+        assert_eq!(mem.read_int(output + 8, 8).unwrap(), 3);
+    }
+    // Read the high distance before replacing it, while preserving the saved return address.
+    startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "SetFilePointerEx",
+        &[file, 0x100000000, 0, 0],
+    );
+    cpu.regs[4] = STACK + 0x1f88;
+    mem.write_int(cpu.regs[4], 8, 0xffffffff).unwrap();
+    for (reg, value) in [1, 2, 8, 9].into_iter().zip([file, 0, cpu.regs[4], 1]) {
+        cpu.regs[reg] = value;
+    }
+    assert_eq!(
+        runtime
+            .dispatch("kernel32.dll", "SetFilePointer", &mut cpu, &mut mem)
+            .unwrap(),
+        Control::Returned
+    );
+    assert_eq!(cpu.rip, 0xffffffff);
+    assert_eq!(mem.read_int(STACK + 0x1f88, 8).unwrap(), 0);
+    assert_eq!(cpu.regs[0], 0);
+    assert!(!wire::x64::runtime::import_supported(
+        "user32.dll",
+        "SetFilePointer"
+    ));
+    startup_call(&mut mem, &mut cpu, &mut runtime, "CloseHandle", &[file]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn win64_set_end_of_file_changes_length_preserves_cursor_and_rejects_mapped_or_readonly_files() {
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let root = std::env::temp_dir().join(format!("wire64-end-of-file-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("length.bin"), b"abcdefgh").unwrap();
+    runtime.set_filesystem(wire::fs::GuestFs::new(&root).unwrap());
+    let path = STACK + 0x100;
+    let output = path + 128;
+    mem.write(path, b"C:\\length.bin\0").unwrap();
+    let file = startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "CreateFileA",
+        &[path, 0xc0000000, 7, 0, 3, 0x80, 0],
+    );
+    let reader = startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "CreateFileA",
+        &[path, 0x80000000, 7, 0, 3, 0x80, 0],
+    );
+    assert_ne!(file, u64::MAX);
+    startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "SetFilePointerEx",
+        &[file, 4, 0, 0],
+    );
+    mem.write_int(wire::x64::runtime::TEB + 0x68, 4, 123)
+        .unwrap();
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "kernelbase.dll",
+            "SetEndOfFile",
+            &[file]
+        ),
+        1
+    );
+    assert_eq!(std::fs::read(root.join("length.bin")).unwrap(), b"abcd");
+    assert_eq!(
+        mem.read_int(wire::x64::runtime::TEB + 0x68, 4).unwrap(),
+        123
+    );
+    startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "SetFilePointerEx",
+        &[file, 0, output, 1],
+    );
+    assert_eq!(mem.read_int(output, 8).unwrap(), 4);
+    startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "SetFilePointerEx",
+        &[file, 8, 0, 0],
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "SetEndOfFile", &[file]),
+        1
+    );
+    assert_eq!(
+        std::fs::read(root.join("length.bin")).unwrap(),
+        b"abcd\0\0\0\0"
+    );
+    for (handle, error) in [(reader, 5), (0xfacefeed00000000 | file, 6)] {
+        assert_eq!(
+            startup_call(&mut mem, &mut cpu, &mut runtime, "SetEndOfFile", &[handle]),
+            0
+        );
+        assert_eq!(
+            startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+            error
+        );
+        assert_eq!(std::fs::metadata(root.join("length.bin")).unwrap().len(), 8);
+    }
+    let section = startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "CreateFileMappingW",
+        &[reader, 0, 2, 0, 0, 0],
+    );
+    assert_ne!(section, 0);
+    let view = startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "MapViewOfFile",
+        &[section, 4, 0, 0, 8],
+    );
+    assert_ne!(view, 0);
+    startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "SetFilePointerEx",
+        &[file, 2, 0, 0],
+    );
+    for close_section in [false, true] {
+        if close_section {
+            startup_call(&mut mem, &mut cpu, &mut runtime, "CloseHandle", &[section]);
+        }
+        assert_eq!(
+            startup_call(&mut mem, &mut cpu, &mut runtime, "SetEndOfFile", &[file]),
+            0
+        );
+        assert_eq!(
+            startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+            1224
+        );
+        assert_eq!(std::fs::metadata(root.join("length.bin")).unwrap().len(), 8);
+        assert_eq!(
+            mem.read_int(view, 4).unwrap(),
+            u32::from_le_bytes(*b"abcd") as u64
+        );
+    }
+    startup_call(&mut mem, &mut cpu, &mut runtime, "UnmapViewOfFile", &[view]);
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut runtime, "SetEndOfFile", &[file]),
+        1
+    );
+    assert_eq!(std::fs::read(root.join("length.bin")).unwrap(), b"ab");
+    cpu.regs[4] = 0xdeadbeef;
+    cpu.regs[1] = file;
+    let before = cpu.clone();
+    assert!(runtime
+        .dispatch("kernel32.dll", "SetEndOfFile", &mut cpu, &mut mem)
+        .is_err());
+    assert_eq!(cpu, before);
+    assert_eq!(std::fs::metadata(root.join("length.bin")).unwrap().len(), 2);
+    for handle in [file, reader] {
+        startup_call(&mut mem, &mut cpu, &mut runtime, "CloseHandle", &[handle]);
+    }
+    assert!(!wire::x64::runtime::import_supported(
+        "user32.dll",
+        "SetEndOfFile"
+    ));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn win64_large_synchronous_reads_use_checked_outputs_short_reads_and_eof_without_cursor_loss() {
+    const BUFFER: u64 = 0x593000000;
+    const REQUEST: usize = 64 * 1024 * 1024;
+    let (mut mem, mut cpu, mut runtime) = startup();
+    let root = std::env::temp_dir().join(format!("wire64-large-read-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let bytes: Vec<u8> = (0..17 * 1024 * 1024 + 3)
+        .map(|i| (i ^ (i >> 16)) as u8)
+        .collect();
+    std::fs::write(root.join("large.bin"), &bytes).unwrap();
+    runtime.set_filesystem(wire::fs::GuestFs::new(&root).unwrap());
+    mem.map(BUFFER, REQUEST as u64, READ | WRITE).unwrap();
+    mem.write_int(BUFFER, 4, 0xabcdef12).unwrap();
+    mem.write_int(BUFFER + bytes.len() as u64, 4, 0xabcdef12)
+        .unwrap();
+    let path = STACK + 0x100;
+    let count = path + 128;
+    mem.write(path, b"C:\\large.bin\0").unwrap();
+    let file = startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "CreateFileA",
+        &[path, 0x80000000, 7, 0, 3, 0x80, 0],
+    );
+    mem.write_int(count, 4, 0xabcdef12).unwrap();
+    cpu.regs[4] = STACK + 0x1f88;
+    mem.write_int(cpu.regs[4], 8, BASE).unwrap();
+    mem.write_int(cpu.regs[4] + 40, 8, 0).unwrap();
+    for (reg, value) in [1, 2, 8, 9]
+        .into_iter()
+        .zip([file, BUFFER, REQUEST as u64, count])
+    {
+        cpu.regs[reg] = value;
+    }
+    // Even a range past the actual file's EOF is preflighted before reading it.
+    mem.protect(BUFFER + REQUEST as u64 - 4096, 4096, READ)
+        .unwrap();
+    let before = cpu.clone();
+    let calls = runtime.api_calls;
+    assert!(runtime
+        .dispatch("kernel32.dll", "ReadFile", &mut cpu, &mut mem)
+        .is_err());
+    assert_eq!(cpu, before);
+    assert_eq!(runtime.api_calls, calls);
+    assert_eq!(mem.read_int(count, 4).unwrap(), 0xabcdef12);
+    assert_eq!(mem.read_int(BUFFER, 4).unwrap(), 0xabcdef12);
+    mem.protect(BUFFER + REQUEST as u64 - 4096, 4096, READ | WRITE)
+        .unwrap();
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "ReadFile",
+            &[file, BUFFER, REQUEST as u64, count, 0]
+        ),
+        1
+    );
+    assert_eq!(mem.read_int(count, 4).unwrap(), bytes.len() as u64);
+    let mut actual = vec![0; bytes.len()];
+    mem.read(BUFFER, &mut actual).unwrap();
+    assert_eq!(actual, bytes);
+    assert_eq!(
+        mem.read_int(BUFFER + bytes.len() as u64, 4).unwrap(),
+        0xabcdef12
+    );
+    startup_call(
+        &mut mem,
+        &mut cpu,
+        &mut runtime,
+        "SetFilePointerEx",
+        &[file, 0, count + 8, 1],
+    );
+    assert_eq!(mem.read_int(count + 8, 8).unwrap(), bytes.len() as u64);
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "ReadFile",
+            &[file, BUFFER, REQUEST as u64, count, 0]
+        ),
+        1
+    );
+    assert_eq!(mem.read_int(count, 4).unwrap(), 0);
+    assert_eq!(
+        mem.read_int(BUFFER, 4).unwrap(),
+        u32::from_le_bytes(bytes[..4].try_into().unwrap()) as u64
+    );
+    startup_call(&mut mem, &mut cpu, &mut runtime, "CloseHandle", &[file]);
     std::fs::remove_dir_all(root).unwrap();
 }

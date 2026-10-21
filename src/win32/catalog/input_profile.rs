@@ -1,4 +1,4 @@
-//! Existing absent-device/input-context behavior, including historical providers.
+//! Host raw-input and absent IME-context contracts, including historical providers.
 use super::{ApiId, ArchitecturePlan, Contract, ExecutionPolicy, Parameter, ReturnConvention};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,7 +45,7 @@ const fn declaration(
         name,
         parameters,
         returns,
-        "PE32 known ABI-only; Win64 no raw delivery/backend or IME/HIMC; preserve empty queries/removal, HWND validation and error/output/saved-frame order; kernel providers remain static-import-only, IME retains historical user32 lookup",
+        "PE32 known ABI-only; Win64 foreground host mouse/keyboard raw delivery with checked registration/packet/query output, no background/HID or IME/HIMC; kernel providers remain static-import-only, IME retains historical user32 lookup",
         [
             ArchitecturePlan {
                 dlls: if ime { &["imm32.dll"] } else { &["user32.dll"] },

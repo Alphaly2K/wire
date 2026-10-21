@@ -5,6 +5,26 @@ use std::{
     path::PathBuf,
     time::{Duration, Instant},
 };
+
+pub(crate) fn trace_input(stage: &str, window: u64, message: u32, wp: u64, lp: u64, tid: u64) {
+    use std::sync::{
+        atomic::{AtomicU32, Ordering},
+        OnceLock,
+    };
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    static EVENTS: AtomicU32 = AtomicU32::new(0);
+    static MOVES: AtomicU32 = AtomicU32::new(0);
+    if !*ENABLED.get_or_init(|| std::env::var_os("WIRE_INPUT_TRACE").is_some()) {
+        return;
+    }
+    let counter = if message == 0x200 { &MOVES } else { &EVENTS };
+    let limit = if message == 0x200 { 512 } else { 4096 };
+    if counter.fetch_add(1, Ordering::Relaxed) < limit {
+        eprintln!(
+            "input {stage}: HWND={window:#x} msg={message:#x} wp={wp:#x} lp={lp:#x} tid={tid}"
+        );
+    }
+}
 #[repr(C)]
 #[derive(Default)]
 pub(crate) struct Event {
@@ -256,7 +276,8 @@ impl Presenter {
         }
     }
 }
-/// Plain native input; the guest adapter maps the window ID and message fields.
+/// Native mouse coordinates are signed client pixels, including wheel events.
+/// The guest adapter maps window IDs and converts wheel points to guest screen pixels.
 pub struct WindowEvent {
     pub window: u32,
     pub message: u32,

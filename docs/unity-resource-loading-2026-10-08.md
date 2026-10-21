@@ -1,5 +1,7 @@
 # Unity logo 后的资源加载接续（2026-10-08）
 
+2026-10-20 的[新接续](reports/alice-execution-2026-10-20.md)已越过本文的 SleepConditionVariableSRW、文件定位和大纹理边界；下文保留当时的功能检查点。
+
 接续 `9a22054` 的性能检查点。主路径仍是 checked AMD64 IR/解释器，
 没有宿主执行 guest x86、扩大 FLAGS 丢弃或绕过数据/代码权限。
 性能 AB/BA 结果仍见 [上一轮性能记录](performance-unity-logo-2026-10-08.md)；

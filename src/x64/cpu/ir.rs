@@ -294,11 +294,11 @@ impl ScalarIr {
             ir.src = 0;
             ir.aux =
                 Self::type_code(if high { bits } else { bits / 2 })? | if high { 4 } else { 0 };
-            ir.addressing |= REGISTER_ONLY;
+            ir.addressing |= REGISTER_ONLY | CHECKED_SEGMENT;
             return Some(ir);
         }
         if op == NOP {
-            ir.addressing |= REGISTER_ONLY;
+            ir.addressing |= REGISTER_ONLY | CHECKED_SEGMENT;
             return Some(ir);
         }
         if op == RETURN {
@@ -403,15 +403,33 @@ impl ScalarIr {
                 | CMOV
                 | SET
                 | BRANCH
+                | ZERO_EXTEND
+                | SIGN_EXTEND
+                | SHIFT
+                | IMUL
+                | BSWAP
+                | BIT_SCAN
+                | EXTEND_ACC
         ) || self.opcode >> 2 == JUMP && self.dst != MEMORY
+            || self.opcode >> 2 == BIT_TEST && self.dst != MEMORY
+            || (VECTOR_FIRST..STRING).contains(&(self.opcode >> 2))
+            || self.opcode >> 2 >= fp::FIRST
     }
     // Inspect only this instruction's access. Permissions and guard effects
     // remain in the ordinary checked executor, in guest execution order.
     fn checked_access(&self, cpu: &Cpu64, mem: &Memory) -> bool {
-        if self.opcode >> 2 == LEA || self.dst != MEMORY && self.src != MEMORY {
+        let op = self.opcode >> 2;
+        // Reads cannot replace the remaining code. The ordinary executor still
+        // checks their full width, permissions and guards in instruction order.
+        if self.dst != MEMORY || matches!(op, LEA | CMP | TEST) {
             return true;
         }
-        mem.owned_noncode_access(self.address(cpu), 1usize << (self.opcode & 3))
+        let size = if (VECTOR_FIRST..STRING).contains(&op) {
+            vector::memory_size(self)
+        } else {
+            1usize << (self.opcode & 3)
+        };
+        mem.owned_noncode_access(self.address(cpu), size)
     }
     fn type_code(bits: u32) -> Option<u8> {
         Some(match bits {
@@ -587,6 +605,36 @@ impl ScalarIr {
         cpu.retired += 1;
         cpu.work += 1;
         Ok(())
+    }
+
+    #[inline(always)]
+    fn step_checked_scalar(&self, cpu: &mut Cpu64, mem: &mut Memory) -> Result<(), String> {
+        debug_assert!(self.is_scalar() && self.checked_member());
+        mem.diagnostic_operands(self.dst == MEMORY || self.src == MEMORY);
+        let flags = cpu.rflags;
+        let rip = cpu.rip;
+        cpu.rip = rip.wrapping_add(self.len as u64);
+        if let Err(e) = self.execute::<_, true>(cpu, mem) {
+            cpu.rflags = flags;
+            cpu.rip = rip;
+            return Err(format!("{rip:#x} scalar IR opcode {}: {e}", self.opcode));
+        }
+        cpu.retired += 1;
+        cpu.work += 1;
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn execute_checked_scalar(&self, cpu: &mut Cpu64, mem: &mut Memory) -> Result<(), String> {
+        debug_assert!(self.is_scalar() && self.checked_member());
+        // Admitted instructions finish all fallible reads before changing a
+        // register. A failing store can change only FLAGS before it fails.
+        let flags = cpu.rflags;
+        let result = self.execute::<_, true>(cpu, mem);
+        if result.is_err() {
+            cpu.rflags = flags;
+        }
+        result
     }
 
     #[inline(always)]

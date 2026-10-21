@@ -24,7 +24,13 @@ impl User {
             ),
             Capabilities | PixelFormat => self.dcs.validate(args[0]).map(|()| {
                 if id == Capabilities {
-                    capabilities64(args[1] as u32)
+                    match args[1] as u32 {
+                        4 => (self.display_size[0] as u64 * 254 + 480) / 960,
+                        6 => (self.display_size[1] as u64 * 254 + 480) / 960,
+                        8 | 118 => self.display_size[0] as u64,
+                        10 | 117 => self.display_size[1] as u64,
+                        index => capabilities64(index),
+                    }
                 } else {
                     0
                 }

@@ -4,6 +4,7 @@ use super::{ApiId, ArchitecturePlan, Contract, ExecutionPolicy, Parameter, Retur
 pub enum ThreadControlApi {
     Create,
     Exit,
+    FreeAndExit,
     QueueApc,
     Context,
     SetDescription,
@@ -36,7 +37,7 @@ const fn declaration(
 use Parameter::{Pointer as P, Uint32 as D};
 use ReturnConvention::{BoolLastError as B, Hresult as H, Pointer as R, Uint32 as U, Void as V};
 
-pub static THREAD_CONTROL_CONTRACTS: [Contract; 6] = [
+pub static THREAD_CONTROL_CONTRACTS: [Contract; 7] = [
     declaration(
         ThreadControlApi::Create,
         "CreateThread",
@@ -45,6 +46,13 @@ pub static THREAD_CONTROL_CONTRACTS: [Contract; 6] = [
         true,
     ),
     declaration(ThreadControlApi::Exit, "ExitThread", &[D], V, true),
+    declaration(
+        ThreadControlApi::FreeAndExit,
+        "FreeLibraryAndExitThread",
+        &[P, D],
+        V,
+        false,
+    ),
     declaration(
         ThreadControlApi::QueueApc,
         "QueueUserAPC",

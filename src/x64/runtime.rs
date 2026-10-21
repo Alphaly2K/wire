@@ -76,6 +76,7 @@ pub struct WindowInfo {
     pub topmost: bool,
 }
 #[derive(Debug, Clone, Copy)]
+/// Native input with full guest HWNDs and signed client mouse coordinates.
 pub struct WindowEvent {
     pub window: u64,
     pub message: u32,
@@ -1274,7 +1275,7 @@ impl Runtime64 {
                     threads::ThreadControlResult::Value(value) => value,
                     threads::ThreadControlResult::Exit(code) => {
                         self.api_calls += 1;
-                        self.record(dll, name, args, args[0]);
+                        self.record(dll, name, args, code as u64);
                         return Ok(Control::ThreadExited(code));
                     }
                     threads::ThreadControlResult::Context { thread, flags } => {
@@ -1367,6 +1368,10 @@ impl Runtime64 {
             _ if file == Some(FileApi::NtQueryDirectory) => {
                 self.files.nt_query_directory(mem, args)?
             }
+            _ if file == Some(FileApi::SetEndOfFile) => {
+                self.files
+                    .end_of_file_call(mem, args, &self.mappings, &self.threads)?
+            }
             _ if file == Some(FileApi::GetFileInformationByHandleEx)
                 && matches!(args[1], 14 | 15) =>
             {
@@ -1381,6 +1386,7 @@ impl Runtime64 {
                         | FileApi::GetFileSizeEx
                         | FileApi::GetFileSize
                         | FileApi::FlushFileBuffers
+                        | FileApi::SetFilePointer
                         | FileApi::SetFilePointerEx
                         | FileApi::GetFileAttributesW
                         | FileApi::GetFileAttributesA
@@ -1532,12 +1538,16 @@ impl Runtime64 {
             }
             _ if file == Some(FileApi::ReadFile) => {
                 let count = args[2] as usize;
-                if args[4] != 0 || count > 16 * 1024 * 1024 || args[3] == 0 {
-                    return Err("unsupported Win64 ReadFile overlap/size/result pointer".into());
+                let regular_file = self.files.flags(args[0]).is_some();
+                if args[4] != 0 || (!regular_file && count > 16 * 1024 * 1024) || args[3] == 0 {
+                    return Err(format!(
+                        "unsupported Win64 ReadFile overlap/size/result pointer: overlap={:#x} size={} result={:#x}",
+                        args[4], count, args[3]
+                    ));
                 }
                 mem.check(args[1], count, WRITE)?;
                 mem.check(args[3], 4, WRITE)?;
-                if self.files.flags(args[0]).is_some() {
+                if regular_file {
                     let result = self.files.read_output(mem, args, count, &self.threads)?;
                     returned.regs[0] = result;
                     *cpu = returned;
@@ -1649,6 +1659,19 @@ impl Runtime64 {
                     Outcome::BlockOnce(pointer) => {
                         self.block(threads::Block::Once(pointer))?;
                         return Ok(Control::Blocked);
+                    }
+                    Outcome::SleepCondition => {
+                        match self
+                            .threads
+                            .sleep_condition(mem, args, &mut self.srw, last_error)?
+                        {
+                            Some(value) => value,
+                            None => return Ok(Control::Blocked),
+                        }
+                    }
+                    Outcome::WakeCondition { pointer, all } => {
+                        self.threads.wake_condition(pointer, all);
+                        0
                     }
                 }
             }

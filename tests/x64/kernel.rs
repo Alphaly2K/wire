@@ -615,6 +615,78 @@ fn win64_small_heap_blocks_pack_reuse_and_reallocate_without_overlapping_live_da
 }
 
 #[test]
+fn win64_heap_in_place_reallocation_preserves_address_or_leaves_block_unchanged() {
+    let (mut mem, mut cpu, mut rt) = startup();
+    let heap = startup_call(&mut mem, &mut cpu, &mut rt, "GetProcessHeap", &[]);
+    for (initial, within, beyond) in [(17, 32, 33), (0x417, 0x800, 0x817), (4097, 8192, 8193)] {
+        let p = startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut rt,
+            "HeapAlloc",
+            &[heap, 0, initial],
+        );
+        mem.write(p, &vec![0xa5; initial as usize]).unwrap();
+        startup_call(&mut mem, &mut cpu, &mut rt, "SetLastError", &[123]);
+        let pages = mem.memory_status();
+        for size in [beyond, u64::MAX] {
+            assert_eq!(
+                startup_call(
+                    &mut mem,
+                    &mut cpu,
+                    &mut rt,
+                    "HeapReAlloc",
+                    &[heap, 0x10, p, size]
+                ),
+                0
+            );
+            assert_eq!(
+                startup_call(&mut mem, &mut cpu, &mut rt, "HeapSize", &[heap, 0, p]),
+                initial
+            );
+            assert_eq!(
+                startup_call(&mut mem, &mut cpu, &mut rt, "GetLastError", &[]),
+                123
+            );
+            assert_eq!(mem.memory_status(), pages);
+            assert_eq!(mem.read_int(p, 8).unwrap(), 0xa5a5a5a5a5a5a5a5);
+        }
+        assert_eq!(
+            startup_call(
+                &mut mem,
+                &mut cpu,
+                &mut rt,
+                "HeapReAlloc",
+                &[heap, 0x19, p, within]
+            ),
+            p
+        );
+        let mut bytes = vec![0; within as usize];
+        mem.read(p, &mut bytes).unwrap();
+        assert!(bytes[..initial as usize].iter().all(|&b| b == 0xa5));
+        assert!(bytes[initial as usize..].iter().all(|&b| b == 0));
+        assert_eq!(
+            startup_call(
+                &mut mem,
+                &mut cpu,
+                &mut rt,
+                "HeapReAlloc",
+                &[heap, 0x10, p, 0]
+            ),
+            p
+        );
+        assert_eq!(
+            startup_call(&mut mem, &mut cpu, &mut rt, "HeapSize", &[heap, 0, p]),
+            0
+        );
+        assert_eq!(
+            startup_call(&mut mem, &mut cpu, &mut rt, "HeapFree", &[heap, 0, p]),
+            1
+        );
+    }
+}
+
+#[test]
 fn win64_system_times_use_real_cpu_counters_and_preflight_all_outputs() {
     let (mut mem, mut cpu, mut runtime) = startup();
     const DATA: u64 = 0x6d0000000;
@@ -1922,7 +1994,10 @@ fn win64_memory_status_reports_actual_guest_commit_limit_and_reservations() {
         1
     );
     let before = mem.read_int(pointer + 16, 8).unwrap();
-    assert_eq!(mem.read_int(pointer + 8, 8).unwrap(), 512 * 1024 * 1024);
+    assert_eq!(
+        mem.read_int(pointer + 8, 8).unwrap(),
+        2 * 1024 * 1024 * 1024
+    );
     let allocation = mem.virtual_alloc(0, 8192, 0x3000, 4).unwrap();
     startup_call(
         &mut mem,

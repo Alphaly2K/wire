@@ -9,6 +9,9 @@ use std::{
     rc::Rc,
 };
 
+/// Per-texture allocation/readback bound, including all mip levels and layers.
+pub const TEXTURE_BYTE_LIMIT: usize = 256 * 1024 * 1024;
+
 #[derive(Clone, Debug)]
 pub struct AdapterInfo {
     pub name: String,
@@ -355,7 +358,7 @@ impl Texture {
         self.0.desc
     }
     pub fn read(&self, subresource: u32, size: usize) -> Result<Vec<u8>, String> {
-        if size > 128 * 1024 * 1024 {
+        if size > TEXTURE_BYTE_LIMIT {
             return Err("texture read capacity".into());
         }
         let mut output = vec![0; size];
@@ -1009,6 +1012,49 @@ impl NativeGraphics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires native Vulkan/MoltenVK and a 256 MiB atlas allocation"]
+    fn native_large_atlas_roundtrip_uses_bounded_transfers_and_retained_views() {
+        use sha2::{Digest, Sha256};
+        let path = |n| std::path::PathBuf::from(std::env::var_os(n).expect(n));
+        let graphics =
+            NativeGraphics::load(&path("WIRE_NATIVE_GRAPHICS"), &path("WIRE_MOLTENVK")).unwrap();
+        let desc = TextureDesc {
+            width: 8192,
+            height: 8192,
+            mips: 1,
+            layers: 1,
+            format: 28,
+            bind: 8,
+        };
+        assert!(graphics
+            .create_texture(TextureDesc { mips: 2, ..desc })
+            .is_err());
+        let texture = graphics.create_texture(desc).unwrap();
+        let mut pixels = vec![0; TEXTURE_BYTE_LIMIT];
+        for (i, pixel) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            pixel.copy_from_slice(&(i as u32).to_le_bytes());
+        }
+        let expected = Sha256::digest(&pixels);
+        texture.write(0, &pixels).unwrap();
+        let view = texture
+            .view(ImageViewDesc {
+                format: 28,
+                mip: 0,
+                mips: 1,
+                layer: 0,
+                layers: 1,
+                kind: 0,
+            })
+            .unwrap();
+        drop(pixels);
+        drop(texture);
+        drop(graphics);
+        assert!(view.texture.read(0, TEXTURE_BYTE_LIMIT + 4).is_err());
+        let actual = view.texture.read(0, TEXTURE_BYTE_LIMIT).unwrap();
+        assert_eq!(Sha256::digest(&actual), expected);
+    }
+
     #[test]
     #[ignore = "requires explicit native library and MoltenVK"]
     fn native_views_keep_resources_and_device_alive_and_reject_foreign_copies() {

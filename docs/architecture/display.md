@@ -2,7 +2,7 @@
 
 `win32/catalog/display.rs` 是 16 项显示 API 的 ABI、provider、动态查询范围和 typed ID 的唯一声明。绑定时解析名称，标量调用使用 `DisplayApi`；Win64 `EnumDisplayMonitors` 使用 `ControlImport::MonitorEnumeration`，PE32 使用 Process 的具名 callback 协调器。
 
-`win32/user/display.rs` 提供不可变 1024×768、32-bit、60-Hz desktop profile，以及 DISPLAY_DEVICE、DEVMODE、MONITORINFO 的显式 little-endian 编码和 metrics 纯核。它不访问 guest 内存或执行 CPU。`win32/x86/display.rs` 和 `x64/runtime/display.rs` 保留架构验证与输出提交；monitor callback 的临时 heap、guest executor、frame 和释放顺序由原进程路径管理。
+`win32/user/display.rs` 提供默认 1024×768、32-bit、60-Hz desktop profile，以及 DISPLAY_DEVICE、DEVMODE、MONITORINFO 的显式 little-endian 编码和 metrics 纯核。它不访问 guest 内存或执行 CPU。Win64 可在执行 guest 前用 `probe64 --desktop-size WIDTHxHEIGHT` 选择 64..8192 范围的逻辑桌面；既有默认值和 PE32 profile 保留。User 的单一尺寸同时供 Win32 metrics/mode/monitor、monitor callback、DXGI output/mode、GDI 分辨率/96-DPI 物理尺寸、游标 screen/clip 与初始窗口约束使用。执行开始后禁止更改，不模拟热插拔或 Windows 运行中切换显示模式。native 窗口按宿主可见区域等比缩放，不据此改变 guest 桌面。`win32/x86/display.rs` 和 `x64/runtime/display.rs` 保留架构验证与输出提交；monitor callback 的临时 heap、guest executor、frame 和释放顺序由原进程路径管理。
 
 Win64 标量查询由 User 执行，只借 Memory 和只读 Threads；Runtime64 只组合资源。HWND 检查、DEVMODE/设备输出、flags 与错误槽访问保持原顺序，EnumDisplayMonitors 的 callback coordinator 保持独立。
 

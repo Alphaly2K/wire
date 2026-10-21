@@ -383,6 +383,52 @@ impl Fpu {
         let flags = self.compare(a, b, quiet);
         self.sw = (self.sw & !(C0 | C2 | C3)) | flags;
     }
+    pub(crate) fn remainder(&mut self) {
+        let a = self.get(0);
+        let b = self.get(1);
+        self.operands(&[a, b]);
+        let difference = if a.is_finite_non_zero() && b.is_finite_non_zero() {
+            a.ilogb() - b.ilogb()
+        } else {
+            0
+        };
+        // Reducing by a scaled divisor removes at least 32 exponent bits per
+        // step. C2 tells the guest to repeat until the quotient fits in 64 bits.
+        let partial = difference >= 64;
+        let divisor = if partial {
+            b.scalbn(difference - 32)
+        } else {
+            b
+        };
+        let result = a.c_fmod(divisor);
+        self.status(result.status);
+        let value = if result.status.contains(Status::INVALID_OP) && !a.is_nan() && !b.is_nan() {
+            Ext::from_bits(INDEFINITE)
+        } else {
+            result.value
+        };
+        self.put(0, value);
+        if partial {
+            self.sw |= C2;
+        } else if value.is_finite() {
+            // Toward-zero FP80 division retains every integer quotient bit
+            // when the exponent difference is below 64, independent of CW.
+            let quotient = if a.is_zero() || b.is_infinite() {
+                0
+            } else {
+                a.abs()
+                    .div_r(b.abs(), Round::TowardZero)
+                    .value
+                    .to_u128_r(64, Round::TowardZero, &mut false)
+                    .value as u64
+            };
+            // Condition bits encode the quotient magnitude.
+            self.sw = (self.sw & !(C0 | C1 | C2 | C3))
+                | ((quotient as u16 & 4) << 6)
+                | ((quotient as u16 & 2) << 13)
+                | ((quotient as u16 & 1) << 9);
+        }
+    }
     pub(crate) fn sqrt(&mut self, x: Ext) -> Ext {
         self.operands(&[x]);
         if x.is_nan() {

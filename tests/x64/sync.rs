@@ -86,6 +86,10 @@ fn inline_sync_keeps_win64_providers_return_faults_and_condition_tokens() {
             ("TryAcquireSRWLockExclusive", vec![pointer]),
             ("TryAcquireSRWLockShared", vec![pointer]),
             ("InitializeConditionVariable", vec![pointer]),
+            (
+                "SleepConditionVariableSRW",
+                vec![pointer, pointer + 8, 0, 0],
+            ),
             ("WakeConditionVariable", vec![pointer]),
             ("WakeAllConditionVariable", vec![pointer]),
             (
@@ -1348,6 +1352,125 @@ fn amd64_address_wait_queues_wake_first_arrival_and_all_across_single_step_budge
 }
 
 #[test]
+fn open_thread_uses_guest_identity_independent_handles_and_dword_arguments() {
+    let high = 0xfacefeed_00000000;
+    for dll in ["kernel32.dll", "KERNELBASE.dll"] {
+        let (mut mem, mut cpu, mut runtime) = startup();
+        let flags = STACK + 0x100;
+        startup_call(&mut mem, &mut cpu, &mut runtime, "SetLastError", &[123]);
+        let first = startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            dll,
+            "OpenThread",
+            &[high | 0x1fffff, high | 1, high | 1],
+        );
+        assert_ne!(first, 0);
+        assert_eq!(
+            startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+            123
+        );
+        assert_eq!(
+            startup_call(&mut mem, &mut cpu, &mut runtime, "GetThreadId", &[first]),
+            1
+        );
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetHandleInformation",
+            &[first, flags],
+        );
+        assert_eq!(mem.read_int(flags, 4).unwrap(), 1);
+        let second = startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            dll,
+            "OpenThread",
+            &[0x1fffff, high, 1],
+        );
+        assert_ne!(second, first);
+        assert_ne!(second, 0);
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            "GetHandleInformation",
+            &[second, flags],
+        );
+        assert_eq!(mem.read_int(flags, 4).unwrap(), 0);
+        assert_eq!(
+            startup_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "SetThreadPriority",
+                &[first, 2]
+            ),
+            1
+        );
+        assert_eq!(
+            startup_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                "GetThreadPriority",
+                &[second]
+            ),
+            2
+        );
+        assert_eq!(
+            startup_call(&mut mem, &mut cpu, &mut runtime, "CloseHandle", &[first]),
+            1
+        );
+        assert_eq!(
+            startup_call(&mut mem, &mut cpu, &mut runtime, "GetThreadId", &[second]),
+            1
+        );
+        assert_eq!(
+            startup_call(&mut mem, &mut cpu, &mut runtime, "CloseHandle", &[second]),
+            1
+        );
+        for (access, id, error) in [(0x1fffff, 0, 87), (0x1fffff, 65, 87), (0x04000000, 1, 50)] {
+            assert_eq!(
+                startup_dll_call(
+                    &mut mem,
+                    &mut cpu,
+                    &mut runtime,
+                    dll,
+                    "OpenThread",
+                    &[access, 0, id]
+                ),
+                0
+            );
+            assert_eq!(
+                startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
+                error
+            );
+        }
+        let reopened = startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            dll,
+            "OpenThread",
+            &[0, 0, 1],
+        );
+        assert_ne!(reopened, 0);
+        assert_eq!(
+            startup_call(&mut mem, &mut cpu, &mut runtime, "GetCurrentThreadId", &[]),
+            1
+        );
+        assert!(!wire::x64::runtime::import_supported(
+            "user32.dll",
+            "OpenThread"
+        ));
+    }
+}
+
+#[test]
 fn win64_thread_handle_duplicates_keep_identity_and_independent_flags_without_closing_thread() {
     let (mut mem, mut cpu, mut runtime) = startup();
     let out = STACK + 0x100;
@@ -2390,4 +2513,228 @@ fn win64_srw_ownership_and_init_once_publish_context_without_fake_contention() {
     );
     assert_eq!(mem.read_int(pending, 4).unwrap(), 0);
     assert_eq!(mem.read_int(context, 8).unwrap(), 0x123456780000);
+}
+
+#[test]
+fn condition_srw_validates_providers_widths_ownership_and_faults_before_releasing() {
+    use wire::x64::runtime::Control;
+    for dll in ["kernel32.dll", "KERNELBASE.dll"] {
+        let (mut mem, mut cpu, mut runtime) = startup();
+        let cv = STACK + 0x100;
+        let lock = cv + 16;
+        let error = wire::x64::runtime::TEB + 0x68;
+        let high = 0xfacefeed00000000;
+        assert!(wire::x64::runtime::import_supported(
+            dll,
+            "SleepConditionVariableSRW"
+        ));
+        assert!(!wire::x64::runtime::import_supported(
+            "user32.dll",
+            "SleepConditionVariableSRW"
+        ));
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut runtime,
+            dll,
+            "AcquireSRWLockExclusive",
+            &[lock],
+        );
+        // Invalid flags short-circuit invalid pointers without releasing a held lock.
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                dll,
+                "SleepConditionVariableSRW",
+                &[0, 0, high, high | 2]
+            ),
+            0
+        );
+        assert_eq!(mem.read_int(error, 4).unwrap(), 87);
+        // Both DWORD arguments discard their upper halves; zero timeout returns holding the lock.
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut runtime,
+                dll,
+                "SleepConditionVariableSRW",
+                &[cv, lock, high, high]
+            ),
+            0
+        );
+        assert_eq!(mem.read_int(error, 4).unwrap(), 1460);
+        assert_eq!(mem.read_int(lock, 8).unwrap(), 1);
+        for args in [[cv, lock, 1, 0], [0, lock, 0, 0], [cv, lock, 0, 1]] {
+            inline_sync_frame(&mut mem, &mut cpu, &args);
+            let before = cpu.clone();
+            let count = runtime.api_calls;
+            assert!(runtime
+                .dispatch(dll, "SleepConditionVariableSRW", &mut cpu, &mut mem)
+                .is_err());
+            assert_eq!(cpu, before);
+            assert_eq!(runtime.api_calls, count);
+            assert_eq!(mem.read_int(lock, 8).unwrap(), 1);
+        }
+        runtime.enable_scheduler();
+        // A read-only SRW token must fault before the waiter is registered or the owner is lost.
+        inline_sync_frame(&mut mem, &mut cpu, &[cv, lock, u32::MAX as u64, 0]);
+        mem.protect(STACK, 4096, READ).unwrap();
+        let before = cpu.clone();
+        assert!(runtime
+            .dispatch(dll, "SleepConditionVariableSRW", &mut cpu, &mut mem)
+            .is_err());
+        assert_eq!(cpu, before);
+        mem.protect(STACK, 4096, READ | WRITE).unwrap();
+        assert_eq!(mem.read_int(lock, 8).unwrap(), 1);
+        assert_eq!(
+            runtime
+                .dispatch(dll, "SleepConditionVariableSRW", &mut cpu, &mut mem)
+                .unwrap(),
+            Control::Blocked
+        );
+        assert_eq!(cpu, before);
+        assert_eq!(mem.read_int(lock, 8).unwrap(), 0);
+        cpu.regs[2] = lock + 8;
+        let before = cpu.clone();
+        assert!(runtime
+            .dispatch(dll, "SleepConditionVariableSRW", &mut cpu, &mut mem)
+            .unwrap_err()
+            .contains("changed while blocked"));
+        assert_eq!(cpu, before);
+        assert_eq!(mem.read_int(lock, 8).unwrap(), 0);
+    }
+}
+
+#[test]
+fn condition_srw_releases_and_reacquires_across_guest_threads_on_wake_and_timeout() {
+    use wire::x64::process::{Outcome, Process64};
+    const CODE: u64 = 0x592000000;
+    const WORKER: u64 = CODE + 4096;
+    const DATA: u64 = CODE + 8192;
+    fn mov(code: &mut Vec<u8>, register: u8, value: u64) {
+        code.extend([0x48 | (register >> 3), 0xb8 | (register & 7)]);
+        code.extend(value.to_le_bytes());
+    }
+    fn call(p: &mut Process64, code: &mut Vec<u8>, name: &str, args: &[u64]) {
+        for (n, &value) in args.iter().enumerate() {
+            mov(code, if n < 4 { [1, 2, 8, 9][n] } else { 0 }, value);
+            if n >= 4 {
+                code.extend([0x48, 0x89, 0x44, 0x24, 32 + (n as u8 - 4) * 8]);
+            }
+        }
+        mov(code, 0, p.runtime.register("kernelbase.dll", name));
+        code.extend([0xff, 0xd0]);
+    }
+    fn save_rax(code: &mut Vec<u8>, address: u64) {
+        mov(code, 2, address);
+        code.extend([0x48, 0x89, 0x02]);
+    }
+    let path =
+        std::env::temp_dir().join(format!("wire-condition-srw64-{}.exe", std::process::id()));
+    std::fs::write(&path, fixture()).unwrap();
+    for slice in [1, 100_000] {
+        for (shared, timeout) in [(false, false), (true, false), (false, true)] {
+            let mut p = Process64::load(&path, false).unwrap();
+            p.memory
+                .map(CODE, 3 * 4096, READ | WRITE | EXECUTE)
+                .unwrap();
+            let mut main = vec![0x48, 0x83, 0xec, 0x38];
+            call(&mut p, &mut main, "SetLastError", &[123]);
+            call(&mut p, &mut main, "AcquireSRWLockExclusive", &[DATA + 16]);
+            call(&mut p, &mut main, "WakeAllConditionVariable", &[DATA]); // Not sticky.
+            call(&mut p, &mut main, "ReleaseSRWLockExclusive", &[DATA + 16]);
+            call(
+                &mut p,
+                &mut main,
+                if shared {
+                    "AcquireSRWLockShared"
+                } else {
+                    "AcquireSRWLockExclusive"
+                },
+                &[DATA + 16],
+            );
+            call(&mut p, &mut main, "CreateThread", &[0, 0, WORKER, 0, 0, 0]);
+            main.extend([0x49, 0x89, 0xc4]); // r12 = worker handle
+            call(&mut p, &mut main, "SwitchToThread", &[]); // Worker contends on our lock.
+            call(
+                &mut p,
+                &mut main,
+                "SleepConditionVariableSRW",
+                &[
+                    DATA,
+                    DATA + 16,
+                    if timeout { 1 } else { u32::MAX as u64 },
+                    shared as u64,
+                ],
+            );
+            save_rax(&mut main, DATA + 32);
+            call(&mut p, &mut main, "GetLastError", &[]);
+            save_rax(&mut main, DATA + 40);
+            call(
+                &mut p,
+                &mut main,
+                "TryAcquireSRWLockExclusive",
+                &[DATA + 16],
+            );
+            save_rax(&mut main, DATA + 48);
+            call(
+                &mut p,
+                &mut main,
+                if shared {
+                    "ReleaseSRWLockShared"
+                } else {
+                    "ReleaseSRWLockExclusive"
+                },
+                &[DATA + 16],
+            );
+            main.extend([0x4c, 0x89, 0xe1]);
+            mov(&mut main, 2, u32::MAX as u64);
+            call(&mut p, &mut main, "WaitForSingleObject", &[]);
+            mov(&mut main, 0, DATA + 24);
+            main.extend([0x48, 0x8b, 0x00, 0x48, 0x83, 0xc4, 0x38, 0xc3]);
+            let mut worker = vec![0x48, 0x83, 0xec, 0x28];
+            call(&mut p, &mut worker, "AcquireSRWLockExclusive", &[DATA + 16]);
+            if timeout {
+                call(&mut p, &mut worker, "Sleep", &[20]); // Timeout expires while another thread still holds the lock.
+            } else {
+                call(&mut p, &mut worker, "WakeConditionVariable", &[DATA]);
+                call(&mut p, &mut worker, "SwitchToThread", &[]); // Woken waiter cannot return yet.
+            }
+            mov(&mut worker, 0, 0x12345678);
+            save_rax(&mut worker, DATA + 24);
+            call(&mut p, &mut worker, "ReleaseSRWLockExclusive", &[DATA + 16]);
+            worker.extend([0x48, 0x83, 0xc4, 0x28, 0xc3]);
+            p.memory.write(CODE, &main).unwrap();
+            p.memory.write(WORKER, &worker).unwrap();
+            p.cpu.rip = CODE;
+            loop {
+                match p.run(p.cpu.work + slice).unwrap() {
+                    Outcome::Budget => assert!(p.cpu.work < 50_000),
+                    result => {
+                        assert_eq!(result, Outcome::Returned(0x12345678));
+                        break;
+                    }
+                }
+            }
+            assert_eq!(p.memory.read_int(DATA + 32, 8).unwrap(), (!timeout) as u64);
+            assert_eq!(
+                p.memory.read_int(DATA + 40, 8).unwrap(),
+                if timeout { 1460 } else { 123 }
+            );
+            assert_eq!(p.memory.read_int(DATA + 48, 8).unwrap(), 0); // The waiter owns its lock again.
+            assert_eq!(p.memory.read_int(DATA + 16, 8).unwrap(), 0);
+            assert_eq!(
+                p.runtime
+                    .trace
+                    .iter()
+                    .filter(|r| r.contains("!SleepConditionVariableSRW "))
+                    .count(),
+                1
+            );
+        }
+    }
+    std::fs::remove_file(path).unwrap();
 }

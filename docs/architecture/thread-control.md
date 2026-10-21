@@ -1,6 +1,8 @@
 # 线程创建、退出、上下文与 APC
 
-六项 export 的 provider、参数 carrier、返回约定和 typed ID 集中在 `win32/catalog/thread_control.rs`。Win64 接受 kernel32/kernelbase；PE32 仅 kernel32，其中 CreateThread/ExitThread 使用 typed route，其余四项保留 ABI-only/error 120。内部 `wire!ExitThread` 继续单独处理 worker 返回，不作为 Windows provider。Win64 的创建 flags、退出 code 截断 DWORD，stack SIZE_T、handle、callback、APC data 和指针保持完整宽度。
+七项 export 的 provider、参数 carrier、返回约定和 typed ID 集中在 `win32/catalog/thread_control.rs`。Win64 接受 kernel32/kernelbase；PE32 仅 kernel32，其中 CreateThread/ExitThread 使用 typed route，其余五项保留 ABI-only/error 120。内部 `wire!ExitThread` 继续单独处理 worker 返回，不作为 Windows provider。Win64 的创建 flags、退出 code 截断 DWORD，stack SIZE_T、handle、callback、APC data 和指针保持完整宽度。
+
+`FreeLibraryAndExitThread` 在 scheduler 和返回帧预检后，先通过原 Modules owner 释放一次完整 HMODULE 的引用，再返回不回 guest 的 ThreadExited 控制结果；Process64 复用原来的 FLS、线程 DLL 通知和调度清理。沿用 FreeLibrary 的能力范围：保留其它引用或已 pin 的 guest image 可以释放引用，最后一个未 pin 的 guest DLL 引用仍明确拒绝 detach/unload；不伪造卸载或绕过错误退出。exit code 按 DWORD 截断，PE32 此入口为 ABI-only/error 120，清栈 8 字节。
 
 Win64 冷绑定 `ControlImport::Thread`，调用时不比较 API 名称。领域结果明确区分普通 Value、Exit 和 Context。根入口先预检返回帧；普通返回保持 CPU、unblock、计数和 trace 的公共提交。Exit 只记计数和 trace，不提交 returned CPU、不清阻塞；Context 成功提交 returned CPU/BOOL 和计数，由 Process64 继续读取已保存的 guest 寄存器，保留原路径的 trace/阻塞规则。该控制结果不运行 guest CPU。
 

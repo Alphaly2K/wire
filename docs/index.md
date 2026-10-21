@@ -3,9 +3,14 @@
 ## 当前实现
 
 - [当前状态与验证矩阵](status.md)：注明代码基线、运行入口与外部测试条件。
-- [重构收尾审计](reports/refactoring-closeout-2026-10-20.md)：逐阶段交付、保留的 legacy/协调边界，以及尚未完成的真实音频验收。
+- [Alice 执行接续](reports/alice-execution-2026-10-20.md)：原始 guest Mono 已显示标题菜单；记录同步、文件、纹理、线程、CPU、shader 和输入补齐的逐阶段证据。
+- [Alice 交互阶段性能采样](reports/alice-profile-2026-10-21.md)：菜单输入已获人工确认，记录当前诊断版的执行器、浮点、图形和探针开销及优化优先级。
+- [AMD64 解释执行优化](reports/executor-optimization-2026-10-21.md)：4–32 条混合指令块、精确 ARM64 单精度、精简回滚和混合循环隔离，731 项回归及三版长样本对照，保留撤回与离散轮次。
+- [重构收尾审计](reports/refactoring-closeout-2026-10-20.md)：逐阶段交付、保留的 legacy/协调边界，R0–R5/R7 的本轮验收完成。
+- [原生音频复查](reports/refactoring-audio-validation-2026-10-20.md)：AudioQueueStart 的受限/原生执行对照、实际 PCM 回调消费与关闭/重开。
 - [架构和依赖方向](architecture/runtime.md)：当前边界、保留 facade 与迁移目标。
 - [宿主与图形边界](architecture/host-graphics.md)：owned 请求、事件消费顺序、GDI 适配及 native 验证入口。
+- [PE32 / Win64 宿主键鼠事件](architecture/input-events.md)：物理键码与文本、左右修饰键、五键鼠标、双轴滚轮、消息状态和坐标边界。
 - [新增 API 与 GUID 契约](architecture/adding-api.md)：唯一声明、冷绑定、双架构错误和提交顺序。
 - [Windows printf](architecture/windows-printf.md)：四项 PE32 cdecl/stdcall 契约、固定前缀与按需变参，保留输出和返回槽顺序。
 - [Windows version 契约](architecture/version.md)：架构 provider 范围、ABI-only 策略与故障提交。

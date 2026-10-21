@@ -14,6 +14,7 @@ pub(in crate::x64::runtime) struct Message {
     pub time: u32,
     pub point: [i32; 2],
     pub hardware: bool,
+    pub pointer: Option<crate::win32::user::mouse_pointer::Snapshot>,
 }
 pub(in crate::x64::runtime) fn read(mem: &Memory, pointer: u64) -> Result<[u64; 5], String> {
     let mut data = [0; 48];
@@ -119,6 +120,7 @@ impl User {
                     time: start.elapsed().as_millis() as u32,
                     point: self.cursor.position(),
                     hardware: false,
+                    pointer: None,
                 });
                 (!quit) as u64
             }
@@ -165,6 +167,23 @@ impl User {
                     bytes[36 + n * 4..40 + n * 4].copy_from_slice(&p.to_le_bytes());
                 }
                 mem.write(a[0], &bytes)?;
+                if let Some(pointer) = m.pointer {
+                    self.mouse_pointer.current.insert(tid, pointer);
+                }
+                if m.hardware {
+                    crate::host::ui::trace_input(
+                        if get || a[4] & 1 != 0 {
+                            "removed"
+                        } else {
+                            "peeked"
+                        },
+                        m.event.window,
+                        m.event.message,
+                        m.event.wparam,
+                        m.event.lparam,
+                        tid,
+                    );
+                }
                 // Native and posted messages in this bridge have no injected
                 // extra-info tag. Publish metadata only after checked output.
                 self.message_state.insert(
@@ -178,6 +197,19 @@ impl User {
                 if get || a[4] & 1 != 0 {
                     self.events.remove(index);
                     if m.hardware {
+                        if let Some(pointer) = m.pointer {
+                            let [message, wp, lp] = pointer.input;
+                            self.keyboard.consumed64(tid, message, wp, lp);
+                        }
+                        if m.event.message == 0xff {
+                            if let Some(packet) = self.raw_input.packets.get_mut(&m.event.lparam) {
+                                packet.queued = false;
+                                if packet.no_legacy {
+                                    let [message, key, lp] = packet.input;
+                                    self.keyboard.consumed64(tid, message, key, lp);
+                                }
+                            }
+                        }
                         self.keyboard.consumed64(
                             tid,
                             m.event.message,
@@ -226,6 +258,7 @@ impl User {
                             time: start.elapsed().as_millis() as u32,
                             point: self.cursor.position(),
                             hardware: false,
+                            pointer: None,
                         });
                     }
                 }

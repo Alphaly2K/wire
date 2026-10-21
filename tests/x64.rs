@@ -50,6 +50,8 @@ mod guid_allocation;
 mod handles;
 #[path = "x64/images_contract.rs"]
 mod images_contract;
+#[path = "x64/input_events.rs"]
+mod input_events;
 #[path = "x64/input_profile_contract.rs"]
 mod input_profile_contract;
 #[path = "x64/interlocked.rs"]

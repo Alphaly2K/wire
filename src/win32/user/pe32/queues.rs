@@ -36,6 +36,7 @@ impl User32 {
                         wparam: id,
                         lparam: timer.proc,
                         time,
+                        point: self.cursor.position(),
                         synthetic_paint: false,
                         hardware_input: false,
                     });
@@ -105,6 +106,7 @@ impl User32 {
                     wparam: 0,
                     lparam: 0,
                     time,
+                    point: self.cursor.position(),
                     synthetic_paint: true,
                     hardware_input: false,
                 });

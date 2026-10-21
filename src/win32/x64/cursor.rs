@@ -97,14 +97,8 @@ impl Cursor64 {
                     .set_position(cursor::clamp(self.position(), clip));
                 1
             }
-            PointerEnabled => 0,
-            EnablePointer => {
-                if a[0] != 0 {
-                    return Ok(CursorResult::error(50));
-                }
-                1
-            }
-            Track | SetPosition => {
+            Track | SetPosition | EnablePointer | PointerEnabled | PointerType | PointerInfo
+            | PointerDevices => {
                 unreachable!("tracking has a separate memory/window adapter; setter is absent")
             }
         };

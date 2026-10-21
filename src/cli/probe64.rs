@@ -16,9 +16,16 @@ pub(super) fn probe(path: &str, opts: &[String]) -> ExitCode {
         let mut graphics_backend = None;
         let mut moltenvk = None;
         let mut guest_args = Vec::new();
+        let mut desktop_size = None;
         let mut opt = opts.iter();
         while let Some(flag) = opt.next() {
             match flag.as_str() {
+                "--desktop-size" => {
+                    let value = opt.next().ok_or("--desktop-size needs WIDTHxHEIGHT")?;
+                    let (w, h) = value.split_once('x').ok_or("--desktop-size needs WIDTHxHEIGHT")?;
+                    desktop_size = Some([w.parse::<u32>().map_err(|e| e.to_string())?, h.parse::<u32>().map_err(|e| e.to_string())?]);
+                    startup = true;
+                }
                 "--guest-arg" => {
                     guest_args.push(opt.next().ok_or("--guest-arg needs a value")?.clone());
                     startup = true;
@@ -78,7 +85,7 @@ pub(super) fn probe(path: &str, opts: &[String]) -> ExitCode {
                 }
                 _ => {
                     return Err(
-                        "usage: wire probe64 <exe> [--max-instr N] [--startup] [--dll] [--window] [--cpu-stats] [--api-trace PATH] [--mono-trace PATH] [--capture-frame PPM] [--guest-arg VALUE] [--graphics-backend PATH --moltenvk PATH]"
+                        "usage: wire probe64 <exe> [--max-instr N] [--startup] [--dll] [--window] [--desktop-size WIDTHxHEIGHT] [--cpu-stats] [--api-trace PATH] [--mono-trace PATH] [--capture-frame PPM] [--guest-arg VALUE] [--graphics-backend PATH --moltenvk PATH]"
                             .into(),
                     )
                 }
@@ -106,6 +113,7 @@ pub(super) fn probe(path: &str, opts: &[String]) -> ExitCode {
                 mono_trace,
                 capture_frame,
                 &guest_args,
+                desktop_size,
             );
         }
         let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
@@ -247,9 +255,14 @@ fn run_startup64(
     mono_trace: Option<&str>,
     capture_frame: Option<&str>,
     guest_args: &[String],
+    desktop_size: Option<[u32; 2]>,
 ) -> Result<(), String> {
     use wire::x64::process::{Outcome, Process64};
     let mut process = Process64::load(Path::new(path), dll_attach)?;
+    if let Some([width, height]) = desktop_size {
+        process.runtime.configure_desktop(width, height)?;
+        println!("virtual desktop: {width}x{height}");
+    }
     process
         .runtime
         .append_guest_arguments(&mut process.memory, guest_args)?;

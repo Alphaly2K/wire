@@ -12,6 +12,7 @@ impl User {
     ) -> Result<u64, String> {
         use DesktopApi::*;
         match id {
+            DoubleClickTime => Ok(u64::from(crate::win32::user::desktop::DOUBLE_CLICK_MS)),
             ParametersA | ParametersW => match args[0] {
                 0x46 => {
                     mem.write_int(args[2], 4, self.desktop.screen_reader() as u64)?;
@@ -52,7 +53,7 @@ impl User {
                     _ => Ok(0x80070057),
                 }
             }
-            DoubleClickTime | DialogBaseUnits | ProcessStation | ObjectInformationW => {
+            DialogBaseUnits | ProcessStation | ObjectInformationW => {
                 unreachable!("fixed desktop queries have no Win64 binding")
             }
         }

@@ -89,6 +89,7 @@ impl User32 {
                         wparam: a[0],
                         lparam: 0,
                         time: clock_ms(start),
+                        point: self.cursor.position(),
                         synthetic_paint: false,
                         hardware_input: false,
                     }
@@ -99,6 +100,7 @@ impl User32 {
                         wparam: a[2],
                         lparam: a[3],
                         time: clock_ms(start),
+                        point: self.cursor.position(),
                         synthetic_paint: false,
                         hardware_input: false,
                     }
@@ -144,8 +146,8 @@ impl User32 {
                         msg.wparam,
                         msg.lparam,
                         msg.time,
-                        0,
-                        0,
+                        msg.point[0] as u32,
+                        msg.point[1] as u32,
                     ];
                     let bytes: Vec<u8> = words.into_iter().flat_map(u32::to_le_bytes).collect();
                     mem.write_bytes(a[0], &bytes).map_err(|e| e.to_string())?;
@@ -235,6 +237,7 @@ impl User32 {
                                     wparam: c,
                                     lparam: words[3],
                                     time: clock_ms(start),
+                                    point: self.cursor.position(),
                                     synthetic_paint: false,
                                     hardware_input: false,
                                 },

@@ -53,9 +53,25 @@ fn desktop_contract_win64_keeps_static_aliases_and_settings_lookup_gap() {
                 matches!(dll, "user32.dll" | "dwmapi.dll")
             );
         }
-        for name in ["GetDoubleClickTime", "GetDialogBaseUnits"] {
-            assert!(!wire::x64::runtime::import_supported(dll, name));
-        }
+        assert!(!wire::x64::runtime::import_supported(
+            dll,
+            "GetDialogBaseUnits"
+        ));
+        assert_eq!(
+            wire::x64::runtime::import_supported(dll, "GetDoubleClickTime"),
+            dll == "user32.dll"
+        );
+        mem.write(text, b"GetDoubleClickTime\0").unwrap();
+        assert_eq!(
+            startup_call(
+                &mut mem,
+                &mut cpu,
+                &mut rt,
+                "GetProcAddress",
+                &[module, text]
+            ) != 0,
+            dll == "user32.dll"
+        );
     }
 }
 
@@ -70,6 +86,14 @@ fn desktop_contract_win64_keeps_screen_reader_state_truncation_and_dwm_errors() 
          name: &str,
          args: &[u64]| startup_dll_call(mem, cpu, rt, "user32.dll", name, args);
     startup_call(&mut mem, &mut cpu, &mut rt, "SetLastError", &[77]);
+    assert_eq!(
+        call(&mut mem, &mut cpu, &mut rt, "GetDoubleClickTime", &[]),
+        500
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut rt, "GetLastError", &[]),
+        77
+    );
     assert_eq!(
         call(
             &mut mem,

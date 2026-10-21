@@ -169,3 +169,119 @@ fn display_contract_win64_output_fault_keeps_prefix_frame_and_api_counter() {
     assert_eq!((cpu.rip, cpu.regs[4], rt.api_calls), before);
     assert_eq!(mem.read_int(output, 4).unwrap(), 0xa5a5a5a5);
 }
+
+#[test]
+fn configured_desktop_win64_is_consistent_across_metrics_modes_monitors_and_cursor_clip() {
+    let (mut mem, mut cpu, mut rt) = startup();
+    assert!(rt.configure_desktop(0, 1080).is_err());
+    assert!(rt.configure_desktop(8193, 1080).is_err());
+    rt.configure_desktop(1920, 1080).unwrap();
+    let data = STACK + 0x100;
+    for (index, expected) in [(0, 1920), (1, 1080), (78, 1920), (79, 1080)] {
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut rt,
+                "user32.dll",
+                "GetSystemMetrics",
+                &[index]
+            ),
+            expected
+        );
+    }
+    for (name, size_at, size, bits) in [
+        ("EnumDisplaySettingsA", 36, 156, 104),
+        ("EnumDisplaySettingsW", 68, 220, 168),
+    ] {
+        mem.write_int(data + size_at, 2, size).unwrap();
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut rt,
+                "user32.dll",
+                name,
+                &[0, u32::MAX as u64, data]
+            ),
+            1
+        );
+        assert_eq!(mem.read_int(data + bits + 4, 4).unwrap(), 1920);
+        assert_eq!(mem.read_int(data + bits + 8, 4).unwrap(), 1080);
+    }
+    let point = 1800 | (1000u64 << 32);
+    let monitor = startup_dll_call(
+        &mut mem,
+        &mut cpu,
+        &mut rt,
+        "user32.dll",
+        "MonitorFromPoint",
+        &[point, 0],
+    );
+    assert_ne!(monitor, 0);
+    mem.write_int(data, 4, 104).unwrap();
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut rt,
+            "user32.dll",
+            "GetMonitorInfoW",
+            &[monitor, data]
+        ),
+        1
+    );
+    for offset in [12, 28] {
+        assert_eq!(mem.read_int(data + offset, 4).unwrap(), 1920);
+    }
+    for offset in [16, 32] {
+        assert_eq!(mem.read_int(data + offset, 4).unwrap(), 1080);
+    }
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut rt,
+            "user32.dll",
+            "GetClipCursor",
+            &[data]
+        ),
+        1
+    );
+    assert_eq!(mem.read_int(data + 8, 4).unwrap(), 1920);
+    assert_eq!(mem.read_int(data + 12, 4).unwrap(), 1080);
+    let dc = startup_dll_call(&mut mem, &mut cpu, &mut rt, "user32.dll", "GetDC", &[0]);
+    assert_ne!(dc, 0);
+    for (index, expected) in [
+        (8, 1920),
+        (10, 1080),
+        (118, 1920),
+        (117, 1080),
+        (88, 96),
+        (90, 96),
+    ] {
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut rt,
+                "gdi32.dll",
+                "GetDeviceCaps",
+                &[dc, index]
+            ),
+            expected
+        );
+    }
+    assert!(rt.configure_desktop(1280, 720).is_err());
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut rt,
+            "user32.dll",
+            "GetSystemMetrics",
+            &[0]
+        ),
+        1920
+    );
+}

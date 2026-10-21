@@ -106,6 +106,7 @@ impl Cpu64 {
                     self.fpu.set_top(if b == 0xf6 { top + 7 } else { top + 1 });
                     self.fpu.sw &= !0x200;
                 }
+                (0xd9, 0xf8) => self.fpu.remainder(),
                 (0xd9, 0xfa) => {
                     let value = self.fpu.get(0);
                     let result = self.fpu.sqrt(value);

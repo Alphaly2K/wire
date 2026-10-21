@@ -66,6 +66,7 @@ struct Context {
   PFN_vkGetDeviceProcAddr get_device = nullptr;
   PFN_vkGetInstanceProcAddr get_instance = nullptr;
   bool presentation = false;
+  bool maintenance4 = false;
   VkPhysicalDeviceFeatures features = {};
   PFN_vkGetPhysicalDeviceFormatProperties format_properties = nullptr;
   ~Context() {
@@ -132,7 +133,8 @@ std::unique_ptr<Context> open_gpu(const char *path, WireGpuInfo& info) {
   symbol<PFN_vkGetPhysicalDeviceProperties2>(get, c->instance, "vkGetPhysicalDeviceProperties2")(c->physical, &properties);
   c->properties = properties.properties; c->floats.pNext = nullptr;
   if (c->properties.apiVersion < VK_API_VERSION_1_3) throw std::runtime_error("device Vulkan < 1.3");
-  VkPhysicalDeviceVulkan12Features v12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+  VkPhysicalDeviceVulkan13Features v13 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
+  VkPhysicalDeviceVulkan12Features v12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, &v13 };
   VkPhysicalDeviceFeatures2 features = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &v12 };
   symbol<PFN_vkGetPhysicalDeviceFeatures2>(get, c->instance, "vkGetPhysicalDeviceFeatures2")(c->physical, &features);
   if (!v12.bufferDeviceAddress || !v12.vulkanMemoryModel || !v12.vulkanMemoryModelDeviceScope)
@@ -156,6 +158,8 @@ std::unique_ptr<Context> open_gpu(const char *path, WireGpuInfo& info) {
   c->family = family;
   c->timestamp_bits = queue_info[family].timestampValidBits;
   VkPhysicalDeviceVulkan12Features enabled = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+  VkPhysicalDeviceVulkan13Features enabled13 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
+  enabled.pNext = &enabled13;enabled13.maintenance4 = v13.maintenance4;c->maintenance4 = v13.maintenance4;
   enabled.bufferDeviceAddress = VK_TRUE; enabled.vulkanMemoryModel = VK_TRUE;
   enabled.vulkanMemoryModelDeviceScope = VK_TRUE;
   enabled.shaderOutputViewportIndex = v12.shaderOutputViewportIndex;
@@ -548,8 +552,18 @@ void build_pipeline(Context& c, PipelineScope& p, Shader *vertex, Shader *pixel,
   if ((vertex && vertex->stage != 1) || (pixel && pixel->stage != 2) || (compute && compute->stage != 4 && compute->stage != 8)) throw std::runtime_error("pipeline stage mismatch");
   if (pixel) for (const auto& input : pixel->inputs) {
     auto found = vertex->outputs.find(input.first);
-    if (found == vertex->outputs.end() || found->second != input.second)
-      throw std::runtime_error("shader I/O location mismatch");
+    bool compatible = found != vertex->outputs.end() && (found->second == input.second ||
+      (c.maintenance4 && found->second.size() == input.second.size() && !input.second.empty() &&
+       std::equal(input.second.begin(),input.second.end()-1,found->second.begin()) &&
+       found->second.back() >= input.second.back()));
+    if (!compatible) {
+      auto shape=[](const std::vector<uint32_t>& values) {
+        std::string text;for(auto value:values)text+=(text.empty()?"":"/")+std::to_string(value);return text;
+      };
+      throw std::runtime_error("shader I/O location mismatch at "+std::to_string(input.first.first)+
+        ":"+std::to_string(input.first.second)+" vertex="+(found==vertex->outputs.end()?"missing":shape(found->second))+
+        " pixel="+shape(input.second));
+    }
   }
   std::array<std::map<uint32_t,VkDescriptorSetLayoutBinding>,4> bindings;
   uint32_t push_bytes = 0; VkShaderStageFlags push_stages = 0;

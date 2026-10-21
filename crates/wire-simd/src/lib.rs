@@ -1,5 +1,6 @@
 //! Exact scalar SSE arithmetic, isolated from guest/process/API code generation.
 //! Concrete Single/Double entries keep APFloat monomorphizations in this crate.
+mod fast;
 mod state;
 pub use state::SimdState;
 
@@ -61,7 +62,7 @@ pub trait ConvertTo<D: Scalar>: Scalar + FloatConvert<D> {
     fn convert_bits(state: &mut SimdState, bits: u64, exception: &mut bool) -> Result<u64, String>;
 }
 macro_rules! scalar {
-    ($format:ty) => {
+    ($format:ty $(, $fast:path)?) => {
         impl Scalar for $format {
             #[inline(never)]
             fn accept(
@@ -90,6 +91,9 @@ macro_rules! scalar {
                 b: u64,
                 exception: &mut bool,
             ) -> Result<u64, String> {
+                $(if let Some(result) = $fast(state, op, a, b, exception) {
+                    return result;
+                })?
                 state.arithmetic::<Self>(op, a, b, exception)
             }
             #[inline(never)]
@@ -125,7 +129,7 @@ macro_rules! scalar {
         }
     };
 }
-scalar!(Single);
+scalar!(Single, fast::single);
 scalar!(Double);
 
 macro_rules! conversion {

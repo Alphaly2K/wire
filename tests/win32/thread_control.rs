@@ -56,6 +56,7 @@ fn thread_control_keeps_pe32_exit_argument_and_worker_eax_paths() {
 fn thread_control_keeps_pe32_optional_abi_and_unknown_provider_cleanup() {
     let mut v = Vm::new();
     for (name, args, bytes) in [
+        ("FreeLibraryAndExitThread", vec![0x18000000, 42], 8),
         ("QueueUserAPC", vec![0xdead0000, 0, DATA], 12),
         ("GetThreadContext", vec![0, DATA], 8),
         ("SetThreadDescription", vec![0, DATA], 8),

@@ -12,6 +12,7 @@ pub(crate) struct Presenter64 {
     surfaces: BTreeMap<u64, crate::gpu::Surface>,
     capture: Option<std::path::PathBuf>,
     captured: u64,
+    geometry: BTreeMap<u64, [u32; 4]>,
 }
 impl Presenter64 {
     pub fn new() -> Result<Self, String> {
@@ -29,6 +30,7 @@ impl Presenter64 {
                 surfaces: BTreeMap::new(),
                 capture: None,
                 captured: 0,
+                geometry: BTreeMap::new(),
             })
         }
     }
@@ -87,6 +89,14 @@ impl Presenter64 {
                 };
                 if let Some((&window, _)) = self.windows.iter().find(|(_, id)| **id == event.window)
                 {
+                    ui::trace_input(
+                        "native",
+                        window,
+                        event.message,
+                        event.wparam as u64,
+                        event.lparam as u64,
+                        0,
+                    );
                     runtime.queue_window_event(WindowEvent {
                         window,
                         message: event.message,
@@ -126,6 +136,17 @@ impl Presenter64 {
                 .into_iter()
                 .find(|w| w.handle == window && w.visible)
                 .ok_or("swapchain window is hidden/destroyed")?;
+            static TRACE_GEOMETRY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *TRACE_GEOMETRY.get_or_init(|| std::env::var_os("WIRE_INPUT_TRACE").is_some()) {
+                let desc = texture.desc();
+                let sizes = [info.width, info.height, desc.width, desc.height];
+                if self.geometry.insert(window, sizes) != Some(sizes) {
+                    eprintln!(
+                        "geometry: HWND={window:#x} client={}x{} texture={}x{}",
+                        sizes[0], sizes[1], sizes[2], sizes[3]
+                    );
+                }
+            }
             self.surfaces.get_mut(&window).unwrap().present(
                 &texture,
                 info.width,

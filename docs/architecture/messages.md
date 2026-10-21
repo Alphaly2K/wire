@@ -14,6 +14,8 @@ Win64 普通消息由 User 准备值、错误或等待请求，只借内存、�
 
 本批只收敛调用契约和过程控制。PE32 消息/计时器仍由 User32 持有，Win64 仍由进程 User 持有；宿主事件通过已有 owned event 边界进入，guest 参数不转成可直接解引用的宿主指针。
 
+2026-10-20 新增的[键鼠事件](input-events.md)在 PE32 消息中也保存入队时的 MSG.pt，不再固定输出零坐标；posted、timer、paint 与 translated 消息使用各自产生时的逻辑游标快照。Win64 继续保留消息位置快照。两端输出检查与移除/键盘消费顺序保持，PE32 五项 metadata/queue-status 的 ABI-only 策略未扩展。
+
 PE32 `win32/user/pe32/queues.rs` 收敛队列资源操作：计时器刷新、post/host 入队、change bits 与消息等待唤醒只借 User32、LastError、Sched 和原 start 时间值，不借 ApiState 或 CPU。Get/Peek/Wait 与对象消息等待使用同一 prepare_queue，保留 timer→过期 synthetic paint 清理→新增 paint 的顺序及两次时间取样；仍使用原队列，没有额外分配或查表。输出 fault 和 keyboard 消费归 USER，实际阻塞/回调归 Process。
 
 owner 基线 `145a271`。两份原 prepare 主体归一一致，timer/host/put/mask 策略及时间取样对照保持。完整 release Win32 255、fmt/release lib/bin strict Clippy/build 通过，证据 `wire-out/refactoring-2026-10-14/r3-user-queues32-{source-checks,verification}.json`；不跑性能或游戏矩阵。

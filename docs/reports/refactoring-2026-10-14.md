@@ -790,3 +790,7 @@ query access、flags、资源表与单调编号收拢为私有 Tokens，open/que
 ## R3 Win64 普通输入/processor 资源与收尾整合
 
 基线 `37b2c9c`。raw input/IME adapter 归 User，只借 Memory 与只读 Threads；processor 查询成为只借 Memory/Threads 的普通函数。根保留输入私有委托，processor 按绑定 ID 直接调用。原处理体经资源替换和 rustfmt 对照一致，raw 算法及其 fixture、Threads 与集成测试原文保持，错误分支才查询 TEB。阶段整合通过 release 全目标 **695 passed / 0 failed / 8 ignored / 21 suites**，工具 **31 项**、all-targets/all-features strict Clippy/build/fmt 通过。本批未改 native 或执行/memory/cache 算法，沿用前述原生证据，不重复性能或游戏矩阵。源码对照与正式 executable SHA/大小见 `wire-out/refactoring-2026-10-14/r3-final-scalar64-{source-checks,verification}.json`；CPU/IR/shared SIMD 与 host 的文本依赖审计见 `r7-closeout-dependencies.json`。当前状态已压缩为领域摘要，历史过程继续保留本报告；保留的 legacy、兼容委托及未完成音频验收见 [收尾审计](refactoring-closeout-2026-10-20.md)。
+
+## R5 音频验收与最终收尾复核
+
+生产代码基线 `85ced07`。补齐[音频验收报告](refactoring-audio-validation-2026-10-20.md)：同一 C 探针将受限环境的失败定位于 AudioQueueStart（−66680，InvalidDevice），沙箱外打开及提交成功；加强后的 Rust ignored fixture 要求真实回调消费全部 2048 个静音样本、计数守恒及重复关闭/重开，并已在沙箱外再次通过。生产音频 owner、C bridge、DirectSound 与构建输入保持。最终重新通过 release 全目标 **695 passed / 0 failed / 8 ignored / 21 suites**、工具 **31 项**及严格 Clippy/build/fmt，首次受限执行的 Unicorn SIGILL 日志保留。README/docs 相对文件链接全部可解析，最终源码与日志哈希见 `wire-out/refactoring-2026-10-14/r7-audio-closeout-verification.json`。R0–R5 与 R7 本轮交付及验收完成，R6 按用户要求排除，保留的 legacy/协调边界见[收尾审计](refactoring-closeout-2026-10-20.md)；本批不重跑性能或游戏矩阵。

@@ -10,6 +10,7 @@ pub enum InlineSyncApi {
     TryExclusive,
     TryShared,
     InitializeCondition,
+    SleepConditionSrw,
     WakeCondition,
     WakeAllCondition,
     BeginOnce,
@@ -24,7 +25,7 @@ const fn declaration(
 ) -> Contract {
     Contract::new(
         ApiId::InlineSync(id), name, parameters, returns,
-        "PE32 ABI-only error 120; Win64 checked 8-byte inline state, SRW process ownership and scheduler retry, nonzero condition wait-list rejection, synchronous InitOnce with ordered output checks/writes, saved return frame and failed Try without unblock",
+        "PE32 ABI-only error 120; Win64 checked 8-byte inline state, SRW ownership and scheduler retry, condition queues with atomic SRW release and reacquire after wake/timeout, nonzero foreign condition-token rejection, synchronous InitOnce with ordered outputs, saved return frame and failed Try without unblock",
         [
             ArchitecturePlan { dlls: &["kernel32.dll"], execution: ExecutionPolicy::LegacyUnimplemented },
             ArchitecturePlan { dlls: &["kernel32.dll", "kernelbase.dll"], execution: ExecutionPolicy::Typed },
@@ -34,7 +35,7 @@ const fn declaration(
 
 use Parameter::{Pointer as P, Uint32 as D};
 use ReturnConvention::{BoolLastError as B, Uint32 as U, Void as V};
-pub static INLINE_SYNC_CONTRACTS: [Contract; 12] = [
+pub static INLINE_SYNC_CONTRACTS: [Contract; 13] = [
     declaration(InlineSyncApi::InitializeSrw, "InitializeSRWLock", &[P], V),
     declaration(
         InlineSyncApi::AcquireExclusive,
@@ -72,6 +73,12 @@ pub static INLINE_SYNC_CONTRACTS: [Contract; 12] = [
         "InitializeConditionVariable",
         &[P],
         V,
+    ),
+    declaration(
+        InlineSyncApi::SleepConditionSrw,
+        "SleepConditionVariableSRW",
+        &[P, P, D, D],
+        B,
     ),
     declaration(
         InlineSyncApi::WakeCondition,

@@ -10,4 +10,6 @@ buffer codec、锁定/回绕、播放控制、重采样/循环/混音及时钟�
 
 host 提取基线 `1148314`：Win32 259、library 61 passed / 8 ignored、严格构建通过。新增原生静音样本/计数/重复关闭 fixture 已显式尝试，在打开 AudioQueue 时失败；独立主线程直接调用原始 audio.c 也失败，原生日志均保留，真实输出验收待可用设备环境。没有将该项记为通过。
 
+2026-10-20 [复查](../reports/refactoring-audio-validation-2026-10-20.md)已通过真实 PCM 验收。同一 C 探针在当前工具受限执行中于 Start 返回 InvalidDevice（−66680），沙箱外正常。加强后的 Rust fixture 验证真实回调消费全部样本、计数守恒、重复关闭与重开；生产 owner、混音和 C 实现保持。上段是最初批次的失败记录，继续保留。
+
 基线 `c0d296b`。对象方法及分配归一核对、PCM/mixer/native pump 与 ABI parser 对照一致。release audio 4、mixer 1、完整 Win32 255、fmt/release lib/bin strict Clippy/build 通过。普通资源借用调整不跑性能或游戏矩阵。证据：`wire-out/refactoring-2026-10-14/r3-dsound32-{source-checks,verification}.json`。

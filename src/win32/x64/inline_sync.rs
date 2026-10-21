@@ -12,6 +12,8 @@ pub(crate) enum Outcome {
     TryFailed,
     BlockSrw { pointer: u64, shared: bool },
     BlockOnce(u64),
+    SleepCondition,
+    WakeCondition { pointer: u64, all: bool },
 }
 
 pub(crate) fn call(
@@ -28,13 +30,17 @@ pub(crate) fn call(
             mem.write_int(args[0], 8, 0)?;
             0
         }
+        SleepConditionSrw => return Ok(Outcome::SleepCondition),
         WakeCondition | WakeAllCondition => {
             if mem.read_int(args[0], 8)? != 0 {
                 return Err(
                     "Win64 condition-variable wait list requires a thread scheduler".into(),
                 );
             }
-            0
+            return Ok(Outcome::WakeCondition {
+                pointer: args[0],
+                all: id == WakeAllCondition,
+            });
         }
         InitializeSrw | AcquireExclusive | AcquireShared | ReleaseExclusive | ReleaseShared
         | TryExclusive | TryShared => {

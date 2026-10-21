@@ -3,6 +3,32 @@
 use super::*;
 
 #[test]
+fn amd64_memory_fences_retire_without_changing_architectural_state() {
+    let mut mem = Memory::default();
+    mem.map(BASE, 8192, READ | WRITE | EXECUTE).unwrap();
+    mem.write(
+        BASE,
+        &[0x0f, 0xae, 0xe8, 0x0f, 0xae, 0xf0, 0x0f, 0xae, 0xf8],
+    )
+    .unwrap();
+    mem.write_int(BASE + 4096, 8, 0x123456789abcdef0).unwrap();
+    let mut cpu = Cpu64::new(BASE, STACK);
+    cpu.rflags = 0xad7;
+    cpu.regs = std::array::from_fn(|n| n as u64 * 0x123456789);
+    cpu.xmm = [[0xa5; 16]; 16];
+    let before = cpu.clone();
+    for n in 1..=3 {
+        cpu.step(&mut mem).unwrap();
+        assert_eq!(cpu.rip, BASE + n * 3);
+        assert_eq!(cpu.regs, before.regs);
+        assert_eq!(cpu.xmm, before.xmm);
+        assert_eq!(cpu.rflags, before.rflags);
+        assert_eq!(mem.read_int(BASE + 4096, 8).unwrap(), 0x123456789abcdef0);
+    }
+    assert_eq!(cpu.retired, before.retired + 3);
+}
+
+#[test]
 fn amd64_sse_moves_aliasing_zeroing_and_checked_stores_match_unicorn() {
     use unicorn_engine::{Arch, Mode, Prot, RegisterX86 as U, Unicorn};
     let code = [
@@ -1448,5 +1474,170 @@ fn amd64_sse_insert_extract_checked_widths_and_faults_preserve_state() {
             .unwrap_err()
             .contains("unsupported AMD64 vector register"));
         assert_eq!(cpu, before);
+    }
+}
+
+#[test]
+fn amd64_fprem_keeps_exact_extended_remainders_quotient_bits_and_control_independence() {
+    use rustc_apfloat::{ieee::X87DoubleExtended as Ext, Float};
+    let mut mem = Memory::default();
+    mem.map(BASE, 4096, READ | WRITE | EXECUTE).unwrap();
+    mem.write(BASE, &[0xd9, 0xf8]).unwrap();
+    for control in [0x007f, 0x027f, 0x037f, 0x077f, 0x0b7f, 0x0f7f] {
+        for (a, b, remainder, quotient) in [
+            (11, 3, 2, 3i64),
+            (-11, 3, -2, 3),
+            (11, -3, 2, 3),
+            (-11, -3, -2, 3),
+        ] {
+            let mut cpu = Cpu64::new(BASE, STACK);
+            cpu.fpu.cw = control;
+            cpu.fpu.set_st_bits(0, Ext::from_i128(a).value.to_bits());
+            cpu.fpu.set_st_bits(1, Ext::from_i128(b).value.to_bits());
+            cpu.fpu.sw |= 0x4700;
+            let before = cpu.clone();
+            cpu.step(&mut mem).unwrap();
+            assert_eq!(
+                cpu.fpu.st_bits(0),
+                Ext::from_i128(remainder).value.to_bits()
+            );
+            assert_eq!(cpu.fpu.st_bits(1), before.fpu.st_bits(1));
+            assert_eq!(cpu.fpu.top(), before.fpu.top());
+            let q = quotient as u16;
+            assert_eq!(
+                cpu.fpu.sw & 0x473f,
+                ((q & 4) << 6) | ((q & 2) << 13) | ((q & 1) << 9)
+            );
+            assert_eq!(cpu.rflags, before.rflags);
+        }
+        let mut cpu = Cpu64::new(BASE, STACK);
+        cpu.fpu.cw = control;
+        cpu.fpu.set_st_bits(0, 0x403f_8000_0000_0000_0001); // 2^64 + 2
+        cpu.fpu.set_st_bits(1, Ext::from_i128(3).value.to_bits());
+        cpu.step(&mut mem).unwrap();
+        assert_eq!(cpu.fpu.st_bits(0), 0);
+        assert_eq!(cpu.fpu.sw & 0x473f, 0x4100);
+    }
+}
+
+#[test]
+fn amd64_fprem_reduces_large_exponents_and_preserves_exception_rollback() {
+    const ONE: u128 = 0x3fff_8000_0000_0000_0000;
+    const INFINITY: u128 = 0x7fff_8000_0000_0000_0000;
+    const INDEFINITE: u128 = 0xffff_c000_0000_0000_0000;
+    let mut mem = Memory::default();
+    mem.map(BASE, 4096, READ | WRITE | EXECUTE).unwrap();
+    mem.write(BASE, &[0xd9, 0xf8]).unwrap();
+    let mut cpu = Cpu64::new(BASE, STACK);
+    cpu.fpu.set_st_bits(0, ONE + (200 << 64));
+    cpu.fpu.set_st_bits(1, 0x4000_c000_0000_0000_0000);
+    let mut steps = 0;
+    loop {
+        cpu.rip = BASE;
+        cpu.step(&mut mem).unwrap();
+        steps += 1;
+        assert!(steps < 10);
+        if cpu.fpu.sw & 0x400 == 0 {
+            break;
+        }
+        if steps == 1 {
+            assert_eq!(cpu.fpu.st_bits(0), ONE + (168 << 64));
+        }
+    }
+    assert!(steps > 1);
+    assert_eq!(cpu.fpu.st_bits(0), ONE);
+    assert_eq!(cpu.fpu.sw & 0x473f, 0x300);
+    for (a, b, result, exceptions) in [
+        (INFINITY, ONE, INDEFINITE, 1),
+        (ONE, 0, INDEFINITE, 1),
+        (1 << 79, ONE, 1 << 79, 0),
+        (ONE, INFINITY, ONE, 0),
+        (ONE | (1 << 79), ONE, 1 << 79, 0),
+        (1, ONE, 1, 2),
+        (
+            0x7fff_c000_0000_0000_0011,
+            ONE,
+            0x7fff_c000_0000_0000_0011,
+            0,
+        ),
+        (
+            0x7fff_8000_0000_0000_0011,
+            ONE,
+            0x7fff_c000_0000_0000_0011,
+            1,
+        ),
+    ] {
+        let mut cpu = Cpu64::new(BASE, STACK);
+        cpu.fpu.set_st_bits(0, a);
+        cpu.fpu.set_st_bits(1, b);
+        cpu.step(&mut mem).unwrap();
+        assert_eq!(cpu.fpu.st_bits(0), result);
+        assert_eq!(cpu.fpu.sw & 0x3f, exceptions);
+        if exceptions != 0 {
+            let mut cpu = Cpu64::new(BASE, STACK);
+            cpu.fpu.set_st_bits(0, a);
+            cpu.fpu.set_st_bits(1, b);
+            cpu.fpu.cw &= !exceptions;
+            let before = cpu.clone();
+            assert!(cpu
+                .step(&mut mem)
+                .unwrap_err()
+                .contains("deferred delivery"));
+            assert_eq!(cpu, before);
+        }
+    }
+    let mut cpu = Cpu64::new(BASE, STACK);
+    cpu.fpu.set_st_bits(0, ONE);
+    cpu.step(&mut mem).unwrap();
+    assert_eq!(cpu.fpu.st_bits(0), INDEFINITE);
+    assert_eq!(cpu.fpu.sw & 0x41, 0x41);
+}
+
+#[test]
+fn amd64_fprem_finite_results_and_quotient_condition_bits_match_unicorn() {
+    use unicorn_engine::{Arch, Mode, Prot, RegisterX86 as U, Unicorn};
+    let mut uc = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+    uc.mem_map(BASE, 4096, Prot::ALL).unwrap();
+    let code = [
+        0xdb, 0xe3, 0xdd, 0x07, 0xdd, 0x06, 0xd9, 0xf8, 0xdf, 0xe0, 0xdd, 0x1a,
+    ];
+    uc.mem_write(BASE, &code).unwrap();
+    let mut mem = Memory::default();
+    mem.map(BASE, 4096, READ | WRITE | EXECUTE).unwrap();
+    mem.write(BASE, &code).unwrap();
+    for a in [-12345.75f64, -11.0, -8.0, -0.0, 0.0, 11.0, 12345.75] {
+        for b in [-7.25f64, -3.0, 0.5, 3.0, 7.25] {
+            let mut cpu = Cpu64::new(BASE, STACK);
+            for (reg, address, native) in [
+                (7, BASE + 0x100, U::RDI),
+                (6, BASE + 0x108, U::RSI),
+                (2, BASE + 0x110, U::RDX),
+            ] {
+                cpu.regs[reg] = address;
+                uc.reg_write(native, address).unwrap();
+            }
+            for (address, value) in [(BASE + 0x100, b), (BASE + 0x108, a)] {
+                mem.write_int(address, 8, value.to_bits()).unwrap();
+                uc.mem_write(address, &value.to_le_bytes()).unwrap();
+            }
+            uc.emu_start(BASE, BASE + code.len() as u64, 0, 0).unwrap();
+            while cpu.rip < BASE + code.len() as u64 {
+                cpu.step(&mut mem).unwrap();
+            }
+            let expected = uc.mem_read_as_vec(BASE + 0x110, 8).unwrap();
+            let actual = mem.read_int(BASE + 0x110, 8).unwrap();
+            let expected = u64::from_le_bytes(expected.try_into().unwrap());
+            // The reference engine loses the sign of exact zero remainders.
+            if expected & 0x7fff_ffff_ffff_ffff == 0 {
+                assert_eq!(actual & 0x7fff_ffff_ffff_ffff, 0);
+            } else {
+                assert_eq!(actual, expected);
+            }
+            assert_eq!(
+                cpu.regs[0] & 0x4700,
+                uc.reg_read(U::RAX).unwrap() & 0x4700,
+                "a={a} b={b}"
+            );
+        }
     }
 }

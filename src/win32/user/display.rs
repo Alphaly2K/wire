@@ -41,6 +41,9 @@ pub(crate) fn device(wide: bool, adapter: bool, label: &str) -> Vec<u8> {
 }
 
 pub(crate) fn mode(wide: bool, size: usize) -> Vec<u8> {
+    mode_for_size(wide, size, [WIDTH, HEIGHT])
+}
+pub(crate) fn mode_for_size(wide: bool, size: usize, dimensions: [u32; 2]) -> Vec<u8> {
     let mut bytes = vec![0; size];
     text(&mut bytes, 0, DEVICE, wide);
     let offset = if wide { 68 } else { 36 };
@@ -48,7 +51,7 @@ pub(crate) fn mode(wide: bool, size: usize) -> Vec<u8> {
     bytes[offset..offset + 2].copy_from_slice(&(size as u16).to_le_bytes());
     bytes[offset + 4..offset + 8].copy_from_slice(&0x005c0020u32.to_le_bytes());
     let bits = if wide { 168 } else { 104 };
-    for (i, value) in [32u32, WIDTH, HEIGHT, 0, REFRESH_HZ]
+    for (i, value) in [32u32, dimensions[0], dimensions[1], 0, REFRESH_HZ]
         .into_iter()
         .enumerate()
     {
@@ -58,10 +61,24 @@ pub(crate) fn mode(wide: bool, size: usize) -> Vec<u8> {
 }
 
 pub(crate) fn monitor(wide: bool, size: usize) -> Vec<u8> {
+    monitor_for_size(wide, size, [WIDTH, HEIGHT])
+}
+pub(crate) fn monitor_for_size(wide: bool, size: usize, dimensions: [u32; 2]) -> Vec<u8> {
     let mut bytes = vec![0; size];
-    for (i, value) in [size as u32, 0, 0, WIDTH, HEIGHT, 0, 0, WIDTH, HEIGHT, 1]
-        .into_iter()
-        .enumerate()
+    for (i, value) in [
+        size as u32,
+        0,
+        0,
+        dimensions[0],
+        dimensions[1],
+        0,
+        0,
+        dimensions[0],
+        dimensions[1],
+        1,
+    ]
+    .into_iter()
+    .enumerate()
     {
         bytes[4 * i..4 * i + 4].copy_from_slice(&value.to_le_bytes());
     }
@@ -72,9 +89,12 @@ pub(crate) fn monitor(wide: bool, size: usize) -> Vec<u8> {
 }
 
 pub(crate) fn metric(index: u32) -> u32 {
+    metric_for_size(index, [WIDTH, HEIGHT])
+}
+pub(crate) fn metric_for_size(index: u32, dimensions: [u32; 2]) -> u32 {
     match index {
-        0 | 16 | 61 | 78 => WIDTH,
-        1 | 17 | 62 | 79 => HEIGHT,
+        0 | 16 | 61 | 78 => dimensions[0],
+        1 | 17 | 62 | 79 => dimensions[1],
         2 | 3 | 9 | 10 | 20 | 21 => 17,
         4 => 23,
         5..=8 => 1,

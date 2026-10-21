@@ -19,10 +19,16 @@ fn cursor_contract_win64_keeps_static_lookup_and_absent_position_setter() {
             "EnableMouseInPointer",
             "IsMouseInPointerEnabled",
             "TrackMouseEvent",
+            "GetPointerType",
+            "GetPointerInfo",
+            "GetPointerDevices",
         ] {
             assert_eq!(
                 wire::x64::runtime::import_supported(dll, name),
-                name != "TrackMouseEvent" || dll == "user32.dll",
+                !matches!(
+                    name,
+                    "TrackMouseEvent" | "GetPointerType" | "GetPointerInfo" | "GetPointerDevices"
+                ) || dll == "user32.dll",
                 "{dll}!{name}"
             );
             mem.write(text, format!("{name}\0").as_bytes()).unwrap();
@@ -142,4 +148,63 @@ fn cursor_contract_win64_output_fault_preserves_cpu_and_accessible_prefix() {
         assert_eq!((cpu.rip, cpu.regs[4], rt.api_calls), before);
         assert_eq!(mem.read_int(output, 4).unwrap(), 0xa5a5a5a5);
     }
+}
+
+#[test]
+fn cursor_contract_win64_pointer_digitizer_list_is_empty_with_checked_count() {
+    let (mut mem, mut cpu, mut rt) = startup();
+    let count = STACK + 0x100;
+    let output = count + 16;
+    mem.write_int(count, 4, 0x1234).unwrap();
+    mem.write(output, &[0xaa; 32]).unwrap();
+    startup_call(&mut mem, &mut cpu, &mut rt, "SetLastError", &[77]);
+    for data in [0, output] {
+        assert_eq!(
+            startup_dll_call(
+                &mut mem,
+                &mut cpu,
+                &mut rt,
+                "user32.dll",
+                "GetPointerDevices",
+                &[count, data]
+            ),
+            1
+        );
+        assert_eq!(mem.read_int(count, 4).unwrap(), 0);
+        assert_eq!(
+            startup_call(&mut mem, &mut cpu, &mut rt, "GetLastError", &[]),
+            77
+        );
+    }
+    let mut bytes = [0; 32];
+    mem.read(output, &mut bytes).unwrap();
+    assert_eq!(bytes, [0xaa; 32]);
+    assert_eq!(
+        startup_dll_call(
+            &mut mem,
+            &mut cpu,
+            &mut rt,
+            "user32.dll",
+            "GetPointerDevices",
+            &[0, output]
+        ),
+        0
+    );
+    assert_eq!(
+        startup_call(&mut mem, &mut cpu, &mut rt, "GetLastError", &[]),
+        87
+    );
+    let bad = STACK + 8190;
+    mem.write(bad, &[0xbb; 2]).unwrap();
+    cpu.regs[1] = bad;
+    cpu.regs[2] = output;
+    let before = cpu.clone();
+    assert!(rt
+        .dispatch("user32.dll", "GetPointerDevices", &mut cpu, &mut mem)
+        .is_err());
+    assert_eq!(cpu.rip, before.rip);
+    assert_eq!(cpu.regs, before.regs);
+    let mut prefix = [0; 2];
+    mem.read(bad, &mut prefix).unwrap();
+    assert_eq!(prefix, [0xbb; 2]);
 }

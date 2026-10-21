@@ -2,6 +2,7 @@ use super::{ApiId, ArchitecturePlan, Contract, ExecutionPolicy, Parameter, Retur
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThreadPropertyApi {
+    Open,
     GetErrorMode,
     SetErrorMode,
     Resume,
@@ -40,7 +41,8 @@ const fn declaration(
 use Parameter::{Int32 as I, Pointer as P, Uint32 as D};
 use ReturnConvention::{BoolLastError as B, Pointer as H, Uint32 as U};
 
-pub static THREAD_PROPERTY_CONTRACTS: [Contract; 10] = [
+pub static THREAD_PROPERTY_CONTRACTS: [Contract; 11] = [
+    declaration(ThreadPropertyApi::Open, "OpenThread", &[D, D, D], H, false),
     declaration(
         ThreadPropertyApi::GetErrorMode,
         "GetThreadErrorMode",

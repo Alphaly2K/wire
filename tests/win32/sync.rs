@@ -36,6 +36,7 @@ fn inline_sync_keeps_pe32_abi_only_stack_cleanup_and_untouched_outputs() {
         ("TryAcquireSRWLockExclusive", vec![DATA]),
         ("TryAcquireSRWLockShared", vec![DATA]),
         ("InitializeConditionVariable", vec![DATA]),
+        ("SleepConditionVariableSRW", vec![DATA, DATA + 8, 0, 0]),
         ("WakeConditionVariable", vec![DATA]),
         ("WakeAllConditionVariable", vec![DATA]),
         (

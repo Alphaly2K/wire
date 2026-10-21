@@ -118,7 +118,7 @@ def main():
                 ok = lib.wire_gpu_pipeline(context, vertex, pixel, None, error, len(error))
                 pipelines.append(dict(vertex=vi, pixel=pi, ok=bool(ok),
                                       error='' if ok else error.value.decode(errors='replace'),
-                                      incompatible=not ok and error.value == b'shader I/O location mismatch'))
+                                      incompatible=not ok and error.value.startswith(b'shader I/O location mismatch')))
         for i, (kind, shader) in enumerate(shaders):
             if kind == 4:
                 ok = lib.wire_gpu_pipeline(context, None, None, shader, error, len(error))

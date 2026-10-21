@@ -27,14 +27,15 @@ const fn declaration(
             | DesktopApi::ProcessStation
             | DesktopApi::ObjectInformationW
     );
+    let timing = matches!(id, DesktopApi::DoubleClickTime);
     Contract::new(
         ApiId::Desktop(id), name, parameters, returns,
-        "process-local logical desktop only; keep PE32 fixed values, synthetic process station handle and unsupported station query preserving outputs/LastError, settings ABI-only and DWM unknown ABI/zero cleanup; Win64 fixed/station queries absent, screen-reader get/set subset, no host preference mutation and no compositor; HRESULT/LastError/output/return-frame order retained; static provider aliases and default settings dynamic lookup gap retained with existing-gateway fallback",
+        "process-local logical desktop only; keep PE32 fixed values, synthetic process station handle and unsupported station query preserving outputs/LastError, settings ABI-only and DWM unknown ABI/zero cleanup; Win64 shared fixed double-click timing, remaining fixed/station queries absent, screen-reader get/set subset, no host preference mutation and no compositor; HRESULT/LastError/output/return-frame order retained; static provider aliases and default settings dynamic lookup gap retained with existing-gateway fallback",
         [ArchitecturePlan { dlls: if settings || fixed { &["user32.dll"] } else { &[] }, execution: if settings { ExecutionPolicy::LegacyUnimplemented } else if fixed { ExecutionPolicy::Typed } else { ExecutionPolicy::Absent } },
-         ArchitecturePlan { dlls: if fixed { &[] } else if settings { &["kernel32.dll", "kernelbase.dll", "user32.dll"] } else { &["kernel32.dll", "kernelbase.dll", "user32.dll", "dwmapi.dll"] }, execution: if fixed { ExecutionPolicy::Absent } else { ExecutionPolicy::Typed } }],
+         ArchitecturePlan { dlls: if timing { &["user32.dll"] } else if fixed { &[] } else if settings { &["kernel32.dll", "kernelbase.dll", "user32.dll"] } else { &["kernel32.dll", "kernelbase.dll", "user32.dll", "dwmapi.dll"] }, execution: if fixed && !timing { ExecutionPolicy::Absent } else { ExecutionPolicy::Typed } }],
     ).with_lookup_dlls([
         if settings || fixed { &["user32.dll"] } else { &[] },
-        if settings || fixed { &[] } else { &["user32.dll", "dwmapi.dll"] },
+        if timing { &["user32.dll"] } else if settings || fixed { &[] } else { &["user32.dll", "dwmapi.dll"] },
     ])
 }
 

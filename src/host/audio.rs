@@ -69,6 +69,7 @@ impl Drop for PcmOutput {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::PcmOutput;
+    use std::time::{Duration, Instant};
 
     #[test]
     #[ignore = "requires a native AudioQueue output device"]
@@ -80,8 +81,19 @@ mod tests {
         let accepted = output.push(&[0; 2048]);
         assert_eq!(accepted, 2048);
         let mut values = [u64::MAX; 4];
-        output.stats(&mut values);
-        assert_eq!(values[0] + values[3], accepted as u64);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            output.stats(&mut values);
+            assert_eq!(values[0] + values[3], accepted as u64);
+            if values[0] == accepted as u64 && values[2] != 0 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "AudioQueue did not drain PCM: {values:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
         output.close();
         assert!(!output.active());
         output.close();
@@ -89,5 +101,10 @@ mod tests {
         let mut closed = [77; 4];
         output.stats(&mut closed);
         assert_eq!(closed, [77; 4]);
+        assert!(output.open());
+        output.stats(&mut values);
+        assert_eq!(values[0], 0);
+        assert_eq!(values[3], 0);
+        output.close();
     }
 }

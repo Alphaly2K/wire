@@ -122,7 +122,8 @@ impl Heap {
         if id == HeapApi::Process {
             return Ok(PROCESS_HEAP);
         }
-        if a[0] != PROCESS_HEAP || a[1] & !9 != 0 {
+        let flags = if id == HeapApi::ReAlloc { 0x19 } else { 9 };
+        if a[0] != PROCESS_HEAP || a[1] & !flags != 0 {
             return Err("unsupported Win64 heap/flags".into());
         }
         if id == HeapApi::Alloc {
@@ -158,6 +159,9 @@ impl Heap {
             }
             self.blocks.get_mut(&a[2]).unwrap().size = size as usize;
             return Ok(a[2]);
+        }
+        if a[1] & 0x10 != 0 {
+            return Ok(0);
         }
         if size > 16 * 1024 * 1024 {
             pages.set_error(mem, 8)?;

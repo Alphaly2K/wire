@@ -5,6 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 mod address;
+mod condition;
 mod control;
 mod properties;
 pub(super) use control::ThreadControlResult;
@@ -16,6 +17,15 @@ pub(crate) struct Spawn {
 }
 #[derive(Clone)]
 pub(super) enum Block {
+    Condition {
+        condition: u64,
+        lock: u64,
+        shared: bool,
+        timeout: u32,
+        ticket: u64,
+        notified: bool,
+        deadline: Option<Instant>,
+    },
     Address {
         address: u64,
         ticket: u64,
@@ -65,6 +75,7 @@ pub(super) struct Threads {
     pub stack_size: u64,
     pub enabled: bool,
     next_address_wait: u64,
+    next_condition_wait: u64,
 }
 impl Threads {
     pub fn new(stack_size: u64) -> Self {
@@ -93,6 +104,7 @@ impl Threads {
             stack_size,
             enabled: false,
             next_address_wait: 0,
+            next_condition_wait: 0,
         }
     }
     pub(super) fn teb(&self) -> u64 {
@@ -149,6 +161,9 @@ impl Threads {
         if close_source && self.flags(source).is_some_and(|flags| flags & 2 != 0) {
             return Err(6);
         }
+        self.alias(id, inherit)
+    }
+    fn alias(&mut self, id: u64, inherit: bool) -> Result<u64, u32> {
         if self.handles.len() >= 1024 || self.next_alias >= 0x7fffa000 {
             return Err(8);
         }
@@ -214,6 +229,7 @@ impl Runtime64 {
     }
     pub(crate) fn finish_thread(&mut self, mem: &mut Memory, code: u32) -> Result<(), String> {
         self.user.keyboard.exit64(self.threads.active);
+        self.user.mouse_pointer.current.remove(&self.threads.active);
         self.user.events.retain(|m| m.tid != self.threads.active);
         let t = self.threads.entries.get_mut(&self.threads.active).unwrap();
         t.exit = Some(code);
@@ -270,6 +286,16 @@ impl Runtime64 {
             Some(Block::Address {
                 notified, deadline, ..
             }) => *notified || deadline.is_some_and(|d| Instant::now() >= d),
+            Some(Block::Condition {
+                lock,
+                shared,
+                notified,
+                deadline,
+                ..
+            }) => {
+                (*notified || deadline.is_some_and(|d| Instant::now() >= d))
+                    && self.srw.available(*lock, *shared)
+            }
             Some(Block::Wait {
                 handles,
                 all,
@@ -297,6 +323,11 @@ impl Runtime64 {
             .values()
             .filter(|t| t.suspended == 0 && t.exit.is_none())
             .filter_map(|t| match &t.block {
+                Some(Block::Condition {
+                    deadline: Some(d),
+                    notified: false,
+                    ..
+                }) if Instant::now() < *d => Some(*d),
                 Some(Block::Address {
                     deadline: Some(d), ..
                 })

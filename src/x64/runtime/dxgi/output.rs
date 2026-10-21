@@ -35,10 +35,10 @@ pub(super) const METHODS: &[MethodAbi] = &[
     ("Output.GetDisplaySurfaceData1", 2, &[]),
     ("Output.DuplicateOutput", 3, &[]),
 ];
-fn mode(format: u32, extended: bool) -> Vec<u8> {
+fn mode(format: u32, extended: bool, dimensions: [u32; 2]) -> Vec<u8> {
     let mut fields = vec![
-        display::WIDTH,
-        display::HEIGHT,
+        dimensions[0],
+        dimensions[1],
         display::REFRESH_HZ,
         1,
         format,
@@ -81,6 +81,7 @@ impl Graphics {
         mem: &mut Memory,
         name: &str,
         a: &[u64],
+        dimensions: [u32; 2],
     ) -> Result<u64, String> {
         let extended = name.ends_with('1');
         match name {
@@ -92,8 +93,8 @@ impl Graphics {
                 for (i, c) in display::DEVICE.encode_utf16().enumerate() {
                     bytes[2 * i..2 * i + 2].copy_from_slice(&c.to_le_bytes());
                 }
-                bytes[72..76].copy_from_slice(&display::WIDTH.to_le_bytes());
-                bytes[76..80].copy_from_slice(&display::HEIGHT.to_le_bytes());
+                bytes[72..76].copy_from_slice(&dimensions[0].to_le_bytes());
+                bytes[76..80].copy_from_slice(&dimensions[1].to_le_bytes());
                 bytes[80..84].copy_from_slice(&1u32.to_le_bytes()); // Attached virtual desktop.
                 bytes[84..88].copy_from_slice(&1u32.to_le_bytes()); // Identity rotation.
                 bytes[88..96].copy_from_slice(&display::MONITOR.to_le_bytes());
@@ -112,7 +113,7 @@ impl Graphics {
                 // The current presentation profile is a single 32-bit mono mode.
                 let supported = matches!(a[1], 28 | 87);
                 if supported && a[4] != 0 && capacity >= 1 {
-                    let bytes = mode(a[1] as u32, extended);
+                    let bytes = mode(a[1] as u32, extended, dimensions);
                     mem.check(a[4], bytes.len(), WRITE)?;
                     mem.write(a[4], &bytes)?;
                 }
@@ -168,7 +169,11 @@ impl Graphics {
                 }
                 mem.write(
                     a[2],
-                    &mode(if fields[4] == 0 { 28 } else { fields[4] }, extended),
+                    &mode(
+                        if fields[4] == 0 { 28 } else { fields[4] },
+                        extended,
+                        dimensions,
+                    ),
                 )?;
                 Ok(0)
             }

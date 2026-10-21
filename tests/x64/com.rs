@@ -622,6 +622,7 @@ fn win64_hstring_outputs_fault_before_headers_allocations_or_reference_counts_ch
             );
         }
     }
+    startup_call(&mut mem, &mut cpu, &mut runtime, "SetLastError", &[77]);
     assert_eq!(
         startup_dll_call(
             &mut mem,
@@ -631,11 +632,11 @@ fn win64_hstring_outputs_fault_before_headers_allocations_or_reference_counts_ch
             "EnableMouseInPointer",
             &[1]
         ),
-        0
+        1
     );
     assert_eq!(
         startup_call(&mut mem, &mut cpu, &mut runtime, "GetLastError", &[]),
-        50
+        77
     );
     assert_eq!(
         startup_dll_call(
@@ -646,7 +647,7 @@ fn win64_hstring_outputs_fault_before_headers_allocations_or_reference_counts_ch
             "IsMouseInPointerEnabled",
             &[]
         ),
-        0
+        1
     );
 }
 

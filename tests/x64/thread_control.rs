@@ -470,6 +470,7 @@ fn thread_control_keeps_win64_exit_cpu_and_provider_boundaries() {
     for name in [
         "CreateThread",
         "ExitThread",
+        "FreeLibraryAndExitThread",
         "QueueUserAPC",
         "GetThreadContext",
         "SetThreadDescription",
@@ -483,4 +484,84 @@ fn thread_control_keeps_win64_exit_cpu_and_provider_boundaries() {
         assert_eq!(rt.api_calls, calls);
         assert_eq!(cpu, before);
     }
+}
+
+#[test]
+fn free_library_and_exit_thread_releases_one_reference_before_nonreturning_exit() {
+    let (mut mem, mut cpu, mut rt) = startup();
+    let base = 0x620000000;
+    rt.register_module(
+        "owned.dll",
+        base,
+        Pe64::parse(&fixture())
+            .unwrap()
+            .exports(&fixture(), base)
+            .unwrap(),
+    );
+    mem.write(STACK + 0x100, b"owned.dll\0").unwrap();
+    assert_eq!(
+        startup_call(
+            &mut mem,
+            &mut cpu,
+            &mut rt,
+            "LoadLibraryA",
+            &[STACK + 0x100]
+        ),
+        base
+    );
+    assert!(request(
+        &mut mem,
+        &mut cpu,
+        &mut rt,
+        "FreeLibraryAndExitThread",
+        &[base, 42]
+    )
+    .unwrap_err()
+    .contains("scheduler"));
+    rt.enable_scheduler();
+    cpu.regs[4] = 0xdead0000;
+    cpu.regs[1] = base;
+    cpu.regs[2] = 42;
+    assert!(rt
+        .dispatch(
+            "kernel32.dll",
+            "FreeLibraryAndExitThread",
+            &mut cpu,
+            &mut mem
+        )
+        .is_err());
+    let calls = rt.api_calls;
+    assert_eq!(
+        request(
+            &mut mem,
+            &mut cpu,
+            &mut rt,
+            "FreeLibraryAndExitThread",
+            &[base, 0xabcdef12_12345678]
+        )
+        .unwrap(),
+        Control::ThreadExited(0x12345678)
+    );
+    assert_eq!(rt.api_calls, calls + 1);
+    assert_eq!(cpu.regs[4], STACK + 0x1f88);
+    let calls = rt.api_calls;
+    assert!(request(
+        &mut mem,
+        &mut cpu,
+        &mut rt,
+        "FreeLibraryAndExitThread",
+        &[base, 42]
+    )
+    .unwrap_err()
+    .contains("detach/unload"));
+    assert_eq!(rt.api_calls, calls);
+    assert!(request(
+        &mut mem,
+        &mut cpu,
+        &mut rt,
+        "FreeLibraryAndExitThread",
+        &[base + (1 << 32), 42]
+    )
+    .unwrap_err()
+    .contains("invalid Win64 module"));
 }

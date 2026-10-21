@@ -59,6 +59,8 @@ mod guid_allocation;
 mod handles;
 #[path = "win32/images_contract.rs"]
 mod images_contract;
+#[path = "win32/input_events.rs"]
+mod input_events;
 #[path = "win32/input_profile_contract.rs"]
 mod input_profile_contract;
 #[path = "win32/interlocked.rs"]

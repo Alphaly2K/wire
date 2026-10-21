@@ -1,6 +1,6 @@
 # 重构收尾审计（2026-10-20）
 
-核对基线 `37b2c9c`，连同本批三个 Win64 input/processor adapter 源文件。按原计划验收，代码重构主体与阶段整合已交付；R5 的真实音频输出验收仍未完成。R6 按用户要求排除。先前 10%–15% 是工作量粗估，后续以本页的具体待验项为准。
+生产代码整合基线 `85ced07`，随后加强音频 fixture 并加入独立诊断探针。按原计划 R0–R5 与 R7 的交付及本轮验收已完成，R6 按用户要求排除。此前唯一剩余的真实音频验收已通过；保留的 legacy 和协调边界明确列于下表。
 
 ## 阶段核对
 
@@ -10,14 +10,14 @@
 | R2 | 919 项 export 契约，DLL/别名/架构 ABI/执行策略在冷阶段绑定；Win64 普通 export 不再维护重复手工支持/arity/DWORD 表 | 原计划允许的 PE32 CRT、专用对象方法与 ABI 例外按下表保留 legacy |
 | R3 | 文件、模块、环境、线程/同步、USER、COM/字符串、图形/音频等资源有 owner；普通 adapter 按实际资源借用 | 组合根仍负责跨资源控制；保留 PE32 KernelObjects32 混合句柄表和原数值空间 |
 | R4 | Process32 拥有运行、调度、USER callback、DLL/TLS、SEH 与 CRT 编排，CPU 单步/IR 保持独立 | Cpu 的公开委托兼容；DLL、SEH、CRT 各自的恢复和部分提交策略保留 |
-| R5 | owned host 窗口/帧、事件消费、GDI/像素边界，AudioQueue/CoreText/Vulkan/Metal 的 Rust owner 和 FFI 已归 host | 窗口、GPU、字体已有实际 native 证据；真实音频见下节待验项 |
+| R5 | owned host 窗口/帧、事件消费、GDI/像素边界，AudioQueue/CoreText/Vulkan/Metal 的 Rust owner 和 FFI 已归 host；真实 PCM 回调消费/关闭/重开通过 | 真实窗口/GPU/字体/音频依赖可访问对应设备的宿主条件，默认 ignored 的配置保持 |
 | R7 | 已形成职责的目录归位，测试 harness、CLI 与 perf/inventory/profile/probe 工具分类，当前/历史文档分开 | 公开 facade 保留，第三方/native 构建和 include 输入路径保持 |
 
-## 唯一尚未完成的本轮验收项
+## 最后音频验收项已关闭
 
-`host::audio::tests::native_pcm_output_accounts_samples_and_closes_once` 显式运行时在第一次 open 失败，后续样本计数和重复关闭断言未执行。独立主线程探针直接编译原始 `src/platform/audio.c`，也无法打开输出；具体错误原因尚未确定。
+原音频 fixture 与主线程 C 探针的打开失败日志保留。本次复查使用同一探针 binary 对照：当前工具的受限执行中，NewOutput 与三次 buffer 分配成功，Start 返回 −66680（InvalidDevice）；沙箱外全部成功，提交/队列计数守恒。
 
-代码侧已有完整 Win32/库回归和关闭顺序核对。真实音频输出的计数、播放和关闭仍需在能打开 AudioQueue 的宿主条件下验收，本页不将其标为通过。原始记录在 `wire-out/refactoring-2026-10-14/r5-host-audio-native.txt` 与 `r5-host-audio-baseline-native.txt`；fixture 和原创探针源码均保留。
+加强后的 `host::audio::tests::native_pcm_output_accounts_samples_and_closes_once` 在沙箱外通过：回调在两秒上限内消费全部 2048 个静音样本，逐次统计保持 consumed+queued=accepted，关闭幂等、关闭后操作及重新打开的独立计数通过。生产 Rust owner、AudioQueue C 和 DirectSound 未改。原创诊断源码归 `tools/probes/audio.c`；原始/新日志与验证范围见 [音频复查](refactoring-audio-validation-2026-10-20.md)。
 
 ## 明确保留的 legacy 与协调代码
 
@@ -48,8 +48,10 @@
 
 本批 release 全目标 **695 passed / 0 failed / 8 ignored / 21 suites**，Python 工具 **31 项**通过，fmt、release all-targets/all-features strict Clippy 和 build 通过。8 项 ignored 为 7 项外部 Metal/native GPU fixture 加新增 PCM 输出 fixture；每项真实执行结果继续按原批次记录。
 
+音频收尾仅改测试与探针。本次重新通过上述全目标、31 项工具测试、严格 Clippy、build 和 fmt，原生 PCM 1 项另在沙箱外显式复跑通过，不混进默认 695 项的计数。受限执行的全目标先在 Unicorn 差分套件收到 SIGILL，随后沙箱外完整通过；两份日志均保留。最终验证、源码和日志哈希见 `wire-out/refactoring-2026-10-14/r7-audio-closeout-verification.json`；[音频复查](refactoring-audio-validation-2026-10-20.md)记录命令及范围。
+
 本批没有修改 CPU/IR、共享 SIMD、memory/cache 或原生算法；普通资源提取按用户调整后的粒度验收，不重跑长性能或游戏矩阵。最近的真实 native 图形验证为 `r7-host-graphics-layout-` 的两项 Metal 和两项 Vulkan fixture；原生窗口及 CoreText 证据见 [完整记录](refactoring-2026-10-14.md)。
 
 对 host、两架构 CPU、PE32 IR 与共享 SIMD 做文本依赖检索，guest runtime 引用只落在已知 `x86/cpu/process_facade.rs` 兼容委托；host 内部可引用 MetalLayer 等 host 类型。这是有明确范围的源码检索，未作为完整 Rust 依赖图证明。明细见 `wire-out/refactoring-2026-10-14/r7-closeout-dependencies.json`。
 
-当前 [状态页](../status.md) 记录交付与待验，领域规则在 `docs/architecture/`，历史过程在带日期报告。用户的设计稿、重构计划、IDE 与 ignore 改动未纳入提交；没有复制游戏、创建 worktree、清缓存或 push。
+当前 [状态页](../status.md) 记录交付与保留范围，领域规则在 `docs/architecture/`，历史过程在带日期报告。用户的设计稿、重构计划、IDE 与 ignore 改动未纳入提交；没有复制游戏、创建 worktree、清缓存或 push。

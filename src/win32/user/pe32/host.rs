@@ -37,11 +37,34 @@ impl User32 {
         start: Instant,
         event: [u32; 4],
     ) {
-        let [hwnd, message, wparam, lparam] = event;
+        let [hwnd, message, wparam, mut lparam] = event;
         let Some(w) = self.windows.get(&hwnd) else {
             return;
         };
         let tid = w.tid;
+        match message {
+            6 if wparam & 0xffff != 0 => self.active = hwnd,
+            6 if self.active == hwnd => self.active = 0,
+            7 => self.focus = hwnd,
+            8 if self.focus == hwnd => self.focus = 0,
+            0x1c if wparam != 0 => self.foreground = hwnd,
+            0x1c if self.foreground == hwnd => self.foreground = 0,
+            _ => {}
+        }
+        if (0x200..=0x20e).contains(&message) {
+            let Ok(origin) = self.client_origin(hwnd) else {
+                return;
+            };
+            let local = [
+                lparam as u16 as i16 as i32,
+                (lparam >> 16) as u16 as i16 as i32,
+            ];
+            let point = std::array::from_fn(|n| origin[n].wrapping_add(local[n]));
+            self.cursor.set_position(point);
+            if matches!(message, 0x20a | 0x20e) {
+                lparam = point[0] as u16 as u32 | ((point[1] as u16 as u32) << 16);
+            }
+        }
         let time = clock_ms(start);
         if !self.keyboard.host([hwnd, message, wparam, lparam, time]) {
             return;
@@ -56,6 +79,7 @@ impl User32 {
                 wparam,
                 lparam,
                 time,
+                point: self.cursor.position(),
                 synthetic_paint: false,
                 hardware_input: true,
             },

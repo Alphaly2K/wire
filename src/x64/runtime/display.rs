@@ -10,6 +10,17 @@ pub(super) struct Enumeration {
     pub release: Vec<u64>,
 }
 impl Runtime64 {
+    /// Select one logical desktop before executing guest code or creating windows.
+    pub fn configure_desktop(&mut self, width: u32, height: u32) -> Result<(), String> {
+        if !(64..=8192).contains(&width) || !(64..=8192).contains(&height) {
+            return Err("desktop dimensions must be between 64 and 8192 pixels".into());
+        }
+        if self.api_calls != 0 || !self.user.windows.is_empty() {
+            return Err("desktop dimensions must be configured before guest execution".into());
+        }
+        self.user.configure_display([width, height]);
+        Ok(())
+    }
     pub(super) fn display_call(
         &self,
         mem: &mut Memory,
@@ -29,6 +40,7 @@ impl User {
         threads: &Threads,
     ) -> Result<u64, String> {
         let wide = id.wide();
+        let [width, height] = self.display_size;
         if id.devices() || id.settings() {
             let device = if args[0] == 0 {
                 String::new()
@@ -75,18 +87,26 @@ impl User {
                 threads.set_error(mem, 87)?;
                 return Ok(0);
             }
-            mem.write(args[2], &profile::mode(wide, size))?;
+            mem.write(
+                args[2],
+                &profile::mode_for_size(wide, size, self.display_size),
+            )?;
             return Ok(1);
         }
         match id {
-            DisplayApi::Metrics => Ok(profile::metric(args[0] as u32) as u64),
+            DisplayApi::Metrics => {
+                Ok(profile::metric_for_size(args[0] as u32, self.display_size) as u64)
+            }
             DisplayApi::InfoA | DisplayApi::InfoW => {
                 let size = mem.read_int(args[1], 4)? as usize;
                 if args[0] != MONITOR || (size != 40 && size != if wide { 104 } else { 72 }) {
                     threads.set_error(mem, 87)?;
                     return Ok(0);
                 }
-                mem.write(args[1], &profile::monitor(wide, size))?;
+                mem.write(
+                    args[1],
+                    &profile::monitor_for_size(wide, size, self.display_size),
+                )?;
                 Ok(1)
             }
             DisplayApi::FromPoint | DisplayApi::FromRect | DisplayApi::FromWindow => {
@@ -99,15 +119,15 @@ impl User {
                         // POINT is an eight-byte by-value struct in one Win64 register.
                         let x = args[0] as u32 as i32;
                         let y = (args[0] >> 32) as u32 as i32;
-                        (0..WIDTH as i32).contains(&x) && (0..HEIGHT as i32).contains(&y)
+                        (0..width as i32).contains(&x) && (0..height as i32).contains(&y)
                     }
                     DisplayApi::FromRect => {
                         let r = rect(mem, args[0])?;
                         r[0] < r[2]
                             && r[1] < r[3]
-                            && r[0] < WIDTH as i32
+                            && r[0] < width as i32
                             && r[2] > 0
-                            && r[1] < HEIGHT as i32
+                            && r[1] < height as i32
                             && r[3] > 0
                     }
                     _ if args[0] == 0 => false,
@@ -117,7 +137,7 @@ impl User {
                             return Ok(0);
                         };
                         let r = window.rect;
-                        r[0] < WIDTH as i32 && r[2] > 0 && r[1] < HEIGHT as i32 && r[3] > 0
+                        r[0] < width as i32 && r[2] > 0 && r[1] < height as i32 && r[3] > 0
                     }
                 };
                 Ok(if intersects || args[1] != 0 {
@@ -153,7 +173,8 @@ impl Runtime64 {
             result.result = 0;
             return Ok(result);
         }
-        let mut r = [0i32, 0, WIDTH as i32, HEIGHT as i32];
+        let [width, height] = self.user.display_size;
+        let mut r = [0i32, 0, width as i32, height as i32];
         if args[1] != 0 {
             let clip = rect(mem, args[1])?;
             r = [
