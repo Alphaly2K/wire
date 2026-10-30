@@ -1,5 +1,9 @@
 # Wire
 
+## 该项目完全由AI生成，且目前项目还未完善，请勿用于生产环境
+
+## 该项目已停止维护并归档
+
 Wire 的目标是面向 WebAssembly 的 x86/AMD64 Windows 二进制转译运行时，复用既有 Win32、Direct3D 和精确指令语义组件。当前通过 Wasm JIT 执行客体程序；预转译缓存和按热度分层编译尚在实现阶段。许可证为 LGPL-2.1-only，第三方声明见 [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES)。
 
 入口位于 [crates/wire-wasm](crates/wire-wasm)，已能运行只使用已迁移服务的 PE32/PE32+ 控制程序。通用 Windows 应用与图形兼容仍在迁移；根 Cargo 工作区默认构建 Wasm 核心，原生解释器及旧执行 IR 已移除。
