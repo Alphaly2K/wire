@@ -44,6 +44,10 @@ pub enum NlsApi {
     CompareStringA,
     CompareStringW,
     CompareStringEx,
+    GetDateFormatA,
+    GetDateFormatW,
+    GetTimeFormatA,
+    GetTimeFormatW,
 }
 const T32: ArchitecturePlan = ArchitecturePlan {
     dlls: &["kernel32.dll"],
@@ -61,6 +65,10 @@ const A64: ArchitecturePlan = ArchitecturePlan {
     dlls: &[],
     execution: ExecutionPolicy::Absent,
 };
+const A32: ArchitecturePlan = ArchitecturePlan {
+    dlls: &[],
+    execution: ExecutionPolicy::Absent,
+};
 const fn declaration(
     id: NlsApi,
     name: &'static str,
@@ -73,7 +81,7 @@ const fn declaration(
         "CP932 virtual defaults; limited Unicode/NLS vocabulary; architecture-specific flags, bounds, error and partial-output rules; locale enumeration uses a dedicated process callback adapter",
         [x86, x64])
 }
-pub static NLS_CONTRACTS: [Contract; 42] = [
+pub static NLS_CONTRACTS: [Contract; 46] = [
     declaration(
         NlsApi::GetAcp,
         "GetACP",
@@ -535,6 +543,66 @@ pub static NLS_CONTRACTS: [Contract; 42] = [
         ],
         ReturnConvention::Uint32,
         L32,
+        A64,
+    ),
+    declaration(
+        NlsApi::GetDateFormatA,
+        "GetDateFormatA",
+        &[
+            Parameter::Uint32,
+            Parameter::Uint32,
+            Parameter::Pointer,
+            Parameter::Pointer,
+            Parameter::Pointer,
+            Parameter::Int32,
+        ],
+        ReturnConvention::CharacterCount,
+        A32,
+        A64,
+    ),
+    declaration(
+        NlsApi::GetDateFormatW,
+        "GetDateFormatW",
+        &[
+            Parameter::Uint32,
+            Parameter::Uint32,
+            Parameter::Pointer,
+            Parameter::Pointer,
+            Parameter::Pointer,
+            Parameter::Int32,
+        ],
+        ReturnConvention::CharacterCount,
+        A32,
+        A64,
+    ),
+    declaration(
+        NlsApi::GetTimeFormatA,
+        "GetTimeFormatA",
+        &[
+            Parameter::Uint32,
+            Parameter::Uint32,
+            Parameter::Pointer,
+            Parameter::Pointer,
+            Parameter::Pointer,
+            Parameter::Int32,
+        ],
+        ReturnConvention::CharacterCount,
+        A32,
+        A64,
+    ),
+    declaration(
+        NlsApi::GetTimeFormatW,
+        "GetTimeFormatW",
+        &[
+            Parameter::Uint32,
+            Parameter::Uint32,
+            Parameter::Pointer,
+            Parameter::Pointer,
+            Parameter::Pointer,
+            Parameter::Int32,
+        ],
+        ReturnConvention::CharacterCount,
+        A32,
         A64,
     ),
 ];

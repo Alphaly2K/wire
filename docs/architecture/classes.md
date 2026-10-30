@@ -1,23 +1,15 @@
 # 窗口类注册与元数据
 
-PE32 类注册、查询、字段修改、comctl32 初始化和隐式系统类注册均由 User32 执行。类调用只借内存、ApiTable、Modules、Scratch32 和 LastError，ApiState 的窄组合方法提供这些资源；公开 find_class facade 继续委托。持久字符串编码只借内存、Scratch32 和 LastError。创建窗口使用同一存储算法，保留 ANSI→wide 两次分配与逐步写入顺序，见[窗口控制](window-control.md)。
+Wasm 入口在 PE32 通过 user32 接入十七项类注册、注销、信息、字段和名称操作，通过 comctl32 接入 InitCommonControls/Ex。AMD64 继续接入六项注册/注销；其余类接口保留旧 absent 范围。provider、参数与返回声明来自 `win32/catalog/classes.rs`。
 
-`win32/catalog/classes.rs` 是十九项 class API 的 provider、参数与执行策略权威来源：原十七项 USER 类操作，加两项 comctl32 初始化。PE32 全部接入 typed ID；Win64 只绑定原有六项注册/注销，信息、字段、类名查询和 comctl32 初始化仍 absent。Win64 静态接受 kernel32/kernelbase/user32，默认动态只有 user32；已有 gateway fallback 仍保留。
+类身份共用 `win32/user/classes64.rs`。PE32 元数据、字段规则、基本类名称和文本复制算法从旧入口提取到 `user/class_metadata.rs`，旧适配保留原输出和返回帧次序，新适配使用当前 VMM、调用帧、进程 USER 和运行时数据页。PE32 注册使用 40/48 字节记录，扩展记录检查 cbSize；过程非零，class/window extra 声明上限均为 4096。AMD64 保留 72/80 字节布局及 class extra/菜单非零时错误 50 的原子集。
 
-PE32 的受检记录、持久 A/W 名称/菜单和 typed handler 在 `win32/user/pe32/classes.rs`。公开 `user32::WindowClass` 与 `find_class` facade 保留；`User32.classes` 仍服务窗口创建和兼容访问，本批没有将这张表伪装成私有 owner。系统控件隐式注册由同一 helper 服务 GetClassInfo* 和 CreateWindowEx*，保留原调用顺序。字段查询、额外存储限制、名称输出及原 trace/LastError 保持；GetClassWord 也保留原完整 32 位值。
+PE32 记录全部十一项字段，接受数字或 A/W 菜单名；GetClassInfo/Ex 输出所选编码的持久名称/菜单指针，Ex 写出实际 cbSize。名称复制与读取调用者存储分离，普通注销后 backing 继续保持进程寿命；静态启动拒绝回收 backing。类信息输出前保存原返回帧并检查完整输出，别名或故障不会留下前缀。缺失类为错误 1411，活动窗口引用使注销返回 1412。显式注册的菜单/源/返回帧故障不消耗 atom，错误槽故障可修复重试。
 
-InitCommonControls/Ex 只接受 PE32 comctl32.dll，同一类模块按原顺序注册十个基本窗口/文本类，保留已存在的类、部分注册后的失败及重复调用行为。Ex 仅读取 dwSize=8，保留原来忽略 dwICC 的行为，不新增整结构预检。成功保留 LastError 和原 scalar return 1；无效 size 返回 error 87、空 note，pointer 故障不完成 API。通用控件的专用消息和丰富布局仍未因此实现；[本批验证](../reports/refactoring-common-controls-2026-10-19.md)及[累计性能复核](../reports/refactoring-post-unity-performance-2026-10-19.md)均已通过。
+Get/SetClassLong 与 GetClassWord 保留旧负索引字段和完整 DWORD carrier；只读 atom 索引返回类身份。修改实例、样式、过程、window extra 和背景 brush 会更新同一类状态，后续窗口使用新的过程/extra 大小，已有窗口保留已捕获过程和存储。class extra 仅保存声明，正索引字段访问仍返回 1413；超过 extra 上限返回 87，菜单名修改仍返回 120。GetClassNameA/W 保留 signed capacity、NUL 和 CP932 字节截断；无效 HWND 先于输出检查返回 1400。
 
-Win64 的 `win32/user/classes64.rs::Classes` 私有拥有类记录和 next atom，提供注册、按 instance/key 查找与注销。注册先检查同 instance 的重名，再检查单调 atom 上限；窗口创建借用只读记录并复制所需属性，注销仍由架构协调层先检查存活窗口。guest 记录解析、受检内存和 LastError 在 `x64/runtime/user/classes.rs`，不进入领域 owner。
+PE32 类名最多 255 个 UTF-16 单元，宽名称保留旧入口对未配对代理项的替换，窄名称按 CP932 严格解码，再按 Unicode 小写匹配；AMD64 最多 256 个 UTF-8 字节，按 ASCII 忽略大小写匹配。重复注册返回 1410；PE32 已存在全局类阻止跨 instance 重名。atom 从 0xc000 单调分配，PE32 包含 0xffff，AMD64 在 next 为 0xffff 时拒绝；注销不复用身份。创建允许 CS_GLOBALCLASS；PE32 注销也允许全局类跨 instance，AMD64 注销要求完整 instance。
 
-Win64 架构调用现由 User 组合 owner 处理，只借内存和当前错误槽，不再借 Runtime64；注册/注销及存活窗口检查顺序保持。名称/ID 的资源 key 解码共用受检内存函数，见 `wire-out/refactoring-2026-10-14/r3-user-resources64-{source-checks,verification}.json`。
+PE32 查询或创建 Button、Edit、Static、ListBox、ComboBox、ScrollBar 时按旧规则注册相应全局基本类。InitCommonControls/Ex 按既有顺序补入这六项和 SysListView32、SysTreeView32、SysTabControl32、msctls_progress32，保留已有同名类。Ex 只读取 dwSize=8，dwICC 继续忽略。每个类拥有真实元数据、16 字节 window extra 和同 JIT 的 DefWindowProcW；只有普通窗口/文本行为，列表、树、标签页和进度条的专用控件语义尚未接入。容量失败保留已经完成的有序注册。
 
-| 现有规则 | PE32 | Win64 |
-| --- | --- | --- |
-| 类名限制 | 255 UTF-16 code units | 256 UTF-8 bytes |
-| 名称匹配 | Unicode lower-case | ASCII case-insensitive |
-| 全局类跨 instance | 查找/查询/注销允许 | 窗口创建允许，注销要求相同完整 instance |
-| class extra / menu | 保留原 metadata 和持久菜单 | 非零 class extra/menu 返回 error50 |
-| atom 上限 | 可分配 0xffff | next==0xffff 即拒绝 |
-
-这些差异按旧行为保留。PE32 先分配持久字符串再插入类，访存失败不消耗 atom；已分配 scratch 不在本批增加回滚。两端继续使用各自既有返回帧与故障提交规则。独立基线、窗口生命周期和冻结性能证据见[窗口类批次报告](../reports/refactoring-classes-2026-10-18.md)。
+PE32 跨 A/W 创建按类编码转换 CREATESTRUCT 标题和名称，标题保存于经过完整预检的回调栈区，长标题及故障重试沿同一续点处理。图标/光标字段已保存和查询，实际图标绘制及控件专用消息仍需对应后端。窗口生命周期和变长暂存区见[窗口控制](window-control.md)。

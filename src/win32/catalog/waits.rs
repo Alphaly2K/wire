@@ -6,6 +6,7 @@ pub enum WaitApi {
     SingleEx,
     Multiple,
     MultipleEx,
+    SignalAndWait,
 }
 
 impl WaitApi {
@@ -13,7 +14,10 @@ impl WaitApi {
         matches!(self, Self::Multiple | Self::MultipleEx)
     }
     pub(crate) fn alertable(self) -> bool {
-        matches!(self, Self::SingleEx | Self::MultipleEx)
+        matches!(
+            self,
+            Self::SingleEx | Self::MultipleEx | Self::SignalAndWait
+        )
     }
 }
 
@@ -47,7 +51,8 @@ const fn declaration(
 
 use Parameter::{Pointer as P, Uint32 as D};
 
-pub static WAIT_CONTRACTS: [Contract; 4] = [
+pub static WAIT_CONTRACTS: [Contract; 5] = [
+    Contract::new(ApiId::Wait(WaitApi::SignalAndWait),"SignalObjectAndWait",&[P,P,D,D],ReturnConvention::Uint32,"Signal an owned event/semaphore/mutex exactly once, then use the same cooperative wait/APC/deadline continuation; validate target and output frame before signaling",[ArchitecturePlan {dlls:&["kernel32.dll","kernelbase.dll"],execution:ExecutionPolicy::LegacyUnimplemented};2]),
     declaration(WaitApi::Single, "WaitForSingleObject", &[P, D]),
     declaration(WaitApi::SingleEx, "WaitForSingleObjectEx", &[P, D, D]),
     declaration(WaitApi::Multiple, "WaitForMultipleObjects", &[D, P, D, D]),

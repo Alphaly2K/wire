@@ -1,13 +1,13 @@
 # Local/Global 内存调用边界
 
-Local/GlobalAlloc、ReAlloc、Free、Size、Lock、Unlock、Flags 共 14 个 export，现有 Local/Global 成对入口共用相同行为和资源。在 `win32/catalog/local_memory.rs` 中声明唯一 provider、签名、实现策略与七个 LocalMemoryApi ID；trace 与动态查询继续保存原 export 名称。该家族与 TLS/FLS 的 LocalApi 分开。
+新 Wasm 入口在两种 ABI 支持 Alloc、ReAlloc、Free、Size、Lock、Unlock、Flags 的全部十四个固定内存 export。PE32 provider 为 kernel32，Win64 为 kernel32/kernelbase，签名由共享 catalog 声明。两种名称使用同一进程堆与分配身份，固定块可由 HeapSize/HeapFree 等对应进程堆操作处理；不为每个小块建立独立页面。
 
-PE32 的 Alloc/Free/Size 使用原进程 GuestHeap，与 HeapAlloc、CRT、FormatMessage 共享；Lock 直接返回输入，Unlock 返回零，普通成功及分配失败保持 LastError。Alloc 继续拒绝 movable bit，保留其它原 flags 行为。ReAlloc/Flags 四项维持 ABI-only error 120、原清栈和输出不变。适配器只借内存、allocator 和进程堆 handle，不持有总 ApiState。
+Alloc 接受固定标志 0 和 ZEROINIT（0x40），返回地址即固定句柄；可移动句柄及其余标志当前返回零和错误 50。Size 返回逻辑请求尺寸，Lock 验证块成员后返回原地址，Flags 对固定块返回零；无效句柄返回错误 6，Flags 的失败值为 0x8000。
 
-Win64 `x64/runtime/local_memory.rs::LocalMemory` 私有拥有原 local-block 集合，并执行 Local/Global 和 FormatMessage 分配提交；仅借内存与 `allocation::Pages` 的原页记录、游标、当前错误槽和 Trace，不借 Runtime64。shell argv 与线程描述在完成原 copy-out 后向 owner 登记，归属时机保持。接受 kernel32/kernelbase 全部 14 项。Alloc flags 子集为 0/0x40，ReAlloc 子集为 0/2/0x40/0x42；DWORD flags 截断，SIZE_T、地址和失败 Free 返回值保持完整 64 位。保留原块内扩展、零填充、允许移动时的 copy/map/unmap 顺序、16MiB 限制、invalid handle error 6、不支持 flags error 50、有效 Unlock error 158 及 invalid Flags 返回 0x8000。
+ReAlloc 接受 0、2、0x40、0x42。固定块原址增长失败且未设置位 2 时返回零，保留原块和 LastError；位 2 允许移动固定块，成功后返回新地址。ZEROINIT 清零增长部分，复制保留原有内容。尺寸、地址与失败 Free 的返回值使用完整指针宽度；标志按 DWORD 截断。Free(NULL) 成功返回零，失败 Free 返回输入句柄并写错误 6。
 
-公共 Win64 gateway 在 Free/ReAlloc 前保存返回 frame；坏返回帧不会先释放 block。原 Local/Global allocator 与 guest slab heap 的资源归属保持，原 FormatMessage、CommandLineToArgvW 等生产的 local block 继续可由 Free 释放。PE32 与 Win64 的锁定、失败输出和错误约定分别保留。
+固定块的两个 Unlock 入口有不同的公开约定：[GlobalUnlock](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-globalunlock) 返回 TRUE 并保留 LastError；[LocalUnlock](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-localunlock) 返回 FALSE 并设置 ERROR_NOT_LOCKED（158）。固定块不增加锁计数。新入口按实际 export 身份选择该行为。
 
-PE32 adapter 位于 `win32/x86/local_memory.rs`；Win64 原 body 位于 `x64/runtime/local_memory.rs`，按 typed ID 选择分支，删除名称及后缀解析。独立旧行为基线及共享资源循环见[验收记录](../reports/refactoring-local-memory-2026-10-16.md)。
+分配额度、对齐、空闲区复用、页寿命与[堆契约](heaps.md)一致。所有线程共享分配，线程退出不释放块；静态启动拒绝回收整组堆。调用参数和返回帧在操作前保存，清零/复制受检后才发布分配记录，访存故障可重试；成功完成计一 work、零客体退休，不采样时钟。
 
-Win64 owner 提取基线 `f65e0bf`，Local/Global、FormatMessage 和两个外部登记点经显式依赖替换核对保持。release 完整 Win64 269、fmt/release lib/bin strict Clippy/build 通过，不重复性能或游戏矩阵。证据 `wire-out/refactoring-2026-10-14/r3-local-memory64-owner-{source-checks,verification}.json`。
+旧 PE32 适配器与旧 Win64 的独立 local-block/page owner 仍作为迁移来源保留。可移动句柄、锁计数、discard/modify 标志及尚未迁移的分配调用者仍待接入。

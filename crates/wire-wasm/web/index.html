@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Wire</title>
+<link rel="stylesheet" href="/web/presenter.css">
+<style>
+body { margin: 0; background: #e8e8e8; color: #202020; font: 14px system-ui, sans-serif; }
+#controls { display: flex; align-items: center; gap: 12px; padding: 12px; background: #fff; }
+#output { margin: 0; padding: 12px; white-space: pre-wrap; }
+#windows { overflow: auto; }
+</style>
+<div id="controls"><button id="start" disabled>启动</button><button id="stop" disabled>停止</button><span id="status" role="status">正在加载…</span></div>
+<main id="windows"></main><pre id="output"></pre>
+<form id="console"><input id="input" aria-label="程序输入" maxlength="65536"><button type="submit">发送</button><button id="eof" type="button">结束输入</button></form>
+<script type="module" src="/web/page.mjs"></script>
+</html>

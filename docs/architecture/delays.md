@@ -1,11 +1,11 @@
-# Sleep 与线程让出边界
+# Sleep 与线程让出
 
-Sleep、SleepEx、SwitchToThread 的 provider、DWORD 参数和 typed ID 集中在 `win32/catalog/delays.rs`。PE32 接受 kernel32，Win64 接受 kernel32/kernelbase；调用阶段按 DelayApi 分发，不再维护重复 ABI/arity/DWORD 或解析这些名称。
+Sleep、SleepEx、SwitchToThread 的 provider、DWORD 参数和返回约定集中在 `win32/catalog/delays.rs`，新 Wasm 入口在两种架构使用同一调度协议。
 
-Win64 冷绑定为 `ControlImport::Delay(id)`，保留进程框架的控制结果。SleepEx 在 alertable 时先尝试交付 APC，保留已有 deadline、INFINITE 和 Blocked 路径，正常完成使用公共 Returned 提交。Sleep 保留原 Sleep block、unblock 与 Yielded；SwitchToThread 保留 SwitchThread 请求，由 Process 决定最终调度结果。后两项在发出请求前提交 saved return frame/CPU/API count，原 trace 分工保持。返回槽在执行 handler 前受检，fault 时 CPU、counter 与线程控制均未提交。
+Sleep(0) 先完成保存的返回帧，再请求 round robin 切换。有限正延迟在首次调用时读取单调 10 MHz 时钟并固定 deadline，醒来时正常返回；INFINITE 保持阻塞。SleepEx 的 alertable=TRUE 支持[用户 APC](thread-control.md)：已有队列优先于延迟且不采样时间，投递完成返回 WAIT_IO_COMPLETION；无 APC 时沿用普通延迟协议。
 
-PE32 保留三个原 body：Sleep/SleepEx 先消费 wake，零延时在完成返回帧后才 round-robin，非零延时 arm deadline 后阻塞；SleepEx 继续忽略 alertable。SwitchToThread 先 poll timeout，再根据其它 runnable 线程设置 BOOL 和 yield。公共 gateway 先写 EAX，再读返回槽，之后才允许线程让出；故障时保留已写 EAX，未执行切换。LastError 不额外清除。
+SwitchToThread 在存在另一个可运行线程时返回 TRUE 并请求切换，否则返回 FALSE。新线程只有在加载锁可用时才具备启动资格，已经开始的线程可在其他线程持有加载锁时执行普通代码和 I/O。
 
-三个 PE32 body 归 `x86/process/synchronization.rs`，只借 CPU、日志和 scheduler；返回结果携带 `yield_after_return`，实际 round-robin 仍在公共 gateway 完成返回帧之后执行。阻塞结果直接回到进程循环，不提交普通 API 返回帧。
+阻塞保留调用帧、CPU、LastError、deadline 和预算，成功返回计一 work。零延迟及 SwitchToThread 不采样时钟；正延迟使用与 QPC 相同的来源。时间源失败先交回宿主，后续恢复沿用已建立的等待状态。无可运行线程时 run 返回 Waiting，由后续运行或宿主输入继续推进；run(0) 不改变状态。
 
-两架构的原 deadline、INFINITE、返回/trace/调度差异保持，没有合并 sleep 与 wait 状态，也未新增回调能力。独立故障基线、实际线程切换/APC/timeout 与原创零延时循环见[验收记录](../reports/refactoring-delays-2026-10-16.md)。
+[线程等待](waits.md) 与[线程生命周期](thread-control.md) 描述共享的状态保存、预算和唤醒边界。

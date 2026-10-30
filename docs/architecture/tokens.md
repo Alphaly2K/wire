@@ -1,21 +1,35 @@
-# Win64 token 资源与查询边界
+# Token 与虚拟线程身份
 
-`x64::runtime::token::Tokens` 私有拥有 token 记录、query access、handle flags 与单调编号。Runtime64 的组合根通过 `open/query/flags/set_flags/close` 操作资源；open/query 只借 guest Memory、参数和当前线程 LastError 的 guest 地址，不再访问整个 Runtime64。SID 纯 codec 保持，OpenThreadToken 的线程身份判断仍由原调度边界负责。
+新 Wasm JIT 运行时在 PE32 与 AMD64 接入 advapi32 的 OpenProcessToken、OpenThreadToken 和 GetTokenInformation，支持静态导入和动态查询。kernel32/kernelbase 的旧私有别名不进入新路径。token 描述进程内的虚拟普通用户，不读取宿主凭据，不提供宿主提权；线程模拟限定为相同虚拟用户的身份级别。
 
-当前 token 表达原有受限 guest 用户的 query-only 身份。OpenProcessToken 只接受当前进程伪句柄和 0/QUERY access，最多 128 个同时存活的 token。句柄从 `0x7fff4000` 单调分配到 `0x7fff4fff`，CloseHandle 释放存活容量但不复用编号。错误优先级为 process handle 6、unsupported access 50、容量/编号耗尽 8，最后才检查 8-byte output。输出故障不消耗编号；输出覆盖返回地址时使用 gateway 预先保存的 frame。
+OpenProcessToken 接受当前进程伪句柄及拥有 PROCESS_QUERY_INFORMATION 或 PROCESS_QUERY_LIMITED_INFORMATION 的真实进程句柄。支持零权限和 TOKEN_QUERY（8）、TOKEN_DUPLICATE（2）、TOKEN_IMPERSONATE（4）的组合；其他请求返回错误 50。成功按 ABI 指针宽度写入句柄后才发布资源。权限与容量检查先于输出，输出或保存返回帧故障不消耗身份。无查询权限的 token 在 GetTokenInformation 返回错误 5。
 
-GetTokenInformation 先验证完整句柄及 query access，再构造原有 class 1/8/18/20/25/29 的 guest 字节。内部指针仍指向 guest output，溢出错误先于指针检查；不读取宿主凭据。先检查 required-size 输出，短容量写 required size 再设置 error 122；足够容量时完整检查 data output，再写 data、最后写 required size。输出别名保持该顺序，guard/访存故障不提交 CPU 返回或 API count。成功保留 LastError。
+每个进程最多 128 个活动 token 和 4096 个累计句柄身份，关闭释放活动容量且不复用编号。PE32 句柄从 `0xa0000000` 开始，AMD64 从 `0x7ffd05000000` 开始，均按完整宽度匹配。所有线程和 DLL 共用状态，其他 VM 隔离；进程退出及静态启动拒绝清理活动 token。
 
-GetHandleInformation 保留原资源查找顺序和 token flags。SetHandleInformation 只接受 mask 低两位，更新错误为 87；其原先提前提交返回、计数及 recent call 的路径保持。PROTECT_FROM_CLOSE 的 token 仍以 error 6 拒绝关闭，和其它资源可能不同；清除保护后才移除资源。关闭后查询立即拒绝，完整 64-bit token 身份不按低 DWORD 匹配。
+GetTokenInformation 支持以下固定虚拟身份记录，内部指针指向调用者缓冲区，不指向宿主或核心内存。padding 为零，所有整数为 Windows 小端序。
 
-三项独立测试位于 `tests/x64/token_owner.rs`，先在旧实现验证 process/access/容量/指针优先级、saved frame、flags、output alias、required-size guard、128 个存活及 4096 个累计编号的边界。原创 `gateway-token-info` 只在循环前打开一个 query token，每轮消费 BOOL、四字节 TokenElevation 与 required size。n=max(1,work/13)，RAX=5n+1、retired=12n+20、work=13n+21、API=n+1；两个小输入已在 ETW 冻结上实际校验，离线 inventory 固定两项 advapi32 导入及各自 IAT。
+| 信息类 | PE32 / AMD64 字节数 | 内容 |
+| --- | --- | --- |
+| TokenUser（1） | 36 / 44 | SID_AND_ATTRIBUTES 后接 S-1-5-21-1-1-1-1000，属性 0；SID 指针分别为输出基址 +8 / +16。 |
+| TokenType（8） | 4 / 4 | 主 token 为 TokenPrimary（1），复制/线程 token 为 TokenImpersonation（2）。 |
+| TokenImpersonationLevel（9） | 4 / 4 | 模拟级别 0..3；主 token 返回错误 87。 |
+| TokenElevationType（18） | 4 / 4 | TokenElevationTypeDefault（1），没有拆分的提升令牌。 |
+| TokenElevation（20） | 4 / 4 | TokenIsElevated 为 0。 |
+| TokenIntegrityLevel（25） | 20 / 28 | SID_AND_ATTRIBUTES 后接 S-1-16-8192，属性 0x60。 |
+| TokenIsAppContainer（29） | 4 / 4 | 0。 |
 
-完整正确性、17 条性能协议及三对启动前缀已验收；保留 PE32 integer/IR 六对长样本 +3.320% 的局部成本，具体调查和全部证据见[验收记录](../reports/refactoring-token-owner-2026-10-19.md)。
+其他信息类返回错误 50。查询先验证完整句柄和 TOKEN_QUERY，再构造记录并检查 ReturnLength；短容量返回错误 122，写所需字节数并保持数据缓冲区。足够容量时先检查全部实际输出，再写数据、最后写 ReturnLength。短容量分支同时预检错误槽，错误槽故障也不提前改写 ReturnLength。输出允许相互别名或覆盖已保存返回槽；指针溢出返回错误 87。
 
-三项入口的唯一声明为 `TOKEN_CONTRACTS`，绑定 TokenApi、arity 和 DWORD 索引。PE32 在 advapi32 三项均 ABI-only；kernel32 仅 OpenProcessToken/OpenThreadToken 的 Wine ABI 已知，GetTokenInformation 与 kernelbase/user32 保留未知 ABI 的零清栈。Win64 静态导入接受 advapi32/kernel32/kernelbase；三个 provider 的动态查询起初都返回 error 127，注册对应 gateway 后由原 fallback 发现，不新增默认动态导出。OpenThreadToken 保持完整线程句柄身份，合法 guest 线程返回 1008，否则为 6，不读取输出地址。双架构独立基线先在原实现通过，首轮错误地预期 advapi32 默认动态导出的记录保留于证据目录，未改动运行时来迎合该预期。
+CloseHandle、Get/SetHandleInformation 和 DuplicateHandle 已接入同一 token owner。支持继承/防关闭标志、相同或缩减权限的复制及 DUPLICATE_CLOSE_SOURCE；不支持扩权。防关闭 token 返回错误 6，解除保护后才可关闭。复制先验证进程的 DUP_HANDLE 权限、输出及资源容量，再发布别名并按需关闭源。
 
-PE32 原创 ABI-only query 循环使用五个参数及独立 advapi32 OFT/IAT，n=max(1,work/9)，EAX=0、retired=9n+7、API=n；单次和 12K 输入的 raw/IR 已在旧冻结通过。Win64 原 token 查询 fixture 字节和预算不变。
+DuplicateToken 要求源 TOKEN_DUPLICATE，级别为 0..3；输出成功后才发布具有 TOKEN_QUERY|TOKEN_IMPERSONATE 的独立 token。非法级别返回 87，复制不足权限返回 5。DuplicateHandle 保留类型与模拟级别。
 
-契约迁移完成 release 全量、debug 定向、静态检查与小型功能/完整日志对照。按用户调整后的验收要求，本批评估为低风险，不重复性能或游戏/native 矩阵；详见[契约验收](../reports/refactoring-token-contract-2026-10-19.md)。
+ImpersonateLoggedOnUser 对主 token 要求 TOKEN_QUERY|TOKEN_DUPLICATE，对模拟 token 要求 TOKEN_QUERY|TOKEN_IMPERSONATE 且级别至少为 SecurityImpersonation（2），低级别返回 1346。成功只修改当前虚拟线程；关闭源 token 后线程身份仍有效。新线程从无模拟状态开始，线程退出清理，RevertToSelf 恢复当前线程，未模拟时调用也成功。没有宿主凭据切换或 ACL 后端。
 
-随后 SID 的无状态 codec 与九项接口移入专用 [SID adapter](sids.md)，token owner 继续只管理 token 资源及信息查询。
+OpenThreadToken 对拥有 THREAD_QUERY_INFORMATION 或 THREAD_QUERY_LIMITED_INFORMATION 的目标线程查询模拟状态，无 token 返回 ERROR_NO_TOKEN（1008），无权限返回 5，无效句柄返回 6。有模拟时在输出成功后发布对应级别的新 token。固定单用户环境没有 OpenAsSelf 的身份差异。失败不读取或改写输出句柄。
+
+成功调用保持 LastError；普通错误返回 FALSE 并写当前线程错误槽。首帧、输入、输出或 guard 故障保持 CPU 和 work，修复映射后可以重试。所有接口不采样时钟。逻辑状态及双 ABI 编码位于 `src/win32/token_state.rs`，新适配器位于 `crates/wire-wasm/src/win32/tokens.rs`。修改 token、更多信息类和其他用户身份尚未接通。
+
+`node crates/wire-wasm/tests/tokens.mjs` 验证布局、权限、复制/关闭、容量和故障事务。显式 `node tools/probes/check_wasm_pe_entry.mjs --tokens-sids-only` 需要 MinGW 两种交叉编译器及支持 Wasm 的 Node，验证项目 C 程序的两种 ABI、O0/O2 和 worker 共享，不依赖游戏文件。
+
+`node crates/wire-wasm/tests/managed-runtime.mjs` 另检查复制类型/级别、权限、线程隔离、关闭后模拟保持和输出故障不消耗身份。

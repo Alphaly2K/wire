@@ -1,25 +1,17 @@
-# PE32 回调执行边界
+# Wasm 回调执行边界
 
-`x86::process::call_guest` 拥有 guest callback frame、预算、嵌套执行及 Returned/Transferred/Exited 区分。DLL/TLS、SEH 和 CRT initializer 直接调用该入口，继续由原调用者决定保存、恢复和非局部转移策略；它们不再绕行 Cpu::call_guest 兼容 facade。
+新 Wasm 入口的客体回调继续使用同一 JIT、VMM、代码缓存与预算。回调入口按 PE32 的栈参数或 Win64 的寄存器/栈参数建立返回 frame，返回到既有逻辑 Callback 网关；不嵌套调用宿主执行循环，也不引入逐指令解释层。
 
-`x86/process/callbacks.rs::invoke` 统一原 USER 的 caller-context 策略：调用前 save_ctx，正常返回或错误时 load_ctx，Transferred/Exited 时保留新上下文。USER 窗口/计时器/对话框、locale、qsort comparator 和 UnhandledExceptionFilter 直接使用该进程服务。CRT 不再依赖 USER callback helper；原 user32::invoke 实现删除。
+异常、直接目标展开、窗口过程、FLS 析构、locale 枚举、PE32 CRT 初始化/排序/退出和 AMD64 函数表查询回调续点由每线程独立保留，包含调用者完整架构状态、搜索或查询进度及原装载嵌套深度，共享最多 32 层的嵌套容量。跨时间片、Sleep、阻塞服务及线程切换仍属于原线程。handler 普通返回后根据异常协议恢复受检 CONTEXT；函数表查询返回后恢复调用者状态并提交捕获的请求结果，内部搜索或展开随后继续。AMD64 目标展开可由普通代码直接发起，完成后写回调用者提供的 CONTEXT、丢弃被越过的回调续点并转到目标。最终写回故障保留已完成的 cleanup。进程累计 work/退休不会恢复成旧值。线程退出清理成功后丢弃其回调与待投递状态，启动拒绝同时清理注册和未启动线程。
 
-SEH 使用异常入口保存的上下文，DLL 初始化和 CRT initializer 也有各自策略，继续直接使用 call_guest。本批没有把这些不同的恢复规则合并。Cpu::run/call_guest 的公开兼容 facade 保留给外部调用，普通指令、执行循环和原 callback frame 构造不变。领域 handler 的 callback 请求/状态机仍按家族继续收敛，不将本批记为 R4 全部完成。
+装载/通知帧继续拥有加载锁。通用 Callback 返回仅在当前线程的装载深度回到发起层时处理；回调内的 LoadLibrary 先完成其嵌套 TLS/DllMain，再返回原回调。DllMain 内抛出的异常也先恢复 DllMain，再交还装载回调。其他线程的普通回调不因某个线程持有装载帧而被当作装载任务。具体加载锁与退出限制见[线程生命周期](thread-control.md)。
 
-窗口文本与 focus/capture/active/foreground 已使用领域请求：User32 产生值、文本 callback 参数或所有权通知，Process 的 window_state 协调器执行 guest 并逐次重查目标。领域准备不再借 CPU 或总状态；提交先于通知、失败不回滚、Transferred/Exited 不恢复原 caller 的策略保持。见[窗口状态](window-state.md)。
+AMD64 目标展开捕获同一线程及装载深度下可跨越的续点。客体回调帧先按其元数据参与展开，再用逻辑 Callback PC 与完整返回 SP 共同识别边界，接回保存的调用者状态；显式查询使用已捕获的 API 返回，异常搜索查询接回原异常的调用者。目标在外层回调内时保留该回调，越过的查询、窗口过程和异常续点则丢弃；放弃窗口创建/销毁时归还相应 USER 对象，越过未完成的 paint 续点时释放其 DC。活动展开预检或 cleanup 的边界需要 collided-unwind 协议，当前明确拒绝跨越；装载帧不加入这条跨越路径。
 
-对话框控件、窗口/线程/子窗口枚举也使用请求：USER 准备文本缓冲或原顺序快照，Process 的 dialog 协调器执行回调；整数解析只在正常返回后提交，顶层与子窗口的 FALSE 返回差异保持。见[对话框与枚举](dialog.md)。
+返回 frame 和记录输出在改变 CPU 或发布续点前受检。回调内的访存或已识别 CPU 异常可以嵌套投递；返回后的 CONTEXT、函数记录或输出故障则保留已完成回调的结果供修复，不重新执行该回调。内部函数表查询在当前栈和异常记录块两者的较低地址下方建帧，保留活动 handler 的栈与参数。run(0) 不执行回调、投递或返回推进；正常回调指令使用给定预算，准备和返回本身不额外计 work。显式函数查询在请求接受时计一次 API work，返回阶段不重复计费。
 
-绘制边界同样使用请求：USER 与 Graphics 准备区域/DC，Process 的 painting 协调器执行擦除并在正常返回后写 PAINTSTRUCT。sent 消息的选择/完成归 USER，monitor 临时输入归 display adapter，两类 callback 都由 Process 执行。见[绘制](painting.md)、[消息](messages.md)和[显示](display.md)。
+目前这条边界用于[异常及函数表回调](exceptions.md)，也用于[窗口生命周期、同步 WNDPROC 和过程转发](window-control.md)。窗口过程可以重入同线程 SendMessage、抛出异常、让出及装载 DLL，API 接受时只计一次 work；创建/销毁的下一阶段失败不重放完成的过程。DispatchMessage 的 WNDPROC 与 TIMERPROC 使用同一窗口续点并保存自身的一参数返回帧，TIMERPROC 使用新 tick 参数且以 void 结果恢复；文本/输入所有权通知、WINDOWPOS 与默认 MOVE/SIZE 通知也复用该边界，每条通知重查当前过程与窗口寿命。[BeginPaint、GetUpdateRect 和默认 WM_PAINT](painting.md) 的擦除过程也使用该续点，后续输出故障保留完成结果与 DC，避免重放；窗口销毁或线程退出回收对应资源。
 
-posted 消息、计时器和键盘转换由 USER 产生值、等待或 dispatch 请求；Process 的 messages 协调器执行阻塞、TIMERPROC 与 WNDPROC。参数读取、change bits、copy-out、移除和键盘消费顺序保持，等待仍在原 API stub 上重新分发。
+[EnumSystemLocalesA/W/Ex](nls.md) 使用保存的原 API 调用、枚举队列和临时栈字符串；返回 BOOL 为 FALSE 或队列耗尽时恢复调用者，API 返回 TRUE。准备下一调用失败时冻结已完成的 BOOL，不重新执行 callback。该续点同样参与 AMD64 的逻辑返回桥接；展开或线程退出时直接丢弃队列，无客体堆资源需要释放。其它枚举调用者、PE32 非局部 catch、完整 unwind 与退出策略的剩余范围记录在根 GOAL。
 
-窗口几何和更新由 USER 准备；Process 在 WM_WINDOWPOSCHANGING 正常返回后让 USER 读取可变 WINDOWPOS 并提交，然后执行 WM_WINDOWPOSCHANGED。默认 WM_MOVE 与 WM_SIZE 之间重新查询过程/状态，见[窗口控制](window-control.md)。
-
-窗口生命周期、显示、同步发送与默认过程随后迁入同一请求模式；`src/win32/user/pe32/` 内已没有 CPU、GuestCallOutcome、invoke 或 call_guest 依赖。创建/销毁循环与各自 cleanup 策略由 Process 的 window 协调器拥有，sent 表仍封装在 USER。其余 DLL/SEH/CRT 等进程边界按各自恢复策略继续收敛。
-
-CRT 的数学返回、初始化器数组和 qsort 编排也归 Process；qsort 保留 caller-context invoke，初始化器继续直接 call_guest。函数表在每次调用后重读，首个错误与继续执行策略保持，见[CRT 边界](crt32.md)。
-
-SEH 搜索、展开和普通 filter 入口随后归 Process 的 exceptions 协调器；CONTEXT codec 单独借内存与 ThreadCtx。SEH 原来的异常入口上下文恢复和普通 filter 的 caller-context 策略分别保留，公开 seh 路径只重导出，见[异常边界](exceptions.md)。
-
-基线 `1a93e31`。原 caller-context helper、八个调用文件、Process 执行循环/frame 作格式化后源码对照，路径与策略保持。初次编译遗漏两处 locale 调用，补齐后验收；失败日志保留。release 完整 Win32 255、IR 31、fmt/release lib/bin strict Clippy/build 通过，不跑性能或游戏矩阵。证据：`wire-out/refactoring-2026-10-14/r4-callback-owner32-{source-checks,verification}.json`。
+[PE32 CRT](crt32.md) 的初始化、qsort 和退出函数在同一续点边界执行 cdecl 回调，保留装载深度及调用者状态。排序保存每次比较与交换的完成进度，初始化重新读取后续指针，退出队列在进入成功后才移除函数；故障修复不重放已完成的客体调用。

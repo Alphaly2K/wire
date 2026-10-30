@@ -28,7 +28,7 @@ const fn declaration(
     let win64 = !matches!(id, CalendarApi::FileToLocalFileTime);
     Contract::new(
         ApiId::Calendar(id), name, parameters, returns,
-        "existing host wall time, Windows calendar arithmetic, timezone rules and aggregate CPU counters; PE32 SYSTEMTIME and zero-zone output keep error 87 and legacy trace, conversions stay ABI-only; Win64 checked memory and saved return frame, validation/alias/error order, unsigned DWORD CompareFileTime carrier and real host DST rules remain unchanged",
+        "owner-provided wall time, Windows calendar arithmetic, timezone rules and CPU counters; native host providers retain their behavior while resident providers use a configured guest clock/zone and one virtual user CPU; PE32 SYSTEMTIME and zero-zone output keep error 87 and legacy trace, conversions stay ABI-only; Win64 checked memory and saved return frame, validation/alias/error order, unsigned DWORD CompareFileTime carrier and real host DST rules remain unchanged",
         [
             ArchitecturePlan {
                 dlls: &["kernel32.dll"],

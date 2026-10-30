@@ -1,0 +1,128 @@
+--- a/spirv/spirv_builder.cpp
++++ b/spirv/spirv_builder.cpp
+@@ -1,4 +1,7 @@
+ #include <algorithm>
++#include <stdexcept>
++// Wire experimental logical-address target: fail on physical pointers.
++
+ #include <cstring>
+ #include <optional>
+ #include <sstream>
+@@ -886,13 +889,22 @@
+ }
+ 
+ 
++// Wire experimental target ABI: per-draw base values come from private
++// backend bindings, preserving D3D's subtraction for nonzero draw offsets.
+ uint32_t SpirvBuilder::emitBuiltInDrawParameter(spv::BuiltIn builtIn) {
+-  uint32_t ptrTypeId = getIdForPtrType(getIdForType(ir::ScalarType::eI32), spv::StorageClassInput);
+-  uint32_t varId = allocId();
+-
+-  pushOp(m_declarations, spv::OpVariable, ptrTypeId, varId, spv::StorageClassInput);
+-  pushOp(m_decorations, spv::OpDecorate, varId, spv::DecorationBuiltIn, builtIn);
+-
++  if (builtIn != spv::BuiltInBaseVertex && builtIn != spv::BuiltInBaseInstance)
++    throw std::runtime_error("unsupported logical draw parameter");
++  auto intTypeId = getIdForType(ir::ScalarType::eI32);
++  auto structId = allocId();
++  pushOp(m_declarations, spv::OpTypeStruct, structId, intTypeId);
++  pushOp(m_decorations, spv::OpDecorate, structId, spv::DecorationBlock);
++  pushOp(m_decorations, spv::OpMemberDecorate, structId, 0u, spv::DecorationOffset, 0u);
++  auto ptrTypeId = getIdForPtrType(structId, spv::StorageClassUniform);
++  auto varId = allocId();
++  pushOp(m_declarations, spv::OpVariable, ptrTypeId, varId, spv::StorageClassUniform);
++  pushOp(m_decorations, spv::OpDecorate, varId, spv::DecorationDescriptorSet, 3u);
++  pushOp(m_decorations, spv::OpDecorate, varId, spv::DecorationBinding,
++    builtIn == spv::BuiltInBaseVertex ? 0u : 1u);
+   addEntryPointId(varId);
+   return varId;
+ }
+@@ -939,14 +951,14 @@
+       case ir::BuiltIn::eVertexId: {
+         m_drawParams.baseVertex = emitBuiltInDrawParameter(spv::BuiltInBaseVertex);
+ 
+-        enableCapability(spv::CapabilityDrawParameters);
++
+         return spv::BuiltInVertexIndex;
+       }
+ 
+       case ir::BuiltIn::eInstanceId: {
+         m_drawParams.baseInstance = emitBuiltInDrawParameter(spv::BuiltInBaseInstance);
+ 
+-        enableCapability(spv::CapabilityDrawParameters);
++
+         return spv::BuiltInInstanceIndex;
+       }
+ 
+@@ -2822,11 +2834,10 @@
+ 
+ void SpirvBuilder::emitMemoryModel() {
+   enableCapability(spv::CapabilityShader);
+-  enableCapability(spv::CapabilityPhysicalStorageBufferAddresses);
+   enableCapability(spv::CapabilityVulkanMemoryModel);
+ 
+   pushOp(m_memoryModel, spv::OpMemoryModel,
+-    spv::AddressingModelPhysicalStorageBuffer64,
++    spv::AddressingModelLogical,
+     spv::MemoryModelVulkan);
+ }
+ 
+@@ -3403,8 +3414,11 @@
+   auto baseId = allocId();
+ 
+   pushOp(m_code, spv::OpLoad, intTypeId, indexId, getIdForDef(ir::SsaDef(op.getOperand(0u))));
+-  pushOp(m_code, spv::OpLoad, intTypeId, baseId, builtIn == ir::BuiltIn::eVertexId
+-    ? m_drawParams.baseVertex : m_drawParams.baseInstance);
++  auto basePtr = allocId();
++  pushOp(m_code, spv::OpAccessChain, getIdForPtrType(intTypeId, spv::StorageClassUniform),
++    basePtr, builtIn == ir::BuiltIn::eVertexId ? m_drawParams.baseVertex : m_drawParams.baseInstance,
++    makeConstU32(0u));
++  pushOp(m_code, spv::OpLoad, intTypeId, baseId, basePtr);
+ 
+   /* Subtract base index and return the correct type */
+   auto resultTypeId = getIdForType(op.getType());
+@@ -4050,9 +4064,10 @@
+   auto y = uint32_t(op.getOperand(2u));
+   auto z = uint32_t(op.getOperand(3u));
+ 
+-  pushOp(m_executionModes, spv::OpExecutionModeId, m_entryPointId,
+-    spv::ExecutionModeLocalSizeId,
+-    makeConstU32(x), makeConstU32(y), makeConstU32(z));
++  // DXBC thread-group dimensions are literals, so keep their equivalent
++  // literal execution mode for strict WebGPU SPIR-V readers.
++  pushOp(m_executionModes, spv::OpExecutionMode, m_entryPointId,
++    spv::ExecutionModeLocalSize, x, y, z);
+ }
+ 
+ 
+@@ -4497,6 +4512,8 @@
+ 
+ 
+ uint32_t SpirvBuilder::getIdForPtrType(uint32_t typeId, spv::StorageClass storageClass) {
++  if (storageClass == spv::StorageClassPhysicalStorageBuffer)
++    throw std::runtime_error("logical shader target does not support physical pointers");
+   SpirvPointerTypeKey key = { typeId, storageClass };
+ 
+   auto entry = m_ptrTypes.find(key);
+--- a/ir/ir_utils.cpp
++++ b/ir/ir_utils.cpp
+@@ -125,7 +125,7 @@
+   for (uint32_t i = 0u; i < dstType.getVectorSize(); i++) {
+     auto src = op.getOperand(i);
+ 
+-    auto [normalizedInt, normalizedFloat] = [src, srcType] {
++    auto normalized = [src, srcType] {
+       switch (srcType.getBaseType()) {
+         case ScalarType::eBool: {
+           bool v = uint64_t(src) != 0u;
+@@ -163,6 +163,10 @@
+       }
+     } ();
+ 
++    // Spell out captures for the bundled Emscripten Clang.
++    const auto normalizedInt = normalized.first;
++    const auto normalizedFloat = normalized.second;
++
+     auto operand = [dstType, normalizedInt, normalizedFloat] {
+       switch (dstType.getBaseType()) {
+         case ScalarType::eBool:

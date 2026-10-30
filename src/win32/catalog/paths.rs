@@ -17,6 +17,8 @@ pub enum PathApi {
     MakeSureDirectoryPathExists,
     UniversalNameA,
     UniversalNameW,
+    CanonicalizeA,
+    CanonicalizeW,
 }
 
 impl PathApi {
@@ -30,6 +32,7 @@ impl PathApi {
                 | Self::AddExtensionW
                 | Self::UnquoteSpacesW
                 | Self::UniversalNameW
+                | Self::CanonicalizeW
         )
     }
 }
@@ -56,7 +59,9 @@ const fn declaration(
 use Parameter::{Pointer as P, Uint32 as D};
 use ReturnConvention::{BoolLastError as B, Void};
 
-pub static PATH_CONTRACTS: [Contract; 15] = [
+pub static PATH_CONTRACTS: [Contract; 17] = [
+    canonicalize(PathApi::CanonicalizeA, "PathCanonicalizeA"),
+    canonicalize(PathApi::CanonicalizeW, "PathCanonicalizeW"),
     declaration(
         PathApi::UniversalNameA,
         "WNetGetUniversalNameA",
@@ -98,3 +103,9 @@ pub static PATH_CONTRACTS: [Contract; 15] = [
         B,
     ),
 ];
+
+const fn canonicalize(id: PathApi, name: &'static str) -> Contract {
+    Contract::new(ApiId::Path(id), name, &[P, P], B,
+        "pinned Wine lexical path canonicalization independent of VFS existence/volume restrictions; UTF16 units retained, A uses CP932 conversion, complete input staged before output, MAX_PATH bound and failure clear/error transaction; successful calls retain LastError",
+        [ArchitecturePlan { dlls: &["shlwapi.dll"], execution: ExecutionPolicy::Typed }; 2])
+}

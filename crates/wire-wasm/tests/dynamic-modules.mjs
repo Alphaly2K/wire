@@ -1,0 +1,85 @@
+import assert from 'node:assert/strict';
+import {WasmMachine,Exit} from '../web/runtime.mjs';
+import {core,stateLayout,encode} from './x87-harness.mjs';
+import {fixture} from './pe-fixture.mjs';
+import {dynamicFixture,nestedFixture,trace} from './dynamic-fixture.mjs';
+
+let checks=0;const equal=(a,b,label)=>{assert.deepEqual(a,b,label);checks++;};
+const text=value=>new TextEncoder().encode(value+'\0');
+const wide=value=>Uint8Array.from([...value.split('').flatMap(c=>[c.charCodeAt(0)&255,c.charCodeAt(0)>>8]),0,0]);
+const snapshot=t=>new Uint8Array(core.memory.buffer,core.wire_state(t.handle),stateLayout[0]).slice();
+async function machine(mode,files){
+ let handle;const vm=new WasmMachine({...core,wire_create(...args){handle=core.wire_create(...args);return handle;}},{mode,clock:()=>0n});
+ for(const [name,file] of Object.entries(files))vm.supplyModule(name,file.bytes);
+ const image=vm.load(fixture(mode).bytes);equal((await vm.run(1000n)).reason,Exit.Returned);vm.map(0x20000n,0x4000n,7);return {vm,handle,mode,image,sp:image.sp-256n,error:image.teb+BigInt(mode===32?0x34:0x68)};
+}
+function frame(t,name,args=[]){const {vm,mode,sp}=t;vm.ip=vm.bind('kernel32.dll',name);vm.register(4,sp);vm.write(sp,encode(vm.entryPoints.returned,mode/8));for(let n=0;n<args.length;n++)if(mode===32)vm.write(sp+4n+BigInt(n*4),encode(args[n],4));else vm.register([1,2,8,9][n],args[n]);}
+async function finish(t,budget=1000n){let work=0n;for(let n=0;n<10000;n++){const result=await t.vm.run(budget);work+=result.work;if(result.reason===Exit.Returned)return work;equal(result.reason,Exit.Budget);assert.ok(n<9999);}throw new Error('module operation did not return');}
+async function request(t,name,args=[],budget=1000n){const before=t.vm.work;frame(t,name,args);const work=await finish(t,budget);equal(t.vm.work-before,work);return t.vm.register(0);}
+const count=(t,id,offset=0)=>t.vm.readInt(trace+BigInt(id*16+offset));
+const slot=(t,base)=>t.vm.readInt(base+0x300cn);
+const tlsBlock=(t,base)=>t.vm.readInt(t.image.tlsArray+slot(t,base)*BigInt(t.mode/8),t.mode/8);
+
+for(const mode of [32,64])for(const budget of [1n,1000n]){
+ const t=await machine(mode,{'leaf.dll':dynamicFixture(mode,{id:1,seed:73,tls:true}),'bridge.dll':dynamicFixture(mode,{id:2,dependency:'leaf.dll',delta:3,tls:true}),'other.dll':dynamicFixture(mode,{id:3,dependency:'leaf.dll',delta:5,tls:true})}),{vm}=t;
+ vm.write(0x20000n,wide('BRIDGE'));equal(vm.moduleBase('bridge.dll'),0n);const retired=vm.retired,work=vm.work;const bridge=await request(t,'LoadLibraryW',[0x20000n],budget),leaf=vm.moduleBase('leaf.dll');assert.ok(bridge&&leaf);equal(vm.moduleBase('bridge.dll'),bridge);equal(vm.work-work,vm.retired-retired+1n);equal(vm.readInt(bridge+0x3000n),76n);equal([count(t,1),count(t,2)],[1n,1n]);equal([count(t,1,8),count(t,2,8)],[2n,2n]);equal(vm.readInt(bridge+0x3050n,mode/8),0n,'dynamic process attach receives reserved zero');equal([slot(t,leaf),slot(t,bridge)],[1n,2n]);equal(vm.readInt(tlsBlock(t,leaf)),0x11110049n);equal(vm.readInt(tlsBlock(t,bridge)),0x11110007n);
+ const before=snapshot(t);equal((await vm.run(0n)).reason,Exit.Budget);equal(snapshot(t),before);
+ vm.write(0x20000n,text('bridge.dll'));equal(await request(t,'LoadLibraryA',[0x20000n],budget),bridge);equal(count(t,2),1n,'repeated loads retain a reference without reattaching');equal(await request(t,'FreeLibrary',[bridge],budget),1n);equal(vm.moduleBase('bridge.dll'),bridge);
+ vm.write(0x20000n,text('other.dll'));const other=await request(t,'LoadLibraryExA',[0x20000n,0n,0n],budget);assert.ok(other);equal(vm.readInt(other+0x3000n),78n);equal(count(t,1),1n,'an existing dependency keeps its TLS and initialized data');
+ const leafTls=tlsBlock(t,leaf),bridgeTls=tlsBlock(t,bridge),bridgeSlot=slot(t,bridge);equal(await request(t,'FreeLibrary',[bridge],budget),1n);equal(vm.moduleBase('bridge.dll'),0n);equal(vm.moduleBase('leaf.dll'),leaf);equal(count(t,2,4),1n);equal(count(t,2,12),2n);equal(count(t,1,4),0n);equal(vm.readInt(t.image.tlsArray+bridgeSlot*BigInt(mode/8),mode/8),0n);assert.throws(()=>vm.readInt(bridgeTls),/memory access/);assert.throws(()=>vm.readInt(bridge),/memory access/);
+ equal(await request(t,'FreeLibrary',[other],budget),1n);equal(vm.moduleBase('other.dll'),0n);equal(vm.moduleBase('leaf.dll'),0n);equal([count(t,3,4),count(t,1,4)],[1n,1n]);equal(vm.readInt(trace+0x400n),0x231n,'detach follows reverse initialization order');assert.throws(()=>vm.readInt(leafTls),/memory access/);
+ vm.write(0x20000n,text('leaf.dll'));const loaded=await request(t,'LoadLibraryA',[0x20000n],budget);equal([bridge,leaf,other].includes(loaded),true,'freed image addresses can be reused');equal(slot(t,loaded),1n,'freed TLS slots can be reused');equal(vm.readInt(loaded+0x3000n),73n);equal(count(t,1),2n);equal(await request(t,'FreeLibrary',[loaded],budget),1n);vm.dispose();
+}
+
+for(const mode of [32,64]){
+ const t=await machine(mode,{'leaf.dll':dynamicFixture(mode,{id:1,seed:73,tls:true}),'bad.dll':dynamicFixture(mode,{id:2,dependency:'leaf.dll',tls:true,attach:false}),'wrong.dll':dynamicFixture(mode===32?64:32,{id:3})}),{vm}=t;
+ vm.write(0x20000n,text('bad.dll'));equal(await request(t,'LoadLibraryA',[0x20000n],1n),0n);equal(vm.readInt(t.error),1114n);equal(vm.moduleBase('bad.dll'),0n);equal(vm.moduleBase('leaf.dll'),0n);equal([count(t,1),count(t,2),count(t,1,4),count(t,2,4)],[1n,1n,1n,1n]);equal(vm.readInt(trace+0x400n),0x21n,'failed attach detaches the failing module before its initialized dependencies');equal([vm.readInt(t.image.tlsArray+BigInt(mode/8),mode/8),vm.readInt(t.image.tlsArray+BigInt(mode/4),mode/8)],[0n,0n]);
+ for(const [name,code] of [['missing.dll',126n],['wrong.dll',193n],['../leaf.dll',5n]]){vm.write(0x20000n,text(name));equal(await request(t,'LoadLibraryA',[0x20000n]),0n);equal(vm.readInt(t.error),code);}
+ vm.write(0x20000n,text('leaf.dll'));equal(await request(t,'LoadLibraryExA',[0x20000n,0n,1n]),0n);equal(vm.readInt(t.error),50n);equal(vm.moduleBase('leaf.dll'),0n);equal(await request(t,'FreeLibrary',[0x123456n]),0n);equal(vm.readInt(t.error),6n);
+ vm.write(0x20000n,text('kernel32'));const kernel=await request(t,'LoadLibraryA',[0x20000n]);assert.ok(kernel);equal(await request(t,'FreeLibrary',[kernel]),1n);equal(vm.moduleBase('kernel32.dll'),0n,'logical providers do not masquerade as PE images');vm.dispose();
+}
+for(const mode of [32,64])for(const attach of [false,true]){
+ const t=await machine(mode,{'parent.dll':nestedFixture(mode,{attach}),'leaf.dll':dynamicFixture(mode,{id:1,seed:73,tls:true})}),{vm}=t;vm.write(0x20000n,text('parent.dll'));const result=await request(t,'LoadLibraryA',[0x20000n],1n),leaf=vm.moduleBase('leaf.dll');assert.ok(leaf);equal(count(t,1),1n);equal(count(t,2),1n);equal(result!==0n,attach,'nested initialization resumes the original DllMain and its outer API caller');
+ if(attach){equal(vm.readInt(result+0x3000n,mode/8),leaf);equal(await request(t,'FreeLibrary',[result],1n),1n);}else{equal(vm.readInt(t.error),1114n);equal(vm.moduleBase('parent.dll'),0n);}
+ equal(vm.moduleBase('leaf.dll'),leaf,'an independent successful nested load keeps its reference');equal(await request(t,'FreeLibrary',[leaf],1n),1n);equal(vm.moduleBase('leaf.dll'),0n);equal(count(t,1,4),1n);equal(count(t,2,4),1n);vm.dispose();
+}
+
+for(const mode of [32,64]){
+ const t=await machine(mode,{'a.dll':dynamicFixture(mode,{id:1,dependency:'b.dll',delta:2,tls:true}),'b.dll':dynamicFixture(mode,{id:2,dependency:'a.dll',delta:3,tls:true})}),{vm}=t;vm.write(0x20000n,text('a.dll'));const a=await request(t,'LoadLibraryA',[0x20000n]),b=vm.moduleBase('b.dll');assert.ok(a&&b);equal(vm.readInt(a+0x3000n),5n);equal(await request(t,'FreeLibrary',[a]),1n);equal(vm.moduleBase('a.dll'),0n);equal(vm.moduleBase('b.dll'),0n);equal(vm.readInt(trace+0x400n),0x12n,'unrooted circular dependencies are reclaimed together');vm.dispose();
+ const repeat=await machine(mode,{'leaf.dll':dynamicFixture(mode,{id:1,tls:true})});repeat.vm.write(0x20000n,text('leaf.dll'));const baseline=repeat.vm.stats();
+ for(let n=0;n<70;n++){const base=await request(repeat,'LoadLibraryA',[0x20000n]);assert.ok(base);equal(await request(repeat,'FreeLibrary',[base]),1n);equal(repeat.vm.moduleBase('leaf.dll'),0n);}
+ equal(count(repeat,1),70n);equal(count(repeat,1,4),70n);equal(repeat.vm.stats(),baseline,'repeated load/unload releases metadata, generated modules and JS instances');repeat.vm.dispose();
+ const retained=await machine(mode,{'parent.dll':nestedFixture(mode,{attach:false}),'leaf.dll':dynamicFixture(mode,{id:1,dependency:'parent.dll',delta:3,tls:true})});retained.vm.write(0x20000n,text('parent.dll'));equal(await request(retained,'LoadLibraryA',[0x20000n]),0n);const parent=retained.vm.moduleBase('parent.dll'),child=retained.vm.moduleBase('leaf.dll');assert.ok(parent&&child);equal(retained.vm.readInt(retained.error),1114n);retained.vm.write(0x20040n,text('GetValue'));equal(await request(retained,'GetProcAddress',[parent,0x20040n]),0n);equal(retained.vm.readInt(retained.error),1114n,'a referenced failed image remains mapped but cannot publish callable exports');equal(await request(retained,'LoadLibraryA',[0x20000n]),0n);equal(retained.vm.readInt(retained.error),1114n);equal(await request(retained,'FreeLibrary',[child]),1n);equal(retained.vm.moduleBase('parent.dll'),0n);equal(retained.vm.moduleBase('leaf.dll'),0n);retained.vm.dispose();
+}
+
+for(const mode of [32,64]){
+ const t=await machine(mode,{'leaf.dll':dynamicFixture(mode,{id:1,tls:true})}),{vm}=t;vm.write(0x20000n,text('leaf.dll'));t.sp=(t.image.sp&~4095n)+8n;const page=t.sp-8n-4096n;frame(t,'LoadLibraryA',[0x20000n]);equal(core.wire_protect(t.handle,page,4096n,2),0);const before=snapshot(t),work=vm.work;equal((await vm.run(1n)).reason,Exit.Fault);equal(snapshot(t),before);equal(vm.work,work);equal(vm.moduleBase('leaf.dll'),0n,'an unwritable first callback frame prevents graph publication');equal(count(t,1),0n);equal(core.wire_protect(t.handle,page,4096n,4),0);await finish(t,1n);const base=vm.moduleBase('leaf.dll');assert.ok(base);equal(count(t,1),1n);
+ frame(t,'FreeLibrary',[base]);equal(core.wire_protect(t.handle,t.image.tlsArray,4096n,2),0);let failed;
+ for(let n=0;n<1000;n++){failed=await vm.run(1n);if(failed.reason===Exit.Fault)break;equal(failed.reason,Exit.Budget);assert.ok(n<999);}
+ equal(failed.reason,Exit.Fault);equal(vm.moduleBase('leaf.dll'),base);equal(count(t,1,4),1n);equal(count(t,1,12),2n);const paused=snapshot(t);equal((await vm.run(0n)).reason,Exit.Budget);equal(snapshot(t),paused);equal(core.wire_protect(t.handle,t.image.tlsArray,4096n,4),0);equal((await vm.run(1n)).reason,Exit.Returned);equal(vm.moduleBase('leaf.dll'),0n);equal(count(t,1,4),1n,'retrying TLS release never repeats completed detach calls');vm.dispose();
+
+ const rejected=await machine(mode,{'bad.dll':dynamicFixture(mode,{id:2,attach:false,tls:true})});rejected.vm.write(0x20000n,text('bad.dll'));frame(rejected,'LoadLibraryA',[0x20000n]);equal(core.wire_protect(rejected.handle,rejected.image.teb,4096n,2),0);
+ for(let n=0;n<1000;n++){failed=await rejected.vm.run(1n);if(failed.reason===Exit.Fault)break;equal(failed.reason,Exit.Budget);assert.ok(n<999);}
+ equal(failed.reason,Exit.Fault);equal(count(rejected,2),1n);equal(count(rejected,2,4),1n);equal(core.wire_protect(rejected.handle,rejected.image.teb,4096n,4),0);equal((await rejected.vm.run(1n)).reason,Exit.Returned);equal(rejected.vm.register(0),0n);equal(rejected.vm.readInt(rejected.error),1114n);equal(rejected.vm.moduleBase('bad.dll'),0n);equal(count(rejected,2,4),1n);rejected.vm.dispose();
+}
+for(const mode of [32,64]){
+ const t=await machine(mode,{'data.dll':dynamicFixture(mode,{entry:false})}),{vm}=t;vm.write(0x20000n,text('data.dll'));const work=vm.work,retired=vm.retired,baseline=vm.stats(),base=await request(t,'LoadLibraryA',[0x20000n]);assert.ok(base);equal(vm.work-work,1n);equal(vm.retired,retired,'an image without notifications adds no virtual guest retirement');equal(await request(t,'FreeLibrary',[base]),1n);equal(vm.moduleBase('data.dll'),0n);equal(vm.stats(),baseline);vm.dispose();
+}
+for(const mode of [32,64])for(const api of ['GetModuleHandleExA','GetModuleHandleExW']){
+ const t=await machine(mode,{'leaf.dll':dynamicFixture(mode,{id:1})}),{vm}=t,out=0x20100n;vm.write(0x20000n,text('leaf.dll'));const base=await request(t,'LoadLibraryA',[0x20000n]);vm.write(0x20040n,api.endsWith('W')?wide('LEAF'):text('LEAF'));
+ equal(await request(t,api,[0n,0x20040n,out]),1n);equal(vm.readInt(out,mode/8),base);equal(await request(t,'FreeLibrary',[base]),1n);equal(vm.moduleBase('leaf.dll'),base,'a successful GetModuleHandleEx adds exactly one external reference');
+ equal(await request(t,api,[6n,base+0x1080n,out]),1n);equal(vm.readInt(out,mode/8),base);equal(await request(t,api,[2n,0n,out]),1n);equal(vm.readInt(out,mode/8),t.image.base);
+ if(mode===64){equal(await request(t,api,[6n,base|(1n<<63n),out]),0n);equal(vm.readInt(out,8),0n);equal(vm.readInt(t.error),126n);}
+ for(const flags of [3n,8n]){vm.write(out,encode(0xa5a5a5a5n,mode/8));equal(await request(t,api,[flags,0x20040n,out]),0n);equal(vm.readInt(out,mode/8),0xa5a5a5a5n);equal(vm.readInt(t.error),87n);}
+ vm.write(0x20080n,api.endsWith('W')?wide('missing.dll'):text('missing.dll'));equal(await request(t,api,[0n,0x20080n,out]),0n);equal(vm.readInt(out,mode/8),0n);equal(vm.readInt(t.error),126n);
+ // Output can alias the saved return address without changing the return target.
+ frame(t,api,[0n,0x20040n,t.sp]);await finish(t);equal(vm.register(0),1n);equal(vm.readInt(t.sp,mode/8),base);equal(await request(t,'FreeLibrary',[base]),1n);equal(vm.moduleBase('leaf.dll'),base);equal(await request(t,'FreeLibrary',[base]),1n);equal(vm.moduleBase('leaf.dll'),0n,'UNCHANGED_REFCOUNT and failed lookups create no reference');vm.dispose();
+}
+for(const mode of [32,64]){
+ const t=await machine(mode,{'leaf.dll':dynamicFixture(mode,{id:1})}),{vm}=t;vm.write(0x20000n,text('leaf.dll'));const base=await request(t,'LoadLibraryA',[0x20000n]);equal(await request(t,'GetModuleHandleExA',[1n,0x20000n,0x20100n]),1n);for(let n=0;n<3;n++)equal(await request(t,'FreeLibrary',[base]),1n);equal(vm.moduleBase('leaf.dll'),base,'PIN keeps the module and its graph alive for the process lifetime');equal(count(t,1,4),0n);vm.dispose();
+ const fault=await machine(mode,{'leaf.dll':dynamicFixture(mode,{id:1})});fault.vm.write(0x20000n,text('leaf.dll'));const loaded=await request(fault,'LoadLibraryA',[0x20000n]),out=0x21ffdn;fault.vm.write(out,new Uint8Array(8).fill(0xa5));frame(fault,'GetModuleHandleExA',[1n,0x20000n,out]);equal(core.wire_protect(fault.handle,0x22000n,4096n,2),0);const before=snapshot(fault);equal((await fault.vm.run(1n)).reason,Exit.Fault);equal(snapshot(fault),before);equal(fault.vm.readInt(out,1),0xa5n);equal(core.wire_protect(fault.handle,0x22000n,4096n,4),0);equal(await request(fault,'FreeLibrary',[loaded]),1n);equal(fault.vm.moduleBase('leaf.dll'),0n,'a failed output must commit neither reference nor pin');fault.vm.dispose();
+ const atomic=await machine(mode,{'leaf.dll':dynamicFixture(mode,{id:1})});atomic.vm.write(0x20000n,text('missing.dll'));atomic.vm.write(0x20100n,encode(0xabcdefn,mode/8));frame(atomic,'GetModuleHandleExA',[0n,0x20000n,0x20100n]);equal(core.wire_protect(atomic.handle,atomic.image.teb,4096n,2),0);const saved=snapshot(atomic);equal((await atomic.vm.run(1n)).reason,Exit.Fault);equal(snapshot(atomic),saved);equal(atomic.vm.readInt(0x20100n,mode/8),0xabcdefn);equal(core.wire_protect(atomic.handle,atomic.image.teb,4096n,4),0);await finish(atomic);equal(atomic.vm.register(0),0n);equal(atomic.vm.readInt(0x20100n,mode/8),0n);equal(atomic.vm.readInt(atomic.error),126n);atomic.vm.dispose();
+ const provider=await machine(mode,{}),gateway=provider.vm.bind('kernel32.dll','GetTickCount64');equal(await request(provider,'GetModuleHandleExW',[6n,gateway+7n,0x20100n]),1n);const handle=provider.vm.readInt(0x20100n,mode/8);provider.vm.write(0x20000n,text('kernel32.dll'));equal(await request(provider,'GetModuleHandleA',[0x20000n]),handle);provider.vm.dispose();
+ const disable=await machine(mode,{'leaf.dll':dynamicFixture(mode,{id:1}),'tls.dll':dynamicFixture(mode,{id:2,tls:true})});disable.vm.write(0x20000n,text('leaf.dll'));const ordinary=await request(disable,'LoadLibraryA',[0x20000n]);disable.vm.write(disable.error,encode(73n,4));equal(await request(disable,'DisableThreadLibraryCalls',[ordinary]),1n);equal(disable.vm.readInt(disable.error),73n);disable.vm.write(0x20000n,text('tls.dll'));const tls=await request(disable,'LoadLibraryA',[0x20000n]);equal(await request(disable,'DisableThreadLibraryCalls',[tls]),0n);equal(disable.vm.readInt(disable.error),126n);equal(await request(disable,'DisableThreadLibraryCalls',[0x123456n]),0n);equal(disable.vm.readInt(disable.error),126n);equal(await request(disable,'FreeLibrary',[ordinary]),1n);equal(count(disable,1,4),1n,'disabling thread calls preserves process detach');equal(await request(disable,'FreeLibrary',[tls]),1n);disable.vm.dispose();
+}
+console.log(`${checks} dynamic DLL initialization/reference/detach/TLS checks passed`);

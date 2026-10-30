@@ -1,17 +1,15 @@
 # SRW、条件变量与 InitOnce 边界
 
-十三项 export 的 provider、arity、参数宽度与架构策略集中到 `win32/catalog/inline_sync.rs`。PE32 保留 kernel32 下的 ABI-only error 120、stdcall 清栈及输出不变；Win64 接受 kernel32/kernelbase，冷绑定为 `ControlImport::InlineSync(id)`。调用时按 ID 处理，不再解析名称前后缀。2026-10-20 的 Alice 接续在原十二项之上新增 `SleepConditionVariableSRW`，属于功能补齐。
+新 Wasm 入口通过 `crates/wire-wasm/src/win32/inline_sync.rs` 接入十四项服务。PE32 接受 kernel32，Win64 接受 kernel32/kernelbase；调用参数、返回值与指针分别按对应 ABI 处理。共享契约目录中的旧执行策略仅用于旧入口，不代表新运行时的接入状态。
 
-`win32/kernel/srw.rs` 的 `SrwLocks` 私有拥有进程锁状态。它检查 guest token 与内部 owner/readers 是否一致、验证释放归属、检查 reader 溢出，再给出待提交的更新或竞争结果。`win32/x64/inline_sync.rs` 先检查 guest 写权限并读取八字节 token，成功写回新 token 后才提交 owner 更新。调度器通过 `available` 查询就绪，保留 shared 可与现有 readers 并行、exclusive 必须无 owner/readers 的规则；没有引入新公平性策略。
+SRW 的独占 owner 与共享计数由进程持有，guest token 宽度为四或八字节；先验证 token、所有权、溢出和完整写权限，写回后才提交状态。共享可与已有读者并行，独占要求没有 owner 或读者；Try 竞争返回 FALSE，普通 Acquire 合作阻塞。共享持有者不逐线程记账，不提供额外公平性保证；非法释放和外来 token 明确拒绝。
 
-adapter 显式返回值、Try 失败、SRW 阻塞或 InitOnce 阻塞。Runtime64 保留 CPU saved return frame、block/unblock、trace/API count 的提交：阻塞不推进 CPU 或计数；失败 Try 提交零返回并计数，保留原有 blocked 状态；一般完成经公共返回路径解除阻塞。SRW owner 与进程同寿命，不持有 CPU、guest 内存或 host mutex。
+InitializeConditionVariable 写入指针宽度的零；非零外来 wait-list token 或带活动等待的重新初始化明确拒绝。SleepConditionVariableSRW 验证 flags、token 和释放权限，SleepConditionVariableCS 要求当前线程恰好持有一层临界区；全部检查完成后，在同一合作调度步骤释放锁并登记等待。两类等待共用登记顺序，等待记录按加载/回调层级保存，嵌套服务不会覆盖外层调用。
 
-条件变量 Initialize 写八字节零，waiter 队列归 `x64/runtime/threads/condition.rs`，不向 guest 发布宿主指针；非零外来 wait-list token 仍拒绝。SleepConditionVariableSRW 验证 DWORD flags、condition 与 SRW token 及释放权限，然后在同一合作调度步骤释放锁并登记 waiter。阻塞不消费返回帧或 API count；唤醒或超时后，必须先按原共享/独占模式重新取得锁才返回。成功保留 LastError，超时返回 FALSE/1460，非法 flags 返回 FALSE/87；有限超时保留第一次登记的 deadline。零超时验证释放归属后立即返回超时，调用内没有可观察的线程切换。
+Wake/WakeAll 标记当前未超时、未通知的匹配等待，不积累信号；single 选择最早登记者，all 标记全部，包含暂时处于外层回调的等待。已经超时的等待不消耗后来的 wake；先收到通知的等待在随后超过 deadline 时仍成功。唤醒或超时后必须重新取得原临界区或原共享/独占 SRW，再返回。成功保留 LastError，超时返回 FALSE/1460，非法 flags 返回 FALSE/87；零超时保留锁并直接返回超时。
 
-Wake/WakeAll 只标记当前未超时且未通知的匹配 waiter，不积累信号；single 按登记序号选择一个，all 标记全部，等待者仍可因锁被占用而继续阻塞。先收到通知的 waiter 不会因随后超过 deadline 改成超时；已经超时的 waiter 不消耗后来的 wake。调度器只在唤醒/超时且锁可取时恢复调用，idle deadline 排除已到期或已通知但仍在等锁的 condition，避免空转。该实现未增加 Windows 的公平性保证、SleepConditionVariableCS 或异步 InitOnce。
+有限正超时保留首次登记的 deadline，使用统一单调 10 MHz 来源；通知或已确认到期后不继续采样时间。重获锁或错误输出故障保留已释放的锁状态、原参数与返回帧，修复后继续。无可运行线程时返回 Waiting，后续宿主恢复或线程进展重试，不在 Wasm 内忙等。阻塞和故障不计 work；完成计一 work，不计客体指令退休。
 
-InitOnceBegin 的顺序仍为 flags 检查、state 读取、pending/context 输出预检，再依状态写入；发布时依次写 state、pending、context。InitOnceComplete 保留非法 flags/context 的短路，之后才读 state；错误经当前线程 LastError 槽写入。输出别名不做去重或事务合并，返回槽在进入语义前保存。
+InitOnceBeginInitialize 支持同步初始化和 CHECK_ONLY；初始化失败可用 INIT_FAILED 还原待初始化状态，竞争者随后可以取得初始化权。已完成状态返回完整指针宽度的 Context，要求低两位为零；异步 flags 返回错误 50，非法 flags/context 返回 87，未完成的 CHECK_ONLY 返回 31。输出先统一预检，再按 state、pending、context 的顺序发布，保留输出别名顺序与保存的返回帧。同步竞争不读取平台时钟。
 
-真实 guest 线程的 SRW/InitOnce 重试、PE32 ABI-only、token/归属故障、DWORD flags 和输出别名等独立基线见[验收记录](../reports/refactoring-inline-sync-2026-10-16.md)。critical section、WaitOnAddress 和线程生命周期仍使用各自现有路径。
-
-条件变量新增两项队列回归与两项 Win64 行为回归，覆盖先 wake 不积累、不同 condition 隔离、single 登记顺序、all/shared 重取锁、超时后锁仍被占用、迟到 wake、通知后 deadline 到期、非法 flags/DWORD 截断、只读锁及阻塞重试身份。真实 guest 线程分别在 1-work 和 100,000-work 切片执行 exclusive/shared 唤醒和持锁超时三种场景；PE32 另验证原 ABI-only 的 16 字节清栈与输出保持。
+便携的 SRW 账本与 condition 等待规则分别位于 `src/win32/kernel/srw.rs` 和 `src/win32/kernel/condition.rs`，均不持有 CPU、客体内存或宿主锁。Critical section、地址等待及线程对象使用各自的服务入口，并共用同一调度器。

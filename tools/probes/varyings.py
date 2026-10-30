@@ -1,11 +1,5 @@
-"""Draw original float4/float3 varyings and reject incompatible stage interfaces."""
-import argparse
-import ctypes as c
-import hashlib
-import json
-from pathlib import Path
+"""Original synthetic DXBC for stage interface and draw controls."""
 import struct
-from .abi import GpuInfo, TextureDesc, ViewDesc, Draw
 
 
 def _pack(*words):
@@ -28,6 +22,7 @@ def _container(inputs, outputs, words, digest):
               (b'SHDR', _pack(*words))]
     data = bytearray(b'DXBC' + bytes.fromhex(digest) + _pack(1, 0, 3) + bytes(12))
     for i, (tag, chunk) in enumerate(chunks):
+        data += bytes((-len(data)) % 4)
         struct.pack_into('<I', data, 32 + 4 * i, len(data))
         data += tag + _pack(len(chunk)) + chunk
     struct.pack_into('<I', data, 24, len(data))
@@ -77,86 +72,3 @@ def fixtures():
             [('TEXCOORD', 0 if register == 1 else 1, 0, kind, register, 7, 7)],
             [('SV_TARGET', 0, 0, 3, 0, 15, 0)], words, digest))
     return result
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    for name in ('backend', 'moltenvk', 'out'):
-        parser.add_argument('--' + name, required=True, type=Path)
-    args = parser.parse_args()
-    args.out.mkdir(parents=True, exist_ok=True)
-    (args.out / 'report.json').unlink(missing_ok=True)
-    lib = c.CDLL(str(args.backend.resolve()))
-    vp, sz = c.c_void_p, c.c_size_t
-    def fn(name, result, arguments):
-        f = getattr(lib, name)
-        f.restype, f.argtypes = result, arguments
-        return f
-    if fn('wire_gpu_abi', c.c_uint32, [])() != 1:
-        raise AssertionError('native graphics ABI mismatch')
-    open_gpu = fn('wire_gpu_open', vp, [c.c_char_p, vp, vp, sz])
-    close = fn('wire_gpu_close', None, [vp])
-    compile_shader = fn('wire_gpu_compile', vp, [vp, vp, sz, c.c_uint32, vp, sz])
-    free_shader = fn('wire_gpu_shader_free', None, [vp])
-    create_texture = fn('wire_gpu_texture_create', vp, [vp, vp, vp, sz])
-    free_texture = fn('wire_gpu_texture_free', None, [vp])
-    create_view = fn('wire_gpu_image_view_create', vp, [vp, vp, vp, sz])
-    free_view = fn('wire_gpu_image_view_free', None, [vp])
-    submit = fn('wire_gpu_draw', c.c_int, [vp, vp, vp, sz])
-    read = fn('wire_gpu_texture_read', c.c_int, [vp, c.c_uint32, vp, sz, vp, sz])
-    error, info = c.create_string_buffer(4096), GpuInfo()
-    def ok(value):
-        if not value:
-            raise AssertionError(error.value.decode(errors='replace'))
-        return value
-    gpu = ok(open_gpu(str(args.moltenvk.resolve()).encode(), c.byref(info), error, len(error)))
-    shaders, texture, view = {}, None, None
-    try:
-        hashes = {}
-        for name, (stage, data) in fixtures().items():
-            (args.out / (name + '.dxbc')).write_bytes(data)
-            hashes[name] = hashlib.sha256(data).hexdigest()
-            shaders[name] = ok(compile_shader(gpu, c.create_string_buffer(data), len(data), stage, error, len(error)))
-        desc = TextureDesc(64, 64, 1, 1, 28, 0x20)
-        texture = ok(create_texture(gpu, c.byref(desc), error, len(error)))
-        view_desc = ViewDesc(28, 0, 1, 0, 1, 1)
-        view = ok(create_view(texture, c.byref(view_desc), error, len(error)))
-        draw = Draw(vertex=shaders['varying.vs'], pixel=shaders['varying.ps'], target=view,
-                    topology=4, count=3, instances=1, viewport=(c.c_float * 6)(0, 0, 64, 64, 0, 1),
-                    raster=(c.c_uint32 * 10)(3, 1, 0, 0, 0, 0x80000000, 1, 0, 1, 0),
-                    depth_state=(c.c_uint32 * 13)(0, 0, 8, 0, 0xffff, 1, 1, 1, 8, 1, 1, 1, 8),
-                    sample_mask=0xffffffff)
-        draw.blend[9] = 15
-        ok(submit(gpu, c.byref(draw), error, len(error)))
-        pixels = c.create_string_buffer(64 * 64 * 4)
-        ok(read(texture, 0, pixels, len(pixels), error, len(error)))
-        expected = bytes((64, 128, 191, 255)) * (64 * 64)
-        assert pixels.raw == expected, 'varying subset pixel mismatch'
-        rejected = []
-        for vertex, pixel in [('short.vs', 'varying.ps'), ('varying.vs', 'missing.ps'), ('varying.vs', 'integer.ps')]:
-            draw.vertex, draw.pixel = shaders[vertex], shaders[pixel]
-            assert not submit(gpu, c.byref(draw), error, len(error)), 'incompatible stage interface accepted'
-            reason = error.value.decode(errors='replace')
-            assert reason.startswith('shader I/O location mismatch'), reason
-            ok(read(texture, 0, pixels, len(pixels), error, len(error)))
-            assert pixels.raw == expected, 'rejected draw changed target'
-            rejected.append(dict(vertex=vertex, pixel=pixel, error=reason))
-        report = dict(device=info.name.decode(), pixels=4096, matched=True,
-                      fixtures_sha256=hashes, rejected=rejected,
-                      pixels_sha256=hashlib.sha256(pixels.raw).hexdigest(),
-                      backend_sha256=hashlib.sha256(args.backend.read_bytes()).hexdigest(),
-                      moltenvk_sha256=hashlib.sha256(args.moltenvk.read_bytes()).hexdigest())
-        (args.out / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
-        print('varying subset draw: 4096 matched pixels; 3 incompatible interfaces rejected without target changes')
-    finally:
-        if view:
-            free_view(view)
-        if texture:
-            free_texture(texture)
-        for shader in shaders.values():
-            free_shader(shader)
-        close(gpu)
-
-
-if __name__ == '__main__':
-    main()

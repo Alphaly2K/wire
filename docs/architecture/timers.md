@@ -1,11 +1,15 @@
-# Waitable timer 调用边界
+# 可等待定时器
 
-九项 waitable timer 的 provider、签名、DWORD/指针宽度和 TimerApi ID 集中在 `win32/catalog/timers.rs`。PE32 全部保持 ABI-only error 120 与原 stdcall 清栈，不新增 timer 实现。Win64 接受 kernel32/kernelbase，普通 scalar 冷绑定直接调用 typed timer adapter，删除独立 arity/DWORD 表和 legacy group 15 路由。
+新 Wasm 入口在 PE32 与 Win64 均支持 CreateWaitableTimerA/W、CreateWaitableTimerExA/W、OpenWaitableTimerA/W、SetWaitableTimer、SetWaitableTimerEx 和 CancelWaitableTimer。provider 与参数宽度来自 `win32/catalog/timers.rs`。名称、别名、权限、安全属性与容量遵循[同步对象规则](sync-objects.md)。
 
-原 timer 状态仍由 Win64 Events owner 管理，保留与 event/semaphore 共用的命名身份、per-alias access、manual/auto 信号、重复对象 wait-all 与取消后的信号行为。创建仍拒绝 SECURITY_ATTRIBUTES；扩展 create 保留 flags/access 的验证与原权限。A/W 名称及 create/open/extended 来自 ID，调用阶段不再解析名称。
+普通创建的 BOOL 与 Ex 的 CREATE_WAITABLE_TIMER_MANUAL_RESET 选择 manual-reset 或 auto-reset。Ex 同时接受 CREATE_WAITABLE_TIMER_HIGH_RESOLUTION，但不改变宿主提供时间的精度；其它 flags 返回错误 87。等待需要 SYNCHRONIZE，设置与取消需要 TIMER_MODIFY_STATE。
 
-timer handler 也已归 Events，只借 Memory 与只读 Threads；Runtime64 仅组合资源，错误分支才通过 Threads 查询当前 TEB。相对/绝对时钟取样仍在原位置，未引入统一时钟或等待抽象。
+due time 是有符号 64 位的 100 ns 数。负数表示相对时间，只采样单调经过时间；非负值表示绝对 FILETIME，同时取得一对新的经过时间与墙钟样本，换算后保存为单调 deadline。设置在过去的绝对时间立即到期；deadline 加法溢出或负 period 返回错误 87。period 以毫秒计，零表示一次性；周期定时器跳过错过的周期，不累积信号 credits。
 
-Set/SetEx 先受检读取 64 位 due time，再检查负 period、APC/completion 与 resume/reason context，最后检查 handle/access 并设置单调 deadline；原相对/绝对时间换算和 checked deadline 加法保持。SetEx 的 reason context 保持完整指针，普通 Set 的 resume 保持 DWORD；未新增回调或唤醒系统的能力。
+Set/SetEx 拒绝非空 APC completion routine，普通 Set 的 resume 及 SetEx 的 reason context 非零均返回错误 50。SetEx 的 tolerable delay 作为容差接受，当前按原 deadline 调度。时钟提供者错误在调用分派前返回宿主，原定时器状态保持，可重试。
 
-Create 按是否复用对象写 LastError 0/183，其它成功保持旧错误；失败设置原错误码。公共 gateway 先受检保存返回 frame，再执行资源变更，最后提交 CPU、trace 与 API count。故障与不支持参数的原优先级不变。独立 ABI、A/W/access、due-time fault 以及原创取消循环见[验收记录](../reports/refactoring-timers-2026-10-16.md)。
+到期只设置信号。manual-reset 保持信号，auto-reset 在成功等待时消耗信号；重新 Set 清除旧信号。Cancel 停止后续到期并保留已有信号，包含本次采样时已到期但尚未观察的状态；没有活动 deadline 时取消不读取时钟。
+
+等待使用与有限超时相同的单调时间源，无可运行线程时返回 Waiting，宿主再次 run 才继续推进，不调用宿主 sleep。绝对设置使用 `wire_service_timed(owner, elapsed, wall)`；普通 `wire_service` 对缺少墙钟样本的绝对设置报接口错误。底层时间分类与桥接见[运行时契约](wasm-runtime.md)。
+
+消息定时器 SetTimer/KillTimer 已接入相同单调时间源，生成 WM_TIMER，由 DispatchMessage 经同一 JIT 调用 TIMERPROC。它们使用 owner/HWND/ID 身份、合并到期消息及 1024 项独立容量；不作为内核对象参与 WaitForSingleObject。查询/消息等待按需推进，取消保留已排队消息，具体契约见[消息队列](messages.md)。

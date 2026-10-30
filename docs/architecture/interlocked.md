@@ -1,25 +1,20 @@
 # Interlocked 与 SLIST 边界
 
-六项契约已接入 `win32/catalog/interlocked.rs`。PE32 六项 Typed；Win64 仅 InitializeSListHead Typed，其余五项 Absent。两个架构适配器只借用参数和内存，旧分发入口负责返回 frame、LastError 同步和 trace；不再维护重复的手写 ABI 与字符串 handler。
+新 Wasm 入口在 PE32 和 AMD64 均提供八项服务，使用 kernel32/kernelbase 的统一调用帧；架构资格独立于共享目录的旧策略。调用不采样时钟，成功计一 work，不增加客体退休数，保留 LastError、FLAGS 与浮点状态。
 
-| export | PE32 | Win64 |
+| export | PE32 | AMD64 |
 | --- | --- | --- |
-| InterlockedIncrement / Decrement | kernel32；LONG 按 32 位回绕，返回新值 | absent |
-| InterlockedExchange | kernel32；写入并返回旧值 | absent |
-| InterlockedCompareExchange | kernel32；比较相等才写入，始终返回旧值 | absent |
-| InitializeSListHead | kernel32；清零 8 字节、要求 8 字节对齐 | kernel32/kernelbase；清零 16 字节、要求 16 字节对齐 |
-| InterlockedFlushSList | kernel32；返回旧 Next、清空 Next/Depth，16 位 Sequence 加一并回绕 | absent |
+| InterlockedIncrement / Decrement | LONG 按 32 位回绕，返回新值 | 相同 |
+| InterlockedExchange | 写入 LONG 并返回旧值 | 相同 |
+| InterlockedCompareExchange | 比较相等才写入，始终返回旧值 | 相同 |
+| InitializeSListHead | 清零 8 字节，要求 8 字节对齐 | 清零 16 字节，要求 16 字节对齐 |
+| InterlockedPushEntrySList / InterlockedPopEntrySList | 32 位 Next、16 位 Depth/Sequence | 完整指针、16 位 Depth、48 位 Sequence；保留 header 第二字的低四位 |
+| InterlockedFlushSList | 返回旧 Next，清空 Next/Depth，Sequence 加一 | 相同，保留第二字的低四位 |
 
-这些 API 在当前合作式 guest 调度中单次执行不让出线程。此处保留已有调度模型；未来若并行运行 guest 线程，需要另行建立共享内存原子操作与内存序语义。
+SLIST 的位布局与序列更新复用便携的 `win32/slist.rs`，内存适配直接使用新 VMM。Depth 和 Sequence 分别按字段宽度回绕，二者不互相进位。entry 与 header 要求相同架构对齐，push 拒绝 NULL entry；非空 pop 校验读出的后继对齐。空 pop 返回 NULL，不写 header，因此只需读取权限。
 
-PE32 的 LONG 参数及返回值保持 32 位位模式，SLIST_HEADER 为 Next:u32、Depth:u16、Sequence:u16。比较失败的 CompareExchange 只要求可读内存；匹配后的写入仍检查写权限。SLIST 先检查对齐，再按原顺序读取和写入，不增加统一的“预检全部指针”步骤。
+LONG 参数及返回保持 32 位位模式，AMD64 的高位参数不参与比较。比较失败的 CompareExchange 只要求读取权限；匹配后的写入仍检查写权限。初始化只写出完整 header，不读取原值。
 
-InitializeSListHead 使用 Void 返回约定；两端继续保留原有零 EAX/RAX trace carrier。其余 LONG 操作保留原 32 位结果位模式，Flush 返回 guest 指针。返回元数据不在公共 gateway 上额外改写寄存器。
+两种 ABI 都在访问数据前保存参数和返回帧，输出覆盖原返回槽时仍使用保存的目标。push 在写 entry.Next 和 header 前预检两处写入，故障不发布部分链接；pop/flush 在完整输入读取与写入检查后提交。故障保留 CPU、work、退休数与 LastError。所有写入沿同一 VMM 源码失效路径撤销生成代码。
 
-PE32 handler 先写输出，公共 gateway 随后读取返回地址。因此 output 与 return slot 重叠时，返回地址可以被本次输出覆盖。checked memory fault 保留原来的 EAX、ESP 和 LastError。Win64 gateway 提前保存返回 frame；16 字节输出即使覆盖 return slot，也使用已保存的返回地址。故障保留 CPU、API count 与 LastError，指针保留完整 64 位。
-
-独立基线见 `tests/win32/interlocked.rs` 和 `tests/x64/interlocked.rs`，在旧 handler 上三项全部通过；既有 kernel 测试另外覆盖 sequence 回绕、返回链及 comparand/exchange 顺序。原创 `gateway-slist` 使用 guest 栈上的对齐 header，无文件、时钟或 native backend 依赖：PE32 retired=`6*n+11`，Win64 retired=`5*n+11`、work=`6*n+11`，两者均检查返回零与 n 次 API 调用。默认性能 case 集合保持原样。
-
-迁移前日志在 `wire-out/refactoring-2026-10-14/r2-interlocked-baseline-*`。首个 PE32 fixture 把末尾 INT3 错计入 retired，失败日志已保留；修正后的 raw/IR smoke 均通过。
-
-完整正确性、25 条性能路径、SSE 硬件计数调查、thread-ID 局部成本及 Alice 启动结果见 [迁移验收](../reports/refactoring-interlocked-catalog-2026-10-15.md)。
+这些 API 在当前合作式客体调度中单次执行不让出线程，其间没有客体回调。当前实现没有并行运行客体线程，也未提供宿主共享内存的并行原子操作协议。未对齐或畸形 SLIST 链接保持原调用并报告明确接口错误，尚未投递相应的 Windows 对齐异常。

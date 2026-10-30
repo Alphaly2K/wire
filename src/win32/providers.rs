@@ -1,0 +1,35 @@
+//! Pure built-in DLL eligibility shared by portable loaders.
+pub fn native_module(name: &str) -> bool {
+    matches!(
+        name,
+        "kernel32.dll"
+            | "ntdll.dll"
+            | "user32.dll"
+            | "gdi32.dll"
+            | "gdiplus.dll"
+            | "d3d9.dll"
+            | "msvcrt.dll"
+            | "advapi32.dll"
+            | "version.dll"
+            | "winmm.dll"
+            | "imm32.dll"
+            | "ole32.dll"
+            | "shell32.dll"
+            | "comctl32.dll"
+            | "shlwapi.dll"
+            | "ws2_32.dll"
+            | "mpr.dll"
+            | "comdlg32.dll"
+            | "mfplat.dll"
+            | "mf.dll"
+            | "ddraw.dll"
+            | "dsound.dll"
+            | "dinput.dll"
+            | "oleaut32.dll"
+            | "wininet.dll"
+            | "riched32.dll"
+            | "riched20.dll"
+            | "msftedit.dll"
+            | "imagehlp.dll"
+    )
+}

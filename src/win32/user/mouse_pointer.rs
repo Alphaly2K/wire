@@ -1,4 +1,5 @@
 //! Mouse promotion and owned pointer-message snapshots; no guest memory.
+pub(crate) const MOUSE: u64 = 0x57010001;
 #[derive(Clone, Copy)]
 pub(crate) struct Snapshot {
     pub window: u64,
@@ -11,6 +12,16 @@ pub(crate) struct Snapshot {
 }
 
 impl Snapshot {
+    #[allow(dead_code)]
+    pub fn info32(self) -> [u8; 88] {
+        let wide = self.info64();
+        let mut bytes = [0; 88];
+        bytes[..16].copy_from_slice(&wide[..16]);
+        bytes[16..20].copy_from_slice(&(MOUSE as u32).to_le_bytes());
+        bytes[20..24].copy_from_slice(&(self.window as u32).to_le_bytes());
+        bytes[24..].copy_from_slice(&wide[32..]);
+        bytes
+    }
     pub fn info64(self) -> [u8; 96] {
         let mut bytes = [0; 96];
         for (offset, value) in [
@@ -25,7 +36,7 @@ impl Snapshot {
         ] {
             bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         }
-        bytes[16..24].copy_from_slice(&super::raw_input::MOUSE.to_le_bytes());
+        bytes[16..24].copy_from_slice(&MOUSE.to_le_bytes());
         bytes[24..32].copy_from_slice(&self.window.to_le_bytes());
         for offset in [32, 48] {
             for (n, value) in self.point.into_iter().enumerate() {

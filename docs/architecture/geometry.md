@@ -1,13 +1,13 @@
-# 矩形与窗口边框边界
+# 矩形与窗口边框
 
-状态：13 项契约、共享纯核与双架构适配已验收，独立旧行为、完整正确性、30 个性能协议及 Alice 启动前缀见[本批报告](../reports/refactoring-geometry-2026-10-18.md)。
+新 Wasm 入口在 PE32/AMD64 的 user32 接通 SetRect、SetRectEmpty、CopyRect、EqualRect、InflateRect、OffsetRect、PtInRect、IsRectEmpty、IntersectRect、UnionRect、AdjustWindowRect、AdjustWindowRectEx 和 AdjustWindowRectExForDpi。新入口不接受旧适配器中的 kernel32/kernelbase 别名。
 
-十项 RECT 运算与三项 AdjustWindowRect 变体集中声明。PE32 全部 user32 typed；Win64 保留原六项 copy/offset/point/frame typed，以及七项 absent。六项 Win64 静态 kernel32/kernelbase/user32、动态仅 user32 的范围单独记录。
+RECT 的四个字段均为 signed LONG，偏移与膨胀按 32 位回绕。空矩形包含零面积和反向边界；无交集和两个空矩形的并集输出全零，并返回 FALSE。所有源先完整复制，再写目的，因此允许目的与源完全或部分重叠。NULL 矩形指针通常返回 FALSE；IsRectEmpty(NULL) 返回 TRUE，均保持 LastError。
 
-PtInRect 的 POINT 是一个 8-byte 值：PE32 占两个连续 stack words，Win64 是一个 packed 64-bit 参数。契约使用 Uint64 表达该 carrier，因此 stdcall 清栈仍为 12 bytes，Win64 arity 为 2，两个 signed LONG 坐标均保留。DWORD/BOOL 与 signed LONG 的 Win64 高位截断继续由绑定参数计划完成。
+PtInRect 的 POINT 是按值八字节结构：PE32 为两个连续栈 word，AMD64 为一个 packed 64-bit carrier；边界含左上、不含右下。共享契约的 Uint64 参数与清栈字节数由两种 ABI 的通用调用帧处理。
 
-`win32/user/geometry.rs` 只处理 `[i32; 4]` 值，包括 signed/empty、wrapping offset/inflate、交并集、96-DPI frame；不访问进程、窗口或 guest 内存。原 Hangover/Wine frame 算法和版权保留，`user32_geometry::frame` 暂作旧窗口调用者的兼容 re-export，client-origin 的窗口遍历仍归旧 owner。
+窗口边框复用同一 96-DPI 非客户区数值核心，与默认 NCCALCSIZE 的 border/caption/menu/edge 尺寸一致。AdjustWindowRectExForDpi 当前仅支持 96 DPI，其余值返回 FALSE 和错误 50，保持原 RECT。一般矩形计算与成功边框调整保持 LastError，不采样时钟。
 
-`win32/x86/geometry.rs` 只借 Args、GuestMem 和 LastError，保留 PE32 trace、unsupported-DPI 的 120、先读后验证 writability 的调整顺序，以及 handler 后读取返回槽。`win32/x64/geometry.rs` 只借 Memory，集中 RECT codec；旧 USER 窗口查询继续复用 codec。Win64 错误由入口提交，unsupported-DPI 50、saved return frame 与输出故障顺序保持。两端均完整 copy-in 后 copy-out，允许输入输出重叠，跨页写入故障保持可访问前缀。
+输入、输出和原返回帧的访存故障保留 CPU、work、退休数及完整输出，修复后可重试。成功前保存参数和返回帧；输出覆盖原返回槽仍按保存位置返回。每次完成计一 work、零客体退休，FLAGS、FP 与 SIMD 保持。
 
-旧 PE32 手写 ABI、geometry adjust 名称分发、common rectangle 分支与函数、Win64 arity/DWORD/名称分发及重复 RECT codec 删除。未新增窗口、DPI 或 Win64 rectangle 能力。
+数值核心位于 `src/win32/user/geometry.rs`，原 Wine/Hangover 派生算法及版权继续保留。旧 PE32/Win64 内存适配器作为迁移参考；新入口只复用纯数值函数。

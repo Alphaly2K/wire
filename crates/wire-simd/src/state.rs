@@ -1,7 +1,19 @@
 //! Shared software SSE arithmetic state. No destination or instruction state is
 //! changed until the caller commits; unmasked exceptions accrue MXCSR only.
 use iced_x86::Mnemonic as M;
+use rustc_apfloat::ieee::{IeeeFloat, Semantics};
 use rustc_apfloat::{Float, FloatConvert, Round, Status, StatusAnd};
+use std::marker::PhantomData;
+
+// The SSE precision with an exponent range wide enough for every finite input
+// operation. Intel detects tiny results before denormal rounding, and unmasked
+// range exceptions retain this precision's inexact status.
+pub(crate) struct Wide<F>(PhantomData<F>);
+impl<F: Float> Semantics for Wide<F> {
+    const BITS: usize = F::PRECISION + 15;
+    const EXP_BITS: usize = 15;
+}
+type Unbounded<F> = IeeeFloat<Wide<F>>;
 const CF: u64 = 1;
 const PF: u64 = 4;
 const ZF: u64 = 64;
@@ -69,7 +81,7 @@ impl SimdState {
         }
     }
     #[inline(always)]
-    pub(crate) fn to_integer<F: Float>(
+    pub(crate) fn convert_integer<F: Float>(
         &mut self,
         value: u64,
         width: u32,
@@ -95,7 +107,7 @@ impl SimdState {
         })
     }
     #[inline(always)]
-    pub(crate) fn arithmetic<F: Float>(
+    pub(crate) fn arithmetic<F: Float + FloatConvert<Unbounded<F>>>(
         &mut self,
         mnemonic: M,
         a: u64,
@@ -124,7 +136,14 @@ impl SimdState {
             return Ok(selected.to_bits() as u64);
         }
         let round = self.round();
-        if flags & 2 != 0 && self.mxcsr & (1 << 8) == 0 && !a.is_nan() && !b.is_nan() {
+        let zero_divisor =
+            matches!(mnemonic, M::Divss | M::Divsd | M::Divps | M::Divpd) && b.is_zero();
+        if flags & 2 != 0
+            && self.mxcsr & (1 << 8) == 0
+            && !a.is_nan()
+            && !b.is_nan()
+            && !zero_divisor
+        {
             self.accept(Status::OK.and(F::ZERO), flags, simd_exception)?;
         }
         let mut result = match mnemonic {
@@ -133,18 +152,33 @@ impl SimdState {
             M::Mulss | M::Mulsd | M::Mulps | M::Mulpd => a.mul_r(b, round),
             _ => a.div_r(b, round),
         };
-        if a.is_nan() || b.is_nan() {
-            // SSE prefers a quiet NaN over a signaling NaN, then the left operand.
-            let selected = if !a.is_nan() || (a.is_signaling() && b.is_nan() && !b.is_signaling()) {
-                b
-            } else {
-                a
+        if (result.value.abs() <= F::smallest_normalized()
+            || result.value.abs() == F::largest()
+            || result.status.intersects(Status::OVERFLOW))
+            && a.is_finite()
+            && b.is_finite()
+            && !(result.value.is_zero() && !result.status.intersects(Status::INEXACT))
+        {
+            let a: Unbounded<F> = a.convert_r(round, &mut false).value;
+            let b: Unbounded<F> = b.convert_r(round, &mut false).value;
+            let wide = match mnemonic {
+                M::Addss | M::Addsd | M::Addps | M::Addpd => a.add_r(b, round),
+                M::Subss | M::Subsd | M::Subps | M::Subpd => a.sub_r(b, round),
+                M::Mulss | M::Mulsd | M::Mulps | M::Mulpd => a.mul_r(b, round),
+                _ => a.div_r(b, round),
             };
+            self.range::<F>(wide, &mut result);
+        }
+        if a.is_nan() || b.is_nan() {
+            // Intel SDM table 4-8: SSE selects the first NaN, quieting SNaNs.
+            let selected = if a.is_nan() { a } else { b };
             result.value = selected.add_r(F::ZERO, round).value;
             flags &= !(1 << 1); // NaN handling precedes the denormal operand exception.
         } else if result.status.contains(Status::INVALID_OP) {
             // Intel's masked invalid-operation indefinite is a negative quiet NaN.
             result.value = F::NAN.copy_sign(-F::ZERO);
+        } else if result.status.contains(Status::DIV_BY_ZERO) {
+            flags &= !(1 << 1);
         }
         Ok(self.accept(result, flags, simd_exception)?.to_bits() as u64)
     }
@@ -216,7 +250,7 @@ impl SimdState {
         Ok(())
     }
     #[inline(always)]
-    pub(crate) fn convert<F: Float + FloatConvert<D>, D: Float>(
+    pub(crate) fn convert<F: Float + FloatConvert<D> + FloatConvert<Unbounded<D>>, D: Float>(
         &mut self,
         bits: u64,
         simd_exception: &mut bool,
@@ -226,8 +260,34 @@ impl SimdState {
         if flags & 2 != 0 && self.mxcsr & (1 << 8) == 0 {
             self.accept(Status::OK.and(D::ZERO), flags, simd_exception)?;
         }
-        let result: StatusAnd<D> = source.convert_r(self.round(), &mut false);
+        let mut result: StatusAnd<D> = source.convert_r(self.round(), &mut false);
+        if (result.value.abs() <= D::smallest_normalized()
+            || result.value.abs() == D::largest()
+            || result.status.intersects(Status::OVERFLOW))
+            && source.is_finite()
+            && !source.is_zero()
+        {
+            let wide: StatusAnd<Unbounded<D>> = source.convert_r(self.round(), &mut false);
+            self.range::<D>(wide, &mut result);
+        }
         Ok(self.accept(result, flags, simd_exception)?.to_bits() as u64)
+    }
+
+    fn range<F: Float>(&self, wide: StatusAnd<Unbounded<F>>, result: &mut StatusAnd<F>) {
+        if !wide.value.is_finite_non_zero() {
+            return;
+        }
+        let overflow = wide.value.ilogb() > F::MAX_EXP;
+        let tiny = wide.value.ilogb() < F::MIN_EXP;
+        if overflow {
+            result.status |= Status::OVERFLOW;
+        }
+        if tiny && (self.mxcsr & (1 << 11) == 0 || result.status.intersects(Status::INEXACT)) {
+            result.status |= Status::UNDERFLOW;
+        }
+        if (overflow && self.mxcsr & (1 << 10) == 0) || (tiny && self.mxcsr & (1 << 11) == 0) {
+            result.status = (result.status & !Status::INEXACT) | (wide.status & Status::INEXACT);
+        }
     }
     #[inline(always)]
     pub(crate) fn sqrt<F: Float>(

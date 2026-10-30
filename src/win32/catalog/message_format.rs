@@ -13,7 +13,7 @@ impl MessageFormatApi {
 const fn declaration(id: MessageFormatApi, name: &'static str) -> Contract {
     use Parameter::{Pointer as P, Uint32 as D};
     Contract::new(ApiId::MessageFormat(id), name, &[D, P, D, D, P, D, P], ReturnConvention::CharacterCount,
-        "architecture-specific existing message sets and flags; CP932/UTF-16 units, original output/allocation/LastError order; PE32 process-heap allocation and trim note, Win64 LocalFree ownership, checked return-frame preflight and restricted insert/language behavior retained",
+        "CP932/UTF-16 character counts exclude the terminating NUL, caller capacity includes it; allocated messages use local storage; adapters own supported message sets, flags, insert/language policy and checked output/error/return-frame order",
         [ArchitecturePlan { dlls: &["kernel32.dll"], execution: ExecutionPolicy::Typed },
          ArchitecturePlan { dlls: &["kernel32.dll", "kernelbase.dll"], execution: ExecutionPolicy::Typed }])
 }

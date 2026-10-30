@@ -1,19 +1,21 @@
-# 线程查询、设置与状态 owner
+# 线程句柄与属性
 
-十一项 export 的 provider、参数宽度、返回约定与 ID 集中在 `win32/catalog/thread_properties.rs`：OpenThread、Get/SetThreadErrorMode、Resume/SuspendThread、GetThreadId、Get/SetThreadPriority、GetExitCodeThread、SetThreadAffinityMask、SetThreadStackGuarantee。Win64 接受 kernel32/kernelbase；PE32 仅 kernel32，其中 OpenThread、GetThreadId、两项 error mode 与 stack guarantee 保持 ABI-only/error 120，其余六项使用 typed adapter。错 DLL 的历史未知 ABI/拒绝策略保持。
+线程属性的 provider、参数与返回约定集中在 `win32/catalog/thread_properties.rs`。新 Wasm 入口在 PE32 与 Win64 均接入 OpenThread、GetThreadId、GetExitCodeThread、Resume/SuspendThread、Get/SetThreadPriority、Get/SetThreadErrorMode、SetThreadAffinityMask 和 SetThreadStackGuarantee；线程执行协议见[线程生命周期](thread-control.md)。
 
-Win64 冷绑定普通 scalar ID，由 Runtime64 保存返回帧后交给 `Threads::property_call`。owner 只借 Memory 和当前 LastError 地址，内部 error mode 字段私有。CPU、公共 unblock、trace 和 API 次数仍由进程提交。Create/ExitThread、APC、CONTEXT 和 description 分配保留专用路径。
+初始线程 ID 为 1，后续身份不回绕复用。GetCurrentThread 返回当前架构完整宽度的 −2；OpenThread 只接受仍存在的线程 ID，未知 ID 返回错误 87。运行中的线程可在关闭原句柄后重开；退出线程需要仍有句柄或等待保留身份。每个 VM 最多 1024 个活动线程别名，整个寿命最多 49152 个；使用普通文件与标准端点别名以外的独立保留区间，耗尽返回错误 8。关闭或复制不会结束线程。
 
-Win64 先解析完整 64 位 thread handle，失败写 error 6，再返回各 API 的原 sentinel；窄化的 pseudo handle 不成立。优先级参数截断为 DWORD，接受 −15、−2…2、15，读取负优先级仍零扩展低 32 位。affinity 使用完整 carrier 且只接受 1。挂起计数上限 127，溢出返回 DWORD MAX/error 87，恢复饱和减一；两个 API 都返回操作前计数。exit code 输出为 DWORD，活动线程为 259。
+线程句柄有独立权限和继承/防关闭 flags，与普通句柄共用 CloseHandle、DuplicateHandle、Get/SetHandleInformation。支持 SYNCHRONIZE、QUERY_INFORMATION/LIMITED_INFORMATION、SET_INFORMATION/LIMITED_INFORMATION 和 SUSPEND_RESUME；THREAD_ALL_ACCESS 映射到该集合，其他访问位返回错误 50。复制只能保留或缩减源权限，越权返回错误 5；查询、挂起、设置和等待分别检查所需权限。复制当前线程 pseudo handle 产生普通独立别名。
 
-error mode 校验先于输出访问；有效 mask 为 0x8007。非空输出先预检、再写旧值，最后更新 owner。输出 fault 不改变 mode，CPU/API/trace 不提交；已保存的返回帧允许输出覆盖原返回槽。成功保留原 LastError，输出与 LastError 别名则按原写入顺序生效。
+PE32 和 Win64 均使用最多 127 次的挂起计数；SuspendThread 增一，ResumeThread 饱和减一，返回修改前计数。对退出线程操作返回错误 6；溢出返回 DWORD MAX 和错误 87。当前线程的挂起在完成服务返回帧之后阻止继续执行。
 
-PE32 adapter 只借 GuestMem、Sched 和 LastError。Sched 拥有 exit 状态读取和二态挂起切换；已有 Waiting/Exited 状态保持，重复挂起不累加，挂起/恢复成功都返回零；这两项不接受当前线程 pseudo handle。优先级设置保持空操作成功、查询固定零。affinity 接受 pseudo handle 或既有调度 handle，随后检查 mask=1。未知 exit handle 仍成功写零，活动线程写 259，已退出线程写其 code。输出先于返回地址读取，覆盖返回槽会改变返回目标；保持旧日志文本与 fault/清栈顺序。
+优先级接受 −15、−2…2、15，读取负值返回零扩展 DWORD；它保存客体属性，当前 round robin 调度不使用优先级排序。查询失败返回 THREAD_PRIORITY_ERROR_RETURN。affinity 只接受单核 mask 1，其余返回错误 87。GetExitCodeThread 成功写 DWORD，活动线程为 STILL_ACTIVE（259），退出线程为保存的 code；输出失败保留原状态和 CPU。
 
-本批保持上述兼容行为，未增加 Windows 线程功能，详见[独立基线与验收](../reports/refactoring-thread-properties-2026-10-17.md)。
+error mode 属于线程，初始为零；有效 mask 为 0x8003，进程专用的 SEM_NOALIGNMENTFAULTEXCEPT 在线程接口返回错误 87。设置时按 DWORD 截断输入，先验证 mask，再向非空输出写旧值，最后提交新值。输出故障不改变 mode，成功保留 LastError。进程默认策略见[进程选项](process-options.md)。SetThreadStackGuarantee 的零请求查询并写零；非零请求保持输入并返回错误 50，尚无异常栈预留。
 
-后续六项创建、退出、APC、CONTEXT 和 description 已迁入独立[线程控制边界](thread-control.md)，继续保留专用控制结果和资源提交规则。
+调用帧在任何输出前保存参数、返回地址及栈完成位置，因此输出覆盖原返回槽也不改变返回目标。接口失败按其约定返回零、DWORD MAX 或优先级错误值并写当前线程的 LastError；成功不清除 LastError。
 
-SetThreadStackGuarantee 在 thread handle 解析之前处理指针参数：零请求查询并写回零，非零请求保持输入、返回失败/error 50，不新增异常栈预留能力。其指针宽度、读写故障和返回帧次序保持，见[补齐验收](../reports/refactoring-scalar-followup-2026-10-20.md)。
+Get/SetThreadLocale 属于 [NLS 契约](nls.md)，在当前线程 TEB 保存 LCID；新线程使用用户默认 locale，后续修改只影响自身及其 CP_THREAD_ACP。进程默认 ACP、用户/系统 locale 保持独立，回调、让出和等待不回滚当前线程的 locale。
 
-2026-10-20 功能接续加入 Win64 OpenThread：三个参数均按 DWORD 读取，只打开已有的 guest thread ID；运行中的线程即使原 handle 已关闭也可重开，已退出线程则必须仍有 handle 保留。每次打开使用与 DuplicateHandle 共用的独立 alias、继承标志、1024 live/4096 lifetime 容量；关闭 alias 不结束线程。未知 ID 返回 error 87，超限 error 8，不支持的 access 位返回 error 50。接受线程/标准权限、generic access 和 MAXIMUM_ALLOWED；沿用既有受限 profile，不模拟 ACL/privilege 或逐 handle access 检查。成功保留 LastError。PE32 保持 ABI-only/error 120，清栈 12 字节。
+SetThreadDescription/GetThreadDescription 在两种 ABI 接受 kernel32/kernelbase，名称属于线程对象，句柄别名共享；已退出但仍有句柄保留的线程可继续查询。设置需要 SET_INFORMATION 或 SET_LIMITED_INFORMATION，查询需要 QUERY_INFORMATION 或 QUERY_LIMITED_INFORMATION。名称保存原始 UTF-16 单元，最多 32767 个，不将未配对代理项改写为替换字符；NULL 设置为空名称。
+
+GetThreadDescription 每次分配独立的、含 NUL 的进程本地块，通过指针宽度的输出写出，调用者使用 LocalFree 释放。旧结果不随名称变化而改变，空名称也返回可释放的两字节块。输出在分配前预检，字符串读取失败不改变旧名称；输出故障不分配或提交 CPU/work。无效句柄或权限错误的查询写 NULL 输出，错误经 NTSTATUS 转为 HRESULT，LastError 保持；调用者使用 SUCCEEDED/FAILED 判断结果。调用不采样时钟，静态启动失败清理名称和分配。

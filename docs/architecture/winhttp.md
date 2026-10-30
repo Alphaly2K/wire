@@ -1,7 +1,7 @@
-# Win64 WinHTTP 适配器
+# WinHTTP profile
 
-五项 export 由 `WINHTTP_CONTRACTS` 统一 provider/ABI/WinHttpApi。静态和动态均仅接受 winhttp.dll，PE32 保持 absent/未知 ABI。处理函数迁入 `win32::x64::winhttp`，只借 Memory、ID、参数和当前线程 LastError 地址；原 legacy runtime 模块删除。
+Wasm 入口在 PE32 和 AMD64 的 `winhttp.dll` 接通五项导出：WinHttpGetIEProxyConfigForCurrentUser、WinHttpGetDefaultProxyConfiguration、WinHttpGetProxyForUrl、WinHttpOpen 和 WinHttpCloseHandle。
 
-当前没有 IE profile 或 HTTP transport。用户 proxy 查询先检查 32-byte 输出，再以错误 2 返回并保持输出；默认 proxy 查询写出原 24-byte direct profile，成功时 LastError 保持。空 profile 指针返回错误 87；Open 返回错误 50；ProxyForUrl/Close 返回错误 6，不伪造 HINTERNET。访存故障和返回帧顺序保持。
+当前 profile 没有 IE 配置或 HTTP transport。用户 proxy 查询先检查完整的 16/32 字节输出范围，再以错误 2 返回并保持输出。默认 proxy 查询写出 12/24 字节的 direct profile，成功保持 LastError；结构内的代理与绕过列表指针均为 NULL。空 profile 指针返回错误 87。Open 返回错误 50，ProxyForUrl/Close 返回错误 6，没有成功创建的 HINTERNET。
 
-本批风险为低：使用既有 `tests/x64/network.rs::win64_winhttp_proxy_profile_and_absent_transport_preserve_fault_outputs` 验证真实输出/错误/故障/provider，所属 release 1、catalog 一致性及 fmt/strict Clippy/release build 通过，不增加重复测试或性能矩阵。基线 `1bd3adf` 已运行过包含该用例的 Win64 264 项；证据和源码/executable SHA 记录于 `wire-out/refactoring-2026-10-14/r2-winhttp-*`。累计 **792 exports**。
+原有处理函数已提取到 `win32::winhttp`，新旧入口共享同一逻辑，仅适配内存操作及结构指针宽度。输出和错误槽故障保持 CPU、work 和保存返回帧，调用不采样时间。检查入口为 `node crates/wire-wasm/tests/winhttp.mjs`，使用项目生成输入；旧入口可通过 `cargo test --locked --offline --test x64 win64_winhttp --target-dir target/resident` 定向复查。

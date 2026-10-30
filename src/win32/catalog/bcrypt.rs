@@ -6,6 +6,7 @@ pub enum BcryptApi {
     Generate,
     Open,
     Close,
+    SystemRandom,
 }
 
 const fn declaration(
@@ -22,7 +23,7 @@ const fn declaration(
 }
 
 use Parameter::{Pointer as P, Uint32 as D};
-pub static BCRYPT_CONTRACTS: [Contract; 3] = [
+pub static BCRYPT_CONTRACTS: [Contract; 4] = [
     declaration(BcryptApi::Generate, "BCryptGenRandom", &[P, P, D, D]),
     declaration(
         BcryptApi::Open,
@@ -30,4 +31,12 @@ pub static BCRYPT_CONTRACTS: [Contract; 3] = [
         &[P, P, P, D],
     ),
     declaration(BcryptApi::Close, "BCryptCloseAlgorithmProvider", &[P, D]),
+    Contract::new(
+        ApiId::Bcrypt(BcryptApi::SystemRandom),
+        "SystemFunction036",
+        &[P, D],
+        ReturnConvention::Uint32,
+        "BOOLEAN RtlGenRandom export; shared secure entropy sample, DWORD byte length, complete output preflight, zero length succeeds, 16 MiB request cap and unchanged LastError; no provider handle",
+        [ArchitecturePlan { dlls: &["advapi32.dll"], execution: ExecutionPolicy::LegacyUnimplemented }; 2],
+    ),
 ];

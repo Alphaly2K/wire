@@ -1,0 +1,13 @@
+[package]
+name = "wire-host"
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-2.1-only"
+publish = false
+description = "Native platform samples for the Wasm application host"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+libc = "0.2"

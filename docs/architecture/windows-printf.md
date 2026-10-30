@@ -1,16 +1,14 @@
-# Windows printf 契约与 PE32 变参
+# Windows printf 与客体变参
 
-`win32/catalog/windows_printf.rs` 声明 wsprintfA/W 与 wvsprintfA/W 的四个 export。PE32 保留精确 user32.dll provider 和原 named export；Win64 继续 absent。普通固定参数只包含目标、格式和可选 va_list，不把变参当作固定 scalar 签名展开。
+新 Wasm 入口在 PE32 与 AMD64 通过 user32.dll 提供 wsprintfA/W 与 wvsprintfA/W。固定参数为目标、格式及可选 va_list；变参根据格式按需读取，字面量和未知转换不访问无用参数。旧 PE32 入口与新入口共用原格式化规则及 CP932/UTF-16 转换。
 
 | 入口 | PE32 调用约定 | 固定参数 | 清栈 |
 | --- | --- | ---: | ---: |
 | wsprintfA/W | cdecl | 2 | 0 字节 |
 | wvsprintfA/W | stdcall | 3 | 12 字节 |
 
-Contract 默认使用 Stdcall，cdecl 必须显式声明；原公开 stdcall_bytes 查询仍返回实际 callee 清栈字节数。两条 wsprintf 的旧 ABI override 删除，其余 legacy 和 CRT 策略保持。
+AMD64 普通调用从 R8/R9 开始读取变参，其余使用原调用栈的八字节参数槽；va_list 使用连续八字节槽。PE32 普通变参从原 ESP+12 开始，va_list 使用四字节槽，I64 数字占两个槽。两种 ABI 均先捕获固定参数与返回地址，完成时仅按调用约定调整栈。
 
-主 gateway 按绑定 ID 选择两参数的 cdecl 前缀；wvsprintf 由三参数 stdcall 契约读取参数。`win32/x86/windows_printf.rs` 只借固定参数、GuestMem 和原 ESP：cdecl 变参从 ESP+12 开始，va_list 入口使用第三个参数。格式化器仍为原 `wsprintf.rs`，按格式需要逐项读取变参，字面量不会访问无用的 va_list。
+字符串、字符、整数、十六进制、宽度/精度和 padding 使用已有 Windows 格式化规则。I64 数字保留 64 位，I32/long 数字使用 32 位，I 数字使用指针宽度；p 输出为 8/16 位大写十六进制。格式最多读取 1M unit，默认字符串最多读取 1023 unit，输出最多 1023 unit 并追加 NUL；达到该输出上限时保留原返回值 0xffffffff。
 
-CP932/UTF-16 转换、Windows 字符/数字规则、1023-unit 上限、错误文本和 guest 输出检查保持。输出仍先于 gateway 读取返回地址，因此允许输出覆盖原 return slot；LastError、日志和返回 frame 的提交顺序保持。
-
-独立回归将调用栈的最后一个固定参数放在已映射区末端，并将 va_list 指向不可读区：四个字面量调用应成功，cdecl/stdcall 分别保留原 ESP，LastError 保持。另验证 wide 输出覆盖返回地址；既有混合变参、I64、CP932/UTF-16 与输出 fault 用例继续保留。
+格式、source 和变参先完成读取，再一次写入完整结果，允许目的与格式、参数或返回槽重叠。实际访存故障不提交输出、调用者或 work，修复后可重试；保持 LastError。旧入口仍保留原错误文本和输出先于返回帧读取的顺序，新入口使用保存的返回地址继续执行。

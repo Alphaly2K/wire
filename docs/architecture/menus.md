@@ -1,11 +1,13 @@
 # PE32 菜单契约与资源归属
 
-`win32/catalog/menu.rs` 集中 27 项 export 的 DLL、参数、stdcall 清栈、typed ID 和架构执行策略。PE32 的 24 项领域入口在绑定时选择 ID；LoadMenuA/W、GetSystemMenu 保留 ABI-only。Win64 全部 absent。当前迁移与验收状态见[批次报告](../reports/refactoring-menus-2026-10-19.md)。
+新 Wasm 入口接通 `win32/catalog/menu.rs` 的全部 27 项 PE32 导出。二十项提供真实菜单和条目状态；DrawMenuBar、TrackPopupMenu/Ex、RedrawWindow、LoadMenuA/W、GetSystemMenu 返回零和 LastError 120。菜单绘制、弹出跟踪、资源加载和系统菜单仍待实现。AMD64 保留旧 absent 范围。
 
-`win32/user/menus32.rs` 拥有原有菜单对象、条目和单调分配句柄。调用只借用 GuestMem、窗口表和 LastError，不再取得整个 ApiState。原菜单图、30 层限制、4096 个对象/条目上限、递归命令查找、循环拒绝与修改回滚保持；本轮没有合并两架构资源模型。
+新旧入口共用 `win32/user/menus.rs` 的对象、条目和菜单图处理体，旧 `menus32.rs` 只适配内存、窗口表、LastError 和 trace。保留递归命令查找、30 层全图校验、循环拒绝及修改回滚。新进程最多拥有 4096 个菜单，每菜单最多 4096 项，总计费额度 16 MiB；计费包含菜单、条目和 UTF-16 payload。PE32 单调句柄位于 `0x41010000..0x42000000`，销毁释放容量并保持身份不复用。
 
-MENUITEMINFO 的 44/48 字节布局、掩码归一化、CP932/UTF-16 文本、旧 bitmap 顺序和输出提交规则保持。读取 item 时先验证文本与结构两个输出，才提交任一输出。共享子菜单销毁会断开存活菜单的引用；窗口上的 child control ID 与菜单句柄即使数值相同也分别处理。窗口销毁继续通过原 Menus::destroy 入口释放菜单。
+MENUITEMINFO 保留 44/48 字节布局、掩码归一化、CP932 字节截断、原始 UTF-16 和旧 bitmap 插入顺序。输入字符串复制到菜单所有者，cch 不限制输入长度。读取条目时预检文本和结构两个完整输出，再依次写文本、结构；别名遵循该顺序，API 使用预先保存的返回帧。新适配传播客体访存 Fault，修复后可重试；旧适配保留将内存错误转换为 87 的协议。普通逻辑错误写入 LastError，五种 DWORD 查询/状态接口使用全一失败值。
 
-DrawMenuBar、TrackPopupMenu/Ex 和真实 API 网关的 RedrawWindow 保留 error 120、menu note 和 unimplemented trace。公开 user32::dispatch 的 RedrawWindow 仍进入原 paint 路径；这个已有的入口差异由独立基线固定，后续功能修正需要另行提交。三个 ABI-only 入口保留空 note。根 menu 模块仅重导出 Menus 和已被字体、文本、窗口使用的 checked read_text，只有一份实现。
+PE32 顶层窗口可在创建或 SetMenu 时附加已有菜单，类菜单名尚不自动实例化菜单。菜单有无变化时按共享默认边框重算客户区，替换已有的自定义客户区；当前不投递菜单变更专用 NCCALCSIZE 通知。菜单和客户区提交前整批核对 GDI 像素额度并准备 backing，保留 DC/bitmap 身份与重叠像素，失败不发布任何几何或菜单变化；成功后重新失效客户区。
 
-性能证据独立对照 scalar-isolation 冻结，不覆盖尚待验收的对话框批次。本批预设 executable 增量上限 +24KiB；累计已验收数量在完整正确性、稳定性能与游戏前缀完成前保持 595。
+DestroyMenu 和 DeleteMenu 递归退休共享子菜单，并清除存活菜单及顶层窗口的失效引用；RemoveMenu 只分离条目。child control ID 即使与菜单句柄相同也保持独立。窗口最终销毁、失败创建和线程退出沿用同一菜单退休入口。强制窗口退休无法因像素扩容失败而回滚，此时存活窗口更新几何并保留既有 DC/像素，下一次 GetDC 重试 backing 分配。静态启动拒绝清空菜单所有者。实际宿主窗口和图形提交仍待接入。
+
+旧网关继续保留四个 typed 未实现入口的 menu note，以及三个 ABI-only 入口的空 note；公开旧 user32::dispatch 的 RedrawWindow 仍走原 paint 路径。根 menu 模块只重导出共享 Menus 与字体、文本、窗口使用的 read_text。

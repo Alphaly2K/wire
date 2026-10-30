@@ -1,5 +1,5 @@
-//! PE32 resource bytes and VS_VERSION_INFO nodes; no process or guest memory.
-use crate::pe::{PeFile, DIR_RESOURCE};
+//! Raw resource bytes and VS_VERSION_INFO nodes; no process or guest memory.
+use crate::pe::{DataDir, Section};
 
 fn u16_at(b: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_le_bytes(b.get(at..at + 2)?.try_into().ok()?))
@@ -7,13 +7,18 @@ fn u16_at(b: &[u8], at: usize) -> Option<u16> {
 fn u32_at(b: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?))
 }
-pub(crate) fn resource(bytes: &[u8]) -> Option<Vec<u8>> {
-    let pe = PeFile::parse(bytes).ok()?;
+pub(crate) fn resource(
+    bytes: &[u8],
+    headers: u32,
+    sections: &[Section],
+    dir: DataDir,
+    languages: &[u16],
+) -> Option<Vec<u8>> {
     let offset = |rva: u32, len: u32| -> Option<usize> {
-        if rva < pe.size_of_headers && rva.checked_add(len)? <= pe.size_of_headers {
+        if rva < headers && rva.checked_add(len)? <= headers {
             return (rva as usize + len as usize <= bytes.len()).then_some(rva as usize);
         }
-        for s in &pe.sections {
+        for s in sections {
             let n = rva.checked_sub(s.virtual_address);
             if let Some(n) = n.filter(|&n| n.checked_add(len).is_some_and(|v| v <= s.raw_size)) {
                 let p = s.raw_ptr.checked_add(n)? as usize;
@@ -22,7 +27,6 @@ pub(crate) fn resource(bytes: &[u8]) -> Option<Vec<u8>> {
         }
         None
     };
-    let dir = pe.dir(DIR_RESOURCE);
     let root = offset(dir.rva, dir.size)?;
     let data = bytes.get(root..root + dir.size as usize)?;
     let entry = |at: usize, id: Option<u32>| -> Option<u32> {
@@ -40,11 +44,15 @@ pub(crate) fn resource(bytes: &[u8]) -> Option<Vec<u8>> {
     if t & 0x80000000 == 0 {
         return None;
     }
-    let n = entry((t & 0x7fffffff) as usize, None)?;
+    let n = entry((t & 0x7fffffff) as usize, Some(1))?;
     if n & 0x80000000 == 0 {
         return None;
     }
-    let l = entry((n & 0x7fffffff) as usize, None)?;
+    let directory = (n & 0x7fffffff) as usize;
+    let l = languages
+        .iter()
+        .find_map(|&language| entry(directory, Some(u32::from(language))))
+        .or_else(|| entry(directory, None))?;
     if l & 0x80000000 != 0 {
         return None;
     }
@@ -56,7 +64,7 @@ pub(crate) fn resource(bytes: &[u8]) -> Option<Vec<u8>> {
     let p = offset(u32_at(data, at)?, size)?;
     let blob = bytes.get(p..p + size as usize)?;
     let length = u16_at(blob, 0)? as usize;
-    (length >= 6 && length <= blob.len()).then(|| blob[..length].to_vec())
+    (length >= 6 && length <= blob.len()).then(|| blob.to_vec())
 }
 pub(crate) struct Node {
     pub(crate) end: usize,
@@ -87,7 +95,12 @@ pub(crate) fn node(b: &[u8], p: usize, end: usize) -> Option<Node> {
         }
         chars.push(c);
     }
-    let value = (at + 3) & !3;
+    let aligned = (at + 3) & !3;
+    let value = if length == 0 && aligned >= stop {
+        at - 2
+    } else {
+        aligned
+    };
     let value_end = value.checked_add(length.checked_mul(if text { 2 } else { 1 })?)?;
     if value_end > stop {
         return None;
@@ -97,7 +110,11 @@ pub(crate) fn node(b: &[u8], p: usize, end: usize) -> Option<Node> {
         value,
         length,
         text,
-        children: (value_end + 3) & !3,
+        children: if length == 0 {
+            aligned
+        } else {
+            (value_end + 3) & !3
+        },
         key: String::from_utf16(&chars).ok()?,
     })
 }

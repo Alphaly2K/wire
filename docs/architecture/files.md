@@ -1,69 +1,75 @@
-# 文件状态与标准句柄
+# 虚拟文件、复制与文件时间
 
-Win64 的 `x64::runtime::files::Files` 拥有真实文件描述符、sharing/access/flags、目录 cursor、受限 GuestFs、NOT_CONTENT_INDEXED 元数据和标准句柄状态。Runtime64 的 set_filesystem 和供 Process 使用的 filesystem facade 继续委托；文件系统只以明确的只读/可写借用交给需要它的 adapter、loader 和目录查询，没有公开字段或 Deref 到 Runtime64。
+本页记录新 Wasm 入口在 PE32/AMD64 的文件契约。文件字节、目录和元数据来自调用者提供的 VFS，不访问宿主文件系统；旧执行器和宿主文件描述符不进入新核心。基础 I/O、枚举、映射和标准端点的完整边界见[运行时契约](wasm-runtime.md#虚拟文件与句柄)。
 
-移动、删除、目录删除和属性更新由 Files 完成。`PathMutation` 区分各操作；`files/calls.rs` adapter 读取 guest 路径和原始 flags，在原错误分支只读借 Threads 写 LastError，Runtime 保留返回 frame 和 trace。路径受限规则、open-handle/cwd 冲突、replace/read-only 检查与原错误码保持原样。
+文件、路径及可选输出通过统一调用帧捕获。A 路径使用 CP932，W 路径使用 UTF-16；DWORD 按低 32 位解释，地址、句柄和 SIZE_T 保留架构宽度。两个架构均在写入前保存返回目标，输出覆盖原参数或返回槽时仍正确完成。
 
-元数据的提交顺序保持原行为：rename 成功后解析目标 canonical path，再收集源目录树的 metadata；先清目标前缀，再将源键迁入。删除成功后清理源键。host 操作与 canonicalize 之间仍可能产生已有的失败状态，没有顺便改为通用原子事务。FindFirst/Next 的原路径键查询与其它 API 的 canonicalize 查询区别也保留。
+VFS 支持逻辑 C 卷、相对路径和当前目录，沿同一路径解析、大小写及祖先目录规则处理文件和 DLL。最多 4096 个普通文件、4096 个显式目录与 4 MiB 路径数据；常驻输入和私有修改合计最多 256 MiB，主映像输入另行保留。外部文件源只声明不可变字节和有符号 64 位范围内的长度，按需供给区间，基础逻辑长度不计常驻输入额度。节点持有独立元数据，未修改的载荷可共享；修改时只复制需要独立的数据。普通句柄共享文件节点，DuplicateHandle 共享原游标与共享预约，关闭最后一个别名才释放预约。
 
-标准句柄由私有 StandardHandles 拥有：
+普通文件读写、只读映射、版本资源和 PE 装载共用外部输入续点。缺少字节时保留原调用帧、输出、游标和退休计数，宿主返回所需区间后重试；取样失败保持可重试，销毁后的结果不再提交。元数据、查找和未被使用的文件不触发下载。读缓存常驻额度为 64 MiB，单次传输最多 256 MiB；装载整张依赖图时临时保留已有输入，最多 512 MiB，完成或失败后恢复常驻额度。私有修改按 64 KiB 页计费；复制共享不可变源，后续写入相互隔离，截断再扩展的尾部为零。
 
-- redirects 保存 GetStdHandle/SetStdHandle 的三个进程槽位，初始值 `0x100/0x101/0x102`。改槽位不关闭 endpoint；关闭 endpoint 后 GetStdHandle 仍返回已保存的数值。
-- open/flags 保存原 endpoint 的寿命和继承/保护关闭标志；aliases 保存复制句柄的 endpoint 身份及独立标志。原 endpoint 关闭后，已有 alias 继续存活。
-- allocator 保留 `0x7fff3000..0x7fff4000` 和最多 128 个活动 alias；文件描述符仍保留原数值空间和 1024 上限，不统一 handle arena。
-- DuplicateHandle 的输出 preflight、process/options 校验和 source-protect 检查顺序保持。新 alias 分配后由 adapter 写出 guest handle；仅在输出成功后执行 CLOSE_SOURCE。
-- narrowed standard access 仍显式拒绝；标准 endpoint 作为重定向 host pipe 查询，console mode 仍失败。stdio 数据传输与 guest 输出检查留在 adapter。
+存储组件区分输入快照与进程视图：`Files::clone` 复制命名空间和元数据节点，保留共享的不可变载荷；`fork_process` 共享同一磁盘、文件节点及额度，各视图独立保存当前目录。共享视图立即看到创建、写入、属性、改名和删除；仍被任一视图作为当前目录使用的目录及其祖先不能移动或删除。目录引用随视图切换和销毁释放，输入快照不持有原磁盘的目录引用。进程创建服务与跨进程句柄的接入状态见 GOAL。
 
-StandardHandles 也拥有 Get/SetStdHandle 的 slot 编码和标准输出 adapter，只借 Memory 与只读 Threads；stdout/stderr 选择、overlap 拒绝和可选计数输出保持原顺序。Pipes 拥有管道 read/write 输出，公共 ReadFile 参数/输出 preflight 和 endpoint 选择仍在 Runtime，管道满/空继续产生原 scheduler 限制错误。
+## 复制
 
-目录 batch 的 cursor 准备/输出/提交、文件 section owner 和 coherence 行为保持各自既有实现。Mappings、Pipes、Searches 的内部状态仍有自己的 owner；本批不合并这些资源。
+CopyFileA/W 通过 kernel32/kernelbase 提供。完整读取并解析两条路径后核对源读取、目标写入的共享权限；只要已有句柄允许相应访问，复制可与这些句柄共存。目标是当前映像时返回 32，持有文件 section/view 时返回 1224。目标为目录、只读或隐藏文件时返回 5；bFailIfExists 非零且目标已存在时返回 80；同一路径返回 32。缺失文件、父目录及不支持卷沿 VFS 返回对应错误。
 
-核心文件 API 的 11 个 export 由 `win32/catalog/files.rs` 统一声明：CreateFileA/W、ReadFile、WriteFile、GetFileSize/Ex、SetFilePointer/Ex、SetEndOfFile、FlushFileBuffers、GetFileType。PE32 全部为 typed 路由，DLL 保持 kernel32；Win64 在 Alice 接续补齐 SetFilePointer 与 SetEndOfFile 后十一项全部 typed，DLL 保持 kernel32/kernelbase。Int64 参数明确描述 SetFilePointerEx 的有符号距离，PE32 占两个栈 slot，Win64 占一个 64 位 carrier；DWORD 截断只在 gateway 取参时进行。
+复制保留源字节、属性和三个时间字段，目标获得独立文件节点。覆盖已有目标时保留节点身份与已开句柄的游标，已有句柄随后观察到新字节和元数据。载荷在首次修改前共享，复制源或目标后的写入互不影响。逻辑数据及路径额度在发布前完整检查，失败保留目标及计费。复制不采样墙钟。
 
-路径与属性的 10 个 export 也由同一契约声明：GetCurrentDirectoryA/W、SetCurrentDirectoryA/W、GetFullPathNameA/W、GetFileAttributesA/W、SetFileAttributesA/W。PE32 全部 typed/kernel32，Win64 其中 8 个 typed/kernel32+kernelbase，GetFullPathNameA/W 保持 absent。查询容量和属性 flags 是 DWORD，指针不截断，A/W 选择由绑定 ID 决定。
+## 扩展复制与替换
 
-PE32 GetFullPathName 的小 buffer 只返回所需容量；成功写字符串后再写可选 file-part 指针，因此第二个输出 fault 时字符串已提交。现有宽字符 file-part 偏移也原样保留。Win64 CWD 输出可以覆盖 guest return slot，gateway 继续使用提前保存的返回地址；成功调用保持 LastError。
+CopyFileExA/W 复用 CopyFile 的共享权限、元数据、独立修改和映射保护。支持 NULL 进度回调以及 FAIL_IF_EXISTS（1）、RESTARTABLE（2）标志；当前复制一次完成。pbCancel 非空时先读取完整 BOOL，非零返回 FALSE/1235，并保留目标。非空进度回调或其他标志返回 FALSE/50，不执行复制；NULL 回调时 lpData 不参与操作。输入指针或取消标志故障不创建目标，可修复重试。接口不读取时钟。
 
-元数据的五个 export 也已迁入契约：GetFileAttributesExA/W、GetFileInformationByHandle、GetFileInformationByHandleEx、GetFileTime。PE32 五个均为 LegacyUnimplemented，Win64 五个均为 typed。PE32 保留清栈、零返回、LastError=120 与输出不变；Win64 保留原信息类子集、目录 class 14/15 cursor、长度检查、可选时间输出及故障顺序。GetFileAttributesEx 的无效信息类先于路径/输出检查，GetFileTime 先检查全部非空输出再写出；返回槽别名继续使用提前保存的 frame。
+ReplaceFileA/W 接受原文件、替换文件和可选备份，完整解析三条路径后才改变命名空间。原文件与替换文件必须存在，目录或只读文件返回 5，备份父目录缺失返回 3，任意两条路径指向同一名称时返回 87。dwReplaceFlags 仅接受 IGNORE_MERGE_ERRORS（2）和 IGNORE_ACL_ERRORS（4），两个保留指针必须为 NULL，其他组合返回 87。活动映像或任意共享进程仍打开的涉及文件返回 32，保留的文件映射返回 1224；当前没有对已打开文件的共享删除支持。
 
-PE32 的 immutable binding 同时缓存 LegacyUnimplemented 执行策略，在读取原参数后直接执行旧未实现返回，保留原诊断和 frame 提交。公开 ApiEntry 变化时重新绑定；未知 ABI 与未迁移 API 仍走旧策略。公开 file facade 仅将 Typed 声明当作可执行实现。
+成功后原路径获得替换文件的节点、字节、文件 ID、访问/修改时间，以及原文件的创建时间和压缩/加密元数据位；这些标志不提供数据加解密能力。替换路径移除，原文件节点可移到备份路径并覆盖已有可写普通备份；未请求备份则释放原节点。未建模的 DACL、命名流、短名称等 NTFS 信息尚未提供。替换文件的原父目录继续存在。整个变更先检查目录、类型和路径额度，再一次发布；失败保留各文件、元数据、身份及计费。外部不可变 backing 保持按需读取，替换不复制或下载整个文件。
 
-目录与文件变更另有 12 个 export：CreateDirectoryA/W、DeleteFileA/W、MoveFileA/W、MoveFileExA/W、RemoveDirectoryA/W、CopyFileA/W。PE32 仅 CreateDirectory/DeleteFile 使用 typed 路由；其余保留未实现策略。Win64 CopyFile 保持 absent。PE32 CreateDirectory 继续忽略 SECURITY_ATTRIBUTES，Win64 先读取 lpSecurityDescriptor 并拒绝显式 descriptor；后者提前完成时的 unblock/API count/trace 不变。MoveFileEx flags 是 DWORD，source/destination 解码先于 flags/空目标校验，Files 的 mutation 和 metadata 提交顺序保持。
+## 文件身份
 
-目录枚举的 7 个 export 已迁入同一契约：FindFirstFileA/W、FindFirstFileExA/W、FindNextFileA/W、FindClose。文件契约合计 45 个，PE32 32 Typed/13 ABI-only，Win64 39 Typed/6 Absent；DLL 仍为 PE32 kernel32、Win64 kernel32/kernelbase。HANDLE 使用指针宽度，Ex 的信息类、搜索操作和 flags 使用 DWORD。绑定 ID 决定 A/W、First/Next/Close 和 Ex 子集，主 gateway 不再逐调用解析名称。
+文件和目录的 64 位 ID 由共享 VFS 在第一次成功打开时分配，同一卷的进程视图使用同一张身份表。关闭句柄不回收 ID，改名保留源身份，覆盖改名撤销原目标身份；删除后在同名路径重新创建会获得新 ID。ReplaceFile 的结果沿用替换文件身份，备份沿用原文件身份。输入快照复制身份与计数状态，后续命名空间变化独立。
 
-枚举保持无效 handle/Ex flags 先于路径和输出检查，成功输出后才分配搜索句柄或推进游标。PE32 FindClose 不会删除普通文件句柄；搜索输出仍按原顺序分步写入，保留可能的部分提交。Win64 先检查整块输出再读取路径，输出可覆盖返回槽和栈参数，gateway 使用预先保存的参数及返回 frame。原搜索句柄空间、entry/handle 上限、metadata 和 LastError 行为不变，Searches 继续拥有 Win64 的枚举状态。
+身份表最多保留 4096 项，序号不回绕、不在卷存活期间复用。身份容量先于文件创建或截断检查，失败返回 8 并保留文件。普通句柄只保存其已打开文件的 ID，不再按进程重新分配或缓存路径身份。
 
-Win64 FindFirst/Next/Close 的处理也由 Searches 执行，只借内存、只读 Files 和 Threads；Files 提供原 metadata 编码。全文目录信息调用归 Files，batch 准备、guest 输出、cursor 提交和 NO_MORE_FILES 后更新的顺序保持。Threads 拥有当前 TEB 的 LastError 写入，错误分支才查询 TEB；成功路径不增加错误槽读取。Runtime64 的旧调用入口仅组合这些资源，原 NtQueryDirectoryFile 与 directory_batch 主体保持。
+## 文件时间与权限
 
-PE32 adapter 位于 `win32/x86/files.rs`：主 gateway 用 bound FileApi/PathApi ID 调用，公开 `file_api::dispatch` 保留原来的大小写/DLL 和函数范围，作为冷解析 facade。adapter 只借 GuestMem、KernelObjects32、filesystem 和 LastError 槽，不接收 ApiState；公开 read_name/write_string 路径继续重导出。内部互斥 Core/Helper ID 区分文件与 SHLWAPI/imagehlp 操作，已迁移调用不再解析 DLL 或 export。GetFileType 仍由主 gateway 执行，invalid/non-file handle 返回 0 并保持 LastError。读写先清零 count，再查 handle/权限和数据 buffer；SetFilePointer/Ex 先定位并清 LastError，再写可选输出，输出失败时定位已提交。错误仍映射成原来的返回值、LastError 和日志文本。
+SetFileTime 通过 kernel32/kernelbase 提供，要求 FILE_WRITE_ATTRIBUTES 或 GENERIC_WRITE。仅有数据写权限不足以设置时间；复制句柄不能提升原句柄的属性权限，缩减访问权后不再保留被移除的权限。
 
-Win64 普通 metadata、大小/flush、seek、attributes 和 cwd adapter 位于 `files/calls.rs`，由 Files 执行，只借 Memory 与只读 Threads。普通文件的 read/write 输出也归 Files；write 明确只读借 Mappings 更新 view。Runtime64 按 bound FileApi 选择原分支，保留跨 Files/Pipes/Mappings/标准 endpoint 的协调。打开/读取/写入的权限、sharing、section coherence、可选输出及 confined path 保持。普通文件大块同步读取的后续扩展见文末；写入和其它 endpoint 保留原 transfer 上限。定位输出先检查，再改变 offset；GetFileSize 清 LastError 的次序保持。GetFileType 按 standard → file → pipe 查询，未知 handle 返回 0/LastError=6。
+三个输入分别设置创建、访问和修改时间，先读取完整的可选 FILETIME，再提交元数据；NULL 或全零字段保持原值。普通值保留完整 64 位，非特殊值的最高位为 1 时返回 87。目录时间使用同一 VFS 元数据，句柄查询和路径查询保持一致。成功保持 LastError，不采样时钟。
 
-Win64 普通文件读写和管道写入继续在原位置提前返回 Control::Returned，gateway 提交提前保存的 CPU return frame、计数和 trace，保留这些 endpoint 原来不调用 scheduler unblock 的行为。管道读入和标准输出写入走原来的通用 unblock/提交路径。没有新建文件完成框架或另移 CPU 提交；这项边界保留是前几个候选性能失败后的渐进取舍。WriteConsoleW 保持原来的拒绝结果，没有借迁移扩展 console 能力。
+按[微软公开约定](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfiletime)，访问/修改时间的全 1 值保留当前字段，并禁止该句柄上的自动更新。VFS 当前不自动更新访问时间；修改时间抑制由文件对象保存，DuplicateHandle 别名共享，独立打开的句柄各自保留状态。普通写入与 SetEndOfFile 遵守抑制，并在该状态下省去墙钟采样。显式设置修改时间仍可改变字段，不解除该句柄的自动更新抑制；句柄关闭后归还对象状态。
 
-普通查询和文件读写提取基线 `8f73bc8`。处理体经资源替换、FileApi 模式规范化及 rustfmt 对照一致，根分发除对应调用替换外保持；读入 preflight 仍在原位置。Files 模型、Mapping/目录主体和文件回归期望未改；Threads 只在原错误分支写 LastError，错误槽不提前取样。
+## 临时文件名
 
-后续基线 `e67b4e0` 将路径变更、SetFileAttributes、普通创建目录及 CreateFile 的 guest 解码/输出也归 Files。打开文件只读借 Mappings 核对活动映射，truncate 与 sharing 的原次序保持；创建目录的安全描述符检查及其提前提交仍在 Runtime。四个处理体及根调用替换经 rustfmt 对照一致，未改文件/Mapping 模型或既有 query/I/O 核。
+GetTempFileNameA/W 通过 kernel32/kernelbase 提供，输出容量由 Win32 接口约定为 MAX_PATH。路径文本保留相对形式，实际文件沿 VFS 当前目录解析；prefix 使用前三个 UTF-16 单元，形成 `prefixXXXX.tmp`，十六进制数字为大写。输入要求有效 Unicode，prefix 截断产生无效代理项或 A 结果无法表示为 CP932 时返回 1113；文件名中的非法分隔或保留字符返回 123。
 
-endpoint 输出提取基线 `beb2a34`：四个处理体及根调用替换经 rustfmt 对照一致，原 StandardHandles/Pipes 模型、Files 调用和测试不变。连续迁移阶段整合通过 release 全目标 694 passed / 8 ignored / 21 suites；严格检查通过。普通文件/管道写的提前返回、管道读/标准输出的通用 unblock 保持区别。
+启动阶段按同一虚拟 profile 建立系统、用户、Local/Roaming 与临时目录，环境中的默认临时路径可直接用于创建。uUnique 为零时要求目录存在，按进程序号跳过已有文件或目录，成功创建空文件并返回非零序号。创建时从同一 wallClock 取得三个初始时间字段；重试保留未提交的序号。uUnique 非零时只构造名字，不检查存在性或创建文件，返回完整 DWORD，名称仅使用低 16 位，也不读取时钟。指定值不消耗进程的自动序号。
 
-文件 section 的八个 export 也由 FileApi 声明：CreateFileMappingA/W、OpenFileMappingA/W、MapViewOfFile/Ex、UnmapViewOfFile、FlushViewOfFile。文件契约在该批合计 53 个，PE32 32 Typed/21 ABI-only，Win64 45 Typed/8 Absent。PE32 八项均保留未实现策略；Win64 OpenFileMappingA/W 保持 absent，其余为原有 unnamed、read-only、file-backed 子集。HANDLE、view size 和可选 base 保留指针宽度，protection/access/offset high/low 使用 DWORD；SECURITY_ATTRIBUTES、access/alignment、handle 查询、错误码和故障提交顺序保持。
+目录输入最长 246 个 UTF-16 单元，最终 A/W 输出含 NUL 还须放得入 260 个对应单元，超过返回 111。输出按实际编码长度整体预检，之后才创建文件、推进序号并写出名称；输出故障不遗留文件。时间源或输入/原返回帧故障保持调用，允许修复后重试。
 
-AreFileApisANSI 随后汇入同一契约，该批合计 54 项：PE32 32 Typed/22 ABI-only，Win64 46 Typed/8 Absent。Win64 仍返回 1，PE32 保留零参数 ABI 与未实现策略，公开 file facade 继续排除 ABI-only 项，见[标量入口补齐](../reports/refactoring-scalar-followup-2026-10-20.md)。
+普通文件时间初始为虚拟纪元零。未抑制的非零 WriteFile 与成功 SetEndOfFile 使用外层墙钟更新修改时间；读、查询、复制、显式时间设置和命名提示不读取平台时间。普通数据写入及文件映射同步沿唯一 VMM 的源码失效协议处理，元数据变更不改动代码字节。
 
-CreatePipe、GetConsoleMode、WriteConsoleW 与 NtQueryDirectoryFile 接入时合计 58 项：PE32 32 Typed/25 ABI-only/1 Absent，Win64 50 Typed/8 Absent；后续 Alice 接续的两项 Win64 补齐见下文。管道创建归 Pipes，原生目录查询及 cursor 提交归 Files；标准 console 拒绝、BOOLEAN carrier、输出检查及 LastError 顺序保持，见[进程与 endpoint 边界](process-control.md)。
+其余映射类型、通用控制台、分段阻塞 I/O、带进度回调的 CopyFileEx 及其它元数据设置的范围统一记录在 [GOAL.md](../../GOAL.md)。
 
-Mappings 独立拥有 section/view 与 retained file descriptor，view 持有 section 引用，文件或 section handle 关闭后已有 view 继续存活。guest WriteFile 更新同 inode 的活动 view；64 位 offset、64KiB 对齐、资源上限及原 backing 生命周期保持。adapter 按冷绑定 ID 调用原 Mappings 方法，不新增通用结果框架。独立行为与性能证据见 [section 验收](../reports/refactoring-file-section-catalog-2026-10-15.md)。
+同组进程共享磁盘、文件节点和共享打开预约，重复句柄维持同一预约，最后一个别名关闭后释放；输入快照保持隔离。共享映像路径也阻止其他进程修改活动映像。磁盘仍有多个进程视图时，新建文件映射返回错误 50；跨进程 section/view 一致性尚未实现。
 
-Win64 section 创建、映射、解除与 flush 的 guest adapter 随后也归 `mapping/calls.rs`。Mappings 按需只读借 Files 取得保留描述符、只读借 Threads 在原错误分支写 LastError，并直接借 Memory；不借 Runtime64 或 CPU。SECURITY_ATTRIBUTES 的读取仍先于 named/pagefile 拒绝，DWORD 半部与指针宽度由原绑定计划保持。根只组合资源，返回帧、unblock、计数和 trace 继续在原位置提交；map/unmap/coherence 与内存算法未改。
+可继承文件句柄在子进程中保留原数值和权限，共享文件/目录游标、自动时间标记及原始共享预约；各进程的继承/保护关闭标志分别保存。匿名管道也使用独立句柄表和共享队列，最后一个 reader/writer 的状态及容量归还跨进程生效。
 
-SHLWAPI/imagehlp 的 13 项与六项通用句柄契约已在 section/Interlocked 新基线上通过验收，详见 [路径与句柄边界](paths-handles.md)。标准句柄及跨资源 CloseHandle 按冷绑定 HandleApi 选择原 owner 的分支，保留保护位、查询顺序和故障提交。PE32 的混合 HandleObj 表、命名索引与分配位置现由 [KernelObjects32](kernel-objects32.md) 私有拥有。
+## 管道查询与 I/O 取消
 
-PE32 文件窄借用迁移基线为 `9090b62`。原文件/path 处理体、文本 codec、公开 facade 及 wildcard 归一核对保持；通配算法移入 `win32/kernel/file_patterns.rs`，Win64 Find 和 NtQueryDirectory 直接复用纯算法。release 完整 Win32 248、Win64 文件 17、fmt/release lib/bin strict Clippy/build 通过。证据位于 `wire-out/refactoring-2026-10-14/r3-files32-{source-checks,verification}.json` 及 validation 日志，不重复性能或游戏矩阵。
+两种 ABI 均通过 kernel32/kernelbase 提供 PeekNamedPipe、CancelIo 和 CancelIoEx。
 
-2026-10-20 Alice 执行接续补齐 Win64 SetFilePointer 和 SetEndOfFile，沿用既有 FileApi ID，不增加 export 总数；文件家族变为 Win64 52 Typed/6 Absent，PE32 策略保持。SetFilePointer 的无 high-pointer 距离按 LONG 符号扩展，有 high-pointer 时读取四字节并合成 signed 64-bit；high 输出先检查写权限，再调用同一 Files seek owner。返回 low DWORD，成功 low=0xffffffff 时清 LastError 以区分失败，其它成功保留 LastError；失败返回 0xffffffff 并写对应错误。返回 frame 在调用前保存，high 输出可与它别名。SetFilePointerEx 的既有 BOOL 和八字节输出约定保持。
+PeekNamedPipe 支持匿名字节管道的可读端及标准输入的存活别名，同步返回当前可读前缀和队列总字节数，不消费数据，也不等待新数据。字节管道的消息剩余量为零；NULL 数据缓冲区只查询数量。输出按数据、复制数量、总量、消息剩余量的顺序发布，预检任一输出失败时所有输出保持。输出只写 DWORD，指针和句柄保留完整架构宽度。写端或缺少读取权限返回 5，普通文件及失效句柄返回 6；全部 writer 已关闭且队列为空、或标准输入 EOF 后已读空时返回 109。
 
-SetEndOfFile 只借 Files、只读 Mappings/Threads 与错误槽，按当前文件位置真实截断或延长，保持 cursor；要求写权限且拒绝目录。任何同一 volume/inode 的 section handle 或 retained view 存活时返回 ERROR_USER_MAPPED_FILE（1224），关闭 section 但仍保留 view 也不能截断。两项新增回归覆盖 >4GiB、负距离、sentinel、DWORD 截断、输出边界/只读/返回槽别名、长度与内容、失败不截断及映射存活；完整 Win64 文件 19 项、strict Clippy/build 通过。
+当前文件和端点仅接受同步 I/O，非零 OVERLAPPED 的提交返回 50。CancelIo 验证普通文件、目录或端点句柄后成功返回，保留同步等待和 LastError；CancelIoEx 因没有未完成的异步请求返回零及 1168，不访问请求指针。两者对失效句柄返回零及 6。GetOverlappedResult/Ex 支持下述已完成状态查询；异步提交、完成/event 等待和 CancelSynchronousIo 尚未实现。
 
-同轮 Alice 随后发出 64MiB 同步 ReadFile。普通文件现支持完整 DWORD 请求长度：gateway 在 I/O 前检查全部输出范围与 count，原有至多 16MiB 的调用保留单次读取；更大的请求以 1MiB scratch 分段写入 guest，遇短读/EOF 即返回实际总量。整个调用不切换 guest 线程，返回 frame 和 count 的最终覆盖顺序保持；主机中途失败时可能已提交部分数据/游标，返回失败与零 count，不作回滚。管道等 endpoint 仍保留原大小限制，OVERLAPPED 继续拒绝。新增 64MiB 请求、17MiB+3 字节内容对照、EOF 尾部不变及远端保护页故障不消费 cursor 的回归后，完整 Win64 文件 20 项与严格检查通过。
+## 已完成 OVERLAPPED 查询
+
+GetOverlappedResult/Ex 从记录的低 DWORD Internal 读取 NTSTATUS，从下一个指针槽读取完整 InternalHigh，再将低 DWORD 写入字节数输出。成功保持 LastError；已完成查询不验证 hFile，不读取 offset/event 字段，也不等待。PE32 使用 4 字节槽，AMD64 使用 8 字节槽。输入、输出和返回位置在写入前保存；错误结果的字节数输出及 LastError 一并预检。
+
+成功、buffer overflow、无效句柄/参数、文件/路径不存在、EOF、内存/权限/磁盘空间不足、pipe disconnected/broken、不支持、取消和 NTWIN32 facility 状态已映射。已知错误先复制完成字节数，再返回 FALSE 及对应错误；未映射状态返回零/50并保持输出。NTWIN32 错误码为零时仍按非零状态返回 FALSE并设置 LastError 0。
+
+STATUS_PENDING 的无等待/零 timeout 查询返回零/996，不访问 InternalHigh、输出或 event；非零等待/timeout 返回零/50。当前不存在异步提交或 completion owner，不伪造 event 完成、超时等待或 alertable callback。
+
+依据为公开 SDK、[GetOverlappedResult](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-getoverlappedresult) 和固定 Wine 10.0 的函数摘录；原署名、许可及摘录见 `third_party/wine-10.0/kernelbase/overlapped.c`。
+
+OpenFileMappingA/W 没有命名 section 命名空间；NULL/空名称返回 NULL/87，其他受检名称返回 NULL/2，不创建 mapping，原匿名映射独立。LockFile/UnlockFile 验证普通存活文件句柄后返回 FALSE/50，无效句柄为 6，没有字节区间锁 owner。CancelSynchronousIo 检查具有 THREAD_TERMINATE 权限的线程句柄后返回 FALSE/50，没有可取消同步请求 owner，已有等待保持。

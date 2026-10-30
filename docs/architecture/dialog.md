@@ -1,13 +1,15 @@
 # 对话框控件与窗口枚举
 
-`win32/catalog/dialog.rs` 为 24 项 PE32 export 提供唯一的 DLL、参数、清栈和 typed ID 声明，Win64 全部 absent。原 22 项控件/枚举已随日志批次及累计复核接入，见[批次报告](../reports/refactoring-dialog-2026-10-19.md)与[当前状态](../status.md)。随后两个 MessageBox 入口仅做普通契约迁移，不重复性能矩阵。
+Wasm 入口在 PE32/AMD64 均接通共享 catalog 的全部 31 项入口。其中十三项提供真实的控件查找、消息包装、整数转换和窗口枚举；其余十八项返回明确的失败和 LastError 120。MessageBoxA/W 没有真实交互，新入口不沿用旧诊断函数固定返回 IDOK 的行为。
 
-MessageBoxA/W 由 `win32/x86/dialog.rs` 仅借 GuestMem 读取原文本和 caption，返回 IDOK 并记录 `SHOWN` 诊断；忽略 flags、NULL 和读故障的原文本策略保持，没有新增 host 对话框。原公开 user32::dispatch facade 继续排除这两个入口，普通 gateway 使用冷绑定 ID。
+GetDlgItem 依次查找直属 WS_CHILD 窗口，以完整父级句柄和 control ID 的低 DWORD 匹配；未找到返回零，不写 LastError。GetDlgCtrlID 从窗口记录返回 ID 的低 DWORD，无效窗口返回零。父子状态、坐标和销毁清理见[窗口生命周期](window-control.md)。数值相同的菜单句柄和 child ID 保持独立。
 
-`win32/user/pe32/dialog.rs` 仅借 User32、内存、scratch、当前 tid 和 LastError，准备控件消息或窗口快照，不依赖 CPU、ApiState 或 callback 执行器。`x86/process/dialog.rs` 消费请求并执行应用 WNDPROC/枚举回调，保留 Returned、阻塞及非局部控制转移；API 入口处理返回 frame 与 trace。ApiState 的小型组合方法只拆分资源借用，scratch 游标仍由原 owner 私有持有。GetDlgItemInt 在调用 WM_GETTEXT 前清零 translated 输出，回调正常返回后才由原纯内存解析写入最终 translated 标志。child 或线程错误先于输出访存。
+八项消息包装调用实际 WNDPROC，使用当前线程、同一 JIT/VMM/预算和 USER 回调栈。Get/SetDlgItemText 与 SendDlgItemMessage 保留完整参数、结果和各自 ABI 的返回栈约定；找不到 child 返回 1400，其他线程的控件返回 120，均先于输出访存。跨 A/W 字符串消息暂时返回 50。
 
-顶层枚举先拒绝空 callback，反序快照只选顶层、非 message-only 窗口，调用前再次排除已销毁窗口，callback FALSE 直接作为返回值。子窗口枚举继续使用原递归快照顺序和去重，FALSE 停止后返回 carrier 仍为 1；空快照也继续成功。这些历史差异分别固定，迁移时保持。
+GetDlgItemInt 在首个回调 frame 和临时缓冲预检成功后清零 translated，再进入 WM_GETTEXT；回调自身故障时该零值保持可见。最多解析返回的 29 个单位，允许 ASCII 空白、可选符号及十进制前缀；signed/unsigned 范围、负数回绕及失败值由共享 `dialog_values.rs` 计算。SetDlgItemInt 使用同一十进制格式化。新适配按控件注册编码使用 ANSI 或 UTF-16 缓冲，缓冲位于该次客体回调栈，覆盖让出、嵌套调用和 DLL 装载寿命。完成结果在输出故障前冻结，恢复不会重放 WNDPROC；translated 与原返回槽别名也使用预先捕获的调用帧。
 
-DialogBoxIndirectParamW、CreateDialogIndirectParamW、MapDialogRect、IsDialogMessageW、CreateIconIndirect、SetWindowPlacement、GetScrollInfo、SetScrollInfo、LockWindowUpdate 仍明确不可用。它们由 typed 领域拒绝，以保留错误 120、原 note 和 unimplemented trace；不借此新增 UI 能力。原公开 `user32::dispatch` 可保留冷路径兼容委托，正常 API 网关直接使用绑定好的领域 ID。
+EnumWindows/EnumThreadWindows 先拒绝空 callback，再按 HWND 反序建立快照；只选择有线程归属的顶层、非 message-only 窗口，线程零筛选沿用旧全部线程规则。EnumChildWindows 保留原递归快照顺序和去重。调用前重新检查成员是否仍存在，不纳入回调中新创建的窗口。顶层枚举返回最后一次 callback 的 DWORD 结果，FALSE 停止；子枚举停止后仍返回 1，空快照也返回 1。两参数 callback 在调用线程运行，可让出、抛出异常或装载 DLL；下一 frame 故障保留完成结果和游标。每线程最多共用 32 层 USER/其他回调。
 
-Process 请求提取基线 `3217b11`。child 查找、消息准备、数字转换、两个快照算法和两种 callback 循环分别核对保持，原 frame/run_loop 未改。正确性沿用独立 fixture 的 NULL/返回 carrier、部分输出、快照销毁与 callback 退出覆盖，不重复性能或游戏矩阵；证据 `wire-out/refactoring-2026-10-14/r4-dialog32-{source-checks,verification}.json`。
+DialogBoxParamA/W 和 DialogBoxIndirectParamA/W 没有模态 manager 或模板创建后端，返回完整 INT_PTR -1/错误 120；零属于合法模态结果，不再用于这一失败路径。CreateDialogParamA/W、CreateDialogIndirectParamA/W 和 EndDialog 返回 NULL/FALSE 与错误 120，不创建或结束任何窗口，不访问模板或调用 DLGPROC。MapDialogRect、IsDialogMessageW、CreateIconIndirect、SetWindowPlacement、GetScrollInfo、SetScrollInfo、LockWindowUpdate 仍返回零/120。MessageBoxA/W 也返回零/120；模态模板、导航、图标创建、滚动条与交互对话框仍缺失。
+
+新旧入口共用 `hierarchy.rs` 的 child/快照算法和 `dialog_values.rs` 的十进制规则。`process/window_dialog.rs` 使用当前 USER owner 和两种 ABI 的回调续点，依赖闭包不包含旧 CPU 执行器、IR 或旧内存适配器。

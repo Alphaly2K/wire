@@ -19,6 +19,18 @@ pub(crate) fn name(id: u32) -> Option<&'static str> {
         _ => None,
     }
 }
+
+pub(crate) fn enumeration(flags: u32) -> impl Iterator<Item = (&'static str, u32)> {
+    [
+        ("en-US", 0x21),
+        ("ja-JP", 0x21),
+        ("en", 0x11),
+        ("ja", 0x11),
+        ("", 0x21),
+    ]
+    .into_iter()
+    .filter(move |&(_, kind)| flags == 0 || flags & kind != 0)
+}
 pub(crate) fn info(id: u32, kind: u32) -> Result<Vec<u8>, u32> {
     let japanese = matches!(id, 0x411 | 0x11);
     let invariant = id == 0x7f;
@@ -177,7 +189,7 @@ pub(crate) fn format(
                     "November",
                     "December",
                 ]
-                .get(month as usize - 1)
+                .get(usize::from(month).wrapping_sub(1))
                 .ok_or(87u32)?;
                 if count == 3 {
                     word[..3].to_owned()

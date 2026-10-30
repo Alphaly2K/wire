@@ -1,27 +1,21 @@
 # 基础字符串、指针与进程查询边界
 
-本批已接入并验收，实现提交 `2999453`。独立旧行为、完整正确性和性能证据见[验收报告](../reports/refactoring-basic-2026-10-18.md)。
+新 Wasm 入口已在两种 ABI 接入七项指针辅助服务，均通过 kernel32/kernelbase 提供，且不采样时钟。服务成功计一 work，不增加客体退休数；参数与返回帧在数据写入前完整保存。相关 LONG/SLIST 服务见 [Interlocked 契约](interlocked.md)。
 
-| 家族 | export 数 | PE32 | Win64 |
-| --- | ---: | --- | --- |
-| 基础字符串 | 14 | kernel32 typed | absent |
-| 指针检查、cache flush、MulDiv、pointer encoding | 7 | kernel32 typed | encoding 两项 kernel32/kernelbase typed，其余五项 absent |
-| 进程、亲和性与处理器查询 | 10 | kernel32 八项 typed、两项 group-count ABI-only | kernel32/kernelbase 四项 processor/group-count typed，其余 absent |
+| 服务 | 新入口契约 |
+| --- | --- |
+| IsBadReadPtr、IsBadWritePtr | 完整指针与 SIZE_T；零长度不访存，权限/范围失败返回 TRUE，保持 LastError；guard 检查失败会消费该页 guard |
+| IsBadCodePtr | 检查一个字节的执行权限，保留 PE32 DEP 规则；guard 返回 TRUE 且不消费 guard |
+| FlushInstructionCache | 接受完整当前进程伪句柄或具有 PROCESS_VM_WRITE 的真实句柄，具体行为见[虚拟内存契约](virtual-memory.md) |
+| MulDiv | 三个有符号 32 位整数，最近舍入且中点远离零；除零或结果溢出返回 −1，保持 LastError |
+| EncodePointer、DecodePointer | 沿用可逆的 identity 策略，保留架构完整指针宽度，不访问客体内存，保持 LastError |
 
-三组契约分别声明调用 ID、provider、参数与返回约定，架构入口保持参数读取、返回 frame、LastError 和 trace 提交。`lstrlen` 与 A/W 版本一样有原 Wine spec 的 4 字节 stdcall ABI，独立测试固定该行为。
+MulDiv 数值算法已提取到 `win32/pointer_values.rs`，新旧内存适配共用，运算不依赖旧执行器。范围检查只查询对应页和权限，不复制大块数据；AMD64 大于 4 GiB 的长度不会被截成 DWORD。Flush 的错误处理独立于其余不修改 LastError 的辅助调用。
 
-字符串适配层只借参数与 GuestMem。A 版本 copy/length 保留原始 byte，W 版本保留 UTF-16 unit；bounded copy 按 signed count 处理，容量为 1 时可不读 source 而只写 NUL，非正容量保留输出。先读入 source 再写目的，支持既有重叠别名；concat 继续在读取 source 后检查目的终止符。普通读取的 1M-unit 上限与失败输出保留不变。比较继续使用原 text reader，大小写只采用可表示为单个 UTF-16 unit 的 uppercase 映射，保留 null/显式 count 和无效 unit 的原策略。
+进程/亲和性查询已在两种 ABI 接入，身份、权限、继承、复制、Ex 内存调用和等待见[进程句柄与查询](process-control.md)。新入口的处理器能力与拓扑查询见[系统信息](system-profile.md)。
 
-指针适配层只借受检内存。零长度 BadRead/BadWrite 不访存，失败返回 BOOL 且不写 LastError；BadCode 使用原 inspect_code。FlushInstructionCache 只接受当前进程伪句柄，其余参数继续忽略，代码写入仍由内存/IR invalidation 处理。MulDiv 保留带符号最近舍入，除零或溢出作为成功路径返回 UINT_MAX，保留 LastError。
+基础字符串 14 项在两种 ABI 通过 kernel32/kernelbase 提供，旧入口和新入口共用处理体。A 版本 copy/length 保留原始 byte，W 版本保留 UTF-16 unit；lstrlen 采用 A 规则，空指针长度为零。lstrcpyn 按有符号 DWORD 容量处理，容量为 1 时只写 NUL，非正容量不访存并返回完整目的指针。先读取 source 再写目的，支持重叠；concat 在 source 快照后检查目的终止符。完整输出预检失败不改变输出和调用者，成功保持 LastError。
 
-后续 EncodePointer/DecodePointer 也汇入该家族，保留各架构全宽 identity、LastError 和 PE32 的 `identity encoding` trace note。Win64 仅调用无状态 encoding adapter；其他五项的 absent 策略保持。合并验收见[标量入口补齐](../reports/refactoring-scalar-followup-2026-10-20.md)。
+普通长度/复制读取上限为 1M unit；lstrcmp 的文本读取上限为 32768 unit，A 输入先按 CP932 解码，随后按 UTF-16 unit 字典序比较。忽略大小写时只采用可表示为单个 UTF-16 unit 的 uppercase 映射，保留原始代理单元。lstrcmp 的空指针按空文本处理，返回 −1/0/1 的 DWORD 表示。
 
-PE32 进程查询只借句柄视图、调度器与内存，OpenProcess 返回资源创建请求，由原入口分配句柄。固定 PID、access mask 和忽略 inherit flag 的策略保持。查询先检查句柄与权限，再检查输出；affinity 先检查两个输出，再按原顺序写入。SetThreadIdealProcessor 失败返回 UINT_MAX；未新增进程执行能力。
-
-GetCurrentPackageId 随后接入 ProcessQueryApi，保留 PE32 桌面应用的 APPMODEL_ERROR_NO_PACKAGE、输出和 LastError 不变策略；Win64 仍 absent，详见[进程 endpoint](process-control.md)。
-
-processor count 的 WORD carrier 由适配层消费，保持 Win64 trace 中原始 64 位参数。PE32 仍对完整 32 位 carrier 检查 0/0xffff，Win64 按原实现只消费低 WORD；两端成功均保留 LastError。group-count 两项在 PE32 仍为 ABI-only/LastError 120，Win64 返回单组 profile。API 返回槽别名仍分别使用 PE32 handler 后读取和 Win64 预先保存 frame 的顺序。
-
-Win64 processor 查询现在是只借 Memory 和只读 Threads 的普通 adapter，不再借整个 Runtime64。原低 WORD 检查和错误槽访问位置保持，根按绑定 ID 直接组合资源。
-
-WMI 的内部 BSTR 分配继续使用同一 Bstrings32 owner 与进程 heap；去掉转借完整 ApiState 的 common_api facade 后，资源和错误顺序保持。common_api 的混合名称分发与模块已删除。
+CompareStringOrdinal 要求非空指针；显式非负 count 最多 1M unit，包含嵌入 NUL，零 count 不访存。count=−1 按 32768-unit 终止文本读取，其他负值无效；返回 1/2/3。非法 count 或超过读取上限返回零并写错误 87；实际内存访问故障保留原服务帧与 work，修复后可重试。参数和返回地址先于输出捕获，输出与返回槽重叠时继续使用保存的返回地址。

@@ -1,15 +1,16 @@
 # BSTR 契约与资源归属
 
-八项 export 的 provider、参数宽度和执行策略集中在 `win32/catalog/bstr.rs`，Win64 的既有八个 ordinal alias 也在同一模块。两架构仅接受 oleaut32。PE32 七项 typed、SysAllocStringByteLen 保留 ABI-only/error 120；Win64 八项 typed。PE32 ordinal 仍由既有 Wine spec 解析，不扩大直接 `#ordinal` 字符串的支持范围。
+Wasm 入口仅接受 oleaut32。PE32 提供 SysAllocString、SysAllocStringLen、SysReAllocString、SysReAllocStringLen、SysFreeString、SysStringLen、SysStringByteLen；AMD64 另提供 SysAllocStringByteLen。名称与仓库 Wine ABI 声明中的对应 ordinal 解析为同一网关。PE32 的 byte allocator 尚未接入，绑定时拒绝。
 
-PE32 的 Bstrings32 私有拥有 BSTR pointer 到 heap base 的记录，分配显式借 GuestMem、GuestHeap 和 process heap ID。Variant 与 WMI 都直接委托同一个 owner，原 common_api allocation facade 已删除。release 保留先删除成员再释放 heap 的顺序，并把是否找到成员、heap 是否释放成功分别返回给 adapter：SysFreeString 映射原 error 87；Variant、重分配和清理路径继续各自原先对 heap free 结果的处理。共用 UTF-16 输入读取迁入 `win32/text.rs`，算法和错误不变。
+BSTR 指向可写 payload，其前四字节是 DWORD byte length，结尾另有两个零字节。长度查询直接读取前缀，接受可读的 foreign prefix；SysStringLen 按二除后截整。内容保留嵌入 NUL 和未配对 surrogate；SysAllocString 的 NULL 输入返回 NULL，显式零长度分配返回 owned 空 BSTR。
 
-Win64 的 Bstrings 私有拥有 pointer、base 和 byte length，并执行原分配、查询、replacement 与释放调用；`automation.rs` 不再依赖 Runtime64。分配显式借 Memory 与 Pages，写 prefix、内容、双字节 terminator 后登记。原 replacement 成员/输出重叠检查及受检释放只借 backing allocation map。free 先 unmap，再移除 backing 和成员，未把 BSTR 与 task/Local/Heap 归属合并。
+| 契约 | PE32 | AMD64 |
+| --- | --- | --- |
+| 所有权 | 与 Variant/WMI 共用进程堆及同一 BSTR 成员表；heap base 为 BSTR−4 | 独立进程数据页及成员表，公共 Heap/Local/task allocator 不拥有它 |
+| 输入范围 | 显式 UTF-16 最多 1M units；终止字符串最多扫描 32768 units | 显式 byte payload 最多 16 MiB−6，UTF-16 长度先检查 DWORD 乘二 |
+| NULL source 重分配 | 保留旧前缀并补零；source 等于旧 BSTR 时也按旧长度裁取 | NULL source 保留 owner 记录的旧 byte 前缀并补零；非 NULL source 按指定长度读取 |
+| 错误 | 语义/容量错误返回零并写 LastError；非法访存报告可恢复故障 | 容量/长度超限返回零；未拥有或重复释放的 handle 明确拒绝，普通长度上限失败保持 LastError |
 
-长度查询在两架构都直接读 pointer−4 的 DWORD byte prefix，接受可读的非 allocator 输入；SysStringLen 按二除后截整。分配与重分配的长度保持 DWORD，Win64 指针完整。PE32 长度上限和 Win64 byte/UTF-16 上限分别保留，空源、空字符串与 odd byte length 的历史差异不统一。
+两种 ABI 都先保存调用参数与返回帧，预检完整输出，读取可能别名的 source，再分配 replacement。即将释放的旧 allocation 不能覆盖结果槽或目标 VARIANT；重叠在释放前拒绝。PE32 保留先发布新指针再释放旧资源的顺序，AMD64 先释放再发布。正常调用保持 FLAGS、FP/SIMD 与 LastError，故障不增加 API work 或客体退休数。
 
-PE32 保留晚返回帧与 HRESULT/LastError 约定，重分配先发布新 pointer、再释放旧资源。Win64 先保存返回帧并预检输出，读取可能别名的 source 后分配和释放旧资源，再发布新 pointer；输出与即将释放的 allocation 重叠仍拒绝。返回槽别名按保存的原返回地址提交，失败不新增 CPU/API count。Variant 的类型支持范围和深复制策略继续原实现。
-
-独立回归覆盖 ordinal/provider、foreign prefix、完整指针/DWORD、严格成员、失败 free 与 heap 共享、OOM/输出保留、重叠和返回槽别名；原创双架构查询负载校验 checksum、退休数和 API count，Win64 另校验 work。详见 [BSTR 验收](../reports/refactoring-bstr-2026-10-17.md)。
-
-调用 owner 提取基线 `97acdf5`，分配/call/source 主体经显式资源替换核对保持，原 membership 实现未改。与 HSTRING 共用一批验收，见[当前重构记录](../reports/refactoring-2026-10-14.md)及 `wire-out/refactoring-2026-10-14/r3-string-calls64-{source-checks,verification}.json`。
+共享语义位于 `win32/com/automation32.rs` 和 `automation64.rs`，旧入口只保留内存/堆适配。进程启动拒绝释放堆与数据页；正常进程终态保留最终内存快照。旧 PE32 适配器继续保留原错误转换和晚返回帧规则，Wasm 入口使用上述统一受检边界。

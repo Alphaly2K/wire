@@ -1,48 +1,37 @@
-# 宿主键鼠事件
+# 宿主窗口与输入边界
 
-PE32 和 Win64 使用同一个 AppKit 输入桥。native 回调只把四个 DWORD 的 owned event 放入有界队列；Presenter 在主线程轮询，guest USER adapter 负责完整 HWND、坐标、键盘状态和消息入队。回调不执行 guest 代码。
+新 Web 入口通过 `windows(processId?)` 枚举已完成创建的顶层窗口，返回独立记录：`handle` 为完整 BigInt HWND，`title` 为字符串，`width/height` 为 client 像素尺寸，`visible/topmost` 为布尔值。省略 PID 查询当前入口所属进程；显式 PID 从同一进程组选择 owner，未知、零或非 DWORD 身份拒绝。装载前返回空数组，创建未完成或已销毁的窗口不发布。浏览器展示层通过以下接口取得窗口状态、GDI 像素及输入队列。
 
-| 输入 | 交付行为 |
+`windowPixels(window, processId?)` 接受 BigInt HWND，返回独立的 `{width, height, stride, rgba}`，其中 `rgba` 是按行从上到下、每像素四字节的 RGBA8 副本，alpha 固定 255，stride 为 width×4。尚未创建 backing、已销毁或未知窗口返回 null；修改返回数组不影响客体像素。`windowOrigin(window, processId?)` 返回两个 signed DWORD 的 client screen 原点，未知或已退休窗口返回 null。装载前允许查询，进程组运行中及 VM 销毁后拒绝。查询不执行客体指令或读取时钟。
+
+底层 `wire_window_pixels(owner, hwnd)` 返回字节长度，零表示无 backing，失败为 `u32::MAX`；公共暂存区的 16 字节头包含四个 little-endian u32：width、height、stride、format=1，随后为 RGBA8。宿主应在下一次使用暂存区前复制输出。
+
+`queueWindowEvents(events, processId?)` 批量供给最多 256 项输入，`queueWindowEvent(event, processId?)` 是单项形式。PID 与 HWND 共同确定接收 owner，不按低位 HWND 跨进程匹配。字段如下：
+
+| 字段 | 契约 |
 | --- | --- |
-| 键盘 | 字母、数字、OEM 标点、控制/导航键、F1–F20、数字键盘的物理 VK 和扫描码；保留 extended、repeat、previous、transition 与 Alt context 位 |
-| 修饰键 | 左右 Shift/Ctrl/Alt，Command 对应左右 Win 键；CapsLock 每次切换产生一对 down/up |
-| 文本 | `NSEvent.characters` 的 UTF-16 经 WM_CHAR/WM_SYSCHAR 暂存，TranslateMessage 后交付；保留代理对，按窗口 A/W 策略编码 |
-| 鼠标 | 左/右/中键、两个侧键、移动及三类拖动；wParam 包含所有已按下的鼠标键及 Shift/Ctrl |
-| 滚轮 | WM_MOUSEWHEEL/WM_MOUSEHWHEEL，有符号高 WORD delta；普通滚轮按 120 单位/格，精确设备按像素累计小数；水平正值向右 |
-| 失焦 | native view 释放它记录的所有按键和鼠标键，避免在窗口外释放后继续保持按下 |
-| 激活/焦点 | 获得 native key window 时交付 WM_ACTIVATEAPP、WM_ACTIVATE、WM_SETFOCUS；失去时交付 WM_KILLFOCUS、非激活通知。两端 USER 同步逻辑 foreground/active/focus；首次点击可激活并交付给 guest |
+| window | unsigned 64-bit BigInt HWND；过期或未知完整身份被忽略，不截断后重新匹配 |
+| message | DWORD；接受激活/焦点 6..8、WM_CLOSE、WM_ACTIVATEAPP、键盘 0x100..0x109、鼠标 0x200..0x20e 和 WM_APP 0x8000..0xffff |
+| wparam/lparam | unsigned 64-bit BigInt，默认零；入队时按客体指针宽度规范化 |
+| time | 可选 DWORD 毫秒；省略时同一批次共享一次单调时钟样本 |
+| point | 可选 `[x,y]`，每项为 signed DWORD screen 像素 |
 
-物理键码使用 US 键位对应的 VK，文本使用宿主提供的实际字符；两者不相互推导。退格与数字键盘 Enter 分别规范为 U+0008/U+000D，AppKit 功能键私用字符不作为文本交付。Win64 另支持宿主事件驱动的前台 Raw Input 逻辑键鼠设备，见[raw/IME 策略](input-profile.md)。IME composition、dead-key 状态机、SendInput 或 hover/leave 尚未新增；布局 API 仍为[虚拟 US profile](keyboard.md)。
+接口要求 VM 暂停执行且已装载；执行中拒绝，销毁后拒绝。先验证完整批次的格式、消息类别和容量，再更新键盘/游标与入队；无效项不会留下前缀消息。每进程队列最多 4096 项，容量按整个输入批次保守预约，包括可能被忽略或合并的项，以及 RawInput 额外产生的 WM_INPUT；数据包容量和完整句柄范围同样在发布前检查。输入不执行客体指令，不改变 CPU/work；成功批次通知调度器重新检查等待线程。
 
-native 鼠标位置统一为逻辑 client 像素，以带符号的两个 WORD 打包，窗口缩放不改变 guest 像素单位。两个 guest adapter 用窗口的 client origin 转为 guest screen 位置，更新逻辑游标并保存当次 MSG.pt；滚轮的 lParam 使用 screen 位置，其余鼠标消息使用 client 位置。Win64 继续应用 ClipCursor 并按有符号 DWORD 扩展 lParam，guest HWND 不经过 u32 截断；PE32 保持原来的无裁剪游标策略。后续移动不会改写已入队消息的位置。
+没有显式 point 时，普通鼠标消息从 lParam 的两个 signed WORD client 坐标加窗口 client origin 得到 screen 坐标；滚轮 lParam 本身使用 screen 坐标。其他消息保存当前逻辑游标。每项保存当次快照，后续移动不会修改旧 MSG.pt；GetMessagePos 按两个 WORD 打包返回。同线程 focus/capture 路由已接入，capture 转发保留 screen 快照并换算接收窗口的 client lParam；滚轮坐标保持 screen。焦点和激活事件在入队时更新对应 owner，见[窗口状态](window-state.md)。ClipCursor 对屏幕位置、接收窗口坐标及 RawInput 使用同一裁剪结果；child 和跨线程输入所有权仍待接入。
 
-Metal drawable 使用 native view bounds 转换后的实际 backing 像素尺寸，每次获取保留图层时同步当前屏幕的 backingScaleFactor。它与 guest client 像素单位分开：Retina 上 1280×720 点的窗口对应 2560×1440 drawable，输入中心仍为 guest 的 (640,360)。旧实现把 guest 尺寸写成 drawableSize，在 Retina 呈现中造成画面裁剪；人工试用后已修复。
+共享 Keyboard owner 接收物理 VK、扫描码和状态位；宿主应另提供其实际布局解析的 UTF-16 WM_CHAR/WM_SYSCHAR，并紧随对应 key-down 送入。配对文本缓存到 TranslateMessage 时才生成字符消息，保留代理对；Unicode 窗口使用 UTF-16，ANSI 窗口使用 CP932。没有宿主文本时只保留控制字符回退，不猜测 US 字符。RawInput 与可选 mouse-to-pointer 转换已接入，原始设备、消费及 NOLEGACY 契约见[输入 profile](input-profile.md)。IME composition、dead-key 解析及宿主键盘布局解析尚未接入。
 
-共享 Keyboard owner 在收到硬件事件时更新 GetAsyncKeyState。只有取出消息（GetMessage 或 PeekMessage 的 PM_REMOVE）才更新当前线程的 GetKeyState/GetKeyboardState；PM_NOREMOVE、输出故障和 PostMessage 不模拟一次硬件消费。左右修饰键单独存储，通用键的 high bit 为两侧的 OR；自动重复不重新设置异步的“自上次查询后按下”低位。中键和侧键按 VK_MBUTTON/VK_XBUTTON1/VK_XBUTTON2 处理，滚轮不会伪造按键变化。
+硬件事件更新异步状态；只有 GetMessage 或 PM_REMOVE 成功取出才更新当前线程的队列状态。PM_NOREMOVE、输出故障和 PostMessage 不模拟硬件消费。窗口销毁清理其缓存文本，线程退出清理线程状态。GetKeyState/GetAsyncKeyState/GetKeyboardState 已接入客体服务，虚拟布局查询见[键盘契约](keyboard.md)。
 
-队列容量维持现有策略：native ring 为 512 个槽（最多保留 511 个事件），PE32 USER 为每线程 10000 条，Win64 USER 为 4096 条；native ring 满时丢弃后来的事件。每次 Presenter 最多消费 512 条，轮询间隔上限 16ms，实际输入延迟仍受解释执行与 host 调度影响。当前不承诺任意输入洪泛无损，也未增加 child focus/capture 重定向。
+底层使用公共 `wire_input` 暂存区。`wire_windows` 返回字节长度，失败为 `u32::MAX`；每个记录为 24 字节头（u64 handle、u32 width、u32 height、u32 flags、u32 UTF-8 字节数）后接标题，flags 的位 0/1 为 visible/topmost。`wire_queue_window_events` 消费整个暂存区，每项 48 字节：u64 HWND、u32 message、u32 flags、u64 wParam、u64 lParam、u32 time、i32 x、i32 y、u32 reserved；flags 位 0 表示显式 point，其余位及 reserved 必须为零。成功返回零，失败返回一并保留队列。Web 层返回持有副本的窗口记录，不暴露暂存区生命周期。
 
-验证入口：
+`wire_window_origin(owner, hwnd)` 使用同一暂存区返回八字节的 `[i32 x, i32 y]`；零表示没有窗口，`u32::MAX` 表示执行活动冲突。它与像素/窗口枚举一样要求在下一次暂存区操作前复制结果。
 
-```sh
-cargo test --release --locked --test win32 --test x64 input_events
-python3 -B tools/probe_input.py --out NEW_OUTPUT_DIR
-```
+## 浏览器展示
 
-前者通过真实 guest 窗口创建和消息 API 验证左右修饰键、五键状态、消息移除边界、重复按键、坐标快照、双轴滚轮和系统字符代理对。后者在独立 NSView 上调用生产 AppKit 回调，使用原创事件检查准确的消息字段、缩放、功能键过滤、Unicode、修饰键组合、拖动、小数滚轮及失焦释放；不向其它应用投递事件。输出保存构建/运行日志、命令、源码和 binary SHA-256。这些是回调及 guest 消息契约验证，不代表已完成真实游戏菜单的交互验收。
+`web/presenter.mjs` 的 `BrowserPresenter(machine, container)` 借用 VM 和一个 DOM 容器，配套样式位于 `web/presenter.css`。`sync()` 在暂停边界同步所有进程的顶层窗口、标题、可见性、topmost 和软件 RGBA8 画面；`run(budget)` 先提交积累的输入，再执行同一 VM 的预算并同步输出，预算和退出原因沿用运行时。调用者负责后续执行/等待和 VM 的关闭。
 
-`tools/probes/ui_geometry.m` 另在真实窗口验证启动尺寸→横屏→竖屏→横屏、保留同一个 MetalLayer、实际 backing drawable 与输入中心。可传入 native graphics 和 MoltenVK 两个绝对路径，使用原创四色/边框 texture 经过真实 Vulkan swapchain 呈现，并在每次 Present 后再次核对 drawable 尺寸。旧实现的失败日志为 `ui-geometry-backing-before.txt`（314×211 对 628×422），修复后日志为 `ui-geometry-gpu-final.txt`，均位于本轮证据目录。
+AMD64 图形配置可使用 `{getCanvas: presenter.getCanvas, shaderCompiler}`。该回调只访问宿主记录，按 PID/HWND 返回独立 WebGPU canvas；同一窗口首次使用 GPU 后保留图形画面到窗口退休，当前没有 GDI 与 DXGI 画面的合成。软件 2D 与 GPU 使用各自的 canvas，避免浏览器 context 类型冲突。`close()` 移除展示窗口及未提交输入，不关闭借用的 VM、GPU owner 或 shader 编译器。
 
-`examples/guest_input_probe.rs` 使用原创 PE64 窗口过程、真实 Presenter64 和消息循环，在独立窗口绘制蓝色区域。真实 OS 点击依次经过 native poll、guest 入队、PeekMessage 移除和 DispatchMessage，guest WNDPROC 将原始参数写入有界 guest-memory log；工具读取该 log 独立检查抬起点位于蓝色区域。实际点击验证了 (200,130) 和完整 down/up 通路，日志为 `guest-input-focus.{out,err}`。这与直接调用 native 回调、手动向 guest 队列插入事件不同，但仍不能代替真实游戏菜单的行为验收。
-
-可显式设置 `WIRE_INPUT_TRACE=1` 诊断 Win64 输入的 native/queued/peeked/removed/dispatch 阶段，输出完整 guest HWND、消息、wParam/lParam 和 tid。普通事件最多 4096 条、移动最多 512 条；默认关闭，不抓取屏幕或其它应用输入。激活事件也进入该通路，便于区分未获焦点、事件未交付和应用未响应。
-
-`guest_input_probe --raw` 另由原创 guest WNDPROC 调用 GetRawInputData、检查真实鼠标 down/up 标志并调用 DefWindowProc 清理。真实点击 (200,130) 通过，日志为 `guest-input-raw.{out,err}`；队列诊断增加 raw-queued/raw-read/raw-buffer 阶段。该模式不使用游戏素材，仍需另行验收游戏菜单的实际行为。
-
-Win64 可通过 EnableMouseInPointer 显式启用鼠标指针消息。该进程设置只允许调用一次，重复设置返回 ERROR_ACCESS_DENIED，默认仍使用普通鼠标消息。启用后，宿主移动、五键组合和滚轮转换成 WM_POINTERUPDATE/DOWN/UP/WHEEL/HWHEEL，保持单一鼠标 pointer ID 1，lParam 使用 guest screen 坐标。首次按下和最后松开改变 contact 状态，其余按钮变化使用 UPDATE；Raw Input 仍独立交付。NOLEGACY 抑制普通键鼠消息，不抑制已启用的指针消息。
-
-GetPointerDevices 按当前没有笔、触摸或触控板 digitizer 的配置返回经过检查的零条列表，不改数据缓冲区。GetPointerType 返回已交付鼠标的 PT_MOUSE，GetPointerInfo 写出完整 96 字节 Win64 POINTER_INFO，包括完整 HWND、屏幕位置、按钮变化和消息时间。查询读取当前线程最近取出或窥视的指针消息快照；后续宿主事件不会覆盖正在处理的 down/up。取消息的输出检查成功后才发布快照，只有移除才提交线程按键状态；窗口销毁和线程退出清理快照。未交付/错误 ID 返回 ERROR_INVALID_PARAMETER，写出故障不改可访问前缀。该子集不提供触摸、笔、历史查询、enter/leave 或 DefWindowProc 向普通鼠标消息的回退；PE32 指针接口保留 ABI-only。
-
-`guest_input_probe --raw --pointer` 由原创 guest WNDPROC 同时读取 Raw Input 和 GetPointerInfo。真实 OS 点击 **(200,130)** 已验证指针 down/up、各自快照和原始数据包，日志为 `guest-input-pointer-live.{out,err}`。回归覆盖快速入队的 down/up、窥视/移除边界、五键组合、负向滚轮、完整 HWND 和原子输出故障；真实应用交互仍单独验收。
-
-`examples/guest_state_probe.rs` 可在执行切片之间只读观察指定 guest 字节，并仅在地址或内容变化时打印。`--watch 'NAME@ADDRESS/OFFSET:SIZE'` 先读取 ADDRESS 处的 64 位指针，再加 OFFSET；多级 `/OFFSET` 依次解引用，不带 `/` 则直接观察 ADDRESS。每条最多八级地址、256 字节，最多 64 条；使用 Memory::observe，不触发 guest guard 或写入状态。`--slice` 控制观察间隔，短于该间隔的状态可能遗漏。该工具需要显式提供 EXE、图形后端和 MoltenVK 路径，可用 `--desktop-size` 选择虚拟桌面，不抓帧；观察会改变执行速度，不能用来比较性能。
+DOM 键盘输入携带物理 VK/set-1 扫描码、重复/扩展/上下文/释放位，并以实际 `KeyboardEvent.key` 提供配对 UTF-16 文本。鼠标坐标按 canvas 显示比例换算为 client 像素，滚轮按已查询的 client 原点生成 screen 坐标并保留小数增量；pointer capture、失焦时释放按键/按钮、激活和 WM_CLOSE 使用相同输入队列。事件只积累宿主数据，不在 DOM 回调中执行客体或重入核心。每进程最多积累 4096 项，邻接鼠标移动合并；键盘与其文本不跨 256 项提交边界拆分，提交失败保留尚未接受的输入。IME、dead key、完整系统键盘布局和原生桌面 compositor 仍不在当前展示层范围。

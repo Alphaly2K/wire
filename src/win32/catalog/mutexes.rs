@@ -22,7 +22,7 @@ const fn declaration(
         name,
         parameters,
         returns,
-        "PE32 legacy shared named-handle namespace, recursive ownership by scheduler TID, error 288 for nonowners and release/wake before return-frame faults; extended create and open remain ABI-only; Win64 remains absent",
+        "PE32 legacy shared named-handle namespace, recursive ownership by scheduler TID, error 288 for nonowners and release/wake before return-frame faults; extended create and open remain ABI-only; Win64 declares ABI for adapters that explicitly support mutex ownership",
         [
             ArchitecturePlan {
                 dlls: &["kernel32.dll"],
@@ -33,8 +33,8 @@ const fn declaration(
                 },
             },
             ArchitecturePlan {
-                dlls: &[],
-                execution: ExecutionPolicy::Absent,
+                dlls: &["kernel32.dll", "kernelbase.dll"],
+                execution: ExecutionPolicy::LegacyUnimplemented,
             },
         ],
     )

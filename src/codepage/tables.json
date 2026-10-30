@@ -1,0 +1,42 @@
+{
+  "format": "Little-endian decode u32 (ffffffff means invalid); sorted encode records scalar:u32,payload_offset:u32,length:u8; payload bytes preserve all successful iconv results",
+  "reference": "Existing src/codepage.rs libiconv behavior, including successful nonreversible expansions and default replacement policy",
+  "libiconv_version": "0x10b",
+  "generator": "tools/probes/generate_codepages.c",
+  "generator_sha256": "8330d3520f0409873c53164e202252fcc8b4f808375cde6d2558f306b2e96680",
+  "tables": {
+    "cp1252-encode.bin": {
+      "bytes": 8856,
+      "sha256": "bd9c1fdb22c48f15d9164197ea6349a023c1f001b4937674328fac5761167ef1"
+    },
+    "cp1252-payload.bin": {
+      "bytes": 1708,
+      "sha256": "8ace3785a0a42a6ab5fa6352f0c7ea3c1f2b8254cff02fd1975daa3d2ccc4f83"
+    },
+    "cp1252-single.bin": {
+      "bytes": 1024,
+      "sha256": "5ec4fd69b5ccaa999c8d15a2f30f1bed47757c063df0b27f9175cc118ff4f0c5"
+    },
+    "cp932-double.bin": {
+      "bytes": 61440,
+      "sha256": "d1c821b8e2d97056024633df59c1dac2805e781924e295b6f721ad90370f22b7"
+    },
+    "cp932-encode.bin": {
+      "bytes": 84573,
+      "sha256": "870c062b81f00cc541211c1b8fe1480f27afad934f06a62ec03c46a11b1424e8"
+    },
+    "cp932-payload.bin": {
+      "bytes": 18603,
+      "sha256": "fe2a2c10ec8fc83da574928de40054e49b86e5a2eb994238eead0c11c08ab2cb"
+    },
+    "cp932-single.bin": {
+      "bytes": 1024,
+      "sha256": "eb3da512c6ef61fbf6a23dcde068be942906014dcad7224308556d376d82f995"
+    }
+  },
+  "mapping_records": {
+    "cp932": 9397,
+    "cp1252": 984
+  },
+  "generation_platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O"
+}

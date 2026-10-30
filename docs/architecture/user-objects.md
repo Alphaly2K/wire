@@ -1,11 +1,11 @@
 # USER 注册名称与窗口属性
 
-`win32/catalog/user_objects.rs` 声明十四项 provider/ABI/执行策略：PE32 十项名称/属性操作为 typed，四项属性枚举保留 ABI-only、error120、零返回和原清栈，不调用 callback；Win64 全部 absent。
+Wasm 入口在 PE32 与 AMD64 通过 user32 接入十项注册名称/属性操作和六项剪贴板查询/失败协议。`win32/catalog/user_objects.rs` 保留旧 provider/ABI/执行策略；四项 EnumPropsA/W/ExA/ExW 仍未接入新入口，没有属性枚举能力。
 
-`win32/user/objects.rs::RegisteredNames` 私有拥有名称表与 next atom，由 PE32 User32 组合。保持原有 clipboard-format/window-message 共享的进程逻辑 namespace，按 Unicode lowercase 匹配；校验原名称非空且不超过 255 UTF-16 units，再查已有记录，最后检查容量并插入。范围包括 0xffff，表满后已有名称仍返回原 atom。此表不访问宿主 clipboard 或桌面。
+当前入口共用 `user/object_services.rs` 的处理函数和 `user/objects.rs` 的状态。RegisteredNames 保留 clipboard-format/window-message 共享的进程 namespace，按 Unicode lowercase 匹配；先校验原名称非空且不超过 255 UTF-16 units，再查已有记录，最后分配 0xc000..0xffff。表满后已有名称仍可查询。名称注册仅维护客体进程状态，不接宿主 clipboard 或桌面。
 
-每个 PE32 Window 组合私有 `Properties` owner，存放完整 u32 值。`PropertyKey::Atom/Name` 表达原字符串前缀区分的两种键；atom 查询不再构造字符串。名称继续按原规则小写，空字符串与零属性值保持；窗口释放同时释放属性。四项枚举尚未实现，不增加属性排序或 callback 行为。
+Properties 存放窗口拥有的完整指针值。Atom/Name 是两类独立键；名称沿原规则小写，空名称与零属性值有效。属性名解码先于 HWND 校验，HWND 校验先于 NULL key 校验；无效 HWND 返回错误 1400，NULL key 返回 87，普通查询缺失返回零并保持 LastError。窗口销毁回调期间属性仍可访问，最终移除窗口时释放；线程退出、启动拒绝和进程终止沿同一 USER 清理路径回收。
 
-受检适配位于 `win32/user/pe32/objects.rs`。注册名与属性名解码、参数/返回布局留在架构层；domain owner 不访问 guest 内存、CPU、线程或 LastError。属性解码先于 HWND 校验，HWND 校验先于零 key 校验；原访存失败、LastError、trace 与返回帧顺序保持。
+新适配使用当前窗口表、CP932/严格 UTF-16、VMM 和保存的调用帧。实际源、错误槽或返回帧故障不完成调用，也不消耗名称身份或修改属性；修复后可重试。全部调用使用当前 VMM 和保存的返回帧。
 
-独立回归包含完整 atom 容量、满表查询、A/W 与两类名称共享、atom/name 键区分、零值/空名、窗口销毁和枚举 ABI；见[批次报告](../reports/refactoring-user-objects-2026-10-18.md)。
+OpenClipboard 没有数据 owner 或传输后端：NULL 或有效本进程 HWND 返回 FALSE/错误 50，非法 HWND 返回 1400。CloseClipboard、EmptyClipboard、GetClipboardData 和 SetClipboardData 返回零与 ERROR_CLIPBOARD_NOT_OPEN(1418)，不访问数据、不接管或释放传入句柄、不调用延迟渲染过程。IsClipboardFormatAvailable 对所有格式返回 FALSE并保持 LastError；已注册格式名称也不会发布数据。宿主剪贴板、进程间共享、Global 内存所有权和延迟渲染仍缺失。

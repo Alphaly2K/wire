@@ -1,19 +1,11 @@
-# Win64 Toolhelp 快照资源边界
+# Toolhelp 进程与线程快照
 
-`x64::runtime::snapshot::Snapshots` 私有拥有记录表、进程/线程枚举游标、handle flags 和单调编号。单个 Snapshot 及其字段不向组合根暴露。Runtime64 只提供当前 guest 的可执行文件名和未退出线程的 `(id, priority)` 迭代器；owner 验证 flags/容量后才收集这些值，不访问宿主进程列表，也不保留 Threads 引用。
+新 Wasm 入口在 PE32 与 Win64 接入 CreateToolhelp32Snapshot、Process32First/Next、Process32FirstW/NextW 和 Thread32First/Next。两种 ABI 均接受 kernel32/kernelbase，契约集中在 `win32/catalog/snapshots.rs`。ANSI 导出使用 Process32First/Next，不另设 FirstA/NextA 别名。
 
-CreateToolhelp32Snapshot 保留 DWORD flags、忽略 PID 的原有限语义，只接受 process/thread/inherit 组合。unsupported flags 返回 50，优先于资源耗尽的 8。最多 128 个存活资源，句柄 `0x7fff1000..0x7fff2000` 单调分配，关闭释放容量但不复用编号。继承位映射到 handle flags；PROTECT_FROM_CLOSE 返回 5，token 的独立规则仍返回 6。Get/SetHandleInformation、DuplicateHandle 身份判断和 CloseHandle 通过只读 membership/flags 或显式 owner 方法协调，原查找及早退提交顺序保持。
+快照只包含当前客体进程及未退出的客体线程；进程 ID 与当前 TEB 一致，线程列表及优先级在创建时冻结。之后的创建、退出或优先级修改不改变旧快照，快照也不保留线程资源引用。进程项包含映像文件名、创建时线程数与普通优先级基准；线程项包含 ID、所属 PID 和对应基准优先级。名称使用 CP932 或 UTF-16，未请求的类型返回错误 18。
 
-线程列表与优先级在创建时复制，之后新增线程或修改优先级不会改变旧快照。process ANSI/wide 共用一个 process_done；线程 First 从零、Next 从当前 thread_at 读取，初始 Next 也从零开始。每次先检查完整 64-bit 句柄，再读取调用者的 dwSize（ANSI 304、wide 568、thread 28）；size 不符为 24，列表耗尽或该类型未请求为 18。读 size 的 guest fault 优先于列表不可用。
+CreateToolhelp32Snapshot 按 DWORD 处理 flags。当前接受 PROCESS、THREAD 及 INHERIT 的非空组合；这两类快照不使用 PID 参数。其余 flags 返回错误 50，容量耗尽返回错误 8，失败返回架构宽度的 INVALID_HANDLE_VALUE。每个 VM 最多 128 个存活快照，句柄在 `0x7ffe0000..0x7ffe1000` 单调分配，关闭释放容量但不复用编号。Get/SetHandleInformation 与 CloseHandle 共用当前句柄路由，防关闭标志返回错误 5。快照复制、模块和堆快照尚未接入；DuplicateHandle 对快照返回明确错误 50。
 
-编码仍由原私有 process_entry/thread_entry 完成，保持 CP932/UTF-16 名称、guest PID 1、线程数量及优先级映射。输出成功后才更新游标；失败 First 不重置、失败 Next 不推进。owner 只借 Memory、参数、绑定得到的 SnapshotApi 与当前线程 LastError guest 地址；执行时不解析 API 名称。返回帧由 gateway 预先保存，因此输出覆盖返回槽仍返回原 PC；成功保留 LastError，guest fault 不提交 CPU/API count。
+进程记录的 PE32 ANSI/Wide 尺寸分别为 296/556，Win64 为 304/568；线程记录两者均为 28。枚举先验证完整句柄，再读 dwSize；小于相应结构返回错误 24，足够时只写完整结构，保留其后字节。ANSI/Wide 共用一个进程游标；线程 First 从零开始，Next 从保存位置读取，初始 Next 也可以取第一项。输出成功后才提交游标，失败 First 不重置、失败 Next 不推进。列表耗尽返回错误 18。
 
-三个独立旧行为测试先在原实现通过，覆盖限额/退休/flags、ANSI/wide 游标共享、guard/边界故障、saved frame 与线程快照隔离。原创 Win64 `gateway-snapshot` 只创建一个 process 快照，循环真实 Process32FirstW copyout，消费 BOOL、PID 和 dwSize，最后关闭并消费 BOOL。n=max(1,work/12)，RAX=570n+1、retired=11n+19、work=12n+21、API=n+2；单次及 12K 输入已在旧冻结实际校验，inventory 固定三个独立 kernel32 OFT/IAT 导入。
-
-完整检查、19 条性能协议、raw 漂移复核及三对启动前缀已验收，具体成本与原始证据见[验收记录](../reports/refactoring-snapshot-owner-2026-10-19.md)。
-
-七项声明位于 `win32::catalog::SNAPSHOT_CONTRACTS`，统一 provider、arity、DWORD 和 typed ID。Win64 的 kernel32/kernelbase 静态导入与动态查询都保留；PE32 仅 kernel32 有已知 stdcall ABI，继续返回零、error 120 和 untouched outputs，kernelbase/user32 保持未知 ABI 的零清栈策略。Process32First/Next 是原 ANSI 名字，不新增 FirstA/NextA alias。Thread32First/Next 的句柄仍以完整 pointer carrier 传入 Win64，避免按 Wine i386 spec 的 long 意外截断。
-
-双架构 provider/ABI 测试先在旧实现通过。追加 PE32 `gateway-snapshot` 仅循环 ABI-only CreateToolhelp32Snapshot，核对返回零、retired=6n+7、API=n，其中 n=max(1,work/6)；它不创建快照资源。小输入 raw/IR 在旧冻结通过，迁移后十次调用的完整日志逐字节一致，包含 UNIMPLEMENTED 诊断。
-
-契约迁移的完整检查、17 个计时协议及三对启动前缀已验收，Win64 copyout 循环 CPU −12.007%，代码别名负载保留 +4.286% 的局部成本。完整原始轮次、采样和代码生成调查见[契约验收](../reports/refactoring-snapshot-contract-2026-10-19.md)。
+记录、布局和游标 owner 从旧入口提取到 `win32/toolhelp.rs`，不依赖 CPU 或客体内存。旧入口保留自己的内存适配与原句柄区间。新入口绑定后按类型分派，保存返回帧后才写输出；输出可以覆盖原返回槽。成功保持 LastError，访存故障不提交 CPU/work；静态启动失败清理全部快照。

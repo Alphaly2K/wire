@@ -1,0 +1,19 @@
+[package]
+name = "wire-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-2.1-only"
+publish = false
+description = "Wasm JIT runtime and portable Windows compatibility components"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+iced-x86 = { version = "1.21.0", default-features = false, features = ["std", "decoder", "instr_info"] }
+rustc_apfloat = "0.2.3"
+wire-simd = { path = "../wire-simd" }
+md-5 = { version = "=0.10.6", default-features = false }
+sha1 = { version = "=0.10.6", default-features = false }
+sha2 = { version = "=0.10.9", default-features = false }
+

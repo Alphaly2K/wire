@@ -14,6 +14,9 @@ pub enum ExceptionApi {
     DeleteTable,
     InstallCallback,
     LookupEntry,
+    CaptureContext,
+    PcToFileHeader,
+    VirtualUnwind,
 }
 
 const fn declaration(
@@ -46,7 +49,40 @@ const fn declaration(
 
 use Parameter::{Pointer as P, Uint32 as D};
 use ReturnConvention::{Pointer as R, Uint32 as U, Void as V};
-pub static EXCEPTION_CONTRACTS: [Contract; 11] = [
+pub static EXCEPTION_CONTRACTS: [Contract; 14] = [
+    Contract::new(
+        ApiId::Exception(ExceptionApi::PcToFileHeader),
+        "RtlPcToFileHeader",
+        &[P, P],
+        R,
+        "returns the mapped image base containing an address and writes BaseOfImage",
+        [ArchitecturePlan {
+            dlls: &[],
+            execution: ExecutionPolicy::Absent,
+        }; 2],
+    ),
+    Contract::new(
+        ApiId::Exception(ExceptionApi::VirtualUnwind),
+        "RtlVirtualUnwind",
+        &[D, P, P, P, P, P, P, P],
+        R,
+        "unwinds a supplied AMD64 CONTEXT with optional saved-register addresses and returns a matching language handler",
+        [ArchitecturePlan {
+            dlls: &[],
+            execution: ExecutionPolicy::Absent,
+        }; 2],
+    ),
+    Contract::new(
+        ApiId::Exception(ExceptionApi::CaptureContext),
+        "RtlCaptureContext",
+        &[P],
+        V,
+        "captures the caller processor context into a guest CONTEXT record",
+        [ArchitecturePlan {
+            dlls: &[],
+            execution: ExecutionPolicy::Absent,
+        }; 2],
+    ),
     declaration(
         ExceptionApi::AddVectored,
         "AddVectoredExceptionHandler",
@@ -72,7 +108,7 @@ pub static EXCEPTION_CONTRACTS: [Contract; 11] = [
         &[P],
         U,
     ),
-    declaration(ExceptionApi::Unwind, "RtlUnwind", &[P, P, P, D], V),
+    declaration(ExceptionApi::Unwind, "RtlUnwind", &[P, P, P, P], V),
     declaration(
         ExceptionApi::UnwindEx,
         "RtlUnwindEx",

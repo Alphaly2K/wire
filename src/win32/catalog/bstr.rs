@@ -12,7 +12,7 @@ pub enum BstrApi {
     AllocateBytes,
 }
 
-// Win64's existing explicit ordinal aliases. PE32 keeps Wine spec resolution.
+// OLE Automation ordinals share the named entry contracts.
 pub(crate) fn symbol<'a>(dll: &str, name: &'a str) -> &'a str {
     if !dll.eq_ignore_ascii_case("oleaut32.dll") {
         return name;
@@ -24,6 +24,10 @@ pub(crate) fn symbol<'a>(dll: &str, name: &'a str) -> &'a str {
         "#5" => "SysReAllocStringLen",
         "#6" => "SysFreeString",
         "#7" => "SysStringLen",
+        "#8" => "VariantInit",
+        "#9" => "VariantClear",
+        "#10" => "VariantCopy",
+        "#12" => "VariantChangeType",
         "#149" => "SysStringByteLen",
         "#150" => "SysAllocStringByteLen",
         _ => name,

@@ -1,6 +1,8 @@
 //! Guest timer-resolution requests; these do not alter host timer resolution.
 use std::collections::BTreeMap;
 
+pub(crate) const CAPS: [u8; 8] = [1, 0, 0, 0, 255, 255, 255, 255];
+
 #[derive(Default)]
 pub(crate) struct PeriodRequests {
     requests: BTreeMap<u32, u32>,

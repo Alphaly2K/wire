@@ -47,17 +47,17 @@ pub(crate) enum PropertyKey {
 
 #[derive(Default)]
 pub(crate) struct Properties {
-    values: BTreeMap<PropertyKey, u32>,
+    values: BTreeMap<PropertyKey, u64>,
 }
 
 impl Properties {
-    pub(crate) fn set(&mut self, key: PropertyKey, value: u32) {
+    pub(crate) fn set(&mut self, key: PropertyKey, value: u64) {
         self.values.insert(key, value);
     }
-    pub(crate) fn get(&self, key: &PropertyKey) -> u32 {
+    pub(crate) fn get(&self, key: &PropertyKey) -> u64 {
         self.values.get(key).copied().unwrap_or(0)
     }
-    pub(crate) fn remove(&mut self, key: &PropertyKey) -> u32 {
+    pub(crate) fn remove(&mut self, key: &PropertyKey) -> u64 {
         self.values.remove(key).unwrap_or(0)
     }
 }

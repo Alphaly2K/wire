@@ -80,3 +80,53 @@ wire's explicit Windows 10.0.19045 workstation profile. Wine's registry,
 manifest-version behavior and process-version-selection code are not ported.
 The C snapshot is not built or linked. Copyright 1997 Marcus Meissner;
 1998 Patrik Stridvall; 1998, 2003 Andreas Mohr; 1997, 2003 Alexandre Julliard.
+
+## Automation arrays
+
+`oleaut32/safearray.c` is an unchanged Wine 10.0 source snapshot, SHA-256
+`c164e43bce1fc70b5e72822bb503337989f6a093c7b1b19dcddfae8646cd3a16`. Bounds ordering, element ownership and lock rules are adapted
+in `crates/wire-wasm/src/win32/safe_arrays.rs` with checked guest storage and
+preflighted destruction. The C snapshot is not built or linked. Copyright
+1999 Sylvain St-Germain; 2002–2003 Marcus Meissner; 2003 Jon Griffiths.
+The original LGPL-2.1-or-later header and project license are retained.
+
+## Winsock ordinal declarations
+
+`abi/ws2_32.spec` is the unchanged `dlls/ws2_32/ws2_32.spec` from the pinned
+Wine 10.0 commit above, SHA-256
+`981f933a563963ed5bb674de34b6c0004a5138a18f7dc387ee4864c7d88a760a`.
+The table has no per-file copyright header and uses Wine's LGPL-2.1-or-later
+project license; LGPL 2.1 is selected. `src/win32/catalog/winsock.rs` uses only
+its ordinal/name declarations. No Wine transport, name service or async
+implementation is compiled or linked.
+
+## Property values
+
+`combase/propvariant.c` is an unchanged excerpt of the pinned
+`dlls/combase/combase.c`: its original license header and the
+FreePropVariantArray/type validation/clear/copy region are retained.
+Copyright 2005 Juan Lang; 2005-2006 Robert Shearman (for CodeWeavers).
+The LGPL-2.1-or-later source is used under LGPL 2.1, compatible with wire.
+Type/ownership rules are adapted in
+`crates/wire-wasm/src/win32/property_values.rs`; guest memory and existing
+task/BSTR/SAFEARRAY owners replace native pointers and allocators. Wire
+preflights destruction and bounds recursive vectors; interface references
+requiring guest AddRef/Release remain explicitly unavailable. The C
+excerpt is not built or linked.
+
+- Excerpt SHA-256: `4f40c099d59f0c71270152fbbd5f5e1edb270b044c1021f9a2bc3761b570c30a`
+- Original complete source SHA-256: `967a2b774aea2af11af3bb955ecda3bd19e5056e13c6af21510eacb0477bb6d0`
+
+## OVERLAPPED result queries
+
+`kernelbase/overlapped.c` retains the original header and unchanged
+GetOverlappedResult/GetOverlappedResultEx functions from the pinned
+`dlls/kernelbase/file.c`. Copyright 1993 John Burton; 1996, 2004 Alexandre
+Julliard; 2008 Jeff Zaroyko. LGPL 2.1 is selected from LGPL-2.1-or-later.
+The completed status/count path is adapted into
+`crates/wire-wasm/src/win32/overlapped.rs`; guest input/output and LastError
+use checked memory. Pending no-wait returns IO_INCOMPLETE; async waits and
+unmapped status values remain unavailable. The C excerpt is not built or linked.
+
+- Excerpt SHA-256: `8c8f388b8f2edc3cac160b79141446231b18b2f42e01d51299fe89594020ba81`
+- Original complete file SHA-256: `a98d40ce91a3e394eb0e8db22da6223d1eb8d176f97c9d20fb2e5749bd34fe93`

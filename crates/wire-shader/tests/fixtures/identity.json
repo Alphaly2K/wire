@@ -1,0 +1,47 @@
+{
+  "description": "Original synthetic DXBC from tools/probes/varyings.py, translated by pinned dxbc-spirv; no game shaders.",
+  "files": [
+    {
+      "name": "varying.vs.spv",
+      "sha256": "b8c39050ad8a0558510d6ffc1949515001863683f89689ff567c80b6a9ebb843",
+      "source": "wire-out/win64-wasm-control-2026-10-21/shader-logical-target-r2/varying.vs.spv",
+      "synthetic": true
+    },
+    {
+      "name": "varying.ps.spv",
+      "sha256": "efa37377716596286a9bb180f75e9881336c5074a782efedc6f21ce5d5806790",
+      "source": "wire-out/win64-wasm-control-2026-10-21/shader-logical-target-r2/varying.ps.spv",
+      "synthetic": true
+    },
+    {
+      "name": "physical.vs.spv",
+      "sha256": "52a7e5274a1ecc8259a6d86e8a54df0c18850aeaeebfbd069b7a8b2d20ff7c8c",
+      "source": "wire-out/win64-wasm-control-2026-10-21/shader-portability-probe-r1/varying.vs.spv",
+      "synthetic": true
+    },
+    {
+      "name": "store.cs.spv",
+      "sha256": "24a6973e137c984fd805bd39363355ea1d6db7adb436dfa0dcd37004c3ff25ee",
+      "source": "Original raw UAV store control from tools/probes/prepare_shader_corpus.py, emitted by shader-wasm-development-r5/dxbc.wasm",
+      "synthetic": true
+    },
+    {
+      "name": "short.vs.spv",
+      "sha256": "c789ee8146d392d7e815f98dbf8ec27202c43fc3301e46e3d7049ea011c362fd",
+      "source": "wire-out/win64-wasm-control-2026-10-21/shader-logical-target-r2/short.vs.spv",
+      "synthetic": true
+    },
+    {
+      "name": "missing.ps.spv",
+      "sha256": "4fae7121f5263b3e1a6dfde0afd4f51eaef0c9c83a78dda96de087fe2a37b20a",
+      "source": "wire-out/win64-wasm-control-2026-10-21/shader-logical-target-r2/missing.ps.spv",
+      "synthetic": true
+    },
+    {
+      "name": "integer.ps.spv",
+      "sha256": "6bc4cf524dc44af194ca888c6629a95fd8f517332ca2ae511312c511b31cbc2d",
+      "source": "wire-out/win64-wasm-control-2026-10-21/shader-logical-target-r2/integer.ps.spv",
+      "synthetic": true
+    }
+  ]
+}

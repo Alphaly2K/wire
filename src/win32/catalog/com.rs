@@ -12,6 +12,12 @@ pub enum ComApi {
     TaskFree,
     OleInitialize,
     OleUninitialize,
+    PropertyClear,
+    PropertyCopy,
+    FreeMarshaler,
+    ProxyBlanket,
+    AgileReference,
+    TaskRealloc,
 }
 
 const COM_PROVIDERS: &[&str] = &[
@@ -33,6 +39,18 @@ const fn declaration(
     parameters: &'static [Parameter],
     returns: ReturnConvention,
 ) -> Contract {
+    if matches!(
+        id,
+        ComApi::PropertyClear
+            | ComApi::PropertyCopy
+            | ComApi::FreeMarshaler
+            | ComApi::ProxyBlanket
+            | ComApi::AgileReference
+    ) {
+        return Contract::new(ApiId::Com(id), name, parameters, returns,
+            "Both ABIs use checked PROPVARIANT records and existing task/BSTR/SAFEARRAY owners; copy never clears the destination, clear zeroes the full record after ownership preflight. Unsupported marshaling/proxy/agile services return explicit HRESULT failures and no interface object.",
+            [ArchitecturePlan { dlls: &["ole32.dll", "combase.dll"], execution: ExecutionPolicy::LegacyUnimplemented }; 2]);
+    }
     let winrt = matches!(id, ComApi::WinrtInitialize | ComApi::WinrtUninitialize);
     let ole = matches!(id, ComApi::OleInitialize | ComApi::OleUninitialize);
     let x86_dlls: &[&str] = if winrt { &[] } else { &["ole32.dll"] };
@@ -48,7 +66,8 @@ const fn declaration(
 
 use Parameter::{Pointer as P, Uint32 as D};
 use ReturnConvention::{Hresult as H, Pointer as R, Void as V};
-pub static COM_CONTRACTS: [Contract; 10] = [
+pub static COM_CONTRACTS: [Contract; 16] = [
+    Contract::new(ApiId::Com(ComApi::TaskRealloc), "CoTaskMemRealloc", &[P,P], R, "Existing COM task owner and realloc; NULL allocates, non-NULL zero frees, failure preserves original block and LastError", [ArchitecturePlan { dlls: &["ole32.dll","combase.dll"], execution: ExecutionPolicy::LegacyUnimplemented }; 2]),
     declaration(ComApi::Initialize, "CoInitialize", &[P], H),
     declaration(ComApi::InitializeEx, "CoInitializeEx", &[P, D], H),
     declaration(ComApi::Uninitialize, "CoUninitialize", &[], V),
@@ -64,4 +83,24 @@ pub static COM_CONTRACTS: [Contract; 10] = [
     declaration(ComApi::TaskFree, "CoTaskMemFree", &[P], V),
     declaration(ComApi::OleInitialize, "OleInitialize", &[P], H),
     declaration(ComApi::OleUninitialize, "OleUninitialize", &[], V),
+    declaration(ComApi::PropertyClear, "PropVariantClear", &[P], H),
+    declaration(ComApi::PropertyCopy, "PropVariantCopy", &[P, P], H),
+    declaration(
+        ComApi::FreeMarshaler,
+        "CoCreateFreeThreadedMarshaler",
+        &[P, P],
+        H,
+    ),
+    declaration(
+        ComApi::ProxyBlanket,
+        "CoSetProxyBlanket",
+        &[P, D, D, P, D, D, P, D],
+        H,
+    ),
+    declaration(
+        ComApi::AgileReference,
+        "RoGetAgileReference",
+        &[D, P, P, P],
+        H,
+    ),
 ];

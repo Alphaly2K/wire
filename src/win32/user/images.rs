@@ -2,13 +2,13 @@
 use std::collections::BTreeMap;
 
 #[derive(PartialEq, Eq)]
-pub(crate) enum Key {
+pub enum Key {
     Id(u32),
     Name(String),
 }
 
 struct Image {
-    instance: u64,
+    instance: Option<u64>,
     key: Key,
     kind: u32,
     shared: bool,
@@ -19,20 +19,28 @@ pub(crate) struct Images {
     records: BTreeMap<u64, Image>,
     next: u64,
     end: u64,
+    byte_budget: Option<usize>,
 }
 
 impl Images {
     pub(crate) fn new(start: u64, end: u64) -> Self {
+        Self::with_byte_budget(start, end, None)
+    }
+    pub(crate) fn with_byte_budget(start: u64, end: u64, byte_budget: Option<usize>) -> Self {
         Self {
             records: BTreeMap::new(),
             next: start,
             end,
+            byte_budget,
         }
     }
 
     pub(crate) fn shared(&self, instance: u64, key: &Key, kind: u32) -> Option<u64> {
         self.records.iter().find_map(|(&handle, image)| {
-            (image.shared && image.instance == instance && &image.key == key && image.kind == kind)
+            (image.shared
+                && image.instance == Some(instance)
+                && &image.key == key
+                && image.kind == kind)
                 .then_some(handle)
         })
     }
@@ -54,12 +62,30 @@ impl Images {
         if self.records.len() >= 4096 || self.next >= self.end {
             return Err(8);
         }
+        if let Some(budget) = self.byte_budget {
+            let key_bytes = |key: &Key| match key {
+                Key::Id(_) => 0,
+                Key::Name(name) => name.len(),
+            };
+            let used: usize = self
+                .records
+                .values()
+                .map(|image| key_bytes(&image.key) + image._payload.len())
+                .sum();
+            if used
+                .checked_add(key_bytes(&key))
+                .and_then(|n| n.checked_add(payload.len()))
+                .is_none_or(|n| n > budget)
+            {
+                return Err(8);
+            }
+        }
         let handle = self.next;
         self.next += 16;
         self.records.insert(
             handle,
             Image {
-                instance,
+                instance: Some(instance),
                 key,
                 kind,
                 shared,
@@ -67,6 +93,16 @@ impl Images {
             },
         );
         Ok(handle)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn retire_instance(&mut self, instance: u64) {
+        // Loaded handles own their payload; only the module cache key expires.
+        for image in self.records.values_mut() {
+            if image.instance == Some(instance) {
+                image.instance = None;
+            }
+        }
     }
 
     pub(crate) fn destroy(&mut self, handle: u64, kind: u32) -> Result<(), u32> {

@@ -5,6 +5,8 @@ pub enum MultimediaApi {
     Caps,
     BeginPeriod,
     EndPeriod,
+    SetEvent,
+    KillEvent,
 }
 
 const fn declaration(
@@ -23,7 +25,9 @@ const fn declaration(
 }
 
 use Parameter::{Pointer as P, Uint32 as D};
-pub static MULTIMEDIA_CONTRACTS: [Contract; 3] = [
+pub static MULTIMEDIA_CONTRACTS: [Contract; 5] = [
+    Contract::new(ApiId::Multimedia(MultimediaApi::SetEvent),"timeSetEvent",&[D,D,P,P,D],ReturnConvention::Uint32,"No multimedia callback/event timer owner or backend; zero timer ID, no callback/event and unchanged LastError",[ArchitecturePlan {dlls:&["winmm.dll"],execution:ExecutionPolicy::LegacyUnimplemented};2]),
+    Contract::new(ApiId::Multimedia(MultimediaApi::KillEvent),"timeKillEvent",&[D],ReturnConvention::Uint32,"No allocated multimedia timer ID: TIMERR_NOCANDO(97), no effect or LastError change",[ArchitecturePlan {dlls:&["winmm.dll"],execution:ExecutionPolicy::LegacyUnimplemented};2]),
     declaration(MultimediaApi::Caps, "timeGetDevCaps", &[P, D]),
     declaration(MultimediaApi::BeginPeriod, "timeBeginPeriod", &[D]),
     declaration(MultimediaApi::EndPeriod, "timeEndPeriod", &[D]),

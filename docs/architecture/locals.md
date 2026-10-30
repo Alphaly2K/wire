@@ -1,27 +1,17 @@
 # TLS/FLS 调用边界
 
-八个 TLS/FLS export 的 provider、scalar ABI 与 typed ID 已汇入 `win32/catalog/locals.rs`。独立基线、切换和完整验收见 [迁移记录](../reports/refactoring-locals-2026-10-16.md)。
+新 Wasm 入口在两种 ABI 支持 TlsAlloc/GetValue/SetValue/Free 和 FlsAlloc/GetValue/SetValue/Free，使用共享 catalog 的八个契约。PE32 provider 为 kernel32，Win64 为 kernel32/kernelbase；索引按 DWORD 截断，值与析构地址保留指针宽度。
 
-PE32 的两张 map 与两个递增计数器由 `win32/kernel/locals32::LocalSlots32` 私有持有，ApiState 通过组件组合，旧四个公开内部字段不再暴露。allocate/get/set/free 只接收 LocalKind、TID、索引和值；不借用 CPU、guest 内存、ApiState、调度器或 LastError。适配器负责获取当前 TID、维护错误/trace/callback 说明及提交返回 frame。Win64 的固定槽标记与 callback identity 随后归入 LocalSlots64，值继续位于原 TEB；没有统一两端槽位策略。[PE32 状态拆分验收](../reports/refactoring-locals32-owner-2026-10-16.md)独立记录性能与故障语义。
+进程复用便携槽标记组件，提供 64 个动态 TLS 和 128 个 FLS 索引，均从零分配并复用空槽。每个线程独立保存值；尚无独立 fiber 对象，FLS 当前对应每线程的默认 fiber。动态 TLS 与 PE 模块的静态 TLS 索引和指针表相互独立。
 
-| 行为 | PE32 | Win64 |
-| --- | --- | --- |
-| provider | kernel32 | kernel32/kernelbase |
-| 索引分配 | 从 1 递增，释放后不复用 | TLS 64 / FLS 128 个槽，复用空槽 |
-| 索引/值 | DWORD 索引和 32 位值 | DWORD 索引；值和 FLS callback 保留完整指针宽度 |
-| 值的存储 | `(TID, slot)` map；接受未分配索引 | 当前 TEB 的 TLS/FLS 区域；先验证槽有效 |
-| GetLastError 影响 | TlsGetValue 清零；FlsGetValue 保持 | 两种 getter 成功清零；无效槽返回 0/error 87 |
-| 释放 | 删除所有 TID 的同索引值，无效索引也返回 1 | 保持槽标记与 TEB 写入的原顺序 |
-| FLS callback | 分配时记录原“callback not invoked”说明 | FlsFree 若存在 callback 且任一存活线程有非零值，返回原错误，保留槽位 |
+初始线程和 worker 均有两页 TEB。PE32 动态 TLS 位于 `TEB+0xe10`，Win64 位于 `TEB+0x1480`；FLS 私有值区位于 `TEB+0x1800`。worker 静态 TLS 指针表仍位于第二页起始处，三者不重叠；PE32 初始 TEB 的两页范围避开 PEB 与共享用户数据地址。调用者通过装载信息取得 TEB，不能假定固定地址。
 
-Win64 分配先检查所有存活线程的目标 TEB 槽可写，再逐一写零，最后提交槽标记。输出 fault 不提前占用槽。TLS free 仍只清当前 TEB，再退休全局槽；下次分配按原规则清所有存活线程。FLS free 在原回调检查之后退休槽，不顺带更改残留 TEB 数据。
+Alloc 先检查全部存活线程的目标槽可写，统一写零后才占用索引。无空槽返回 OUT_OF_INDEXES（0xffffffff）和错误 8。无效或已释放索引的 Get/Set/Free 返回零及错误 87。TlsGetValue 成功清零 LastError；FlsGetValue 成功保留 LastError，遵循各自的[公开](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-tlsgetvalue)[契约](https://learn.microsoft.com/en-us/windows/win32/api/fibersapi/nf-fibersapi-flsgetvalue)。其余成功操作保留 LastError。
 
-Win64 冷绑定由 LocalApi 选择原 TlsGet/TlsSet/TlsFree HotImport；执行 body 与 delay-general frame 检查保留。PE32 仍在公共返回阶段提交 EAX、frame 和 TEB error；返回槽 fault 可以发生在分配索引或资源变更之后。两端不同的故障顺序不统一为事务。
+TlsFree 检查并清空全部存活线程的对应值后释放索引，不释放值指向的内存。FlsFree 还为每个非零值捕获原析构地址与参数。全部槽和首个调用帧可写后，清空值并释放旧索引，再由调用线程依次执行普通 JIT 回调。回调可以嵌套调用服务、释放新索引或重新分配同一索引；在途队列持有旧地址/参数，完成时不修改替代索引。
 
-动态查询通过同一 provider 契约；历史上剩余的 FLS 与 timeGetTime 手工 lookup 名单已删除，并以 fresh-provider 测试约束合法 DLL 范围。`GetProcAddress` 已有 gateway fallback 保留。
+worker 返回或显式 ExitThread 在 DLL_THREAD_DETACH 前收集当前线程的 FLS 析构。先预检并清零带析构的槽，再按索引顺序调用非零值，之后才通知 DLL 和释放线程资源。每个退出阶段收集一次；回调中重新写入的值不再次遍历。普通 EXE 原始入口 RET 仍交回宿主为 Returned，进程有序退出与 fiber 生命周期继续按 GOAL 中的范围推进。
 
-`win32/kernel/locals64.rs` 私有拥有 TLS 64/FLS 128 两个原数组，提供 vacancy、受检查询、显式 commit 与按索引顺序遍历 active FLS。Runtime64 不再暴露这两张表。架构层仍先检查/写 TEB，再 commit 标记；FLS destructor 保留先读取并预检全部 active 槽，再清 callback 槽的两遍处理，包括 callback=0 时原先的值读取。静态 TLS 模板/块与 thread 创建仍由原进程路径管理。
+析构使用与异常、窗口过程相同的保存状态和 CallFrame，PE32 接收一个 stdcall 栈参数，Win64 使用 RCX。FlsFree 完成恢复原调用者并返回 TRUE；退出析构保留退出码。后续调用帧故障保留剩余队列，不重放已经完成的回调。首帧故障不释放索引或清空值；参数和返回帧先保存。完成 API 计一 work，实际回调指令独立退休，推进队列不增加虚拟退休或时钟采样。
 
-普通 TLS/FLS adapter 也已收窄到 LocalSlots64、Memory 和只读 Threads，Runtime64 只组合资源。Threads 按原 BTreeMap 顺序提供存活线程 TEB，不建立快照或额外分配；两遍 preflight/写零与 FLS free 检查保持。专用 hot TLS、槽位模型和 FLS destructor 未改。
-
-Win64 owner 基线 `1e3a534`。普通 local_call 与 hot TLS 的 TEB/error/commit 主体归一核对保持；完整 release Win64 269、fmt/release lib/bin strict Clippy/build 通过。无新增分配、槽容量或动态分发，按普通状态封装不跑性能矩阵。证据 `wire-out/refactoring-2026-10-14/r3-locals64-owner-{source-checks,verification}.json`。
+旧 PE32 的单调 map、旧 Win64 的受限析构适配器继续作为迁移来源；新入口直接复用槽标记，不调用旧执行器。跨退出析构的非局部展开、独立 fiber 创建/切换/销毁和进程退出仍待接入。

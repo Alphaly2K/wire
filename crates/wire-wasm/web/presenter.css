@@ -1,0 +1,6 @@
+.wire-window { display: inline-flex; flex-direction: column; margin: 8px; overflow: hidden; border: 1px solid #757575; background: #fff; color: #171717; vertical-align: top; }
+.wire-window[hidden], .wire-window canvas[hidden] { display: none; }
+.wire-window header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 4px 8px; background: #ededed; font: 14px system-ui, sans-serif; }
+.wire-window header button { border: 0; background: transparent; color: inherit; cursor: pointer; font: 20px system-ui, sans-serif; }
+.wire-surface { line-height: 0; }
+.wire-surface canvas { display: block; max-width: 100%; height: auto; image-rendering: pixelated; }

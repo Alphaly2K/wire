@@ -20,12 +20,22 @@ pub enum WindowControlApi {
     Position,
     SendA,
     SendW,
+    SendTimeoutA,
+    SendTimeoutW,
 }
 impl WindowControlApi {
+    pub(crate) const fn timeout(self) -> bool {
+        matches!(self, Self::SendTimeoutA | Self::SendTimeoutW)
+    }
     pub(crate) fn wide(self) -> bool {
         matches!(
             self,
-            Self::CreateW | Self::DefaultW | Self::DefaultDialogW | Self::CallW | Self::SendW
+            Self::CreateW
+                | Self::DefaultW
+                | Self::DefaultDialogW
+                | Self::CallW
+                | Self::SendW
+                | Self::SendTimeoutW
         )
     }
     pub(crate) fn default_procedure(self) -> bool {
@@ -50,6 +60,13 @@ const fn declaration(
     parameters: &'static [Parameter],
     returns: ReturnConvention,
 ) -> Contract {
+    if id.timeout() {
+        return Contract::new(
+            ApiId::WindowControl(id), name, parameters, returns,
+            "Same-thread WNDPROC continuation, full-width message/result and saved original frame; timeout ignored for the same queue, ERRORONEXIT detects window destruction; optional result is preflighted before callback and published after a frozen completion. Cross-thread, broadcast and cross-A/W text marshalling remain unavailable.",
+            [ArchitecturePlan { dlls: &["user32.dll"], execution: ExecutionPolicy::LegacyUnimplemented }; 2],
+        );
+    }
     Contract::new(
         ApiId::WindowControl(id), name, parameters, returns,
         "retain original creation/default/forwarding callback, message blocking, return-frame and partial state commit rules; Win64 WNDPROC requires process executor and valid callback frame, UpdateWindow remains scalar; omitted Win64 APIs absent; static-only kernel aliases",
@@ -59,7 +76,7 @@ const fn declaration(
 }
 use Parameter::{Int32 as I, Pointer as P, Uint32 as U};
 use ReturnConvention::{BoolLastError as B, Pointer as H};
-pub static WINDOW_CONTROL_CONTRACTS: [Contract; 17] = [
+pub static WINDOW_CONTROL_CONTRACTS: [Contract; 19] = [
     declaration(
         WindowControlApi::CreateA,
         "CreateWindowExA",
@@ -122,4 +139,16 @@ pub static WINDOW_CONTROL_CONTRACTS: [Contract; 17] = [
     ),
     declaration(WindowControlApi::SendA, "SendMessageA", &[P, U, P, P], H),
     declaration(WindowControlApi::SendW, "SendMessageW", &[P, U, P, P], H),
+    declaration(
+        WindowControlApi::SendTimeoutA,
+        "SendMessageTimeoutA",
+        &[P, U, P, P, U, U, P],
+        H,
+    ),
+    declaration(
+        WindowControlApi::SendTimeoutW,
+        "SendMessageTimeoutW",
+        &[P, U, P, P, U, U, P],
+        H,
+    ),
 ];

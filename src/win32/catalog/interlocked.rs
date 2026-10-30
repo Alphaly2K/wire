@@ -8,6 +8,8 @@ pub enum InterlockedApi {
     CompareExchange,
     InitializeSListHead,
     FlushSList,
+    PopSList,
+    PushSList,
 }
 
 const fn declaration(
@@ -15,16 +17,19 @@ const fn declaration(
     name: &'static str,
     parameters: &'static [Parameter],
     returns: ReturnConvention,
-    win64: bool,
+    architectures: [bool; 2],
 ) -> Contract {
     Contract::new(
         ApiId::Interlocked(id), name, parameters, returns,
-        "cooperative guest execution; PE32 wrapping LONG operations and aligned 8-byte SLIST headers; failed compare needs no write; Win64 only aligned 16-byte initialization; preserve checked access, LastError and architecture-specific return-frame order",
+        "cooperative guest execution; PE32 wrapping LONG operations and aligned 8-byte SLIST headers; failed compare needs no write; Win64 aligned 16-byte SLIST headers and indivisible entry push/pop; preserve checked access, LastError and architecture-specific return-frame order",
         [
-            ArchitecturePlan { dlls: &["kernel32.dll"], execution: ExecutionPolicy::Typed },
             ArchitecturePlan {
-                dlls: if win64 { &["kernel32.dll", "kernelbase.dll"] } else { &[] },
-                execution: if win64 { ExecutionPolicy::Typed } else { ExecutionPolicy::Absent },
+                dlls: if architectures[0] { &["kernel32.dll"] } else { &[] },
+                execution: if architectures[0] { ExecutionPolicy::Typed } else { ExecutionPolicy::Absent },
+            },
+            ArchitecturePlan {
+                dlls: if architectures[1] { &["kernel32.dll", "kernelbase.dll"] } else { &[] },
+                execution: if architectures[1] { ExecutionPolicy::Typed } else { ExecutionPolicy::Absent },
             },
         ],
     )
@@ -33,47 +38,61 @@ const fn declaration(
 use Parameter::{Int32 as I, Pointer as P};
 use ReturnConvention::{Pointer as R, Uint32 as U};
 
-pub static INTERLOCKED_CONTRACTS: [Contract; 6] = [
+pub static INTERLOCKED_CONTRACTS: [Contract; 8] = [
     declaration(
         InterlockedApi::Increment,
         "InterlockedIncrement",
         &[P],
         U,
-        false,
+        [true, false],
     ),
     declaration(
         InterlockedApi::Decrement,
         "InterlockedDecrement",
         &[P],
         U,
-        false,
+        [true, false],
     ),
     declaration(
         InterlockedApi::Exchange,
         "InterlockedExchange",
         &[P, I],
         U,
-        false,
+        [true, false],
     ),
     declaration(
         InterlockedApi::CompareExchange,
         "InterlockedCompareExchange",
         &[P, I, I],
         U,
-        false,
+        [true, false],
     ),
     declaration(
         InterlockedApi::InitializeSListHead,
         "InitializeSListHead",
         &[P],
         ReturnConvention::Void,
-        true,
+        [true, true],
     ),
     declaration(
         InterlockedApi::FlushSList,
         "InterlockedFlushSList",
         &[P],
         R,
-        false,
+        [true, false],
+    ),
+    declaration(
+        InterlockedApi::PopSList,
+        "InterlockedPopEntrySList",
+        &[P],
+        R,
+        [false, true],
+    ),
+    declaration(
+        InterlockedApi::PushSList,
+        "InterlockedPushEntrySList",
+        &[P, P],
+        R,
+        [false, true],
     ),
 ];

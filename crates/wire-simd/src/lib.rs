@@ -81,7 +81,7 @@ macro_rules! scalar {
                 round: Round,
                 exception: &mut bool,
             ) -> Result<u64, String> {
-                state.to_integer::<Self>(bits, width, round, exception)
+                state.convert_integer::<Self>(bits, width, round, exception)
             }
             #[inline(never)]
             fn arithmetic(
@@ -130,7 +130,7 @@ macro_rules! scalar {
     };
 }
 scalar!(Single, fast::single);
-scalar!(Double);
+scalar!(Double, fast::double);
 
 macro_rules! conversion {
     ($from:ty, $to:ty) => {

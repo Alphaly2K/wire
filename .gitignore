@@ -1,5 +1,8 @@
-/target
+target/
+.idea/
 *.log
 wire-out/
 tests/control/*.exe
 .DS_Store
+__pycache__/
+*.pyc

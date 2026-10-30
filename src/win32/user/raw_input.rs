@@ -1,7 +1,7 @@
 //! Logical host devices, registrations and bounded raw packets; no guest memory.
 use std::collections::BTreeMap;
 
-pub(crate) const MOUSE: u64 = 0x57010001;
+pub(crate) use super::mouse_pointer::MOUSE;
 pub(crate) const KEYBOARD: u64 = 0x57010002;
 pub(crate) const CAPACITY: usize = 4096;
 
@@ -11,6 +11,7 @@ pub(crate) struct Registration {
     pub flags: u32,
     pub target: u64,
 }
+
 pub(crate) struct Packet {
     pub window: u64,
     pub tid: u64,
@@ -21,12 +22,16 @@ pub(crate) struct Packet {
     payload: Vec<u8>,
 }
 impl Packet {
-    pub fn bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(24 + self.payload.len());
+    pub fn size(&self, width: usize) -> usize {
+        8 + width * 2 + self.payload.len()
+    }
+    pub fn bytes(&self, width: usize) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.size(width));
         bytes.extend(self.kind.to_le_bytes());
-        bytes.extend((24 + self.payload.len() as u32).to_le_bytes());
-        bytes.extend(if self.kind == 0 { MOUSE } else { KEYBOARD }.to_le_bytes());
-        bytes.extend(0u64.to_le_bytes()); // RIM_INPUT: foreground delivery.
+        bytes.extend((self.size(width) as u32).to_le_bytes());
+        let device = if self.kind == 0 { MOUSE } else { KEYBOARD };
+        bytes.extend_from_slice(&device.to_le_bytes()[..width]);
+        bytes.extend_from_slice(&0u64.to_le_bytes()[..width]); // RIM_INPUT: foreground delivery.
         bytes.extend(&self.payload);
         bytes
     }
@@ -46,6 +51,24 @@ impl Default for RawInput {
     }
 }
 impl RawInput {
+    pub fn check_capacity(&self, additional: usize, handle_end: u64) -> Result<(), String> {
+        if self
+            .packets
+            .len()
+            .checked_add(additional)
+            .is_none_or(|n| n > CAPACITY)
+        {
+            return Err("raw input packet capacity exceeded".into());
+        }
+        if self
+            .next
+            .checked_add(additional as u64)
+            .is_none_or(|n| n > handle_end)
+        {
+            return Err("raw input handle exhaustion".into());
+        }
+        Ok(())
+    }
     pub fn remove_window(&mut self, window: u64) {
         self.registrations.retain(|_, r| r.target != window);
         self.packets.retain(|_, p| p.window != window);
@@ -83,15 +106,15 @@ impl RawInput {
                 payload[12 + n * 4..16 + n * 4].copy_from_slice(&normalized.to_le_bytes());
             }
             let button: u16 = match message {
-                0x201 => 1,
+                0x201 | 0x203 => 1,
                 0x202 => 2,
-                0x204 => 4,
+                0x204 | 0x206 => 4,
                 0x205 => 8,
-                0x207 => 16,
+                0x207 | 0x209 => 16,
                 0x208 => 32,
-                0x20b if key >> 16 == 1 => 64,
+                0x20b | 0x20d if key >> 16 == 1 => 64,
                 0x20c if key >> 16 == 1 => 128,
-                0x20b if key >> 16 == 2 => 256,
+                0x20b | 0x20d if key >> 16 == 2 => 256,
                 0x20c if key >> 16 == 2 => 512,
                 0x20a => 0x400,
                 0x20e => 0x800,
@@ -109,9 +132,7 @@ impl RawInput {
             payload[6..8].copy_from_slice(&(key as u16).to_le_bytes());
             payload[8..12].copy_from_slice(&message.to_le_bytes());
         }
-        if self.packets.len() >= CAPACITY {
-            return Err("raw input packet capacity exceeded".into());
-        }
+        self.check_capacity(1, u64::MAX)?;
         let handle = self.next;
         self.next = self
             .next
@@ -130,5 +151,36 @@ impl RawInput {
             },
         );
         Ok(Some((handle, no_legacy)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn pe32_packet_identity_limit_preflights_the_whole_batch() {
+        let mut input = RawInput {
+            next: u32::MAX.into(),
+            ..Default::default()
+        };
+        input.registrations.insert(
+            2,
+            Registration {
+                usage: 2,
+                flags: 0,
+                target: 0,
+            },
+        );
+        assert!(input.check_capacity(2, 1 << 32).is_err());
+        assert!(input.packets.is_empty());
+        input.check_capacity(1, 1 << 32).unwrap();
+        assert_eq!(
+            input
+                .host(1, [0x200, 0, 0], [0, 0], [1024, 768], |_| Some(1))
+                .unwrap(),
+            Some((u32::MAX.into(), false))
+        );
+        assert!(input.check_capacity(1, 1 << 32).is_err());
+        assert_eq!(input.packets.len(), 1);
     }
 }

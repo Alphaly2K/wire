@@ -28,6 +28,9 @@ pub enum FileApi {
     GetFileInformationByHandle,
     GetFileInformationByHandleEx,
     GetFileTime,
+    SetFileTime,
+    GetTempFileNameA,
+    GetTempFileNameW,
     CreateDirectoryA,
     CreateDirectoryW,
     DeleteFileA,
@@ -40,6 +43,10 @@ pub enum FileApi {
     RemoveDirectoryW,
     CopyFileA,
     CopyFileW,
+    CopyFileExA,
+    CopyFileExW,
+    ReplaceFileA,
+    ReplaceFileW,
     FindFirstFileA,
     FindFirstFileW,
     FindFirstFileExA,
@@ -60,6 +67,14 @@ pub enum FileApi {
     GetConsoleMode,
     WriteConsoleW,
     NtQueryDirectory,
+    PeekNamedPipe,
+    CancelIo,
+    CancelIoEx,
+    OverlappedResult,
+    OverlappedResultEx,
+    CancelSynchronous,
+    Lock,
+    Unlock,
 }
 
 impl FileApi {
@@ -79,6 +94,9 @@ impl FileApi {
                 | Self::MoveFileExW
                 | Self::RemoveDirectoryW
                 | Self::CopyFileW
+                | Self::CopyFileExW
+                | Self::ReplaceFileW
+                | Self::GetTempFileNameW
                 | Self::FindFirstFileW
                 | Self::FindFirstFileExW
                 | Self::FindNextFileW
@@ -210,7 +228,31 @@ const fn section(
     )
 }
 
-pub static FILE_CONTRACTS: [Contract; 58] = [
+const fn portable(
+    id: FileApi,
+    name: &'static str,
+    parameters: &'static [Parameter],
+    returns: ReturnConvention,
+) -> Contract {
+    Contract::new(ApiId::File(id), name, parameters, returns,
+        "bounded virtual files, architecture-width pointers and DWORD carriers; callers validate complete inputs and outputs before namespace/metadata publication; native legacy adapters have no route",
+        [ArchitecturePlan { dlls: &[], execution: ExecutionPolicy::Absent },
+         ArchitecturePlan { dlls: &[], execution: ExecutionPolicy::Absent }])
+}
+
+pub static FILE_CONTRACTS: [Contract; 73] = [
+    portable(FileApi::CancelSynchronous,"CancelSynchronousIo",&[P],B),
+    portable(FileApi::Lock,"LockFile",&[P,D,D,D,D],B),
+    portable(FileApi::Unlock,"UnlockFile",&[P,D,D,D,D],B),
+    portable(FileApi::OverlappedResult, "GetOverlappedResult", &[P,P,P,D], B),
+    portable(FileApi::OverlappedResultEx, "GetOverlappedResultEx", &[P,P,P,D,D], B),
+    portable(FileApi::CopyFileExA, "CopyFileExA", &[P, P, P, P, P, D], B),
+    portable(FileApi::CopyFileExW, "CopyFileExW", &[P, P, P, P, P, D], B),
+    portable(FileApi::ReplaceFileA, "ReplaceFileA", &[P, P, P, D, P, P], B),
+    portable(FileApi::ReplaceFileW, "ReplaceFileW", &[P, P, P, D, P, P], B),
+    portable(FileApi::SetFileTime, "SetFileTime", &[P, P, P, P], B),
+    portable(FileApi::GetTempFileNameA, "GetTempFileNameA", &[P, P, D, P], U),
+    portable(FileApi::GetTempFileNameW, "GetTempFileNameW", &[P, P, D, P], U),
     declaration(
         FileApi::CreateFileA,
         "CreateFileA",
@@ -444,4 +486,7 @@ pub static FILE_CONTRACTS: [Contract; 58] = [
         [ArchitecturePlan { dlls: &[], execution: ExecutionPolicy::Absent },
          ArchitecturePlan { dlls: &["ntdll.dll"], execution: ExecutionPolicy::Typed }],
     ),
+    portable(FileApi::PeekNamedPipe, "PeekNamedPipe", &[P, P, D, P, P, P], B),
+    portable(FileApi::CancelIo, "CancelIo", &[P], B),
+    portable(FileApi::CancelIoEx, "CancelIoEx", &[P, P], B),
 ];

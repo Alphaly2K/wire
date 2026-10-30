@@ -13,6 +13,14 @@ pub enum ProcessQueryApi {
     ActiveGroupCount,
     MaximumGroupCount,
     PackageId,
+    MemoryInfo,
+    Priority,
+    SetPriority,
+    Times,
+    WorkingSet,
+    SetWorkingSet,
+    Enumerate,
+    InputIdle,
 }
 
 const fn declaration(
@@ -37,7 +45,68 @@ const fn declaration(
 
 use Parameter::{Pointer as P, Uint16 as W, Uint32 as D};
 use ReturnConvention::{BoolLastError as B, Pointer as R, Uint32 as U};
-pub static PROCESS_QUERY_CONTRACTS: [Contract; 11] = [
+pub static PROCESS_QUERY_CONTRACTS: [Contract; 21] = [
+    support(
+        ProcessQueryApi::Priority,
+        "GetPriorityClass",
+        &[P],
+        U,
+        &["kernel32.dll", "kernelbase.dll"],
+    ),
+    support(
+        ProcessQueryApi::SetPriority,
+        "SetPriorityClass",
+        &[P, D],
+        B,
+        &["kernel32.dll", "kernelbase.dll"],
+    ),
+    support(
+        ProcessQueryApi::Times,
+        "GetProcessTimes",
+        &[P, P, P, P, P],
+        B,
+        &["kernel32.dll", "kernelbase.dll"],
+    ),
+    support(
+        ProcessQueryApi::WorkingSet,
+        "GetProcessWorkingSetSize",
+        &[P, P, P],
+        B,
+        &["kernel32.dll", "kernelbase.dll"],
+    ),
+    support(
+        ProcessQueryApi::SetWorkingSet,
+        "SetProcessWorkingSetSize",
+        &[P, P, P],
+        B,
+        &["kernel32.dll", "kernelbase.dll"],
+    ),
+    support(
+        ProcessQueryApi::Enumerate,
+        "K32EnumProcesses",
+        &[P, D, P],
+        B,
+        &["kernel32.dll", "kernelbase.dll"],
+    ),
+    support(
+        ProcessQueryApi::Enumerate,
+        "EnumProcesses",
+        &[P, D, P],
+        B,
+        &["psapi.dll"],
+    ),
+    support(
+        ProcessQueryApi::InputIdle,
+        "WaitForInputIdle",
+        &[P, D],
+        U,
+        &["user32.dll"],
+    ),
+    memory_info("GetProcessMemoryInfo", &["psapi.dll"]),
+    memory_info(
+        "K32GetProcessMemoryInfo",
+        &["kernel32.dll", "kernelbase.dll"],
+    ),
     declaration(
         ProcessQueryApi::PackageId,
         "GetCurrentPackageId",
@@ -90,3 +159,21 @@ pub static PROCESS_QUERY_CONTRACTS: [Contract; 11] = [
         U,
     ),
 ];
+
+const fn memory_info(name: &'static str, dlls: &'static [&'static str]) -> Contract {
+    Contract::new(
+        ApiId::ProcessQuery(ProcessQueryApi::MemoryInfo), name, &[P, P, D], B,
+        "current-process live VMM counters and retained peaks; 40/72-byte base and 44/80-byte extended layouts, short buffers fail with 122 before handle checks; QUERY or QUERY_LIMITED access; mapped/image pages excluded from private commit; no paging or guest kernel pool; full output preflight, success preserves LastError; EX2 unavailable",
+        [ArchitecturePlan { dlls, execution: ExecutionPolicy::Typed }; 2],
+    )
+}
+
+const fn support(
+    id: ProcessQueryApi,
+    name: &'static str,
+    parameters: &'static [Parameter],
+    returns: ReturnConvention,
+    dlls: &'static [&'static str],
+) -> Contract {
+    Contract::new(ApiId::ProcessQuery(id),name,parameters,returns,"Existing virtual process owner, access and identity; priority and process-family enumeration are shared state; unavailable CPU accounting, working-set controls or input-idle monitoring fail explicitly",[ArchitecturePlan {dlls,execution:ExecutionPolicy::LegacyUnimplemented};2])
+}

@@ -1,0 +1,31 @@
+import {core,encode,Exit,equal,checks,snapshot,machine,frame,call,finish} from './gdi-harness.mjs';
+const api=(t,name,args=[])=>call(t,name,args,'kernel32.dll');
+const put=(vm,p,v,width=4)=>vm.write(p,encode(v,width));
+for(const mode of [32,64]){
+ const t=await machine(mode),{vm}=t,current=(1n<<BigInt(mode))-2n,width=mode/8,p=0x22000n,out=0x23000n;
+ const description=[0x41n,0x65e5n,0xd83dn,0xde80n,0xd800n,0x42n];vm.write(p,description.concat(0n).flatMap(v=>Array.from(encode(v,2))));put(vm,t.error,123n);
+ const ok=value=>equal(value&0x80000000n,0n);
+ ok(api(t,'SetThreadDescription',[current,p]));ok(api(t,'GetThreadDescription',[current,out]));const first=vm.readInt(out,width);
+ equal(api(t,'LocalSize',[first]),14n);for(let n=0;n<description.length;n++)equal(vm.readInt(first+BigInt(n*2),2),description[n]);equal(vm.readInt(first+12n,2),0n);
+ ok(api(t,'SetThreadDescription',[current,0n]));ok(api(t,'GetThreadDescription',[current,out]));const empty=vm.readInt(out,width);equal(vm.readInt(empty,2),0n);equal(api(t,'LocalSize',[empty]),2n);equal(vm.readInt(first+2n,2),0x65e5n);
+ equal(api(t,'LocalFree',[empty]),0n);equal(api(t,'LocalFree',[first]),0n);
+ vm.write(0x30000n,[0xb8,37,0,0,0,...(mode===32?[0xc2,4,0]:[0xc3])]);const worker=api(t,'CreateThread',[0n,65536n,0x30000n,0n,4n,0n]);
+ ok(api(t,'SetThreadDescription',[worker,p]));ok(api(t,'GetThreadDescription',[current,out]));const main=vm.readInt(out,width);equal(vm.readInt(main,2),0n);equal(api(t,'LocalFree',[main]),0n);
+ const query=api(t,'OpenThread',[0x800n,0n,2n]),setter=api(t,'OpenThread',[0x400n,0n,2n]);
+ equal(api(t,'SetThreadDescription',[query,0xdead0000n]),0xd0000022n);put(vm,out,0x5555n,width);equal(api(t,'GetThreadDescription',[setter,out]),0xd0000022n);equal(vm.readInt(out,width),0n);
+ equal(api(t,'SetThreadDescription',[0n,p]),0xd0000008n);equal(api(t,'GetThreadDescription',[0n,out]),0xd0000008n);equal(vm.readInt(out,width),0n);
+ ok(api(t,'GetThreadDescription',[query,out]));const value=vm.readInt(out,width);equal(vm.readInt(value+8n,2),0xd800n);equal(api(t,'LocalFree',[value]),0n);
+ const cross=0x24fffn;vm.write(cross,[0x42,0,0,0]);frame(t,'SetThreadDescription',[worker,cross],'kernel32.dll');equal(core.wire_protect(t.handle,0x25000n,4096n,1),0);
+ let before=snapshot(t);equal(vm.service().reason,Exit.Fault);equal(snapshot(t),before);equal(core.wire_protect(t.handle,0x25000n,4096n,4),0);
+ ok(api(t,'GetThreadDescription',[worker,out]));const retained=vm.readInt(out,width);equal(vm.readInt(retained,2),0x41n);equal(api(t,'LocalFree',[retained]),0n);
+ vm.write(0x40000n,new Uint8Array(65536).fill(0x41));equal(api(t,'SetThreadDescription',[current,0x40000n]),0xd000000dn);
+ put(vm,0x4fffen,0n,2);ok(api(t,'SetThreadDescription',[current,0x40000n]));ok(api(t,'GetThreadDescription',[current,out]));const maximum=vm.readInt(out,width);
+ equal(api(t,'LocalSize',[maximum]),65536n);equal(vm.readInt(maximum+65532n,2),0x4141n);equal(vm.readInt(maximum+65534n,2),0n);equal(api(t,'LocalFree',[maximum]),0n);
+ put(vm,cross,0x5555n,width);frame(t,'GetThreadDescription',[worker,cross],'kernel32.dll');equal(core.wire_protect(t.handle,0x25000n,4096n,2),0);before=snapshot(t);
+ equal(vm.service().reason,Exit.Fault);equal(snapshot(t),before);equal(vm.readInt(cross,1),0x55n);equal(core.wire_protect(t.handle,0x25000n,4096n,4),0);equal(vm.service().reason,Exit.Dispatch);equal(api(t,'LocalFree',[vm.readInt(cross,width)]),0n);
+ equal(api(t,'ResumeThread',[worker]),1n);frame(t,'WaitForSingleObject',[worker,0xffffffffn],'kernel32.dll');await finish(t);
+ ok(api(t,'GetThreadDescription',[worker,out]));const exited=vm.readInt(out,width);equal(vm.readInt(exited+2n,2),0x65e5n);equal(api(t,'LocalFree',[exited]),0n);
+ for(const handle of [worker,query,setter])equal(api(t,'CloseHandle',[handle]),1n);equal(vm.readInt(t.error),123n);
+ for(const name of ['SetThreadDescription','GetThreadDescription'])equal(vm.bind('kernelbase.dll',name),vm.bind('kernel32.dll',name));equal(t.time.calls,0);equal(t.time.wallCalls,0);vm.dispose();
+}
+console.log(`${checks} thread description UTF-16/local ownership/rights/lifetime/fault/HRESULT checks passed`);

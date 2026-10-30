@@ -1,9 +1,7 @@
 # 系统与临时目录查询
 
-十项 `SYSTEM_PATH_CONTRACTS` 统一目录查询身份、参数顺序、DWORD 截断及架构范围。PE32 均保留 kernel32 的既有 ABI-only 策略；Win64 支持六项 Windows/system A/W 查询及两项 Wide temp 查询，静态和动态 provider 为 kernel32/kernelbase。ANSI temp 查询在 Win64 继续 absent。
+新 Wasm 入口接入十项服务，两种 ABI 均接受 kernel32/kernelbase：GetSystemDirectoryA/W、GetWindowsDirectoryA/W、GetSystemWindowsDirectoryA/W、GetTempPathA/W 和 GetTempPath2A/W。共享目录中的旧 PE32 ABI-only 和 Win64 ANSI temp absent 策略仅作用于旧入口。
 
-Windows、System32 和 Temp 默认路径移入不可变 GuestEnvironment；`win32::x64::system_paths` 只借 Memory、ID、参数和环境描述，独立完成计数与受检 copyout。系统目录参数为 buffer/count，临时目录为 count/buffer，长度以 A/W 字符单位计算。不足容量返回包括 NUL 的所需长度且不写输出；成功写入 NUL 并返回不含 NUL 的长度。保留 LastError，不检查或创建宿主目录。
+系统目录为虚拟 profile 的 `C:\Windows\System32`，两类 Windows 目录均为 `C:\Windows`。临时目录依次选择客体环境中非空的 TMP、TEMP、USERPROFILE，均不存在时使用 Windows 目录；当前普通用户的 GetTempPath2 使用相同选择。路径在虚拟命名空间按当前目录做词法解析，临时目录带末尾反斜杠，不要求目录已经存在，也不创建目录或访问宿主文件系统。
 
-独立基线 `dba0edf` 在旧实现上固定双架构行为：Win64 覆盖八项查询的 provider、NULL 长度查询、容量边界、A/W 字节、尾部哨兵、返回槽别名及跨页故障时 CPU/API count/output；PE32 覆盖十项 ABI-only 名称和 kernelbase 未知清栈。此批不涉及执行器或内存/cache 热路径，不做性能计时；证据位于 `wire-out/refactoring-2026-10-14/r2-system-paths-*`。
-
-相关 release 双架构各 1 项、catalog 一致性、fmt、release lib/bin strict Clippy 和 release build 通过。八项现有 Win64 arity/DWORD 与两项 absent 名称对照旧元数据保持，十项 PE32 参数槽与原 Wine ABI 一致。源码/executable SHA 记录于验证 JSON，累计 **851 exports**。
+系统目录参数顺序为 buffer/count，临时目录为 count/buffer，容量截断为 DWORD。ANSI 使用 CP932 字节数，Wide 使用 UTF-16 code unit；不足容量返回包含 NUL 的所需长度并保持输出和 LastError，成功写入 NUL 并返回不含 NUL 的长度。非法虚拟路径返回零及对应错误码。完整输出统一预检，故障可重试；返回槽与输出重叠时仍使用保存的调用帧。服务完成计一 work、不计客体退休，不采样时间。

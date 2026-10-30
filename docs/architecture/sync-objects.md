@@ -1,21 +1,15 @@
-# 事件与信号量调用边界
+# 事件与信号量
 
-16 个 export 的 provider、scalar ABI 和执行策略集中在 `win32/catalog/sync_objects.rs`，装载或动态查询时绑定 SyncObjectApi。PE32 适配器留在原 API facade，Win64 的 typed adapter 位于 `x64/runtime/sync_objects.rs`；执行时按 ID 选择操作及 A/W、Ex、Open 变体，不再解析 export 字符串。命名对象、句柄、等待调度和错误提交的 owner 保持。
+新 Wasm 入口在 PE32 与 Win64 均支持 CreateEventA/W、CreateEventExA/W、OpenEventA/W、SetEvent、ResetEvent、CreateSemaphoreA/W、CreateSemaphoreExA/W、OpenSemaphoreA/W 和 ReleaseSemaphore。参数宽度和 provider 来自 `win32/catalog/sync_objects.rs`；PE32 另接入 PulseEvent，AMD64 保持该项 absent。
 
-| export | PE32 | Win64 |
-| --- | --- | --- |
-| CreateEventA/W、OpenEventA/W、SetEvent、ResetEvent | typed；kernel32 | typed；kernel32/kernelbase |
-| CreateEventExA/W | ABI-only；error 120、原 stdcall 清栈 | typed；kernel32/kernelbase |
-| PulseEvent | typed；kernel32 | absent |
-| CreateSemaphoreA/W、ReleaseSemaphore | typed；kernel32 | typed；kernel32/kernelbase |
-| CreateSemaphoreExA/W、OpenSemaphoreA/W | ABI-only；error 120、原 stdcall 清栈 | typed；kernel32/kernelbase |
+事件、信号量、[互斥体](mutexes.md)与[定时器](timers.md)共用有类型的命名空间。同名、同类型创建返回新的句柄别名，保留已有对象状态；跨类型冲突返回错误 6。名称区分大小写，`Local\name` 与 `name` 共用身份，最多接受 260 个 UTF-16 单元。A 名称使用 CP932，W 使用 UTF-16。
 
-参数中的 handle、name、SECURITY_ATTRIBUTES 和 previous-count 指针保留 guest 指针宽度；BOOL、flags、access 和 LONG count 使用 32 位 carrier，Win64 先按契约截断。声明中的 signed LONG 不改变原位模式。Wine spec 仍作为未迁移家族的 ABI 来源，ABI-only 项不因此获得实现。
+创建先检查 LastError 输出，成功时新对象写 0，已有对象写 183；打开与其它成功操作保持 LastError。SECURITY_ATTRIBUTES 接受正确结构长度、空安全描述符及继承标志；非空安全描述符返回错误 50。Ex 创建拒绝未知 flags，访问掩码按对象类型验证。
 
-PE32 沿用共享 handle/name map：同名对象跨 event/mutex/semaphore 类型复用同一 handle；OpenEvent 也保留原名称查找策略。Create 使用旧 error 183 行为，成功的 Set/Reset/Pulse 不额外清错。Set/Pulse 的 manual/auto waiter 数量和 wake 提交保持；Pulse 清除信号。ReleaseSemaphore 先按旧规则相加并 clamp 到 maximum，再写 previous-count，最后唤醒 waiter；输出 fault 时 count 已提交。公共 gateway 最后读取返回地址，返回槽 fault 也可能发生在资源变更之后。
+manual-reset event 在 ResetEvent 前保持信号；auto-reset event 每次成功等待消耗一个信号。SetEvent 不积累重复信号。信号量只接受正数释放量；超过 maximum 返回错误 298，非法数量返回错误 87。ReleaseSemaphore 先检查权限、数量和可选 previous-count 输出，写入成功后才增加计数；输出故障不会增加 credits。对象等待见[混合等待](waits.md)。
 
-Win64 的 Events owner 保留对象与每个 alias 的 access，命名对象跨类型冲突报 error 6。Create/Open 的错误、Local 前缀、长度及 access 检查、非零 SECURITY_ATTRIBUTES 拒绝都按原顺序执行。ReleaseSemaphore 先验证 count/权限并获得 previous，再写 guest 输出，最后提交 count；输出 fault 不增加 count。公共 gateway 仍预先保存 return frame，CPU/API count/trace 的最终提交顺序保持。
+每个别名有独立权限、继承和保护关闭标志，支持 CloseHandle、DuplicateHandle、Get/SetHandleInformation。等待需要 SYNCHRONIZE，Set/ResetEvent 和 ReleaseSemaphore 需要 modify-state；权限不足返回错误 5。对象句柄范围为 `0x90000000..0xa0000000`，最多 1024 个活动句柄，身份单调分配而不复用。最后一个句柄关闭后，已挂起等待仍保留对象和名称，直至等待完成或取消。
 
-Win64 普通调用现直接由 Events 执行，只借 Memory 和只读 Threads；文本读取直接使用受检 codec，Threads 在实际写错误时读取当前 TEB。Runtime64 入口只组合资源；对象、alias 和等待算法保持。与 timer 一起通过完整 Win64 269、library 61 passed / 7 ignored 及严格构建，见 `r3-sync-services64` 证据。
+PulseEvent 要求事件的 modify-state 权限，复用对象身份和普通混合等待的原子获取规则。只检查当前作用域内已经挂起的等待，manual event 完成全部可满足等待，auto event 至多被一次成功等待消费。wait-all 的其余对象或消息不就绪时不消费任何对象；已过期、有待投递 APC 的 alertable wait、被更深回调覆盖的等待不接收脉冲。完成值保存在等待续点中，随后 Set/Reset、关闭句柄、超时或新 APC 均不撤销它；对象引用保留到等待实际完成或取消。事件在 PulseEvent 返回前复位，后来发起的等待不能获得该脉冲。线程间选择顺序不提供公平性保证。
 
-本批不迁移 mutex、timer、WaitFor* 或合作线程调度，也不统一两架构不同的命名、权限、count 和 fault 策略。独立旧行为基线与迁移验收见[本批记录](../reports/refactoring-sync-objects-2026-10-16.md)。
+调用帧在资源变更前完整捕获，输出可覆盖原参数或返回槽；成功计一 work，不计客体退休。普通事件和信号量操作不采样时间；PulseEvent 仅在相关等待有有限 deadline、活动 timer 或消息 timer 时取一个单调样本，时间源失败不改变事件或等待。完成值已冻结的等待恢复时不再采样或获取对象。

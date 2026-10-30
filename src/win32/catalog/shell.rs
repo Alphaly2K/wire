@@ -8,6 +8,12 @@ pub enum ShellApi {
     SpecialFolderW,
     FolderA,
     FolderW,
+    ExecuteA,
+    ExecuteW,
+    FileOperationA,
+    FileOperationW,
+    ExecuteExA,
+    ExecuteExW,
 }
 impl ShellApi {
     pub(crate) fn wide(self) -> bool {
@@ -32,7 +38,23 @@ const fn declaration(
 }
 use Parameter::{Pointer as P, Uint32 as D};
 use ReturnConvention::{BoolLastError as B, Hresult as H, Pointer as R};
-pub static SHELL_CONTRACTS: [Contract; 6] = [
+pub static SHELL_CONTRACTS: [Contract; 12] = [
+    unavailable(ShellApi::ExecuteExA, "ShellExecuteExA", &[P], B),
+    unavailable(ShellApi::ExecuteExW, "ShellExecuteExW", &[P], B),
+    unavailable(ShellApi::ExecuteA, "ShellExecuteA", &[P, P, P, P, P, D], R),
+    unavailable(ShellApi::ExecuteW, "ShellExecuteW", &[P, P, P, P, P, D], R),
+    unavailable(
+        ShellApi::FileOperationA,
+        "SHFileOperationA",
+        &[P],
+        ReturnConvention::Uint32,
+    ),
+    unavailable(
+        ShellApi::FileOperationW,
+        "SHFileOperationW",
+        &[P],
+        ReturnConvention::Uint32,
+    ),
     declaration(ShellApi::Arguments, "CommandLineToArgvW", &[P, P], R),
     declaration(
         ShellApi::KnownFolder,
@@ -55,3 +77,14 @@ pub static SHELL_CONTRACTS: [Contract; 6] = [
     declaration(ShellApi::FolderA, "SHGetFolderPathA", &[P, D, P, D, P], H),
     declaration(ShellApi::FolderW, "SHGetFolderPathW", &[P, D, P, D, P], H),
 ];
+
+const fn unavailable(
+    id: ShellApi,
+    name: &'static str,
+    parameters: &'static [Parameter],
+    returns: ReturnConvention,
+) -> Contract {
+    Contract::new(ApiId::Shell(id), name, parameters, returns,
+        "No shell verb association or interactive/multi-file operation backend; execute returns SE_ERR_NOASSOC and LastError 1155, file operations return ERROR_CALL_NOT_IMPLEMENTED without changing the record, files or LastError",
+        [ArchitecturePlan { dlls: &["shell32.dll"], execution: ExecutionPolicy::LegacyUnimplemented }; 2])
+}

@@ -1,17 +1,17 @@
 # 绘制区域与 paint DC
 
-InvalidateRect、ValidateRect、GetUpdateRect、BeginPaint、EndPaint 五项 PE32 export 的 DLL、参数和 typed ID 集中在 `win32/catalog/painting.rs`。当前实现已接入，验证与性能状态见[后续报告](../reports/refactoring-painting-followup-2026-10-19.md)。Win64 五项继续 absent。早期六项候选的撤回记录仍见[历史报告](../reports/refactoring-painting-2026-10-19.md)。
+新 Wasm 入口在 PE32/Win64 接入 InvalidateRect、ValidateRect、GetUpdateRect、BeginPaint、EndPaint 和 UpdateWindow，provider 为 user32.dll。共享目录的旧 Win64 absent 策略保持；新运行时显式扩展已迁移入口。RedrawWindow、复杂 region 与非客户区绘制未绑定。
 
-RedrawWindow 的真实 API 网关归 MenuApi::Redraw，保留 error 120 与菜单未实现诊断；公开 `user32::dispatch` facade 进入本页描述的矩形绘制路径。两者是现有入口差异，不将 RedrawWindow 纳入五项 paint 契约。独立菜单回归同时验证两个入口。
+窗口保存 client 坐标中的矩形更新区域和 erase 请求。InvalidateRect 将输入与 client bounds 相交，再合并包围矩形；erase 在区域间累积。ValidateRect 的 NULL 输入或完全覆盖旧包围矩形的输入清除区域，部分覆盖暂不做矩形减法。所有绘制 API 先验证 HWND 和当前线程所有权，再访问客体 RECT/PAINTSTRUCT；无效窗口返回 1400，跨线程调用返回 50。
 
-`win32/user/pe32/paint.rs` 只借内存、Graphics 和 LastError，准备更新矩形、erase 标记及 DC/clip，并产生值、立即更新或 BeginPaint 请求；它不依赖 CPU、ApiState 或 guest 执行器。窗口拥有 update/erase，graphics 拥有 DC 和像素。`x86/process/painting.rs` 执行 WM_ERASEBKGND，正常返回后完成 PAINTSTRUCT 写入；立即更新继续委托 typed 窗口控制。绑定后的网关、默认窗口过程 WM_PAINT 与公开名称 facade 共用该边界。PE32 适配器遇到 Returned 后才提交普通 API 返回；阻塞或非局部转移保持原 CPU/API 提交规则。
+BeginPaint 先检查完整输出和必要的回调 frame，再取得带更新区域 clip 的实际 DC，消耗当次区域并按需调用 WM_ERASEBKGND。回调在同一 JIT、线程和预算中执行；期间新产生的失效区域独立保留。正常返回后输出 PAINTSTRUCT，擦除返回非零时 fErase 为零。后续输出故障保留已完成的擦除和 DC，修复后继续输出；不会重放擦除过程。PAINTSTRUCT 在 PE32 为 64 字节，Win64 为 72 字节，HDC 保留指针宽度。
 
-早期迁移候选改变了软件浮点的实际内联，AMD64 FP 三对持续回退；该候选及其模块命名、内联和编译配置试验均已撤回。后续精确浮点编译边界独立验收，本次五项迁移不重新引入这些试验。宿主后台渲染对性能测量的影响另在后续报告记录。
+GetUpdateRect 不消耗区域；可选 erase 使用临时 clipped DC 调用同一擦除过程，成功后仅在区域版本未改变时清除旧 erase 请求。回调中新产生的 erase 请求会保留。输出故障保留已完成过程和临时 DC；成功输出后释放 DC。输出 RECT 是发起查询时的快照。
 
-验证顺序属于契约：五项 paint 均先校验 HWND，再访问 guest RECT/PAINTSTRUCT；RedrawWindow facade 先拒绝复杂 region 和不支持的 flags，再校验 HWND。BeginPaint 先检查 PAINTSTRUCT 的 64 字节可写性，然后创建 DC、设置 clip、清除 update/erase 并调用擦除过程。回调失败或转移后，已经发生的状态变更继续保留。PAINTSTRUCT 在正常回调返回后写入。EndPaint 读取原结构并释放对应 DC；该过程保留独立新产生的 update region，重复释放仍返回错误 6。
+EndPaint 读取完整 PAINTSTRUCT，验证 DC 的窗口、线程及 paint 类型后释放；不会清除其间新产生的区域。重复释放返回错误 6。ReleaseDC 不接受 paint DC。窗口销毁和线程退出清理相应 DC；AMD64 展开越过尚未完成的 paint 续点时也归还该 DC。
 
-普通网关在 handler 输出之后读取返回地址，因此 PAINTSTRUCT 或 RECT 覆盖返回槽时必须使用覆盖后的值。成功路径保持原 LastError；错误 DLL 保持未知 ABI、零参数清栈及原未实现诊断，不新增 kernel32/kernelbase 别名。
+UpdateWindow 在存在区域时同步发送 WM_PAINT，没有区域时直接成功。默认 WM_PAINT 使用同一消耗/擦除/释放流程；默认 WM_ERASEBKGND 按类背景 brush 填写实际像素并服从 clip。可见窗口创建、显示和允许重绘的位置变更会失效 client；尺寸变更保留 backing 的相交像素。画面快照通过 [windowPixels 与 BrowserPresenter](input-events.md) 在暂停边界送入浏览器画布，根进程与子进程按 PID/HWND 区分。
 
-现有行为只支持矩形更新区域。ValidateRect 仅在请求覆盖完整旧矩形时清除区域；GetUpdateRect 保持原有可选输出与 erase 参数行为。复杂 region、非客户区绘制和额外 Win64 功能另行实现，避免改变此次迁移的可观察行为。
+可见脏窗口在消息查询和请求 QS_PAINT 的等待中合成一条 WM_PAINT。验证、消费区域和销毁会清除旧的合成消息；显式 PostMessage 的 WM_PAINT 独立保留。队列满时保留更新区域供后续查询，详见[消息契约](messages.md)。
 
-请求边界基线 `94eadcb`。准备算法、失效矩形、回调与后置输出核对保持，Graphics 和 callback frame 未改；release 完整 Win32 257、IR 31、fmt/release lib/bin strict Clippy/build 通过。普通职责提取不重复性能或游戏矩阵，证据 `wire-out/refactoring-2026-10-14/r4-paint32-{source-checks,verification}.json`。
+调用帧在输出前捕获。RECT/PAINTSTRUCT 覆盖返回槽时仍使用原返回地址与清栈量，成功路径保持 LastError。

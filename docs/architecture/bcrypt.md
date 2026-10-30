@@ -1,9 +1,13 @@
-# Win64 BCrypt RNG
+# 安全随机数
 
-`x64::runtime::bcrypt::RngProviders` 私有拥有 RNG 句柄集合，处理函数只借 Memory、BcryptApi 和参数。三项 export 的 provider/ABI/类型集中于 `BCRYPT_CONTRACTS`；静态导入接受 bcrypt/kernel32/kernelbase，动态查找沿用已有 gateway fallback。PE32 保持 absent/未知 ABI。
+新 Wasm 入口在 PE32/AMD64 提供 bcrypt.dll 的 BCryptOpenAlgorithmProvider、BCryptGenRandom 和 BCryptCloseAlgorithmProvider，返回 NTSTATUS，保持 LastError。仅支持 RNG 与可选的 Microsoft Primitive Provider；其他算法或实现返回 STATUS_NOT_SUPPORTED。旧 kernel provider 别名不对新入口开放。
 
-当前仅支持 RNG 和可选的 Microsoft Primitive Provider。最多 1024 个同时打开的 provider，句柄从 TEB+0x700000 起间隔 16，关闭后重新使用最低空闲值；比较完整 64 位身份。伪句柄 0x81 和 system-preferred flag 保持原行为，flags/length 仍截断 DWORD。返回 NTSTATUS，LastError 保持。
+每个进程复用共享的 RNG provider 状态，最多同时打开 1024 个句柄，关闭后可复用。完整句柄身份参与验证；支持伪句柄 0x81，以及空句柄配合 BCRYPT_USE_SYSTEM_PREFERRED_RNG。flags 和长度按 DWORD 处理，单次长度上限 16 MiB。零长度调用不访问输出，也不请求随机源。
 
-生成随机数先校验 flags、handle、16MiB 长度上限，再预检输出范围，随后以 256-byte 块调用原 OS entropy 并一次写回；失败不发布部分随机数据。open 先读算法和 implementation 名称，再验证 flags/名称与输出，最后检查容量并登记。输出可以覆盖保存过的 guest 返回地址；访存故障不提交 CPU 返回或 API count。
+随机数据通过 Web 入口的 `random(length)` 提供，默认使用 Web Crypto，每次采样不超过 65536 字节。提供者必须同步返回精确长度的 Uint8Array 或 `null`；`null` 返回 STATUS_UNSUCCESSFUL，抛错或非法返回值保留调用供重试。核心在采样前观察参数、返回帧与完整输出权限，guard 不被预检消耗；实际调用通过统一 VMM 提交输出，故障不发布部分数据或 CPU 返回。
 
-独立 provider/容量/句柄回归位于 `tests/x64/bcrypt_contract.rs`，原 OS entropy/边界测试位于 `tests/x64/kernel.rs`。本次不扩展密码学能力；见[迁移验收](../reports/refactoring-bcrypt-2026-10-20.md)。
+open 先读取算法与实现名，再验证 flags、名称、输出及容量，输出成功后登记句柄。close 只移除本进程的有效句柄。进程退出与启动拒绝会清理 provider；随机字节不跨调用保留。统一服务调用帧允许输出覆盖已保存的返回槽。
+
+底层采样协议和 `wire_service_random_bytes` 见[Wasm 运行时](wasm-runtime.md)。旧原生入口复用相同的 provider 状态与校验，熵源仍由其宿主提供。
+
+advapi32 的 SystemFunction036（公开名称 RtlGenRandom）复用上述熵源与完整输出预检，参数为 buffer 和 DWORD length，不需要 provider 句柄。返回 BOOLEAN，成功 1、失败 0，保持 LastError；零长度不访问 buffer 或采样并成功，超出 16 MiB 或熵源不可用返回 FALSE 并保持输出。提供者抛错、非法返回值和访存故障沿同一可重试边界处理。该入口仅从 advapi32 绑定，不增加客体执行循环中的宿主调用。

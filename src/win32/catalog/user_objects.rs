@@ -17,9 +17,26 @@ pub enum UserObjectApi {
     EnumW,
     EnumExA,
     EnumExW,
+    OpenClipboard,
+    CloseClipboard,
+    EmptyClipboard,
+    GetClipboard,
+    SetClipboard,
+    ClipboardAvailable,
 }
 
 impl UserObjectApi {
+    pub(crate) const fn clipboard_data(self) -> bool {
+        matches!(
+            self,
+            Self::OpenClipboard
+                | Self::CloseClipboard
+                | Self::EmptyClipboard
+                | Self::GetClipboard
+                | Self::SetClipboard
+                | Self::ClipboardAvailable
+        )
+    }
     pub(crate) fn wide(self) -> bool {
         matches!(
             self,
@@ -52,17 +69,22 @@ const fn declaration(
     parameters: &'static [Parameter],
     returns: ReturnConvention,
 ) -> Contract {
+    if id.clipboard_data() {
+        return Contract::new(ApiId::UserObject(id), name, parameters, returns,
+            "No clipboard backend or data owner: OpenClipboard fails 50 after HWND validation, close/empty/get/set fail ERROR_CLIPBOARD_NOT_OPEN(1418); no format is available, and availability queries preserve LastError. No handle transfer, data access or delayed-render callback.",
+            [ArchitecturePlan { dlls: &["user32.dll"], execution: ExecutionPolicy::LegacyUnimplemented }; 2]);
+    }
     Contract::new(
         ApiId::UserObject(id), name, parameters, returns,
-        "PE32 process-only shared clipboard-format/window-message name namespace, Unicode lowercase identity, 255 UTF-16-unit limit and inclusive monotonic 0xffff capacity; per-window property ownership and distinct atom/name keys; retain decode-before-HWND/key validation, zero values, errors and frame order; property enumeration stays ABI-only/error120 and no callback, Win64 remains absent",
+        "Historical ABI plans retained below. Current adapters share process-only registered format/message names, Unicode lowercase identity, 255 UTF-16-unit limit, monotonic 0xffff capacity and per-window properties across both ABIs. Atom/name keys, input-before-HWND checks, error/return order and unsupported property enumeration are retained; clipboard data is a separate unavailable backend.",
         [ArchitecturePlan { dlls: &["user32.dll"], execution: if id.enumeration() { ExecutionPolicy::LegacyUnimplemented } else { ExecutionPolicy::Typed } },
          ArchitecturePlan { dlls: &[], execution: ExecutionPolicy::Absent }],
     ).with_lookup_dlls([&["user32.dll"], &[]])
 }
 
-use Parameter::Pointer as P;
+use Parameter::{Pointer as P, Uint32 as D};
 use ReturnConvention::{BoolLastError as B, Pointer as H, Uint32 as U};
-pub static USER_OBJECT_CONTRACTS: [Contract; 14] = [
+pub static USER_OBJECT_CONTRACTS: [Contract; 20] = [
     declaration(
         UserObjectApi::ClipboardA,
         "RegisterClipboardFormatA",
@@ -87,4 +109,15 @@ pub static USER_OBJECT_CONTRACTS: [Contract; 14] = [
     declaration(UserObjectApi::EnumW, "EnumPropsW", &[P, P], U),
     declaration(UserObjectApi::EnumExA, "EnumPropsExA", &[P, P, P], U),
     declaration(UserObjectApi::EnumExW, "EnumPropsExW", &[P, P, P], U),
+    declaration(UserObjectApi::OpenClipboard, "OpenClipboard", &[P], B),
+    declaration(UserObjectApi::CloseClipboard, "CloseClipboard", &[], B),
+    declaration(UserObjectApi::EmptyClipboard, "EmptyClipboard", &[], B),
+    declaration(UserObjectApi::GetClipboard, "GetClipboardData", &[D], H),
+    declaration(UserObjectApi::SetClipboard, "SetClipboardData", &[D, P], H),
+    declaration(
+        UserObjectApi::ClipboardAvailable,
+        "IsClipboardFormatAvailable",
+        &[D],
+        B,
+    ),
 ];

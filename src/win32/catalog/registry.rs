@@ -20,6 +20,23 @@ pub enum RegistryApi {
     DeleteA,
     DeleteW,
     Close,
+    EnumKeyA,
+    EnumKeyW,
+    EnumKeyExA,
+    EnumKeyExW,
+    EnumValueA,
+    EnumValueW,
+    QueryInfoA,
+    QueryInfoW,
+    DeleteKeyA,
+    DeleteKeyW,
+    DeleteKeyExA,
+    DeleteKeyExW,
+    DeleteTreeA,
+    DeleteTreeW,
+    ShellDeleteKeyA,
+    ShellDeleteKeyW,
+    Flush,
 }
 impl RegistryApi {
     pub(crate) const fn wide(self) -> bool {
@@ -33,7 +50,22 @@ impl RegistryApi {
                 | Self::QueryExW
                 | Self::SetExW
                 | Self::DeleteW
+                | Self::EnumKeyW
+                | Self::EnumKeyExW
+                | Self::EnumValueW
+                | Self::QueryInfoW
+                | Self::DeleteKeyW
+                | Self::DeleteKeyExW
+                | Self::DeleteTreeW
+                | Self::ShellDeleteKeyW
         )
+    }
+    pub(crate) const fn dlls(self) -> &'static [&'static str] {
+        if matches!(self, Self::ShellDeleteKeyA | Self::ShellDeleteKeyW) {
+            &["shlwapi.dll"]
+        } else {
+            &["advapi32.dll"]
+        }
     }
 }
 
@@ -64,7 +96,14 @@ const fn declaration(
 }
 
 use Parameter::{Pointer as P, Uint32 as D};
-pub static REGISTRY_CONTRACTS: [Contract; 17] = [
+const fn added(id: RegistryApi, name: &'static str, parameters: &'static [Parameter]) -> Contract {
+    Contract::new(
+        ApiId::Registry(id), name, parameters, ReturnConvention::Uint32,
+        "Process-local registry enumeration, metadata and key deletion; case-preserving names, access checks, deleted-handle lifetime and atomic outputs; no persistent store, timestamps or security descriptor backend",
+        [ArchitecturePlan { dlls: &[], execution: ExecutionPolicy::Absent }; 2],
+    )
+}
+pub static REGISTRY_CONTRACTS: [Contract; 34] = [
     declaration(RegistryApi::CreateA, "RegCreateKeyA", &[P, P, P]),
     declaration(RegistryApi::CreateW, "RegCreateKeyW", &[P, P, P]),
     declaration(
@@ -98,4 +137,45 @@ pub static REGISTRY_CONTRACTS: [Contract; 17] = [
     declaration(RegistryApi::DeleteA, "RegDeleteValueA", &[P, P]),
     declaration(RegistryApi::DeleteW, "RegDeleteValueW", &[P, P]),
     declaration(RegistryApi::Close, "RegCloseKey", &[P]),
+    added(RegistryApi::EnumKeyA, "RegEnumKeyA", &[P, D, P, D]),
+    added(RegistryApi::EnumKeyW, "RegEnumKeyW", &[P, D, P, D]),
+    added(
+        RegistryApi::EnumKeyExA,
+        "RegEnumKeyExA",
+        &[P, D, P, P, P, P, P, P],
+    ),
+    added(
+        RegistryApi::EnumKeyExW,
+        "RegEnumKeyExW",
+        &[P, D, P, P, P, P, P, P],
+    ),
+    added(
+        RegistryApi::EnumValueA,
+        "RegEnumValueA",
+        &[P, D, P, P, P, P, P, P],
+    ),
+    added(
+        RegistryApi::EnumValueW,
+        "RegEnumValueW",
+        &[P, D, P, P, P, P, P, P],
+    ),
+    added(
+        RegistryApi::QueryInfoA,
+        "RegQueryInfoKeyA",
+        &[P, P, P, P, P, P, P, P, P, P, P, P],
+    ),
+    added(
+        RegistryApi::QueryInfoW,
+        "RegQueryInfoKeyW",
+        &[P, P, P, P, P, P, P, P, P, P, P, P],
+    ),
+    added(RegistryApi::DeleteKeyA, "RegDeleteKeyA", &[P, P]),
+    added(RegistryApi::DeleteKeyW, "RegDeleteKeyW", &[P, P]),
+    added(RegistryApi::DeleteKeyExA, "RegDeleteKeyExA", &[P, P, D, D]),
+    added(RegistryApi::DeleteKeyExW, "RegDeleteKeyExW", &[P, P, D, D]),
+    added(RegistryApi::DeleteTreeA, "RegDeleteTreeA", &[P, P]),
+    added(RegistryApi::DeleteTreeW, "RegDeleteTreeW", &[P, P]),
+    added(RegistryApi::ShellDeleteKeyA, "SHDeleteKeyA", &[P, P]),
+    added(RegistryApi::ShellDeleteKeyW, "SHDeleteKeyW", &[P, P]),
+    added(RegistryApi::Flush, "RegFlushKey", &[P]),
 ];

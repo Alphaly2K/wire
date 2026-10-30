@@ -62,7 +62,7 @@ pub(crate) fn verify(
     requested: Request,
     mask: u32,
     conditions: u64,
-    version: crate::runtime::environment::WindowsVersion,
+    version: super::WindowsVersion,
 ) -> u32 {
     if requested.size != 284 || mask == 0 || mask & !0xff != 0 || conditions == 0 {
         return INVALID;
@@ -92,7 +92,12 @@ pub(crate) fn verify(
     // major version satisfies >= without independently checking the minor field.
     let mut last = 0;
     let mut passed = true;
-    for (bit, value) in [(1, version.major), (0, version.minor), (5, 0), (4, 0)] {
+    for (bit, value) in [
+        (1, version.major),
+        (0, version.minor),
+        (5, u32::from(version.service_pack_major)),
+        (4, u32::from(version.service_pack_minor)),
+    ] {
         if mask & (1 << bit) == 0 {
             continue;
         }

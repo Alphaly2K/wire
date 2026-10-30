@@ -1,22 +1,8 @@
-[package]
-name = "wire"
-version = "0.1.0"
-edition = "2021"
-license = "LGPL-2.1-only"
-description = "Watari-Is-a-Runtime-Environment: non-JIT x86 interpretation + Win32 compatibility layer (feasibility spike)"
-
-[dependencies]
-iced-x86 = { version = "1.21.0", default-features = false, features = ["std", "decoder", "instr_info"] }
-libc = "0.2"
-rustc_apfloat = "0.2.3"
-sha2 = "0.10.9"
-wire-simd = { path = "crates/wire-simd" }
-
-[dev-dependencies]
-unicorn-engine = "2"
+[workspace]
+resolver = "2"
+members = ["crates/wire-wasm", "crates/wire-host", "crates/wire-simd"]
+default-members = ["crates/wire-wasm"]
+exclude = ["crates/wire-shader"]
 
 [profile.release]
-debug = true
-
-[profile.release.package.wire-simd]
-codegen-units = 1
+panic = "abort"

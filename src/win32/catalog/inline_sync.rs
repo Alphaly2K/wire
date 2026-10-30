@@ -11,6 +11,7 @@ pub enum InlineSyncApi {
     TryShared,
     InitializeCondition,
     SleepConditionSrw,
+    SleepConditionCs,
     WakeCondition,
     WakeAllCondition,
     BeginOnce,
@@ -35,7 +36,7 @@ const fn declaration(
 
 use Parameter::{Pointer as P, Uint32 as D};
 use ReturnConvention::{BoolLastError as B, Uint32 as U, Void as V};
-pub static INLINE_SYNC_CONTRACTS: [Contract; 13] = [
+pub static INLINE_SYNC_CONTRACTS: [Contract; 14] = [
     declaration(InlineSyncApi::InitializeSrw, "InitializeSRWLock", &[P], V),
     declaration(
         InlineSyncApi::AcquireExclusive,
@@ -78,6 +79,12 @@ pub static INLINE_SYNC_CONTRACTS: [Contract; 13] = [
         InlineSyncApi::SleepConditionSrw,
         "SleepConditionVariableSRW",
         &[P, P, D, D],
+        B,
+    ),
+    declaration(
+        InlineSyncApi::SleepConditionCs,
+        "SleepConditionVariableCS",
+        &[P, P, D],
         B,
     ),
     declaration(

@@ -1,17 +1,22 @@
 //! Export identity and ABI plans are resolved during binding, not execution.
 //! Unconverted families remain on explicit legacy routes.
+mod accessibility;
 mod address_waits;
 mod audio;
 mod basic_strings;
 mod bcrypt;
 mod bstr;
 mod calendar;
+mod certificates;
 mod classes;
 mod clocks;
 mod com;
+mod console;
 mod context;
 mod critical_sections;
+mod crypto;
 mod cursor;
+mod debug;
 mod delays;
 mod desktop;
 mod devices;
@@ -25,9 +30,11 @@ mod gdi_dc;
 mod gdi_operations;
 mod geometry;
 mod graphics;
+mod graphics_probe;
 mod guid;
 mod handles;
 mod heaps;
+mod icmp;
 mod identity;
 mod images;
 mod inline_sync;
@@ -47,6 +54,7 @@ mod painting;
 mod paths;
 mod pointer_helpers;
 mod process_control;
+mod process_memory;
 mod process_options;
 mod process_queries;
 mod process_startup;
@@ -77,6 +85,7 @@ mod windows_printf;
 mod winhttp;
 mod winrt;
 mod winsock;
+pub use accessibility::{AccessibilityApi, ACCESSIBILITY_CONTRACTS};
 pub use address_waits::{AddressWaitApi, ADDRESS_WAIT_CONTRACTS};
 pub use audio::{AudioApi, AUDIO_CONTRACTS};
 pub use basic_strings::{BasicStringApi, BASIC_STRING_CONTRACTS};
@@ -84,12 +93,16 @@ pub use bcrypt::{BcryptApi, BCRYPT_CONTRACTS};
 pub(crate) use bstr::symbol as bstr_symbol;
 pub use bstr::{BstrApi, BSTR_CONTRACTS};
 pub use calendar::{CalendarApi, CALENDAR_CONTRACTS};
+pub use certificates::{CertificateApi, CERTIFICATE_CONTRACTS};
 pub use classes::{ClassApi, CLASS_CONTRACTS};
 pub use clocks::{ClockApi, CLOCK_CONTRACTS};
 pub use com::{ComApi, COM_CONTRACTS};
+pub use console::{ConsoleApi, CONSOLE_CONTRACTS};
 pub use context::{ContextApi, CONTEXT_CONTRACTS};
 pub use critical_sections::{CriticalSectionApi, CRITICAL_SECTION_CONTRACTS};
+pub use crypto::{CryptoApi, CRYPTO_CONTRACTS};
 pub use cursor::{CursorApi, CURSOR_CONTRACTS};
+pub use debug::{DebugApi, DEBUG_CONTRACTS};
 pub use delays::{DelayApi, DELAY_CONTRACTS};
 pub use desktop::{DesktopApi, DESKTOP_CONTRACTS};
 pub use devices::{DeviceApi, DEVICE_CONTRACTS};
@@ -104,9 +117,11 @@ pub use gdi_operations::{GdiApi, GDI_OPERATION_CONTRACTS};
 pub use geometry::{GeometryApi, GEOMETRY_CONTRACTS};
 pub(crate) use graphics::symbol as graphics_symbol;
 pub use graphics::{GraphicsExportApi, GRAPHICS_EXPORT_CONTRACTS};
+pub use graphics_probe::{GraphicsProbeApi, GRAPHICS_PROBE_CONTRACTS};
 pub use guid::{GuidApi, GUID_CONTRACTS};
 pub use handles::{HandleApi, HANDLE_CONTRACTS};
 pub use heaps::{HeapApi, HEAP_CONTRACTS};
+pub use icmp::{IcmpApi, ICMP_CONTRACTS};
 pub use identity::{IdentityApi, IDENTITY_CONTRACTS};
 pub use images::{ImageApi, IMAGE_CONTRACTS};
 pub use inline_sync::{InlineSyncApi, INLINE_SYNC_CONTRACTS};
@@ -126,6 +141,7 @@ pub use painting::{PaintingApi, PAINTING_CONTRACTS};
 pub use paths::{PathApi, PATH_CONTRACTS};
 pub use pointer_helpers::{PointerHelperApi, POINTER_HELPER_CONTRACTS};
 pub use process_control::{ProcessControlApi, PROCESS_CONTROL_CONTRACTS};
+pub use process_memory::{ProcessMemoryApi, PROCESS_MEMORY_CONTRACTS};
 pub use process_options::{ProcessOptionApi, PROCESS_OPTION_CONTRACTS};
 pub use process_queries::{ProcessQueryApi, PROCESS_QUERY_CONTRACTS};
 pub use process_startup::{StartupApi, STARTUP_CONTRACTS};
@@ -145,6 +161,10 @@ pub use tokens::{TokenApi, TOKEN_CONTRACTS};
 pub use tracing::{EtwApi, ETW_CONTRACTS};
 pub use user_objects::{UserObjectApi, USER_OBJECT_CONTRACTS};
 pub use variant::{VariantApi, VARIANT_CONTRACTS};
+mod safe_arrays;
+mod security;
+pub use safe_arrays::{SafeArrayApi, SAFE_ARRAY_CONTRACTS};
+pub use security::{SecurityApi, SECURITY_CONTRACTS};
 pub use version::{VersionApi, VERSION_CONTRACTS};
 pub use version_resources::{VersionResourceApi, VERSION_RESOURCE_CONTRACTS};
 pub use virtual_memory::{VirtualMemoryApi, VIRTUAL_MEMORY_CONTRACTS};
@@ -175,6 +195,18 @@ pub enum Parameter {
     Int64,
     /// A WORD is consumed by its adapter; retain the historical Win64 carrier.
     Uint16,
+    /// By-value 16/24-byte VARIANT; captured in three u64 slots on both ABIs.
+    Variant,
+}
+
+impl Parameter {
+    pub const fn slots(self) -> usize {
+        if matches!(self, Self::Variant) {
+            3
+        } else {
+            1
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -192,6 +224,8 @@ pub enum ReturnConvention {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApiId {
+    GraphicsProbe(GraphicsProbeApi),
+    Crypto(CryptoApi),
     WindowsPrintf(WindowsPrintfApi),
     Audio(AudioApi),
     FontResource(FontResourceApi),
@@ -204,6 +238,7 @@ pub enum ApiId {
     Winrt(WinrtApi),
     Bstr(BstrApi),
     Variant(VariantApi),
+    SafeArray(SafeArrayApi),
     Guid(GuidApi),
     Identity(IdentityApi),
     Version(VersionApi),
@@ -217,6 +252,7 @@ pub enum ApiId {
     Path(PathApi),
     Clock(ClockApi),
     Context(ContextApi),
+    Debug(DebugApi),
     Local(LocalApi),
     SyncObject(SyncObjectApi),
     Mutex(MutexApi),
@@ -237,6 +273,7 @@ pub enum ApiId {
     BasicString(BasicStringApi),
     PointerHelper(PointerHelperApi),
     ProcessQuery(ProcessQueryApi),
+    ProcessMemory(ProcessMemoryApi),
     Keyboard(KeyboardApi),
     RawInput(RawInputApi),
     Ime(ImeApi),
@@ -271,6 +308,11 @@ pub enum ApiId {
     Winsock(WinsockApi),
     ProcessOption(ProcessOptionApi),
     SystemPath(SystemPathApi),
+    Certificate(CertificateApi),
+    Icmp(IcmpApi),
+    Accessibility(AccessibilityApi),
+    Console(ConsoleApi),
+    Security(SecurityApi),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -318,15 +360,17 @@ impl Contract {
         limits: &'static str,
         plans: [ArchitecturePlan; 2],
     ) -> Self {
-        assert!(parameters.len() <= 16, "scalar gateway argument limit");
         let mut dwords = [0; 16];
         let mut dword_count = 0;
         let mut i = 0;
+        let mut slot = 0;
         while i < parameters.len() {
+            assert!(slot + parameters[i].slots() <= 16, "gateway argument limit");
             if matches!(parameters[i], Parameter::Int32 | Parameter::Uint32) {
-                dwords[dword_count] = i;
+                dwords[dword_count] = slot;
                 dword_count += 1;
             }
+            slot += parameters[i].slots();
             i += 1;
         }
         Self {
@@ -388,12 +432,10 @@ impl Contract {
         }
         self.parameters
             .iter()
-            .map(|parameter| {
-                if matches!(parameter, Parameter::Int64 | Parameter::Uint64) {
-                    8
-                } else {
-                    4
-                }
+            .map(|parameter| match parameter {
+                Parameter::Variant => 16,
+                Parameter::Int64 | Parameter::Uint64 => 8,
+                _ => 4,
             })
             .sum()
     }
@@ -446,6 +488,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         &PATH_CONTRACTS,
         &CLOCK_CONTRACTS,
         &CONTEXT_CONTRACTS,
+        &DEBUG_CONTRACTS,
         &LOCAL_CONTRACTS,
         &SYNC_OBJECT_CONTRACTS,
         &MUTEX_CONTRACTS,
@@ -472,6 +515,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         &BASIC_STRING_CONTRACTS,
         &POINTER_HELPER_CONTRACTS,
         &PROCESS_QUERY_CONTRACTS,
+        &PROCESS_MEMORY_CONTRACTS,
         &KEYBOARD_CONTRACTS,
         &RAW_INPUT_CONTRACTS,
         &IME_CONTRACTS,
@@ -500,6 +544,7 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         &ETW_CONTRACTS,
         &REGISTRY_CONTRACTS,
         &BCRYPT_CONTRACTS,
+        &CRYPTO_CONTRACTS,
         &SSPI_CONTRACTS,
         &WINHTTP_CONTRACTS,
         &DEVICE_CONTRACTS,
@@ -511,9 +556,28 @@ pub fn contracts() -> impl Iterator<Item = &'static Contract> {
         &SHELL_CONTRACTS,
         &PROCESS_CONTROL_CONTRACTS,
         &GRAPHICS_EXPORT_CONTRACTS,
+        &GRAPHICS_PROBE_CONTRACTS,
         &WINDOWS_PRINTF_CONTRACTS,
+        &SAFE_ARRAY_CONTRACTS,
+        &CERTIFICATE_CONTRACTS,
+        &ICMP_CONTRACTS,
+        &ACCESSIBILITY_CONTRACTS,
+        &CONSOLE_CONTRACTS,
+        &SECURITY_CONTRACTS,
     ];
     FAMILIES.iter().flat_map(|family| family.iter())
+}
+
+/// Normalize provider-owned aliases identically in every Win64 loader.
+pub(crate) fn normalize_symbol<'a>(dll: &str, name: &'a str) -> &'a str {
+    safe_arrays::symbol(
+        dll,
+        bstr_symbol(dll, graphics_symbol(dll, winsock_symbol(dll, name))),
+    )
+}
+
+pub(crate) fn safe_array_symbol<'a>(dll: &str, name: &'a str) -> &'a str {
+    safe_arrays::symbol(dll, name)
 }
 
 #[cfg(test)]
@@ -534,10 +598,8 @@ mod tests {
                     .iter()
                     .any(|&architecture| contract.dlls(architecture).contains(dll)));
             }
-            assert!(contract
-                .win64_dwords()
-                .iter()
-                .all(|&i| i < contract.parameters.len()));
+            let slots = contract.parameters.iter().map(|p| p.slots()).sum();
+            assert!(contract.win64_dwords().iter().all(|&i| i < slots));
             for architecture in [Architecture::X86, Architecture::X64] {
                 let mut owners = std::collections::HashSet::new();
                 for dll in contract.dlls(architecture) {

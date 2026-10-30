@@ -1,31 +1,37 @@
 # 图形创建与 COM 契约
 
-七项公开创建入口由 `win32/catalog/graphics.rs` 统一声明：CreateDXGIFactory/1/2、D3D11CreateDevice、D3D11CreateDeviceAndSwapChain、D3D12CreateDevice、D3D12GetDebugInterface。PE32 全部保持 Absent/未知 ABI；Win64 保留原 typed 子集与各调用的实际失败结果，D3D12 仍无 backend，D3D11 combined 创建仍显式拒绝。
+新 Wasm 入口在 AMD64 接通 CreateDXGIFactory/1/2、D3D11CreateDevice、D3D11CreateDeviceAndSwapChain、D3D12CreateDevice 和 D3D12GetDebugInterface。PE32 七项保持原 absent 范围，D3D9 使用[独立契约](d3d9.md)。公开创建入口的 ABI、架构和 provider 来自 `win32/catalog/graphics.rs`。
 
-旧静态导入接受各自的图形 DLL、kernel32/kernelbase 和内部 `wire.dxgi`，其中内部 provider 区分大小写；契约用 exact-provider 元数据保留这项身份规则。fresh GetProcAddress 仅在各自图形 DLL 中发现入口，已经安装的同 provider gateway 继续可发现。D3D12 序数 #101/#102 的归一也移入契约模块。公开 DLL 的大小写规则保持。
+创建入口保留旧静态导入的实际图形 DLL、kernel32/kernelbase 别名和区分大小写的内部 `wire.dxgi`；fresh GetProcAddress 仍只在实际图形 DLL 中发现创建入口，已有绑定沿原契约查询。D3D12 的 #101/#102 序数继续归一。内部 COM 方法由 vtable 安装时绑定，不能通过公开名称任意绑定。
 
-gateway 在冷绑定阶段取得 GraphicsExportApi、arity 和 DWORD 位图，执行时直接选择创建 handler。原 DXGI/D3D11 创建处理体与 COM 方法分发分开，输出 preflight、对象父子引用、错误顺序、原生 backend 调用和 CPU/trace 提交保持。本批没有更改 shader、渲染、present 或 vtable 布局。
+两种 ABI 另提供十八项可选后端接口，复用当前 GDI/USER 身份和服务调用帧。它们不会创建图形对象或初始化 GPU；程序可按失败结果选择已有后端。
 
-旧行为基线 `01b714f`。release 图形单元 10 passed / 2 ignored、PE32 未知 ABI 1、模块 12、catalog 1，fmt/release lib/bin strict Clippy/build 通过。另显式运行真实 GPU swapchain/backbuffer/resize/lifetime/deferred-present 1 项通过。创建、方法处理体和 ordinal 归一核对保持。证据见 `wire-out/refactoring-2026-10-14/r2-graphics-{source-checks,verification}.json` 及 validation 日志。普通契约迁移不执行性能矩阵。
+| provider | 接口 | 当前协议 |
+| --- | --- | --- |
+| opengl32.dll | wglCreateContext、wglCreateLayerContext、wglDeleteContext、wglGetCurrentContext、wglGetCurrentDC、wglGetProcAddress、wglMakeCurrent、wglCopyContext、wglShareLists、wglSwapLayerBuffers | 没有 GL context，当前 context/DC 查询返回零并保留 LastError；MakeCurrent 的 NULL context 请求成功，忽略 DC。有效 DC 的创建或 swap 返回零/错误 50，非法 DC 和不存在的 context 操作返回零/错误 6。GetProcAddress 在无当前 context 时返回零/错误 6，不读取扩展名，也不提供扩展入口。 |
+| gdi32.dll | ChoosePixelFormat、SetPixelFormat、DescribePixelFormat、SwapBuffers | 有效 DC 返回零/错误 50，非法 DC 返回零/错误 6；不读写不支持的描述符。原 GetPixelFormat 直接沿用 GDI 服务，有效 DC 返回未设置格式零。 |
+| dxgidebug.dll / dxgi.dll | DXGIGetDebugInterface / DXGIGetDebugInterface1 | 没有调试接口，检查 IID 和输出后清空完整宽度的输出指针，返回 E_NOINTERFACE；NULL IID/输出返回 E_INVALIDARG。Flags 当前忽略。 |
+| d3d11.dll | D3D11On12CreateDevice | 没有 D3D12 互操作，返回 DXGI_ERROR_UNSUPPORTED；可选 device/context 指针及 DWORD feature-level 输出全部预检后清零。NULL 输入 device 返回 E_INVALIDARG 并保持输出；其余后端专用输入不解引用。 |
+| dwmapi.dll | DwmSetWindowAttribute | 有效逻辑窗口返回 DWM_E_COMPOSITIONDISABLED，非法完整 HWND 返回 E_HANDLE；不修改属性，不读取属性数据。 |
 
-随后以 `7435932` 为基线，将 common/factory/adapter/output/swapchain 的 70 条方法声明合为 `(name, arity, DWORD indices)`，vtable 与参数绑定读取同一条声明。D3D11 原有三元组表保持，原两份查找合为一个入口。所有方法的参数数量、截断索引与槽位顺序经旧源码逐项核对一致。
+HRESULT 调用保持 LastError，Win32 失败调用只写当前线程真实错误槽；全部故障保持原调用帧、计数与尚未发布的输出，返回槽别名使用已捕获的返回地址。新入口在 `crates/wire-wasm/src/win32/graphics_probe.rs`，ABI 在 `src/win32/catalog/graphics_probe.rs`。GL 渲染状态、GLSL 前端、像素格式表、D3D12 互操作、debug 对象和宿主 compositor 均未实现；D3D/WebGPU 资源与呈现协议不提供这些语义。
 
-BoundMethod 在冷阶段保存静态方法声明与 DXGI/D3D11 家族路由，gateway 直接进入相应 handler，每次调用不再扫描 D3D11 方法表。handler 内仍保留原名称分支与对象类型检查；这一步没有将全部 COM 方法改为独立 enum。旧 groups 位图同时收敛为 graphics binding 与 file_search 标志，文件枚举行为保持。
+空 context 与扩展查询遵循公开的 [wglMakeCurrent](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-wglmakecurrent) 和 [wglGetProcAddress](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-wglgetprocaddress) 契约；可选调试层与互操作签名见 [DXGIGetDebugInterface1](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_3/nf-dxgi1_3-dxgigetdebuginterface1) 和 [D3D11On12CreateDevice](https://learn.microsoft.com/en-us/windows/win32/api/d3d11on12/nf-d3d11on12-d3d11on12createdevice)。
 
-该批 release 图形 10、真实 GPU swapchain 1、Win64 文件 17 项通过，fmt/release lib/bin strict Clippy/build 通过。检查中发现并收窄了 BoundImport.graphics 的可见性；最终静态检查和构建通过。源码核对与验证记录为 `r2-graphics-methods-{source-checks,verification}.json`，不重复性能矩阵或 PE32 游戏。
+DXGI/D3D11 的处理体由现行 Wasm 适配器复用，包含真实 COM 身份/引用、父子对象、adapter/output 缓存、private data、设备/上下文、资源/视图、状态、swapchain 和方法布局。共享入口在 `src/graphics/dxgi.rs`，新适配在 `crates/wire-wasm/src/win32/graphics.rs`；旧执行器、CPU、USER owner 和原生图形提交不进入新核心。窗口存在检查、客户区尺寸/可见性和显示 profile 来自当前 USER，查询单个窗口不复制整个窗口列表。
 
-Win64 COM 的 vtable、对象分配、adapter 缓存及递归释放现由 Graphics 的 `dxgi/objects.rs` 拥有。分配明确借 Memory、Gateways 和共享页游标；释放只借 Memory，按原顺序处理 swapchain、映射 buffer/texture、view、context 绑定与 parent。表的 gateway 注册、map/write/seal、游标推进和引用提交顺序保持，公开 attach_graphics 继续委托。其它 D3D11/DXGI handler 暂由 Runtime64 组合资源。
+COM vtable 和对象页由运行时拥有并只读密封，客体 VirtualFree/VirtualProtect 不能退休或改写它们；对象通过 Release 递归释放父对象、绑定资源、映射页和 GPU 句柄。现有 1024 对象、private-data 项数/字节及资源描述符限制保持。线程之间共享进程图形 owner，VM 之间独立。
 
-该 owner 提取经五个生命周期主体及全部调用点源码对照，release Win64 269、library 61 passed / 7 ignored、严格 Clippy/build/fmt 通过；另显式通过原生 procedural draw 和 swapchain/backbuffer/resize/lifetime 两项 GPU 测试。证据 `r3-graphics-objects64-{source-checks,verification}.json`。
+调用帧先捕获完整参数和返回位置，DWORD 按声明收窄，标量 float 参数从相应 XMM 寄存器读取。输出可以覆盖原返回槽，完成仍使用保存的目标。共享内存适配器保留结构化访问/guard 故障；失败不计服务 work，已完成服务计一 work、零客体退休。COM 查询/资源操作的输出检查及原失败协议继续由共享处理体执行。
 
-虚拟 output 的缓存/模式查询、D3D11 context 建立、单项 binding 引用替换以及 native draw 输入准备也直接归 Graphics。output/context 分配借 gateway 和游标，其余操作仅用 owner 状态与必要内存；public graphics_draws 保留原 facade。所有修改文件按明确资源替换对照一致，draw 的 shader/资源检查和 GPU 提交算法保持。完整 Win64 269、library 61 passed / 7 ignored、两个显式 GPU fixture 及严格构建通过，见 `r3-graphics-services64-{source-checks,verification}.json`。
+装载 AMD64 映像后，在暂停且尚未创建图形对象时调用 `await vm.enableGraphics(options)` 配置便携 WebGPU；普通指令已经执行不妨碍配置。可通过 `options.canvas` 或同步的 `options.getCanvas(hwnd, processId)` 提供呈现目标，通过 `options.shaderCompiler` 提供原有便携 shader 编译器。canvas 回调在图形服务中调用，应使用传入的身份和宿主数据，不重入 VM。shader 编译器由调用者管理，不随进程或 VM 关闭。配置失败不发布 backend；实际 WebGPU 不可用时明确报错。普通 JIT 指令继续在同一 Wasm 引擎驻留执行。
 
-D3D11 创建、COM 方法与 input-layout 解析通过临时 `d3d11::Calls` 借用 Graphics、Gateways、共享页游标和 Trace；内存仍是每次调用的明确参数。它不拥有第二份状态，不借 Runtime64、线程、USER 或 CPU。Runtime64 的创建/调用方法只组合这四项资源。递归 11.1→11.0 路由在同一借用内完成；Map 的游标推进和输出故障顺序保持。
+子进程继承图形选项，在首次可用的 DXGI/D3D11 创建调用前按需初始化独立后端；普通控制台子进程不创建 GPU device。选项可以经另一架构的中间进程传递给后代。初始化失败保留原服务和配置供重试；进程退出或启动拒绝关闭本进程后端，父进程先退出不关闭子进程后端。多个进程使用同一 canvas 时，每次 Present 按当前 device 重新配置，旧 owner 的关闭或缓存驱逐不会撤销其他 owner 的配置。
 
-DXGI 和 D3D11 的 private-data 字节/容量处理共用 Graphics 的原实现；对象/provider 校验仍由各入口按原顺序执行。input-layout 的名称读取使用 `win32/x64/text.rs` 中原样提取的 ASCII codec，Runtime64 的旧静态方法继续委托。
+异步 GPU 操作按 bridge 的 typed pending 状态暂停，错误文本不决定阻塞。运行时保存原调用帧并固定当前线程，待同一 GPU job 完成后重试该 API，完成前不计 work；随后发生输出故障时继续保留原帧。`run()` 自动等待 GPU flush，显式 `service()` 返回 `Exit.Graphics`，可用 `await vm.flushGraphics()` 后重试。pending 期间允许修复客体内存，CPU 编辑要求先完成该图形调用，避免改变在途请求的身份。
 
-DXGI factory/D3D12 能力创建及普通 factory/adapter/COM 操作位于 Graphics 的 `dxgi/calls.rs`，明确借内存、gateway、共享游标及必要的只读 User。原对象类型检查、D3D11 QueryInterface 转发和 swapchain 控制路由仍由根协调器先执行；parent 使用检查时取得的值。窗口关联只查询 User 的现有窗口成员关系。vtable、provider、对象查询与错误输出顺序保持。
+绘制命令在运行区间内批量提交；Present 和读回按后端自身的同步边界提交。VM 销毁先释放 Rust 持有的资源，再关闭 WebGPU owner 并归还可复用 bridge 槽；静态启动拒绝和进程退出也释放其图形 owner。
 
-swapchain 创建/查询/resize 使用临时 Calls，只借 Graphics、gateway、共享游标、Trace 和只读 User。Graphics 拥有 backbuffer 创建、present 状态检查、帧资源快照和成功计数；窗口快照仍在原验证位置读取，resize 仍先建立新 buffer，再释放旧 buffer，最后替换记录。GetDevice 在构造 D3D11 资源借用前复制原三个参数。
+D3D11 保留已有兼容子集，尚不满足完整 feature-level 一致性。未支持的专用方法继续明确失败；combined device/swapchain 创建当前报接口错误，应分开创建。D3D12 没有设备或 debug 后端，分别返回 DXGI_ERROR_UNSUPPORTED 和 E_NOINTERFACE，并按旧规则清空有效输出。shader 编译、阶段连接、实际 Draw 和 canvas Present 使用共享编译器及 WebGPU 处理体；资源创建、更新、清屏、复制、异步读回及最终释放使用同一后端。
 
-Runtime64 的 present 协调器保留公共 frame/统计入口，成功时仍先更新图形计数，再 API count → unblock → record；Process/Presenter 的 GPU surface 提交和 guest 返回帧保持。连续图形迁移整合通过 release 全目标 694 passed / 7 ignored、21 suites，严格 Clippy/build/fmt 与两个显式 GPU fixture；证据 `r3-swapchain-calls64-{source-checks,verification}.json`。
+各阶段状态 getter、Dispatch、间接绘制、命令列表、UAV、mip 生成和部分 factory/output 操作仍有缺口；GeometryShader 创建在 WebGPU 的 stage 检查处失败。逐项方法名、共享处理源码和实际失败协议见[接口台账](../api-migration.json)的 `legacy_com_methods` 与 `graphics_capability_gaps`。

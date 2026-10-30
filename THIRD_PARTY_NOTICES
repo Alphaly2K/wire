@@ -2,14 +2,14 @@
 
 wire is licensed LGPL-2.1-only (see LICENSE). This file records the origin and
 version of third-party code used by this repository, per project policy.
-The license texts for the IR frontend/hash dependencies are preserved in
+The license texts for the decoder and hash dependencies are preserved in
 licenses/third-party/. Include these notices and license texts with binary
 redistributions; linking rather than copying source does not remove the
 license notice obligations.
 
-## Build dependencies (linked, not distributed as source)
+## Rust dependencies (linked, not distributed as source)
 
-- libc crate (MIT OR Apache-2.0) — host OS bindings. https://github.com/rust-lang/libc
+- libc crate (MIT OR Apache-2.0; MIT selected) — host OS bindings. https://github.com/rust-lang/libc
 - rustc_apfloat 0.2.3+llvm-462a31f5a5ab (Apache-2.0 WITH LLVM-exception) —
   pure Rust software floating-point arithmetic, including x87 extended precision.
   https://github.com/rust-lang/rustc_apfloat
@@ -24,15 +24,16 @@ license notice obligations.
   Copyright (C) 2018-present iced project and contributors.
 - lazy_static 1.5.1 (MIT OR Apache-2.0; MIT selected) — iced-x86 dependency.
   https://github.com/rust-lang-nursery/lazy-static.rs
-- sha2 0.10.9 (MIT OR Apache-2.0; MIT selected) — source EXE SHA-256 binding.
+- md-5 0.10.6, sha1 0.10.6 and sha2 0.10.9 (MIT OR Apache-2.0; MIT selected) —
+  incremental CryptoAPI MD5, SHA-1, SHA-256, SHA-384 and SHA-512 hashes.
   https://github.com/RustCrypto/hashes
 - digest 0.10.7 and crypto-common 0.1.7 (MIT OR Apache-2.0; MIT selected) —
-  sha2 traits and common types. https://github.com/RustCrypto/traits
+  hash traits and common types. https://github.com/RustCrypto/traits
 - block-buffer 0.10.4 and cpufeatures 0.2.17 (MIT OR Apache-2.0; MIT selected) —
-  sha2 buffering and host feature detection. https://github.com/RustCrypto/utils
-- generic-array 0.14.7 (MIT) — sha2 transitive dependency.
+  hash buffering and host feature detection. https://github.com/RustCrypto/utils
+- generic-array 0.14.7 (MIT) — hash transitive dependency.
   https://github.com/fizyk20/generic-array
-- typenum 1.20.1 (MIT OR Apache-2.0; MIT selected) — sha2 transitive dependency.
+- typenum 1.20.1 (MIT OR Apache-2.0; MIT selected) — hash transitive dependency.
   https://github.com/paholg/typenum
 - cfg-if 1.0.5 (MIT OR Apache-2.0; MIT selected) — host feature selection.
   https://github.com/rust-lang/cfg-if
@@ -97,6 +98,13 @@ license notice obligations.
 
 ## Imported source code
 
+- MinGW-w64 14.0.0, https://www.mingw-w64.org/ (ZPL-2.1).
+  Exact DLL/export/ABI declarations derived from the public COFF import
+  libraries, adapted 2026-10-29, reside in third_party/mingw-w64/.
+  Copyright (c) 2009 - 2013 by the mingw-w64 project and contributors.
+  The original license and archive hashes are retained there. No compiler,
+  runtime library or imported machine code is linked or distributed.
+
 - Wine 10.0, commit b073859675060c9211fcbccfd90e4e87520dc2c2
   (https://github.com/wine-mirror/wine), imported/adapted 2026-10-06.
   LGPL-2.1-or-later; LGPL 2.1 selected for wire's combined work.
@@ -111,12 +119,16 @@ license notice obligations.
     the upstream Wine LGPL license is retained.
   - dlls/user32/win.c: Copyright 1993, 1994 Alexandre Julliard.
     Enumeration excerpts with original header preserved in
-    user32/win-enumeration.c; adapted into src/user32_enum.rs using wire's
-    logical window table and guest callback/control-transfer boundaries.
+    user32/win-enumeration.c; adapted into src/win32/user/hierarchy.rs and
+    crates/wire-wasm/src/process/window_dialog.rs using wire's logical
+    window table and guest callback/control-transfer boundaries.
   - dlls/user32/dialog.c and win.c: dialog-control/text excerpts adapted into
-    src/user32_common.rs. Copyright 1993, 1994, 1996 Alexandre Julliard.
+    src/win32/user/pe32/dialog.rs and src/win32/user/dialog_values.rs.
+    Copyright 1993, 1994, 1996 Alexandre Julliard.
+    The Wasm JIT lifecycle migration retains this derivation and attribution
+    in crates/wire-wasm/src/process/windows.rs.
   - dlls/user32/menu.c and dlls/win32u/menu.c: menu item normalization,
-    masks, submenu lookup and lifetime adapted into src/menu.rs.
+    masks, submenu lookup and lifetime adapted into src/win32/user/menus.rs.
     Copyright 1993 Martin Ayotte, 1993 Robert J. Amstadt, 1994 Alexandre
     Julliard, 1995/2009 Alexandre Julliard, 1997 Morten Welinder,
     2005 Maxime Bellengé, 2006 Phil Krylov.
@@ -124,12 +136,42 @@ license notice obligations.
     comdlg32,shlwapi,wininet,comctl32,mpr}/*.spec export tables embedded by
     src/win32_abi.rs as named/ordinal x86 stdcall ABI data. Each spec is
     covered by Wine's project license; checksums in the source README.
+  - dlls/ws2_32/ws2_32.spec: unchanged ordinal and ABI declaration table,
+    embedded by src/win32/catalog/winsock.rs. The table has no individual
+    copyright header; the Wine LGPL license and pinned source checksum are
+    retained. No socket transport or Wine namespace provider is imported.
   No Wine C code, Wine server or platform backend is built or linked.
+  - dlls/oleaut32/safearray.c: Copyright 1999 Sylvain St-Germain,
+    2002-2003 Marcus Meissner, 2003 Jon Griffiths. Bounds ordering,
+    scalar/BSTR/VARIANT ownership and lock rules adapted into
+    crates/wire-wasm/src/win32/safe_arrays.rs, with checked guest storage,
+    bounded allocation and complete destruction preflight. The unchanged
+    snapshot and provenance are retained in third_party/wine-10.0/.
+  - dlls/combase/combase.c: Copyright 2005 Juan Lang; 2005-2006 Robert
+    Shearman (for CodeWeavers). PROPVARIANT type, vector, copy and clear
+    rules adapted into crates/wire-wasm/src/win32/property_values.rs with
+    existing task/BSTR/SAFEARRAY owners, bounded graphs and transactional
+    publication/destruction. The unchanged function excerpt and original
+    header are retained in third_party/wine-10.0/combase/propvariant.c.
+  - dlls/kernelbase/file.c: Copyright 1993 John Burton; 1996, 2004 Alexandre
+    Julliard; 2008 Jeff Zaroyko. Completed OVERLAPPED status/count query
+    behavior is adapted into crates/wire-wasm/src/win32/overlapped.rs with
+    checked guest storage and preflighted outputs. Async waits are unavailable.
+    The original header and unchanged function excerpt are retained in
+    third_party/wine-10.0/kernelbase/overlapped.c; no C snapshot is linked.
 
 - Hangover, commit 56e385b7ff490edd281b288f420677093563560b,
   https://github.com/AndreRH/hangover; its pinned AndreRH/wine submodule,
   commit 3ea3a14941b6a122b892c84141ce9662c008081e, reviewed/adapted 2026-10-06.
   The used files explicitly permit LGPL-2.1-or-later; LGPL 2.1 selected.
+  - dlls/kernelbase/path.c: Copyright 2018 Nikolay Sivov, 2018 Zhiyi Zhang,
+    2021-2023 Zebediah Figura. Path roots, extensions, quote removal and
+    PathCanonicalize lexical rules adapted into src/win32/path_helpers.rs;
+    the Wasm adapter stages checked CP932/UTF-16 input and bounded output.
+    The original snapshot is retained as third_party/hangover/path.c.
+  - dlls/user32/wsprintf.c: Copyright 1996 Alexandre Julliard. Windows
+    formatting rules adapted into src/win32/windows_printf.rs, shared by the
+    legacy PE32 adapter and the Wasm JIT runtime with checked guest arguments.
   - dlls/oleaut32/oleaut.c: Copyright 1999, 2000 Marcus Meissner.
     BSTR function excerpts adapted into src/common_api.rs with checked guest
     memory, real guest allocations and ownership; no Wine BSTR cache.
@@ -137,14 +179,24 @@ license notice obligations.
     1995 Alex Korobka, 2022 Jacek Caban for CodeWeavers. Default window
     position messages and nonclient geometry adapted into src/user32_common.rs
     and src/user32_geometry.rs with guest callbacks.
+    The shared geometry now resides in src/win32/user/geometry.rs and is also
+    compiled by the Wasm JIT runtime with its original attribution retained.
+  - dlls/win32u/input.c: Copyright 1993 Bob Amstadt and David Metcalfe;
+    1996 Albrecht Kleine and Frans van Dorsselaer; 1997 David Faure;
+    1998 Morten Welinder and Ulrich Weigand; 2001 Eric Pouech;
+    2002 Alexandre Julliard. Virtual keyboard scan, character and key-name
+    rules reside in src/win32/user/keyboard_layout.rs and are reused by the
+    Wasm JIT runtime with their original attribution retained.
   - include/d3d9.h: Copyright 2002–2003 Jason Edmeades and Raphael Junqueira.
     Unmodified header and derived COM slot/stdcall table preserved. Only ABI
     data is embedded; the CPU raster backend is independently implemented.
   Original excerpts, COPYING.LIB and checksums in third_party/hangover/.
   WoW64 USER/GDI conversion files were reviewed; no emulator or Linux backend
-  code was imported or linked. See docs/hangover-win32-design.md.
+  code was imported or linked.
 
 QEMU license headers were reviewed at v10.1.0; no QEMU implementation was
-imported. See docs/ir-aot-design.md for the file-level LGPL/GPL distinction.
+imported. target/i386/tcg/{translate.c,cc_helper.c} declare
+LGPL-2.1-or-later, while tcg/tci.c declares GPL-2.0-or-later. These file-level
+declarations do not apply to the entire TCG subsystem or its dependencies.
 Future imported files must retain their original notices and record their
 source project, version/commit and license here.

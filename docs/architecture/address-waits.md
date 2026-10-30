@@ -1,9 +1,11 @@
 # 地址等待与线程状态边界
 
-三项 WaitOnAddress/WakeByAddressSingle/WakeByAddressAll 的 provider、参数和控制 ID 集中到 `win32/catalog/address_waits.rs`。Win64 接受 kernel32、kernelbase 和 api-ms-win-core-synch-l1-2-0；SIZE_T 保持完整 64 位，只有 timeout 截断为 DWORD。PE32 标记 absent，继续走原有未知 ABI、零参数清栈与 error 120，不将名字已收录推成 ABI 已知。
+新 Wasm 入口的三项 WaitOnAddress/WakeByAddressSingle/WakeByAddressAll 服务由 `crates/wire-wasm/src/win32/address_waits.rs` 实现。两种 ABI 均接受 kernel32、kernelbase 和 api-ms-win-core-synch-l1-2-0；SIZE_T 保持对应指针宽度，timeout 截断为 DWORD。该 API-set 的 Sleep/SleepEx 复用现有延迟服务。共享目录中的旧 PE32 absent 策略保留在旧入口，新运行时独立接入。
 
-冷绑定得到 `ControlImport::AddressWait`。Runtime64 负责保存返回帧、按 ID 调用线程 owner、保留 Blocked 或公共返回路径的 CPU/unblock/trace/API count 提交。原 address helper 从 `impl Runtime64` 移入 `threads/address.rs` 的 `impl Threads`，只借线程状态、受检 Memory 和当前 LastError 槽；不再借总运行时。序号保持私有，阻塞注册也由线程 owner 执行，旧 Runtime64 block facade 供其它尚在迁移的调用继续使用。
+首次等待先验证 SIZE_T 为 1/2/4/8，再依次读取当前值和比较值；值不同立即成功，保持 LastError。值相同且 timeout 为零返回 FALSE/1460；无效 SIZE_T 返回 FALSE/87，且不读取比较地址。等待按加载/回调层级保存完整参数、返回位置和首次 deadline；重试只观察通知与 deadline，不重新读取比较内存。
 
-行为顺序保持：首先验证 SIZE_T 为 1/2/4/8；若已有地址等待，先校验地址 identity，再看 notified 和 deadline，重试不读取比较内存。首次等待依次读取当前值和比较值，值不同立即成功；值相同且 timeout 为零返回 1460。序号 checked_add 先于 scheduler 注册，注册成功后才推进序号，重试保持原 deadline。
+WakeSingle 选择地址匹配、未通知且未过期的最早登记者；WakeAll 标记全部有效匹配者。暂时挂起的线程及外层回调的等待仍可收到通知。通知先于超时时，后续延迟调度仍返回成功；已经到期的等待不消耗后来通知。Wake 不读取客体地址，无等待者时不积累信号。
 
-唤醒按未通知、未退出、未过期且地址相同的最早 ticket 选择单个等待者；WakeAll 标记所有有效匹配者。没有等待者时不保存 wake credit，Wake 不读取 guest 地址。所有内存故障、LastError、到达顺序及真实线程行为维持独立旧行为基线，见[验收记录](../reports/refactoring-address-waits-2026-10-17.md)。
+有限正超时使用统一单调 10 MHz 来源；无限等待、零超时和没有有限候选的 wake 不采样时间。通知或确认到期后停止采样。故障不消耗 work，也不推进等待序号或清掉原调用；错误输出故障可修复后重试。完成计一 work，不计客体退休；无可运行线程时返回 Waiting，宿主恢复后继续调度。
+
+`src/win32/kernel/address_wait.rs` 仅包含便携等待身份、通知/deadline 判断和 FIFO 选择，不依赖任何 CPU 或内存类型。旧入口的内存适配保留在其线程模块，新入口使用同一 VMM 与待完成服务生命周期。

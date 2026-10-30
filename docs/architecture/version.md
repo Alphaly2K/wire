@@ -2,19 +2,20 @@
 
 本页记录 OS profile 查询；文件中的版本资源使用独立 [version.dll 边界](version-resources.md)。
 
-唯一声明位于 `win32/catalog/version.rs`，冷绑定派生 PE32 栈字节数、Win64 arity/DWORD 截断与 typed ID。适配器借用架构内存、不可变 GuestEnvironment 和 LastError 位置；Win64 层级比较算法位于 `win32/kernel/version.rs`，不依赖 Runtime64 或 guest 内存。原 Wine LGPL 来源与版权声明保留。
+新 Wasm 入口在两种 ABI 接入八项版本服务，使用不可变 GuestEnvironment。层级比较复用 `src/win32/kernel/version.rs`，不依赖 CPU 或客体内存；原 Wine LGPL 来源和版权声明保留。
 
 | 行为 | PE32 | Win64 |
 | --- | --- | --- |
-| 默认 profile | 6.1.7601 | 10.0.19045 |
-| GetVersion/Ex provider | kernel32 | kernel32/kernelbase |
-| RtlGetVersion provider | ntdll | kernel32/kernelbase/ntdll（保留历史范围） |
-| 查询结构大小 | A/W/Rtl 均接受 148/156/276/284 | A 接受 148/156；W/Rtl 接受 276/284 |
-| Rtl 查询非法 size | 返回 0，LastError=87 | INVALID_PARAMETER，LastError 保留 |
-| VerifyVersionInfoA/W、VerSetConditionMask | known stdcall ABI=16，未实现返回 0/LastError=120 | W/mask typed；A 拒绝 |
-| RtlVerifyVersionInfo | ABI unknown，零清栈 legacy | 三个 kernel/ntdll provider，NTSTATUS |
-| output alias return slot | 输出后读取返回地址 | handler 前保存返回 frame |
+| 默认 profile | 6.1.7601 / Service Pack 1 | 10.0.19045 / 无 Service Pack |
+| GetVersion/Ex、VerifyVersionInfoA/W | kernel32/kernelbase | kernel32/kernelbase |
+| RtlGetVersion/RtlVerifyVersionInfo | ntdll | kernel32/kernelbase/ntdll（历史范围） |
+| VerSetConditionMask | kernel32/kernelbase | kernel32/kernelbase/ntdll（历史范围） |
+| 查询结构大小 | A：148/156；W/Rtl：276/284 | A：148/156；W/Rtl：276/284 |
+| Rtl 查询非法 size | INVALID_PARAMETER，保持 LastError | INVALID_PARAMETER，保持 LastError |
+| 参数与返回 | ConditionMask 完整 64 位栈参数；mask 返回 EDX:EAX | ConditionMask 与 mask 返回均保持 64 位 |
 
-Win64 verify 先受检读取完整 284 字节，再检查 size/mask/conditions；访存 fault 不提交 CPU/API count。产品类型、suite、platform/build、major/minor/service-pack 的比较顺序保留，BOOL 错误分别映射 160/1150，NTSTATUS 直接返回。条件 mask 保留已有位并消费条件参数低三位；不额外截断旧 trace 的 BYTE carrier。
+查询输出包含 profile 的 major/minor/build/platform；扩展结构另含 Service Pack、suite 和 workstation 产品类型，PE32 的 CSD 字符串为 Service Pack 1。GetVersionEx 的非法大小返回零/87，RtlGetVersion 返回 STATUS_INVALID_PARAMETER 并保持 LastError。完整输出写入前预检，返回槽可与输出重叠；输出之外的字节保持不变。
 
-`tests/version_contract.rs` 是迁移前固定的独立基线；现有 Win64 集成测试继续验证层级比较、GetProcAddress、LastError 与跨页 output fault。性能工具显式选择 `gateway-version`，两种架构从各自固定 profile 的数值计算 checksum；默认 fixture 集合保持原样。
+VerifyVersionInfoA 先读取完整 156 字节，W/Rtl 读取 284 字节，再校验结构大小、TypeMask 和 ConditionMask。产品类型、suite、platform/build 按既有顺序比较，major/minor/service-pack 使用层级关系；更高的 major 可满足 `>=`，不再独立要求 minor 同时更高。普通 BOOL 校验失败分别映射 160（参数无效）和 1150（版本不满足）；RtlVerifyVersionInfo 直接返回 NTSTATUS，保持 LastError。
+
+VerSetConditionMask 保留传入 mask 并加入所选字段的条件低三位，保持完整 64 位结果。全部调用不读取宿主 OS 或平台时间；访存故障不提交 CPU/work，成功完成计一 work、不计客体退休。共享目录中旧 PE32 ABI-only 与 Win64 absent 策略仅供旧入口使用。

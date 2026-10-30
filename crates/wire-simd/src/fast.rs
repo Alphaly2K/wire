@@ -1,4 +1,4 @@
-//! Normal finite single-precision arithmetic, with exact inexact detection.
+//! Normal finite arithmetic under the host's checked floating-point controls.
 use crate::SimdState;
 use iced_x86::Mnemonic as M;
 
@@ -38,6 +38,10 @@ pub(crate) fn single(
     if !(1..255).contains(&((bits >> 23) & 255)) {
         return None;
     }
+    // Keep rounding at the normal/subnormal boundary in the general path.
+    if bits & 0x7fff_ffff == 0x0080_0000 {
+        return None;
+    }
     if state.mxcsr & 0x1020 == 0x1020 {
         return Some(Ok(u64::from(bits)));
     }
@@ -67,6 +71,11 @@ pub(crate) fn single(
 
 #[inline(always)]
 fn host_rounds_normally() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        // Wasm arithmetic fixes rounding and preserves subnormals.
+        true
+    }
     #[cfg(target_arch = "aarch64")]
     {
         let control: u64;
@@ -77,10 +86,45 @@ fn host_rounds_normally() -> bool {
         }
         control & ((3 << 22) | (1 << 24) | 0x9f00) == 0
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "wasm32")))]
     {
         false
     }
+}
+
+#[inline(always)]
+pub(crate) fn double(
+    state: &mut SimdState,
+    op: M,
+    a: u64,
+    b: u64,
+    _exception: &mut bool,
+) -> Option<Result<u64, String>> {
+    // Once masked precision is sticky, normal finite results cannot add any
+    // status. Other rounding modes and every exceptional boundary stay exact.
+    if state.mxcsr & 0x7020 != 0x1020
+        || !(1..2047).contains(&((a >> 52) & 2047))
+        || !(1..2047).contains(&((b >> 52) & 2047))
+        || !host_rounds_normally()
+    {
+        return None;
+    }
+    let a = f64::from_bits(a);
+    let b = f64::from_bits(b);
+    let result = match op {
+        M::Addsd | M::Addpd => a + b,
+        M::Subsd | M::Subpd => a - b,
+        M::Mulsd | M::Mulpd => a * b,
+        M::Divsd | M::Divpd => a / b,
+        _ => return None,
+    }
+    .to_bits();
+    if !(1..2047).contains(&((result >> 52) & 2047))
+        || result & 0x7fff_ffff_ffff_ffff == 0x0010_0000_0000_0000
+    {
+        return None;
+    }
+    Some(Ok(result))
 }
 
 #[cfg(test)]

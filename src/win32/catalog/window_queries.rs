@@ -28,6 +28,7 @@ pub enum WindowQueryApi {
     ClientToScreen,
     ScreenToClient,
     MapPoints,
+    Related,
 }
 impl WindowQueryApi {
     pub(crate) const fn pointer(self) -> bool {
@@ -70,7 +71,8 @@ const fn declaration(
 }
 use Parameter::{Int32 as I, Pointer as P, Uint32 as U};
 use ReturnConvention::{BoolLastError as B, Pointer as H, Uint32 as D};
-pub static WINDOW_QUERY_CONTRACTS: [Contract; 25] = [
+pub static WINDOW_QUERY_CONTRACTS: [Contract; 26] = [
+    Contract::new(ApiId::WindowQuery(WindowQueryApi::Related),"GetWindow",&[P,U],H,"Existing logical parent/owner and creation-order sibling hierarchy; no native z-order or enabled-popup monitor",[ArchitecturePlan {dlls:&["user32.dll"],execution:ExecutionPolicy::LegacyUnimplemented};2]),
     declaration(WindowQueryApi::IsWindow, "IsWindow", &[P], B),
     declaration(WindowQueryApi::Visible, "IsWindowVisible", &[P], B),
     declaration(WindowQueryApi::Unicode, "IsWindowUnicode", &[P], B),

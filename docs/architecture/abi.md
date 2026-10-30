@@ -1,15 +1,11 @@
-# PE32 ABI 来源
+# PE32 ABI 来源与绑定
 
-`win32::abi::pe32` 集中维护原 14 份 Wine/Hangover spec、typed i386 参数解析、ordinal 名称解析及显式 legacy 例外。原私有根模块 win32_abi 已迁入该目录；没有改第三方输入或引入新的 ABI 推测。
+新 Wasm 入口按 `win32/catalog` 的架构、provider、参数与返回约定绑定系统导出。Contract 默认 stdcall，cdecl 显式声明；stdcall_bytes 返回实际 callee 清栈字节数，参数捕获与清栈共用同一契约。DLL 名称按装载规则归一，导出名称区分大小写。
 
-绑定优先级保持：catalog 的架构契约 → 原 DSound/WMI/D3D9/GDI+ 方法入口 → legacy 例外 → typed i386 spec → 原 CRT 零清栈策略 → 未知 ABI。ordinal 名称解析仍只依据原 spec 的 typed i386 范围，例外表和 CRT 策略不扩大 ordinal 可见性。
+WMI、DirectSound 的 PE32 内部 COM 方法和 AMD64 DXGI/D3D11 方法由各自的 vtable 创建时注册，使用共享方法声明确定参数宽度及清栈；内部名称不会自动成为公开 DLL 导出。返回位置与参数在写入输出前保存，输出覆盖原栈槽时仍从已保存的帧完成调用。
 
-根 API 表原有 301 条手工声明。以 `0459298` 审计，270 条与 spec 完全一致，全部删除；其余 31 条保留在 override_stack_bytes，并按 cdecl varargs、未声明类型的 GDI 别名、未加载 spec 的 provider 和直接 ordinal 拼写注明原因。现有 spec 共解析出 5,614 个 named stdcall ABI；手工表与这些记录没有数值冲突。ABI 已知仍与实现能力分开，未知 CRT 名字仍沿用历史零清栈诊断策略。
+按值 VARIANT 在 PE32 占 16 字节内联栈空间，在 AMD64 由对应参数位置的寄存器或栈槽传入 24 字节结构指针。捕获层把整个结构复制到固定参数快照的三个 u64 槽，PE32 的第三槽为零；后续参数仍使用原逻辑参数位置决定 AMD64 carrier。整份快照不分配堆内存，不解引用 VARIANT payload；源或返回槽故障不发布调用。`UiaRaiseAutomationPropertyChangedEvent` 的四个逻辑参数对应 PE32 的 40 字节 stdcall 清栈。
 
-native_export 继续只描述 ABI 可知性；旧 msvcrt 名称白名单已被更早的 CRT 零清栈分支覆盖，因此归并为同一查询。没有新增实现、改变 DLL 大小写、补造未知签名或改变 dispatch 的 cdecl 参数读取策略。
+旧 `win32::abi::pe32` 保留 Wine/Hangover spec、typed i386 参数解析、ordinal 名称解析及 legacy 例外，供迁移核对。ABI 声明、旧路由和新实现资格分别列于 [接口台账](../api-migration.json)。GDI+ 在 PE32 复用完整 stdcall 声明，已支持的矩阵/启动/分配子集与其余状态 6 的失败协议见 [GDI+ 契约](gdiplus.md)。DirectSound 在 PE32 复用全部 14 项声明和 ordinal，内部方法仅由 vtable 注册，具体能力见 [音频契约](directsound.md)。CRT 的旧函数均使用已接入的 cdecl 契约，非返回退出不读取返回槽；原始数据导出使用可写存储，具体能力、未实现协议及返回约定见 [CRT 契约](crt32.md)。旧 D3D9 的签名已知不代表新入口可调用；未知名称不会采用旧 CRT 零清栈诊断策略伪造实现。
 
-原 spec 输入、解析主体、ordinal 范围、COM 优先级及 31 项例外逐项核对保持。release 完整 Win32 248、fmt/release lib/bin strict Clippy/build 通过；不重复性能或游戏矩阵。证据见 `wire-out/refactoring-2026-10-14/r2-pe32-abi-{inventory,source-checks,verification}.json` 及 validation 日志。
-
-随后六项 version.dll 文件资源入口接入 [唯一领域契约](version-resources.md)，删除对应 override；当前 legacy 例外剩余 25 项，原 ABI 字节数和 ordinal 范围保持。前文 31 项是来源收敛时的历史基线。
-
-[Windows printf](windows-printf.md) 后续将 wsprintfA/W 的 cdecl 零清栈也归入契约，wvsprintfA/W 保留原三参数 stdcall。删除两条 override 后，当前 legacy 例外为 23 项；Contract 默认 Stdcall，cdecl 显式声明，stdcall_bytes 兼容查询返回实际 callee 清栈字节数。固定前缀与清栈均由同一 typed ID 派生，其余 spec/CRT/未知规则保持。
+序数只按对应 provider 的已接入声明解析，不因名称路由或 legacy 例外扩大可见性。[文件版本资源](version-resources.md)与 [Windows printf](windows-printf.md)等接口的额外约束由各自领域契约说明。

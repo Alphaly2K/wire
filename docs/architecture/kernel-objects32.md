@@ -7,5 +7,3 @@
 CloseHandle 由 owner 同时删除对象与指向该 handle 的名字，原删除/析构与名字清理顺序保持。FindClose 先检查 Search 类型，再执行独立移除，不与 CloseHandle 混用。wait/auto-reset/Mutex recursion/线程退出仍按原 gateway 和 scheduler 顺序执行，owner 没有持有 CPU、内存或 LastError。
 
 文件、搜索、event/mutex/semaphore、线程与进程仍是原 HandleObj 变体。进程查询 adapter 只借 KernelObjects32 和 scheduler；[文件 adapter](files.md)移入架构目录，仅借 filesystem/对象/错误槽及 GuestMem。[同步与等待 adapter](waits.md)也不再接收 ApiState，DirectSound signal 复用窄对象操作。Win64 独立 handle owner 保持。
-
-基线 `b5182db`。原对象变体、分配、同名逻辑、gateway 和进程查询主体归一核对保持。release Win32 248、线程间 owner 迁移 1 项，fmt/release lib/bin strict Clippy/build 通过；现有独立测试覆盖共享名字、类型拒绝、关闭寿命及返回栈 fault 前的对象提交。没有新增与实现镜像的测试或重复性能矩阵。证据位于 `wire-out/refactoring-2026-10-14/r3-objects32-{source-checks,verification}.json` 及 validation 日志。

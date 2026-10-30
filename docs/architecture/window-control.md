@@ -1,25 +1,25 @@
 # 窗口生命周期与过程控制
 
-`win32/catalog/window_control.rs` 是十七项创建、销毁、默认过程、过程转发、显示/更新、启用、父窗口、位置和同步发送接口的唯一 provider、参数宽度及架构策略声明。PE32 的 ABI 清栈和 Win64 的 DWORD 截断由契约生成；Win64 静态兼容 kernel32/kernelbase/user32，动态查询保留仅 user32 的范围。
+新 Wasm 入口在 PE32/Win64 支持 CreateWindowExA/W、DestroyWindow、DefWindowProcA/W、CallWindowProcA/W、ShowWindow、MoveWindow/SetWindowPos、UpdateWindow 和同线程 SendMessageA/W、SendMessageTimeoutA/W，以及 EnableWindow、SetParent、DefDlgProcA/W。导出和 ABI 来自 `win32/catalog/window_control.rs`，各架构声明的入口均已绑定。窗口过程在同一 Wasm JIT、代码缓存、VMM 和预算中执行，使用每线程回调续点，不嵌套宿主执行循环。
 
-PE32 `win32/user/pe32/control.rs` 只准备创建、显示、销毁、同步发送和默认过程请求，不依赖 CPU、ApiState 或 guest 执行器；`x86/process/window.rs` 执行生命周期回调、过程转发与发送等待。内置类注册仍由组合根协调，创建记录只借 USER、内存、scratch、tid 和 LastError。几何/更新由 `win32/user/pe32/window_geometry.rs` 准备，`x86/process/window_geometry.rs` 执行通知。只有正常返回才由 API 层完成返回帧，阻塞或非局部转移继续交给进程编排。创建保持 WM_NCCREATE/WM_CREATE 和原清理顺序，后续通知重新读取窗口过程；ShowWindow 和 DestroyWindow 在回调前提交原状态，回调失败时保留该状态。MoveWindow/SetWindowPos 的 guest WINDOWPOS 可在回调中修改，之后才提交位置并发送 WM_WINDOWPOSCHANGED，继续使用操作开始时的过程快照。同步发送保留跨线程排队、唤醒及重新分发。
+窗口记录复用便携的 `win32/user/windows64.rs`，独立于旧执行器；过程和所有 HWND、instance、wParam/lParam 使用客体指针宽度。每进程最多 1024 个活动窗口和 4096 个单调窗口身份，注销/销毁不复用 HWND。两种 ABI 支持 child、owner 和 message-only parent，验证 parent 存在，其他线程的非桌面 parent 返回 50；child 的 hMenu 按 control ID 保存，PE32 顶层非零菜单必须有效，否则返回 1401；AMD64 顶层非零菜单返回 50。跨线程发送和跨 A/W 文本消息转换仍返回 50。类菜单名尚不自动实例化菜单，挂接/销毁与客户区更新见[菜单契约](menus.md)。两种 ABI 按类注册编码构造 CREATESTRUCT。跨 A/W 调用的标题经 CP932/UTF-16 转换后存放于本次回调栈区；PE32 使用类的持久名称指针，AMD64 将转换后的类名保存在同一回调栈区，容量按所需字符串检查。
 
-默认窗口过程复用原文本、非客户区、背景和绘制实现。UpdateWindow 在 PE32 上按原 update region 决定是否执行 WM_PAINT；RedrawWindow 的同步更新也经过同一协调器。窗口记录仍由既有 User32 资源持有，本批收敛控制入口，不重排资源生命周期。
+创建先捕获完整 API 调用，再检查回调 frame、记录输出、类、过程和参数，成功后才发布窗口。CW_USEDEFAULT 使用 100/100/800/600，尺寸限于 1..8192，拒绝坐标溢出。CREATESTRUCT 位于本次调用的客体栈存储中，其生命周期覆盖创建回调；该存储和回调 frame 相互分离。Win64 依次调用 WM_GETMINMAXINFO、WM_NCCREATE、WM_NCCALCSIZE、WM_CREATE，初始 MINMAXINFO 使用 1280×720 的逻辑显示尺寸；PE32 保留 WM_NCCREATE、WM_CREATE 顺序，client 几何使用共享非客户区算法。
 
-同步发送的完成查找先于 HWND 验证，发送方退出、消息上限、ID 提交和 receiver wake 仍由 USER 管理；Process 消费等待请求后才 block_current，重醒仍重新分发同一 stub。创建拒绝时的 cleanup 继续复用一次过程快照，普通创建/销毁通知按原位置重查过程；callback fault 不额外回滚已提交状态。
+每次生命周期通知重新读取当前窗口过程，允许在创建中 subclass。WM_NCCREATE 返回零后发送 WM_NCDESTROY；WM_CREATE 返回 -1 后发送 WM_DESTROY、WM_NCDESTROY，再删除窗口。回调中自行销毁窗口使原创建返回零。下一 frame 或 NCCALCSIZE 读取失败保留已完成回调结果，修复后不重放；最终普通返回无需重新写入已无用途的 frame。
 
-默认 WM_WINDOWPOSCHANGED 由 USER 准备 WM_MOVE，然后 Process 执行；执行后重新向 USER 取得当前窗口、过程、style 和 client size，再发送 WM_SIZE。初始 flags 继续取自回调前的 WINDOWPOS。`user32_common.rs` 只保留文本与内存 codec，不依赖 CPU/ApiState，闲置的私有 client_origin 转发入口删除。
+DestroyWindow 只允许 owner 线程，发送 WM_DESTROY/WM_NCDESTROY 后删除窗口，递归销毁同一对象返回零。ShowWindow 先提交可见位，再发送 WM_SHOWWINDOW；PE32 可见性未改变时不通知，Win64 还发送 WM_SIZE 并仅接受 0/1/4/5/8。返回先前可见性。CallWindowProc 可直接转发四个窗口参数；SendMessage 重新进入当前过程，保留完整 LRESULT。
 
-`win32/user/pe32/lifecycle.rs` 的 User32::remove_window/exit_thread 统一管理窗口与线程退休，只借 Graphics、Menus 和 Sched；清理不借 ApiState、guest memory 或 CPU。原 keyboard→待处理 send 完成/唤醒→graphics→focus/active/foreground/capture→window/menu→timer/queue 清理，以及退出后的 cursor/keyboard/thread queue 清理次序保持。创建失败、DestroyWindow 和 Process 线程退出直接调用同一 owner 方法。基线 `5af8a4b`；完整 release Win32 255、fmt/release lib/bin strict Clippy/build 通过，覆盖跨线程 send 在窗口销毁或 owner 退出时唤醒，证据 `wire-out/refactoring-2026-10-14/r3-user-retirement32-{source-checks,verification}.json`。本批不跑性能或游戏矩阵。
+SendMessageTimeoutA/W 复用同一 WNDPROC 调用链，只支持同线程窗口。同队列调用忽略 uTimeout，不采样时钟；接受 SMTO_BLOCK、ABORTIFHUNG、NOTIMEOUTIFNOTHUNG、ERRORONEXIT 的组合（掩码 0x2b），其他 flags 返回零/87。成功状态为非零，即使窗口过程的 LRESULT 为零；可选 lpdwResult 接收完整 DWORD_PTR。输出在进入回调前预检，在回调完成后发布；过程可让出、嵌套或装载 DLL，输出故障后保留冻结结果并允许重试，不重放过程。输出与原返回槽重叠也使用已保存的返回位置。
 
-Win64 在冷绑定时把需要过程执行器的操作保存为 `ControlImport::Window(id)`，执行时返回显式 `WindowResult`，由进程处理 callback/resume。先验证执行器及 callback frame，再检查 HWND、参数和过程，保持故障顺序。UpdateWindow 保留原 scalar 行为，不新增 frame 检查；DefDlgProcA/W、EnableWindow、SetParent 保持 absent。DispatchMessage 暂留消息领域，进入 typed SendMessage 协调器时继续执行原有的第二次 frame 检查。
+ERRORONEXIT 在窗口于处理期间销毁后返回零和错误 1400，保持结果输出；错误槽故障可原位修复。没有该标志时仍返回发送成功并发布过程结果。非法 HWND 返回 1400，跨线程、HWND_BROADCAST 和跨 A/W 文本消息返回 50，资格失败不访问结果指针。跨线程等待/超时、hung-thread 检测、广播及字符串 marshalling 仍缺失。[公开接口契约](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendmessagetimeoutw)。
 
-Win64 默认过程的 NCCALCSIZE/标量处理与 UpdateWindow 归 User，只借内存和只读 Threads；协调器仍在原 frame 检查之后调用。原处理体及窗口 start/resume/退休顺序核对保持，和键盘 owner 一并通过完整 Win64 269、library 61 passed / 7 ignored 及必要构建，基线 `8f5b3d6`，证据 `wire-out/refactoring-2026-10-14/r3-user-keyboard64-{source-checks,verification}.json`。
+两种 ABI 子窗口的 rect/client 使用父客户区坐标，查询及宿主鼠标输入通过共享父链计算屏幕原点；移动父窗口后子窗口坐标立即反映新位置。SetParent 检查无效父级和循环，保留样式；child 改挂或分离时保持屏幕位置，不重复叠加边框偏移，不能表示的本地矩形返回 87。EnableWindow 返回先前 disabled 状态，仅在启用状态变化时发送 WM_ENABLE；首帧预检后提交样式，过程内故障保持已接受的改变。
 
-两架构的现有差异继续保留：PE32 ShowWindow 将任意非零模式视为显示，且不要求 owner；Win64 只接受既有模式。PE32 支持原 GDI update region 与同步跨线程发送；Win64 保留原错误及能力范围。后续能力扩展需独立测试和验收，不借本次重构改变行为。
+默认过程当前接入 NCCREATE、NCCALCSIZE、WM_WINDOWPOSCHANGED 的 MOVE/SIZE 通知、WM_SETTEXT/GETTEXT/GETTEXTLENGTH 和 WM_CLOSE 的销毁转移；其余消息保留标量零返回。两种 ABI 的 DefDlgProcA/W 复用同一基本默认子集，模态 dialog manager 尚未接通。文本使用同一有界 CP932/UTF-16 编码与完整输出预检，容量为零不访问输出。默认 WM_CLOSE 完成销毁后返回零。UpdateWindow、默认 WM_PAINT 与 WM_ERASEBKGND 使用[绘制续点和实际 GDI 像素](painting.md)；其余系统消息仍待迁移。
 
-验证与性能证据见[本批记录](../reports/refactoring-window-control-2026-10-18.md)。
+MoveWindow/SetWindowPos 在两种 ABI 使用标准 WINDOWPOS 和 NCCALCSIZE_PARAMS 布局，暂存记录位于本次调用的客体栈上，保留至全部通知结束。流程为 WM_WINDOWPOSCHANGING、需要时 WM_NCCALCSIZE、提交几何与可见/topmost 状态、WM_WINDOWPOSCHANGED；默认后者再通知 WM_MOVE/WM_SIZE。每阶段重读过程和 guest 修改的记录；NOSENDCHANGING 跳过首通知，NOMOVE/NOSIZE 使用现有几何，normalized WINDOWPOS 保存实际值。CHANGING/NCCALCSIZE 后的记录或 frame 故障不重放完成回调。
 
-几何请求基线 `c8c735e`，新增独立 guest fixture 在迁移前固定 WM_MOVE 替换过程并最小化、WM_SIZE 使用新过程/状态。原 parent、enable precommit、position prepare/commit、update、text/codec 与 frame 核对保持，release 完整 Win32 258、IR 31、fmt/release lib/bin strict Clippy/build 通过。删除闲置 facade 后重跑必要构建，首次 dead-code Clippy 日志保留；不跑性能或游戏矩阵。证据 `wire-out/refactoring-2026-10-14/r4-window-geometry32-{source-checks,verification}.json`。
+接受 0x7ff 内的同步 flags；尺寸为 0..8192，拒绝坐标加法溢出。NOZORDER 允许忽略 insert-after；否则当前只支持 HWND_TOPMOST/HWND_NOTOPMOST，其他相对 z-order 和异步请求返回 50。错误 HWND 返回 1400，其他线程窗口返回 50。NCCALCSIZE 必须给出有效且有界的 client RECT；几何提交前预检下一 frame，已提交的状态不因后续过程异常而回滚。已有 backing 的尺寸变更先分配并保留重叠像素，成功后提交几何；失败保留原状态。没有 NOREDRAW 时失效整个 client。完整重绘策略、激活通知和相对 z-order 仍待迁移。
 
-生命周期/发送请求基线 `2f87673`。创建准备与 callback/cleanup、发送完成/入队/wake、show/destroy commit、默认 nonclient/background、class 字符串分配/查找与 frame 核对保持。完整 release Win32 258、IR 31、fmt/release lib/bin strict Clippy/build 通过；字段简写 lint 修正后通过，首次日志保留。不跑性能或游戏矩阵，证据 `wire-out/refactoring-2026-10-14/r4-window-control32-{source-checks,verification}.json`。
+每个接受的 API 计一次 work，WNDPROC 指令及其服务使用同一累计预算，各阶段准备/返回不额外计费。窗口过程可抛出异常、让出、等待或装载 DLL；装载返回仍按发起深度识别。目标展开可跨 WNDPROC 续点，放弃创建或销毁操作时回收该窗口；线程退出删除其窗口对象，静态启动拒绝清空 USER 状态。父窗口最终退休时同时清理 WS_CHILD 后代及其排队消息、输入引用、属性、DC 与像素，child ID 不销毁数值相同的菜单。完整后代销毁通知、线程退出通知和 owner 弹窗销毁联动仍待迁移。DispatchMessage 共用这条 WNDPROC 边界并保留自身 ABI，见[消息队列](messages.md)。线程退出另释放该线程的兼容 DC；宿主窗口展示与图形提交见[虚拟桌面](display.md)和对应图形契约。

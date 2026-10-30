@@ -1,18 +1,13 @@
-# GDI DC 与设备能力边界
+# GDI DC 与设备能力
 
-`win32/catalog/gdi_dc.rs` 统一七项 export 的 ABI、provider、动态查询和执行策略。PE32 五项 typed，GetWindowDC/GetPixelFormat 保留 ABI-only；Win64 六项 typed，GetWindowDC absent。名字仅在绑定和查询时解析，调用使用 `GdiDcApi`。
+新 Wasm 入口在两种 ABI 接入 GetDC、ReleaseDC、CreateCompatibleDC、DeleteDC、GetDeviceCaps 和 GetPixelFormat。前两项属于 user32.dll，其余属于 gdi32.dll；新运行时保留目录已有的 provider 资格。GetWindowDC 未绑定。
 
-PE32 `win32/gdi/dc_x86.rs` 仅借 Args、实际 Graphics owner、窗口尺寸查询与 LastError。`graphics/dc.rs` 提供 compatible DC 创建、删除和 capability 查询；窗口 DC 的 bitmap backing、字体/位图选择、handle 数值与容量、释放顺序仍由 Graphics 管理。[其余 raster/font/bitmap](gdi-operations.md)使用 typed GdiOperation 和只借 Graphics/错误槽的 adapter，没有复制 DC 表。
+DC 身份与成员存放在共享 DeviceContexts 表中，新入口的 raster 状态直接附在该记录上，不维护第二张 DC 成员表。记录保存完整窗口/线程身份、compatible 类型、选择的位图/brush/font、颜色、原点、viewport 和 clip。句柄单调分配，不因释放立即复用；窗口、内存和 paint DC 的释放方式及 owner 必须匹配，失败返回零和错误 6。
 
-Win64 `win32/gdi/dc.rs::DeviceContexts` 私有拥有 DC 成员、完整窗口/线程身份、compatible 类型与单调 next/end；`x64/runtime/user/gdi.rs` 由 User owner 协调，只借内存、tid 与当前错误槽，不再借 Runtime64。创建仅借窗口存在性 closure，失败验证不分配 handle；查询允许原线程范围，释放检查原创建线程和类型。销毁窗口时的旧 DC 生命周期保持。owner 提取证据 `wire-out/refactoring-2026-10-14/r3-user-services64-{source-checks,verification}.json`。
+GetDC 为窗口 client 创建或复用实际 32 位像素 backing，ReleaseDC 只释放 DC，像素保留到窗口销毁。GetDC(NULL) 对应独立的 1280×720 虚拟屏幕。兼容 DC 初始选择 1×1 monochrome stock bitmap，可选入自己的兼容位图。线程退出释放其 DC，独立位图和 DIB backing 属于进程；窗口销毁释放窗口 backing 和相关 DC。paint DC 的特殊寿命见[绘制契约](painting.md)。
 
-| 行为 | PE32 | Win64 |
-| --- | --- | --- |
-| provider | GetDC/ReleaseDC/GetWindowDC 属 user32，其余属 gdi32 | 六项支持 kernel32/kernelbase/user32 静态；四项 GDI 名称还支持 gdi32 |
-| 默认动态查询 | 对应 user32 或 gdi32 | user32；四项 GDI 还支持 gdi32，原已绑定 gateway fallback 保留 |
-| backing | 实际 CPU bitmap/font/DC | 逻辑 display DC，未选择 pixel format |
-| version / raster capability | 0x300 / 0x2081 | 0x400 / 0 |
-| GetPixelFormat | error120，零返回 | 有效 DC 返回零，保留 LastError |
-| GetWindowDC | ABI-only/error120 | absent |
+每 VM 的 DC、位图和逻辑字体合计最多 4096 项，包含 stock bitmap 和 PE32 的七种 stock font；像素 backing 总计最多 256 MiB。单个位图每轴为 1..16384，最多 16 Mi 像素。资源或身份容量不足返回错误 8，非法尺寸返回 87；分配失败不消耗新句柄。窗口 backing 随 client resize 保留重叠内容，失败保留原 backing 和窗口几何。
 
-两端完整 handle 与 DWORD carrier、返回 frame、错误输出、stock bitmap 和 COLORREF sentinel 由独立基线与既有 GDI/真实窗口测试验证。验收证据见[批次报告](../reports/refactoring-gdi-dc-2026-10-18.md)。
+GetDeviceCaps 发布固定 1280×720、32 bits/pixel、1 plane、96 DPI、60 Hz 的 raster profile；RASTERCAPS 发布 RC_BITBLT 和 RC_STRETCHDIB。GetPixelFormat 对有效 DC 返回零，当前没有已选择的像素格式；ChoosePixelFormat、SetPixelFormat、DescribePixelFormat 和 SwapBuffers 提供[无后端失败协议](graphics-contracts.md)。该 profile 不查询宿主显示设备。
+
+对象、像素与位图服务见 [GDI operations](gdi-operations.md)。旧运行时的适配器仍留作迁移依据，默认产品入口切换记录在根 GOAL。

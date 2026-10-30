@@ -1,20 +1,13 @@
 # 键盘状态与布局边界
 
-状态：已接入并验收，实现提交 `386f38a`。独立基线、完整正确性、性能成本与游戏前缀证据见[本批报告](../reports/refactoring-keyboard-2026-10-18.md)。
+新 Wasm 入口在 PE32/Win64 接入 `KeyboardApi` 的 16 项接口，ABI 与 provider 来自 `win32/catalog/keyboard.rs`。PE32 的布局操作在新运行时具备实际实现，旧目录中的 ABI-only 执行策略保持不变。状态和文本复用共享 Keyboard owner，虚拟 US 的 scan/character/key-name 规则复用已有 LGPL 实现并保留归属；不引入旧 CPU 执行器。
 
-| 家族 | export 数 | PE32 | Win64 |
-| --- | ---: | --- | --- |
-| GetKeyState / GetAsyncKeyState / GetKeyboardState | 3 | user32 typed | user32 typed；kernel32/kernelbase 保留静态导入路由，动态查询仍拒绝 |
-| layout / type / MapVirtualKey / key name / ToUnicode | 13 | user32 ABI-only，保留 LastError 120 和原 stdcall 清栈 | user32 typed，保留虚拟 US 布局 |
+GetAsyncKeyState 查询进程的物理键状态并消费该键的“自上次查询后按下”低位；GetKeyState/GetKeyboardState 查询当前线程取出硬件消息时的快照。只有成功的 GetMessage 或 PM_REMOVE 更新队列状态，PM_NOREMOVE、输出故障和 PostMessage 不模拟硬件消费。左右修饰键独立保存，通用键 high bit 为两侧的 OR；异步自动重复不重置 press latch。非法 VK 返回零。GetKeyboardState 写出完整 256 字节，跨页故障保留可访问前缀，输出可与原调用帧重叠。
 
-契约声明唯一调用 ID、provider、参数宽度与返回约定。三个 Win64 状态 API 的静态导入和动态查询范围不同，通过 lookup provider 显式记录。PE32 layout API 继续使用既有 ABI-only 策略；键盘能力不由 Wine spec 中存在签名来推导。
+GetKeyboardLayout 使用固定 HKL `0x04090409`，tid 为零表示当前线程，已退出或不存在的线程返回零。GetKeyboardLayoutList 返回一个布局，negative signed count 返回 87，count 为零或输出为 NULL 时仅返回数量，不访问输出；实际输出使用 guest 指针宽度。GetKeyboardLayoutNameA/W 写入 `00000409` 及 NUL，GetKeyboardType 使用虚拟增强键盘类型 4、子类型 0、十二个功能键。HKL 参数保留完整宽度，Ex 接受零或该固定身份，其余返回 87。
 
-异步状态、已读取消息的队列状态、toggle、文字和线程隔离仍由同一个 Keyboard owner 管理。PE32 状态适配器只借明确参数、内存、owner 和当前 tid；异步查询继续消费原有低位标志。GetKeyboardState 只读取当前线程的快照，成功保留 LastError，访存失败沿原错误路径返回。两端返回槽别名分别保留 handler 后读取与预先保存 frame 的顺序。
+MapVirtualKeyA/W/ExA/W 支持虚拟键、Set-1 scan、字符和 EX 左右修饰键映射，未知映射类型返回零。GetKeyNameTextA/W 使用 signed capacity，非正容量或 NULL 输出返回零；结果按容量减一截断并 NUL 结束。key name 来自同一 US profile。
 
-2026-10-20 的功能接续补齐了[宿主键鼠事件](input-events.md)：同一 owner 解析扫描码区分左右修饰键，并维护通用键聚合状态；中键和两个侧键进入相同的异步/队列状态路径，重复 key-down 不重新设置异步低位。WM_SYSCHAR 与 WM_CHAR 一样先缓存实际 UTF-16，再由 TranslateMessage 交付。原重构验收记录保留为历史结果。
+ToUnicode/Ex 先检查 signed 容量，再检查 flags/HKL，然后读取完整的调用者 256 字节状态并写 UTF-16。输入/输出可以重叠，写入故障不修改前缀。flags 接受 0..7；keyup 且没有相应 flag 时不生成字符。当前至多产生一个字符，容量大于一时再写一个 NUL；无字符时写零并返回零，实际 U+0000 字符返回一。接口不改变队列键态或消费宿主文本缓存。
 
-布局查询使用既有 US HKL `0x04090409`，与 guest 的日语 NLS profile 分开。线程查询继续检查存活线程；HKL 在 Win64 保留完整指针宽度。纯 scan/VK、character 和 key-name 规则集中到 `win32/user/keyboard_layout.rs`，不依赖 guest 内存或进程总状态，保留 Hangover/Wine 来源和 LGPL 声明。
-
-ToUnicode 使用调用者的 256-byte 状态，signed 容量检查先于 flags、layout 和指针访问；读取完整输入后写入输出，保留输入/输出别名。flag 范围、keyup 分支、NUL、截断及失败输出顺序保持。US profile 没有 IME、dead-key、AltGr 或组合状态；API 查询与 host 已解析的 WM_CHAR 文字仍各自按原路径处理。
-
-Win64 状态/布局适配器现归 User，只借内存与只读 Threads；原错误分支才通过 Threads 读取当前 TEB 并写 LastError。原 handler 经资源替换对照一致，内部 fixture 只调整调用资源，期望不变。基线 `8f5b3d6`，完整 release Win64 269、library 61 passed / 7 ignored、fmt/strict Clippy/build 通过；证据 `wire-out/refactoring-2026-10-14/r3-user-keyboard64-{source-checks,verification}.json`。
+虚拟 US 布局与客体日语 NLS profile 独立。宿主按实际布局解析的 UTF-16 仍经[输入事件](input-events.md)缓存并由 TranslateMessage 交付；ToUnicode 的 US 查询独立于这条路径。IME、dead-key、AltGr、组合状态及布局切换尚未接入。上述查询不读取时钟，成功保留 LastError，错误分支才写错误槽；访存失败沿统一 Fault/修复协议处理。

@@ -7,6 +7,7 @@ pub enum ThreadControlApi {
     FreeAndExit,
     QueueApc,
     Context,
+    SetContext,
     SetDescription,
     GetDescription,
 }
@@ -37,7 +38,7 @@ const fn declaration(
 use Parameter::{Pointer as P, Uint32 as D};
 use ReturnConvention::{BoolLastError as B, Hresult as H, Pointer as R, Uint32 as U, Void as V};
 
-pub static THREAD_CONTROL_CONTRACTS: [Contract; 7] = [
+pub static THREAD_CONTROL_CONTRACTS: [Contract; 8] = [
     declaration(
         ThreadControlApi::Create,
         "CreateThread",
@@ -66,6 +67,17 @@ pub static THREAD_CONTROL_CONTRACTS: [Contract; 7] = [
         &[P, P],
         B,
         false,
+    ),
+    Contract::new(
+        ApiId::ThreadControl(ThreadControlApi::SetContext),
+        "SetThreadContext",
+        &[P, P],
+        B,
+        "selective processor context of a suspended guest thread",
+        [ArchitecturePlan {
+            dlls: &[],
+            execution: ExecutionPolicy::Absent,
+        }; 2],
     ),
     declaration(
         ThreadControlApi::SetDescription,
